@@ -18,6 +18,7 @@ real RSA-signed ``tenant_admin`` JWT lifted through the BFF session so
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 import warnings
 from collections.abc import Iterator
@@ -86,6 +87,22 @@ _BIG_BODY = "Always confirm the change set with the operator before applying. " 
 #: A body whose single estimate exceeds the 600-token budget outright
 #: (>~2000 chars / 3.3). Used for the create/preview over-budget cases.
 _OVER_BUDGET_BODY = "x" * 2200
+
+#: An operational body that sits just under the 600-token budget once
+#: rendered with a one-letter title (597 tokens). A longer title alone
+#: pushes it over (614 tokens), so a title-only edit flips the verdict.
+_TITLE_DECIDES_BODY = "x" * 1680
+_SHORT_TITLE = "T"
+_LONG_TITLE = "A much longer title that pushes this rule over the budget"
+
+_TITLE_INPUT_RE = re.compile(r'<input\b[^>]*\bname="title"[^>]*>', re.DOTALL)
+
+
+def _title_input(html: str) -> str:
+    """Return the ``<input name="title">`` element from a modal render."""
+    match = _TITLE_INPUT_RE.search(html)
+    assert match is not None, "title input not found"
+    return match.group(0)
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +344,12 @@ def test_create_modal_renders_for_admin() -> None:
     # The debounced preview wiring is present.
     assert 'hx-post="/ui/conventions/preview"' in body
     assert "keyup changed delay:300ms" in body
+    # The title counts towards the rendered cost, so it refreshes the
+    # preview too -- not only the body textarea.
+    title_input = _title_input(body)
+    assert 'hx-post="/ui/conventions/preview"' in title_input
+    assert 'hx-trigger="keyup changed delay:300ms"' in title_input
+    assert 'hx-target="#conventions-token-preview"' in title_input
     # #240: the create form is migrated off dead daisyUI-v4 classes
     # (removed in v5 — zero compiled rules — which collapsed the
     # label-over-input column and misaligned the grids).
@@ -486,6 +509,48 @@ def test_preview_over_budget_operational_flagged_red() -> None:
     assert "text-error" in body
 
 
+def test_preview_flags_entry_over_budget_only_once_rendered() -> None:
+    """#3746: the preview uses the rendered standalone cost, like the write check."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id, jwks = _admin_session()
+    client, mock = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        response = client.post(
+            "/ui/conventions/preview",
+            # estimate_tokens(body) == 600 -- within budget on its own.
+            data={"title": "Title", "body": "x" * 1979, "kind": "operational"},
+            **_csrf_kwargs(session_id),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert 'data-over-budget="true"' in response.text
+
+
+def test_preview_title_only_change_flips_over_budget_warning() -> None:
+    """A title-only edit refreshes the warning: same body, longer title, red."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id, jwks = _admin_session()
+    client, mock = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        within = client.post(
+            "/ui/conventions/preview",
+            data={"title": _SHORT_TITLE, "body": _TITLE_DECIDES_BODY, "kind": "operational"},
+            **_csrf_kwargs(session_id),
+        )
+        over = client.post(
+            "/ui/conventions/preview",
+            data={"title": _LONG_TITLE, "body": _TITLE_DECIDES_BODY, "kind": "operational"},
+            **_csrf_kwargs(session_id),
+        )
+    finally:
+        mock.stop()
+    assert within.status_code == 200, within.text
+    assert 'data-over-budget="false"' in within.text
+    assert over.status_code == 200, over.text
+    assert 'data-over-budget="true"' in over.text
+
+
 def test_preview_same_body_as_reference_not_flagged() -> None:
     """The same over-budget body as kind=reference is NOT flagged (exempt)."""
     _seed_tenant(_TENANT_A, "tenant-a")
@@ -603,6 +668,11 @@ def test_edit_modal_shows_kind_and_slug_readonly() -> None:
     # The title/priority/body editable fields are pre-filled.
     assert 'value="Editable"' in body
     assert "original body" in body
+    # A title edit refreshes the token preview, same as a body edit.
+    title_input = _title_input(body)
+    assert 'hx-post="/ui/conventions/preview"' in title_input
+    assert 'hx-trigger="keyup changed delay:300ms"' in title_input
+    assert 'hx-target="#conventions-token-preview"' in title_input
     # #241: the edit form is migrated off dead daisyUI-v4 classes (removed
     # in v5 — zero compiled rules — which collapsed the label-over-input
     # column and misaligned the grids).

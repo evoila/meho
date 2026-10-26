@@ -53,7 +53,6 @@ import respx
 from fastapi.testclient import TestClient
 from httpx import ASGITransport
 
-import meho_backplane.audit as _audit_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.main import app
@@ -64,16 +63,6 @@ from ._oidc_jwt_helpers import ISSUER as _ISSUER
 from ._oidc_jwt_helpers import make_rsa_keypair, mint_token, mock_discovery_and_jwks, public_jwks
 
 _TENANT_A = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
-
-
-@pytest.fixture(autouse=True)
-def _noop_broadcast(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Silence the broadcast publisher (see ``test_api_v1_agent_grants``)."""
-
-    async def _noop(*_a: object, **_kw: object) -> None:
-        pass
-
-    monkeypatch.setattr(_audit_module, "publish_event", _noop)
 
 
 @pytest.fixture(autouse=True)
@@ -782,3 +771,216 @@ async def test_service_principal_can_still_list_approvals() -> None:
             )
     assert response.status_code == 200, response.text
     assert response.json() == []
+
+
+# ---------------------------------------------------------------------------
+# #3692 — delegated-decision reason trailers: a reason that names who
+# instructed the approver must also carry the instruction and refs; the
+# block is stored on the decision audit row and shown on GET /{id}.
+# ---------------------------------------------------------------------------
+
+_DELEGATED_OK = (
+    "Ran the cleanup in the change window.\n"
+    "\n"
+    "Instructed-by: lead@example.com\n"
+    'Instruction: "please reject this one, wrong cluster"\n'
+    "Refs: #12, CHG-9"
+)
+_DELEGATED_NO_REFS = 'Ran the cleanup.\n\nInstructed-by: lead@example.com\nInstruction: "go ahead"'
+
+
+def _seed_pending_request() -> uuid.UUID:
+    """Insert one pending request parked by another principal; return its id."""
+    import asyncio
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
+    from meho_backplane.operations._validate import compute_params_hash
+
+    request_id = uuid.uuid4()
+
+    async def _seed() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            session.add(
+                ApprovalRequest(
+                    id=request_id,
+                    tenant_id=_TENANT_A,
+                    run_id=None,
+                    principal_sub="svc-parker",
+                    op_id="vault.kv.put",
+                    connector_id="vault-1.x",
+                    target_id=None,
+                    params_hash=compute_params_hash({}),
+                    params={},
+                    proposed_effect={"op_id": "vault.kv.put", "connector_id": "vault-1.x"},
+                    status=ApprovalRequestStatus.PENDING.value,
+                )
+            )
+
+    asyncio.run(_seed())
+    return request_id
+
+
+def _request_status(request_id: uuid.UUID) -> str:
+    import asyncio
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import ApprovalRequest
+
+    async def _load() -> str:
+        async with get_sessionmaker()() as session:
+            row = await session.get(ApprovalRequest, request_id)
+            assert row is not None
+            return row.status
+
+    return asyncio.run(_load())
+
+
+@pytest.mark.parametrize(
+    ("path_suffix", "extra_body"),
+    [
+        ("approve", {"params": {}}),
+        ("reject", {}),
+        ("decide", {"decision": "approved"}),
+    ],
+)
+def test_delegated_reason_missing_refs_returns_422(
+    client: TestClient, path_suffix: str, extra_body: dict[str, Any]
+) -> None:
+    """An ``Instructed-by:`` reason without ``Refs:`` is refused with 422.
+
+    Every REST decision route funnels into the service chokepoint, so the
+    refusal is the same on ``/approve``, ``/reject`` and ``/decide``, and
+    the row stays pending (nothing was recorded half-way).
+    """
+    request_id = _seed_pending_request()
+    key = make_rsa_keypair("kid-op")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
+        response = client.post(
+            f"/api/v1/approvals/{request_id}/{path_suffix}",
+            headers=headers,
+            json={**extra_body, "reason": _DELEGATED_NO_REFS},
+        )
+
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail.startswith("delegated_reason_invalid"), detail
+    assert "Refs" in detail, detail
+    assert _request_status(request_id) == "pending"
+
+
+@pytest.mark.parametrize(
+    ("path_suffix", "extra_body"),
+    [
+        ("approve", {"params": {}}),
+        ("reject", {}),
+        ("decide", {"decision": "approved"}),
+    ],
+)
+def test_over_length_reason_returns_422(
+    client: TestClient, path_suffix: str, extra_body: dict[str, Any]
+) -> None:
+    """A reason over the shared 2000-character bound is a 422 on every body."""
+    from meho_backplane.operations.approval_queue import MAX_REASON_LENGTH
+
+    key = make_rsa_keypair("kid-op")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
+        response = client.post(
+            f"/api/v1/approvals/{uuid.uuid4()}/{path_suffix}",
+            headers=headers,
+            json={**extra_body, "reason": "x" * (MAX_REASON_LENGTH + 1)},
+        )
+
+    assert response.status_code == 422, response.text
+    assert "reason" in response.text
+
+
+def test_delegated_reject_is_shown_on_get(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A valid delegated reject lands, and GET /{id} shows the delegation."""
+    monkeypatch.setenv("APPROVAL_ALLOW_DELEGATED_DECISION", "true")
+    get_settings.cache_clear()
+    request_id = _seed_pending_request()
+    key = make_rsa_keypair("kid-op")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
+        decided = client.post(
+            f"/api/v1/approvals/{request_id}/reject",
+            headers=headers,
+            json={"reason": _DELEGATED_OK},
+        )
+        shown = client.get(f"/api/v1/approvals/{request_id}", headers=headers)
+        listed = client.get("/api/v1/approvals?status=rejected", headers=headers)
+
+    assert decided.status_code == 200, decided.text
+    assert shown.status_code == 200, shown.text
+    assert shown.json()["delegation"] == {
+        "instructed_by": "lead@example.com",
+        "instruction": "please reject this one, wrong cluster",
+        "refs": ["#12", "CHG-9"],
+    }
+    # The list view stays lean: the block is single-request only.
+    assert all(item["delegation"] is None for item in listed.json())
+
+
+@pytest.mark.parametrize(
+    ("path_suffix", "extra_body"),
+    [
+        ("approve", {"params": {}}),
+        ("reject", {}),
+        ("decide", {"decision": "approved"}),
+        ("decide", {"decision": "rejected"}),
+    ],
+)
+def test_delegated_decision_on_production_returns_403(
+    client: TestClient, path_suffix: str, extra_body: dict[str, Any]
+) -> None:
+    """#3693: setting off, a valid delegated decision is a 403 on every route.
+
+    The ``/reject`` case pins its own error arm: without it the typed error
+    escapes the ladder and the route answers 500. A request header that
+    claims a lab environment changes nothing; only the boot setting does.
+    """
+    request_id = _seed_pending_request()
+    key = make_rsa_keypair("kid-op")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {
+            "Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}",
+            "X-Meho-Environment": "lab",
+        }
+        response = client.post(
+            f"/api/v1/approvals/{request_id}/{path_suffix}",
+            headers=headers,
+            json={**extra_body, "reason": _DELEGATED_OK},
+        )
+
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail.startswith("delegated_decision_forbidden:"), detail
+    assert "APPROVAL_ALLOW_DELEGATED_DECISION" in detail, detail
+    assert _request_status(request_id) == "pending"
+
+
+def test_ordinary_decision_has_no_delegation_on_get(client: TestClient) -> None:
+    """A plain reason leaves ``delegation`` null on the read view."""
+    request_id = _seed_pending_request()
+    key = make_rsa_keypair("kid-op")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
+        decided = client.post(
+            f"/api/v1/approvals/{request_id}/reject",
+            headers=headers,
+            json={"reason": "wrong cluster"},
+        )
+        shown = client.get(f"/api/v1/approvals/{request_id}", headers=headers)
+
+    assert decided.status_code == 200, decided.text
+    assert shown.json()["delegation"] is None

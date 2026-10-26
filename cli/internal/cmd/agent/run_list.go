@@ -158,8 +158,8 @@ func printRunList(w io.Writer, runs *[]api.AgentRunSummaryResponse) {
 		fmt.Fprintln(w, "no agent runs")
 		return
 	}
-	fmt.Fprintf(w, "%-36s  %-18s  %-20s  %-12s  %-24s  %s\n",
-		"RUN ID", "STATUS", "AGENT", "TRIGGER", "CREATED", "WORK_REF")
+	fmt.Fprintf(w, "%-36s  %-18s  %-20s  %-12s  %-24s  %-20s  %s\n",
+		"RUN ID", "STATUS", "AGENT", "TRIGGER", "CREATED", "WORK_REF", "IDENTITY")
 	for _, r := range *runs {
 		workRef := "-"
 		if r.WorkRef != nil && *r.WorkRef != "" {
@@ -169,13 +169,28 @@ func printRunList(w io.Writer, runs *[]api.AgentRunSummaryResponse) {
 		if r.AgentName != nil && *r.AgentName != "" {
 			agentName = *r.AgentName
 		}
-		fmt.Fprintf(w, "%-36s  %-18s  %-20s  %-12s  %-24s  %s\n",
+		fmt.Fprintf(w, "%-36s  %-18s  %-20s  %-12s  %-24s  %-20s  %s\n",
 			r.RunId.String(),
 			string(r.Status),
 			agentName,
 			r.Trigger,
 			r.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 			workRef,
+			runIdentity(r.IdentitySub, r.IdentityAct),
 		)
 	}
+}
+
+// runIdentity renders who a run acted as. A direct run reads
+// "<agent> for <person>"; a scheduled run, where the agent is itself the
+// subject, reads just the subject. "-" when the server sent neither.
+func runIdentity(sub, act *string) string {
+	subject := "-"
+	if sub != nil && *sub != "" {
+		subject = *sub
+	}
+	if act != nil && *act != "" {
+		return *act + " for " + subject
+	}
+	return subject
 }

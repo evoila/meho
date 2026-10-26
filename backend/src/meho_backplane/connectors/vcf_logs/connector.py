@@ -45,7 +45,7 @@ References
 ----------
 
 * Issue: https://github.com/evoila/meho/issues/830
-* Wrapper: https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/vcf-logs.sh
+* Wrapper: ``scripts/vcf-logs.sh`` in the consumer's private repo.
 * vRLI API: https://developer.broadcom.com/xapis/vrealize-log-insight-api/latest/
 
 Auth model gating
@@ -144,8 +144,8 @@ _log = structlog.get_logger(__name__)
 
 # vRLI session-establish endpoint. POST with JSON body
 # ``{username, password, provider}``; success returns 200 with a JSON
-# body carrying ``sessionId`` + ``ttl``. Per the consumer wrapper at
-# https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/vcf-logs.sh
+# body carrying ``sessionId`` + ``ttl``. Per the consumer wrapper
+# ``scripts/vcf-logs.sh`` (in the consumer's private repo).
 # Sourced from the reviewed ``vrli_session`` ExecutionProfile (G0.28-T8
 # #1974) via the named ``session_login`` scheme's vetted login-path builder
 # so the typed connector and a profiled connector share one declaration of

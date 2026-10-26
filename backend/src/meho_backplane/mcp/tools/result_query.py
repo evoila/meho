@@ -41,8 +41,9 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.jsonflux.query.json_pointer import MAX_POINTER_LENGTH
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
 from meho_backplane.operations.result_query import (
     MAX_LIMIT,
     QueryContractError,
@@ -50,6 +51,7 @@ from meho_backplane.operations.result_query import (
     ResultQueryOutputTooLargeError,
     ResultQuerySpec,
     ResultQueryTimeoutError,
+    ResultReadRejectedError,
     read_result_window,
     run_result_query,
 )
@@ -74,7 +76,9 @@ async def _result_query_handler(
     optional ``query`` argument:
 
     * absent → paging mode: delegate the ``[offset : offset+limit]`` window
-      to the shared :func:`read_result_window` core (unchanged, #3179).
+      to the shared :func:`read_result_window` core (#3179). A page that
+      runs past the time budget (#3640) is the same recoverable
+      ``query_timeout`` as a query.
     * present → query mode: validate it into a
       :class:`~meho_backplane.jsonflux.query.contract.ResultQuerySpec` and
       delegate to :func:`run_result_query`, which compiles it to one bounded
@@ -93,25 +97,35 @@ async def _result_query_handler(
             data={"reason": "invalid_handle_id", "handle_id": str(raw_handle)},
         ) from exc
 
-    raw_query = arguments.get("query")
-    if raw_query is not None:
-        return await _run_query(operator, handle_id, raw_query)
-
     offset = int(arguments.get("offset", 0))
     limit = int(arguments.get("limit", 50))
+
+    raw_query = arguments.get("query")
+    if raw_query is not None:
+        return await _run_query(operator, handle_id, raw_query, offset, limit)
 
     try:
         return await read_result_window(operator, handle_id, offset, limit)
     except ResultHandleNotFoundError as exc:
         raise _handle_not_found(handle_id) from exc
+    except QueryContractError as exc:
+        raise McpInvalidParamsError(str(exc), data={"reason": "invalid_query"}) from exc
+    except ResultQueryTimeoutError as exc:
+        raise McpInvalidParamsError(str(exc), data={"reason": "query_timeout"}) from exc
     except ResultQueryOutputTooLargeError as exc:
-        raise McpInvalidParamsError(str(exc), data={"reason": "output_too_large"}) from exc
+        raise McpInvalidParamsError(
+            str(exc), data={"reason": "output_too_large", "delivery": "unavailable"}
+        ) from exc
+    except ResultReadRejectedError as exc:
+        raise _read_rejected(exc) from exc
 
 
 async def _run_query(
     operator: Operator,
     handle_id: UUID,
     raw_query: Any,
+    offset: int,
+    limit: int,
 ) -> dict[str, Any]:
     """Validate the ``query`` argument and run the bounded structured query.
 
@@ -130,7 +144,7 @@ async def _run_query(
             data={"reason": "invalid_query"},
         ) from exc
     try:
-        return await run_result_query(operator, handle_id, spec)
+        return await run_result_query(operator, handle_id, spec, offset=offset, limit=limit)
     except ResultHandleNotFoundError as exc:
         raise _handle_not_found(handle_id) from exc
     except QueryContractError as exc:
@@ -138,7 +152,19 @@ async def _run_query(
     except ResultQueryTimeoutError as exc:
         raise McpInvalidParamsError(str(exc), data={"reason": "query_timeout"}) from exc
     except ResultQueryOutputTooLargeError as exc:
-        raise McpInvalidParamsError(str(exc), data={"reason": "output_too_large"}) from exc
+        raise McpInvalidParamsError(
+            str(exc), data={"reason": "output_too_large", "delivery": "unavailable"}
+        ) from exc
+    except ResultReadRejectedError as exc:
+        raise _read_rejected(exc) from exc
+
+
+def _read_rejected(exc: ResultReadRejectedError) -> McpRateLimitedError:
+    """Build the recoverable ``-32000`` error for a refused read (#3640)."""
+    return McpRateLimitedError(
+        str(exc),
+        data={"reason": exc.reason, "retry_after_seconds": exc.retry_after_seconds},
+    )
 
 
 def _handle_not_found(handle_id: UUID) -> McpInvalidParamsError:
@@ -160,8 +186,9 @@ register_mcp_tool(
         surface=ToolSurface.WORKING,
         description=(
             "Read rows back from a JSONFlux result handle. After "
-            "`call_operation` reduces a large list response, you get an "
-            "inline sample plus a handle (`result.handle.handle_id`); call "
+            "`call_operation` (or `list_targets`) reduces a large list "
+            "response, you get an inline sample plus a handle "
+            "(`result.handle.handle_id`); call "
             "this tool to read the FULL set beyond that sample, either by "
             "paging or by running a bounded server-side query. "
             "Paging: pass `handle_id` (required, the UUID from the reduced "
@@ -183,7 +210,17 @@ register_mcp_tool(
             "A handle that does not exist, has expired (TTL elapsed), or "
             "belongs to another operator is a recoverable error (`-32602`, "
             "`data.reason=handle_not_found`) — re-run the original operation "
-            "to get a fresh handle. Only use this when "
+            "to get a fresh handle. "
+            "Document handles: when the reduced response has "
+            '`result_record: "document"` (one large object, not a list), read '
+            'one part with `query={"path": "/key/0/name"}` (an RFC '
+            '6901 JSON Pointer; `""` is the whole document). An array '
+            "value pages with `offset` / `limit`; any other value comes back "
+            "in `value`. A rows handle with `omitted_scalar_count` keeps the "
+            "fields that did not fit its inline summary the same way when its "
+            "`fetch_more.drill_in.rationale` says so: read one with "
+            '`query={"path": "/<field name>"}`. `path` cannot be '
+            "combined with the other `query` fields. Only use this when "
             "`fetch_more.drill_in.available` is `true` on the handle; when "
             "it is `false` the full set was not spilled and you must "
             "re-call the operation with narrower params instead."
@@ -225,7 +262,10 @@ register_mcp_tool(
                         "Optional structured query (query mode). When present, "
                         "`offset`/`limit` are ignored and the handle is queried "
                         "server-side as one bounded read-only SELECT. Every "
-                        "referenced field must be a column on the handle."
+                        "referenced field must be a column on the handle. "
+                        "For a document handle, or for the fields a rows handle "
+                        "left out of its inline summary, send only `path` "
+                        "instead; `offset`/`limit` then page an array value."
                     ),
                     "additionalProperties": False,
                     "properties": {
@@ -317,6 +357,20 @@ register_mcp_tool(
                                 "The result flags `truncated` when more rows existed."
                             ),
                         },
+                        "path": {
+                            "type": "string",
+                            "maxLength": MAX_POINTER_LENGTH,
+                            "description": (
+                                "Document handles only: an RFC 6901 JSON Pointer "
+                                "to the value to read, for example "
+                                '`/status/conditions/0`; `""` is the whole '
+                                "document. `~1` means `/` and `~0` means `~` "
+                                "inside a key. An array value pages with the "
+                                "top-level `offset` / `limit`. Cannot be "
+                                "combined with `filter`, `select`, `group_by`, "
+                                "`aggregate`, `order_by`, or `limit`."
+                            ),
+                        },
                     },
                 },
             },
@@ -346,6 +400,23 @@ register_mcp_tool(
                 "coverage_note": {
                     "type": ["string", "null"],
                     "description": "Query mode only. Human-readable coverage caveat when partial.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Path reads only. The JSON Pointer that was read.",
+                },
+                "value_type": {
+                    "type": "string",
+                    "enum": ["object", "array", "string", "number", "boolean", "null"],
+                    "description": (
+                        "Path reads only. The JSON type of the value at `path`. "
+                        "An `array` pages in `rows`; any other type is in `value`."
+                    ),
+                },
+                "value": {
+                    "description": (
+                        "Path reads only, when `value_type` is not `array`: the value at `path`."
+                    ),
                 },
             },
             "required": [

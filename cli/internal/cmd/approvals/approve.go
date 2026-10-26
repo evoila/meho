@@ -6,6 +6,8 @@ package approvals
 import (
 	"context"
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -38,7 +40,12 @@ func newApproveCmd() *cobra.Command {
 			"paused agent run resumes off the broadcast (T9 #1117). " +
 			"Only pending requests can be approved; any other status " +
 			"returns 409. --reason attaches a human-readable " +
-			"rationale to the decision row.",
+			"rationale to the decision row. If another person told " +
+			"you in writing to make this decision, end the reason " +
+			"with three lines: Instructed-by: <who>, Instruction: " +
+			"\"<their words>\", Refs: <issue or change ref>. A reason " +
+			"with Instructed-by: but without the other two lines " +
+			"is refused (422).",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -76,7 +83,12 @@ func newRejectCmd() *cobra.Command {
 			"paused agent run aborts off the broadcast (T9 #1117). " +
 			"Only pending requests can be rejected; any other status " +
 			"returns 409. --reason attaches a human-readable " +
-			"rationale to the rejection.",
+			"rationale to the rejection. If another person told " +
+			"you in writing to make this decision, end the reason " +
+			"with three lines: Instructed-by: <who>, Instruction: " +
+			"\"<their words>\", Refs: <issue or change ref>. A reason " +
+			"with Instructed-by: but without the other two lines " +
+			"is refused (422).",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -130,7 +142,14 @@ func runDecision(
 	if jsonOut {
 		return output.PrintJSON(cmd.OutOrStdout(), detail)
 	}
-	w := cmd.OutOrStdout()
+	printDecision(cmd.OutOrStdout(), idArg, detail)
+	return nil
+}
+
+// printDecision renders the post-decision summary: the new status, who
+// decided and when, and -- for a delegated decision (#3692) -- who
+// instructed the reviewer, their words, and the refs.
+func printDecision(w io.Writer, idArg string, detail *api.ApprovalRequestView) {
 	fmt.Fprintf(w, "approval_request %s → %s\n", idArg, string(detail.Status))
 	if detail.ReviewedBy != nil {
 		fmt.Fprintf(w, "reviewed by: %s\n", principalLabel(*detail.ReviewedBy, detail.ReviewedByName))
@@ -138,7 +157,13 @@ func runDecision(
 	if detail.DecidedAt != nil {
 		fmt.Fprintf(w, "decided at:  %s\n", *detail.DecidedAt)
 	}
-	return nil
+	if dl := detail.Delegation; dl != nil {
+		fmt.Fprintf(w, "instructed by: %s\n", dl.InstructedBy)
+		fmt.Fprintf(w, "instruction:   %q\n", dl.Instruction)
+		fmt.Fprintf(w, "refs:          %s\n", strings.Join(dl.Refs, ", "))
+	}
+	// An approve runs the operation; say how the run ended (#3543).
+	printRunOutcome(w, detail)
 }
 
 // postDecision calls POST /api/v1/approvals/{id}/decide via the

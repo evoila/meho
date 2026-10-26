@@ -16,18 +16,16 @@ Two halves, each pinned directly at its layer:
   ``error_extras`` dict into ``payload["error"]`` so the DISPATCH audit row
   records the same envelope the caller received, not merely
   ``result_status='error'``. This is the persistence-layer pin the DoD asks
-  for; the end-to-end wiring (dispatch -> audit_and_broadcast_safe ->
+  for; the end-to-end wiring (dispatch -> audit_safe ->
   write_audit_row) is exercised against a real DB in
   ``test_connectors_argocd_write_e2e.py``.
 
-* HALF 3 (fail-closed audit precondition, S07 #295) -- on the success
-  path a write-class / post-approval dispatch whose DISPATCH audit row
-  cannot commit returns a distinct ``connector_error`` instead of
-  ``status='ok'`` (CLAUDE.md postulate 7 / v0.1-spec §6), with no
-  phantom broadcast. Read-class ``safe`` ops keep the historical
-  fail-open posture. The gate lives in
-  :func:`~meho_backplane.operations.dispatcher._requires_durable_audit`
-  and is honoured by ``audit_and_broadcast_safe``'s ``require_audit`` flag.
+* HALF 3 (fail-closed audit precondition) -- on the success path any
+  dispatch, read or write, whose DISPATCH audit row cannot commit returns
+  ``audit_commit_failed`` instead of ``status='ok'`` (CLAUDE.md postulate 7
+  / v0.1-spec §6): ``execution_outcome='uncertain'``, ``retry=False``, no
+  ``audit_id``. It is never a ``connector_error``,
+  because the connector call itself worked.
 """
 
 from __future__ import annotations
@@ -46,12 +44,12 @@ from sqlalchemy import select
 import meho_backplane.operations._audit as audit_module
 import meho_backplane.operations.dispatcher as dispatcher_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
+from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.operations import (
     PassThroughReducer,
     dispatch,
@@ -61,7 +59,6 @@ from meho_backplane.operations import (
 )
 from meho_backplane.operations._audit import _build_audit_payload
 from meho_backplane.operations._errors import result_connector_error
-from meho_backplane.operations.dispatcher import _requires_durable_audit
 from meho_backplane.redaction import RedactionManifestEntry, RedactionMiddlewareResult
 from meho_backplane.settings import get_settings
 
@@ -191,18 +188,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Record every :func:`publish_event` call so the test can assert none fired."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 class _NoOpConnector(Connector):
@@ -426,86 +411,62 @@ def _install_preserved_redaction(
     return raw_payload, [entry.model_dump(mode="json") for entry in manifest], policy_id
 
 
-def test_requires_durable_audit_gates_on_write_class_and_safety_tier() -> None:
-    """The gate is True for write-class OR non-``safe`` ops, False for safe reads."""
-    # write-class op is fail-closed even at the safe tier ...
-    assert _requires_durable_audit(SimpleNamespace(op_id="demo.thing.create", safety_level="safe"))
-    # ... including the credential-write class.
-    assert _requires_durable_audit(SimpleNamespace(op_id="vault.kv.put", safety_level="safe"))
-    # A safe read-class op keeps the historical fail-open posture.
-    assert not _requires_durable_audit(
-        SimpleNamespace(op_id="demo.thing.list", safety_level="safe")
-    )
-    # A read-class op above the safe tier (the post-approval superset) is fail-closed.
-    assert _requires_durable_audit(SimpleNamespace(op_id="demo.thing.list", safety_level="caution"))
-    assert _requires_durable_audit(
-        SimpleNamespace(op_id="demo.thing.get", safety_level="destructive")
-    )
+def _assert_audit_commit_failed(result: Any) -> None:
+    """The handler ran but its row did not commit: uncertain, no receipt, no retry."""
+    assert result.status == "error"
+    assert result.error.startswith("audit_commit_failed:")
+    assert result.extras["error_code"] == "audit_commit_failed"
+    assert result.extras["execution_outcome"] == "uncertain"
+    assert result.extras["retry"] is False
+    assert "Do not run it again" in result.extras["remediation"]
+    # It is not a connector error: the connector call worked.
+    assert "connector_error" not in result.error
+    assert "exception_class" not in result.extras
+    assert result.audit_id is None
+    assert result.delivery is None
 
 
 @pytest.mark.asyncio
-async def test_write_class_dispatch_fails_closed_when_audit_row_cannot_commit(
+@pytest.mark.parametrize(
+    ("op_id", "safety_level"),
+    [
+        ("demo.thing.create", "safe"),  # write class
+        ("demo.thing.list", "safe"),  # safe read: no longer fail-open
+        ("demo.thing.list", "caution"),  # approved-run tier
+    ],
+)
+async def test_completed_dispatch_is_uncertain_when_audit_row_cannot_commit(
+    op_id: str,
+    safety_level: str,
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A write-class op whose DISPATCH audit row cannot commit returns connector_error."""
-    await _register_op("demo.thing.create", safety_level="safe", embedding=stub_embedding_service)
+    """A completed handler whose audit row cannot commit never reports ok.
+
+    Reads and writes follow one rule: no committed row, no success. The
+    handler ran exactly once and the caller is told not to run it again.
+    """
+    calls = _configure_recording_handler({"state": "complete"})
+    await _register_op(
+        op_id,
+        safety_level=safety_level,
+        embedding=stub_embedding_service,
+        handler=_module_recording_handler,
+    )
     monkeypatch.setattr(audit_module, "write_audit_row", _raise_audit_commit)
 
     with patch.object(audit_module, "_log", Mock()) as mock_log:
         result = await dispatch(
             operator=_make_operator(),
             connector_id="demo-1.x",
-            op_id="demo.thing.create",
+            op_id=op_id,
             target=_FakeTarget(),
             params={"name": "widget"},
         )
 
-    # AC1: an error OperationResult, not wrap_ok_result.
-    assert result.status != "ok"
-    assert result.status == "error"
-    # AC2: a distinct connector_error code, not a generic ok envelope.
-    assert result.error == "connector_error: AuditCommitError"
-    assert result.extras["error_code"] == "connector_error"
-    assert result.extras["exception_class"] == "AuditCommitError"
-    # A failed write has no committed receipt and cannot claim delivery.
-    assert result.audit_id is None
-    assert result.delivery is None
-    # AC3: no phantom broadcast when the audit commit fails.
-    assert captured_events == []
-    # AC4: the error-level dispatch_audit_failed log line still fires.
-    logged = [call.args[0] for call in mock_log.exception.call_args_list if call.args]
-    assert "dispatch_audit_failed" in logged
-
-
-@pytest.mark.asyncio
-async def test_read_class_dispatch_stays_fail_open_when_audit_row_cannot_commit(
-    stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A safe read-class op keeps the historical fail-open behaviour (still ok)."""
-    await _register_op("demo.thing.list", safety_level="safe", embedding=stub_embedding_service)
-    monkeypatch.setattr(audit_module, "write_audit_row", _raise_audit_commit)
-
-    with patch.object(audit_module, "_log", Mock()) as mock_log:
-        result = await dispatch(
-            operator=_make_operator(),
-            connector_id="demo-1.x",
-            op_id="demo.thing.list",
-            target=_FakeTarget(),
-            params={},
-        )
-
-    # Fail-open preserved for read-class: the caller still sees ok.
-    assert result.status == "ok", result.error
-    # No committed row means no receipt even though the response itself delivered.
-    assert result.audit_id is None
-    assert result.delivery == "complete"
-    # The broadcast is still skipped when the audit row does not land.
-    assert captured_events == []
-    # The failure is still recorded for the on-call.
+    _assert_audit_commit_failed(result)
+    assert calls == [{"name": "widget"}]
+    # The error-level dispatch_audit_failed log line still fires.
     logged = [call.args[0] for call in mock_log.exception.call_args_list if call.args]
     assert "dispatch_audit_failed" in logged
 
@@ -514,7 +475,7 @@ async def test_read_class_dispatch_stays_fail_open_when_audit_row_cannot_commit(
 # HALF 4 -- committed receipt and unavailable delivery after response shaping
 # failures (#3636). These tests deliberately drive dispatch end to end: the
 # handler completed, redaction supplied audit artefacts, the reducer failed,
-# then the audit/broadcast boundary chose the caller-visible outcome.
+# then the audit boundary chose the caller-visible outcome.
 # ---------------------------------------------------------------------------
 
 
@@ -523,7 +484,6 @@ async def test_read_class_dispatch_stays_fail_open_when_audit_row_cannot_commit(
 async def test_completed_handler_reducer_failure_keeps_committed_audit_receipt(
     op_id: str,
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
     committed_audit_writes: list[dict[str, Any]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -564,6 +524,9 @@ async def test_completed_handler_reducer_failure_keeps_committed_audit_receipt(
     assert result.handle is None
     assert result.delivery == "unavailable"
     assert result.audit_id is not None
+    # Completed with a committed row: still ok, and the caller must not retry.
+    assert result.extras["retry"] is False
+    assert "error_code" not in result.extras
     assert "raw-delivery-secret" not in str(result)
     assert "private diagnostic" not in str(result)
     assert calls == [{"request": "once"}]
@@ -578,15 +541,11 @@ async def test_completed_handler_reducer_failure_keeps_committed_audit_receipt(
     assert row.raw_payload == expected_raw
     assert row.redaction_manifest == expected_manifest
     assert row.payload["redaction_policy_id"] == expected_policy
-    assert len(captured_events) == 1
-    assert captured_events[0].audit_id == result.audit_id
-    assert captured_events[0].result_status == "ok"
 
 
 @pytest.mark.asyncio
 async def test_completed_write_reducer_failure_fails_closed_when_audit_cannot_commit(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A mutation with failed shaping still cannot report success without its row."""
@@ -613,23 +572,18 @@ async def test_completed_write_reducer_failure_fails_closed_when_audit_cannot_co
     finally:
         set_default_reducer(PassThroughReducer())
 
-    assert result.status == "error"
-    assert result.error == "connector_error: AuditCommitError"
-    assert result.audit_id is None
-    assert result.delivery is None
+    _assert_audit_commit_failed(result)
     assert "raw-delivery-secret" not in str(result)
     assert "private diagnostic" not in str(result)
     assert calls == [{}]
-    assert captured_events == []
 
 
 @pytest.mark.asyncio
-async def test_completed_safe_read_reducer_failure_stays_ok_without_audit_receipt(
+async def test_completed_safe_read_reducer_failure_is_uncertain_without_audit_receipt(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The historical safe-read audit fail-open rule also covers shaping failure."""
+    """A safe read with failed shaping and no committed row is not ok either."""
     raw_payload = {"credential": "raw-delivery-secret"}
     _install_preserved_redaction(monkeypatch, raw_payload=raw_payload)
     calls = _configure_recording_handler(raw_payload)
@@ -653,55 +607,10 @@ async def test_completed_safe_read_reducer_failure_stays_ok_without_audit_receip
     finally:
         set_default_reducer(PassThroughReducer())
 
-    assert result.status == "ok"
-    assert result.error is None
-    assert result.audit_id is None
-    assert result.delivery == "unavailable"
+    _assert_audit_commit_failed(result)
     assert "raw-delivery-secret" not in str(result)
     assert "private diagnostic" not in str(result)
     assert calls == [{}]
-    assert captured_events == []
-
-
-@pytest.mark.asyncio
-async def test_broadcast_failure_after_audit_commit_keeps_receipt(
-    stub_embedding_service: AsyncMock,
-    committed_audit_writes: list[dict[str, Any]],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A failed fan-out cannot erase the receipt for an already committed row."""
-    calls = _configure_recording_handler({"state": "complete"})
-
-    async def _raise_broadcast(*_args: Any, **_kwargs: Any) -> None:
-        raise RuntimeError("broadcast private diagnostic")
-
-    await _register_op(
-        "demo.thing.create",
-        safety_level="safe",
-        embedding=stub_embedding_service,
-        handler=_module_recording_handler,
-    )
-    monkeypatch.setattr(audit_module, "publish_event", _raise_broadcast)
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="demo-1.x",
-        op_id="demo.thing.create",
-        target=_FakeTarget(),
-        params={},
-    )
-
-    assert result.status == "ok"
-    assert result.delivery == "complete"
-    assert result.audit_id is not None
-    assert "broadcast private diagnostic" not in str(result)
-    assert calls == [{}]
-    assert len(committed_audit_writes) == 1
-    assert committed_audit_writes[0]["audit_id"] == result.audit_id
-    rows = await _committed_rows_for("demo.thing.create")
-    assert len(rows) == 1
-    assert rows[0].id == result.audit_id
-    assert rows[0].status_code == 200
-    assert rows[0].payload["result_status"] == "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -716,7 +625,6 @@ async def test_broadcast_failure_after_audit_commit_keeps_receipt(
 @pytest.mark.asyncio
 async def test_dispatch_streamed_non2xx_returns_structured_error_with_audit_row(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
     committed_audit_writes: list[dict[str, Any]],
 ) -> None:
     """A handler raising HTTPStatusError with an UNREAD streamed response is safe.
@@ -759,3 +667,68 @@ async def test_dispatch_streamed_non2xx_returns_structured_error_with_audit_row(
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "error"
     assert rows[0].payload["error"]["error_code"] == "connector_error"
+
+
+# ---------------------------------------------------------------------------
+# A handler that RETURNS an error result, instead of raising (#4274)
+# ---------------------------------------------------------------------------
+
+
+_returned_result: list[OperationResult] = []
+
+
+async def _module_returning_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> OperationResult:
+    """Typed handler that returns a built OperationResult instead of raising."""
+    return _returned_result[0]
+
+
+def _returned_error() -> OperationResult:
+    return OperationResult(
+        status="error",
+        op_id="demo.thing.returns",
+        error="demo_refused: the handler stopped before it did anything",
+        duration_ms=0.0,
+        extras={"error_code": "demo_refused", "remediation": "Do something else."},
+    )
+
+
+@pytest.mark.asyncio
+async def test_handler_returned_error_result_writes_one_execution_row(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A returned error result gets exactly one execution row with its error_code."""
+    returned = _returned_error()
+    _returned_result[:] = [returned]
+    await _register_op(
+        "demo.thing.returns",
+        safety_level="safe",
+        embedding=stub_embedding_service,
+        handler=_module_returning_handler,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="demo-1.x",
+        op_id="demo.thing.returns",
+        target=_FakeTarget(),
+        params={},
+    )
+
+    rows = await _committed_rows_for("demo.thing.returns")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.event_class == AuditEventClass.OPERATION_EXECUTION.value
+    assert row.payload["result_status"] == "error"
+    assert row.payload["error"]["error_code"] == "demo_refused"
+
+    # The caller gets the handler's result as it was, plus the audit receipt.
+    assert result.audit_id == row.id
+    assert result.model_dump(exclude={"audit_id"}) == returned.model_dump(exclude={"audit_id"})
+
+
+# A handler that returns a waiting or denied result gets the operation's own
+# row too (#4275). Those tests live in ``test_operations_composite_wait_audit.py``.

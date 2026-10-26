@@ -29,9 +29,9 @@ tasks land the schema additions:
   rows; closing that gap is a separate follow-up.
 * ``parent_audit_id`` — composite-operation lineage column landed by
   G0.6-T7 (#398) via migration ``0006``. Populated on the returned row from
-  ``audit_log.parent_audit_id`` (G8.2-T3 #1011); the *flat filter* on
-  ``parent_audit_id`` still raises :class:`UnsupportedFilterError` (un-gating
-  it is out of scope for #377).
+  ``audit_log.parent_audit_id`` (G8.2-T3 #1011). The flat filter on
+  ``parent_audit_id`` is an exact match that returns the direct children of
+  one row (#4030).
 * ``agent_session_id`` — the MCP-session correlation column landed by
   G8.2-T1 (#1009) via migration ``0014``. Populated on the returned row from
   ``audit_log.agent_session_id``; the filter is un-gated (G8.2-T3 #1011) and
@@ -43,7 +43,7 @@ tasks land the schema additions:
 
 The three computed fields — ``op_id``, ``op_class``, ``result_status`` — are
 derived at query time using the same logic the broadcast middleware uses on
-the publish side (``meho_backplane.audit._publish_broadcast_event``,
+the publish side (``meho_backplane.audit._resolve_op_id_and_class_override``,
 ``meho_backplane.broadcast.events.classify_op``,
 ``meho_backplane.audit._classify_http_status``). MCP-written rows carry
 ``op_id`` / ``op_class`` inside the ``payload`` JSON dict (see
@@ -60,10 +60,13 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from meho_backplane.db.models import AuditEventClass
+
 __all__ = [
     "AuditEntry",
     "AuditQueryFilters",
     "AuditQueryResult",
+    "EventClassCounts",
     "MyRecentPage",
     "ReplayNode",
 ]
@@ -91,7 +94,13 @@ class AuditQueryFilters(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     target: str | None = None
+    # Partial, case-insensitive match on the user id (``operator_sub``) or
+    # the name (``payload['principal_name']``) -- #4668.
     principal: str | None = None
+    # Exact match on the user id only. Not on the REST body or the MCP
+    # input schema: the "my recent" views set it from the caller's own
+    # token so the result never widens to another person's rows.
+    principal_sub: str | None = None
     op_id: str | None = None
     op_class: str | None = None
     result_status: str | None = None
@@ -101,6 +110,16 @@ class AuditQueryFilters(BaseModel):
     parent_audit_id: uuid.UUID | None = None
     agent_session_id: uuid.UUID | None = None
     work_ref: str | None = None
+    # Exact match on ``audit_log.event_class`` (#3733). ``None`` (the
+    # default) applies no class filter, so a query returns every class --
+    # the same rows it returned before the column existed.
+    event_class: AuditEventClass | None = None
+    # Whether the row has a stored flight-recorder trace (#4855). ``True``
+    # keeps only the ``operation_execution`` rows with a ``dispatch_trace``
+    # row for the same audit id and tenant: the rows the trace route
+    # returns a trace for. ``False`` keeps the other rows. ``None`` (the
+    # default) applies no filter.
+    has_trace: bool | None = None
     limit: int = Field(default=100, ge=1, le=1000)
     cursor: str | None = None
 
@@ -162,6 +181,10 @@ class AuditEntry(BaseModel):
     # the verdict directly instead of joining ``method``+``path`` + parsing
     # ``payload``.
     policy_decision: str | None
+    # What kind of accountable event the row records (#3733), from the real
+    # ``audit_log.event_class`` column. Rows written before the column
+    # existed read as ``legacy_request``.
+    event_class: str
     broadcast_event_id: uuid.UUID | None
 
 
@@ -206,6 +229,15 @@ class AuditQueryResult(BaseModel):
 
     rows: list[AuditEntry]
     next_cursor: str | None
+
+
+class EventClassCounts(BaseModel):
+    """Rows per event class, and the start of the counted window (#3747)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    counts: dict[str, int]
+    since: datetime
 
 
 class MyRecentPage(BaseModel):

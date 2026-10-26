@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -179,9 +181,66 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 	if d.DecidedAt != nil {
 		fmt.Fprintf(w, "Decided at:   %s\n", *d.DecidedAt)
 	}
+	// Delegated decision (#3692): the reviewer acted on another human's
+	// written instruction, read off the decision audit row.
+	if dl := d.Delegation; dl != nil {
+		fmt.Fprintf(w, "Instructed by: %s\n", dl.InstructedBy)
+		fmt.Fprintf(w, "Instruction:  %q\n", dl.Instruction)
+		fmt.Fprintf(w, "Refs:         %s\n", strings.Join(dl.Refs, ", "))
+	}
+	printRunOutcome(w, d)
 	if d.ProposedEffect != nil {
 		b, _ := json.MarshalIndent(d.ProposedEffect, "  ", "  ")
 		fmt.Fprintf(w, "Effect:\n  %s\n", string(b))
+	}
+}
+
+// printRunOutcome renders what happened when an approved request ran
+// (#3543). "approved" alone does not say whether the change landed: the
+// run can fail after the approval. Prints nothing for a request that is
+// not approved.
+func printRunOutcome(w io.Writer, d *api.ApprovalRequestView) {
+	if d.ResultState == nil {
+		return
+	}
+	fmt.Fprintf(w, "Run:          %s\n", runStateLabel(d.ResultState))
+	o := d.ResumeOutcome
+	if o == nil {
+		return
+	}
+	if o.ResumedAt != nil {
+		fmt.Fprintf(w, "Run started:  %s\n", *o.ResumedAt)
+	}
+	if o.ResultStatus != nil {
+		fmt.Fprintf(w, "Run result:   %s\n", *o.ResultStatus)
+	}
+	if o.ErrorCode != nil {
+		fmt.Fprintf(w, "Error code:   %s\n", *o.ErrorCode)
+	}
+	if o.AuditId != nil {
+		fmt.Fprintf(w, "Run audit:    %s (meho audit show %s)\n", o.AuditId.String(), o.AuditId.String())
+	}
+}
+
+// runStateLabel turns the run state of an approved request into one short
+// word (one word, so the list table still splits on spaces). "-" when there
+// is no run state (the request is not approved). "started" means a run
+// began but stored no result yet: it may still be running.
+func runStateLabel(s *api.ApprovalResultState) string {
+	if s == nil {
+		return "-"
+	}
+	switch *s {
+	case api.ApprovalResultStateNotStarted:
+		return "not-run"
+	case api.ApprovalResultStateStarted:
+		return "started"
+	case api.ApprovalResultStateExecuted:
+		return "ok"
+	case api.ApprovalResultStateFailed:
+		return "FAILED"
+	default:
+		return string(*s)
 	}
 }
 

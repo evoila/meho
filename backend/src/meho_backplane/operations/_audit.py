@@ -1,20 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Audit row writing + broadcast publishing for the G0.6 dispatcher.
+"""Audit row writing for the G0.6 dispatcher.
 
 The dispatcher (T5, #396) writes one ``audit_log`` row per dispatch
-synchronously and publishes one :class:`BroadcastEvent` (fail-open per
-the :func:`publish_event` contract). This module owns:
+synchronously. It publishes no Broadcast event (#3758): the feed carries
+deliberate agent announcements only. This module owns:
 
 * :func:`write_audit_row` -- the row insert. Composes the payload from
   the descriptor + parent audit linkage (composite recursion contextvar)
   + result_status.
-* :func:`publish_broadcast` -- the broadcast emit with redacted payload.
-* :func:`audit_and_broadcast_safe` -- the dispatcher's "write + publish,
-  swallow internal failures" wrapper. The :class:`OperationResult` has
-  already been decided by the time this runs; audit/broadcast failures
-  log loudly but don't flip the outcome.
+* :func:`audit_safe` -- the dispatcher's "write, swallow internal
+  failures" wrapper. The :class:`OperationResult` has already been
+  decided by the time this runs; audit failures log loudly but don't
+  flip the outcome (unless ``require_audit`` is set).
 
 The audit-row contract uses ``method='DISPATCH'`` and
 ``path=descriptor.op_id`` so the chassis :class:`AuditLog` table shape
@@ -35,32 +34,27 @@ import structlog
 
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
-from meho_backplane.broadcast import (
-    BroadcastEvent,
-    classify_op,
-    publish_event,
-    redact_payload,
-)
-from meho_backplane.broadcast.events import scrub_broadcast_params
+from meho_backplane.broadcast.events import resolve_op_class
+from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EndpointDescriptor
+from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor
 from meho_backplane.operations._errors import status_code_for_result
+from meho_backplane.operations.caller_gone import caller_gone_at
+from meho_backplane.request_usage.collector import current_request_id
 
 __all__ = [
     "AgentRunAuditMeta",
-    "BroadcastLineage",
     "agent_run_audit_meta_var",
     "agent_session_id_var",
-    "audit_and_broadcast_safe",
     "audit_rejection_safe",
+    "audit_safe",
     "parent_audit_id_var",
     "policy_decision_var",
-    "publish_broadcast",
     "resolve_agent_session_id",
-    "resolve_broadcast_lineage",
     "reveal_secret_var",
     "run_id_var",
     "step_id_var",
+    "with_audit_receipt",
     "work_ref_var",
     "write_audit_row",
 ]
@@ -224,10 +218,19 @@ def resolve_agent_session_id() -> uuid.UUID | None:
       inbound ``Mcp-Session-Id`` header (stored as the canonical UUID
       string). This is how a *direct* operator dispatch over MCP carries
       the same session anchor its envelope rows get from
-      :func:`~meho_backplane.mcp.audit.write_mcp_audit_row`.
+      :func:`~meho_backplane.mcp.audit.write_mcp_audit_row`. Since #4672
+      :func:`write_audit_row` reads it too, so the operation row of a
+      direct MCP ``call_operation`` (ok, error or denied) and every
+      operation an MCP tool runs inside carry the MCP session id.
 
-    Returns ``None`` outside both contexts (chassis HTTP, system sweeps)
-    — the correct value for the nullable column. A bound-but-malformed
+    A client-credential service principal that dispatches over the REST
+    chassis with a ``work_ref`` reaches the first source too:
+    ``call_operation`` binds :data:`agent_session_id_var` to the session id
+    of the principal's orchestration run for that work_ref
+    (:mod:`meho_backplane.operations.addon_orchestration`, #3446).
+
+    Returns ``None`` outside these contexts (chassis HTTP without such a
+    binding, system sweeps) — the correct value for the nullable column. A bound-but-malformed
     ``mcp_session_id`` is a programming error (the binder only binds
     canonical UUID strings); it is logged and treated as unbound, the
     same fail-soft posture :func:`meho_backplane.mcp.audit._resolve_uuid_contextvar`
@@ -247,43 +250,6 @@ def resolve_agent_session_id() -> uuid.UUID | None:
     except ValueError:
         _log.warning("audit_lineage_malformed_mcp_session_id", value=raw)
         return None
-
-
-@dataclass(frozen=True, slots=True)
-class BroadcastLineage:
-    """The publish-site lineage keys projected onto a broadcast event.
-
-    A single read of the three contextvars the sibling audit-row writer
-    (:func:`write_audit_row`) already consumes, packaged so every
-    :class:`~meho_backplane.broadcast.events.BroadcastEvent` construction
-    site projects the same actor / session / work_ref lineage the durable
-    ``audit_log`` row records for the same operation. Frozen so the value
-    handed to a construction site cannot drift between read and use.
-    """
-
-    actor_sub: str | None
-    agent_session_id: uuid.UUID | None
-    work_ref: str | None
-
-
-def resolve_broadcast_lineage() -> BroadcastLineage:
-    """Read the current task's lineage contextvars for a broadcast event.
-
-    Mirrors :func:`write_audit_row`'s three reads so the real-time
-    broadcast carries the same lineage the audit row does: the RFC 8693
-    actor (:func:`~meho_backplane.auth.delegation.resolve_actor_sub`), the
-    agent-run session (:data:`agent_session_id_var`), and the external
-    change-ticket reference (:data:`work_ref_var`). All three default to
-    ``None`` outside a delegated / agent-run / work-ref-bound context —
-    the correct value for a direct human request, which is why a
-    delegated agent's work now broadcasts under ``actor_sub`` = the agent
-    while ``principal_sub`` stays the human.
-    """
-    return BroadcastLineage(
-        actor_sub=resolve_actor_sub(),
-        agent_session_id=agent_session_id_var.get(),
-        work_ref=work_ref_var.get(),
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -427,12 +393,12 @@ def _build_audit_payload(
     ``payload["error"]`` so a failed dispatch's durable audit row records
     *why* it failed rather than only ``result_status='error'``, closing
     the forensics gap where the approver's ephemeral surface saw the real
-    error but the ledger did not. ``None`` (and ``{}``) on every non-error
-    write, so success / denied / pending rows are unchanged. The envelope
+    error but the ledger did not. ``None`` (and ``{}``) on a success write;
+    the row of a run that stopped because a step waits or was denied (#4275)
+    carries that result's extras here too. The envelope
     is already Tier-1-redacted + capped by the ``operations/_errors.py``
     builders, so persisting it to the durable ledger adds no leak surface;
-    it is threaded to the audit row **only**, never onto the params-only
-    broadcast frame (:func:`publish_broadcast`).
+    it is threaded to the audit row only.
     """
     payload: dict[str, Any] = {
         "op_id": descriptor.op_id,
@@ -462,6 +428,8 @@ def _build_audit_payload(
     # default keys are documented + load-bearing for audit consumers,
     # so this layering is the explicit knob, not an accidental coupling.
     payload.update(_resolve_audit_extras_from_contextvars())
+    # The op that ran, not a route's own label (e.g. agent.run) still bound.
+    payload.update(op_id=descriptor.op_id, op_class=resolve_op_class(descriptor.op_id))
     # #2680: the structured error envelope is authoritative for an error
     # row, so it lands last -- after the handler-extras merge -- under a
     # dedicated ``error`` key that cannot collide with the structural /
@@ -479,18 +447,25 @@ def _apply_contextvar_lineage_mirrors(payload: dict[str, Any]) -> None:
     broadcast-event surface, whose consumers parse ``payload`` rather than
     the columns. Each key is present only when its contextvar is bound:
 
-    * agent-run attribution (G11.4-T5 #1074) -- ``agent_session_id`` plus
-      the ``model`` / ``provider`` / ``cost`` from the active
-      :class:`AgentRunAuditMeta` snapshot (the ``agent_run`` row holds the
-      durable copy; this is the per-row attribution slice);
+    * session attribution -- ``agent_session_id``, the same value the
+      row's column gets from :func:`resolve_agent_session_id` (the agent
+      run id inside MEHO's own agent loop, G11.4-T5 #1074, else the MCP
+      session id of a direct MCP call, #4672), plus the ``model`` /
+      ``provider`` / ``cost`` from the active :class:`AgentRunAuditMeta`
+      snapshot (the ``agent_run`` row holds the durable copy; this is the
+      per-row attribution slice);
     * runbook correlation (G12.1-T2 #1294) -- ``run_id`` / ``step_id``,
       ``None`` outside a runbook step execution;
     * credential_read reveal choice (#2467) -- ``reveal_secret`` (bool),
       bound only for a credential_read dispatch (``True`` = the caller
       opted into the raw value, ``False`` = the default key-name-scrubbed
-      response), so the key stays absent for every other op.
+      response), so the key stays absent for every other op;
+    * caller gone (#3696) -- ``caller_gone_at`` (ISO-8601), present only when
+      the caller of a synchronous request disconnected before this row was
+      written (:mod:`meho_backplane.operations.caller_gone`). The operation
+      still ran to the end.
     """
-    agent_session_id = agent_session_id_var.get()
+    agent_session_id = resolve_agent_session_id()
     if agent_session_id is not None:
         payload["agent_session_id"] = str(agent_session_id)
     meta = agent_run_audit_meta_var.get()
@@ -515,6 +490,9 @@ def _apply_contextvar_lineage_mirrors(payload: dict[str, Any]) -> None:
     reveal_secret = reveal_secret_var.get()
     if reveal_secret is not None:
         payload["reveal_secret"] = reveal_secret
+    gone_at = caller_gone_at()
+    if gone_at is not None:
+        payload["caller_gone_at"] = gone_at.isoformat()
 
 
 def _resolve_target_id(target: Any) -> uuid.UUID | None:
@@ -528,22 +506,41 @@ def _resolve_target_id(target: Any) -> uuid.UUID | None:
     return raw if isinstance(raw, uuid.UUID) else None
 
 
+def _apply_principal_name(payload: dict[str, Any], operator: Operator) -> None:
+    """Store the caller's display name in ``payload["principal_name"]`` (#4029).
+
+    Audit readers (``meho audit show`` / ``query``, the console) read the
+    name from this key, the same key the MCP wrapper rows and the approval
+    rows use. The name always belongs to the row's ``operator_sub``. On an
+    approved run that is the approver when a person approves through the
+    console, CLI or REST, and the agent when MEHO's own agent waits for
+    the approval and resumes the run itself. Left out when the token has no
+    ``name`` claim.
+    """
+    if operator.name:
+        payload["principal_name"] = operator.name
+
+
 class AuditCommitError(RuntimeError):
     """The DISPATCH audit row could not be committed.
 
-    Raised by :func:`audit_and_broadcast_safe` when ``require_audit`` is
-    set (the write-class / post-approval success path) and
+    Raised by :func:`audit_safe` when ``require_audit`` is
+    set (every completed-handler success path) and
     :func:`write_audit_row` fails. Per CLAUDE.md postulate 7 / v0.1-spec
     §6 the durable audit row is a hard precondition of a successful
-    return, so the dispatcher converts this into a ``connector_error``
-    result rather than reporting ``status='ok'`` for a mutation that
-    left no governance-grade record.
+    return, so the dispatcher converts this into an ``audit_commit_failed``
+    result (``execution_outcome='uncertain'``, ``retry=False``) rather than
+    reporting ``status='ok'`` for a call that left no governance-grade
+    record.
     """
 
 
+# code-quality-allow: was 99 lines on main before #3733; the required
+# event_class argument adds a few lines. Splitting it is out of scope here.
 async def write_audit_row(
     *,
     audit_id: uuid.UUID,
+    event_class: AuditEventClass,
     operator: Operator,
     descriptor: EndpointDescriptor,
     target: Any,
@@ -575,7 +572,12 @@ async def write_audit_row(
 
     *error_extras* (#2680) is the error row's structured envelope,
     forwarded to :func:`_build_audit_payload` where it lands under
-    ``payload["error"]``. ``None`` on every non-error write.
+    ``payload["error"]``. ``None`` on a success write.
+
+    *event_class* (#3733) is declared by the caller, which knows what
+    happened: ``operation_execution`` when the operation ran (``ok``,
+    ``error``, or stopped part-way because a step waits for approval or was
+    denied, #4275), ``policy_decision`` when a gate refused it before it ran.
     """
     sessionmaker = get_sessionmaker()
     payload = _build_audit_payload(
@@ -586,13 +588,15 @@ async def write_audit_row(
         redaction_policy_id=redaction_policy_id,
         handle_metadata=handle_metadata,
     )
+    _apply_principal_name(payload, operator)
     target_id = _resolve_target_id(target)
     parent_audit_id = parent_audit_id_var.get()
-    # G11.4-T5 #1074 -- read the agent-session lineage key off the
-    # contextvar the invoker bound around the loop. ``None`` outside
-    # an agent run (the chassis HTTP / MCP dispatch path), which is
-    # the correct value for the nullable column.
-    agent_session_id = agent_session_id_var.get()
+    # The session this row belongs to (#4672): the agent run's id inside
+    # MEHO's own agent loop (G11.4-T5 #1074), else the ``Mcp-Session-Id``
+    # of a direct MCP call, so the operation row carries the same session
+    # as its MCP tool row and the session replay finds it. ``None`` only
+    # for a call with neither (REST / CLI, system sweeps).
+    agent_session_id = resolve_agent_session_id()
     # G12.1-T2 #1294 -- read the runbook correlation contextvars. The
     # columns (``run_id`` / ``step_id``) are added by migration ``0034``
     # (G12.1-T1 #1292). We pass them only when the model carries the
@@ -628,10 +632,14 @@ async def write_audit_row(
             target_id=target_id,
             parent_audit_id=parent_audit_id,
             agent_session_id=agent_session_id,
+            event_class=event_class,
             method="DISPATCH",
             path=descriptor.op_id,
             status_code=status_code_for_result(result_status),
-            request_id=None,
+            # #3695: the request's correlation id. A standing-grant
+            # auto-approval row written for this call carries the same
+            # value, so the approval links forward to this row.
+            request_id=current_request_id(),
             duration_ms=Decimal(str(round(duration_ms, 2))),
             payload=payload,
             raw_payload=raw_payload,
@@ -642,80 +650,13 @@ async def write_audit_row(
         await session.commit()
 
 
-async def publish_broadcast(
+async def audit_safe(
     *,
     audit_id: uuid.UUID,
+    event_class: AuditEventClass,
     operator: Operator,
     descriptor: EndpointDescriptor,
     target: Any,
-    params: dict[str, Any],
-    result_status: str,
-) -> None:
-    """Emit one :class:`BroadcastEvent` for the dispatch.
-
-    Fail-open per the :func:`publish_event` contract -- a publish
-    failure logs + bumps the error counter; the dispatcher's
-    :class:`OperationResult` is independent.
-
-    Fail-closed on content (meho-internal #151): ``classify_op`` alone
-    decided the payload detail here, so a secret-bearing write op
-    missing from the ``credential_*`` allowlists broadcast its raw
-    request params to every co-tenant feed subscriber. The params now
-    run through :func:`scrub_broadcast_params` -- a key-name scrub plus
-    the Tier-1 deterministic redactor -- **before** the payload is
-    built, and any secret detection collapses the broadcast to
-    aggregate-only regardless of ``op_class``. Decision #3's
-    full-detail default is preserved for params in which no secret
-    material is detected.
-    """
-    op_class = classify_op(descriptor.op_id)
-    scrubbed_params, secret_detected = scrub_broadcast_params(params)
-    if secret_detected and op_class not in {
-        "credential_read",
-        "credential_mint",
-        "credential_write",
-        "audit_query",
-    }:
-        _log.info(
-            "broadcast_params_secret_detected",
-            op_id=descriptor.op_id,
-            op_class=op_class,
-        )
-    payload = redact_payload(
-        op_class,
-        {"params": scrubbed_params},
-        result_status,
-        detail="aggregate" if secret_detected else None,
-    )
-    raw_target_name = getattr(target, "name", None) if target is not None else None
-    target_name = raw_target_name if isinstance(raw_target_name, str) else None
-    lineage = resolve_broadcast_lineage()
-    event = BroadcastEvent(
-        event_id=uuid.uuid4(),
-        ts=datetime.now(UTC),
-        tenant_id=operator.tenant_id,
-        principal_sub=operator.sub,
-        principal_name=operator.name,
-        target_name=target_name,
-        op_id=descriptor.op_id,
-        op_class=op_class,
-        result_status=result_status,
-        audit_id=audit_id,
-        payload=payload,
-        actor_sub=lineage.actor_sub,
-        agent_session_id=lineage.agent_session_id,
-        work_ref=lineage.work_ref,
-    )
-    await publish_event(event)
-
-
-async def audit_and_broadcast_safe(
-    *,
-    audit_id: uuid.UUID,
-    operator: Operator,
-    descriptor: EndpointDescriptor,
-    target: Any,
-    params: dict[str, Any],
     params_hash: str,
     result_status: str,
     duration_ms: float,
@@ -726,46 +667,42 @@ async def audit_and_broadcast_safe(
     error_extras: dict[str, Any] | None = None,
     require_audit: bool = False,
 ) -> uuid.UUID | None:
-    """Write the audit row + publish broadcast; return a committed receipt.
+    """Write the dispatch audit row; return a committed receipt.
 
-    Broadcast failures are always fail-open (per :func:`publish_event`'s
-    contract): they are recorded at error level and never flip the
-    :class:`OperationResult` status.
+    A dispatch publishes no Broadcast event (#3758): the feed carries
+    deliberate agent announcements only, and this row is the record.
 
     Audit-row failures are gated by *require_audit* (S07, #295):
 
     * ``require_audit=False`` (the default; the deny / error / announce
-      callers and read-class success) -- an audit-insert failure is
+      callers) -- an audit-insert failure is
       recorded via ``dispatch_audit_failed`` and swallowed. The caller
-      keeps the outcome it already decided; the broadcast is skipped.
-    * ``require_audit=True`` (the write-class / post-approval success
-      path) -- the durable DISPATCH row is a hard precondition of a
-      successful return (CLAUDE.md postulate 7 / v0.1-spec §6). An
-      audit-insert failure is still logged, the broadcast is still
-      skipped, and then :exc:`AuditCommitError` is raised so the caller
-      fails the operation instead of reporting ``status='ok'`` for a
-      mutation with no governance-grade record.
+      keeps the outcome it already decided.
+    * ``require_audit=True`` (the success path of every completed
+      handler, read or write, and the row of a multi-step operation that
+      stopped because a step waits or was denied, #4275) -- the durable DISPATCH row is a hard
+      precondition of a successful return (CLAUDE.md postulate 7 /
+      v0.1-spec §6). An audit-insert failure is still logged, and then
+      :exc:`AuditCommitError` is raised so the caller fails the
+      operation instead of reporting ``status='ok'`` for a call with no
+      governance-grade record.
 
     *raw_payload* / *redaction_manifest* / *redaction_policy_id* are
     the connector-boundary redaction artefacts (G11.4-T2 #1071);
-    forwarded to :func:`write_audit_row`. The broadcast event still
-    consumes *params* (request-side) rather than the response-side
-    raw payload: per :func:`publish_broadcast`'s
-    :func:`~meho_backplane.broadcast.events.redact_payload` step, the
-    broadcast surface ships params only -- the response goes nowhere
-    near the broadcast subscribers, who already see redacted outcomes
-    via the broadcast detail policy (G6.3).
+    forwarded to :func:`write_audit_row`.
 
     *error_extras* (#2680) is the built error result's structured
-    envelope. It is forwarded to :func:`write_audit_row` (landing under
-    ``payload["error"]`` on the durable row) and deliberately **not**
-    passed to :func:`publish_broadcast`: the broadcast frame stays
-    params-only, so the error detail rides the audit ledger alone.
-    ``None`` on every non-error write.
+    envelope. It is forwarded to :func:`write_audit_row` and lands under
+    ``payload["error"]`` on the durable row. ``None`` on every non-error
+    write.
+
+    *event_class* (#3733) is forwarded to :func:`write_audit_row`; see
+    there for which class each caller declares.
     """
     try:
         await write_audit_row(
             audit_id=audit_id,
+            event_class=event_class,
             operator=operator,
             descriptor=descriptor,
             target=target,
@@ -785,36 +722,15 @@ async def audit_and_broadcast_safe(
             result_status=result_status,
             operator_sub=operator.sub,
         )
-        # Skip the broadcast when audit failed -- the broadcast event
-        # references the audit_id by FK contract, so a phantom event
-        # would mislead subscribers about a row that doesn't exist. This
-        # holds whether we swallow or re-raise below, so no phantom event
-        # is emitted on either branch.
         if require_audit:
-            # Write-class / post-approval success path: the DISPATCH row
-            # is a hard precondition of a successful return. Fail the
-            # operation so the caller never sees status=ok for a mutation
-            # that left no durable audit record.
+            # Completed-handler success path: the DISPATCH row is a hard
+            # precondition of a successful return. Fail the operation so
+            # the caller never sees status=ok for a call that left no
+            # durable audit record.
             raise AuditCommitError(
                 f"DISPATCH audit row could not be committed for {descriptor.op_id}"
             ) from audit_exc
         return None
-    try:
-        await publish_broadcast(
-            audit_id=audit_id,
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            result_status=result_status,
-        )
-    except Exception:
-        _log.exception(
-            "dispatch_broadcast_failed",
-            op_id=descriptor.op_id,
-            result_status=result_status,
-            operator_sub=operator.sub,
-        )
     return audit_id
 
 
@@ -827,8 +743,13 @@ async def audit_rejection_safe(
     params_hash: str,
     result_status: str,
     duration_ms: float,
-) -> None:
+) -> uuid.UUID | None:
     """Write one audit row for a pre-execution rejection; no broadcast (#3500).
+
+    Returns the row id when the row committed, ``None`` when the write
+    failed, like :func:`audit_safe`. The caller puts it on the result with
+    :func:`with_audit_receipt` so the refused call can be linked to its row
+    (#4669).
 
     Used for the abuse-control rejections (rate limit / concurrent-op cap):
     the over-limit event must be audited (spec §6), but -- unlike a policy
@@ -842,10 +763,14 @@ async def audit_rejection_safe(
     The request changed nothing, so a missing audit row for a rejected call
     is a monitoring gap, not a correctness one -- the opposite of the
     write-class success path's fail-closed ``require_audit`` contract.
+
+    The row is always ``event_class='policy_decision'`` (#3733): a gate
+    refused the call and nothing ran.
     """
     try:
         await write_audit_row(
             audit_id=audit_id,
+            event_class=AuditEventClass.POLICY_DECISION,
             operator=operator,
             descriptor=descriptor,
             target=target,
@@ -860,3 +785,19 @@ async def audit_rejection_safe(
             result_status=result_status,
             operator_sub=operator.sub,
         )
+        return None
+    return audit_id
+
+
+def with_audit_receipt(result: OperationResult, receipt: uuid.UUID | None) -> OperationResult:
+    """Return *result* with *receipt* as its ``audit_id``; unchanged when there is none.
+
+    Every path that writes an audit row for a result it already built uses
+    this: the error row (#3864) and every refusal row (#4669). The result
+    stays as it is when the row did not commit (``receipt is None``) or when
+    it already carries an ``audit_id``, so ``audit_id: null`` keeps meaning
+    "no audit row was written".
+    """
+    if receipt is None or result.audit_id is not None:
+        return result
+    return result.model_copy(update={"audit_id": receipt})

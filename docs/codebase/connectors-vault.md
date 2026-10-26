@@ -64,7 +64,7 @@ precedence at the login site (`auth.vault._resolve_login_role`) is:
 The **per-tenant tier (#3852)** consults `settings.vault_oidc_role_by_tenant`
 — a comma-separated `<tenant-uuid>=<role>` map (env `VAULT_OIDC_ROLE_BY_TENANT`,
 empty by default) — keyed on `operator.tenant_id`. It lets one fixed role stop
-spanning tenants on a shared multi-tenant instance (meho-internal#356): an
+spanning tenants on a shared multi-tenant instance: an
 operator of a sandbox tenant logs into a role whose `bound_claims` + Vault
 policy it satisfies, for **both** the target-less `vault.kv.*` family (which
 dispatches with `target=None`, so the per-target override never fires) and any
@@ -87,8 +87,8 @@ Guarantees:
 - **Fail-closed.** A resolved role Vault denies surfaces
   `VaultRoleDeniedError` from the login with **no** fallback to the wide
   role — the #2757 no-silent-widen rule, extended to the per-target role.
-- **Null-version safe.** The live `rdc-vault-teardown` target ships
-  `version=null`; it resolves to the connector via the wildcard
+- **Null-version safe.** A teardown target (for example `vault-teardown`)
+  may ship `version=null`; it resolves to the connector via the wildcard
   registration (G0.15-T6 #1215), and role resolution keys on `product` +
   `extras` alone, never `version`.
 - **Preflight-consistent.** The park-time write-capability preflight runs
@@ -101,10 +101,10 @@ evaluation fails closed to `unknown` (a `VaultRoleDeniedError`), which is a
 loud flag of a misconfigured sensor rather than a silent widen; pin
 monitoring sensors on the standard target, not the delete-scoped one.
 
-Consumer-side provisioning (the `meho-teardown` role + `rdc-vault-teardown`
+Consumer-side provisioning (the `meho-teardown` role + `vault-teardown`
 target registration) is documented in
 [`docs/cross-repo/vault-provisioning.md`](../cross-repo/vault-provisioning.md)
-§8; lab-verified in `claude-rdc-hetzner-dc#2814` (PR `#2815`).
+§8; verified end-to-end in a lab deployment.
 
 ## Key types
 
@@ -130,7 +130,7 @@ target registration) is documented in
   `credential_read` (decision #3 — aggregate-only broadcast).
 - **`sys` op group** (`ops_sys.py`, G3.3-T2 #546; policy ops
   G3.15-T2 #1410; bootstrap ops G3.15-T5 #1413) —
-  `register_vault_sys_typed_operations()` registers four read-only
+  `register_vault_sys_typed_operations()` registers six read-only
   diagnostics ops, the four ACL-policy ops, and the four bootstrap
   enable/tune ops under group key `sys`. The diagnostics ops are all
   `safety_level='safe'`,
@@ -144,12 +144,66 @@ target registration) is documented in
     signature but is unused.
   - `vault.sys.seal_status` — `GET /v1/sys/seal-status`. Returns the
     raw seal-status object.
+
+    `health` and `seal_status` answer for the **one node** behind the
+    target's address. In a cluster with integrated storage (raft) that
+    address reaches the active node, so both say `sealed: false` even
+    when a standby node came back sealed after a restart. Their
+    descriptions and `llm_instructions` say so and point to the two
+    cluster-wide reads below.
+  - `vault.sys.ha_status` — `GET /v1/sys/ha-status`. Returns
+    `{nodes: [...]}`, one row per node the active node has heard from
+    (`hostname`, `api_address`, `cluster_address`, `active_node`,
+    `last_echo`, `version`, `clock_skew_ms`, `echo_duration_ms`).
+    Vault puts the list under `data.Nodes` (capital N); the handler
+    also accepts a lower-case key. Enterprise-only fields are dropped.
+  - `vault.sys.raft.autopilot_state` —
+    `GET /v1/sys/storage/raft/autopilot/state`. Returns `healthy`,
+    `failure_tolerance` (how many more nodes may fail before Vault
+    stops), `leader`, and `{servers: [...]}` with one row per raft
+    server sorted by id (`id`, `name`, `address`, `status`,
+    `node_status`, `node_type`, `healthy`, `last_contact`, `last_index`,
+    `last_term`, `stable_since`, `version`). Vault returns `servers` as
+    a map keyed by raft id; the handler turns it into a list so the
+    answer is set-shaped. Vault's `voters` id list is left out on
+    purpose: a second top-level list would stop the result reduction
+    from finding the server rows, and each row's `status` already says
+    whether the server is the leader, a voter or a non-voter. The
+    `result_scalars` hint keeps `healthy`, `failure_tolerance` and
+    `leader` next to the reduced rows. Only clusters with raft storage
+    answer; a Vault on another storage backend returns an error, which
+    surfaces as `connector_error`.
+
+    Both live in `ops_sys_cluster.py` (split out to keep `ops_sys.py`
+    small) and are registered from
+    `register_vault_sys_typed_operations()`. hvac 2.4.0 has no helper
+    for either endpoint, so they call `client.adapter.get(<api path>)`
+    through the operator client. A 403 raises
+    `hvac.exceptions.Forbidden`, which the dispatcher turns into the
+    normal `connector_vault_forbidden` error.
+
+    **Vault policy the two reads need.** Both paths need the `read`
+    capability. Neither is sudo-protected (Vault's root-protected
+    endpoint list does not name them). The autopilot read must run in
+    the root namespace. Add this to the policy of MEHO's Vault role
+    (the role the operator JWT logs in to, `VAULT_OIDC_ROLE`):
+
+    ```hcl
+    path "sys/ha-status" {
+      capabilities = ["read"]
+    }
+    path "sys/storage/raft/autopilot/state" {
+      capabilities = ["read"]
+    }
+    ```
+
+    Without the grant the ops return `connector_vault_forbidden`.
   - `vault.sys.mounts.list` — `GET /v1/sys/mounts`. Returns the
     envelope's `data` under a `mounts` key.
   - `vault.sys.auth.list` — `GET /v1/sys/auth`. Returns the envelope's
     `data` under an `auth_methods` key.
 
-  The three authenticated ops forward the operator JWT via
+  The five authenticated ops forward the operator JWT via
   `vault_client_for_operator` and offload the blocking `hvac` call with
   `asyncio.to_thread`.
 
@@ -348,8 +402,33 @@ target registration) is documented in
 | `vault.kv.put` | `create_or_update_secret` | caution | `credential_write` |
 | `vault.kv.patch` | `patch` | caution | `credential_write` |
 | `vault.kv.delete` | `delete_secret_versions` | dangerous | `write` |
+| `vault.kv.metadata.delete` | `delete_metadata_and_all_versions` | destructive | `write` |
 
-All six register into operation group `kv`.
+All seven register into operation group `kv`.
+
+**Permanent delete (`vault.kv.metadata.delete`, #3424).** `kv.delete` is a
+soft delete: Vault keeps the data and an undelete brings it back.
+`kv.metadata.delete` removes the whole secret for good: every version and
+its metadata (`DELETE /v1/<mount>/metadata/<path>`). Only the secret at that
+exact path goes; secrets below it (`<path>/...`) are not touched. Because it
+cannot be undone, it is in the `destructive` tier (`requires_approval=True`):
+
+- The caller must run `preview_operation` first and pass its `preview_hash`
+  to `call_operation`. A second person must approve; agents are denied.
+- The preview builder (`kv_write_preview._kv_metadata_delete_preview`) reads
+  only the params. The approver sees the mount, the path and a
+  `blast_radius` block: the secret, what goes with it (all versions and the
+  metadata) and `irreversibility: "permanent"`. Never a secret value.
+- The handler reads the metadata before and after the delete, because Vault
+  answers the DELETE with 204 whether or not the secret existed. It returns
+  `status: "unchanged"` when nothing was there (nothing is sent, so it is
+  safe to run twice), `"deleted"` only when the read after the delete finds
+  nothing, and `"still_present"` when the secret is still there. The status
+  names follow the governed teardown deletes. The result names the mount and
+  path only (`{status, object: {kind, mount, path}, guidance}`).
+- After a delete, `vault.kv.versions` on the same path fails with
+  `exception_class="InvalidPath"` (Vault's 404), the same not-found shape as
+  every other KV read.
 
 **`kv.put` vs. `kv.patch`.** `kv.put` replaces the latest version
 wholesale (KV v2 does not merge — omitted keys are dropped). `kv.patch`
@@ -393,7 +472,7 @@ degrades to a runtime `connector_error`; `[^/]+` rejects a
 slash-bearing value (`"secret/data"`) where hvac expects the bare
 mount handle.
 
-**Mount-included `path` guard (#1755).** All six handlers resolve their
+**Mount-included `path` guard (#1755).** All seven handlers resolve their
 `(mount, path)` pair through the shared `_extract_mount_and_path(op_id,
 params)` helper, which applies the `mount` default + `.strip()` and adds
 a **path-shape pre-flight**: a `path` beginning with `"<mount>/"` raises
@@ -485,8 +564,9 @@ broadcast is the consistent, safe direction (same rationale as the
 ## Approval gating
 
 The mutating KV ops — `vault.kv.put` (`caution`), `vault.kv.patch`
-(`caution`), `vault.kv.delete` (`dangerous`) — register
-`requires_approval=True` (G3.15-T1 #1409). The flag became meaningful
+(`caution`), `vault.kv.delete` (`dangerous`), `vault.kv.metadata.delete`
+(`destructive`, #3424) — register `requires_approval=True` (G3.15-T1
+#1409). The flag became meaningful
 once G11.7-T1 (#1401) routed human principals hitting a
 `requires_approval` op to the **approval queue** (park for review)
 instead of hard-denying — so the gate no longer blocks the operator,
@@ -534,7 +614,7 @@ path that runs once a human approves.
 
 A `requires_approval` KV write parks for a four-eyes review. That review
 is **wasted** if the approved write then hits Vault `permission denied` —
-the consumer incident (`claude-rdc-hetzner-dc#864`) was exactly this: the
+a real consumer incident was exactly this: the
 `meho-mcp` role's templated policy granted `read` but no
 `create`/`update` on the write path, so every approved KV write failed
 post-approval.
@@ -551,11 +631,16 @@ so the banner reflects the role that will execute) and issues
 (`vault_kv_write_target_path`): `put`/`patch` render `<mount>/data/<path>`,
 but `vault.kv.delete`'s version soft-delete POSTs to `<mount>/delete/<path>`
 and Vault authorizes it with `update` on that **`/delete/`** path — not the
-data path (#3274; probing `/data/` for a delete gave a false pass). It
+data path (#3274; probing `/data/` for a delete gave a false pass).
+`vault.kv.metadata.delete` renders `<mount>/metadata/<path>` (#3424). It
 compares the granted capabilities against the per-op requirement in
-`VAULT_KV_WRITE_CAPABILITIES` (`put`/`patch` need `create`+`update` on the
-data path; `delete` needs `update` on the delete path) and returns a
-redaction-safe summary:
+`VAULT_KV_WRITE_CAPABILITIES` (`put` needs `create`+`update` on the data
+path; `patch` needs `read`+`update` there, because hvac reads the current
+version first and then writes to a secret that already exists, so it never
+needs `create` (#4831, #3897); `delete` needs `update` on the delete path;
+`metadata.delete` needs `read`+`delete` on the metadata path, because it
+reads the path before and after the delete) and returns a redaction-safe
+summary:
 
 ```python
 {"check": "vault.capabilities-self", "path": "secret/data/...",
@@ -564,8 +649,14 @@ redaction-safe summary:
 ```
 
 The dispatcher merges that under
-`ApprovalRequest.proposed_effect["permission_preflight"]`, so the
-approval surface can render a "this write will be denied" banner.
+`ApprovalRequest.proposed_effect["permission_preflight"]`. When
+`will_be_denied` is `True`, the dispatcher refuses the park instead: no
+approval row is written and the caller gets `denied` /
+`write_capability_denied` with `path`, `granted`, `required` and a
+`doc_ref` to the write policy (#3542). The refused attempt is still
+recorded as a `denied` audit row, like a policy denial. This holds for a
+top-level call and for a step inside a multi-step operation. A probe that fails
+returns `None` (fail-soft), so it never refuses a park.
 
 Two design points keep this correct:
 
@@ -647,11 +738,12 @@ raw >50-key list once a handle is produced.
    broadcast event, and reduces the result (JSONFlux).
 4. `op_class` for audit/broadcast is **derived from the op-id suffix**
    by `broadcast.events.classify_op`, not passed at registration. The
-   four `sys` ops classify as `read` — `.list` was already a read
-   suffix; `.health` and `.seal_status` were added to the read-suffix
-   tuple by #546 (no secret content, so they broadcast at the same
-   sensitivity as `.list`/`.get` rather than falling through to the
-   full-detail `other` class).
+   six `sys` diagnostics ops classify as `read` — `.list` was already a
+   read suffix; `.health` and `.seal_status` were added to the
+   read-suffix tuple by #546, and `.ha_status` / `.autopilot_state` for
+   the cluster-wide reads (no secret content, so they broadcast at the
+   same sensitivity as `.list`/`.get` rather than falling through to
+   the full-detail `other` class).
 
 ## Error handling
 
@@ -751,6 +843,11 @@ and a real Postgres audit store (reusing the integration conftest's
   call. Acceptable under v0.2 dogfood load (per-request login is
   already the v0.1/v0.2 model); revisit if a per-operator token cache
   lands.
+- `vault.sys.health` and `vault.sys.seal_status` see only the node
+  behind the target's address. Use `vault.sys.ha_status` or
+  `vault.sys.raft.autopilot_state` for the whole cluster. There is no
+  per-node seal read yet (that would need a per-node address on the
+  target).
 - `sys` policy writes (`policy.write` / `policy.delete`) landed in
   G3.15-T2 (#1410), approval-gated; the sys bootstrap writes
   (`auth.enable` / `auth.tune` / `mounts.enable` / `mounts.tune`)

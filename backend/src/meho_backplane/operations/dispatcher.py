@@ -14,11 +14,18 @@ phases the parent Initiative names:
    (:func:`~meho_backplane.operations._lookup.parse_connector_id`).
 2. Look up :class:`EndpointDescriptor` by the natural key
    (:func:`~meho_backplane.operations._lookup.lookup_descriptor`).
-   Unknown -> structured ``unknown_op`` error.
-3. Validate ``params`` against ``descriptor.parameter_schema`` via
+   Unknown -> structured ``unknown_op`` (or ``unknown_connector``) error.
+3. For an ingested op whose catalog opts into a target check, the
+   catalog must accept the target, or a sibling catalog of the same
+   implementation that does must have the same op enabled; the dispatch
+   then runs on that sibling
+   (:mod:`meho_backplane.operations._catalog_guard`, #3600). Otherwise ->
+   structured ``unqualified_target_version`` error. Then validate
+   ``params`` against the chosen ``descriptor.parameter_schema`` via
    :class:`Draft202012Validator` (JSON Schema 2020-12, OpenAPI 3.1
    compatible) -- :func:`~meho_backplane.operations._validate.validate_params`.
-   Invalid -> structured ``invalid_params`` error.
+   Invalid -> structured ``invalid_params`` error. So for a guarded op a
+   target the catalogs cannot serve is reported before bad params.
 4. Policy gate (G11.2-T3 + T4;
    :func:`~meho_backplane.operations._validate.policy_gate`). **Agent**
    principals resolve a three-state
@@ -52,8 +59,8 @@ phases the parent Initiative names:
    :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`,
    installed at startup; the import-time default is the
    :class:`~meho_backplane.operations.reducer.PassThroughReducer` shim).
-9. Write the audit row synchronously + publish a broadcast event
-   (:func:`~meho_backplane.operations._audit.audit_and_broadcast_safe`).
+9. Write the audit row synchronously (no Broadcast event, #3758)
+   (:func:`~meho_backplane.operations._audit.audit_safe`).
    The audit row carries the raw payload, the redaction manifest, and
    the resolved policy id.
 10. Return the :class:`OperationResult`.
@@ -71,6 +78,11 @@ form ``"<code>: <human-readable>"`` so callers can both string-match
 Detail payloads land in ``extras``. Codes:
 
 * ``unknown_op`` -- the natural key didn't resolve a descriptor.
+  ``extras["connectors_with_op"]`` lists other caller-visible connectors
+  that have the op (#4031); the message names them, or points at
+  ``search_operations`` when the list is empty.
+* ``unknown_connector`` -- the ``connector_id`` matches no connector the
+  caller can see (#4031), the same test the discovery meta-tools use.
 * ``invalid_params`` -- params failed JSON Schema validation.
 * ``invalid_op_schema`` -- the **stored** ``parameter_schema`` itself is
   broken: it carries a ``$ref`` the validator cannot resolve within the
@@ -106,6 +118,9 @@ Detail payloads land in ``extras``. Codes:
 * ``awaiting_approval`` -- the policy gate issued a ``needs_approval``
   verdict; a durable :class:`~meho_backplane.db.models.ApprovalRequest`
   row was created. ``extras["approval_request_id"]`` carries the UUID.
+* ``write_capability_denied`` (status ``denied``) -- the op needed
+  approval, but its park-time permission preflight said the write will
+  be denied, so no approval row was created (#3542).
 * ``connector_unsupported`` -- the connector / handler raised
   :exc:`NotImplementedError`: it *deliberately* does not implement
   what the dispatch requires (an unsupported ``target.auth_model``;
@@ -222,7 +237,7 @@ Returning a structured :class:`OperationResult` for every operator-
 visible failure mode keeps the contract uniform across the three call
 sites; genuine programming bugs (DB connection drops, audit insert
 failures) are caught + logged via
-:func:`~meho_backplane.operations._audit.audit_and_broadcast_safe`'s
+:func:`~meho_backplane.operations._audit.audit_safe`'s
 exception swallow, never crashing the dispatcher.
 
 References
@@ -252,40 +267,43 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
 from meho_backplane.broadcast.events import classify_op, scrub_secret_named_values
-from meho_backplane.broadcast.history import WRITE_OP_CLASSES, build_target_activity_advisory
+from meho_backplane.broadcast.history import build_target_activity_advisory
 from meho_backplane.broadcast.reflex import build_reflex_advisory
 from meho_backplane.checks.advisory import build_checks_alert_advisory
 from meho_backplane.connectors import (
     OperationResult,
     ResolutionLabel,
     ResultHandle,
-    get_connector_v2,
     resolve_connector_or_label,
     resolve_target_version,
 )
+from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError, shim_kind
-from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+from meho_backplane.db.models import AuditEventClass, EndpointDescriptor, PermissionVerdict
 from meho_backplane.flight_recorder import attach_agent_trace_handle
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.operations._audit import (
     AuditCommitError,
-    audit_and_broadcast_safe,
     audit_rejection_safe,
+    audit_safe,
     parent_audit_id_var,
     policy_decision_var,
     reveal_secret_var,
+    with_audit_receipt,
 )
 from meho_backplane.operations._branches import (
     dispatch_composite,
     dispatch_ingested,
     dispatch_typed,
 )
+from meho_backplane.operations._catalog_guard import select_catalog_for_target
 from meho_backplane.operations._errors import (
     is_auth_failed_status,
     is_probe_refused,
     result_ambiguous_connector,
     result_announce_required,
+    result_audit_commit_failed,
     result_awaiting_approval,
     result_blast_radius_required,
     result_composite_terminal_error,
@@ -302,6 +320,7 @@ from meho_backplane.operations._errors import (
     result_connector_vault_write_forbidden,
     result_denied,
     result_handler_unreachable,
+    result_idempotency_key_conflict,
     result_invalid_op_schema,
     result_invalid_params,
     result_no_connector,
@@ -309,8 +328,8 @@ from meho_backplane.operations._errors import (
     result_preview_hash_mismatch,
     result_rate_limited,
     result_target_required,
-    result_unknown_op,
-    result_unqualified_target_version,
+    result_vault_credentials_read_error,
+    result_write_capability_denied,
     wrap_ok_result,
 )
 from meho_backplane.operations._handler_resolve import (
@@ -321,10 +340,10 @@ from meho_backplane.operations._handler_resolve import (
     reset_handler_cache,
 )
 from meho_backplane.operations._lookup import (
-    count_known_ops,
     lookup_descriptor,
     parse_connector_id,
 )
+from meho_backplane.operations._op_miss import op_miss_result
 from meho_backplane.operations._preview import (
     BLAST_RADIUS_KEY,
     PreviewContext,
@@ -339,11 +358,13 @@ from meho_backplane.operations._request_preview import (
 )
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
+    compute_audit_params_hash,
     compute_params_hash,
     ingested_schema_for_validation,
     policy_gate,
     validate_params,
 )
+from meho_backplane.operations._vendor_text import withhold_vendor_text
 from meho_backplane.operations.composite import (
     COMPOSITE_DEPTH_TOP_LEVEL,
     CompositeRecursionLimitExceeded,
@@ -361,7 +382,10 @@ from meho_backplane.operations.dispatch_limits import (
 from meho_backplane.operations.reducer import (
     PassThroughReducer,
     Reducer,
+    full_result_capture_var,
+    handle_owner_sub_var,
 )
+from meho_backplane.operations.result_document import json_text_bytes
 from meho_backplane.redaction import (
     RedactionMiddlewareResult,
     apply_connector_boundary_redaction,
@@ -376,6 +400,7 @@ __all__ = [
     "DispatchChild",
     "Dispatcher",
     "compute_params_hash",
+    "descriptor_requires_target",
     "dispatch",
     "import_handler",
     "parent_audit_id_var",
@@ -465,6 +490,23 @@ def _handler_requires_target(handler_ref: str) -> bool:
     if param_names and param_names[0] == "self":
         return True
     return "connector" in param_names
+
+
+def descriptor_requires_target(descriptor: EndpointDescriptor) -> bool:
+    """True when dispatching *descriptor* needs a ``target``.
+
+    An ``ingested`` op always reaches its vendor API through the target's
+    connector, so it always needs one. A ``typed`` / ``composite`` op
+    needs one only when its handler binds to a connector instance (see
+    :func:`_handler_requires_target`). Mirrors the checks in
+    :func:`_resolve_connector_instance`; the exact-op contract of
+    ``search_operations`` uses it to tell the caller up front.
+    """
+    if descriptor.source_kind == "ingested":
+        return True
+    if descriptor.source_kind in ("typed", "composite"):
+        return _handler_requires_target(descriptor.handler_ref or "")
+    return False
 
 
 async def _resolve_connector_instance(
@@ -850,27 +892,24 @@ async def _execute_and_audit_inner(
     # DISPATCH row reads ``error``, the caller (and a parked-then-approved run's
     # decision result + step events) sees ``status='error'`` + ``error_code``,
     # and the redacted envelope's upstream detail is preserved on both surfaces.
+    #
+    # The envelope goes through the reducer like a success payload, so a large
+    # per-item list (``vm.power.bulk`` over hundreds of VMs) comes back as a
+    # result handle, not inline (postulate 6). ``status`` / ``summary`` /
+    # ``issues`` always stay inline so the caller can see why it failed.
     terminal_error_code = _composite_terminal_error_code(descriptor, redaction.redacted)
     if terminal_error_code is not None:
-        duration_ms = _elapsed_ms(started)
-        return await _audit_error_and_return(
-            result_composite_terminal_error(
-                op_id,
-                error_code=terminal_error_code,
-                envelope=redaction.redacted,
-                error_summary=_composite_error_summary(terminal_error_code, redaction.redacted),
-                duration_ms=duration_ms,
-            ),
-            audit_id=audit_id,
-            operator=operator,
+        return await _reduce_and_audit_composite_error(
+            op_id=op_id,
             descriptor=descriptor,
+            operator=operator,
             target=target,
             params=params,
             params_hash=params_hash,
-            duration_ms=duration_ms,
-            raw_payload=redaction.raw,
-            redaction_manifest=manifest_to_audit_payload(redaction.manifest),
-            redaction_policy_id=redaction.policy_id,
+            audit_id=audit_id,
+            redaction=redaction,
+            started=started,
+            error_code=terminal_error_code,
         )
 
     return await _reduce_and_audit_success(
@@ -919,10 +958,104 @@ def _composite_terminal_error_code(descriptor: EndpointDescriptor, envelope: Any
     issues = envelope.get("issues")
     if not isinstance(issues, list):
         return None
-    if not any(isinstance(item, dict) and item.get("severity") == "error" for item in issues):
+    if not any(_is_error_issue(item) for item in issues):
         return None
     status = envelope.get("status")
     return status if isinstance(status, str) and status else "composite_error"
+
+
+#: Envelope keys a composite terminal-error result keeps inline, verbatim, when
+#: the reducer moved the rest of the envelope behind a result handle.
+_TERMINAL_ERROR_INLINE_KEYS: tuple[str, ...] = ("status", "summary")
+
+#: How many ``issues[]`` entries a reduced terminal-error result keeps inline.
+#: Matches the reducer's default preview size.
+_TERMINAL_ERROR_INLINE_ISSUES = 5
+
+#: Budget for the inline ``issues`` list, in bytes of JSON text measured with
+#: :func:`json_text_bytes` (escaped, the way the MCP transport sends it). Half
+#: of the reducer's 4 KB inline threshold; the other half is left for the
+#: reducer's own summary fields, ``status`` and ``summary``.
+_TERMINAL_ERROR_ISSUES_BYTE_BUDGET = 2048
+
+#: Longest string value an inline issue entry may carry, in bytes of JSON text
+#: (a non-ASCII character costs six bytes, ``\u00fc``, not one). The same cap
+#: as the result's ``error`` line
+#: (:data:`~meho_backplane.operations._errors._EXC_MESSAGE_CAP`).
+_TERMINAL_ERROR_ISSUE_TEXT_CAP = 256
+
+_TERMINAL_ERROR_TEXT_CUT_MARK = "...<truncated>"
+
+
+def _is_error_issue(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("severity") == "error"
+
+
+def _cut_text_to_bytes(text: str, cap: int) -> str:
+    """Cut *text* so its JSON text, cut mark included, is at most *cap* bytes."""
+    if json_text_bytes(text) - 2 <= cap:  # minus the enclosing quotes
+        return text
+    budget = cap - len(_TERMINAL_ERROR_TEXT_CUT_MARK)
+    used = 0
+    kept = 0
+    for char in text[:cap]:  # every character costs at least one byte
+        cost = json_text_bytes(char) - 2
+        if used + cost > budget:
+            break
+        used += cost
+        kept += 1
+    return text[:kept] + _TERMINAL_ERROR_TEXT_CUT_MARK
+
+
+def _cap_issue_text(item: Any) -> Any:
+    """Return *item* with every string value cut to the inline text cap."""
+    if not isinstance(item, dict):
+        return item
+    return {
+        key: _cut_text_to_bytes(value, _TERMINAL_ERROR_ISSUE_TEXT_CAP)
+        if isinstance(value, str)
+        else value
+        for key, value in item.items()
+    }
+
+
+def _bounded_issues(issues: list[Any]) -> dict[str, Any]:
+    """A bounded inline view of a terminal-error envelope's ``issues[]``.
+
+    Keeps at most :data:`_TERMINAL_ERROR_INLINE_ISSUES` entries, in their
+    original order, choosing the ``error``-severity entries first so the
+    reason for the failure is never pushed out by warnings. Every string value
+    is cut to :data:`_TERMINAL_ERROR_ISSUE_TEXT_CAP` bytes of JSON text, and
+    the list as a whole stays within :data:`_TERMINAL_ERROR_ISSUES_BYTE_BUDGET`
+    bytes: entries are added in rank order until the next one would not fit.
+    The first ranked entry (the error, when there is one) is always kept so
+    the reason for the failure stays visible. ``issues_total`` carries the
+    full count so the caller can tell the view from the whole list.
+    """
+    ranked = [i for i, item in enumerate(issues) if _is_error_issue(item)]
+    ranked += [i for i, item in enumerate(issues) if not _is_error_issue(item)]
+    kept: dict[int, Any] = {}
+    used = 2  # the enclosing brackets
+    for index in ranked[:_TERMINAL_ERROR_INLINE_ISSUES]:
+        capped = _cap_issue_text(issues[index])
+        cost = json_text_bytes(capped) + 1  # plus the separating comma
+        if kept and used + cost > _TERMINAL_ERROR_ISSUES_BYTE_BUDGET:
+            break
+        kept[index] = capped
+        used += cost
+    return {
+        "issues": [kept[index] for index in sorted(kept)],
+        "issues_total": len(issues),
+    }
+
+
+def _terminal_error_inline_fields(envelope: dict[str, Any]) -> dict[str, Any]:
+    """The failure fields a reduced terminal-error result keeps inline."""
+    inline = {key: envelope[key] for key in _TERMINAL_ERROR_INLINE_KEYS if key in envelope}
+    issues = envelope.get("issues")
+    if isinstance(issues, list):
+        inline.update(_bounded_issues(issues))
+    return inline
 
 
 def _composite_error_summary(error_code: str, envelope: dict[str, Any]) -> str:
@@ -936,20 +1069,98 @@ def _composite_error_summary(error_code: str, envelope: dict[str, Any]) -> str:
     return error_code
 
 
-def _requires_durable_audit(descriptor: EndpointDescriptor) -> bool:
-    """Whether a failed DISPATCH audit commit must fail the operation.
+async def _reduce_and_audit_composite_error(
+    *,
+    op_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    audit_id: uuid.UUID,
+    redaction: RedactionMiddlewareResult,
+    started: float,
+    error_code: str,
+) -> OperationResult:
+    """Reduce a composite terminal-error envelope, audit it as ``error``, return it.
 
-    True for write-class ops (:data:`WRITE_OP_CLASSES` via
-    :func:`classify_op`) and for any op above the ``safe`` tier -- the
-    superset that also covers every post-approval / needs-approval-resumed
-    dispatch (approval is gated on ``caution`` or higher). For these the
-    durable audit row is a hard precondition of a successful return
-    (CLAUDE.md postulate 7 / v0.1-spec §6), so the success path fails
-    closed into a ``connector_error`` when the row cannot commit. Safe
-    read-class ops keep the historical fail-open posture -- S07 (#295)
-    scopes this pass to the write / post-approval path.
+    #4223: the error arm used to hand the redacted envelope to the caller
+    verbatim, so only success payloads went through the result reducer. A
+    refusal that lists many candidates (``folder.create``'s
+    ``ambiguous_parent`` on a vCenter with hundreds of same-named folders)
+    then shipped the whole list inline with no handle — the postulate-6 limit
+    on inline lists applies to failures too. The envelope now takes the same
+    reducer path as a success payload: a small envelope passes through
+    unchanged, an oversized one comes back as the bounded summary with the
+    full envelope behind a result handle (a document record, #3633).
+
+    When the reducer hands out a handle, the failure fields are copied over its
+    summary (#3813): ``status`` and ``summary`` verbatim, and a bounded view of
+    ``issues`` (:func:`_bounded_issues`) with ``issues_total``. So the caller
+    always sees why the call failed without a drill-in, and the inline result
+    stays small however many issues the handler returned. The full list is in
+    the stored result (as the handle's rows when ``issues`` is the envelope's
+    one list, or as the whole document otherwise) and in the audit row's raw
+    payload.
+
+    The ``error_code`` and the ``"<sentinel>: <message>"`` line are read from
+    the **full** envelope before the reduce, so they never depend on what the
+    summary kept. A reducer failure keeps the operation an error and drops the
+    inline envelope (``delivery="unavailable"``) instead of leaking it; the
+    audit row still records the raw payload and the redaction manifest.
     """
-    return classify_op(descriptor.op_id) in WRITE_OP_CLASSES or descriptor.safety_level != "safe"
+    error_summary = _composite_error_summary(error_code, redaction.redacted)
+    serialised_manifest = manifest_to_audit_payload(redaction.manifest)
+    envelope: dict[str, Any] | None = redaction.redacted
+    handle: ResultHandle | None = None
+    delivery: Literal["complete", "partial", "unavailable"] | None = None
+    try:
+        summary, handle = await _DEFAULT_REDUCER.reduce(
+            redaction.redacted,
+            descriptor.response_schema,
+            _build_reducer_context(
+                op_id=op_id,
+                descriptor=descriptor,
+                operator=operator,
+                target=target,
+                audit_id=audit_id,
+            ),
+        )
+    except Exception as exc:
+        _log.warning(
+            "result_delivery_unavailable",
+            op_id=op_id,
+            audit_id=str(audit_id),
+            exception_class=type(exc).__name__,
+        )
+        envelope, handle, delivery = None, None, "unavailable"
+    else:
+        if handle is not None:
+            envelope = dict(summary) if isinstance(summary, dict) else {"value": summary}
+            envelope.update(_terminal_error_inline_fields(redaction.redacted))
+    duration_ms = _elapsed_ms(started)
+    return await _audit_error_and_return(
+        result_composite_terminal_error(
+            op_id,
+            error_code=error_code,
+            envelope=envelope,
+            error_summary=error_summary,
+            duration_ms=duration_ms,
+            handle=handle,
+            delivery=delivery,
+        ),
+        audit_id=audit_id,
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params=params,
+        params_hash=params_hash,
+        duration_ms=duration_ms,
+        raw_payload=redaction.raw,
+        redaction_manifest=serialised_manifest,
+        redaction_policy_id=redaction.policy_id,
+        handle_metadata=_handle_metadata_for_audit(handle),
+    )
 
 
 async def _reduce_and_audit_success(
@@ -1004,12 +1215,12 @@ async def _reduce_and_audit_success(
     summary, handle = reduced
     duration_ms = _elapsed_ms(started)
     try:
-        receipt = await audit_and_broadcast_safe(
+        receipt = await audit_safe(
             audit_id=audit_id,
+            event_class=AuditEventClass.OPERATION_EXECUTION,
             operator=operator,
             descriptor=descriptor,
             target=target,
-            params=params,
             params_hash=params_hash,
             result_status="ok",
             duration_ms=duration_ms,
@@ -1017,18 +1228,15 @@ async def _reduce_and_audit_success(
             redaction_manifest=serialised_manifest,
             redaction_policy_id=redaction.policy_id,
             handle_metadata=_handle_metadata_for_audit(handle),
-            require_audit=_requires_durable_audit(descriptor),
+            require_audit=True,
         )
-    except AuditCommitError as exc:
-        # The mutation already ran against the vendor, but the durable
-        # DISPATCH row -- the only record carrying raw_payload,
-        # redaction_manifest, policy_decision, target_id and
-        # agent_session_id -- did not commit. For a write-class /
-        # post-approval op that row is a precondition of a successful
-        # return (postulate 7 / v0.1-spec §6), so surface a distinct
-        # connector_error instead of status=ok. No broadcast was emitted
-        # (audit_and_broadcast_safe skips it when the audit fails).
-        return result_connector_error(op_id, exc, duration_ms)
+    except AuditCommitError:
+        # The handler already ran, but the durable DISPATCH row -- the only
+        # record carrying raw_payload, redaction_manifest, target_id and
+        # agent_session_id -- did not commit. That row is a precondition of
+        # a successful return for every op, read or write (postulate 7 /
+        # v0.1-spec §6). The outcome is uncertain and must not be retried.
+        return result_audit_commit_failed(op_id, duration_ms)
     activity_advisory = await build_target_activity_advisory(
         operator,
         op_id=descriptor.op_id,
@@ -1132,7 +1340,7 @@ async def _run_branch_with_error_handling(
     and the stage-the-credential remediation instead.
     """
     try:
-        return await _run_source_kind_branch(
+        raw = await _run_source_kind_branch(
             descriptor=descriptor,
             connector_instance=connector_instance,
             operator=operator,
@@ -1341,6 +1549,7 @@ async def _run_branch_with_error_handling(
             VAULT_KV_WRITE_CAPABILITIES,
             vault_kv_write_target_path,
         )
+        from meho_backplane.connectors.vault.target_auth import resolve_vault_target_auth
 
         if op_id in VAULT_KV_WRITE_CAPABILITIES:
             try:
@@ -1356,6 +1565,10 @@ async def _run_branch_with_error_handling(
                 duration_ms,
                 write_path=write_path,
                 identity_hint=operator.sub,
+                # #3716: name the acting target + role so the remediation can
+                # point at a retarget before a policy edit.
+                target_name=getattr(target, "name", None),
+                vault_role=resolve_vault_target_auth(target).role,
             )
         else:
             expected_secret_ref: str | None = None
@@ -1419,6 +1632,20 @@ async def _run_branch_with_error_handling(
             params_hash=params_hash,
             duration_ms=duration_ms,
         )
+    except SecretRefReadError as ref_exc:
+        # #3864: a secret named in the op params (a password ref) could not be
+        # read. The write did not run; say so with its own code.
+        duration_ms = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            result_vault_credentials_read_error(op_id, ref_exc, duration_ms),
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
     except ConnectorResourceNotFoundError as not_found_exc:
         duration_ms = _elapsed_ms(started)
         return await _audit_error_and_return(
@@ -1458,6 +1685,17 @@ async def _run_branch_with_error_handling(
             params_hash=params_hash,
             duration_ms=duration_ms,
         )
+    else:
+        return await _audit_returned_result(
+            raw,
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            started=started,
+        )
 
 
 def _error_extras_for_audit(result: OperationResult) -> dict[str, Any] | None:
@@ -1475,6 +1713,89 @@ def _error_extras_for_audit(result: OperationResult) -> dict[str, Any] | None:
     return dict(extras) if extras else None
 
 
+async def _audit_returned_result(
+    raw: Any,
+    *,
+    audit_id: uuid.UUID,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    started: float,
+) -> Any:
+    """Write the operation's own audit row when a handler *returns* a result.
+
+    A typed or composite handler can return an :class:`OperationResult`
+    instead of raising: an error result (#4274, for example a composite's
+    ``composite_resume_unsupported``), or the result of a step that stopped
+    the operation part-way on the ``enforce_subop_policy`` seam (#4275): the
+    step waits for approval (``awaiting_approval``) or is denied (``denied``).
+    Without this row nothing carries this dispatch's ``audit_id``, yet the
+    rows of the steps that ran point at it as ``parent_audit_id``, the waiting
+    step's ``approval.request`` row does too, and the flight-recorder trace is
+    stored under it. Any other status passes through unchanged, and anything
+    that is not an :class:`OperationResult` is the raw payload and passes
+    through too.
+
+    The row is an ``operation_execution`` row: the operation's code ran, even
+    if only partly. The step's own decision stays on the step's decision row
+    (#3733). ``result_status`` is the status the caller got, and
+    ``payload["error"]`` holds the result's extras (the ``approval_request_id``
+    of a wait, the ``reason`` of a deny). The row records the real elapsed
+    time, because a handler-built result may carry ``duration_ms=0``. The
+    caller gets the handler's result as it was, plus the row's ``audit_id``.
+
+    An error row is written fail-open, like every error row: when it does not
+    commit the caller still gets the error, only without an ``audit_id``. A
+    wait or deny row is written fail-closed (``require_audit=True``), like the
+    ``ok`` row: the caller must never hear "waits for approval" or "denied"
+    for a run that left no record (postulate 7). When that row does not
+    commit the caller gets ``audit_commit_failed``; for a wait the result
+    keeps the ``approval_request_id``, because the request is saved and still
+    waits. The row is written last, after the handler returned, so it never
+    shares the approval request's transaction and is never changed later
+    (``docs/decisions/composite-audit-when-a-step-waits.md``).
+    """
+    if not isinstance(raw, OperationResult):
+        return raw
+    duration_ms = _elapsed_ms(started)
+    if raw.status == "error":
+        return await _audit_error_and_return(
+            raw,
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
+    if raw.status not in ("awaiting_approval", "denied"):
+        return raw
+    try:
+        receipt = await audit_safe(
+            audit_id=audit_id,
+            event_class=AuditEventClass.OPERATION_EXECUTION,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params_hash=params_hash,
+            result_status=raw.status,
+            duration_ms=duration_ms,
+            error_extras=_error_extras_for_audit(raw),
+            require_audit=True,
+        )
+    except AuditCommitError:
+        approval_request_id = raw.extras.get("approval_request_id")
+        return result_audit_commit_failed(
+            descriptor.op_id,
+            duration_ms,
+            approval_request_id=str(approval_request_id) if approval_request_id else None,
+        )
+    return raw.model_copy(update={"audit_id": receipt})
+
+
 async def _audit_error_and_return(
     result: OperationResult,
     *,
@@ -1488,13 +1809,14 @@ async def _audit_error_and_return(
     raw_payload: Any | None = None,
     redaction_manifest: list[dict[str, Any]] | None = None,
     redaction_policy_id: str | None = None,
+    handle_metadata: dict[str, Any] | None = None,
 ) -> OperationResult:
     """Write the ``result_status='error'`` audit row for a built result, then return it.
 
     #2680: inverts the legacy audit-then-build ordering. Every error arm now
     builds its structured :class:`OperationResult` **first** so the envelope
     is in scope for the audit write; this helper threads that envelope
-    (:func:`_error_extras_for_audit`) into ``audit_and_broadcast_safe`` ->
+    (:func:`_error_extras_for_audit`) into ``audit_safe`` ->
     ``write_audit_row`` -> ``_build_audit_payload`` so the durable DISPATCH
     row records the same ``error_code`` / ``http_status`` / ``upstream_message``
     detail the caller received, not merely ``result_status='error'``. The
@@ -1505,25 +1827,40 @@ async def _audit_error_and_return(
     *raw_payload* / *redaction_manifest* / *redaction_policy_id* are available
     to error arms that already hold connector-boundary redaction artefacts;
     pre-response error arms pass ``None``. Fail-open on the audit write is
-    preserved: ``audit_and_broadcast_safe`` swallows its own internal failures,
+    preserved: ``audit_safe`` swallows its own internal failures,
     so the never-raises contract holds and the built ``result`` is always
     returned.
+
+    *handle_metadata* (#4223) is set by the composite terminal-error arm when
+    the reducer put an oversized error envelope behind a result handle, so the
+    audit row carries the ``handle_id`` the way a reduced success row does.
+
+    #3864: when the row commits, the returned result carries its ``audit_id``,
+    the same receipt the success path returns. So an approver, and the stored
+    result of an approved run, can point at the row that records the failure.
+
+    #4854: for an operation that sends a secret, the vendor's text is replaced
+    first (:func:`~meho_backplane.operations._vendor_text.withhold_vendor_text`).
+    Every error result passes here, so the caller's answer, the audit row and
+    the stored approval result all hold the same text.
     """
-    await audit_and_broadcast_safe(
+    result = withhold_vendor_text(result, op_id=descriptor.op_id, tags=descriptor.tags)
+    receipt = await audit_safe(
         audit_id=audit_id,
+        event_class=AuditEventClass.OPERATION_EXECUTION,
         operator=operator,
         descriptor=descriptor,
         target=target,
-        params=params,
         params_hash=params_hash,
         result_status="error",
         duration_ms=duration_ms,
         raw_payload=raw_payload,
         redaction_manifest=redaction_manifest,
         redaction_policy_id=redaction_policy_id,
+        handle_metadata=handle_metadata,
         error_extras=_error_extras_for_audit(result),
     )
-    return result
+    return with_audit_receipt(result, receipt)
 
 
 async def _evict_connector_credentials(connector_instance: Connector | None, target: Any) -> None:
@@ -1732,7 +2069,7 @@ async def _retry_after_session_invalidation(
     """
     await invalidate_session(target)
     try:
-        return await _run_source_kind_branch(
+        raw = await _run_source_kind_branch(
             descriptor=descriptor,
             connector_instance=connector_instance,
             operator=operator,
@@ -1803,6 +2140,17 @@ async def _retry_after_session_invalidation(
             params=params,
             params_hash=params_hash,
             duration_ms=duration_ms,
+        )
+    else:
+        return await _audit_returned_result(
+            raw,
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            started=started,
         )
 
 
@@ -2014,26 +2362,27 @@ async def _unavailable_delivery_result(
     """Record a completed handler whose response could not be shaped.
 
     The handler already returned successfully. A reducer failure must not invite a
-    retry, particularly for a mutation; the audit receipt is exposed only when its
-    write committed.
+    retry, particularly for a mutation, so the result says ``retry=False``. The
+    audit row must commit; when it does not, the caller gets
+    :func:`result_audit_commit_failed` instead of ``status="ok"``.
     """
     try:
-        receipt = await audit_and_broadcast_safe(
+        receipt = await audit_safe(
             audit_id=audit_id,
+            event_class=AuditEventClass.OPERATION_EXECUTION,
             operator=operator,
             descriptor=descriptor,
             target=target,
-            params=params,
             params_hash=params_hash,
             result_status="ok",
             duration_ms=duration_ms,
             raw_payload=raw_payload,
             redaction_manifest=redaction_manifest,
             redaction_policy_id=redaction_policy_id,
-            require_audit=_requires_durable_audit(descriptor),
+            require_audit=True,
         )
-    except AuditCommitError as exc:
-        return result_connector_error(op_id, exc, duration_ms)
+    except AuditCommitError:
+        return result_audit_commit_failed(op_id, duration_ms)
     return OperationResult(
         status="ok",
         op_id=op_id,
@@ -2041,10 +2390,11 @@ async def _unavailable_delivery_result(
         audit_id=receipt,
         delivery="unavailable",
         extras={
+            "retry": False,
             "remediation": (
                 "Operation already executed; inspect its audit record when an audit_id is present, "
                 "or inspect operation status. Do not re-invoke it."
-            )
+            ),
         },
     )
 
@@ -2084,9 +2434,67 @@ async def _reduce_or_error(
     a debugger has the same pre-redaction evidence available as on
     the success path.
     """
+    reducer_context = _build_reducer_context(
+        op_id=op_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        audit_id=audit_id,
+    )
+    # #4117: the sensor runner asks for the full redacted payload beside the
+    # shortened result. Filled before the reduce so a reducer failure still
+    # leaves the capture usable; every other caller leaves the var unset.
+    capture = full_result_capture_var.get()
+    if capture is not None:
+        capture.payload = raw
+        capture.captured = True
+    try:
+        return await _DEFAULT_REDUCER.reduce(
+            raw,
+            descriptor.response_schema,
+            reducer_context,
+        )
+    except Exception as exc:
+        _log.warning(
+            "result_delivery_unavailable",
+            op_id=op_id,
+            audit_id=str(audit_id),
+            exception_class=type(exc).__name__,
+        )
+        return await _unavailable_delivery_result(
+            op_id=op_id,
+            descriptor=descriptor,
+            operator=operator,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            audit_id=audit_id,
+            duration_ms=_elapsed_ms(started),
+            raw_payload=raw_payload_for_audit,
+            redaction_manifest=redaction_manifest_for_audit,
+            redaction_policy_id=redaction_policy_id,
+        )
+
+
+def _build_reducer_context(
+    *,
+    op_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    audit_id: uuid.UUID,
+) -> dict[str, Any]:
+    """The per-dispatch context dict handed to the result reducer.
+
+    Shared by the success path (:func:`_reduce_or_error`) and the composite
+    terminal-error arm (:func:`_reduce_and_audit_composite_error`, #4223) so
+    both reduce under the same owner, tenant and author hints.
+    """
     reducer_context: dict[str, Any] = {
         "op_id": op_id,
-        "operator_sub": operator.sub,
+        # #3548: an approval resume runs under the approver but binds the
+        # parking principal as the handle owner, so the parker can read it.
+        "operator_sub": handle_owner_sub_var.get() or operator.sub,
         "audit_id": str(audit_id),
         "source_kind": descriptor.source_kind,
     }
@@ -2126,8 +2534,9 @@ async def _reduce_or_error(
     # author registered one via ``llm_instructions``) so the reducer copies
     # the listed scalar siblings (a validation/task id, execution status)
     # into the inline summary instead of swallowing them with the rest of
-    # the dict envelope. ``None`` on ops without a hint -- the summary
-    # keeps its bookkeeping-only shape. Pulled here (vs. in the reducer)
+    # the dict envelope. ``None`` on ops without a hint -- the reducer then
+    # applies its bounded default scalar rule (#3633), except for
+    # credential-class ops, which keep only the bookkeeping. Pulled here (vs. in the reducer)
     # for the same decoupling reason as the two hints above.
     result_scalars = _result_scalars_from_descriptor(descriptor)
     if result_scalars is not None:
@@ -2145,32 +2554,7 @@ async def _reduce_or_error(
     result_digest = _result_digest_from_descriptor(descriptor)
     if result_digest is not None:
         reducer_context["result_digest"] = result_digest
-    try:
-        return await _DEFAULT_REDUCER.reduce(
-            raw,
-            descriptor.response_schema,
-            reducer_context,
-        )
-    except Exception as exc:
-        _log.warning(
-            "result_delivery_unavailable",
-            op_id=op_id,
-            audit_id=str(audit_id),
-            exception_class=type(exc).__name__,
-        )
-        return await _unavailable_delivery_result(
-            op_id=op_id,
-            descriptor=descriptor,
-            operator=operator,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            audit_id=audit_id,
-            duration_ms=_elapsed_ms(started),
-            raw_payload=raw_payload_for_audit,
-            redaction_manifest=redaction_manifest_for_audit,
-            redaction_policy_id=redaction_policy_id,
-        )
+    return reducer_context
 
 
 def _identifier_default_effect(
@@ -2281,10 +2665,9 @@ async def _build_proposed_effect(
             # #2331: promote a will-be-denied preflight to a named,
             # top-level warning on the envelope so the approval surface can
             # render a "this write may not land" banner without reaching
-            # into the ``permission_preflight`` sub-dict. Rides #2332's
-            # preview provenance surface (its natural carrier per the task):
-            # a warning, not a gate — refuse-to-park stays off by default,
-            # the approver may know the write policy is landing alongside.
+            # into the ``permission_preflight`` sub-dict. Since #3542 the
+            # park seams refuse such a park (``_preflight_denied_refusal``),
+            # so the warning only shows on rows parked before that change.
             if preflight.get("will_be_denied") is True:
                 base["write_capability_warning"] = "connector_identity_may_lack_write"
         # Stamp the reviewer-facing preview provenance onto every parked
@@ -2421,6 +2804,113 @@ async def _destructive_binding_refusal(
     return None
 
 
+async def destructive_binding_evidence(
+    *,
+    op_id: str,
+    connector_id: str,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    params: dict[str, Any],
+    preview_hash: str,
+) -> dict[str, Any] | None:
+    """Run the destructive binding checks for a delete-grant use (#4622).
+
+    The same two checks the park path runs
+    (:func:`_destructive_binding_refusal`): the preview hash must match the
+    hash of a fresh server-side preview of the identical call, and the
+    proposed effect must carry a valid blast radius. Returns the evidence
+    the grant-use audit row stores (``preview_hash`` and ``blast_radius``)
+    when both pass, else ``None``. The caller then parks the call, and the
+    park path returns the exact refusal (``preview_hash_mismatch``,
+    ``blast_radius_required``), so a refused call writes no grant-use row.
+    """
+    proposed_effect = await _build_proposed_effect(
+        op_id=op_id,
+        connector_id=connector_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        params=params,
+    )
+    refusal = await _destructive_binding_refusal(
+        op_id=op_id,
+        connector_id=connector_id,
+        operator=operator,
+        target=target,
+        params=params,
+        preview_hash=preview_hash,
+        proposed_effect=proposed_effect,
+        duration_ms=0.0,
+    )
+    if refusal is not None or proposed_effect is None:
+        return None
+    return {"preview_hash": preview_hash, BLAST_RADIUS_KEY: proposed_effect[BLAST_RADIUS_KEY]}
+
+
+def _preflight_denied_refusal(
+    *, op_id: str, proposed_effect: dict[str, Any] | None, duration_ms: float
+) -> OperationResult | None:
+    """Refuse a park whose permission preflight says the write will be denied (#3542).
+
+    Returns a ``denied`` / ``write_capability_denied`` result when
+    ``proposed_effect["permission_preflight"]["will_be_denied"]`` is
+    ``True``, else ``None``. A person must not spend an approval on a write
+    the identity cannot perform; the caller fixes the grant and retries.
+    A missing preflight (none registered, or a fail-soft probe fault) never
+    refuses.
+    """
+    preflight = (proposed_effect or {}).get("permission_preflight")
+    if not isinstance(preflight, dict) or preflight.get("will_be_denied") is not True:
+        return None
+    return result_write_capability_denied(op_id, preflight, duration_ms)
+
+
+async def _audit_denied_and_return(
+    result: OperationResult,
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    duration_ms: float,
+) -> OperationResult:
+    """Write the ``denied`` audit row for a refused park, then return the result.
+
+    The one audit path for every refusal that stops a park before an approval
+    row exists: the destructive-tier binding checks (#3197, #4647), a
+    ``write_capability_denied`` preflight (#3542) and an idempotency-key
+    conflict (#3486). Shared by the dispatcher park
+    (:func:`_handle_needs_approval`) and the composite sub-op gate
+    (``composite.enforce_subop_policy``). The row lands
+    on the refused op's own path with the refusal details under
+    ``payload["error"]``, like an ordinary policy denial. For a sub-op the
+    row carries the parent operation's audit id through
+    :data:`~meho_backplane.operations._audit.parent_audit_id_var`, which the
+    composite branch binds for the whole handler body. The parent operation
+    gets its own ``denied`` execution row from :func:`_audit_returned_result`
+    when the handler returns the refusal (#4275); this row records the step's
+    decision, so the step keeps its own record (#3733).
+
+    #4669: when the row commits, the returned result carries its ``audit_id``,
+    like an error result does. The parent operation's own row replaces it on
+    the caller's answer for a sub-op (:func:`_audit_returned_result`).
+    """
+    receipt = await audit_safe(
+        audit_id=uuid.uuid4(),
+        event_class=AuditEventClass.POLICY_DECISION,
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params_hash=params_hash,
+        result_status="denied",
+        duration_ms=duration_ms,
+        error_extras=_error_extras_for_audit(result),
+    )
+    return with_audit_receipt(result, receipt)
+
+
 async def _handle_needs_approval(
     *,
     op_id: str,
@@ -2432,23 +2922,47 @@ async def _handle_needs_approval(
     params_hash: str,
     duration_ms: float,
     preview_hash: str | None = None,
+    idempotency_key: str | None = None,
 ) -> OperationResult:
     """Create a durable pending approval row and return an awaiting_approval result.
 
     G11.2-T4 (#817). Called when :func:`policy_gate` returns
     ``"needs_approval"``. Opens its own DB session (same pattern as
-    :func:`audit_and_broadcast_safe`) so the pending row + request audit
+    :func:`audit_safe`) so the pending row + request audit
     row commit atomically without coupling to any outer transaction.
 
+    When the op's park-time permission preflight says the write will be
+    denied, the park is refused with ``write_capability_denied`` and no
+    approval row is written (#3542, :func:`_preflight_denied_refusal`). The
+    refusal is still recorded as a ``denied`` audit row through the same
+    writer an ordinary policy denial uses, so the attempt stays in the
+    operation audit trail.
+
     For a ``destructive``-tier op (#3197) the park is gated first by
-    :func:`_destructive_binding_refusal`: it refuses (fail-closed, no row
-    written) unless the caller presented a matching ``preview_hash`` and the
-    ``proposed_effect`` carries a blast-radius statement. The verified
-    ``preview_hash`` is then persisted on the row for approve-time
-    re-verification.
+    :func:`_destructive_binding_refusal`: it refuses (fail-closed, no
+    approval row written) unless the caller presented a matching
+    ``preview_hash`` and the ``proposed_effect`` carries a blast-radius
+    statement. The refusal is recorded as a ``denied`` audit row like the
+    preflight refusal above (#4647). The verified ``preview_hash`` is then
+    persisted on the row for approve-time re-verification.
+
+    Two refusals write no audit row on purpose. Neither is a decision about
+    the call; both are a MEHO-side fault, and no audit event class describes
+    them. A missing or malformed approval encryption key
+    (``ApprovalHandoffKeyError``) only returns a ``denied`` result whose
+    message names the key setting; nothing is logged. A failure while saving
+    the approval request is logged as ``approval_queue_create_failed`` and
+    returns a ``denied`` result.
 
     On success returns :func:`~meho_backplane.operations._errors.result_awaiting_approval`
     with the pending row's id in ``extras["approval_request_id"]``.
+
+    With an ``idempotency_key`` (#3486), a retry of the same call by the
+    same principal returns the existing live row's id (and
+    ``extras["approval_request_reused"] = True``) instead of a new row; no
+    second ``approval.pending`` event is published. The gates above still
+    run first, unchanged. A key held by a different call is refused with
+    ``idempotency_key_conflict`` and nothing is parked.
     On unexpected failure, logs at error level and falls back to a
     ``denied`` result so the dispatcher never raises.
     """
@@ -2458,8 +2972,9 @@ async def _handle_needs_approval(
     from meho_backplane.db.engine import get_sessionmaker
     from meho_backplane.operations.approval_handoff import ApprovalHandoffKeyError
     from meho_backplane.operations.approval_queue import (
+        IdempotencyKeyConflictError,
         create_pending_request,
-        publish_approval_event,
+        record_approval_step_event,
     )
 
     run_id = current_agent_run_id_var.get()
@@ -2490,10 +3005,11 @@ async def _handle_needs_approval(
         params=params,
     )
 
-    # #3197: the destructive tier refuses to park (fail-closed, no durable
+    # #3197: the destructive tier refuses to park (fail-closed, no approval
     # row) unless the caller presented a matching preview_hash and the
     # blast-radius statement is present. Non-destructive ops skip this
-    # entirely and park exactly as before.
+    # entirely and park exactly as before. #4647: the refused attempt is
+    # still audited as a denial, like a policy denial.
     if descriptor.safety_level == "destructive":
         refusal = await _destructive_binding_refusal(
             op_id=op_id,
@@ -2506,7 +3022,33 @@ async def _handle_needs_approval(
             duration_ms=duration_ms,
         )
         if refusal is not None:
-            return refusal
+            return await _audit_denied_and_return(
+                refusal,
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                duration_ms=duration_ms,
+            )
+
+    # #3542: a preflight that says the write will be denied refuses the
+    # park (no approval row written) instead of asking a person to approve
+    # it. The attempt is still audited as a denial, like a policy denial,
+    # with the capability-only refusal details on the row.
+    refusal = _preflight_denied_refusal(
+        op_id=op_id, proposed_effect=proposed_effect, duration_ms=duration_ms
+    )
+    if refusal is not None:
+        return await _audit_denied_and_return(
+            refusal,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
 
     try:
         sessionmaker = get_sessionmaker()
@@ -2518,23 +3060,44 @@ async def _handle_needs_approval(
                 op_id=op_id,
                 target=target,
                 params=params,
-                params_hash=params_hash,
+                # The approval check needs every value, so the request
+                # stores the full hash, not the audit hash in ``params_hash``.
+                params_hash=compute_params_hash(params),
                 run_id=run_id,
                 proposed_effect=proposed_effect,
                 preview_hash=preview_hash,
+                idempotency_key=idempotency_key,
             )
             await session.commit()
-        # Publish AFTER commit so a phantom event cannot outlive a failed
-        # transaction (the helper is fail-open: a broadcast outage does
-        # not block the durable decision).
-        await publish_approval_event(
+        if getattr(request, "_reused", False):
+            return result_awaiting_approval(op_id, request.id, duration_ms, reused=True)
+        # Record the add-on step events AFTER commit so a phantom event
+        # cannot outlive a failed transaction (the helper is fail-open).
+        expired_request = getattr(request, "_expired_request", None)
+        if expired_request is not None:
+            await record_approval_step_event(
+                tenant_id=operator.tenant_id,
+                request=expired_request,
+                decision="expired",
+                audit_id=expired_request._audit_id,
+            )
+        await record_approval_step_event(
             tenant_id=operator.tenant_id,
             request=request,
             decision="pending",
-            principal_sub=operator.sub,
             audit_id=request._audit_id,  # type: ignore[attr-defined]
         )
         return result_awaiting_approval(op_id, request.id, duration_ms)
+    except IdempotencyKeyConflictError as exc:
+        return await _audit_denied_and_return(
+            result_idempotency_key_conflict(op_id, exc.request_id, duration_ms),
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
     except ApprovalHandoffKeyError:
         return result_denied(
             op_id,
@@ -2560,6 +3123,37 @@ async def _handle_needs_approval(
         )
 
 
+def _params_error(
+    descriptor: EndpointDescriptor,
+    op_id: str,
+    params: dict[str, Any],
+    started: float,
+) -> OperationResult | None:
+    """Validate *params* against the descriptor's schema; ``None`` when they pass.
+
+    #293 (security review S05): for an ingested (generic-connector) op,
+    validate against a schema that forbids undeclared params. Freshly
+    ingested descriptors already carry ``additionalProperties: false``
+    (openapi._build_parameter_schema); this backstop applies the same
+    clause to descriptors ingested before that fix, so an undeclared
+    param is rejected as ``invalid_params`` here rather than defaulting
+    onto the vendor query string in ``_split_ingested_params``.
+    """
+    schema_to_validate = descriptor.parameter_schema
+    if descriptor.source_kind == "ingested":
+        schema_to_validate = ingested_schema_for_validation(descriptor.parameter_schema)
+    try:
+        validation_errors = validate_params(schema_to_validate, params)
+    except InvalidOpSchemaError as exc:
+        # #3095: the stored schema itself is broken (dangling $ref) --
+        # the descriptor is at fault, not the caller. Structured error
+        # instead of letting PointerToNowhere escape as a 500.
+        return result_invalid_op_schema(op_id, exc.missing_ref, _elapsed_ms(started))
+    if validation_errors:
+        return result_invalid_params(op_id, validation_errors, _elapsed_ms(started))
+    return None
+
+
 # code-quality-allow: 8-phase orchestrator -- phases stay linear so the
 # 8-numbered-steps contract in the module docstring stays grep-visible;
 # splitting would scatter structured-error returns + obscure never-raises.
@@ -2572,6 +3166,7 @@ async def dispatch(
     params: dict[str, Any],
     _approved: bool = False,
     preview_hash: str | None = None,
+    idempotency_key: str | None = None,
 ) -> OperationResult:
     """Single entry point for every MEHO operation.
 
@@ -2588,6 +3183,12 @@ async def dispatch(
     the server-recomputed preview hash (see :func:`_destructive_binding_refusal`).
     ``None`` (the default) for every non-destructive dispatch and on the
     ``_approved`` resume path (the binding was verified at park + approve).
+
+    ``idempotency_key`` is an optional client-chosen retry key (#3486). It
+    is consulted **only** when the call parks for approval: a retry of the
+    identical call by the same principal returns the existing live
+    approval request instead of a second one (see
+    :func:`_handle_needs_approval`). Ignored on every other path.
 
     ``_approved`` is an **internal** flag set only by the approval-queue
     resume path (:mod:`meho_backplane.api.v1.approvals`) after a human
@@ -2614,7 +3215,10 @@ async def dispatch(
     if "reveal_secret" in params:
         params = {key: value for key, value in params.items() if key != "reveal_secret"}
     credential_read = classify_op(op_id) == "credential_read"
-    params_hash = compute_params_hash(params)
+    # The hash every audit row of this dispatch carries: keyed, with
+    # secret-named values left out. A parked approval stores the full
+    # approval hash instead (``_handle_needs_approval``).
+    params_hash = compute_audit_params_hash(params)
     product, version, impl_id = parse_connector_id(connector_id)
 
     # --- Step 2: descriptor lookup ----------------------------------------
@@ -2626,78 +3230,47 @@ async def dispatch(
         op_id=op_id,
     )
     if descriptor is None:
-        known_op_count = await count_known_ops(
+        return await op_miss_result(
             tenant_id=operator.tenant_id,
-            product=product,
-            version=version,
-            impl_id=impl_id,
+            connector_id=connector_id,
+            op_id=op_id,
+            triple=(product, version, impl_id),
+            started=started,
         )
-        return result_unknown_op(op_id, known_op_count, _elapsed_ms(started))
 
-    # --- Step 3: parameter_schema validation ------------------------------
-    # #293 (security review S05): for an ingested (generic-connector) op,
-    # validate against a schema that forbids undeclared params. Freshly
-    # ingested descriptors already carry ``additionalProperties: false``
-    # (openapi._build_parameter_schema); this backstop applies the same
-    # clause to descriptors ingested before that fix, so an undeclared
-    # param is rejected as ``invalid_params`` here rather than defaulting
-    # onto the vendor query string in ``_split_ingested_params``.
-    schema_to_validate = descriptor.parameter_schema
-    if descriptor.source_kind == "ingested":
-        schema_to_validate = ingested_schema_for_validation(descriptor.parameter_schema)
-    try:
-        validation_errors = validate_params(schema_to_validate, params)
-    except InvalidOpSchemaError as exc:
-        # #3095: the stored schema itself is broken (dangling $ref) --
-        # the descriptor is at fault, not the caller. Structured error
-        # instead of letting PointerToNowhere escape as a 500.
-        return result_invalid_op_schema(op_id, exc.missing_ref, _elapsed_ms(started))
-    if validation_errors:
-        return result_invalid_params(op_id, validation_errors, _elapsed_ms(started))
-
+    # --- Step 3: catalog target guard + parameter_schema validation -------
     # A connector may opt an ingested catalog into a target-compatibility
-    # guard. The owner lookup is exact: it names the catalog the caller
-    # selected, while the resolver answers which connector class the target
-    # would use. Resolve only for an advertised guard so existing descriptor
-    # kinds retain their policy and targetless dispatch behaviour.
-    pre_resolved_connector_class: type[Connector] | None = None
-    owner_class = get_connector_v2(descriptor.product, descriptor.version, descriptor.impl_id)
-    if (
-        descriptor.source_kind == "ingested"
-        and owner_class is not None
-        and owner_class.enforces_catalog_target_compatibility
-    ):
-        pre_resolved_connector_class, _resolution_label, _resolution_message = (
-            resolve_connector_or_label(target)
-        )
-        target_product = getattr(target, "product", None)
-        if not isinstance(target_product, str) or not target_product:
-            target_product = None
-        target_version = resolve_target_version(target)
-        incompatibility = owner_class.catalog_target_incompatibility(
-            descriptor_source_kind=descriptor.source_kind,
-            target_product=target_product,
-            target_version=target_version,
-            selected_target_connector=pre_resolved_connector_class,
-        )
-        if incompatibility is not None:
-            duration_ms = _elapsed_ms(started)
-            await audit_rejection_safe(
-                audit_id=uuid.uuid4(),
-                operator=operator,
-                descriptor=descriptor,
-                target=target,
-                params_hash=params_hash,
-                result_status="unqualified_target_version",
-                duration_ms=duration_ms,
-            )
-            return result_unqualified_target_version(
-                op_id,
-                reason=incompatibility,
-                target_product=target_product,
-                target_version=target_version,
-                duration_ms=duration_ms,
-            )
+    # guard. When the named catalog cannot serve the target but a sibling
+    # catalog of the same implementation can and has the same op enabled,
+    # the dispatch moves to that sibling (#3600): its descriptor, its
+    # connector_id (so policy, approval and audit name what really runs),
+    # and its parameter schema. The params are checked once, after this
+    # choice, against the descriptor that will run -- so for a guarded
+    # ingested op, ``unqualified_target_version`` comes before
+    # ``invalid_params``. An approval resume (``_approved``) never
+    # switches: the approver saw and the gate checked the stored catalog,
+    # and this path skips both. If the target's detected version moved
+    # while the request waited, the resume is refused and the caller
+    # must make a new request.
+    selection = await select_catalog_for_target(
+        operator=operator,
+        descriptor=descriptor,
+        connector_id=connector_id,
+        target=target,
+        params_hash=params_hash,
+        started=started,
+        allow_sibling=not _approved,
+    )
+    if isinstance(selection, OperationResult):
+        return selection
+    pre_resolved_connector_class = selection.connector_class
+    if selection.descriptor is not descriptor:
+        descriptor = selection.descriptor
+        connector_id = selection.connector_id
+        product, version = descriptor.product, descriptor.version
+    params_error = _params_error(descriptor, op_id, params, started)
+    if params_error is not None:
+        return params_error
 
     # --- Step 3.5: dispatch limits (#3500) --------------------------------
     # Per-principal rate limit + per-principal concurrent-op cap, enforced
@@ -2719,7 +3292,7 @@ async def dispatch(
         _rate_retry = await check_dispatch_rate_limit(operator.tenant_id, operator.sub, _rate_limit)
         if _rate_retry is not None:
             duration_ms = _elapsed_ms(started)
-            await audit_rejection_safe(
+            receipt = await audit_rejection_safe(
                 audit_id=uuid.uuid4(),
                 operator=operator,
                 descriptor=descriptor,
@@ -2728,12 +3301,15 @@ async def dispatch(
                 result_status="rate_limited",
                 duration_ms=duration_ms,
             )
-            return result_rate_limited(
-                op_id,
-                kind="rate",
-                limit=_rate_limit,
-                retry_after_seconds=_rate_retry,
-                duration_ms=duration_ms,
+            return with_audit_receipt(
+                result_rate_limited(
+                    op_id,
+                    kind="rate",
+                    limit=_rate_limit,
+                    retry_after_seconds=_rate_retry,
+                    duration_ms=duration_ms,
+                ),
+                receipt,
             )
         _conc_cap = resolve_dispatch_concurrency_cap(_limit_settings, operator.tenant_id)
         _conc_retry, _dispatch_slot_key = await acquire_dispatch_slot(
@@ -2744,7 +3320,7 @@ async def dispatch(
         )
         if _conc_retry is not None:
             duration_ms = _elapsed_ms(started)
-            await audit_rejection_safe(
+            receipt = await audit_rejection_safe(
                 audit_id=uuid.uuid4(),
                 operator=operator,
                 descriptor=descriptor,
@@ -2753,12 +3329,15 @@ async def dispatch(
                 result_status="rate_limited",
                 duration_ms=duration_ms,
             )
-            return result_rate_limited(
-                op_id,
-                kind="concurrency",
-                limit=_conc_cap,
-                retry_after_seconds=_conc_retry,
-                duration_ms=duration_ms,
+            return with_audit_receipt(
+                result_rate_limited(
+                    op_id,
+                    kind="concurrency",
+                    limit=_conc_cap,
+                    retry_after_seconds=_conc_retry,
+                    duration_ms=duration_ms,
+                ),
+                receipt,
             )
 
     # --- Step 4: policy gate ---------------------------------------------
@@ -2786,26 +3365,33 @@ async def dispatch(
             # G11.2-T3: async, three-state verdict (auto-execute / needs-approval
             # / deny). The call site signature is unchanged; the function now
             # awaits a DB read to load the principal's AgentPermission rows.
+            # #4622: the preview hash and the params reach the gate so a
+            # delete grant (sandbox mode) can check the binding before it
+            # records the grant use. Every other path ignores them.
             verdict, gate_reason = await policy_gate(
                 operator=operator,
                 descriptor=descriptor,
                 target=target,
                 connector_id=connector_id,
+                preview_hash=preview_hash,
+                params=params,
             )
             policy_decision_var.set(verdict.value)
             if verdict == PermissionVerdict.DENY:
                 duration_ms = _elapsed_ms(started)
-                await audit_and_broadcast_safe(
+                receipt = await audit_safe(
                     audit_id=uuid.uuid4(),
+                    event_class=AuditEventClass.POLICY_DECISION,
                     operator=operator,
                     descriptor=descriptor,
                     target=target,
-                    params=params,
                     params_hash=params_hash,
                     result_status="denied",
                     duration_ms=duration_ms,
                 )
-                return result_denied(op_id, gate_reason or "policy denied", duration_ms)
+                return with_audit_receipt(
+                    result_denied(op_id, gate_reason or "policy denied", duration_ms), receipt
+                )
             if verdict == PermissionVerdict.NEEDS_APPROVAL:
                 # G11.2-T4 (#817): write a durable ApprovalRequest row (+ its
                 # synchronous "request" audit row) and return an
@@ -2824,26 +3410,30 @@ async def dispatch(
                     params_hash=params_hash,
                     duration_ms=duration_ms,
                     preview_hash=preview_hash,
+                    idempotency_key=idempotency_key,
                 )
             if verdict is not PermissionVerdict.AUTO_EXECUTE:
                 # Defensive fail-closed: only an explicit AUTO_EXECUTE proceeds
                 # to execution. Any unexpected verdict (a future enum member, a
                 # bug in the resolver) denies rather than silently executing.
                 duration_ms = _elapsed_ms(started)
-                await audit_and_broadcast_safe(
+                receipt = await audit_safe(
                     audit_id=uuid.uuid4(),
+                    event_class=AuditEventClass.POLICY_DECISION,
                     operator=operator,
                     descriptor=descriptor,
                     target=target,
-                    params=params,
                     params_hash=params_hash,
                     result_status="denied",
                     duration_ms=duration_ms,
                 )
-                return result_denied(
-                    op_id,
-                    gate_reason or f"unexpected policy verdict {verdict!r}; denied",
-                    duration_ms,
+                return with_audit_receipt(
+                    result_denied(
+                        op_id,
+                        gate_reason or f"unexpected policy verdict {verdict!r}; denied",
+                        duration_ms,
+                    ),
+                    receipt,
                 )
 
             # --- Opt-in announce gate (#3133) --------------------------
@@ -2863,17 +3453,19 @@ async def dispatch(
             )
             if announce_block is not None:
                 duration_ms = _elapsed_ms(started)
-                await audit_and_broadcast_safe(
+                receipt = await audit_safe(
                     audit_id=uuid.uuid4(),
+                    event_class=AuditEventClass.POLICY_DECISION,
                     operator=operator,
                     descriptor=descriptor,
                     target=target,
-                    params=params,
                     params_hash=params_hash,
                     result_status="denied",
                     duration_ms=duration_ms,
                 )
-                return result_announce_required(op_id, announce_block, duration_ms)
+                return with_audit_receipt(
+                    result_announce_required(op_id, announce_block, duration_ms), receipt
+                )
         else:
             # Approval-queue resume path: the gate is skipped because an
             # operator already approved this exact call. Stamp the row with

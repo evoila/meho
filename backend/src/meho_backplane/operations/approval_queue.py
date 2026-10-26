@@ -73,21 +73,29 @@ where a malicious approver swaps the params between the "request" and the
 
 from __future__ import annotations
 
+import re
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, cast
+from enum import StrEnum
+from typing import Any, Final, NamedTuple, cast
 
 import structlog
 from sqlalchemy import CursorResult, and_, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.delegation import resolve_actor_sub
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.db.models import (
     ApprovalRequest,
     ApprovalRequestStatus,
+    AuditEventClass,
     AuditLog,
 )
 from meho_backplane.operations._audit import (
@@ -95,11 +103,13 @@ from meho_backplane.operations._audit import (
     parent_audit_id_var,
     policy_decision_var,
     resolve_agent_session_id,
-    resolve_broadcast_lineage,
     work_ref_var,
 )
 from meho_backplane.operations._errors import result_already_resumed, result_denied
-from meho_backplane.operations._validate import compute_params_hash
+from meho_backplane.operations._validate import (
+    params_hash_candidates,
+    params_hash_matches,
+)
 from meho_backplane.operations.approval_handoff import (
     ApprovalHandoffError,
 )
@@ -112,33 +122,56 @@ from meho_backplane.operations.approval_handoff import (
 from meho_backplane.operations.approval_handoff import (
     store as store_handoff,
 )
+from meho_backplane.operations.reducer import handle_owner_sub_var
 
 __all__ = [
+    "EXPIRY_OPERATOR_SUB",
+    "MAX_REASON_LENGTH",
     "ApprovalError",
     "ApprovalNotFoundError",
     "ApprovalRequestAlreadyDecidedError",
     "ApprovalRequestExpiredError",
+    "ApprovalResultState",
+    "DelegatedDecisionForbiddenError",
+    "DelegatedReasonInvalidError",
+    "Delegation",
+    "IdempotencyKeyConflictError",
     "NonHumanApprovalError",
     "ParamsMismatchError",
     "PreviewBindingMissingError",
     "ResultAccessForbiddenError",
     "SelfApprovalForbiddenError",
     "UnauthorizedApprovalError",
+    "approval_result_state",
     "approve_request",
     "claim_resume",
+    "composite_resume_binding",
     "consume_remote_write_approval",
     "create_pending_request",
     "expire_stale_requests",
+    "expiry_operator",
     "find_remote_write_approval",
+    "get_decision_delegation",
     "get_request",
     "list_pending",
-    "publish_approval_event",
+    "parse_delegation",
     "read_approval_result",
+    "record_approval_step_event",
+    "rehydrate_resume_target",
     "reject_request",
     "resume_dispatch_after_approval",
 ]
 
-_log = structlog.get_logger(__name__)
+
+def _log() -> Any:
+    # Resolved per call, not held as a module-level proxy. Production sets
+    # ``cache_logger_on_first_use=True`` in ``configure_logging``, and a
+    # cached logger keeps the processor list it was built with. A later
+    # ``structlog.configure(...)`` replaces that list, so test capture such
+    # as ``structlog.testing.capture_logs`` cannot reach a cached logger.
+    # Same precedent as ``meho_backplane.auth.jwt``.
+    return structlog.get_logger(__name__)
+
 
 #: Synthetic status code used for approval audit rows. Mirrors the
 #: ``status_code_for_result`` convention: ``202`` means "accepted / pending".
@@ -216,6 +249,26 @@ class ParamsMismatchError(ApprovalError):
         super().__init__(
             f"params hash mismatch on approval_request {request_id}; "
             "original params must be supplied unchanged"
+        )
+
+
+class IdempotencyKeyConflictError(ApprovalError):
+    """An ``idempotency_key`` is already used by a different call (#3486).
+
+    Raised by :func:`create_pending_request` when the same principal sends a
+    key that a live (``pending`` or ``approved``) request already holds, but
+    the new call is not the same call: a different ``op_id``,
+    ``connector_id``, target, params, ``preview_hash`` or ``work_ref``.
+    Returning the old request would tell the caller that the wrong call is
+    waiting for approval, so the new call is refused and nothing is parked.
+    """
+
+    def __init__(self, request_id: uuid.UUID) -> None:
+        self.request_id = request_id
+        super().__init__(
+            f"idempotency_key is already used by approval_request {request_id} "
+            "for a different call; send the identical call to get that request "
+            "back, or use a new key"
         )
 
 
@@ -346,6 +399,488 @@ class ResultAccessForbiddenError(ApprovalError):
         )
 
 
+class DelegatedReasonInvalidError(ApprovalError):
+    """A decision reason names an instructing human but is incomplete.
+
+    Raised by :func:`parse_delegation` (called from :func:`approve_request`
+    and :func:`reject_request`) when the reason carries an
+    ``Instructed-by:`` line but the trailer block at its end is missing
+    ``Instruction:`` or ``Refs:``, has an empty value, repeats a key, or is
+    not one contiguous block of ``Key: value`` lines (#3692). Fail-closed:
+    a delegated decision that cannot say who instructed, what they wrote,
+    and where it is tracked is refused, not recorded half-way. The route
+    layer maps this to 422.
+    """
+
+    def __init__(self, problem: str) -> None:
+        self.problem = problem
+        super().__init__(
+            f"delegated decision reason is invalid: {problem}. End the reason "
+            "with a block of three lines: 'Instructed-by: <who>', "
+            "'Instruction: \"<their words>\"', 'Refs: <issue or change ref>'"
+        )
+
+
+class DelegatedDecisionForbiddenError(ApprovalError):
+    """A delegated decision was made on a deployment that is not lab-class.
+
+    Raised by :func:`approve_request` and :func:`reject_request` when the
+    decision ``reason`` carries a valid delegation block (#3692) and the
+    deployment has not set ``Settings.approval_allow_delegated_decision``
+    (#3693). On production an approve or reject must be the approver's own
+    call, not one made on another person's instruction. The switch is read
+    from the environment at boot, so no request field can change the
+    outcome. The route layer maps this to 403.
+    """
+
+    def __init__(self, request_id: uuid.UUID, *, operator_sub: str, instructed_by: str) -> None:
+        self.request_id = request_id
+        self.operator_sub = operator_sub
+        self.instructed_by = instructed_by
+        super().__init__(
+            f"operator {operator_sub!r} may not decide approval_request "
+            f"{request_id} on the instruction of {instructed_by!r}: delegated "
+            "decisions are allowed only on lab-class deployments "
+            "(APPROVAL_ALLOW_DELEGATED_DECISION=true). Decide on your own "
+            "judgement, without the Instructed-by: block"
+        )
+
+
+#: Upper bound on a decision ``reason``, shared by the REST bodies and the
+#: console form. The audit row stores the reason verbatim; the bound keeps a
+#: paste accident from landing a huge free-text blob on the ledger.
+MAX_REASON_LENGTH: Final[int] = 2000
+
+
+@dataclass(frozen=True, slots=True)
+class Delegation:
+    """Who told the approver to decide, in their own words (#3692).
+
+    Parsed from the git-trailer-style block at the end of a decision
+    ``reason`` by :func:`parse_delegation`. The approver still decides under
+    their **own** identity (``reviewed_by``); this records the other human
+    whose written instruction they acted on. Not related to the RFC 8693
+    ``principal_act`` pair, which describes the *requester's* delegation.
+    """
+
+    instructed_by: str
+    instruction: str
+    refs: tuple[str, ...]
+
+    def to_payload(self) -> dict[str, Any]:
+        """Return the JSON shape stored on the decision audit row."""
+        return {
+            "instructed_by": self.instructed_by,
+            "instruction": self.instruction,
+            "refs": list(self.refs),
+        }
+
+
+#: A reason is delegated iff any line starts with ``Instructed-by:``.
+_INSTRUCTED_BY_LINE = re.compile(r"^[ \t]*instructed-by[ \t]*:", re.IGNORECASE | re.MULTILINE)
+#: One ``Key: value`` trailer line (git trailer shape).
+_TRAILER_LINE = re.compile(r"^([A-Za-z][A-Za-z0-9-]*)[ \t]*:[ \t]*(.*)$")
+#: Quote pairs stripped from the ``Instruction:`` value.
+_QUOTE_PAIRS: Final[tuple[tuple[str, str], ...]] = (('"', '"'), ("\u201c", "\u201d"))
+
+
+def _trailer_block(reason: str) -> dict[str, str] | None:
+    """Parse the last paragraph of *reason* as ``Key: value`` trailers.
+
+    Returns a lower-cased-key dict, or ``None`` when any line of the last
+    paragraph is not a trailer line. Raises on a repeated key.
+    """
+    block: list[str] = []
+    for line in reversed(reason.strip().splitlines()):
+        if not line.strip():
+            break
+        block.append(line.strip())
+    trailers: dict[str, str] = {}
+    for line in reversed(block):
+        match = _TRAILER_LINE.match(line)
+        if match is None:
+            return None
+        key = match.group(1).lower()
+        if key in trailers:
+            raise DelegatedReasonInvalidError(f"the {match.group(1)}: line appears more than once")
+        trailers[key] = match.group(2).strip()
+    return trailers
+
+
+def _unquote(value: str) -> str:
+    for opening, closing in _QUOTE_PAIRS:
+        if len(value) >= 2 and value.startswith(opening) and value.endswith(closing):
+            return value[1:-1].strip()
+    return value
+
+
+def parse_delegation(reason: str) -> Delegation | None:
+    """Parse the delegated-decision trailers out of a decision *reason*.
+
+    Pure and deterministic (#3692). Returns ``None`` when no line starts
+    with ``Instructed-by:`` (keys are case-insensitive) -- an ordinary
+    decision. Otherwise the last paragraph of the reason must be a block of
+    ``Key: value`` lines carrying non-empty ``Instructed-by:``,
+    ``Instruction:`` and ``Refs:`` (comma-separated). Other trailer keys in
+    the block are ignored. Surrounding double quotes on the instruction are
+    removed; the words inside are kept verbatim.
+
+    Raises:
+        DelegatedReasonInvalidError: The marker is present but the block is
+            missing, malformed, or incomplete.
+    """
+    if not reason or not _INSTRUCTED_BY_LINE.search(reason):
+        return None
+    trailers = _trailer_block(reason)
+    if trailers is None or "instructed-by" not in trailers:
+        raise DelegatedReasonInvalidError(
+            "the Instructed-by:, Instruction: and Refs: lines must be one block "
+            "of 'Key: value' lines at the end of the reason, after a blank line"
+        )
+    instructed_by = trailers["instructed-by"]
+    instruction = _unquote(trailers.get("instruction", ""))
+    refs = tuple(ref.strip() for ref in trailers.get("refs", "").split(",") if ref.strip())
+    missing = [
+        name
+        for name, value in (
+            ("Instructed-by", instructed_by),
+            ("Instruction", instruction),
+            ("Refs", refs),
+        )
+        if not value
+    ]
+    if missing:
+        raise DelegatedReasonInvalidError(f"missing or empty: {', '.join(missing)}")
+    return Delegation(instructed_by=instructed_by, instruction=instruction, refs=refs)
+
+
+def _record_delegation(
+    extra: dict[str, Any],
+    delegation: Delegation | None,
+    *,
+    request: ApprovalRequest,
+    operator: Operator,
+    decision: str,
+) -> None:
+    """Add the structured delegation block to *extra* and log it (#3692).
+
+    No-op for an ordinary decision. The block rides the decision audit
+    row's payload (no column, no migration -- the #2087 break-glass
+    precedent), and the WARNING event makes a delegated decision visible
+    in the log stream the way ``approval_self_approval_break_glass`` does.
+    """
+    if delegation is None:
+        return
+    extra["delegation"] = delegation.to_payload()
+    _log().warning(
+        "approval_delegated_decision",
+        approval_request_id=str(request.id),
+        op_id=request.op_id,
+        decision=decision,
+        reviewed_by=operator.sub,
+        instructed_by=delegation.instructed_by,
+        tenant_id=str(operator.tenant_id),
+    )
+
+
+def _check_delegated_allowed(
+    delegation: Delegation | None,
+    *,
+    request: ApprovalRequest,
+    operator: Operator,
+    decision: str,
+) -> None:
+    """Refuse a delegated decision unless the deployment is lab-class (#3693).
+
+    An ordinary decision (*delegation* is ``None``) always passes. A
+    delegated one passes only when ``Settings.approval_allow_delegated_decision``
+    is set. Settings are imported lazily, like :func:`_check_self_approval`.
+
+    Raises:
+        DelegatedDecisionForbiddenError: Delegated decision on a deployment
+            without the lab-class switch.
+    """
+    if delegation is None:
+        return
+
+    from meho_backplane.settings import get_settings
+
+    if get_settings().approval_allow_delegated_decision:
+        return
+    _log().warning(
+        "approval_delegated_decision_refused",
+        approval_request_id=str(request.id),
+        op_id=request.op_id,
+        decision=decision,
+        operator_sub=operator.sub,
+        instructed_by=delegation.instructed_by,
+        tenant_id=str(operator.tenant_id),
+    )
+    raise DelegatedDecisionForbiddenError(
+        request.id, operator_sub=operator.sub, instructed_by=delegation.instructed_by
+    )
+
+
+class ApprovalResultState(StrEnum):
+    """Whether an approved request has run yet (#3486).
+
+    Read off the row, never stored. ``status`` keeps its closed four-state
+    contract; this field adds the run phase next to it, so a client that
+    lists or shows requests can tell "approved, not run yet" from
+    "approved and run" without polling the owner-only ``/result`` read.
+
+    * :attr:`NOT_STARTED` -- approved, and no resumer has claimed the run
+      yet (``resumed_at IS NULL``).
+    * :attr:`STARTED` -- a resumer claimed the run (``resumed_at`` is set),
+      but no result is stored. Either the op is still running, or the run
+      ended without a stored result: the result write is best-effort, and a
+      re-dispatch that raised instead of returning an envelope stores
+      nothing. Both resume paths (operator surfaces and the in-process
+      agent waiter) store the envelope they get back.
+    * :attr:`EXECUTED` -- the stored result has ``status == "ok"``.
+    * :attr:`FAILED` -- a result is stored and its ``status`` is not ``ok``.
+    """
+
+    NOT_STARTED = "not_started"
+    STARTED = "started"
+    EXECUTED = "executed"
+    FAILED = "failed"
+
+
+def approval_result_state(request: ApprovalRequest) -> ApprovalResultState | None:
+    """Return the run phase of *request*, or ``None`` when it is not approved (#3486)."""
+    if request.status != ApprovalRequestStatus.APPROVED.value:
+        return None
+    if request.resume_result is not None:
+        if request.resume_result.get("status") == "ok":
+            return ApprovalResultState.EXECUTED
+        return ApprovalResultState.FAILED
+    if request.resumed_at is not None:
+        return ApprovalResultState.STARTED
+    return ApprovalResultState.NOT_STARTED
+
+
+#: Statuses in which a request still holds its ``idempotency_key`` (#3486).
+#: Must match the partial unique index predicate of migration ``0105``.
+_IDEMPOTENT_LIVE_STATUSES: Final[tuple[str, ...]] = (
+    ApprovalRequestStatus.PENDING.value,
+    ApprovalRequestStatus.APPROVED.value,
+)
+
+
+async def _find_idempotent_request(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    principal_sub: str,
+    idempotency_key: str,
+) -> ApprovalRequest | None:
+    """Return the live request that holds *idempotency_key* for this principal.
+
+    Scoped to the tenant **and** the principal, so a key never matches
+    another tenant's or another requester's request.
+
+    ``populate_existing`` refreshes a row the session already holds. The
+    retry loop in :func:`_resolve_idempotent_request` calls this again after
+    its locked re-read missed; by then the row may have been approved on
+    another connection. Without the refresh the session would keep the
+    cached ``pending`` state, treat the row as overdue again, and loop.
+    """
+    stmt = (
+        select(ApprovalRequest)
+        .where(
+            ApprovalRequest.tenant_id == tenant_id,
+            ApprovalRequest.principal_sub == principal_sub,
+            ApprovalRequest.idempotency_key == idempotency_key,
+            ApprovalRequest.status.in_(_IDEMPOTENT_LIVE_STATUSES),
+        )
+        .execution_options(populate_existing=True)
+    )
+    return (await session.execute(stmt)).scalars().first()
+
+
+def _reuse_idempotent_request(
+    existing: ApprovalRequest,
+    *,
+    op_id: str,
+    connector_id: str,
+    target_id: uuid.UUID | None,
+    params: dict[str, Any],
+    preview_hash: str | None,
+) -> ApprovalRequest:
+    """Return *existing* for a retry, or refuse when the call differs (#3486).
+
+    The retry must be the identical call: its *params* must match the
+    stored ``params_hash`` (:func:`params_hash_matches`). ``work_ref`` is
+    compared too, so two runs under different change tickets never share
+    one request.
+    """
+    same_call = (
+        existing.op_id == op_id
+        and existing.connector_id == connector_id
+        and existing.target_id == target_id
+        and params_hash_matches(params, existing.params_hash)
+        and existing.preview_hash == preview_hash
+        and existing.work_ref == work_ref_var.get()
+    )
+    if not same_call:
+        raise IdempotencyKeyConflictError(existing.id)
+    _log().info(
+        "approval_request_reused",
+        approval_request_id=str(existing.id),
+        op_id=op_id,
+        connector_id=connector_id,
+        principal_sub=existing.principal_sub,
+        tenant_id=str(existing.tenant_id),
+    )
+    existing._reused = True  # type: ignore[attr-defined]
+    return existing
+
+
+async def _insert_idempotent_request(
+    session: AsyncSession, request: ApprovalRequest, *, idempotency_key: str
+) -> ApprovalRequest | None:
+    """Insert *request* in a savepoint; return the winner if a racer got there first.
+
+    The partial unique index (migration ``0105``) makes the second of two
+    racing inserts fail. That insert's savepoint rolls back, the outer
+    transaction stays usable, and the row the other request committed is
+    returned. Returns ``None`` when *request* itself was inserted.
+    """
+    try:
+        async with session.begin_nested():
+            session.add(request)
+            await session.flush()
+    except IntegrityError:
+        existing = await _find_idempotent_request(
+            session,
+            tenant_id=request.tenant_id,
+            principal_sub=request.principal_sub,
+            idempotency_key=idempotency_key,
+        )
+        if existing is None:
+            raise
+        return existing
+    return None
+
+
+#: The acting identity for every expiry: the sweeper and the late-retry path
+#: of :func:`create_pending_request`. A stable synthetic sub makes expiries
+#: filterable in audit queries and distinct from operator-driven decisions,
+#: the same pattern the topology scheduler (``system:topology-scheduler``)
+#: and connector system contexts use.
+EXPIRY_OPERATOR_SUB: Final = "system:approval-expiry"
+
+
+def expiry_operator(tenant_id: uuid.UUID) -> Operator:
+    """Build the synthetic per-tenant operator that expires requests.
+
+    ``raw_jwt`` is the empty string: an expiry forwards no token
+    downstream. ``OPERATOR`` role satisfies the ``>= operator`` floor
+    :func:`expire_stale_requests` enforces on the acting identity.
+    """
+    return Operator(
+        sub=EXPIRY_OPERATOR_SUB,
+        name=None,
+        email=None,
+        raw_jwt="",
+        tenant_id=tenant_id,
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+
+def _is_overdue_pending(existing: ApprovalRequest) -> bool:
+    """True when *existing* is ``pending`` and past its deadline (#3486)."""
+    if existing.status != ApprovalRequestStatus.PENDING.value:
+        return False
+    return _deadline_has_passed(existing, _now(), _resolve_default_ttl())
+
+
+async def _lock_and_expire_pending(
+    session: AsyncSession, existing: ApprovalRequest
+) -> ApprovalRequest | None:
+    """Lock the overdue *existing* row and expire it; ``None`` if it changed (#3486).
+
+    The sweeper may not have run yet (or may be off). An overdue ``pending``
+    row can no longer be approved, so a retry must not get it back. It is
+    locked and expired here, in the caller's transaction, the same way
+    :func:`expire_stale_requests` does it and under the same
+    :func:`expiry_operator` identity, so the decision audit row names the
+    system, not the requester. That frees the key for a new request.
+
+    Returns ``None`` when the locked re-read finds no ``pending`` row with
+    this id: a concurrent sweep, reject, approve, or another retry changed
+    it between the caller's first read and this lock. The caller must then
+    look the key up again instead of using the stale row.
+    """
+    cutoff = _now()
+    default_ttl = _resolve_default_ttl()
+    stmt = (
+        select(ApprovalRequest)
+        .where(
+            ApprovalRequest.id == existing.id,
+            ApprovalRequest.status == ApprovalRequestStatus.PENDING.value,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    locked = (await session.execute(stmt)).scalars().first()
+    if locked is None:
+        return None
+    await _expire_request(
+        session,
+        locked,
+        operator=expiry_operator(locked.tenant_id),
+        cutoff=cutoff,
+        default_ttl=default_ttl,
+    )
+    return locked
+
+
+async def _resolve_idempotent_request(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    principal_sub: str,
+    idempotency_key: str,
+) -> tuple[ApprovalRequest | None, ApprovalRequest | None]:
+    """Find what *idempotency_key* holds right now: ``(live, expired)`` (#3486).
+
+    * ``(row, None)``: a usable request holds the key (``approved``, or
+      ``pending`` within its deadline). The caller returns it for the retry.
+    * ``(None, row)``: the key was held by an overdue ``pending`` request.
+      This call expired it; the caller parks a new request with the key.
+    * ``(None, None)``: the key is free.
+
+    When the locked re-read in :func:`_lock_and_expire_pending` misses, the
+    row changed under us: a sweep or reject freed the key, an approve kept
+    it live, or another retry already expired the row and parked its
+    replacement. The key is looked up again so the caller gets that current
+    state (the replacement, for example), never the stale first read. Each
+    repeat follows a committed change to the row it saw, so the loop ends.
+    """
+    while True:
+        existing = await _find_idempotent_request(
+            session,
+            tenant_id=tenant_id,
+            principal_sub=principal_sub,
+            idempotency_key=idempotency_key,
+        )
+        if existing is None:
+            return None, None
+        if not _is_overdue_pending(existing):
+            return existing, None
+        expired = await _lock_and_expire_pending(session, existing)
+        if expired is not None:
+            return None, expired
+        _log().info(
+            "approval_request_idempotency_key_rechecked",
+            approval_request_id=str(existing.id),
+            principal_sub=principal_sub,
+            tenant_id=str(tenant_id),
+        )
+
+
 def _now() -> datetime:
     """Return the current UTC datetime. Isolated for testing."""
     return datetime.now(UTC)
@@ -390,6 +925,7 @@ async def _write_audit_row(
     session: AsyncSession,
     *,
     audit_id: uuid.UUID,
+    event_class: AuditEventClass,
     operator: Operator,
     request: ApprovalRequest,
     path: str,
@@ -398,6 +934,12 @@ async def _write_audit_row(
     extra_payload: dict[str, Any] | None = None,
 ) -> None:
     """Insert one ``audit_log`` row for an approval queue event.
+
+    *event_class* (#3733) is declared by each caller:
+    ``policy_decision`` for the ``approval.request`` row (the gate decided
+    the call needs approval), ``approval_decision`` for an approve, reject
+    or expiry ``approval.decision`` row, and ``legacy_request`` for the
+    ``approval.result`` read row.
 
     Uses ``method='APPROVAL'`` and the provided *path* (``'approval.request'``
     or ``'approval.decision'``). The payload carries the
@@ -423,7 +965,8 @@ async def _write_audit_row(
     }
     # Hoist the acting operator's display name so the name-aware audit views
     # resolve the approval row's ``operator_sub`` to a human name (#3300) --
-    # the same ``payload['principal_name']`` shape dispatch rows carry (#1212).
+    # the same ``payload['principal_name']`` shape the MCP wrapper rows (#1212)
+    # and the DISPATCH run rows (#4029) carry.
     # ``operator`` is the requester on a "request" row / the reviewer on a
     # "decision" row, so the name always pairs with ``operator_sub``. Omitted
     # when the token had no name (resolver fails open to the raw sub); display
@@ -433,8 +976,10 @@ async def _write_audit_row(
     if extra_payload:
         payload.update(extra_payload)
     # policy-gate verdict (#130). The parked "request" row is written on the
-    # requester's task, where the dispatcher bound ``policy_decision_var`` to
-    # ``needs-approval`` before parking, so the var carries the verdict here.
+    # requester's task, where the dispatcher (or, for a step inside a
+    # multi-step operation, the step gate ``composite.enforce_subop_policy``,
+    # #4646) bound ``policy_decision_var`` to ``needs-approval`` before
+    # parking, so the var carries the verdict here.
     # A "decision" row is written on the *approver's* task (var unset) and on
     # a path where no gate ran, so it correctly stays NULL — the operator's
     # approve/reject is recorded via ``result_status``, not a gate verdict.
@@ -473,6 +1018,7 @@ async def _write_audit_row(
         target_id=request.target_id,
         parent_audit_id=parent_audit_id,
         agent_session_id=request.agent_session_id,
+        event_class=event_class,
         method="APPROVAL",
         path=path,
         status_code=status_code,
@@ -493,6 +1039,30 @@ async def _write_audit_row(
     await session.flush()
 
 
+class ResumeRequester(NamedTuple):
+    """The requester of an approval request, as saved on its row (#4217).
+
+    Bound in :data:`resume_requester_var` while an approved composite step is
+    re-run, so a later step that waits again is saved for this requester.
+    """
+
+    sub: str
+    act: str | None
+    name: str | None
+
+
+#: The requester of the approval request whose composite is being re-run
+#: (#4217). Bound by :func:`composite_resume_binding` on both resume paths
+#: (the reviewer's and the agent's). A composite step that waits again
+#: during the re-run is saved for this requester, so the new request belongs
+#: to whoever started the operation, whoever runs the re-run. ``None``
+#: outside such a re-run.
+resume_requester_var: ContextVar[ResumeRequester | None] = ContextVar(
+    "resume_requester",
+    default=None,
+)
+
+
 # code-quality-allow: already over the 100-line limit on main before #1481
 # (105 lines); the principal_act source fix adds a handful of lines, not the
 # bulk — splitting the row-build + audit-write is out of scope for this fix.
@@ -510,6 +1080,8 @@ async def create_pending_request(
     expires_at: datetime | None = None,
     preview_hash: str | None = None,
     resume_parent: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
+    requester: ResumeRequester | None = None,
 ) -> ApprovalRequest:
     """Insert a pending :class:`ApprovalRequest` row + one audit row.
 
@@ -533,7 +1105,8 @@ async def create_pending_request(
             stored params, and also used to verify hash consistency.
         params_hash: Pre-computed
             :func:`~meho_backplane.operations._validate.compute_params_hash`
-            of *params*. Stored for resume-path verification.
+            of *params* (the full approval hash, not the audit hash).
+            Stored for resume-path verification.
         run_id: The ``agent_run.id`` this request belongs to; ``None``
             for non-agent-run dispatches.
         proposed_effect: Human-readable summary for the reviewer.
@@ -555,16 +1128,62 @@ async def create_pending_request(
             dispatchable descriptor call, so
             :func:`resume_dispatch_after_approval` re-dispatches this parent
             composite ``_approved=True`` with the approved sub-op pre-cleared.
+            Optional keys (#4217): ``"state"``, the JSON the composite saved
+            for that re-entry, and ``"after_main_effect": true`` for a step
+            that runs after the composite's main change exists.
             ``None`` for a direct-op park (the generic re-dispatch of
             ``op_id`` is used).
+        idempotency_key: Optional client-chosen retry key (#3486). When the
+            same principal in the same tenant already has a ``pending`` or
+            ``approved`` request with this key, that request is returned
+            instead of a new one: no new row, no new audit row. The
+            returned row carries the transient attr ``_reused = True`` (and
+            no ``_audit_id``), so the caller does not publish a second
+            ``approval.pending`` event. A ``pending`` request already past
+            its deadline is not returned: it is expired in this
+            transaction and a new request is parked. The new row then
+            carries the expired one as ``_expired_request`` (else
+            ``None``), so the caller can publish ``approval.expired``
+            after commit. ``None`` keeps the old behaviour.
+        requester: The requester to save on the row instead of *operator*
+            (#4217). Set for a composite step that waits again while an
+            approved request is re-run: the new request belongs to the
+            requester of the request being re-run, not to the reviewer who
+            runs it. ``None`` saves *operator* (and the bound actor) as the
+            requester.
 
     Returns:
-        The flushed :class:`ApprovalRequest` row.
+        The flushed :class:`ApprovalRequest` row (new, or reused).
+
+    Raises:
+        IdempotencyKeyConflictError: *idempotency_key* is held by a live
+            request for a different call.
     """
     target_id: uuid.UUID | None = None
     raw_tid = getattr(target, "id", None) if target is not None else None
     if isinstance(raw_tid, uuid.UUID):
         target_id = raw_tid
+
+    def _reuse(existing: ApprovalRequest) -> ApprovalRequest:
+        return _reuse_idempotent_request(
+            existing,
+            op_id=op_id,
+            connector_id=connector_id,
+            target_id=target_id,
+            params=params,
+            preview_hash=preview_hash,
+        )
+
+    expired_request: ApprovalRequest | None = None
+    if idempotency_key is not None:
+        live, expired_request = await _resolve_idempotent_request(
+            session,
+            tenant_id=operator.tenant_id,
+            principal_sub=operator.sub,
+            idempotency_key=idempotency_key,
+        )
+        if live is not None:
+            return _reuse(live)
 
     if proposed_effect is None:
         proposed_effect = {
@@ -583,6 +1202,10 @@ async def create_pending_request(
     # ``None``. The prior ``getattr(operator, "identity_act", None)`` was
     # dead code — ``Operator`` has no such field, so it was always ``None``.
     principal_act: str | None = resolve_actor_sub()
+    principal_sub = operator.sub
+    principal_name = operator.name
+    if requester is not None:
+        principal_sub, principal_act, principal_name = requester
 
     # External change-ticket ref (work_ref I2-T1 #1659): read from the
     # same request-time ContextVar the audit writers read (bound at the
@@ -617,13 +1240,13 @@ async def create_pending_request(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
         run_id=run_id,
-        principal_sub=operator.sub,
+        principal_sub=principal_sub,
         principal_act=principal_act,
         # Requester display name hoisted from the JWT ``name`` claim at park
         # time (#3300) so every approvals surface renders a name alongside
         # ``principal_sub``. ``None`` when the token carried no name --
         # fail-open to the raw sub. Same pattern as audit_log.principal_name.
-        principal_name=operator.name,
+        principal_name=principal_name,
         op_id=op_id,
         connector_id=connector_id,
         target_id=target_id,
@@ -638,9 +1261,16 @@ async def create_pending_request(
         agent_session_id=resolve_agent_session_id(),
         request_audit_id=request_audit_id,
         resume_parent=stored_resume_parent,
+        idempotency_key=idempotency_key,
     )
-    session.add(request)
-    await session.flush()
+    if idempotency_key is None:
+        session.add(request)
+        await session.flush()
+    else:
+        winner = await _insert_idempotent_request(session, request, idempotency_key=idempotency_key)
+        if winner is not None:
+            return _reuse(winner)
+    request._expired_request = expired_request  # type: ignore[attr-defined]
     if handoff_payload is not None:
         request.execution_handle = store_handoff(
             session, request.id, request.tenant_id, handoff_payload
@@ -651,6 +1281,7 @@ async def create_pending_request(
     await _write_audit_row(
         session,
         audit_id=request_audit_id,
+        event_class=AuditEventClass.POLICY_DECISION,
         operator=operator,
         request=request,
         path="approval.request",
@@ -658,17 +1289,17 @@ async def create_pending_request(
         duration_ms=0.0,
     )
 
-    _log.info(
+    _log().info(
         "approval_request_created",
         approval_request_id=str(request.id),
         op_id=op_id,
         connector_id=connector_id,
-        principal_sub=operator.sub,
+        principal_sub=principal_sub,
         tenant_id=str(operator.tenant_id),
         run_id=str(run_id) if run_id else None,
     )
-    # Expose the audit_id as a transient attr so callers can publish the
-    # ``approval.pending`` broadcast event AFTER they commit the session.
+    # Expose the audit_id as a transient attr so callers can record the
+    # ``approval.pending`` step event AFTER they commit the session.
     # A publish-before-commit would surface a phantom event if the commit
     # fails. The transient attr does not persist to the DB row.
     request._audit_id = request_audit_id  # type: ignore[attr-defined]
@@ -702,8 +1333,8 @@ async def approve_request(
        :class:`SelfApprovalForbiddenError` (G11.7-T1 #1401). Checked
        before the hash check so a self-approver learns *why* they are
        refused rather than being told their params mismatch.
-    5. If *params* is supplied, ``compute_params_hash(params)`` matches
-       the stored ``params_hash`` (else 422, :class:`ParamsMismatchError`).
+    5. If *params* is supplied, it matches the stored ``params_hash``
+       (:func:`params_hash_matches`; else 422, :class:`ParamsMismatchError`).
        The hash check is **skipped** when *params* is ``None`` — the
        operator-decision path (G11.2-T5 MCP/CLI surface) approves by
        request id alone and does not have the original params. The
@@ -752,10 +1383,18 @@ async def approve_request(
             (only raised when *params* is supplied).
         PreviewBindingMissingError: The row is ``destructive``-tier but
             carries no ``preview_hash`` binding (#3197).
+        DelegatedReasonInvalidError: *reason* names an instructing human
+            (``Instructed-by:``) but its trailer block is incomplete (#3692).
+        DelegatedDecisionForbiddenError: *reason* is a valid delegated
+            decision but the deployment is not lab-class (#3693).
     """
     request = await _load_pending_for_approval(
         session, request_id, operator=operator, params=params
     )
+    # Validate before any state change so a bad or forbidden delegated
+    # reason leaves the row pending (#3692, #3693).
+    delegation = parse_delegation(reason)
+    _check_delegated_allowed(delegation, request=request, operator=operator, decision="approved")
 
     now = _now()
     request.status = ApprovalRequestStatus.APPROVED.value
@@ -770,11 +1409,13 @@ async def approve_request(
     extra: dict[str, Any] = {"decision": "approved", "reviewed_by": operator.sub}
     if reason:
         extra["reason"] = reason
+    _record_delegation(extra, delegation, request=request, operator=operator, decision="approved")
 
     approve_audit_id = uuid.uuid4()
     await _write_audit_row(
         session,
         audit_id=approve_audit_id,
+        event_class=AuditEventClass.APPROVAL_DECISION,
         operator=operator,
         request=request,
         path="approval.decision",
@@ -783,7 +1424,7 @@ async def approve_request(
         extra_payload=extra,
     )
 
-    _log.info(
+    _log().info(
         "approval_request_approved",
         approval_request_id=str(request_id),
         op_id=request.op_id,
@@ -823,6 +1464,10 @@ async def reject_request(
         UnauthorizedApprovalError: Operator lacks approvals access
             (``read_only`` without the ``approver`` capability, #3243).
         ApprovalRequestAlreadyDecidedError: Row is not ``pending``.
+        DelegatedReasonInvalidError: *reason* names an instructing human
+            (``Instructed-by:``) but its trailer block is incomplete (#3692).
+        DelegatedDecisionForbiddenError: *reason* is a valid delegated
+            decision but the deployment is not lab-class (#3693).
     """
     _check_reviewer_role(operator)
 
@@ -833,6 +1478,8 @@ async def reject_request(
 
     if request.status != ApprovalRequestStatus.PENDING.value:
         raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
+    delegation = parse_delegation(reason)
+    _check_delegated_allowed(delegation, request=request, operator=operator, decision="rejected")
 
     now = _now()
     request.status = ApprovalRequestStatus.REJECTED.value
@@ -847,11 +1494,13 @@ async def reject_request(
     extra: dict[str, Any] = {"decision": "rejected", "reviewed_by": operator.sub}
     if reason:
         extra["reason"] = reason
+    _record_delegation(extra, delegation, request=request, operator=operator, decision="rejected")
 
     reject_audit_id = uuid.uuid4()
     await _write_audit_row(
         session,
         audit_id=reject_audit_id,
+        event_class=AuditEventClass.APPROVAL_DECISION,
         operator=operator,
         request=request,
         path="approval.decision",
@@ -860,7 +1509,7 @@ async def reject_request(
         extra_payload=extra,
     )
 
-    _log.info(
+    _log().info(
         "approval_request_rejected",
         approval_request_id=str(request_id),
         op_id=request.op_id,
@@ -904,8 +1553,8 @@ async def claim_resume(
     Why a conditional ``UPDATE`` rather than a Python ``if`` + edit (the
     same reasoning as :func:`~meho_backplane.operations.agent_run.extend_lease`'s
     lease claim): a read-then-write would race a concurrent resumer -- the
-    agent waiter woken by the ``approval.approved`` broadcast vs. the
-    operator surface that published it -- with both reading
+    agent waiter that read the approved row vs. the operator surface
+    that approved it -- with both reading
     ``resumed_at IS NULL`` and both dispatching the write. The predicate
     and the write commit together in one statement, so at most one resumer
     wins even across processes / pods: a concurrent claim blocks on the
@@ -950,19 +1599,20 @@ async def find_remote_write_approval(
     tenant_id: uuid.UUID,
     op_id: str,
     target_id: uuid.UUID | None,
-    params_hash: str,
+    params: dict[str, Any],
 ) -> ApprovalRequest | None:
     """Find the committed approval that authorises a remote-write mint (read-only).
 
     Mechanism 1 of the satellite write-path composed gate (#3189, design §3):
     the ``remote-write`` (caution) tier mints a capability **only** against a
     committed :class:`ApprovalRequest` for the *identical*
-    ``(tenant, op, target, params_hash)`` -- the human approval decision is the
+    ``(tenant, op, target, params)`` -- the human approval decision is the
     mint's authorization, exactly as :func:`resume_dispatch_after_approval`
     re-dispatches an approved op with the policy gate bypassed
-    (``dispatch(..., _approved=True)``). The ``params_hash`` predicate is the
-    swap defence (#1503 / #3197): a mint whose params differ from the approved
-    ones matches no row and is refused.
+    (``dispatch(..., _approved=True)``). The ``params_hash`` predicate (any of
+    :func:`params_hash_candidates` for *params*) is the swap defence
+    (#1503 / #3197): a mint whose params differ from the approved ones matches
+    no row and is refused.
 
     Read-only: it never mutates a row, so the mint can refuse fail-closed (no
     approval, or -- later -- the signing key is unavailable) **without**
@@ -981,7 +1631,7 @@ async def find_remote_write_approval(
         .where(
             ApprovalRequest.tenant_id == tenant_id,
             ApprovalRequest.op_id == op_id,
-            ApprovalRequest.params_hash == params_hash,
+            ApprovalRequest.params_hash.in_(params_hash_candidates(params)),
             ApprovalRequest.status == ApprovalRequestStatus.APPROVED.value,
             ApprovalRequest.resumed_at.is_(None),
             target_clause,
@@ -1028,7 +1678,7 @@ async def consume_remote_write_approval(
     if cast(CursorResult[Any], claimed).rowcount != 1:
         return False
     request.resumed_at = stamp
-    _log.info(
+    _log().info(
         "remote_write_approval_bound",
         approval_request_id=str(request.id),
         op_id=request.op_id,
@@ -1052,7 +1702,9 @@ async def resume_dispatch_after_approval(
     parked **direct** operator op is executed exactly once regardless of
     which surface granted it. The in-process agent-run resume path does
     not call this — it keeps the params in memory and re-dispatches from
-    there (see :mod:`meho_backplane.agent.approval_wait`).
+    there (see :mod:`meho_backplane.agent.approval_wait`). Both paths re-enter
+    a parked composite sub-op through the same
+    :func:`composite_resume_binding` helper (#3421).
 
     *params* source:
 
@@ -1088,7 +1740,7 @@ async def resume_dispatch_after_approval(
     Exactly-one-resumer claim (#2293): every operator surface routes
     through here, and for a run-bound request the in-process agent waiter
     (:mod:`meho_backplane.agent.approval_wait`) also resumes off the
-    ``approval.approved`` broadcast. Both must win :func:`claim_resume`
+    approved row it reads. Both must win :func:`claim_resume`
     before dispatching, so the approved op executes exactly once: this
     path wins the claim right before :func:`dispatch` (after the
     fail-closed checks, so a refused resume never burns the claim) and, if
@@ -1103,7 +1755,7 @@ async def resume_dispatch_after_approval(
     if effective_params is None and request.execution_handle is None:
         return _resume_pre0036_denied(operator, request)
 
-    resolved_target, denied = await _rehydrate_resume_target(operator, request)
+    resolved_target, denied = await rehydrate_resume_target(operator, request)
     if denied is not None:
         return denied
 
@@ -1112,11 +1764,11 @@ async def resume_dispatch_after_approval(
     # refused resume (pre-0036 params gap, unresolvable target) never burns
     # the claim and leaves the op un-executable. A lost claim means another
     # resumer already executed the approved op (the in-process agent waiter
-    # woken by the same approval.approved broadcast, or a racing operator
+    # that read the same approved row, or a racing operator
     # surface), so no-op with a benign already_resumed result rather than
     # double-dispatching the approved write.
     if not await claim_resume(request.id):
-        _log.info(
+        _log().info(
             "approval_resume_already_claimed",
             approval_request_id=str(request.id),
             op_id=request.op_id,
@@ -1137,7 +1789,7 @@ async def resume_dispatch_after_approval(
             )
             await handoff_session.commit()
         effective_params = cast(dict[str, Any], handoff["params"])
-        if compute_params_hash(effective_params) != request.params_hash:
+        if not params_hash_matches(effective_params, request.params_hash):
             raise ApprovalHandoffError(
                 "approval execution payload does not match the approved request"
             )
@@ -1158,14 +1810,17 @@ async def resume_dispatch_after_approval(
 def _dump_result_envelope(result: Any) -> dict[str, Any] | None:
     """Project a re-dispatch result into a JSON dict for durable storage (#3209).
 
-    The winning resume path returns an
+    The operator resume path returns an
     :class:`~meho_backplane.connectors.schemas.OperationResult` (a Pydantic
     model). ``model_dump(mode="json")`` yields the reduced / handle-shaped
     envelope — the same one the approver sees inline, so a set-shaped response
-    is already a JSONFlux ``handle`` (v0.1-spec §4), never a raw body. Returns
-    ``None`` when the value is not a dumpable model (defence-in-depth; a
-    non-model result is simply not captured rather than raising).
+    is already a JSONFlux ``handle`` (v0.1-spec §4), never a raw body. The
+    in-process agent resume already holds that dump as a plain dict (#3486);
+    it is stored as is. Returns ``None`` for anything else (defence-in-depth;
+    an unknown result shape is simply not captured rather than raising).
     """
+    if isinstance(result, dict):
+        return result
     dump = getattr(result, "model_dump", None)
     if dump is None:
         return None
@@ -1173,14 +1828,18 @@ def _dump_result_envelope(result: Any) -> dict[str, Any] | None:
     return projection if isinstance(projection, dict) else None
 
 
-async def _persist_resume_result(request_id: uuid.UUID, result: Any) -> None:
+async def persist_resume_result(request_id: uuid.UUID, result: Any) -> None:
     """Store the approved re-dispatch's reduced result envelope on the row (#3209).
 
     Called on the exactly-one-resumer winning path only, so it runs at most
-    once per approved request. The stored value is the reduced /
-    handle-shaped ``OperationResult`` envelope; the originating consumer reads
-    it back — principal-scoped — via ``GET /api/v1/approvals/{id}/result`` to
-    resume a non-idempotent parked op (VCF ``bringup.start``) by poll.
+    once per approved request: by :func:`_dispatch_resume_with_bound_context`
+    for the operator surfaces, and by the in-process agent waiter
+    (:mod:`meho_backplane.agent.approval_wait`) after its re-dispatch (#3486),
+    so a request the agent resumed also moves off ``started`` on the list and
+    show views. The stored value is the reduced / handle-shaped
+    ``OperationResult`` envelope; the originating consumer reads it back —
+    principal-scoped — via ``GET /api/v1/approvals/{id}/result`` to resume a
+    non-idempotent parked op (VCF ``bringup.start``) by poll.
 
     Fail-soft: the dispatch's own synchronous audit row already committed
     inside :func:`~meho_backplane.operations.dispatcher.dispatch` (the
@@ -1209,7 +1868,7 @@ async def _persist_resume_result(request_id: uuid.UUID, result: Any) -> None:
         # Fail-soft convenience write (see docstring): the dispatch's own
         # synchronous audit row already committed, so a capture failure must
         # not break the approve path.
-        _log.warning(
+        _log().warning(
             "approval_resume_result_persist_failed",
             approval_request_id=str(request_id),
             exc_info=True,
@@ -1225,7 +1884,7 @@ def _resume_pre0036_denied(operator: Operator, request: ApprovalRequest) -> Any:
     call. Reached before the claim, so it never burns it. Extracted to keep
     :func:`resume_dispatch_after_approval` under the function-size budget.
     """
-    _log.warning(
+    _log().warning(
         "approval_resume_params_unavailable",
         approval_request_id=str(request.id),
         op_id=request.op_id,
@@ -1241,6 +1900,103 @@ def _resume_pre0036_denied(operator: Operator, request: ApprovalRequest) -> Any:
         ),
         0.0,
     )
+
+
+def requester_of(request: ApprovalRequest) -> ResumeRequester:
+    """The requester saved on *request* (#4217)."""
+    return ResumeRequester(request.principal_sub, request.principal_act, request.principal_name)
+
+
+@contextmanager
+def composite_resume_binding(
+    *,
+    subop_op_id: str,
+    subop_params_hash: str,
+    resume_parent: dict[str, Any] | None,
+    requester: ResumeRequester | None = None,
+) -> Iterator[tuple[str, dict[str, Any]] | None]:
+    """Set up the re-entry of a parent composite for an approved sub-op park.
+
+    The one composite re-entry path both resume surfaces share (#3351, #3421):
+    the operator surface (:func:`_dispatch_resume_with_bound_context`) and the
+    in-process agent waiter
+    (:func:`~meho_backplane.agent.approval_wait.resume_or_surface_awaiting_approval`).
+    Sharing it keeps the two surfaces from drifting apart.
+
+    * ``resume_parent`` set (a composite sub-op park) — yields the parent
+      composite's ``(op_id, params)`` to re-dispatch ``_approved=True``. For the
+      block it sets
+      :data:`~meho_backplane.operations.composite.composite_resume_var` to the
+      approved sub-op's ``(op_id, params_hash)``, so that one sub-op clears its
+      gate instead of parking again. It also sets
+      :data:`~meho_backplane.operations.composite.composite_resume_scope_var`,
+      which is never consumed, so a second governed sub-op that would need its
+      own approval fails closed (``composite_resume_multi_gate_unsupported``)
+      instead of parking (#3351 review B1). A step marked
+      ``after_main_effect`` is the exception: it may wait again (#4217).
+    * ``resume_parent`` is ``None`` (a direct park) — yields ``None`` and sets
+      nothing; the caller keeps its generic re-dispatch.
+
+    When the park saved a ``state`` (#4217), the block also binds
+    :data:`~meho_backplane.operations.composite.composite_resume_state_var`
+    with it and the park's ``after_main_effect`` mark, so the re-entered
+    composite can continue at the step that waited instead of running from
+    the start. It binds :data:`resume_requester_var` with *requester*, the
+    requester of the request being re-run, so a step that waits again is
+    saved for that requester on both resume paths (#4217).
+    """
+    if resume_parent is None:
+        yield None
+        return
+
+    from meho_backplane.operations.composite import (
+        CompositeResumeState,
+        composite_resume_scope_var,
+        composite_resume_state_var,
+        composite_resume_var,
+    )
+
+    parent_op_id = str(resume_parent["op_id"])
+    saved_state = resume_parent.get("state")
+    approved_subop = (subop_op_id, subop_params_hash)
+    resume_token = composite_resume_var.set(approved_subop)
+    scope_token = composite_resume_scope_var.set(approved_subop)
+    state_token = composite_resume_state_var.set(
+        CompositeResumeState(
+            op_id=parent_op_id,
+            state=cast(dict[str, Any], saved_state),
+            after_main_effect=bool(resume_parent.get("after_main_effect")),
+        )
+        if isinstance(saved_state, dict)
+        else None
+    )
+    requester_token = resume_requester_var.set(requester)
+    try:
+        yield parent_op_id, cast(dict[str, Any], resume_parent["params"])
+    finally:
+        resume_requester_var.reset(requester_token)
+        composite_resume_state_var.reset(state_token)
+        composite_resume_scope_var.reset(scope_token)
+        composite_resume_var.reset(resume_token)
+
+
+def _run_audit_context(request: ApprovalRequest) -> dict[str, Any]:
+    """The ``audit_*`` log context to bind while an approved op runs (#3864).
+
+    The REST approve routes bind ``audit_op_id="approval.decide"`` (and its
+    siblings) for their own request row. The dispatcher copies every bound
+    ``audit_*`` key into the run's audit payload, so those keys relabelled the
+    run as ``approval.decide``. A search for the real op then found no run at
+    all. Every route key is set to ``None`` here (the payload builder skips
+    ``None``), and only ``approval_request_id`` is kept, so the run row names
+    its own op and the request it ran for. ``bound_contextvars`` puts the
+    route keys back when the run ends.
+    """
+    context: dict[str, Any] = {
+        key: None for key in structlog.contextvars.get_contextvars() if key.startswith("audit_")
+    }
+    context["audit_approval_request_id"] = str(request.id)
+    return context
 
 
 async def _dispatch_resume_with_bound_context(
@@ -1272,6 +2028,8 @@ async def _dispatch_resume_with_bound_context(
     clears its gate and the whole governed step reproduces, instead of the
     old generic re-dispatch of the un-executable sub-op key. A direct-op park
     (``resume_parent IS NULL``) keeps the generic re-dispatch of ``op_id``.
+    The var handling lives in :func:`composite_resume_binding`, which the
+    in-process agent waiter uses too (#3421).
 
     The resume re-enters the composite under the approving reviewer, who
     auto-executes every governed sub-op (all ``dangerous`` +
@@ -1279,63 +2037,60 @@ async def _dispatch_resume_with_bound_context(
     pass. ``composite_resume_scope_var`` is bound too — unconsumed for the whole
     re-entry — so :func:`~meho_backplane.operations.composite.enforce_subop_policy`
     can fail closed (``composite_resume_multi_gate_unsupported``) if a second
-    governed sub-op would ever need its own approval, rather than re-park and
-    re-run the earlier legs on a second resume (#3351 review B1).
+    governed sub-op would need its own approval, rather than re-park and
+    re-run the earlier legs on a second resume (#3351 review B1). The
+    exception is a step marked ``after_main_effect`` (#4217): it saved where
+    to continue, so it may wait again. That new request is saved for the
+    requester of *request*, not for the reviewer who runs this re-run.
     """
-    from meho_backplane.operations.composite import (
-        composite_resume_scope_var,
-        composite_resume_var,
-    )
     from meho_backplane.operations.dispatcher import dispatch
 
     resume_parent = (
         resume_parent_override if resume_parent_override is not None else request.resume_parent
     )
-    if resume_parent is not None:
-        dispatch_op_id = str(resume_parent["op_id"])
-        dispatch_params = cast(dict[str, Any], resume_parent["params"])
-        approved_subop = (request.op_id, request.params_hash)
-        resume_token = composite_resume_var.set(approved_subop)
-        # The scope var is NOT consumed on the sub-op match, so the fail-closed
-        # multi-gate guard in ``enforce_subop_policy`` can still tell it is
-        # inside a resume after the approved sub-op has cleared (#3351 B1).
-        scope_token = composite_resume_scope_var.set(approved_subop)
-    else:
-        dispatch_op_id = request.op_id
-        dispatch_params = effective_params
-        resume_token = None
-        scope_token = None
-
     work_ref_token = work_ref_var.set(request.work_ref)
     session_token = agent_session_id_var.set(request.agent_session_id)
     parent_token = parent_audit_id_var.set(request.request_audit_id)
+    # #3548: the approver runs the op, but the parker asked for the data and is
+    # the only one GET /approvals/{id}/result serves, so the parker owns any
+    # result handle this run spills.
+    owner_token = handle_owner_sub_var.set(request.principal_sub)
     try:
-        result = await dispatch(
-            operator=operator,
-            connector_id=request.connector_id,
-            op_id=dispatch_op_id,
-            target=resolved_target,
-            params=dispatch_params,
-            _approved=True,
-        )
+        with (
+            structlog.contextvars.bound_contextvars(**_run_audit_context(request)),
+            composite_resume_binding(
+                subop_op_id=request.op_id,
+                subop_params_hash=request.params_hash,
+                resume_parent=resume_parent,
+                requester=requester_of(request),
+            ) as parent_call,
+        ):
+            dispatch_op_id, dispatch_params = (
+                parent_call if parent_call is not None else (request.op_id, effective_params)
+            )
+            result = await dispatch(
+                operator=operator,
+                connector_id=request.connector_id,
+                op_id=dispatch_op_id,
+                target=resolved_target,
+                params=dispatch_params,
+                _approved=True,
+            )
     finally:
+        handle_owner_sub_var.reset(owner_token)
         parent_audit_id_var.reset(parent_token)
         agent_session_id_var.reset(session_token)
         work_ref_var.reset(work_ref_token)
-        if resume_token is not None:
-            composite_resume_var.reset(resume_token)
-        if scope_token is not None:
-            composite_resume_scope_var.reset(scope_token)
     # Persist the reduced result envelope so the originating consumer can read it
     # back (principal-scoped) and resume a non-idempotent parked op by poll
     # instead of a second submit (#3209). Reached only by the exactly-one-resumer
     # winner, so the capture runs at most once; fail-soft, never breaks the
     # approve path.
-    await _persist_resume_result(request.id, result)
+    await persist_resume_result(request.id, result)
     return result
 
 
-async def _rehydrate_resume_target(
+async def rehydrate_resume_target(
     operator: Operator,
     request: ApprovalRequest,
 ) -> tuple[Any, Any]:
@@ -1350,6 +2105,13 @@ async def _rehydrate_resume_target(
     since dispatching with ``target=None`` would let a typed handler that
     derives its connection from ``connector_id`` / ``params`` execute the
     approved privileged write outside the original target scope.
+
+    Shared by the operator surface (:func:`resume_dispatch_after_approval`)
+    and the in-process agent waiter's composite re-entry
+    (:mod:`meho_backplane.agent.approval_wait`, #3421). Loading by the saved
+    ``target_id`` instead of the name the caller used at park time means a
+    target renamed, or deleted and re-created under the same name, while the
+    request waited can never receive the approved write.
     """
     if request.target_id is None:
         return None, None
@@ -1363,7 +2125,7 @@ async def _rehydrate_resume_target(
     if resolved_target is not None:
         return resolved_target, None
 
-    _log.warning(
+    _log().warning(
         "approval_resume_target_unresolvable",
         approval_request_id=str(request.id),
         op_id=request.op_id,
@@ -1489,9 +2251,9 @@ async def expire_stale_requests(
     Returns:
         List of the expired :class:`ApprovalRequest` rows (may be empty).
         Each row carries the transient ``_audit_id`` attribute (the
-        decision row's primary key) so the caller can publish a
-        fail-open ``approval.expired`` broadcast event **after commit**
-        via :func:`publish_approval_event`. The attribute is set on
+        decision row's primary key) so the caller can record a
+        fail-open ``approval.expired`` step event **after commit**
+        via :func:`record_approval_step_event`. The attribute is set on
         every returned row — see :func:`approve_request` /
         :func:`reject_request` for the same pattern.
     """
@@ -1518,41 +2280,61 @@ async def expire_stale_requests(
     rows = list(result.scalars().all())
 
     for request in rows:
-        # Backfill a legacy null deadline to the coalesced value so the
-        # decision audit row and the persisted row agree on when it expired.
-        if request.expires_at is None and default_ttl is not None:
-            request.expires_at = request.created_at + default_ttl
-        request.status = ApprovalRequestStatus.EXPIRED.value
-        request.decided_at = cutoff
-        await discard_handoff(session, request.id, request.tenant_id)
-        await session.flush()
-
-        expire_audit_id = uuid.uuid4()
-        await _write_audit_row(
-            session,
-            audit_id=expire_audit_id,
-            operator=operator,
-            request=request,
-            path="approval.decision",
-            status_code=_DECISION_STATUS_CODE_EXPIRED,
-            duration_ms=0.0,
-            extra_payload={"decision": "expired", "expires_at": str(request.expires_at)},
+        await _expire_request(
+            session, request, operator=operator, cutoff=cutoff, default_ttl=default_ttl
         )
-
-        _log.info(
-            "approval_request_expired",
-            approval_request_id=str(request.id),
-            op_id=request.op_id,
-            tenant_id=str(operator.tenant_id),
-        )
-        # Expose the audit_id as a transient attr so the caller can
-        # publish the ``approval.expired`` broadcast event AFTER commit.
-        # See create_pending_request / approve_request / reject_request
-        # for the same publish-after-commit invariant: a publish-before-
-        # commit would surface a phantom event if the commit fails.
-        request._audit_id = expire_audit_id  # type: ignore[attr-defined]
 
     return rows
+
+
+async def _expire_request(
+    session: AsyncSession,
+    request: ApprovalRequest,
+    *,
+    operator: Operator,
+    cutoff: datetime,
+    default_ttl: timedelta | None,
+) -> None:
+    """Move one locked, overdue ``pending`` row to ``expired`` + audit it.
+
+    Shared by :func:`expire_stale_requests` and the idempotent retry path
+    of :func:`create_pending_request` (#3486), so both write the same
+    decision audit row. The caller holds the row lock and owns the commit.
+    """
+    # Backfill a legacy null deadline to the coalesced value so the
+    # decision audit row and the persisted row agree on when it expired.
+    if request.expires_at is None and default_ttl is not None:
+        request.expires_at = request.created_at + default_ttl
+    request.status = ApprovalRequestStatus.EXPIRED.value
+    request.decided_at = cutoff
+    await discard_handoff(session, request.id, request.tenant_id)
+    await session.flush()
+
+    expire_audit_id = uuid.uuid4()
+    await _write_audit_row(
+        session,
+        audit_id=expire_audit_id,
+        event_class=AuditEventClass.APPROVAL_DECISION,
+        operator=operator,
+        request=request,
+        path="approval.decision",
+        status_code=_DECISION_STATUS_CODE_EXPIRED,
+        duration_ms=0.0,
+        extra_payload={"decision": "expired", "expires_at": str(request.expires_at)},
+    )
+
+    _log().info(
+        "approval_request_expired",
+        approval_request_id=str(request.id),
+        op_id=request.op_id,
+        tenant_id=str(operator.tenant_id),
+    )
+    # Expose the audit_id as a transient attr so the caller can
+    # record the ``approval.expired`` step event AFTER commit.
+    # See create_pending_request / approve_request / reject_request
+    # for the same publish-after-commit invariant: a publish-before-
+    # commit would surface a phantom event if the commit fails.
+    request._audit_id = expire_audit_id  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -1642,7 +2424,7 @@ def _check_self_approval(operator: Operator, request: ApprovalRequest) -> None:
     from meho_backplane.settings import get_settings
 
     if not no_break_glass_tier and get_settings().approval_allow_self_approval:
-        _log.warning(
+        _log().warning(
             "approval_self_approval_break_glass",
             approval_request_id=str(request.id),
             op_id=request.op_id,
@@ -1686,10 +2468,8 @@ async def _load_pending_for_approval(
     if _deadline_has_passed(request, _now(), _resolve_default_ttl()):
         raise ApprovalRequestExpiredError(request_id)
     _check_self_approval(operator, request)
-    if params is not None:
-        incoming_hash = compute_params_hash(params)
-        if incoming_hash != request.params_hash:
-            raise ParamsMismatchError(request_id)
+    if params is not None and not params_hash_matches(params, request.params_hash):
+        raise ParamsMismatchError(request_id)
     _check_destructive_preview_binding(request)
     return request
 
@@ -1793,6 +2573,43 @@ async def get_request(
     return await _load_for_tenant(session, request_id, tenant_id)
 
 
+async def get_decision_delegation(
+    session: AsyncSession, request: ApprovalRequest
+) -> Delegation | None:
+    """Read the delegation block off *request*'s decision audit row (#3692).
+
+    The block lives only on the ``approval.decision`` audit row's payload
+    (no column), so the single-request read views load it from there.
+    Returns ``None`` for an undecided or expired request, for an ordinary
+    decision, or when the stored block is not the expected shape
+    (fail-open: the view just omits it).
+    """
+    if request.status not in (
+        ApprovalRequestStatus.APPROVED.value,
+        ApprovalRequestStatus.REJECTED.value,
+    ):
+        return None
+    stmt = select(AuditLog.payload).where(
+        AuditLog.tenant_id == request.tenant_id,
+        AuditLog.path == "approval.decision",
+        AuditLog.payload["approval_request_id"].as_string() == str(request.id),
+    )
+    if request.request_audit_id is not None:
+        # Indexed narrowing: decision rows parent-link to the request row.
+        stmt = stmt.where(AuditLog.parent_audit_id == request.request_audit_id)
+    for payload in (await session.execute(stmt)).scalars():
+        block = payload.get("delegation") if isinstance(payload, dict) else None
+        if not isinstance(block, dict):
+            continue
+        refs = block.get("refs")
+        return Delegation(
+            instructed_by=str(block.get("instructed_by", "")),
+            instruction=str(block.get("instruction", "")),
+            refs=tuple(str(ref) for ref in refs) if isinstance(refs, list) else (),
+        )
+    return None
+
+
 async def read_approval_result(
     session: AsyncSession,
     *,
@@ -1829,6 +2646,7 @@ async def read_approval_result(
     await _write_audit_row(
         session,
         audit_id=uuid.uuid4(),
+        event_class=AuditEventClass.LEGACY_REQUEST,
         operator=operator,
         request=request,
         path="approval.result",
@@ -1843,33 +2661,32 @@ async def read_approval_result(
 
 
 # ---------------------------------------------------------------------------
-# G11.2-T5 (#818) broadcast notifications. Fail-open: a broadcast outage
-# never blocks the durable decision (the row + audit are the truth).
+# #3027 add-on step events for approval lifecycle steps.
 # ---------------------------------------------------------------------------
 
 
-async def publish_approval_event(
+async def record_approval_step_event(
     *,
     tenant_id: uuid.UUID,
     request: ApprovalRequest,
     decision: str,
-    principal_sub: str,
     audit_id: uuid.UUID,
 ) -> None:
-    """Publish a fail-open broadcast event for an approval lifecycle step.
+    """Record an approval lifecycle step for the paired add-on that asked for it.
 
     *decision* is one of ``"pending"`` (creation), ``"approved"``,
-    ``"rejected"``, or ``"expired"`` (sweeper-driven). The broadcast
-    ``op_id`` is ``approval.<decision>`` so operator watchers can match
-    the family with a simple glob (``approval.*``).
+    ``"rejected"``, or ``"expired"`` (sweeper-driven). The event kind is
+    ``approval.<decision>``.
 
-    #3027 step-event push: alongside the fail-open Valkey broadcast, the
-    outcome is durably recorded for the paired add-on that **requested**
-    the approval (matched by ``request.principal_sub`` — the requester's
-    ``sub``, constant across the request's lifecycle, so every decision
-    routes to the same add-on regardless of who decided it). The record is
-    a self-contained fail-open commit; a no-op when the requester is not a
-    paired add-on.
+    #3027 step-event push: the outcome is durably recorded for the paired
+    add-on that **requested** the approval (matched by
+    ``request.principal_sub`` — the requester's ``sub``, constant across
+    the request's lifecycle, so every decision routes to the same add-on
+    regardless of who decided it). The record is a self-contained
+    fail-open commit; a no-op when the requester is not a paired add-on.
+
+    No Broadcast event is published (#3758). The stored approval row is
+    what waiters, the approvals bell and the console read.
     """
     from meho_backplane.operations.addon_step_events import AddonStepEventService
 
@@ -1887,39 +2704,3 @@ async def publish_approval_event(
             "work_ref": request.work_ref,
         },
     )
-    try:
-        from meho_backplane.broadcast.events import BroadcastEvent, classify_op
-        from meho_backplane.broadcast.publisher import publish_event
-
-        broadcast_op_id = f"approval.{decision}"
-        lineage = resolve_broadcast_lineage()
-        event = BroadcastEvent(
-            event_id=uuid.uuid4(),
-            ts=datetime.now(UTC),
-            tenant_id=tenant_id,
-            principal_sub=principal_sub,
-            op_id=broadcast_op_id,
-            op_class=classify_op(broadcast_op_id),
-            result_status="ok",
-            audit_id=audit_id,
-            payload={
-                "op_class": classify_op(broadcast_op_id),
-                "result_status": "ok",
-                "approval_request_id": str(request.id),
-                "decision": decision,
-                "connector_id": request.connector_id,
-                "approval_op_id": request.op_id,
-            },
-            actor_sub=lineage.actor_sub,
-            agent_session_id=lineage.agent_session_id,
-            work_ref=lineage.work_ref,
-        )
-        await publish_event(event)
-    except Exception:
-        # Fail-open: a broadcast outage must not block the durable
-        # decision. The row + audit row remain the source of truth.
-        _log.exception(
-            "approval_broadcast_failed",
-            approval_request_id=str(request.id),
-            decision=decision,
-        )

@@ -34,6 +34,10 @@ __all__ = [
     "PROJECT_VIEW_RESPONSE_SCHEMA",
     "PR_STATUS_SUMMARY_PARAMETER_SCHEMA",
     "PR_STATUS_SUMMARY_RESPONSE_SCHEMA",
+    "REPO_CREATE_PARAMETER_SCHEMA",
+    "REPO_CREATE_RESPONSE_SCHEMA",
+    "REPO_VIEW_PARAMETER_SCHEMA",
+    "REPO_VIEW_RESPONSE_SCHEMA",
     "SUB_ISSUE_ADD_PARAMETER_SCHEMA",
     "SUB_ISSUE_ADD_RESPONSE_SCHEMA",
 ]
@@ -476,4 +480,205 @@ SUB_ISSUE_ADD_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "description": "The parent issue after the sub-issue was linked.",
+}
+
+
+# ===========================================================================
+# gh.composite.repo_view (one repository, read)
+# ===========================================================================
+
+
+REPO_VIEW_PARAMETER_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["owner", "repo"],
+    "properties": {
+        "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "GitHub repository owner (user or organisation login).",
+        },
+        "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "GitHub repository name (without the owner prefix).",
+        },
+    },
+    "examples": [{"owner": "<owner>", "repo": "<repo>"}],
+    "description": (
+        "Parameters for gh.composite.repo_view. Reads one repository "
+        "(GET /repos/{owner}/{repo}) and returns a short summary of it."
+    ),
+}
+
+
+REPO_VIEW_RESPONSE_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+        "name",
+        "full_name",
+        "owner",
+        "owner_type",
+        "visibility",
+        "default_branch",
+        "archived",
+        "topics",
+        "open_issues_count",
+        "pushed_at",
+        "permissions",
+    ],
+    "properties": {
+        "name": {"type": "string", "description": "Repository name without the owner."},
+        "full_name": {"type": "string", "description": "Owner and name, as 'owner/repo'."},
+        "owner": {
+            "type": "string",
+            "description": "Login of the user or organisation that owns it.",
+        },
+        "owner_type": {
+            "type": ["string", "null"],
+            "description": "Kind of owner: 'User' or 'Organization'.",
+        },
+        "visibility": {
+            "type": ["string", "null"],
+            "description": "'public', 'private' or 'internal'.",
+        },
+        "default_branch": {"type": "string", "description": "Name of the default branch."},
+        "archived": {
+            "type": "boolean",
+            "description": "True when the repository is archived (read-only).",
+        },
+        "topics": {
+            "type": "array",
+            "items": {"type": "string", "description": "One topic label."},
+            "description": "Topic labels set on the repository.",
+        },
+        "open_issues_count": {
+            "type": "integer",
+            "description": (
+                "Number of open issues and pull requests together, as GitHub counts them."
+            ),
+        },
+        "pushed_at": {
+            "type": ["string", "null"],
+            "description": "Time of the last push, as an ISO 8601 timestamp.",
+        },
+        "permissions": {
+            "type": ["object", "null"],
+            "description": (
+                "What the connector's own identity may do in this repository. "
+                "null when GitHub does not report it."
+            ),
+            "properties": {
+                "read": {"type": "boolean", "description": "May read the code and issues."},
+                "write": {"type": "boolean", "description": "May push commits and change issues."},
+                "admin": {"type": "boolean", "description": "May change the repository settings."},
+            },
+        },
+    },
+    "description": (
+        "Short summary of one repository. Only these fields, not the full vendor answer."
+    ),
+}
+
+
+# One GitHub owner or repository name. The lookahead after ``$`` matters:
+# the validator is Python ``re``, where ``$`` also matches before a final
+# newline, so without it ``"name\n"`` would pass.
+_GITHUB_NAME_PATTERN = "^[A-Za-z0-9._-]+$(?!\\n)"
+
+REPO_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["org", "name"],
+    "properties": {
+        "org": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": _GITHUB_NAME_PATTERN,
+            "description": (
+                "Login of the GitHub organisation that will own the repository. "
+                "Letters, digits, '.', '-' and '_' only."
+            ),
+        },
+        "name": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": _GITHUB_NAME_PATTERN,
+            "description": (
+                "Name of the new repository (without the organisation prefix). "
+                "Letters, digits, '.', '-' and '_' only."
+            ),
+        },
+        "description": {
+            "type": "string",
+            "description": "Short text shown under the repository name. Optional.",
+        },
+        "visibility": {
+            "type": "string",
+            "enum": ["private", "public"],
+            "description": (
+                "Who can see the repository. 'private' when omitted. "
+                "Pass 'public' only when the caller asks for a public repository."
+            ),
+        },
+        "with_readme": {
+            "type": "boolean",
+            "description": (
+                "When true, GitHub makes a first commit with an empty README, so the "
+                "default branch exists at once. False when omitted (empty repository)."
+            ),
+        },
+    },
+    "examples": [{"org": "example-org", "name": "example-repo", "visibility": "private"}],
+    "description": (
+        "Parameters for gh.composite.repo_create. Creates one repository in an "
+        "organisation (POST /orgs/{org}/repos). Private unless visibility is 'public'."
+    ),
+}
+REPO_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+        "status",
+        "name",
+        "full_name",
+        "owner",
+        "url",
+        "visibility",
+        "default_branch",
+        "guidance",
+    ],
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["created", "unchanged"],
+            "description": (
+                "'created' when the repository was made. 'unchanged' when a repository "
+                "with that name already exists; then nothing was written."
+            ),
+        },
+        "name": {"type": "string", "description": "Repository name without the owner."},
+        "full_name": {"type": "string", "description": "Owner and name, as 'org/repo'."},
+        "owner": {"type": "string", "description": "Login of the organisation that owns it."},
+        "url": {"type": "string", "description": "Web address of the repository."},
+        "visibility": {
+            "type": ["string", "null"],
+            "description": "'public', 'private' or 'internal'.",
+        },
+        "default_branch": {
+            "type": ["string", "null"],
+            "description": "Name of the default branch, for example 'main'.",
+        },
+        "guidance": {
+            "type": "string",
+            "description": "One sentence that says what happened.",
+        },
+    },
+    "description": (
+        "Result of gh.composite.repo_create: what happened, and the main facts of the "
+        "repository (new or already existing)."
+    ),
 }

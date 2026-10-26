@@ -14,7 +14,7 @@ Structurally it is a copy of the ``winsrv`` estate mold (#3261): identity canary
 JSONFlux envelope for list reads, and the ``rke2`` approval-parked-write mold
 for its destructive ops.
 
-Op surface (27 ops across five groups; safety tier per the Initiative #3259
+Op surface (28 ops across five groups; safety tier per the Initiative #3259
 satellite table — reads ``safe``, recoverable writes ``caution``, destructive
 ``dangerous`` + ``requires_approval``):
 
@@ -26,6 +26,7 @@ satellite table — reads ``safe``, recoverable writes ``caution``, destructive
 * ``msad.user.list``              [safe]      Get-ADUser -Filter * (list).
 * ``msad.user.get``               [safe]      Get-ADUser -Identity.
 * ``msad.user.search``            [safe]      Get-ADUser -Filter {name/sam -like} (list).
+* ``msad.user.password-expiry``   [safe]      Get-ADUser -Identity (password age / expiry).
 * ``msad.user.create``            [caution]   New-ADUser (created disabled, no password).
 * ``msad.user.set``               [caution]   Set-ADUser (attributes; never a password).
 * ``msad.user.enable``            [caution]   Enable-ADAccount.
@@ -107,7 +108,9 @@ MSAD_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     ),
     "users": (
         "Use to inventory and manage AD user accounts: list / get / search "
-        "(read-only, ``safe``); create / set-attributes / enable / disable "
+        "(read-only, ``safe``); password-expiry (read-only, ``safe`` — when "
+        "one account's password was last set and when it expires, with the "
+        "whole days left for a sensor); create / set-attributes / enable / disable "
         "(``caution`` — recoverable); delete (``dangerous`` + "
         "``requires_approval`` — parks for a human). ``create`` makes a "
         "**disabled, passwordless** account — a plaintext password cannot ride "
@@ -309,12 +312,14 @@ def _msad_ops() -> tuple[MsadOp, ...]:
     from meho_backplane.connectors.msad.ops_domain import DOMAIN_OPS
     from meho_backplane.connectors.msad.ops_groups import GROUP_OPS
     from meho_backplane.connectors.msad.ops_ou import OU_OPS
+    from meho_backplane.connectors.msad.ops_password import PASSWORD_OPS
     from meho_backplane.connectors.msad.ops_users import USER_OPS
 
     return (
         _MSAD_ABOUT_OP,
         *DOMAIN_OPS,
         *USER_OPS,
+        *PASSWORD_OPS,
         *GROUP_OPS,
         *COMPUTER_OPS,
         *OU_OPS,

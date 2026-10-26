@@ -18,11 +18,11 @@ models that G9.1-T1 (#448, migration `0007`) created.
 
 **Read half — entry points (async, read-only):**
 
-- `find_dependents(operator, name_or_alias, *, kind=None, depth=16, kind_filter=None, include_stale=True)`
+- `find_dependents(operator, name_or_alias, *, kind=None, depth=16, kind_filter=None, relation_class=None, include_stale=True)`
   — reverse traversal, "what depends on me".
-- `find_dependencies(operator, name_or_alias, *, kind=None, depth=16, kind_filter=None, include_stale=True)`
+- `find_dependencies(operator, name_or_alias, *, kind=None, depth=16, kind_filter=None, relation_class=None, include_stale=True)`
   — forward traversal, "what I depend on".
-- `find_path(operator, from_name, to_name, *, from_kind=None, to_kind=None, max_hops=8)`
+- `find_path(operator, from_name, to_name, *, from_kind=None, to_kind=None, max_hops=8, include_stale=True, direction="undirected", relation_class=None, missing_endpoint_raises=False)`
   — shortest unweighted path, or `None` if unreachable.
 
 **Annotation — entry points (async, write half, G9.2-T3 #595):**
@@ -119,12 +119,13 @@ funnel through these primitives.
   `AmbiguousNodeError` (bare name maps to multiple kinds in the
   tenant) / `NodeNotFoundError` (no match — including names that
   exist only in another tenant). Works for non-target nodes
-  (`target_id IS NULL`) as well as registered targets. The
-  ambiguity-probe SQL is shared with the traversal verbs'
-  `_assert_anchor_unambiguous`, so the "name → multiple kinds"
-  surface is single-sourced; traversal's not-found behavior is
-  unchanged (empty result, not a raise) — only `resolve_node`
-  surfaces `NodeNotFoundError`.
+  (`target_id IS NULL`) as well as registered targets. The closure
+  and path verbs resolve their anchors through it too, so the
+  ambiguity rule is single-sourced. It skips `legacy:` rows and, after
+  the scope cut-over (#3749), also raises `AmbiguousNodeError` (with
+  `scopes`) when one `(kind, name)` exists in several scopes.
+  `find_path` turns its `NodeNotFoundError` into `None` unless the
+  caller passes `missing_endpoint_raises=True` (#3760).
 
 **Edge listing — entry point (async, read-only, G9.2-T4 #596):**
 
@@ -292,6 +293,215 @@ as a warning callout next to the counts (#2210).
 | `via_edge_kind` | `str \| None` | The `graph_edge.kind` of the edge used to reach this node; `None` for the root. |
 | `parent_node_id` | `UUID \| None` | #2538 chain provenance: the `graph_node.id` the walk stepped from; `None` for the root. In a closure result the parent is always itself a row of that result, so the flat list reconstructs the exact dependency chain without follow-up edge lookups. Additive (`None` default). |
 | `via_edge_id` | `UUID \| None` | #2538 chain provenance: the `graph_edge.id` that was walked to reach this node; `None` for the root. Additive (`None` default). |
+| `source_scope` | `str \| None` | #3739: the stored `graph_node.source_scope` — `global`, `target:<uuid>`, `legacy:<uuid>` or `None`. Additive (`None` default). See §Source scope (expand step). |
+| `scope_status` | `"global" \| "target" \| "legacy" \| "unresolved"` | #3739: derived from `source_scope` (read-only, computed). `unresolved` means the row has no scope yet; readers report it and never fall back to `target_id`. |
+| `last_seen` | `datetime \| None` | #3760: when MEHO last saw the node in a refresh. `None` when the latest refresh no longer reported it. Not the vendor's own time. |
+| `via_edge_source` | `str \| None` | #3760: `source` (`auto` / `curated`) of the edge walked to reach this node; `None` for the root. |
+| `via_edge_last_seen` | `datetime \| None` | #3760: `last_seen` of that edge; `None` for the root or a soft-deleted edge. |
+| `via_relation_class` | `"containment" \| "placement" \| "dependency" \| "unknown" \| None` | #3760: relation class of that edge (read-only, computed). See §Direction, relation class and freshness. |
+
+### Source scope (expand step, #3739)
+
+A node is keyed by `(tenant_id, kind, name)`, so two targets that report
+the same name (two clusters with a `default` namespace) collapse into one
+row. Migration `0108` is the first, expand-only step of the fix. It adds
+the place to record where a name is unique, and changes no writer.
+
+- **Columns.** `graph_node.source_scope` (nullable text) and
+  `graph_node.source_scope_provenance` (nullable text: what set the
+  scope; the backfill writes `migration:0108`).
+- **Vocabulary** (`SOURCE_SCOPE_PATTERN` in `db/models.py`):
+  - `global` — the name means the same thing for the whole tenant.
+  - `target:<uuid>` — the name is unique only inside one target
+    (`targets.id`).
+  - `legacy:<uuid>` — a pre-migration row kept apart from scoped rows;
+    the UUID is the row's own `graph_node.id`, so legacy rows never
+    collide.
+  - `NULL` — not resolved yet. Readers show it as `unresolved`.
+- **CHECK.** `ck_graph_node_source_scope` is portable (PostgreSQL and
+  SQLite) and accepts only the three forms with canonical lowercase
+  UUIDs. `TopologyNode.source_scope` checks the same pattern.
+- **Backfill.** Only `kind = 'target'` rows get `global` (the row is the
+  registered target itself; live target names are unique per tenant).
+  Every other row stays `NULL`. `target_id` is never read as a scope: it
+  only names the last target that saw the row.
+- **Snapshot.** `graph_node_scope_snapshot` holds one row per node that
+  existed at upgrade time: its key, `last_target_id`, `scope_status`
+  (`global` / `unresolved`) and `schema_version = 1`. It is keyed by the
+  node id, so same-named rows never clash. It is the input for the later
+  repair step. No ORM model reads it yet. The upgrade creates the table
+  only when it is absent and adds rows only for nodes that have none, so
+  a row records the first time `0108` saw the node.
+- **Old key kept.** `graph_node_tenant_kind_name_idx` stays unique on
+  `(tenant_id, kind, name)`. PostgreSQL treats NULLs as distinct in a
+  unique index, so a fourth nullable key alone would let two unresolved
+  rows share a name. A non-unique `graph_node_tenant_scope_kind_name_idx`
+  on `(tenant_id, source_scope, kind, name)` is added for scope lookups.
+- **Writers unchanged until the cut-over.** In `legacy` mode refresh and
+  seeding still write `NULL`, so rows written before the cut-over also
+  read as `unresolved`. The cut-over below switches them.
+- **Downgrade.** Keeps every row, drops the two columns, the CHECK and
+  the scope index, and keeps `graph_node_scope_snapshot`. The snapshot
+  cannot be re-taken later, because a refresh moves `target_id` to the
+  last target that saw the row; keeping the table is how the repair
+  input is exported before the columns go. A re-upgrade keeps it as is.
+  Downgrade refuses when `source_scope` holds a value `0108` did not
+  write (any `target:` / `legacy:` value, or a value from another
+  writer): the old schema cannot hold it, so recover by rolling forward.
+- **Not in this step.** Writing scoped nodes, splitting or repairing
+  rows and dropping the old key belong to the staged cut-over (#3749,
+  next section). Path answer changes belong to #3760.
+- **Tests.** `tests/migrations/test_migration_0108_add_graph_node_source_scope.py`
+  (SQLite), `tests/integration/test_topology_source_scope_migration.py`
+  (PostgreSQL: NULL uniqueness, upgrade/downgrade, refusal) and the
+  legacy-read tests in `tests/integration/test_topology_query.py`.
+
+### Source scope cut-over (#3749)
+
+The cut-over moves the graph from the old key `(tenant_id, kind, name)`
+to `(tenant_id, source_scope, kind, name)`. After it, two clusters can
+each own a `default` namespace, and no answer joins them through that
+shared name. It needs fresh answers from every target, so it is an
+operator step, not a migration. Code: `topology/scope_repair/`.
+
+**Mode.** `topology_identity_state` (migration `0111`) holds one row:
+`mode` is `legacy` or `scoped`. Every install starts `legacy`; only the
+cut-over sets `scoped`. `topology/identity_mode.py` reads it. Writers
+read it with `FOR SHARE` inside their own transaction. Staging and the
+cut-over take `FOR UPDATE` first, so a writer never mixes the two modes
+and no write lands while staging runs.
+
+| Writer | `legacy` mode | `scoped` mode |
+|---|---|---|
+| refresh | keys on `(kind, name)` tenant-wide, adopts rows across targets, writes `NULL` scope | loads only rows in the scope each hint maps to: `target:<target id>`, or `global` for the target's own `kind='target'` node; never touches another target's rows, `global` seeds or `legacy:` rows; soft-deletes only rows in its own scope (plus its own `global` target node) |
+| `create_or_get_node` | writes `NULL` scope | writes `global` (provenance `curated`) |
+
+Both modes skip `legacy:` rows when a seed looks for a row to merge
+into, and a seed of a `(kind, name)` that exists in several scopes
+raises `AmbiguousNodeError`.
+
+**Commands** (run inside the backplane image; they use its settings):
+
+```
+python -m meho_backplane.topology.scope_repair stage
+python -m meho_backplane.topology.scope_repair show <manifest-id>
+python -m meho_backplane.topology.scope_repair cutover <manifest-id>
+```
+
+**Stage** (`stage.py`). Calls `discover_topology` on every live target
+of every tenant (same call as a refresh, as `system:topology-scope-repair`)
+and never writes to the graph. It reads the graph, builds the plan
+(`plan.py`, pure) and saves one `topology_scope_manifest` row: status,
+the graph `snapshot_version` and the plan as JSON. A target that fails
+is recorded with its exception class name only. The plan stores keys,
+scopes, ids and reasons, never properties.
+
+The whole run is one transaction. It holds the mode row (`FOR UPDATE`)
+and `LOCK TABLE graph_node, graph_edge IN EXCLUSIVE MODE`, so graph
+writes wait until the manifest is saved. Reads go on. A refresh that
+starts while a target is being asked cannot add a row the plan would
+set aside as unreported: the plan is built against the graph the
+targets were asked against. Waiting writers run after staging, so run
+the cut-over soon after; a refresh that changes the graph in between
+makes the cut-over refuse (`snapshot_changed`), and you stage again.
+
+Plan rules per tenant. A *claim* is one target reporting a node, in the
+scope above.
+
+| Existing row | Decision |
+|---|---|
+| claimed in exactly one scope | `adopt`: keeps its id, history and edges; gets the scope |
+| claimed in two or more scopes | `legacy`: set aside as `legacy:<its id>` (curated rows too); each claimant gets a new row |
+| not claimed, `kind='target'` or curated | `keep` as `global` |
+| not claimed, probe-made | `legacy` (`not_rediscovered`) |
+
+A claim with no existing row is `publish` (a new row with empty
+properties; the next refresh fills them). Discovered edges link the
+final ids: `adopt` an existing edge with the same ends and kind, else
+`publish`. Every other existing edge is decided too:
+
+| Existing edge no discovery adopted | Decision |
+|---|---|
+| touches a `legacy` row | `quarantine` (`endpoint_set_aside`): stays for history; readers skip it through the legacy row |
+| probe-made, no target reported it again | `quarantine` (`not_rediscovered`): the cut-over writes its tombstone and deletes the row. It was another target's claim on a row that now belongs to one target, so it would join two targets that share nothing |
+| curated, both ends stay readable | left as it is (operator data) |
+
+The plan is the same whatever order the targets answered in. It is
+*complete* (manifest `staged`) only when every target answered and there
+is no problem; otherwise the manifest is `incomplete`. Problems:
+`target_unavailable`, `unresolved_edge` (an edge to a node the same
+target did not report), `global_name_claimed_twice`.
+
+`snapshot_version` is a SHA-256 over node ids, keys, `source`,
+`source_scope` and liveness, and edge ids, ends, kind, `source` and
+liveness. It leaves out properties, timestamps and `target_id`: a
+refresh rewrites those on every run (`target_id` flips between targets
+that share a name) and the plan does not use them.
+
+**Cut over** (`cutover.py`), one PostgreSQL transaction:
+
+1. lock the mode row (`FOR UPDATE`); refuse unless `legacy`;
+2. load the manifest (`FOR UPDATE`); refuse unless `staged`; refuse a
+   malformed scope, a problem or an unavailable target in the plan;
+3. `LOCK TABLE graph_node, graph_edge IN EXCLUSIVE MODE`, fingerprint
+   the graph again, refuse a different `snapshot_version`;
+4. `LOCK TABLE targets IN EXCLUSIVE MODE` (reads go on, target changes
+   wait until the cut-over commits), then compare the live target set
+   with the staged one: refuse when a staged target was deleted
+   (`target_unavailable`) or a target was added after staging
+   (`target_added`; its rows are not in the plan and the graph
+   fingerprint cannot see a target with no rows yet);
+5. drop `graph_node_tenant_kind_name_idx`;
+6. apply node then edge decisions with history rows (node history
+   snapshots now include `source_scope`) and one audit row per tenant
+   (`topology.scope_cutover`, `operation_execution`). `adopt` sets the
+   scope, `target_id` (probe rows) and `last_seen`; `legacy` sets
+   `legacy:<id>` and soft-deletes probe rows; a quarantined edge with a
+   legacy end is soft-deleted when probe-made and left as it is when
+   curated; a probe edge no target reported again is deleted after a
+   `removed` history row (a soft-deleted edge would still be a hop,
+   because traversal keeps stale rows by default);
+7. `source_scope` `SET NOT NULL`; recreate
+   `graph_node_tenant_scope_kind_name_idx` as unique;
+8. set `mode = 'scoped'`; mark the manifest `cut_over`.
+
+Refusals (`CutoverRefusedError.reason`) happen before step 5, so the old
+graph is unchanged and readable. Refusals about the manifest
+(`snapshot_changed`, `target_unavailable`, `target_added`,
+`malformed_scope`, `unresolved_edge`) mark it `refused`; stage again. A crash at any step
+rolls the whole transaction back; the same manifest can then roll
+forward if the graph has not changed. There is no way back to the old
+key: a second cut-over and a new staging run refuse once `scoped`, and
+the `0111` downgrade refuses too (as does `0108`'s, on `target:` /
+`legacy:` values).
+
+**Schema after the cut-over** differs from the ORM declaration in
+`db/models.py`, which still declares the pre-cut-over shape (old unique
+key, nullable `source_scope`). Fresh installs and the test database
+start `legacy`, so the ORM matches them. A later migration can require
+`scoped` and update the model.
+
+**Readers** need no mode. `legacy:` rows only exist after the cut-over,
+and every reader skips them: `resolve_node` (and so annotate, bulk
+import, history and the closure verbs), the traversal CTEs (never step
+onto one), `find_path` (never a hop), the UI resolver and the UI BFS
+overlays. `list_edges` skips every edge with a `legacy:` end, on the
+REST, CLI and MCP edge listings alike, and so do the console graph
+view and the node drawer's edge lists. `list_nodes` and the timeline
+still show legacy rows, with `scope_status = legacy`, for repair
+reports. When one `(kind, name)`
+exists in several scopes, `resolve_node` raises `AmbiguousNodeError`
+with `scopes` set instead of picking one; the traversal and path
+statements anchor on the resolved row id.
+
+**Tests.** `tests/test_topology_scope_plan.py` (plan rules, order,
+snapshot), `tests/migrations/test_migration_0111_add_topology_scope_cutover_state.py`
+(SQLite: tables, CHECKs, downgrade guard) and
+`tests/integration/test_topology_scope_cutover.py` (PostgreSQL: staged
+manifest, a refresh that waits during staging, atomic cut-over,
+refusals, interrupted cut-over, soft-delete, rollback guard, curated
+quarantine with the edge listing, an old edge from a target that
+stopped reporting a shared row).
 
 ### `TopologyPath` — frozen Pydantic v2 (read half)
 
@@ -299,6 +509,7 @@ as a warning callout next to the counts (#2210).
 |---|---|---|
 | `nodes` | `tuple[TopologyNode, ...]` | Ordered from the `from` node (`depth == 0`) to the `to` node (`depth == total_hops`). |
 | `total_hops` | `int` | Number of edges traversed; equals `len(nodes) - 1`. |
+| `direction` | `"undirected" \| "forward" \| "reverse"` | #3760: the edge direction the search applied. Default `undirected`. |
 
 ### `TopologyEdgeEndpoint` — frozen Pydantic v2 (edge listing, G9.2-T4)
 
@@ -307,6 +518,7 @@ as a warning callout next to the counts (#2210).
 | `id` | `UUID` | `graph_node.id`. |
 | `kind` | `str` | `graph_node.kind`. |
 | `name` | `str` | `graph_node.name`. |
+| `source_scope` | `str \| None` | #3760: the node's stored `source_scope`, so an edge says which source each end came from. |
 
 Compact node identity carried as `from_endpoint` / `to_endpoint` on
 `TopologyEdge`. The full node `properties` bag is intentionally
@@ -325,6 +537,7 @@ separately via `resolve_node`.
 | `source` | `str` | `'auto'` (probe-derived) or `'curated'` (operator-asserted). |
 | `properties` | `dict` | `graph_edge.properties` JSONB; deep-frozen (same discipline as `TopologyNode.properties`). Carries the conflict markers `conflicts_with` (array, G9.2-T3 #595) and `superseded_by` (UUID, also #595). |
 | `last_seen` | `datetime \| None` | The refresh service's "I observed this edge at" timestamp. NULL after a soft-delete; soft-deleted edges are excluded from `list_edges` by default. Also the stable total-order key the helper paginates against. |
+| `relation_class` | `"containment" \| "placement" \| "dependency" \| "unknown"` | #3760: what the edge means (read-only, computed from `kind`). |
 
 ## Control flow — write half
 
@@ -476,7 +689,8 @@ a `SELECT DISTINCT ON (id) ... ORDER BY id, depth, name,
 parent_node_id, via_edge_id` subquery (keeping the minimum-depth
 occurrence of each node; the provenance columns extend the ORDER BY as
 a deterministic tie-break so converging equal-depth parents resolve
-identically on every run) and re-orders the result by `(depth, name)`.
+identically on every run) and re-orders the result by `(depth, name,
+id)`.
 `CYCLE` only prevents revisiting a node on the *same* branch; the
 `DISTINCT ON` collapse is what makes a converging DAG return one row
 per node rather than one row per path.
@@ -512,26 +726,25 @@ MCP `query_topology.include_stale`.
 
 ### Anchor disambiguation
 
-`graph_node` uniqueness is `(tenant_id, kind, name)`. Resolving an
-anchor by `name` alone would match every kind with that name and
-silently merge unrelated closures. `_assert_anchor_unambiguous` probes
-the distinct kinds for `(tenant_id, name)` before traversing: a no-op
-when `kind` is supplied or the name maps to one kind, but a raise of
-`AmbiguousNodeError` (a `ValueError` subclass carrying `name` + the
-matched `kinds`) when `kind` is omitted and the name spans multiple
-kinds. `find_path` applies the same probe independently to each
-endpoint. Alias → name resolution remains the T5/T6 router's job; this
+`graph_node` uniqueness is `(tenant_id, kind, name)` before the scope
+cut-over and `(tenant_id, source_scope, kind, name)` after it. Resolving
+an anchor by `name` alone would match every kind with that name and
+silently merge unrelated closures. Every verb resolves its anchor with
+`resolve_node` first: it raises `AmbiguousNodeError` (a `ValueError`
+subclass carrying `name`, the matched `kinds` and, for a scope
+ambiguity, `scopes`) when `kind` is omitted and the name spans multiple
+kinds, or when one `(kind, name)` exists in several scopes. `legacy:`
+rows are never candidates. The CTEs then anchor on the resolved row id.
+`find_path` resolves each endpoint the same way (`_resolve_endpoint_id`;
+a missing endpoint returns `None`). Alias → name resolution remains the T5/T6 router's job; this
 substrate matches `graph_node.name` directly.
 
 As of G9.2-T2 (#594), `AmbiguousNodeError` is defined in
 `meho_backplane.topology.resolvers` (alongside `resolve_node` and the
 new `NodeNotFoundError`) and re-exported by
 `meho_backplane.topology.query` for back-compat with pre-G9.2
-importers. The kind-collection SQL is single-sourced in the resolver
-module; the traversal's `_assert_anchor_unambiguous` and
-`resolve_node` call into the same helper, so the "name → multiple
-kinds in this tenant" surface stays consistent across the two
-call paths. The not-found behavior intentionally differs between the
+importers. The ambiguity rule lives only in `resolve_node`, so the
+traversal verbs and the write paths share one answer. The not-found behavior intentionally differs between the
 two surfaces: `resolve_node` raises `NodeNotFoundError`; the
 traversal verbs keep G9.1's silent-on-miss contract (empty result,
 not an exception) — opting traversal into the stricter raise-on-miss
@@ -551,12 +764,15 @@ target (auto-discovery is k8s-only today; only
 `KubernetesConnector` overrides `discover_topology`). The REST
 front maps the exception to `404 node_untracked`; the MCP front
 returns the typed `{kind, status: "node_untracked", name,
-nodes: []}` envelope. The CLI's `formatNotFound` renders the
+nodes: []}` envelope, which also carries `direction`,
+`relation_class` and `evidence` like every other closure answer
+(#3760). The CLI's `formatNotFound` renders the
 operator-actionable "register / refresh the target or annotate
 the relationship" prompt. `find_path` keeps its G9.1 silent-on-miss
-contract — `None` is the recoverable "no route" answer for a
-single-anchor walk and is structurally distinct from "this anchor
-isn't in the graph."
+contract by default — `None` is the recoverable "no route" answer.
+The MCP front passes `missing_endpoint_raises=True` (#3760) so a
+missing endpoint raises `NodeNotFoundError` and the answer can say
+`node_untracked` instead of `no_route`.
 
 ### Path search
 
@@ -592,6 +808,65 @@ enumerates the whole ≤`max_hops` ball; its envelope is pinned by
 `tests/integration/test_topology_path_pruning.py` on a dense
 `MeshSpec` mesh (row-count pin + load-invariant timing ratio, see
 `docs/architecture/topology.md` §Performance expectations).
+
+### Direction, relation class and freshness (#3760)
+
+**Path direction.** `find_path(direction=...)` turns each `bi_edge` leg
+on or off with the `:walk_forward` / `:walk_reverse` binds.
+`undirected` (the default) keeps both legs, so reachability is the same
+as before. `forward` follows each edge from its `from` node to its `to`
+node only; `reverse` the other way only. `TopologyPath.direction`
+echoes the value. The closure verbs were always directed:
+`find_dependents` walks `reverse`, `find_dependencies` walks `forward`.
+
+**Relation class.** `topology/evidence.py` maps only reviewed edge
+kinds: `belongs-to` → `containment`, `runs-on` → `placement`,
+`authenticates-via` → `dependency`. Every other kind is `unknown`, even
+`depends-on`; MEHO never guesses that an unmapped kind is a dependency,
+and containment is never a service dependency. `relation_class=` on the
+closure verbs, `find_path` and `list_edges` becomes two SQL binds:
+`:class_kinds` (keep these kinds) for a mapped class, or
+`:class_excluded_kinds` (drop the mapped kinds) for `unknown`. The
+mapping lives once in Python, not in the SQL.
+
+**Source and freshness.** Closure and path rows carry the node's
+`source`, `source_scope` and `last_seen`, plus the walked edge's
+`via_edge_source` and `via_edge_last_seen`. Edge rows carry `source`,
+`last_seen` and each endpoint's `source_scope`. `last_seen` is MEHO's
+own time, never the vendor's. For an `auto` row it is the last refresh
+that reported the row. For a `curated` row it is when the operator
+entered or re-stated the row (`annotate_edge`, `create_or_get_node`);
+a refresh that also observes a curated row bumps `last_seen`
+(`_refresh_curated_node` / `_refresh_curated_edge`) but never changes
+or removes the row. Rows from different targets come from different
+refreshes, so no answer is one consistent snapshot. `classify_freshness`
+turns a row into one of four values:
+
+| Value | Rule |
+|---|---|
+| `stale` | `last_seen` is NULL: the latest refresh no longer reported it. |
+| `asserted` | `source='curated'`: an operator stated it. A refresh never changes or removes it; a refresh that also observes it only moves `last_seen` forward. |
+| `old_observation` | Seen, but more than two `topology_refresh_interval_seconds` ago. |
+| `observed` | Seen within the last two refresh intervals. |
+
+**MCP answer shape.** `query_topology` adds `path_direction` and
+`relation_class` arguments. Closure answers carry `direction`,
+`relation_class`, per-row `freshness` / `via_edge_freshness` and an
+`evidence` block (`stale_rows`, `stale_rows_note`, `observation_note`,
+and `freshness_meaning` for each value that appears). The stale view is
+reported as the queries apply it: with `include_stale=false` the walk
+skips stale rows, but the closure root and the two path endpoints are
+returned even when stale (#2538), and `stale_rows_note` plus the `stale`
+entry of `freshness_meaning` say so (`stale_rows_evidence` and
+`STALE_SHOWN_COPY` in `topology/evidence.py`). `kind=path` always
+carries `status`: `found`, `node_untracked` (an endpoint is not in the
+graph) or `no_route` (both ends exist, no route under the selected
+direction, relation class and stale view), with a plain-language
+`detail` for the last two. All three path outcomes carry `evidence`, so
+a `no_route` caused by an excluded stale edge still says that stale
+rows were excluded. `kind=edges` rows carry `relation_class` and
+`freshness`. The REST routes return the new model fields but keep their
+own shape; they do not take `direction` or `relation_class` yet.
 
 ### Cycle safety
 
@@ -629,6 +904,144 @@ merge entirely — only `last_seen` bumps; the operator-supplied `note`
 Only `unannotate_edge` of the curated row clears the marker. The `->>`
 operator is PG-only (manual §9.16); the recursive CTE is itself PG-only,
 so the guard runs only where the column is JSONB.
+
+### Bounded closure answers (#3764)
+
+`query_topology` with `kind=dependents` / `dependencies` does not call
+`find_dependents` / `find_dependencies`. It calls `bounded_closure`,
+which walks the graph hop by hop under limits, so a dense graph cannot
+make the database do unbounded work. The REST, CLI and console closure
+routes still call the unbounded recursive-CTE verbs (see Known issues).
+
+What `bounded_closure` does (`_bounded_walk`):
+
+- **One snapshot.** The first statement is `SET TRANSACTION ISOLATION
+  LEVEL REPEATABLE READ READ ONLY`, so the root lookup and every hop
+  read the same state of the graph. A refresh that lands between two
+  hops is not seen until the next query; the answer can never join
+  nodes from two graph states into a chain that never existed.
+- **Root.** The lookup (`node_identity_statement` in `resolvers.py`,
+  with the same rules as `resolve_node`) selects id, kind, name,
+  source, scope and `last_seen`, never `properties`. The anchor
+  statement (`_CLOSURE_ANCHOR_SQL`) then returns the root row with its
+  properties only when they fit the byte budget. So a root with
+  oversized properties is named, is the one node in the answer with
+  empty properties, and stops the walk with `limit_hit="byte_limit"`;
+  its properties never reach Python.
+- **One statement per hop, not one recursive CTE.** Each hop statement
+  (`_CLOSURE_STEP_SQL_REVERSE` / `_FORWARD`) expands only the nodes kept
+  at the previous hop (`:frontier`), skips every node already in the
+  answer (`:visited`), and returns at most `:row_limit` rows in
+  `(name, id)` order. On a dense mesh each node is expanded once, so the
+  cost grows with the number of nodes, not with the number of paths
+  (the recursive CTE follows every path).
+- **Bounded work inside a hop.** The hop statement has five parts.
+  `reached` is every edge out of the frontier that passes the filters,
+  with the node's id and name only. `picked` groups those by node and
+  keeps the first `:row_limit` in `(name, id)` order, so the database
+  sorts ids and names, never properties, and a top-N sort keeps only
+  `:row_limit` rows in memory. `via` picks, for the kept nodes only,
+  the parent and edge with the smallest ids (the same choice the
+  recursive CTE makes). `ordered` is the kept ids as one array in that
+  order, and `loaded` walks it with a recursive query: it loads the
+  next node's properties only while the running byte total before it
+  is within `:byte_budget`. So a hop the byte limit cuts reads the
+  properties of the rows it returns and no others, and the largest
+  temporary result is the budget plus one row, never every kept node's
+  properties. `reached` is `NOT MATERIALIZED`, so a very wide hop is
+  one pass over its edges, and PostgreSQL never stores the whole hop as
+  a temporary result.
+- **Nodes.** `:row_limit` is `max_nodes + 1` minus the rows already in
+  hand, so the walk never fetches more than `max_nodes + 1` rows in
+  total, and it stops asking as soon as that row is in hand.
+- **Bytes.** Each hop computes `row_bytes` (the stored bytes of the
+  node's kind, name, scope and properties) and a running total that
+  continues from the previous hop (`:bytes_before`). Rows whose running
+  total before them is within `:byte_budget` come back, so one row past
+  the budget comes back, with its properties left out, and shows that
+  the byte limit applied. The walk stops asking after that row.
+- **Time.** The budget covers the whole walk, the root lookup included.
+  Before every statement the time left is set as `SELECT
+  set_config('statement_timeout', :timeout_ms, true)` (the `true` makes
+  it end with the transaction, like `SET LOCAL`). When the time is up,
+  or PostgreSQL stops a statement (SQLSTATE `57014`), the answer has no
+  nodes and `limit_hit="time_budget"`. The root is still known when the
+  walk ran out of time; it is `None` when the lookup itself did, and the
+  MCP answer then has no `root` block.
+- **Depth.** After the last hop within `depth` the walk probes one hop
+  further with `LIMIT 1`. A row there means more nodes exist
+  (`limit_hit="hop_limit"`); it is not returned.
+
+`_cut_closure_rows` keeps the rows within all limits and names the first
+limit that stopped them. The kept rows are always the first part of
+the full closure in `(depth, name, id)` order, never a sample from the
+middle. The root is always kept. Defaults: `CLOSURE_MAX_NODES` 2000,
+`CLOSURE_MAX_BYTES` 4 MiB, `CLOSURE_TIME_BUDGET_MS` 5000.
+
+The walk is tested without a database with a fake session that records
+each statement (`tests/test_topology_query_schemas.py`), and against
+PostgreSQL in `tests/integration/test_topology_query.py`: the hop
+statements are counted (a star cut at the first hop sends one; the
+dense mesh sends one per layer plus the probe); a wide star with large
+properties is run under `EXPLAIN (ANALYZE, BUFFERS)` to show the hop
+reads a small part of the blocks all the properties take and sorts
+only kilobytes, once cut by the node limit and once by the byte limit
+with room for every node; edges written between two hops stay out of
+the answer;
+an oversized root is named without its properties; a slow lookup ends
+at the time budget with no root.
+
+The MCP facet then hands the rows to `bounded_answer` in
+`mcp/tools/_topology_answer.py`. It reuses the shared result
+contracts and adds nothing of its own:
+
+1. The rows go through the shared `JsonFluxReducer`. A small answer
+   stays inline (`nodes`). A large one is kept behind a result handle
+   under the caller's tenant and subject; `result_query` reads it back
+   with the usual ownership check. The answer then carries the reducer
+   summary and `handle` instead of `nodes`. The handle's
+   `fetch_more.drill_in.stored_rows` says how many rows the store kept.
+   Rows the reducer could not profile (its admission work limit) come
+   back from it as `status: unprofiled`; `status` means something else
+   on this tool and its `outputSchema` only allows those values, so the
+   answer drops `status`, keeps the reducer's `reason`
+   (`admission_limit_exceeded`) and reports `store_unavailable`.
+2. The finished answer, `completeness` and `delivery` included, is
+   measured with `measure_delivered_wire_bytes` against
+   `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`. Over the ceiling, smaller
+   answers are built and measured in turn until one fits: the inline
+   preview is dropped when the handle is readable
+   (`delivery="partial"`); then the inline rows and the handle are
+   dropped (`delivery="unavailable"`); the last resort keeps only `kind`,
+   `completeness` and `delivery`. Each smaller answer carries
+   `delivered_bytes` (the size of the whole answer) and
+   `delivery_max_bytes`. The last resort fits by construction for any
+   ceiling the settings accept; it is still measured, and a warning is
+   logged if it is ever over.
+3. A `completeness` block names every limit that applied:
+
+| Limit | `state` | What it means |
+|---|---|---|
+| none | `complete` | Every node is in `nodes` or behind `handle`. |
+| `hop_limit` | `incomplete` | Every node within `depth` is there; more exist past it. |
+| `node_limit`, `byte_limit` | `incomplete` | The first part of the closure in row order. |
+| `time_budget` | `unavailable` | No nodes. The traversal ran out of time. |
+| `store_cap` | `incomplete` | The store kept only the first `retained` rows. |
+| `store_unavailable` | `unavailable` | The store kept nothing; only the preview exists. |
+| `delivery_cap` | unchanged, or `unavailable` | The answer was too large to send inline; see `delivery`. |
+
+`found` is how many rows the query produced and `retained` how many can
+be read. `guidance` says how to narrow the query. The answer also
+carries `root` (the anchor), `query` (target and filters), `node_count`,
+`edge_count` (one walked edge per non-root node), `ordering` and
+`snapshot_at` (when the query ran; rows behind the handle are that
+answer, not a re-run).
+
+`kind=history` goes through the same `bounded_answer` with `rows`. A
+page that reaches `limit` is reported as `row_limit` (`incomplete`),
+because older rows may exist. When the rows are kept behind a handle,
+the handle's inline preview leaves out `snapshot` (`preview_omits`);
+the full rows, snapshots included, are read through `result_query`.
 
 ## Annotation control flow (write half — G9.2-T3 #595)
 
@@ -736,6 +1149,11 @@ audit row per operation (rather than per history row) keeps
 consumers rely on — and lets `meho topology diff` / `history` /
 `timeline` (T3-T5) join history back to the principal / session /
 target via `audit_log.id`.
+
+That audit row is the topology writer's own domain record of the
+change, written in the same transaction (#3747). It is never the REST or
+MCP request wrapper row, which is request activity and is being retired.
+`tests/test_audit_domain_provenance.py` checks this for annotate.
 
 ### Refresh path
 
@@ -973,11 +1391,10 @@ response. A caller that overflows the cap narrows `since` /
 column stores 32-char hex without dashes, and the dashed-string
 filter silently matched zero rows — `resolve_node` then raised a
 spurious `NodeNotFoundError`. Production PG accepts both forms,
-masking the bug. #859 pins `_ANCHOR_KINDS_SQL` to a SAUuid bind
-type so both dialects round-trip cleanly. The closure / path verbs
-were unaffected because they call `_assert_anchor_unambiguous`,
-which only raises when 2+ kinds match (a zero-row result is
-intentionally silent there — G9.1 contract).
+masking the bug. #859 pinned the old `_ANCHOR_KINDS_SQL` to a SAUuid
+bind type so both dialects round-trip cleanly. Since #3749,
+`resolve_node` uses one ORM select (the `Uuid` column type handles the
+bind), and that raw SQL is gone.
 
 ### Audit class
 
@@ -1482,8 +1899,6 @@ tables, happy path, `--json`, cross-tenant seed 404).
 - `meho_backplane.auth.operator.Operator` — `operator.tenant_id` is
   the only tenant boundary; every read statement filters node and edge
   `tenant_id` against it.
-- `meho_backplane.broadcast` — `BroadcastEvent` / `publish_event`
-  (fail-open, G6.1).
 - `meho_backplane.settings` — `topology_refresh_interval_seconds`,
   `topology_history_retention_days`,
   `topology_history_prune_interval_seconds`,
@@ -1533,7 +1948,8 @@ across every long-lived lifespan-owned task.
   growth is the export path: `meho topology timeline --json > out.jsonl`
   to cold storage of choice.
 - `TOPOLOGY_HISTORY_PRUNE_INTERVAL_SECONDS` (default `604800` / 7d,
-  range `[60, 604800]`). Sleep between ticks. Below one minute
+  range `[60, 604800]`). Time between runs, counted from the last
+  recorded run (see "When it runs" below). Below one minute
   competes with normal write load; weekly cadence is the documented
   ceiling — slower pruning is expressed by raising
   `TOPOLOGY_HISTORY_RETENTION_DAYS`.
@@ -1554,6 +1970,28 @@ D, "cutoff": <iso-ts>}`. The no-op case (`RETENTION_DAYS=0`) writes
 no audit row — weekly empty-payload rows would flood `audit_log` for
 no operator value. The G8.2 audit-query verb picks this up via
 `meho audit query --op topology.history.prune`.
+
+**When it runs.** The interval (`TOPOLOGY_HISTORY_PRUNE_INTERVAL_SECONDS`, default 7 days) counts
+from the **last recorded run**, not from pod start. So a pod restart (an
+update, a crash, a node drain) does not start the interval again:
+
+- After a pod starts, the prune waits one minute, so it does not run in
+  the middle of startup.
+- Then it reads the time of its newest `topology.history.prune` audit row within the
+  last interval. A row counts only if it has the system tenant id,
+  `method='INTERNAL'`, `operator_sub='system:topology-history-retention'` and that path. Every run
+  writes this row, also when it deleted 0 rows.
+- If there is no such row, it runs at once. Otherwise it waits only for
+  the rest of the interval. After that it runs once per interval.
+- A last-run time in the future (a pod with a fast clock wrote it) counts
+  as "due now". If the read fails, it logs `topology_history_retention_last_run_read_failed`
+  and runs at once. The wait is never longer than one interval.
+- Each start logs `topology_history_retention_scheduled` with `last_run_at` and
+  `next_run_in_seconds`, so you can check the schedule after a restart.
+- With retention days set to `0` no row is written, so the no-op
+  heartbeat runs about one minute after each start.
+
+The shared steps live in `backend/src/meho_backplane/loop_schedule.py`.
 
 **Failure isolation.** Per-tick `try` / `except` so a transient DB
 blip logs `topology_history_retention_tick_failed` and the loop
@@ -1584,6 +2022,10 @@ shape.
   contracts (deep `properties` immutability, `TopologyPath` invariants)
   have no DB dependency and are unit-tested in
   `backend/tests/test_topology_query_schemas.py`.
+- **Closure limits are MCP-only.** The REST, CLI and console closure
+  routes still call `find_dependents` / `find_dependencies` with no
+  node, byte or time limit (#3764 changed the `query_topology` answer
+  only).
 - **Unweighted only.** `find_path` treats every edge as cost 1.
   Weighted-edge support is deferred to v0.2.next per #363.
 - **No graph-node alias resolution yet.** `name_or_alias` is matched

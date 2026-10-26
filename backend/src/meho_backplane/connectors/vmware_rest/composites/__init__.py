@@ -63,6 +63,12 @@ Scope:
   ``safety_level="destructive"`` -- ``vm.destroy`` / #3198 (the first
   destructive composite -- the governed-delete tier), ``namespace.delete``
   and ``storage_policy.delete``.
+* 7 teardown composites (#3339; ``_teardown`` / ``_teardown_network`` /
+  ``_datastore_files`` / ``_library_delete``): six destructive deletes --
+  ``network.portgroup.delete``, ``host.standard_portgroup.delete``,
+  ``folder.delete``, ``datastore.file.delete``, ``content_library.delete``,
+  ``content_library.item.delete`` -- plus the caution paired create
+  ``datastore.dir.create``.
   They cover every state-mutating workflow Goal #214 names as
   required for govc-wrapper retirement: ``vm.create``, ``vm.clone``,
   ``vm.clone_from_template`` (folder-template clone via CloneVM_Task,
@@ -80,8 +86,26 @@ Scope:
   ``vm.customize`` (GOSC create + apply, secret-hygienic) (#2892), plus
   ``vm.deploy_from_library`` (OVF/OVA content-library deploy, retiring
   ``govc library.deploy``) (#2909).
+* the destructive DRS rule delete ``cluster.drs_rule.delete``
+  (``_drs_rule_delete``): removes one DRS rule from a cluster, by name.
+* the VM snapshot writes (``_snapshot``): ``vm.snapshot.create`` (caution,
+  waits for approval) and the destructive ``vm.snapshot.delete``. The list is
+  the typed read ``vmware.snapshot.list``; the revert lives in ``_write``.
+* the two alarm changes ``alarm.acknowledge`` and ``alarm.reset``
+  (``_alarm``, #4383): both ``caution`` with ``requires_approval=True``.
 """
 
+from meho_backplane.connectors.vmware_rest.composites._alarm import (
+    alarm_acknowledge_composite,
+    alarm_reset_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
+    datastore_dir_create_composite,
+    datastore_file_delete_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
+    cluster_drs_rule_delete_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._guest import (
     guest_env_read_composite,
     guest_file_read_composite,
@@ -101,6 +125,11 @@ from meho_backplane.connectors.vmware_rest.composites._library import (
     content_library_subscribed_status_composite,
     content_library_subscribed_sync_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._library_delete import (
+    content_library_delete_composite,
+    content_library_item_delete_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._license import license_assign_composite
 from meho_backplane.connectors.vmware_rest.composites._namespace import (
     namespace_create_composite,
     namespace_delete_composite,
@@ -116,6 +145,11 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
 )
 from meho_backplane.connectors.vmware_rest.composites._register import (
     register_vmware_composite_operations,
+    register_vmware_composite_operations_8_0,
+)
+from meho_backplane.connectors.vmware_rest.composites._snapshot import (
+    vm_snapshot_create_composite,
+    vm_snapshot_delete_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
     storage_policy_create_composite,
@@ -126,6 +160,15 @@ from meho_backplane.connectors.vmware_rest.composites._supervisor import (
     supervisor_disable_composite,
     supervisor_enable_composite,
     supervisor_status_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._teardown import folder_delete_composite
+from meho_backplane.connectors.vmware_rest.composites._teardown_network import (
+    host_standard_portgroup_delete_composite,
+    network_portgroup_delete_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._vm_allocation import (
+    vm_resource_allocation_set_composite,
+    vm_resource_allocation_show_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
@@ -160,28 +203,44 @@ from meho_backplane.operations.typed_register import register_typed_op_registrar
 # ``_eager_import_connectors`` so every connector subpackage has self-
 # registered by the time the runner iterates.
 register_typed_op_registrar(register_vmware_composite_operations)
+# The same composites on the ``vmware-rest-8.0`` catalog (#3789), so the
+# catalog the resolver picks for an 8.0.x target carries them too.
+register_typed_op_registrar(register_vmware_composite_operations_8_0)
 
 # Side-effect import: registers the 24 write composites' park-time
 # ``proposed_effect`` preview builders (#1608, destructive-tier
 # blast-radius #3198) onto the per-op hook in
 # :mod:`meho_backplane.operations._preview` — mirrors how
 # ``connectors/argocd/__init__`` wires ``ops_write_preview``.
-from meho_backplane.connectors.vmware_rest.composites import _write_preview  # noqa: E402,F401
+# Same for the guest file read (#4850): a caution read, so an agent's call
+# waits for approval.
+from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402,F401
+    _guest_file_read_preview,
+    _write_preview,
+)
 
 __all__ = [
+    "alarm_acknowledge_composite",
+    "alarm_reset_composite",
     "cluster_drs_recommendations_composite",
     "cluster_drs_rule_create_composite",
+    "cluster_drs_rule_delete_composite",
     "cluster_patch_composite",
+    "content_library_delete_composite",
+    "content_library_item_delete_composite",
     "content_library_subscribed_create_composite",
     "content_library_subscribed_items_list_composite",
     "content_library_subscribed_status_composite",
     "content_library_subscribed_sync_composite",
+    "datastore_dir_create_composite",
+    "datastore_file_delete_composite",
     "datastore_mount_nfs_composite",
     "datastore_refresh_composite",
     "datastore_usage_composite",
     "disk_mark_flash_composite",
     "event_tail_composite",
     "folder_create_composite",
+    "folder_delete_composite",
     "guest_customization_spec_create_composite",
     "guest_env_read_composite",
     "guest_file_read_composite",
@@ -191,15 +250,19 @@ __all__ = [
     "guest_program_run_composite",
     "host_detach_from_vds_composite",
     "host_evacuate_composite",
+    "host_standard_portgroup_delete_composite",
+    "license_assign_composite",
     "namespace_create_composite",
     "namespace_delete_composite",
     "namespace_status_composite",
     "network_portgroup_audit_composite",
     "network_portgroup_create_composite",
+    "network_portgroup_delete_composite",
     "network_portgroup_security_set_composite",
     "network_portgroup_vlan_set_composite",
     "performance_summary_composite",
     "register_vmware_composite_operations",
+    "register_vmware_composite_operations_8_0",
     "service_control_composite",
     "storage_policy_create_composite",
     "storage_policy_delete_composite",
@@ -221,5 +284,9 @@ __all__ = [
     "vm_power_bulk_composite",
     "vm_power_composite",
     "vm_resize_composite",
+    "vm_resource_allocation_set_composite",
+    "vm_resource_allocation_show_composite",
+    "vm_snapshot_create_composite",
+    "vm_snapshot_delete_composite",
     "vm_snapshot_revert_composite",
 ]

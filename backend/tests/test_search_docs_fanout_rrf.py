@@ -97,8 +97,16 @@ def _make_operator(*, capabilities: frozenset[str]) -> Operator:
     )
 
 
-def _make_collection(*, collection_key: str, backend_type: str = "fanout-fake") -> DocCollection:
-    """Build a frozen :class:`DocCollection` read shape routed to *backend_type*."""
+def _make_collection(
+    *,
+    collection_key: str,
+    backend_type: str = "fanout-fake",
+    ref_extra: dict[str, Any] | None = None,
+) -> DocCollection:
+    """Build a frozen :class:`DocCollection` read shape routed to *backend_type*.
+
+    *ref_extra* adds keys to the ``backend.ref`` (e.g. the #3912 scope gates).
+    """
     now = datetime.now(UTC)
     return DocCollection(
         id=uuid4(),
@@ -108,7 +116,7 @@ def _make_collection(*, collection_key: str, backend_type: str = "fanout-fake") 
         products=("p",),
         description=None,
         when_to_use=None,
-        backend={"type": backend_type, "ref": {"key": collection_key}},
+        backend={"type": backend_type, "ref": {"key": collection_key, **(ref_extra or {})}},
         status="ready",
         last_ingested_at=None,
         doc_count=None,
@@ -153,10 +161,19 @@ class _ScriptedBackend(SearchBackend):
         *,
         backend_ref: Any = None,
         metadata_filters: dict[str, Any] | None = None,
+        soft_scope: dict[str, str] | None = None,
         limit: int = 10,
     ) -> CorpusSearchResponse:
         key = (backend_ref or {}).get("key")
-        self.calls.append({"key": key, "query": query, "limit": limit})
+        self.calls.append(
+            {
+                "key": key,
+                "query": query,
+                "limit": limit,
+                "metadata_filters": metadata_filters,
+                "soft_scope": soft_scope,
+            }
+        )
         return CorpusSearchResponse(chunks=self._scripts.get(key, []))
 
 
@@ -448,6 +465,29 @@ async def test_fanout_passes_per_collection_limit(_restore_registry: None) -> No
 
     await search_docs_fanout(operator, "q", collections=collections, limit=3)
     assert all(call["limit"] == 3 for call in backend.calls)
+
+
+async def test_fanout_sends_no_refinements_whatever_the_gates(_restore_registry: None) -> None:
+    """A fan-out sends neither filters nor a soft scope, gates on or not (#3912).
+
+    One collection opts into the soft scope, one into hard filters, one into
+    both, one into neither: every backend call still carries no
+    ``metadata_filters`` and no ``soft_scope``.
+    """
+    backend = _ScriptedBackend({"soft": [], "hard": [], "both": [], "off": []})
+    register_backend(_ScriptedBackend.backend_type, backend)
+    operator = _make_operator(capabilities=frozenset({"meho-docs"}))
+    collections = [
+        _make_collection(collection_key="soft", ref_extra={"scope": "soft"}),
+        _make_collection(collection_key="hard", ref_extra={"scope_filters": True}),
+        _make_collection(collection_key="both", ref_extra={"scope": "soft", "scope_filters": True}),
+        _make_collection(collection_key="off"),
+    ]
+
+    await search_docs_fanout(operator, "q", collections=collections, limit=5)
+    assert sorted(call["key"] for call in backend.calls) == ["both", "hard", "off", "soft"]
+    assert all(call["metadata_filters"] is None for call in backend.calls)
+    assert all(call["soft_scope"] is None for call in backend.calls)
 
 
 async def test_fanout_fails_closed_on_any_backend_outage(_restore_registry: None) -> None:

@@ -30,6 +30,15 @@ one ``audit_log`` row per record, each linked to its mint audit row
 (``gateway_command.mint_audit_id``) so the store-and-forward effect joins the
 mint/result audit subtree the split lineage (#2500) already forms.
 
+The checks above use the record's plain values. The ``audit_log`` row stores
+keyed hashes instead, like every other audit row: ``params_hash`` is
+:func:`~meho_backplane.operations._validate.compute_audit_params_hash` of the
+command's stored params (the value the mint row carries), and ``record_hash``
+and ``signature`` go through
+:func:`~meho_backplane.operations._validate.compute_audit_digest_hash`. The
+plain values stay where they are checked: with the runner, in the chain head
+(``runner_effect_chain``) and on the ``gateway_command`` row.
+
 Residual (design §3, mechanism 4): a **fully compromised** runner holds its own
 genesis and can forge a self-consistent alternate chain. Tamper evidence catches
 transit tampering + dropped records, **not** a lying edge; that residual is
@@ -41,17 +50,21 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.db.models import AuditLog, GatewayCommand, RunnerEffectChain
+from meho_backplane.db.models import AuditEventClass, AuditLog, GatewayCommand, RunnerEffectChain
 from meho_backplane.memory.audit import (
     INTERNAL_METHOD,
     write_internal_audit_row,
+)
+from meho_backplane.operations._validate import (
+    compute_audit_digest_hash,
+    compute_audit_params_hash,
 )
 from meho_backplane.runner.effect_audit import (
     GENESIS_PREV_HASH,
@@ -88,6 +101,18 @@ STORE_AND_FORWARD_PROVENANCE: str = "store-and-forward"
 
 #: Synthetic identity for centre-detected effect-chain security events.
 _SECURITY_OPERATOR_SUB: str = "system:satellite-effect-audit"
+
+
+class _MintLink(NamedTuple):
+    """What an effect record's command contributes to its audit row."""
+
+    #: The command's mint audit row id, or ``None`` when no command matches.
+    mint_audit_id: uuid.UUID | None
+    #: ``True`` when a minted command matches the record.
+    linked: bool
+    #: The command's stored params when its digest equals the record's
+    #: ``params_hash``; ``None`` otherwise.
+    params: dict[str, Any] | None
 
 
 class EffectChainTamperError(Exception):
@@ -216,8 +241,12 @@ async def _write_effect_audit_row(
     references, so the remote effect joins the mint/result subtree; ``linked``
     is ``False`` when no minted command matches (a residual: a lying edge may
     reference a capability that was never minted — recorded, not fatal here).
+
+    ``params_hash``, ``signature`` and ``record_hash`` hold keyed hashes, not
+    the record's plain values (see the module docstring and
+    :func:`_effect_params_hash`).
     """
-    mint_audit_id, linked = await _resolve_mint_link(
+    link = await _resolve_mint_link(
         session, tenant_id=operator.tenant_id, runner_id=record.runner_id, record=record
     )
     audit_id = uuid.uuid4()
@@ -228,22 +257,25 @@ async def _write_effect_audit_row(
         "phase": str(record.phase),
         "command_id": record.command_id,
         "op_id": record.op_id,
-        "params_hash": record.params_hash,
-        "signature": record.signature,
+        "params_hash": _effect_params_hash(record, link.params),
+        "signature": (
+            compute_audit_digest_hash(record.signature) if record.signature is not None else None
+        ),
         "target_scope": record.target_scope,
         "outcome": record.outcome,
         "recorded_at": record.recorded_at,
-        "record_hash": record.record_hash,
+        "record_hash": compute_audit_digest_hash(record.record_hash),
         "chain_verified": True,
-        "linked": linked,
+        "linked": link.linked,
     }
     session.add(
         AuditLog(
             id=audit_id,
+            event_class=AuditEventClass.OPERATION_EXECUTION,
             occurred_at=datetime.now(UTC),
             operator_sub=operator.sub,
             tenant_id=operator.tenant_id,
-            parent_audit_id=mint_audit_id,
+            parent_audit_id=link.mint_audit_id,
             method=EFFECT_AUDIT_METHOD,
             path=EFFECT_AUDIT_PATH,
             status_code=200,
@@ -256,30 +288,49 @@ async def _write_effect_audit_row(
     return audit_id
 
 
+def _effect_params_hash(record: EffectAuditRecord, params: dict[str, Any] | None) -> str:
+    """The ``params_hash`` an effect audit row stores.
+
+    With the command's stored params (*params*, set when their digest equals
+    the record's), the same masked, keyed hash every audit row carries, so the
+    effect rows match their mint row. Without them, the keyed hash of the
+    runner's digest.
+    """
+    if params is not None:
+        return compute_audit_params_hash(params)
+    return compute_audit_digest_hash(record.params_hash)
+
+
 async def _resolve_mint_link(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
     runner_id: str,
     record: EffectAuditRecord,
-) -> tuple[uuid.UUID | None, bool]:
-    """Resolve the mint audit id the effect record links to, if the command exists."""
+) -> _MintLink:
+    """Resolve the command an effect record belongs to, if it exists."""
     try:
         command_uuid = uuid.UUID(record.command_id)
     except (ValueError, AttributeError):
-        return (None, False)
+        return _MintLink(mint_audit_id=None, linked=False, params=None)
     row = (
         await session.execute(
-            select(GatewayCommand.mint_audit_id).where(
+            select(
+                GatewayCommand.mint_audit_id,
+                GatewayCommand.params,
+                GatewayCommand.params_hash,
+            ).where(
                 GatewayCommand.id == command_uuid,
                 GatewayCommand.tenant_id == tenant_id,
                 GatewayCommand.runner_id == runner_id,
             )
         )
-    ).scalar_one_or_none()
+    ).one_or_none()
     if row is None:
-        return (None, False)
-    return (row, True)
+        return _MintLink(mint_audit_id=None, linked=False, params=None)
+    mint_audit_id, params, digest = row
+    matched = params if digest == record.params_hash else None
+    return _MintLink(mint_audit_id=mint_audit_id, linked=True, params=matched)
 
 
 async def _load_head(
@@ -342,6 +393,7 @@ async def quarantine_effect_chain(
     effect row at audit-query time.
     """
     return await write_internal_audit_row(
+        event_class=AuditEventClass.SECURITY_EVENT,
         operator_sub=_SECURITY_OPERATOR_SUB,
         tenant_id=tenant_id,
         method=INTERNAL_METHOD,

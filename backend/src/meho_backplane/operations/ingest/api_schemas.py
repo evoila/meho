@@ -79,6 +79,7 @@ __all__ = [
     "DroppedOpModel",
     "EditGroupBody",
     "EditOpBody",
+    "GroupSummaryModel",
     "GroupingResultModel",
     "IngestJobHandle",
     "IngestJobStatusResponse",
@@ -235,7 +236,8 @@ class IngestRequest(BaseModel):
     omit-equals-global semantics the MCP sibling
     ``meho_connector_ingest`` documents. The operator's own tenant
     UUID targets their tenant-curated namespace; any other UUID is
-    rejected with a synchronous 403 on both the sync and async
+    rejected (unless the operator holds ``platform_admin``, #3800)
+    with a synchronous 403 on both the sync and async
     branches by :meth:`IngestionPipelineService.authorize_scope`
     (checked eagerly at the route before the async job row is
     created, #2208, and again inside the service as defence-in-depth).
@@ -273,7 +275,9 @@ class IngestRequest(BaseModel):
             "semantics as the MCP tool meho_connector_ingest "
             "(tenant_admin only). Pass your own tenant UUID for a "
             "tenant-scoped ingest; another tenant's UUID is rejected "
-            "with 403."
+            "with 403 unless the caller holds platform_admin, which "
+            "may ingest into another tenant when it names that "
+            "tenant here (the write is audited)."
         ),
     )
     #: Explicit-quadruple counterpart to the catalog row's
@@ -678,6 +682,27 @@ class IngestionResultModel(BaseModel):
     dropped_ops: list[DroppedOpModel] = Field(default_factory=list)
 
 
+class GroupSummaryModel(BaseModel):
+    """Pydantic projection of
+    :class:`~meho_backplane.operations.ingest.llm_groups.GroupSummary`.
+
+    One row per group: how many ops this run added to it, and how many
+    typed, composite, and ingested ops it holds now.
+    ``typed_operation_count > 0`` means a typed registrar owns the
+    group; grouping never files ingested ops into such a group.
+    Composite ops do not make a group typed.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    group_key: str
+    created: bool
+    operations_added: int
+    typed_operation_count: int
+    composite_operation_count: int
+    ingested_operation_count: int
+
+
 class GroupingResultModel(BaseModel):
     """Pydantic projection of
     :class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.
@@ -694,6 +719,7 @@ class GroupingResultModel(BaseModel):
     operations_unassigned: int
     llm_call_count: int
     llm_duration_ms: float
+    groups: list[GroupSummaryModel] = Field(default_factory=list)
 
 
 class IngestResponse(BaseModel):
@@ -893,7 +919,11 @@ class ConnectorListItem(BaseModel):
     about what verb closes the workflow). It is a :class:`NextStep`
     object on ``state="registered"`` rows and ``None`` on
     ``state="ingested"`` rows (no operator action remains for an
-    ingested connector). The hint is computed against the curated
+    ingested connector) — with one exception: a tenant row stored under
+    a former product name (``vcf-logs`` rows for ``vrli-rest-9.0``,
+    #4889) can never be called, so it ships ``dispatchable=False`` plus
+    a ``next_step`` naming ``meho connector delete <id>`` as the
+    clean-up. For registered rows the hint is computed against the curated
     connector-spec catalog (#743): when the catalog carries an entry
     for the registry's ``(product, version)`` the verb points at
     ``meho connector ingest --catalog ...``; otherwise it points at
@@ -922,7 +952,9 @@ class ConnectorListItem(BaseModel):
     ``tenant_id``, but surfacing it directly lets a consumer key on it
     without re-deriving. ``shadowed_by_tenant_scope`` is the precedence
     marker: within a single response, a ``"builtin"`` row carries
-    ``True`` when a ``"tenant"`` row shares its ``connector_id`` — i.e.
+    ``True`` when a ``"tenant"`` row shares its ``connector_id`` **and**
+    ``product`` (the rule dispatch uses; a tenant row under a former
+    product name, #4889, shares the id but shadows nothing) — i.e.
     the built-in copy is *shadowed* by a tenant-scoped twin that
     :func:`~meho_backplane.operations._lookup.lookup_descriptor` resolves
     first (tenant-wins dispatch precedence). The two fields exist because
@@ -935,7 +967,10 @@ class ConnectorListItem(BaseModel):
     keep working; the listing sets ``scope`` explicitly per row and
     stamps ``shadowed_by_tenant_scope`` in a post-pass over the full
     response. Invariant: within one response no two rows share
-    ``(connector_id, scope)``. See :data:`ConnectorScope`.
+    ``(connector_id, scope)``, with one exception: a tenant row stored
+    under a former product name (#4889) sits next to the tenant's
+    current copy of the same id; ``product`` tells the two apart. See
+    :data:`ConnectorScope`.
     """
 
     model_config = ConfigDict(frozen=True)

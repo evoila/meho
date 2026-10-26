@@ -32,6 +32,7 @@ import (
 //   - keycloak group member add (--group-id|--group-name) (--user-id|--username)   → keycloak.group.member.add
 //   - keycloak group member remove (--group-id|--group-name) (--user-id|--username)→ keycloak.group.member.remove
 //   - keycloak group member list --id UUID [--max N]                               → keycloak.group.member.list
+//   - keycloak group delete (--id|--name) [--delete-subgroups]                     → keycloak.group.delete (#3944, see delete.go)
 //
 // Attributes are supplied as repeatable `--attribute key=value` flags;
 // repeating a key accumulates its values into the Keycloak
@@ -44,13 +45,14 @@ import (
 func newGroupCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "group",
-		Short:        "Keycloak group sub-verbs (list, create, update-attributes, member)",
+		Short:        "Keycloak group sub-verbs (list, create, update-attributes, member, delete)",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newGroupListCmd())
 	cmd.AddCommand(newGroupCreateCmd())
 	cmd.AddCommand(newGroupUpdateAttributesCmd())
 	cmd.AddCommand(newGroupMemberCmd())
+	cmd.AddCommand(newGroupDeleteCmd())
 	return cmd
 }
 

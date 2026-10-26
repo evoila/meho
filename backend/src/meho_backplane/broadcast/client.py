@@ -168,11 +168,9 @@ def get_broadcast_blocking_client() -> redis.Redis:
     socket layer at 5 s — which would otherwise produce the spurious
     ``feed_error`` frame catalogued in RDC #789 N1 (Initiative #1353).
 
-    Callers: the SSE feed (:mod:`meho_backplane.api.v1.feed`), the UI
-    SSE bridge (:mod:`meho_backplane.ui.routes.broadcast.stream`), the
-    ``meho_broadcast_watch`` MCP tool
-    (:mod:`meho_backplane.mcp.tools.broadcast`), and the agent approval
-    wait loop (:mod:`meho_backplane.agent.approval_wait`). Non-blocking
+    Caller: the archive watch wake-up
+    (:mod:`meho_backplane.broadcast.archive_reader`), used by
+    ``meho_broadcast_watch`` and the SSE feeds. Non-blocking
     operations (``PING``, ``XADD``, ``XRANGE``, ``XREVRANGE``) stay on
     the fast client so a hung Valkey keeps surfacing inside the
     ``/ready`` poll window.

@@ -49,7 +49,6 @@ import pytest
 import respx
 from sqlalchemy import select
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
@@ -133,12 +132,6 @@ _PROVIDER_REGIONS: dict[str, Any] = {
     "values": [{"id": "region-1", "name": "rg-a", "nsxManager": "nsx-1", "isEnabled": True}],
     "resultTotal": 1,
 }
-_PROVIDER_SITE: dict[str, Any] = {
-    "id": "site-1",
-    "name": "VCFA-TYPED",
-    "restName": "vcfa-typed-rest",
-    "productVersion": "9.0.0.0-12345",
-}
 _TENANT_PROJECTS: dict[str, Any] = {
     "content": [{"id": "project-1", "name": "proj-a", "organizationId": "org-1"}],
     "totalElements": 1,
@@ -191,7 +184,8 @@ _TENANT_DEPLOYMENT_DETAIL: dict[str, Any] = _TENANT_DEPLOYMENTS["content"][0]
 _PAYLOAD_BY_OP: dict[str, dict[str, Any]] = {
     "vcfa.provider.org.list": _PROVIDER_ORGS,
     "vcfa.provider.region.list": _PROVIDER_REGIONS,
-    "vcfa.provider.health": _PROVIDER_SITE,
+    # Health's authenticated leg reads the org list (#3865).
+    "vcfa.provider.health": _PROVIDER_ORGS,
     "vcfa.tenant.project.list": _TENANT_PROJECTS,
     "vcfa.tenant.deployment.list": _TENANT_DEPLOYMENTS,
     "vcfa.tenant.deployment.get": _TENANT_DEPLOYMENT_DETAIL,
@@ -242,18 +236,6 @@ def _stub_embedding(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    """Stub :func:`publish_event` so the broadcast bus doesn't fire."""
-    events: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -264,7 +246,7 @@ async def _stub_credentials_loader(_target: object, _operator: Operator) -> dict
     return {"username": "svc-meho", "password": "vcfa-typed-password"}
 
 
-async def _seed_target(*, host: str, fqdn: str | None) -> Target:
+async def _seed_target(*, host: str, fqdn: str | None, version: str = "9.0") -> Target:
     """Insert the typed-reads Target row and return it (expunged)."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -280,7 +262,7 @@ async def _seed_target(*, host: str, fqdn: str | None) -> Target:
             auth_model="shared_service_account",
             vpn_required=False,
             extras={},
-            fingerprint=_FINGERPRINT,
+            fingerprint={**_FINGERPRINT, "version": version},
             notes="seeded by test_connectors_vcf_automation_typed_reads._seed_target",
         )
         session.add(target)
@@ -343,7 +325,7 @@ class _Bundle:
 
 
 @pytest.fixture
-async def typed_bundle(captured_events: list[Any]) -> AsyncIterator[_Bundle]:
+async def typed_bundle() -> AsyncIterator[_Bundle]:
     """Register the seven typed ops (zero ingested state) + respx-mock the appliance."""
     await VcfAutomationConnector.register_typed_operations()
     seeded = await _seed_target(host=_HOST, fqdn=_FQDN)
@@ -407,7 +389,7 @@ async def test_typed_ops_register_as_source_kind_typed_with_zero_ingested_rows()
 def test_every_typed_op_declares_the_plane_its_path_rides() -> None:
     """Each op's declared ``plane`` matches ``plane_for_path(op.path)``.
 
-    The import-time ``_validate_typed_op_planes()`` already enforces this;
+    The import-time ``validate_typed_ops()`` already enforces this;
     pinning it as an explicit test documents the contract that a declared
     plane / path drift is a hard failure (it would otherwise surface as a
     misrouted HTTP 401 — both planes carry a Bearer header but reject the
@@ -451,7 +433,7 @@ async def test_typed_ops_dispatch_ok(op_id: str, typed_bundle: _Bundle) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_provider_typed_op_rides_provider_plane(captured_events: list[Any]) -> None:
+async def test_provider_typed_op_rides_provider_plane() -> None:
     """Provider typed op establishes the provider session + Accept; tenant cache stays empty."""
     await VcfAutomationConnector.register_typed_operations()
     seeded = await _seed_target(host=_HOST, fqdn=_FQDN)
@@ -486,11 +468,23 @@ async def test_provider_typed_op_rides_provider_plane(captured_events: list[Any]
     assert tenant_cached is None, (
         f"provider-only dispatch must not establish the tenant session; got {tenant_cached!r}"
     )
-    # The request rode the provider plane's Accept media type.
-    assert accept_by_path.get("/cloudapi/1.0.0/site") == PROVIDER_CLOUDAPI_ACCEPT, accept_by_path
+    # The authenticated leg rode the provider plane's Accept media type.
+    assert accept_by_path.get("/cloudapi/1.0.0/orgs") == PROVIDER_CLOUDAPI_ACCEPT, accept_by_path
+    # Structured health: provider leg + the unauthenticated about leg.
+    assert result["result"]["provider_plane"] == {
+        "reachable": True,
+        "authenticated": True,
+        "check": "GET /cloudapi/1.0.0/orgs",
+        "org_count": 1,
+    }
+    assert result["result"]["api"] == {
+        "reachable": True,
+        "latestApiVersion": "9.0",
+        "supportedApiVersions": ["9.0"],
+    }
 
 
-async def test_tenant_typed_op_rides_tenant_plane(captured_events: list[Any]) -> None:
+async def test_tenant_typed_op_rides_tenant_plane() -> None:
     """Tenant typed op establishes the tenant session + Accept; provider cache stays empty."""
     await VcfAutomationConnector.register_typed_operations()
     seeded = await _seed_target(host=_HOST, fqdn=_FQDN)
@@ -529,7 +523,95 @@ async def test_tenant_typed_op_rides_tenant_plane(captured_events: list[Any]) ->
     assert accept_by_path.get("/iaas/api/about") == TENANT_ACCEPT, accept_by_path
 
 
-async def test_provider_op_query_params_forward_pagination(captured_events: list[Any]) -> None:
+async def test_tenant_op_on_91_appliance_falls_back_and_re_mints_through_dispatch() -> None:
+    """#3865 end to end: legacy 400 → CSP mint → refreshToken exchange, then a 401 re-mint.
+
+    Drives ``call_operation`` (the real dispatcher path) against an appliance
+    that 400s the password body the way VCFA 9.1 does. The first data-path
+    GET answers 401 (expired bearer); the connector evicts its cached tenant
+    bearer, re-runs the whole login chain, retries once, and the op returns
+    ``status="ok"``.
+    """
+    await VcfAutomationConnector.register_typed_operations()
+    seeded = await _seed_target(host=_HOST, fqdn=_FQDN)
+    instance = _resolve_connector()
+    cache_key = target_cache_key(seeded)
+
+    try:
+        async with respx.mock(
+            base_url=_BASE_URL, assert_all_called=False, assert_all_mocked=False
+        ) as m:
+            login = m.post("/iaas/api/login")
+            login.side_effect = [
+                httpx.Response(400, json={"message": "'refreshToken' can not be null."}),
+                httpx.Response(200, json={"token": "bearer-stale"}),
+                httpx.Response(400, json={"message": "'refreshToken' can not be null."}),
+                httpx.Response(200, json={"token": "bearer-fresh"}),
+            ]
+            csp = m.post("/csp/gateway/am/api/login").respond(
+                200, json={"refresh_token": "minted-refresh"}
+            )
+            projects = m.get("/iaas/api/projects")
+            projects.side_effect = [
+                httpx.Response(401),
+                httpx.Response(200, json=_TENANT_PROJECTS),
+            ]
+            result = await call_operation(
+                _OPERATOR,
+                {
+                    "connector_id": VCFA_CONNECTOR_ID,
+                    "op_id": "vcfa.tenant.project.list",
+                    "target": {"name": _TARGET_NAME},
+                    "params": {},
+                },
+            )
+            tenant_cached = instance._tenant_tokens.get(cache_key)
+    finally:
+        await instance.aclose()
+        reset_dispatcher_caches()
+
+    assert result["status"] == "ok", result
+    assert csp.call_count == 2
+    assert login.call_count == 4
+    assert projects.calls[1].request.headers["authorization"] == "Bearer bearer-fresh"
+    assert tenant_cached == "bearer-fresh"
+
+
+async def test_provider_health_reports_about_failure_without_failing() -> None:
+    """An unreachable /iaas/api/about lands in ``api``; the provider leg still reports ok."""
+    await VcfAutomationConnector.register_typed_operations()
+    await _seed_target(host=_HOST, fqdn=_FQDN)
+    instance = _resolve_connector()
+
+    try:
+        async with respx.mock(
+            base_url=_BASE_URL, assert_all_called=False, assert_all_mocked=False
+        ) as m:
+            m.post("/cloudapi/1.0.0/sessions/provider").respond(
+                200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": _PROVIDER_JWT}
+            )
+            orgs = m.get("/cloudapi/1.0.0/orgs").respond(200, json=_PROVIDER_ORGS)
+            m.get("/iaas/api/about").respond(503)
+            result = await call_operation(
+                _OPERATOR,
+                {
+                    "connector_id": VCFA_CONNECTOR_ID,
+                    "op_id": "vcfa.provider.health",
+                    "target": {"name": _TARGET_NAME},
+                    "params": {},
+                },
+            )
+    finally:
+        await instance.aclose()
+        reset_dispatcher_caches()
+
+    assert result["status"] == "ok", result
+    assert orgs.calls[0].request.url.params["pageSize"] == "1"
+    assert result["result"]["provider_plane"]["authenticated"] is True
+    assert result["result"]["api"] == {"reachable": False, "error": "HTTPStatusError"}
+
+
+async def test_provider_op_query_params_forward_pagination() -> None:
     """``vcfa.provider.org.list`` forwards ``page`` / ``pageSize`` as query params."""
     await VcfAutomationConnector.register_typed_operations()
     await _seed_target(host=_HOST, fqdn=_FQDN)
@@ -565,9 +647,55 @@ async def test_provider_op_query_params_forward_pagination(captured_events: list
     assert "page=2" in captured["query"] and "pageSize=50" in captured["query"], captured
 
 
-async def test_tenant_deployment_list_forwards_odata_and_returns_content(
-    captured_events: list[Any],
+@pytest.mark.parametrize(
+    ("version", "expected_path"),
+    [
+        ("9.0", "/cloudapi/vcf/regions"),
+        ("9.1", "/cloudapi/v1/regions"),
+        ("9.1.1", "/cloudapi/v1/regions"),
+        # A fingerprint label that is not a product version keeps the 9.0 path.
+        ("2021-07-15", "/cloudapi/vcf/regions"),
+    ],
+)
+async def test_provider_region_list_path_follows_target_version(
+    version: str, expected_path: str
 ) -> None:
+    """``vcfa.provider.region.list`` calls the region path of the target's version (#4604)."""
+    await VcfAutomationConnector.register_typed_operations()
+    await _seed_target(host=_HOST, fqdn=_FQDN, version=version)
+    instance = _resolve_connector()
+
+    try:
+        async with respx.mock(
+            base_url=_BASE_URL, assert_all_called=False, assert_all_mocked=False
+        ) as m:
+            m.post("/cloudapi/1.0.0/sessions/provider").respond(
+                200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": _PROVIDER_JWT}
+            )
+            legacy = m.get("/cloudapi/vcf/regions").respond(200, json=_PROVIDER_REGIONS)
+            v1 = m.get("/cloudapi/v1/regions").respond(200, json=_PROVIDER_REGIONS)
+            result = await call_operation(
+                _OPERATOR,
+                {
+                    "connector_id": VCFA_CONNECTOR_ID,
+                    "op_id": "vcfa.provider.region.list",
+                    "target": {"name": _TARGET_NAME},
+                    "params": {},
+                },
+            )
+    finally:
+        await instance.aclose()
+        reset_dispatcher_caches()
+
+    assert result["status"] == "ok", result
+    called = legacy if expected_path == "/cloudapi/vcf/regions" else v1
+    other = v1 if called is legacy else legacy
+    assert called.call_count == 1
+    assert other.call_count == 0
+    assert called.calls[0].request.headers["Accept"] == PROVIDER_CLOUDAPI_ACCEPT
+
+
+async def test_tenant_deployment_list_forwards_odata_and_returns_content() -> None:
     """``vcfa.tenant.deployment.list`` forwards OData params, returns the content envelope.
 
     Pins the PassThrough reducer so the assertion targets the inline
@@ -618,9 +746,7 @@ async def test_tenant_deployment_list_forwards_odata_and_returns_content(
     assert {"id", "name", "status", "projectId", "resources"} <= content[0].keys(), content[0]
 
 
-async def test_tenant_deployment_get_requests_detail_path_and_returns_object(
-    captured_events: list[Any],
-) -> None:
+async def test_tenant_deployment_get_requests_detail_path_and_returns_object() -> None:
     """``vcfa.tenant.deployment.get`` hits ``/iaas/api/deployments/<id>``, returns the object.
 
     Pins the PassThrough reducer for the same reason as the list test —
@@ -670,9 +796,7 @@ async def test_tenant_deployment_get_requests_detail_path_and_returns_object(
     )
 
 
-async def test_tenant_deployment_get_percent_encodes_the_id(
-    captured_events: list[Any],
-) -> None:
+async def test_tenant_deployment_get_percent_encodes_the_id() -> None:
     """A reserved char in the id is percent-encoded — it cannot extend the path.
 
     OpenAPI ``style: simple`` semantics (the same contract the ingested
@@ -712,9 +836,7 @@ async def test_tenant_deployment_get_percent_encodes_the_id(
     assert detail_route.called, "the encoded detail route was never hit"
 
 
-async def test_tenant_deployment_get_missing_id_is_invalid_params(
-    captured_events: list[Any],
-) -> None:
+async def test_tenant_deployment_get_missing_id_is_invalid_params() -> None:
     """Omitting the required ``id`` fails schema validation before any request."""
     await VcfAutomationConnector.register_typed_operations()
     await _seed_target(host="10.20.30.5", fqdn=_FQDN)

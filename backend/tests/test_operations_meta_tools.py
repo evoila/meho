@@ -32,8 +32,10 @@ assertions to hold across dialects.
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -51,15 +53,23 @@ from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations.meta_tools import (
+    SEARCH_CLASSIFY_MIN_HITS,
+    SEARCH_NARROWING_MAX,
+    SEARCH_NEAR_TIE_BAND,
+    SEARCH_OUTCOMES,
     ConnectorNotIngestedError,
+    OperationSearchHit,
     UnknownConnectorError,
+    UnknownOperationError,
+    _classify_hits,
+    _search_guidance,
     call_operation,
     describe_descriptor,
     list_operation_groups,
     search_operations,
 )
 from meho_backplane.retrieval.embedding import EMBEDDING_DIMENSION
-from meho_backplane.settings import get_settings
+from meho_backplane.settings import RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES, get_settings
 
 # ---------------------------------------------------------------------------
 # Settings + isolation fixtures
@@ -805,9 +815,51 @@ async def test_search_operations_ranks_lexical_match_first(
     # `vault.kv.read` is the obvious lexical match for "read secret".
     assert len(hits) >= 1
     assert hits[0]["op_id"] == "vault.kv.read"
-    # Score surfaces -- fused, per-signal.
-    assert hits[0]["fused_score"] > 0
-    assert hits[0]["bm25_score"] is not None
+    # #3668: a ranked hit is slim by default -- no ranking scores.
+    assert set(hits[0]) == {
+        "op_id",
+        "summary",
+        "description",
+        "group_key",
+        "safety_level",
+        "requires_approval",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("role", "expect_scores"),
+    [(TenantRole.OPERATOR, False), (TenantRole.TENANT_ADMIN, True)],
+)
+async def test_search_operations_scores_only_under_admin_opt_in(
+    stub_embedding_service: AsyncMock,
+    role: TenantRole,
+    expect_scores: bool,
+) -> None:
+    """#3668: ``include_scores`` is honoured only for a tenant_admin caller."""
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=_module_handler,
+        summary="Read a KV v2 secret from a path.",
+        description="Reads a secret stored in the KV v2 mount.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    result = await search_operations(
+        _make_operator(role=role),
+        {"connector_id": "vault-1.x", "query": "read secret", "include_scores": True},
+    )
+    hit = result["hits"][0]
+    assert ("fused_score" in hit) is expect_scores
+    assert ("bm25_score" in hit) is expect_scores
+    assert ("cosine_score" in hit) is expect_scores
+    if expect_scores:
+        assert hit["fused_score"] > 0
+        assert hit["bm25_score"] is not None
 
 
 @pytest.mark.asyncio
@@ -1111,6 +1163,367 @@ async def test_search_operations_clamps_limit_to_max(
 
 
 # ---------------------------------------------------------------------------
+# search_operations — no-suitable-match taxonomy (#3670)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_foreign_tenant_op(*, tenant_id: UUID, op_id: str) -> None:
+    """Seed one enabled vault op owned by *tenant_id*."""
+    from datetime import UTC, datetime
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s, s.begin():
+        s.add(
+            EndpointDescriptor(
+                id=uuid.uuid4(),
+                tenant_id=tenant_id,
+                product="vault",
+                version="1.x",
+                impl_id="vault",
+                op_id=op_id,
+                source_kind="typed",
+                method=None,
+                path=None,
+                handler_ref="tests.test_operations_meta_tools._module_handler",
+                summary="Foreign tenant op.",
+                description="Op owned by another tenant.",
+                group_id=None,
+                tags=[],
+                parameter_schema={"type": "object"},
+                response_schema=None,
+                llm_instructions=None,
+                safety_level="safe",
+                requires_approval=False,
+                is_enabled=True,
+                embedding=None,
+                custom_description=None,
+                custom_notes=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+
+def _hit(op_id: str, fused: float, bm25: float | None) -> OperationSearchHit:
+    return OperationSearchHit(
+        op_id=op_id,
+        summary=None,
+        description=None,
+        group_key=None,
+        safety_level="safe",
+        requires_approval=False,
+        fused_score=fused,
+        bm25_score=bm25,
+        cosine_score=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_search_operations_outcome_taxonomy(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Every result carries ``outcome``; the MCP outputSchema pins the enum."""
+    import meho_backplane.mcp.tools.operations  # noqa: F401  (registers the tool)
+    from meho_backplane.mcp.registry import get_tool
+
+    assert set(SEARCH_OUTCOMES) == {
+        "matched",
+        "ambiguous",
+        "no_match",
+        "unknown_group",
+        "zero_enabled_operations",
+    }
+    entry = get_tool("search_operations")
+    assert entry is not None
+    schema = entry[0].outputSchema
+    assert schema is not None
+    # #3668 made the outputSchema a ``oneOf``; the ranked shape comes first.
+    ranked = schema["oneOf"][0]
+    assert ranked["properties"]["outcome"]["enum"] == list(SEARCH_OUTCOMES)
+    assert ranked["properties"]["narrowing"]["maxItems"] == SEARCH_NARROWING_MAX
+    assert "outcome" in ranked["required"]
+
+    group_id = await _seed_group(
+        tenant_id=None,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        group_key="kv",
+        name="KV",
+        when_to_use="kv.",
+    )
+    await _seed_descriptors(
+        group_id=group_id,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        enabled_flags=[True],
+    )
+    operator = _make_operator()
+
+    matched = await search_operations(operator, {"connector_id": "vault-1.x", "query": "op"})
+    assert matched["outcome"] == "matched"
+    assert matched["advisory"] is None
+    assert matched["narrowing"] == []
+    assert [h["op_id"] for h in matched["hits"]] == ["vault.op0"]
+
+    # Seeded rows carry no embedding, so a query sharing no word with the
+    # op returns nothing: enabled ops exist, none matched.
+    no_match = await search_operations(
+        operator, {"connector_id": "vault-1.x", "query": "zzz-unrelated"}
+    )
+    assert no_match["outcome"] == "no_match"
+    assert no_match["hits"] == []
+    assert no_match["advisory"]
+    assert 0 < len(no_match["narrowing"]) <= SEARCH_NARROWING_MAX
+
+    unknown_group = await search_operations(
+        operator, {"connector_id": "vault-1.x", "query": "op", "group": "nope"}
+    )
+    assert unknown_group["outcome"] == "unknown_group"
+    assert unknown_group["hits"] == []
+
+    for result in (matched, no_match, unknown_group):
+        assert result["outcome"] in SEARCH_OUTCOMES
+        assert set(result) == {"hits", "query_duration_ms", "outcome", "advisory", "narrowing"}
+
+
+@pytest.mark.asyncio
+async def test_search_operations_zero_enabled_abstains(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """An ingested connector with no enabled op abstains and names no op.
+
+    The fixture carries disabled built-in ops plus one enabled op owned by
+    another tenant. Neither may surface, and neither may count as "enabled"
+    for the calling tenant.
+    """
+    group_id = await _seed_group(
+        tenant_id=None,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        group_key="kv",
+        name="KV",
+        when_to_use="kv.",
+        review_status="staged",
+    )
+    await _seed_descriptors(
+        group_id=group_id,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        enabled_flags=[False, False],
+    )
+    await _seed_foreign_tenant_op(tenant_id=_TENANT_B, op_id="vault.foreign.op")
+    operator = _make_operator(tenant_id=_TENANT_A)
+
+    result = await search_operations(operator, {"connector_id": "vault-1.x", "query": "op"})
+
+    assert result["outcome"] == "zero_enabled_operations"
+    assert result["hits"] == []
+    assert "operator must enable" in result["advisory"]
+    serialized = json.dumps(result)
+    assert '"op_id"' not in serialized
+    for hidden in ("vault.op0", "vault.op1", "vault.foreign.op"):
+        assert hidden not in serialized
+
+
+@pytest.mark.asyncio
+async def test_search_operations_unknown_group_narrowing(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """An unknown ``group`` lists only the caller's visible group keys, capped."""
+    kv = await _seed_group(
+        tenant_id=None,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        group_key="kv",
+        name="KV",
+        when_to_use="kv.",
+    )
+    await _seed_descriptors(
+        group_id=kv, product="vault", version="1.x", impl_id="vault", enabled_flags=[True]
+    )
+    # A staged group with no enabled op is hidden from discovery.
+    await _seed_group(
+        tenant_id=None,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        group_key="hidden-staged",
+        name="Hidden",
+        when_to_use="hidden.",
+        review_status="staged",
+    )
+    # Another tenant's group is never visible to tenant A.
+    await _seed_group(
+        tenant_id=_TENANT_B,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        group_key="tenant-b-only",
+        name="B",
+        when_to_use="b.",
+    )
+    operator = _make_operator(tenant_id=_TENANT_A)
+
+    result = await search_operations(
+        operator, {"connector_id": "vault-1.x", "query": "op", "group": "no-such-group"}
+    )
+
+    assert result["outcome"] == "unknown_group"
+    assert result["hits"] == []
+    assert result["narrowing"] == ["kv"]
+    assert "no-such-group" in result["advisory"]
+
+    # The list is bounded by the named cap.
+    for i in range(SEARCH_NARROWING_MAX + 3):
+        await _seed_group(
+            tenant_id=None,
+            product="vault",
+            version="1.x",
+            impl_id="vault",
+            group_key=f"extra-{i:02d}",
+            name=f"Extra {i}",
+            when_to_use="extra.",
+        )
+    capped = await search_operations(
+        operator, {"connector_id": "vault-1.x", "query": "op", "group": "no-such-group"}
+    )
+    assert capped["outcome"] == "unknown_group"
+    assert len(capped["narrowing"]) == SEARCH_NARROWING_MAX
+
+
+@pytest.mark.asyncio
+async def test_search_operations_negative_intent_abstains(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A request no enabled op satisfies never comes back ``matched``.
+
+    The connector holds only read operations about virtual machines. The
+    query asks to delete machines. The read ops are close in meaning (the
+    cosine signal returns them) but share none of the query's words, so the
+    result is a misleading near-match and must not read as ``matched``.
+    """
+    for op_id, summary, description in (
+        ("vm.list", "List virtual machines.", "Returns the machines in the inventory."),
+        ("vm.get", "Get one virtual machine.", "Returns details of a single machine."),
+    ):
+        await register_typed_operation(
+            product="vault",
+            version="1.x",
+            impl_id="vault",
+            op_id=op_id,
+            handler=_module_handler,
+            summary=summary,
+            description=description,
+            parameter_schema={"type": "object"},
+            when_to_use=None,
+            embedding_service=stub_embedding_service,
+        )
+    operator = _make_operator()
+
+    result = await search_operations(
+        operator,
+        {"connector_id": "vault-1.x", "query": "delete every production VM"},
+    )
+
+    assert result["outcome"] in {"no_match", "ambiguous"}
+    assert result["outcome"] != "matched"
+    assert result["advisory"]
+    assert "do not call" in result["advisory"].lower()
+
+
+def test_search_operations_near_tie_is_ambiguous() -> None:
+    """Top two fused scores inside the near-tie band read as ``ambiguous``."""
+    clear = [_hit("a", 0.05, 2.0), _hit("b", 0.05 - 2 * SEARCH_NEAR_TIE_BAND, 1.0)]
+    tied = [_hit("a", 0.05, 2.0), _hit("b", 0.05 - SEARCH_NEAR_TIE_BAND / 2, 1.0)]
+    semantic_only = [_hit("a", 0.05, None)]
+
+    assert _classify_hits(clear) == "matched"
+    assert _classify_hits([_hit("a", 0.05, 1.0)]) == "matched"
+    assert _classify_hits(tied) == "ambiguous"
+    assert _classify_hits(semantic_only) == "ambiguous"
+
+
+@pytest.mark.asyncio
+async def test_search_operations_limit_one_still_sees_near_tie(
+    stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``limit=1`` must not hide the tied second hit from the near-tie check.
+
+    The retriever is asked for at least ``SEARCH_CLASSIFY_MIN_HITS`` hits.
+    The outcome is the same for ``limit=1`` and ``limit=2``; only the
+    returned list is cut, and its order does not change.
+    """
+    group_id = await _seed_group(
+        tenant_id=None,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        group_key="kv",
+        name="KV",
+        when_to_use="kv.",
+    )
+    await _seed_descriptors(
+        group_id=group_id, product="vault", version="1.x", impl_id="vault", enabled_flags=[True]
+    )
+    tied = [_hit("a", 0.05, 2.0), _hit("b", 0.05 - SEARCH_NEAR_TIE_BAND / 2, 1.0)]
+    asked_limits: list[int] = []
+
+    async def fake_hybrid_search(session: Any, **kwargs: Any) -> list[OperationSearchHit]:
+        asked_limits.append(kwargs["limit"])
+        return tied[: kwargs["limit"]]
+
+    monkeypatch.setattr("meho_backplane.operations.meta_tools.hybrid_search", fake_hybrid_search)
+    operator = _make_operator()
+
+    one = await search_operations(
+        operator, {"connector_id": "vault-1.x", "query": "op", "limit": 1}
+    )
+    two = await search_operations(
+        operator, {"connector_id": "vault-1.x", "query": "op", "limit": 2}
+    )
+
+    assert one["outcome"] == two["outcome"] == "ambiguous"
+    assert [h["op_id"] for h in one["hits"]] == ["a"]
+    assert [h["op_id"] for h in two["hits"]] == ["a", "b"]
+    assert asked_limits == [SEARCH_CLASSIFY_MIN_HITS, 2]
+    assert all(asked >= SEARCH_CLASSIFY_MIN_HITS for asked in asked_limits)
+
+
+def test_search_operations_ambiguous_guidance_requires_narrowing() -> None:
+    """Every place that explains ``ambiguous`` says: do not call, narrow first.
+
+    The advisory, the hosted-agent tool description, the MCP tool
+    description, and ``docs/codebase/mcp.md`` must agree. None may allow a
+    call on an ``ambiguous`` result.
+    """
+    import meho_backplane.mcp.tools.operations  # noqa: F401  (registers the tool)
+    from meho_backplane.agent.toolset import _OPERATIONS_META_TOOLS
+    from meho_backplane.mcp.registry import get_tool
+
+    advisory, _ = _search_guidance("ambiguous", group_key=None)
+    assert advisory is not None
+    agent_spec = next(s for s in _OPERATIONS_META_TOOLS if s.name == "search_operations")
+    entry = get_tool("search_operations")
+    assert entry is not None
+    docs = (Path(__file__).resolve().parents[2] / "docs" / "codebase" / "mcp.md").read_text()
+    docs_row = next(line for line in docs.splitlines() if line.startswith("| `ambiguous` |"))
+
+    for text in (advisory, agent_spec.description, entry[0].description, docs_row):
+        lowered = text.lower()
+        assert "do not call" in lowered
+        assert "narrow" in lowered
+        assert "clearly does what was asked" not in lowered
+        assert "call one only if" not in lowered
+        assert "call a hit only if" not in lowered
+
+
+# ---------------------------------------------------------------------------
 # call_operation
 # ---------------------------------------------------------------------------
 
@@ -1242,6 +1655,67 @@ async def test_call_operation_missing_target_name_returns_target_required_envelo
     )
     assert result["status"] == "error"
     assert result["extras"]["error_code"] == "target_required"
+
+
+@pytest.mark.asyncio
+async def test_call_operation_refuses_undeliverable_receipt_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3641: an op_id whose receipt cannot fit the wire ceiling never runs.
+
+    With the ceiling at its floor, 256 non-ASCII characters (escaped twice
+    in the MCP text block) push even the receipt of a completed run over
+    the ceiling. The call comes back as a ``receipt_too_large`` error
+    envelope, and the dispatcher is never called.
+    """
+    monkeypatch.setenv(
+        "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES", str(RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES)
+    )
+    get_settings.cache_clear()
+    dispatch_mock = AsyncMock()
+    monkeypatch.setattr("meho_backplane.operations.meta_tools.dispatch", dispatch_mock)
+    operator = _make_operator(tenant_id=_TENANT_A)
+    op_id = "\u00e9" * 256
+    result = await call_operation(
+        operator,
+        {"connector_id": "vault-1.x", "op_id": op_id, "target": None, "params": {}},
+    )
+    assert result["status"] == "error"
+    assert result["op_id"] == op_id
+    assert result["extras"]["error_code"] == "receipt_too_large"
+    assert result["extras"]["receipt_bytes"] > RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
+    assert result["extras"]["delivery_max_bytes"] == RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
+    assert result["audit_id"] is None
+    assert result["delivery"] is None
+    assert "did not run" in result["error"]
+    dispatch_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_call_operation_realistic_op_id_runs_at_the_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 256-character ASCII op_id fits the floor, so the pre-check lets it run."""
+    monkeypatch.setenv(
+        "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES", str(RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES)
+    )
+    get_settings.cache_clear()
+    op_id = "x" * 256
+    dispatch_mock = AsyncMock(
+        return_value=OperationResult(
+            status="ok", op_id=op_id, result={"done": True}, duration_ms=1.0, audit_id=uuid.uuid4()
+        )
+    )
+    monkeypatch.setattr("meho_backplane.operations.meta_tools.dispatch", dispatch_mock)
+    operator = _make_operator(tenant_id=_TENANT_A)
+    result = await call_operation(
+        operator,
+        {"connector_id": "vault-1.x", "op_id": op_id, "target": None, "params": {}},
+    )
+    dispatch_mock.assert_awaited_once()
+    assert result["status"] == "ok"
+    assert result["result"] == {"done": True}
+    assert result["audit_id"] is not None
 
 
 @pytest.mark.asyncio
@@ -1533,6 +2007,18 @@ async def test_call_operation_unknown_op_returns_structured_error(
     stub_embedding_service: AsyncMock,
 ) -> None:
     """Unknown op_id surfaces as an OperationResult with ``status='error'``."""
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=_module_handler,
+        summary="Read a secret from Vault KV v2.",
+        description="Reads a secret from the KV v2 mount.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
     operator = _make_operator(tenant_id=_TENANT_A)
     result = await call_operation(
         operator,
@@ -1546,6 +2032,205 @@ async def test_call_operation_unknown_op_returns_structured_error(
     assert result["status"] == "error"
     assert result["error"].startswith("unknown_op:")
     assert result["extras"]["error_code"] == "unknown_op"
+
+
+# ---------------------------------------------------------------------------
+# search_operations exact-op mode (#3668)
+# ---------------------------------------------------------------------------
+
+
+async def _connector_bound_handler(
+    operator: Operator,
+    connector: Any,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Composite-style handler that reaches its connector through the target."""
+    return {}
+
+
+#: A bundled schema shaped like an ingested one (#3095): a nested ``$ref``
+#: resolved inside the stored document, plus ``oneOf`` / ``enum`` /
+#: ``default`` / ``additionalProperties`` and per-property examples.
+_EXACT_OP_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "path": {"type": "string", "example": "secret/app"},
+        "version": {"type": "integer", "default": 0, "examples": [1, 2]},
+        "mode": {"type": "string", "enum": ["fast", "full"]},
+        "body": {"$ref": "#/components/schemas/Body"},
+        "big": {"type": "string", "example": "x" * 2000},
+    },
+    "required": ["path"],
+    "additionalProperties": False,
+    "components": {
+        "schemas": {
+            "Body": {
+                "oneOf": [{"type": "string"}, {"type": "object"}],
+            },
+        },
+    },
+}
+
+
+async def _register_exact_op(
+    stub_embedding_service: AsyncMock,
+    *,
+    op_id: str = "vault.kv.read",
+    handler: Any = _module_handler,
+    safety_level: Any = "safe",
+    requires_approval: bool = False,
+    llm_instructions: dict[str, Any] | None = None,
+) -> None:
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id=op_id,
+        handler=handler,
+        summary="Read a KV v2 secret from a path.",
+        description="Reads a secret stored in the KV v2 mount.",
+        parameter_schema=_EXACT_OP_SCHEMA,
+        when_to_use=None,
+        safety_level=safety_level,
+        requires_approval=requires_approval,
+        llm_instructions=llm_instructions,
+        embedding_service=stub_embedding_service,
+    )
+
+
+@pytest.mark.asyncio
+async def test_search_operations_exact_op_returns_contract(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """With ``op_id`` the handler returns one contract, not ranked hits."""
+    pagination_hint = {"style": "cursor", "param": "after"}
+    await _register_exact_op(
+        stub_embedding_service,
+        llm_instructions={
+            "pagination_hint": pagination_hint,
+            "examples": [{"path": "secret/demo"}],
+        },
+    )
+    stub_embedding_service.encode_one.reset_mock()
+
+    result = await search_operations(
+        _make_operator(),
+        {"connector_id": "vault-1.x", "op_id": "vault.kv.read", "query": "ignored"},
+    )
+
+    assert "hits" not in result
+    contract = result["operation"]
+    async with get_sessionmaker()() as s:
+        stored = (
+            await s.execute(
+                select(EndpointDescriptor.parameter_schema).where(
+                    EndpointDescriptor.op_id == "vault.kv.read"
+                )
+            )
+        ).scalar_one()
+    assert contract["parameter_schema"] == stored
+    assert contract["parameter_schema"] == _EXACT_OP_SCHEMA
+    assert contract["connector_id"] == "vault-1.x"
+    assert contract["op_id"] == "vault.kv.read"
+    assert contract["safety_level"] == "safe"
+    assert contract["requires_approval"] is False
+    # Bounded examples: schema + llm_instructions, the 2000-char one dropped.
+    values = [e["value"] for e in contract["examples"]]
+    assert values == ["secret/app", 1, 2, {"path": "secret/demo"}]
+    assert contract["examples"][0] == {
+        "source": "parameter_schema",
+        "param": "path",
+        "value": "secret/app",
+    }
+    # A module-level typed handler needs no target; the rule is by name.
+    assert contract["target"]["required"] is False
+    assert contract["target"]["resolves_by"] == "name"
+    assert "result_query" in contract["result_shape"]["guidance"]
+    assert "handle" in contract["result_shape"]["envelope_fields"]
+    assert contract["pagination_hint"] == pagination_hint
+    assert any("awaiting_approval" in rule for rule in contract["recovery"])
+    # Deterministic: no ranking, so no query embedding.
+    stub_embedding_service.encode_one.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_search_operations_exact_op_target_and_destructive_guidance(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A connector-bound destructive op needs a target and a preview first."""
+    await _register_exact_op(
+        stub_embedding_service,
+        op_id="vault.kv.destroy",
+        handler=_connector_bound_handler,
+        safety_level="destructive",
+        requires_approval=True,
+    )
+
+    contract = (
+        await search_operations(
+            _make_operator(),
+            {"connector_id": "vault-1.x", "op_id": "vault.kv.destroy"},
+        )
+    )["operation"]
+
+    assert contract["target"]["required"] is True
+    assert contract["requires_approval"] is True
+    assert "list_targets" in contract["target"]["guidance"]
+    assert contract["pagination_hint"] is None
+    assert any("preview_operation" in rule for rule in contract["recovery"])
+    assert any("target_required" in rule for rule in contract["recovery"])
+
+
+@pytest.mark.asyncio
+async def test_search_operations_exact_op_unknown_op_raises_structured(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Unknown ``op_id`` on a known connector -> typed not-found, every time."""
+    await _register_exact_op(stub_embedding_service)
+    operator = _make_operator()
+
+    for _ in range(2):
+        with pytest.raises(UnknownOperationError) as excinfo:
+            await search_operations(
+                operator,
+                {"connector_id": "vault-1.x", "op_id": "vault.does.not.exist"},
+            )
+        assert excinfo.value.as_error_data()["reason"] == "unknown_op"
+        assert excinfo.value.as_error_data()["op_id"] == "vault.does.not.exist"
+
+
+@pytest.mark.asyncio
+async def test_search_operations_exact_op_unknown_connector_raises(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The connector checks run first: an unknown connector keeps its error."""
+    with pytest.raises(UnknownConnectorError):
+        await search_operations(
+            _make_operator(),
+            {"connector_id": "ghost-9.9", "op_id": "ghost.op"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_search_operations_exact_op_disabled_op_is_not_found(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A disabled op cannot be called, so exact-op mode does not return it."""
+    await _register_exact_op(stub_embedding_service)
+    async with get_sessionmaker()() as s, s.begin():
+        row = (
+            await s.execute(
+                select(EndpointDescriptor).where(EndpointDescriptor.op_id == "vault.kv.read")
+            )
+        ).scalar_one()
+        row.is_enabled = False
+
+    with pytest.raises(UnknownOperationError):
+        await search_operations(
+            _make_operator(),
+            {"connector_id": "vault-1.x", "op_id": "vault.kv.read"},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1768,10 +2453,12 @@ async def test_real_descriptor_embedding_path(
 
 def test_call_operation_output_schema_status_enum_includes_awaiting_approval() -> None:
     """The ``call_operation`` outputSchema ``status`` enum lists the parked
-    outcome so a spec-compliant MCP client validating the structured result
-    accepts ``awaiting_approval`` (G11.7-T1 #1401 / MCP 2025-06-18 server
-    output contract). The enum stays bounded to statuses the dispatcher
-    actually emits — no ``pending``.
+    outcome and the rate-limit refusal, so a spec-compliant MCP client
+    validating the structured result accepts ``awaiting_approval``
+    (G11.7-T1 #1401) and ``rate_limited`` (#3500) (MCP 2025-06-18 server
+    output contract). The enum stays bounded to statuses the tool actually
+    emits: the dispatcher's five, plus ``pending`` / ``running`` from the
+    async mode (#3695). No ``already_resumed``.
     """
     import meho_backplane.mcp.tools.operations  # noqa: F401  (registers the tool)
     from meho_backplane.mcp.registry import get_tool
@@ -1781,4 +2468,12 @@ def test_call_operation_output_schema_status_enum_includes_awaiting_approval() -
     defn, _ = entry
     assert defn.outputSchema is not None
     enum = defn.outputSchema["properties"]["status"]["enum"]
-    assert set(enum) == {"ok", "error", "denied", "awaiting_approval"}, enum
+    assert set(enum) == {
+        "ok",
+        "error",
+        "denied",
+        "awaiting_approval",
+        "rate_limited",
+        "pending",
+        "running",
+    }, enum

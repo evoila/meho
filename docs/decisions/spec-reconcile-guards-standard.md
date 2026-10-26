@@ -296,8 +296,11 @@ split.
   ingest rejects these fragments), so a conversion would be a
   test-only artifact with no dispatch-fidelity value.
 - **Excluded (provider plane, 5 op_ids: `GET:/cloudapi/1.0.0/orgs`,
-  `GET:/cloudapi/vcf/regions`, `GET:/cloudapi/1.0.0/site`,
-  `POST:/cloudapi/1.0.0/sessions/provider`, `GET:/api/versions`).**
+  `GET:/cloudapi/vcf/regions` (now also checked per version, see the
+  last bullet), `POST:/cloudapi/1.0.0/sessions/provider`,
+  `GET:/api/versions`, and the CSP token mint
+  `POST:/csp/gateway/am/api/login` — #3865; CSP identity sits outside
+  `vra-sdk-go`, the same exclusion the vra8 lane carries for it).**
   What was checked, per family: (1) **vendor-published artifacts** —
   no `automation/` directory in
   [`vmware/vcf-api-specs`](https://github.com/vmware/vcf-api-specs)
@@ -337,13 +340,22 @@ split.
   #499/#2006). **Mechanical repoint** to `GET:/cloudapi/vcf/regions`
   — same resource, same paged `values[]`/`resultTotal` envelope, same
   `Accept` (the cloudapi form; `provider_accept_for_path` keys on the
-  `/api/` prefix only), plane classification unchanged. One residual
-  the exclusion cannot discharge: `GET:/cloudapi/1.0.0/site`
-  (`vcfa.provider.health`) is unverifiable today — no spec serves it,
-  no live probe of the singular `/site` form is recorded (the plural
-  `/sites` 404s live, 2026-05-05), and vCD 10.5 serves the singular
-  form. Left as-is per "never invent a path"; the activation run
-  reconciles it.
+  `/api/` prefix only), plane classification unchanged. A residual left
+  by the first run, `GET:/cloudapi/1.0.0/site` (`vcfa.provider.health`),
+  was settled by a live finding (#3865): on VCFA 9.1 an authenticated
+  GET answers 405. The health op moved to the already-reconciled
+  `GET:/cloudapi/1.0.0/orgs` plus the armed `GET:/iaas/api/about`, and
+  `/site` left the manifest.
+- **Region path now checked per version (#4604).** The shelf now pins
+  one reference list per VCFA version, made from Broadcom's public
+  reference pages: the `provider-infrastructure-apis` TSV list in
+  `vcf-automation-9.0-reference/`, `vcf-automation-9.1/` and
+  `vcf-automation-9.1.1/`. The lane checks that the region path the
+  connector picks for each version is a `GET` line in that version's
+  list: `GET:/cloudapi/vcf/regions` on 9.0, `GET:/cloudapi/v1/regions`
+  on 9.1 and 9.1.1. CI requires the three lists, so a missing list fails
+  instead of skipping. The other provider op_ids stay in the exclusion
+  above; this change checks only the region path.
 
 ### vcd — fully excluded, all-typed (no pinnable spec) (#3057)
 
@@ -394,16 +406,17 @@ dual-impl** of `product="vcfa"` (initiative
 [#3056](https://github.com/evoila/meho/issues/3056), task #3058; the
 modern `vcfa-rest` provider/tenant lane is `vcf-automation-9.0` above).
 Its lane (`backend/tests/test_connectors_vra8_spec_reconcile.py`) is a
-**manifest pin only** — it sweeps the eight hand-coded op_ids
+**manifest pin only** — it sweeps the nine hand-coded op_ids
 unconditionally so the enumeration is proven on every run, with no
 served-op-id compare. **This exclusion differs from `vcd` above: a
 committable spec _does_ exist — it just isn't ingestable.**
 
-- **Excluded (8 op_ids: `POST:/csp/gateway/am/api/login`,
+- **Excluded (9 op_ids: `POST:/csp/gateway/am/api/login`,
   `POST:/iaas/api/login`, `GET:/iaas/api/about`, `GET:/iaas/api/projects`,
   `GET:/deployment/api/deployments`,
   `GET:/deployment/api/deployments/{deployment_id}`,
-  `GET:/blueprint/api/blueprints`, `GET:/catalog/api/admin/items`).**
+  `GET:/blueprint/api/blueprints`, `GET:/catalog/api/admin/items`,
+  `GET:/vco/api/about`).**
   What was checked: (1) **the five `/iaas` + `/deployment` + `/blueprint`
   + `/catalog` read paths** are served by the Apache-2.0
   [`vmware/vra-sdk-go`](https://github.com/vmware/vra-sdk-go) swaggers
@@ -417,8 +430,15 @@ committable spec _does_ exist — it just isn't ingestable.**
   and `POST /csp/gateway/am/api/login` is the **CSP identity service**,
   which no vra-sdk-go spec covers (CSP identity is a separate vIDM
   surface). So no single artifact can serve a reconcile authority for the
-  full eight without false reds. **Residual risk, named** (the nsx
-  lesson): this task ran no live probe of a vRA 8 appliance — live
+  full nine without false reds. (3) **`GET /vco/api/about`** (the
+  version and build read of `vcfa.vra8.api_file.get`) is served by the
+  Orchestrator inside the appliance, not by any Automation service; it is
+  checked against the vendor's Orchestrator API reference (8.x on the
+  vendor's site, 9.0 on the spec shelf) — no 8.18 API file exists. The
+  documentation paths that read fetches (`/automation/api-docs`,
+  `/automation-ui/api-docs`, `/vco/api/docs`, `/{service}/api/swagger`)
+  are pinned apart, as paths no API file lists. **Residual risk, named**
+  (the nsx lesson): this task ran no live probe of a vRA 8 appliance — live
   end-to-end verification against a vRA 8.x source appliance is the
   deferred tail (the same unit-tested-first posture `vcd` / `fleet-lcm`
   shipped with).

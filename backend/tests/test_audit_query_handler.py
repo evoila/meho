@@ -18,13 +18,19 @@ Coverage matrix (G8.1-T1 acceptance criteria):
 * AC5 — Cursor pagination forward-only: 250 rows / ``limit=100`` produces 3
   pages, last page ``next_cursor=None``.
 * AC6 — ``op_id="vsphere.vm.*"`` glob matches MCP payload rows correctly.
-* AC8 — ``parent_audit_id`` filter raises :class:`UnsupportedFilterError`
-  (the flat filter stays gated; ``agent_session_id`` is un-gated by G8.2-T3).
+* #4030 — ``parent_audit_id`` exact-match filter returns the direct children
+  of one row (an approval request's decision and run rows), tenant-scoped.
 * G8.2-T3 — ``agent_session_id`` filter narrows rows; ``parent_audit_id`` /
   ``agent_session_id`` populate on the returned ``AuditEntry``.
 * work_ref I1-T3 #1658 — ``work_ref`` exact-match filter narrows to rows whose
   ``work_ref`` matches (excluding different / NULL); ``work_ref`` populates on
   every returned ``AuditEntry``.
+* #4668 — ``principal`` matches part of the user id **or** part of the stored
+  name, case-insensitively, with LIKE metacharacters escaped on both;
+  ``principal_sub`` matches the user id exactly and never the name.
+* #4855 — ``has_trace=True`` keeps only ``operation_execution`` rows with a
+  ``dispatch_trace`` row in the caller's tenant; ``has_trace=False`` keeps the
+  other rows; ``None`` returns every row.
 * :class:`InvalidCursorError` propagates when a tampered cursor is passed.
 * ``target_name`` denormalization via LEFT JOIN works (and is None when the
   audit row has no ``target_id``).
@@ -44,12 +50,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.audit_query import (
     AuditQueryFilters,
     InvalidCursorError,
-    UnsupportedFilterError,
     decode_cursor,
     query_audit,
 )
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, Target
+from meho_backplane.db.models import AuditEventClass, AuditLog, DispatchTrace, Target, Tenant
 from meho_backplane.settings import get_settings
 
 
@@ -91,6 +96,7 @@ async def _seed_audit_row(
     agent_session_id: uuid.UUID | None = None,
     parent_audit_id: uuid.UUID | None = None,
     work_ref: str | None = None,
+    event_class: AuditEventClass = AuditEventClass.LEGACY_REQUEST,
 ) -> uuid.UUID:
     """Insert one :class:`AuditLog` row and return its ``id``."""
     row_id = uuid.uuid4()
@@ -109,9 +115,34 @@ async def _seed_audit_row(
             agent_session_id=agent_session_id,
             parent_audit_id=parent_audit_id,
             work_ref=work_ref,
+            event_class=event_class.value,
         ),
     )
     return row_id
+
+
+async def _seed_tenant(s: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+    """Insert the :class:`Tenant` row ``dispatch_trace.tenant_id`` references."""
+    s.add(Tenant(id=tenant_id, slug=f"t-{tenant_id.hex[:8]}", name="Tenant"))
+
+
+async def _seed_trace(
+    s: AsyncSession,
+    *,
+    audit_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> None:
+    """Insert one :class:`DispatchTrace` header for *audit_id*, owned by *tenant_id*."""
+    now = datetime.now(UTC)
+    s.add(
+        DispatchTrace(
+            id=uuid.uuid4(),
+            audit_id=audit_id,
+            tenant_id=tenant_id,
+            created_at=now,
+            expires_at=now + timedelta(days=7),
+        ),
+    )
 
 
 async def _seed_target(s: AsyncSession, *, tenant_id: uuid.UUID, name: str) -> uuid.UUID:
@@ -476,21 +507,79 @@ async def test_op_class_filter_against_payload(session: AsyncSession) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Unsupported filters (AC8)
+# parent_audit_id filter (#4030)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_parent_audit_id_filter_raises_unsupported(
+async def test_parent_audit_id_filter_returns_approval_decision_and_run_rows(
     session: AsyncSession,
 ) -> None:
-    """``parent_audit_id`` filter raises until the column lands (G0.6-T7 #398)."""
-    with pytest.raises(UnsupportedFilterError):
-        await query_audit(
-            AuditQueryFilters(parent_audit_id=uuid.uuid4()),
-            tenant_id=uuid.uuid4(),
-            session=session,
-        )
+    """An approval request's decision and run rows are found by their parent.
+
+    The three rows carry no agent session, so ``parent_audit_id`` is the only
+    link between them. The filter returns the direct children only: not the
+    request row itself, not an unrelated row, not a grandchild, and not a
+    row in another tenant that points at the same parent id.
+    """
+    tenant_id = uuid.uuid4()
+    other_tenant_id = uuid.uuid4()
+    request_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
+        method="APPROVAL",
+        path="approval.request",
+        status_code=202,
+    )
+    decision_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
+        operator_sub="approver-1",
+        method="APPROVAL",
+        path="approval.decision",
+        parent_audit_id=request_id,
+    )
+    run_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 3, tzinfo=UTC),
+        operator_sub="approver-1",
+        method="DISPATCH",
+        path="vsphere.vm.power_off",
+        parent_audit_id=request_id,
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 4, tzinfo=UTC),
+        method="DISPATCH",
+        path="vsphere.vm.child_step",
+        parent_audit_id=run_id,
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 5, tzinfo=UTC),
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=other_tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 6, tzinfo=UTC),
+        parent_audit_id=request_id,
+    )
+    await session.commit()
+
+    result = await query_audit(
+        AuditQueryFilters(parent_audit_id=request_id),
+        tenant_id=tenant_id,
+        session=session,
+    )
+
+    assert [row.id for row in result.rows] == [run_id, decision_id]
+    assert all(row.parent_audit_id == request_id for row in result.rows)
+    assert all(row.tenant_id == tenant_id for row in result.rows)
 
 
 @pytest.mark.asyncio
@@ -659,19 +748,25 @@ async def test_audit_id_exact_lookup(session: AsyncSession) -> None:
 
 @pytest.mark.asyncio
 async def test_principal_partial_match(session: AsyncSession) -> None:
-    """``principal="ali"`` matches ``alice`` but not ``bob``."""
+    """``principal="ali"`` matches the user id ``alice`` but not ``bob``.
+
+    Both rows carry a name that does not contain ``ali``, so the match
+    comes from the user id arm alone (#4668 keeps the old behaviour).
+    """
     tenant_id = uuid.uuid4()
     await _seed_audit_row(
         session,
         tenant_id=tenant_id,
         occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
         operator_sub="alice",
+        payload={"principal_name": "Operator One"},
     )
     await _seed_audit_row(
         session,
         tenant_id=tenant_id,
         occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
         operator_sub="bob",
+        payload={"principal_name": "Operator Two"},
     )
     await session.commit()
 
@@ -720,6 +815,122 @@ async def test_principal_escapes_sql_wildcards(session: AsyncSession) -> None:
         session=session,
     )
     assert {entry.principal_sub for entry in result.rows} == {"alice%bob"}
+
+
+@pytest.mark.asyncio
+async def test_principal_matches_name_case_insensitive(session: AsyncSession) -> None:
+    """#4668: part of ``payload['principal_name']`` matches, whatever the case.
+
+    The user ids are UUID-like and share no text with the filter, so the
+    match can only come from the name arm. A row without a name and a row
+    with a different name stay out.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
+        operator_sub="0f1e2d3c-0000-4000-8000-000000000001",
+        payload={"principal_name": "Ada Lovelace"},
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
+        operator_sub="0f1e2d3c-0000-4000-8000-000000000002",
+        payload={"principal_name": "Grace Hopper"},
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 3, tzinfo=UTC),
+        operator_sub="0f1e2d3c-0000-4000-8000-000000000003",
+    )
+    await session.commit()
+
+    for value in ("ada love", "LACE", "Ada Lovelace"):
+        result = await query_audit(
+            AuditQueryFilters(principal=value),
+            tenant_id=tenant_id,
+            session=session,
+        )
+        assert [entry.principal_name for entry in result.rows] == ["Ada Lovelace"], value
+
+
+@pytest.mark.asyncio
+async def test_principal_escapes_sql_wildcards_in_name(session: AsyncSession) -> None:
+    """#4668: ``_`` / ``%`` in the filter match the name literally, not as wildcards."""
+    tenant_id = uuid.uuid4()
+    for index, name in enumerate(("agent_ops", "agentXops", "ci%bot", "ciXbot")):
+        await _seed_audit_row(
+            session,
+            tenant_id=tenant_id,
+            occurred_at=datetime(2026, 5, 14, 0, 0, index + 1, tzinfo=UTC),
+            operator_sub=f"0f1e2d3c-0000-4000-8000-00000000001{index}",
+            payload={"principal_name": name},
+        )
+    await session.commit()
+
+    result = await query_audit(
+        AuditQueryFilters(principal="agent_ops"),
+        tenant_id=tenant_id,
+        session=session,
+    )
+    assert {entry.principal_name for entry in result.rows} == {"agent_ops"}
+
+    result = await query_audit(
+        AuditQueryFilters(principal="ci%bot"),
+        tenant_id=tenant_id,
+        session=session,
+    )
+    assert {entry.principal_name for entry in result.rows} == {"ci%bot"}
+
+
+@pytest.mark.asyncio
+async def test_principal_sub_exact_match_never_widens_to_name(session: AsyncSession) -> None:
+    """#4668: ``principal_sub`` matches the user id exactly — not the name, not a part.
+
+    This is the filter the "my recent" views bind to the caller's own
+    user id. A peer whose *name* contains that id, and a user id that
+    merely starts with it, must stay out.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
+        operator_sub="op-self",
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
+        operator_sub="op-other",
+        payload={"principal_name": "op-self lookalike"},
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 3, tzinfo=UTC),
+        operator_sub="op-self-2",
+    )
+    await session.commit()
+
+    result = await query_audit(
+        AuditQueryFilters(principal_sub="op-self"),
+        tenant_id=tenant_id,
+        session=session,
+    )
+    assert [entry.principal_sub for entry in result.rows] == ["op-self"]
+
+    # The partial filter with the same value finds all three — which is
+    # exactly why "my recent" must not use it.
+    result = await query_audit(
+        AuditQueryFilters(principal="op-self"),
+        tenant_id=tenant_id,
+        session=session,
+    )
+    assert len(result.rows) == 3
 
 
 @pytest.mark.asyncio
@@ -1079,3 +1290,150 @@ async def test_lineage_populated_from_row(session: AsyncSession) -> None:
     entry = result.rows[0]
     assert entry.agent_session_id == session_id
     assert entry.parent_audit_id == parent_id
+
+
+# ---------------------------------------------------------------------------
+# has_trace filter (#4855)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_has_trace_fixture(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    other_tenant_id: uuid.UUID,
+) -> dict[str, uuid.UUID]:
+    """Seed the rows the three ``has_trace`` cases are checked against.
+
+    In the caller's tenant: an operation run with a trace, an operation run
+    without one, a legacy row and a policy row that each have a trace row,
+    and an operation run whose trace header belongs to the other tenant.
+    """
+    await _seed_tenant(session, tenant_id=tenant_id)
+    await _seed_tenant(session, tenant_id=other_tenant_id)
+    base = datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC)
+    rows = {
+        "op_with_trace": await _seed_audit_row(
+            session,
+            tenant_id=tenant_id,
+            occurred_at=base + timedelta(seconds=1),
+            event_class=AuditEventClass.OPERATION_EXECUTION,
+        ),
+        "op_without_trace": await _seed_audit_row(
+            session,
+            tenant_id=tenant_id,
+            occurred_at=base + timedelta(seconds=2),
+            event_class=AuditEventClass.OPERATION_EXECUTION,
+        ),
+        "legacy_with_trace": await _seed_audit_row(
+            session,
+            tenant_id=tenant_id,
+            occurred_at=base + timedelta(seconds=3),
+        ),
+        "policy_with_trace": await _seed_audit_row(
+            session,
+            tenant_id=tenant_id,
+            occurred_at=base + timedelta(seconds=4),
+            event_class=AuditEventClass.POLICY_DECISION,
+        ),
+        "op_with_foreign_trace": await _seed_audit_row(
+            session,
+            tenant_id=tenant_id,
+            occurred_at=base + timedelta(seconds=5),
+            event_class=AuditEventClass.OPERATION_EXECUTION,
+        ),
+    }
+    await _seed_trace(session, audit_id=rows["op_with_trace"], tenant_id=tenant_id)
+    await _seed_trace(session, audit_id=rows["legacy_with_trace"], tenant_id=tenant_id)
+    await _seed_trace(session, audit_id=rows["policy_with_trace"], tenant_id=tenant_id)
+    await _seed_trace(session, audit_id=rows["op_with_foreign_trace"], tenant_id=other_tenant_id)
+    await session.commit()
+    return rows
+
+
+async def test_has_trace_true_keeps_only_operation_rows_with_a_trace_in_tenant(
+    session: AsyncSession,
+) -> None:
+    """#4855: ``has_trace=True`` returns the rows the trace route serves a trace for."""
+    tenant_id = uuid.uuid4()
+    rows = await _seed_has_trace_fixture(session, tenant_id=tenant_id, other_tenant_id=uuid.uuid4())
+
+    result = await query_audit(
+        AuditQueryFilters(has_trace=True),
+        tenant_id=tenant_id,
+        session=session,
+    )
+
+    assert [r.id for r in result.rows] == [rows["op_with_trace"]]
+
+
+async def test_has_trace_false_keeps_the_other_rows(session: AsyncSession) -> None:
+    """#4855: ``has_trace=False`` is the exact complement of ``has_trace=True``."""
+    tenant_id = uuid.uuid4()
+    rows = await _seed_has_trace_fixture(session, tenant_id=tenant_id, other_tenant_id=uuid.uuid4())
+
+    result = await query_audit(
+        AuditQueryFilters(has_trace=False),
+        tenant_id=tenant_id,
+        session=session,
+    )
+
+    assert {r.id for r in result.rows} == {
+        rows["op_without_trace"],
+        rows["legacy_with_trace"],
+        rows["policy_with_trace"],
+        rows["op_with_foreign_trace"],
+    }
+
+
+async def test_has_trace_unset_returns_every_row(session: AsyncSession) -> None:
+    """#4855: no ``has_trace`` means no filter -- the same rows as before."""
+    tenant_id = uuid.uuid4()
+    rows = await _seed_has_trace_fixture(session, tenant_id=tenant_id, other_tenant_id=uuid.uuid4())
+
+    result = await query_audit(
+        AuditQueryFilters(),
+        tenant_id=tenant_id,
+        session=session,
+    )
+
+    assert {r.id for r in result.rows} == set(rows.values())
+
+
+async def test_has_trace_combines_with_the_other_filters(session: AsyncSession) -> None:
+    """#4855: ``has_trace`` narrows on top of ``since`` and ``op_id``, like the CLI list."""
+    tenant_id = uuid.uuid4()
+    await _seed_tenant(session, tenant_id=tenant_id)
+    base = datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC)
+    old_with_trace = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=base - timedelta(days=40),
+        event_class=AuditEventClass.OPERATION_EXECUTION,
+        payload={"op_id": "vmware.vm.list"},
+    )
+    recent_with_trace = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=base - timedelta(days=1),
+        event_class=AuditEventClass.OPERATION_EXECUTION,
+        payload={"op_id": "vmware.vm.list"},
+    )
+    other_op_with_trace = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=base - timedelta(days=1),
+        event_class=AuditEventClass.OPERATION_EXECUTION,
+        payload={"op_id": "k8s.pod.list"},
+    )
+    for audit_id in (old_with_trace, recent_with_trace, other_op_with_trace):
+        await _seed_trace(session, audit_id=audit_id, tenant_id=tenant_id)
+    await session.commit()
+
+    result = await query_audit(
+        AuditQueryFilters(has_trace=True, op_id="vmware.*", since=base - timedelta(days=30)),
+        tenant_id=tenant_id,
+        session=session,
+    )
+
+    assert [r.id for r in result.rows] == [recent_with_trace]

@@ -15,8 +15,7 @@
 #   2. dual-run on a disposable     — orchestrated here; effect captured
 #      target                         via the shipped READ ops, not stdout
 #   3. state diff, not framing      — automatable (verifier)
-#   4. audit + broadcast + approval — automatable (verifier)
-#      completeness
+#   4. audit + approval completeness — automatable (verifier)
 #   5. bounded live soak            — documented protocol (the runbook)
 #
 # This driver is the **consumer-extensible** entry point: a connector
@@ -30,7 +29,7 @@
 #
 # It deliberately performs NO writes itself and builds NO new approval
 # infrastructure — it dispatches the ops under test and reads the
-# already-shipped audit / broadcast / READ surfaces back (G11.7's
+# already-shipped audit / READ surfaces back (G11.7's
 # explicit non-goal: reuse the queue, do not rebuild it).
 #
 # ---------------------------------------------------------------------------
@@ -52,7 +51,6 @@
 #   wrapper-state.json   stage 3 — post-op read-back of the wrapper's effect
 #   meho-state.json      stage 3 — post-op read-back of MEHO's effect
 #   audit-rows.json      stage 4 — array of audit_log rows for the op window
-#   broadcast-events.json stage 4 — array of broadcast events for the window
 #   meta.json            stage 4 — { "returned_after_decision": bool,
 #                                     "decision": "approved"|"rejected" }
 #
@@ -126,6 +124,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BACKEND_DIR="$REPO_ROOT/backend"
 [[ -d "$BACKEND_DIR" ]] || usage_err "backend dir not found at $BACKEND_DIR"
+PYTHON="$BACKEND_DIR/.venv/bin/python"
+[[ -x "$PYTHON" ]] || usage_err "prepared backend environment missing: run uv sync --locked in $BACKEND_DIR before using this driver"
 
 require_file() {
   [[ -f "$EVIDENCE_DIR/$1" ]] || usage_err "missing evidence file: $EVIDENCE_DIR/$1 (see --help for the contract)"
@@ -135,7 +135,6 @@ require_file meho-plan.json
 require_file wrapper-state.json
 require_file meho-state.json
 require_file audit-rows.json
-require_file broadcast-events.json
 require_file meta.json
 if [[ "$IDEMPOTENT" -eq 1 ]]; then
   require_file meho-state-2.json
@@ -157,7 +156,7 @@ set +e
   OP="$OP" CONNECTOR="$CONNECTOR" EVIDENCE_DIR="$EVIDENCE_DIR" \
   IDEMPOTENT="$IDEMPOTENT" SOAK_CLEAN="$SOAK_CLEAN" \
   EXPLAINED_FILE="$EXPLAINED_FILE" REPORT="$REPORT" \
-  uv run --locked python - <<'PY'
+  "$PYTHON" - <<'PY'
 import json
 import os
 from pathlib import Path
@@ -197,7 +196,6 @@ report.stages.append(
     assert_approval_completeness(
         op,
         audit_rows=load("audit-rows.json"),
-        broadcast_events=load("broadcast-events.json"),
         returned_after_decision=bool(meta.get("returned_after_decision", False)),
         decision=meta.get("decision", "approved"),
     )

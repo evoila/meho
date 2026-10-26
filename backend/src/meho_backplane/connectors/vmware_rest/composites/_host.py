@@ -61,6 +61,7 @@ import httpx
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.composite_issues import issue
 from meho_backplane.connectors.vmware_rest.composites._host_nfs_mount import (
     build_mounted_result,
     build_nas_volume_spec,
@@ -125,6 +126,11 @@ _OP_UPDATE_SERVICE_POLICY: Final = "POST:/HostServiceSystem/{moId}/UpdateService
 # read, like disk-grow's device read), but the op_id is listed on the sub-op
 # manifests so the reconcile lane asserts the path exists in the pinned spec.
 _OP_RETRIEVE_PROPERTIES: Final = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+# The NFS mount pre-check reads every datastore of the host in one call and
+# follows the continuation pages vCenter may send (#4862).
+_OP_CONTINUE_RETRIEVE_PROPERTIES: Final = (
+    "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx"
+)
 
 # Concrete runtime path for the config-manager read: the PropertyCollector is
 # a singleton whose moId is the literal ``propertyCollector`` (the same
@@ -137,6 +143,7 @@ _VMOMI_RETRIEVE_PROPERTIES_PATH: Final = "/PropertyCollector/propertyCollector/R
 #: assert every declared vim path exists in the spec.
 _VIM_SUB_OPS_HOST_DATASTORE_MOUNT_NFS: tuple[str, ...] = (
     _OP_RETRIEVE_PROPERTIES,
+    _OP_CONTINUE_RETRIEVE_PROPERTIES,
     _OP_CREATE_NAS_DATASTORE,
 )
 _VIM_SUB_OPS_HOST_DISK_MARK_FLASH: tuple[str, ...] = (
@@ -330,7 +337,21 @@ async def _resolve_host_and_manager(
         connector, target, operator, host_moid=host_moid, prop=prop
     )
     if manager_moid is None:
-        return None, None, {"status": "config_manager_unreadable", "host": host_moid}
+        return (
+            None,
+            None,
+            {
+                "status": "config_manager_unreadable",
+                "host": host_moid,
+                "issues": [
+                    issue(
+                        "connector",
+                        "error",
+                        f"could not read {prop} of host {host_moid!r}; nothing was changed",
+                    )
+                ],
+            },
+        )
     return host_moid, manager_moid, None
 
 
@@ -462,14 +483,20 @@ async def disk_mark_flash_composite(
         results.append(await _poll_mark_disk(connector, target, operator, disk_uuid, task_payload))
 
     marked = sum(1 for row in results if row["status"] == "marked")
-    return {
-        "status": "marked" if marked == len(results) else "partial",
+    failed = len(results) - marked
+    envelope: dict[str, Any] = {
+        "status": "marked" if failed == 0 else "partial",
         "host": host_moid,
         "mode": mode,
         "results": results,
-        "summary": {"marked": marked, "failed": len(results) - marked},
+        "summary": {"marked": marked, "failed": failed},
         "guidance": None,
     }
+    if failed:
+        envelope["issues"] = [
+            issue("connector", "error", f"{failed} of {len(results)} disk(s) were not marked")
+        ]
+    return envelope
 
 
 async def _poll_mark_disk(

@@ -38,6 +38,7 @@ import re
 from typing import Any
 
 import pytest
+from cryptography.fernet import Fernet
 
 from meho_backplane.features import (
     _READY_ENTRY_FEATURE,
@@ -296,6 +297,18 @@ def test_approval_queue_effective_posture_reports_break_glass() -> None:
     assert block["approval_queue"]["effective_posture"] == "single_operator_break_glass"
 
 
+def test_ready_delegated_decision_posture_defaults_to_production() -> None:
+    """#3693: by default ``/ready`` says delegated decisions are refused."""
+    block = build_features_block(_settings_with())
+    assert block["approval_queue"]["delegated_decision_posture"] == "production_own_hand_only"
+
+
+def test_ready_delegated_decision_posture_reports_lab_class() -> None:
+    """``APPROVAL_ALLOW_DELEGATED_DECISION=true`` surfaces on ``/ready`` (#3693)."""
+    block = build_features_block(_settings_with(approval_allow_delegated_decision=True))
+    assert block["approval_queue"]["delegated_decision_posture"] == "lab_class_delegation_allowed"
+
+
 # ---------------------------------------------------------------------------
 # mcp (G0.14-T13 #1202)
 # ---------------------------------------------------------------------------
@@ -325,17 +338,53 @@ def test_mcp_block_reports_server_pinned_protocol_version() -> None:
 
 
 # ---------------------------------------------------------------------------
+# approval_custody (#3712)
+# ---------------------------------------------------------------------------
+
+
+def test_approval_custody_missing_when_key_unset() -> None:
+    """No key: credential-write approvals are denied, and the block says so."""
+    block = build_features_block(_settings_with())
+    custody = block["approval_custody"]
+    assert custody["configured"] is False
+    assert custody["custody"] == "missing"
+    assert custody["missing_env"] == ["APPROVAL_HANDOFF_ENCRYPTION_KEY"]
+    assert custody["docs"] == "docs/codebase/approvals.md"
+
+
+def test_approval_custody_configured_with_valid_fernet_key() -> None:
+    """A valid Fernet key reads as configured, and the key is never echoed."""
+    key = Fernet.generate_key().decode()
+    block = build_features_block(_settings_with(approval_handoff_encryption_key=key))
+    custody = block["approval_custody"]
+    assert custody["configured"] is True
+    assert custody["custody"] == "configured"
+    assert custody["missing_env"] == []
+    assert key not in repr(block)
+
+
+def test_approval_custody_malformed_key_is_not_configured() -> None:
+    """A key the Fernet constructor rejects is reported, not trusted."""
+    block = build_features_block(_settings_with(approval_handoff_encryption_key="not-a-fernet-key"))
+    custody = block["approval_custody"]
+    assert custody["configured"] is False
+    assert custody["custody"] == "malformed"
+    assert custody["missing_env"] == ["APPROVAL_HANDOFF_ENCRYPTION_KEY"]
+    assert "not-a-fernet-key" not in repr(block)
+
+
+# ---------------------------------------------------------------------------
 # Block-level shape
 # ---------------------------------------------------------------------------
 
 
-def test_features_block_carries_all_five_entries() -> None:
-    """The block enumerates the five gated features by exact key name.
+def test_features_block_carries_all_six_entries() -> None:
+    """The block enumerates the six gated features by exact key name.
 
     Operator tooling (and downstream alerting) keys off these names.
     Renaming any of them is a wire-compat break that this assertion
     catches at test time rather than at integration time. The ``mcp``
-    entry was added in G0.14-T13 (#1202).
+    entry was added in G0.14-T13 (#1202), ``approval_custody`` in #3712.
     """
     block = build_features_block(_settings_with())
     assert set(block.keys()) == {
@@ -343,13 +392,14 @@ def test_features_block_carries_all_five_entries() -> None:
         "ui_surface",
         "audit_replay",
         "approval_queue",
+        "approval_custody",
         "mcp",
     }
 
 
 @pytest.mark.parametrize(
     "feature",
-    ["agent_runtime", "ui_surface", "audit_replay", "approval_queue", "mcp"],
+    ["agent_runtime", "ui_surface", "audit_replay", "approval_queue", "approval_custody", "mcp"],
 )
 def test_every_feature_has_configured_bool(feature: str) -> None:
     """Each entry carries a ``configured: bool`` — the load-bearing field."""
@@ -374,6 +424,7 @@ READY_ENTRY_FEATURE_CONTRACT = {
     "ui_surface": "ui_console",
     "audit_replay": "audit",
     "approval_queue": "approvals",
+    "approval_custody": "approvals",
 }
 
 _ISSUE_URL_RE = re.compile(r"^https://github\.com/evoila/meho/issues/\d+$")

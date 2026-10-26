@@ -65,6 +65,34 @@ var typedOpCLICoverage = map[string]string{
 	"vcfa.tenant.deployment.list": "deployment list",
 	"vcfa.tenant.deployment.get":  "deployment get",
 	"vcfa.tenant.about":           "about --plane tenant", // pinned by TestAboutVerbDispatchesPerPlane
+	// Provisioning surface (#3890): agent-surface-only, reached through
+	// `meho operation call` / MCP call_operation — no dedicated CLI verb.
+	"vcfa.provider.right.list":       "",
+	"vcfa.provider.role.list":        "",
+	"vcfa.provider.org.create":       "",
+	"vcfa.provider.role.create":      "",
+	"vcfa.provider.user.create":      "",
+	"vcfa.provider.api_token.create": "",
+	"vcfa.provider.api_token.revoke": "",
+	"vcfa.tenant.project.create":     "",
+	"vcfa.tenant.login.test":         "",
+	// Image ops: agent-surface-only too, reached through
+	// `meho operation call` / MCP call_operation.
+	"vcfa.tenant.image_profile.list":             "",
+	"vcfa.tenant.fabric_image.list":              "",
+	"vcfa.tenant.cloud_account.enumerate_images": "",
+	"vcfa.tenant.image_profile.mapping.update":   "",
+	// A project's own network and its first deployment: agent-surface-only,
+	// reached through `meho operation call` / MCP call_operation.
+	"vcfa.tenant.fabric_network.list":      "",
+	"vcfa.tenant.fabric_compute.list":      "",
+	"vcfa.tenant.region.list":              "",
+	"vcfa.tenant.zone.list":                "",
+	"vcfa.tenant.fabric_network.update":    "",
+	"vcfa.tenant.network_profile.create":   "",
+	"vcfa.tenant.blueprint_request.create": "",
+	"vcfa.tenant.blueprint_request.get":    "",
+	"vcfa.tenant.deployment.delete":        "",
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed VCFA

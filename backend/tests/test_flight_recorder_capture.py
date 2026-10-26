@@ -220,6 +220,39 @@ async def test_vendor_call_span_captured_and_redacted() -> None:
     assert span.attributes["body_recorded"] is True
 
 
+class _MaskingHttpConnector(_ConcreteHttpConnector):
+    """A connector that masks a vendor field before the trace records the body."""
+
+    def trace_response_body(self, response: Any) -> Any:
+        body = dict(response.json())
+        body["pairingPassword"] = "***"
+        return body
+
+
+@pytest.mark.asyncio
+async def test_connector_masked_response_body_is_what_the_span_records() -> None:
+    """``trace_response_body`` replaces the raw bytes; the result stays unmasked."""
+    tenant_id = await _seed_tenant(slug="fr-cap-masked")
+    conn = _MaskingHttpConnector()
+    operator = _make_operator(tenant_id)
+    target = _make_target()
+    audit_id = uuid.uuid4()
+
+    async with respx.mock(base_url=_BASE_URL) as mock:
+        mock.get("/api/items").respond(200, json={"name": "a", "pairingPassword": "plain-value"})
+        result = await _run_get(
+            conn, operator=operator, target=target, op_id="svc.items.list", audit_id=audit_id
+        )
+    await conn.aclose()
+
+    assert result == {"name": "a", "pairingPassword": "plain-value"}
+    _, spans = await _fetch_trace(audit_id)
+    assert len(spans) == 1
+    assert spans[0].attributes["response_body"] == {"name": "a", "pairingPassword": "***"}
+    assert spans[0].attributes["body_recorded"] is True
+    assert "plain-value" not in span_json(spans[0])
+
+
 @pytest.mark.asyncio
 async def test_vendor_call_span_carries_no_query_string_in_url() -> None:
     """The URL is stripped to the request line -- no query values leak."""

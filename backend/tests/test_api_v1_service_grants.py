@@ -3,13 +3,20 @@
 
 """REST tests for ``/api/v1/service-principals/grants*`` (#3151).
 
-Two contracts:
+Three contracts:
 
 * **RBAC** — every route is gated by ``require_role(TenantRole.OPERATOR)``;
   a ``read_only`` JWT gets HTTP 403 ``insufficient_role`` everywhere.
+* **People only on create and revoke (#4616)** — a machine ``principal_kind``
+  (``agent`` / ``service``) holding the ``operator`` role gets HTTP 403
+  ``human_principal_required`` on create and revoke, before the route runs,
+  and the refusal lands on the audit log. List and show stay role-only.
 * **Happy path (operator)** — create → list → show → revoke round-trips,
   and the create-time review rejects a delete-shaped op / a wildcard with
   HTTP 422.
+* **Revoke reason (#3489)** — an optional ``reason`` on revoke lands on
+  the grant row (``revoked_reason``) and on the ``service_grant.revoke``
+  audit row payload, the same way create records its ``reason``.
 """
 
 from __future__ import annotations
@@ -21,10 +28,12 @@ from typing import Any
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
-import meho_backplane.audit as _audit_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog
 from meho_backplane.main import app
 from meho_backplane.settings import get_settings
 
@@ -34,16 +43,6 @@ from ._oidc_jwt_helpers import make_rsa_keypair, mint_token, mock_discovery_and_
 
 _TENANT_A = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 _BASE = "/api/v1/service-principals/grants"
-
-
-@pytest.fixture(autouse=True)
-def _noop_broadcast(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Silence the broadcast publisher so responses don't stall on Valkey."""
-
-    async def _noop(*_a: object, **_kw: object) -> None:
-        pass
-
-    monkeypatch.setattr(_audit_module, "publish_event", _noop)
 
 
 @pytest.fixture(autouse=True)
@@ -106,6 +105,70 @@ def test_read_only_role_is_rejected(
     assert response.json() == {"detail": "insufficient_role"}
 
 
+# RUNNER is refused earlier on the wire (401 missing_runner_id and the
+# runner path-cage in middleware), so it never reaches the human-only guard
+# over REST. Same split as ``test_api_v1_agent_grants``.
+_MACHINE_KINDS: tuple[str, ...] = ("agent", "service")
+
+_HUMAN_ONLY_ENDPOINTS: tuple[tuple[str, str, dict[str, Any] | None], ...] = (
+    ("POST", _BASE, _ENDPOINTS[2][2]),
+    ("DELETE", f"{_BASE}/{_GRANT_ID}", None),
+)
+
+
+def _machine_operator_token(key: Any, *, kind: str, sub: str) -> str:
+    """Mint a machine principal at ``operator`` so only the people-only gate can refuse it."""
+    return mint_token(
+        key,
+        sub=sub,
+        tenant_role=TenantRole.OPERATOR.value,
+        tenant_id=str(_TENANT_A),
+        principal_kind=kind,
+    )
+
+
+async def _refusal_audit_rows(operator_sub: str, method: str, path: str) -> list[AuditLog]:
+    async with get_sessionmaker()() as session:
+        return list(
+            (
+                await session.execute(
+                    select(AuditLog).where(
+                        AuditLog.operator_sub == operator_sub,
+                        AuditLog.method == method,
+                        AuditLog.path == path,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+
+@pytest.mark.parametrize("kind", _MACHINE_KINDS)
+@pytest.mark.parametrize("method, path, body", _HUMAN_ONLY_ENDPOINTS)
+async def test_machine_principal_denied_on_create_and_revoke(
+    client: TestClient, method: str, path: str, body: dict[str, Any] | None, kind: str
+) -> None:
+    """A machine ``operator`` token → 403 ``human_principal_required`` on create and revoke (#4616).
+
+    The token holds the ``operator`` role, so the role check passes and the
+    403 can only come from the people-only check. The refusal is audited
+    as a 403 row, the same way the approval routes record theirs.
+    """
+    sub = f"machine-{kind}-{method.lower()}"
+    key = make_rsa_keypair(f"kid-machine-{kind}")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_machine_operator_token(key, kind=kind, sub=sub)}"}
+        response = client.request(method, path, headers=headers, json=body)
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"].startswith("human_principal_required"), response.text
+
+    rows = await _refusal_audit_rows(sub, method, path)
+    assert len(rows) == 1
+    assert rows[0].status_code == 403
+
+
 def test_operator_crud_round_trip(client: TestClient) -> None:
     """create (201) → list → show → revoke (204) → show-revoked → re-revoke (404)."""
     key = make_rsa_keypair("kid-op")
@@ -148,11 +211,12 @@ def test_operator_crud_round_trip(client: TestClient) -> None:
     "op_id, expect_fragment",
     [
         ("DELETE:/vcenter/vm/{vm}", "delete-shaped"),
+        ("POST:/VirtualMachine/{moId}/Destroy_Task", "vendor action name 'Destroy_Task'"),
         ("vmware.composite.vm.*", "wildcard"),
     ],
 )
 def test_create_review_rejects_bad_op(client: TestClient, op_id: str, expect_fragment: str) -> None:
-    """A delete-shaped op / a wildcard op_id is refused with HTTP 422."""
+    """A delete-shaped op, a vendor delete action name, or a wildcard op_id is refused with 422."""
     key = make_rsa_keypair("kid-op2")
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
@@ -210,3 +274,156 @@ def test_create_rejects_target_id_with_selector(client: TestClient) -> None:
         }
         response = client.post(_BASE, headers=headers, json=body)
     assert response.status_code == 422, response.text
+
+
+def test_list_flags_orphaned_grant_with_remediation(client: TestClient) -> None:
+    """A grant whose target was deleted lists as orphaned (#3430); a selector grant does not."""
+    import asyncio
+    from datetime import UTC, datetime
+
+    from meho_backplane.db.models import Target
+
+    target_id = uuid.uuid4()
+
+    async def _seed_deleted_target() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            session.add(
+                Target(
+                    id=target_id,
+                    tenant_id=_TENANT_A,
+                    name="old-appliance",
+                    aliases=[],
+                    product="vmware",
+                    host="old-appliance.test",
+                    port=443,
+                    deleted_at=datetime.now(UTC),
+                )
+            )
+
+    asyncio.run(_seed_deleted_target())
+    key = make_rsa_keypair("kid-orphan")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
+        base_body = {
+            "principal_sub": "svc:orphan-bot",
+            "op_id": "vmware.composite.vm.create",
+            "connector_id": "vmware-rest-9.0",
+            "reason": "unattended build",
+        }
+        orphan = client.post(
+            _BASE, headers=headers, json={**base_body, "target_id": str(target_id)}
+        )
+        assert orphan.status_code == 201, orphan.text
+        selector = client.post(
+            _BASE, headers=headers, json={**base_body, "target_name_pattern": "old-appliance"}
+        )
+        assert selector.status_code == 201, selector.text
+
+        listed = client.get(_BASE, headers=headers, params={"principal_sub": "svc:orphan-bot"})
+    assert listed.status_code == 200, listed.text
+    by_id = {g["id"]: g for g in listed.json()["grants"]}
+    orphan_row = by_id[orphan.json()["id"]]
+    assert orphan_row["orphaned"] is True
+    assert "target_name_pattern='old-appliance'" in orphan_row["orphan_remediation"]
+    assert orphan_row["revoked_at"] is None
+    selector_row = by_id[selector.json()["id"]]
+    assert selector_row["orphaned"] is False
+    assert selector_row["orphan_remediation"] is None
+
+
+def _create_grant(client: TestClient, headers: dict[str, str], op_id: str) -> str:
+    body = {
+        "principal_sub": "svc:deploy-bot",
+        "op_id": op_id,
+        "connector_id": "vmware-rest-9.0",
+        "reason": "unattended build",
+    }
+    created = client.post(_BASE, headers=headers, json=body)
+    assert created.status_code == 201, created.text
+    return str(created.json()["id"])
+
+
+async def _revoke_audit_payload(grant_id: str) -> dict[str, Any]:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(AuditLog).where(
+                        AuditLog.method == "DELETE",
+                        AuditLog.path == f"{_BASE}/{grant_id}",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].status_code == 204
+    return dict(rows[0].payload)
+
+
+@pytest.mark.asyncio
+async def test_revoke_reason_lands_on_grant_row_and_audit_row(client: TestClient) -> None:
+    """A revoke reason round-trips onto ``revoked_reason`` and the audit payload."""
+    key = make_rsa_keypair("kid-rev-reason")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
+        grant_id = _create_grant(client, headers, "vmware.composite.vm.snapshot")
+
+        revoked = client.delete(
+            f"{_BASE}/{grant_id}", headers=headers, params={"reason": "bot retired"}
+        )
+        assert revoked.status_code == 204, revoked.text
+
+        after = client.get(f"{_BASE}/{grant_id}", headers=headers)
+        assert after.status_code == 200
+        assert after.json()["revoked_reason"] == "bot retired"
+
+        history = client.get(_BASE, headers=headers, params={"include_revoked": "true"})
+        by_id = {g["id"]: g for g in history.json()["grants"]}
+        assert by_id[grant_id]["revoked_reason"] == "bot retired"
+
+    payload = await _revoke_audit_payload(grant_id)
+    assert payload["op_id"] == "service_grant.revoke"
+    assert payload["reason"] == "bot retired"
+
+
+@pytest.mark.asyncio
+async def test_revoke_without_reason_stays_valid(client: TestClient) -> None:
+    """No reason → 204, ``revoked_reason`` is null, and the audit payload has no reason."""
+    key = make_rsa_keypair("kid-rev-noreason")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
+        grant_id = _create_grant(client, headers, "vmware.composite.vm.clone")
+
+        revoked = client.delete(f"{_BASE}/{grant_id}", headers=headers)
+        assert revoked.status_code == 204, revoked.text
+
+        after = client.get(f"{_BASE}/{grant_id}", headers=headers)
+        assert after.json()["revoked_at"] is not None
+        assert after.json()["revoked_reason"] is None
+
+    payload = await _revoke_audit_payload(grant_id)
+    assert payload["op_id"] == "service_grant.revoke"
+    assert "reason" not in payload
+
+
+@pytest.mark.parametrize("reason", ["", "x" * 2049])
+def test_revoke_rejects_empty_or_too_long_reason(client: TestClient, reason: str) -> None:
+    """The revoke reason uses the same 1..2048 length rule as the create reason."""
+    key = make_rsa_keypair("kid-rev-badreason")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
+        grant_id = _create_grant(client, headers, "vmware.composite.vm.migrate")
+
+        response = client.delete(f"{_BASE}/{grant_id}", headers=headers, params={"reason": reason})
+        assert response.status_code == 422, response.text
+
+        # The grant is still live: a rejected revoke changes nothing.
+        after = client.get(f"{_BASE}/{grant_id}", headers=headers)
+        assert after.json()["revoked_at"] is None

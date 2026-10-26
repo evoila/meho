@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Claude Code plugin version check (#4004).
+#
+# Claude Code gives users a new copy of a plugin only when its `version`
+# changes. The plugin stayed at 0.30.0 through many plugin changes, so users
+# never got those fixes. `scripts/ci/check_plugin_version.py` fails when:
+#   - `plugin.json` and the repo-root `marketplace.json` show different
+#     versions, or
+#   - a pull request changes a file under `clients/claude-code-plugin/`
+#     (except `test/`) and does not raise the `plugin.json` version.
+#
+# No `paths:` filter, so the check reports on every pull request and can be
+# made a required check. It is one cheap git diff. It also runs in the merge
+# queue: there HEAD's first parent is the queue entry in front of this pull
+# request, so two pull requests that raise to the same version cannot both
+# get in.
+
+name: Plugin Version Check
+
+on:
+  pull_request:
+    branches: [main]
+  # Bare `merge_group:`: the event does not support `paths:` filtering.
+  merge_group:
+
+concurrency:
+  # Same shape as readme-version-check.yml: never cancel a merge-queue run,
+  # because a cancelled queue check fails the merge attempt.
+  group: plugin-version-check-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+
+permissions:
+  contents: read
+
+jobs:
+  plugin-version:
+    name: Plugin Version Check
+    # Untrusted-PR runner isolation, as in readme-version-check.yml: the job
+    # runs a repo script over PR content and needs nothing internal, so fork
+    # PRs go to a disposable GitHub-hosted runner. See docs/codebase/devops.md.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # HEAD is the merge commit; depth 2 brings its first parent, the
+          # commit this change is compared with.
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: '3.14'
+
+      - name: Check the plugin version
+        run: python scripts/ci/check_plugin_version.py --base HEAD^1

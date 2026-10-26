@@ -118,6 +118,27 @@ spec:
                   key: {{ .Values.broadcast.auth.existingSecretPasswordKey }}
             {{- end }}
             {{- end }}
+            {{- if .Values.resultCache.enabled }}
+            # RESULT_CACHE_REDIS_URL points result-handle reads and writes at
+            # the dedicated result-cache store (charts/result-cache). Unset,
+            # the backplane falls back to BROADCAST_REDIS_URL. The host and
+            # the Secret name below come from the subchart's own name helper,
+            # which shortens long names to 63 characters; a hand-built
+            # `<release>-result-cache` would not match for a long release name.
+            - name: RESULT_CACHE_REDIS_URL
+              value: "redis://{{ include "resultCache.fullname" . }}:{{ .Values.resultCache.service.port }}/0"
+            {{- if .Values.resultCache.auth.enabled }}
+            - name: RESULT_CACHE_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.resultCache.auth.existingSecret | default (printf "%s-auth" (include "resultCache.fullname" .)) }}
+                  key: {{ .Values.resultCache.auth.existingSecretPasswordKey }}
+            {{- end }}
+            # Write new result handles to the dedicated store. Turn on only
+            # after every backplane Pod runs the reader-first code.
+            - name: RESULT_CACHE_WRITER_ENABLED
+              value: {{ .Values.resultCache.writerEnabled | quote }}
+            {{- end }}
             # Other operator-supplied secrets (Keycloak client secret, Vault
             # role bindings) come via ESO-synced Kubernetes Secrets; G2.6
             # wires the references when each surface lands.
@@ -134,7 +155,9 @@ spec:
                   name: {{ include "meho.agentSecretName" . | quote }}
                   key: {{ .Values.agent.secretKey | quote }}
             {{- end }}
-            {{- if .Values.keycloakAdmin.enabled }}
+            {{- if or .Values.keycloakAdmin.enabled .Values.coreKeycloak.enabled }}
+            {{- /* With the built-in Keycloak on, all three point at its meho-admin client through the Service (#4591). */}}
+            {{- $kc := include "meho.keycloakSettings" . | fromYaml }}
             # G11.2 (#803) — Keycloak Admin REST API credentials gating
             # agent-principal registration. All three render together
             # (schema requires `url` + `clientId` + `clientSecret` refs
@@ -145,14 +168,14 @@ spec:
             # `503 keycloak_admin_not_configured` (see
             # `meho_backplane.features._agent_runtime_block`).
             - name: KEYCLOAK_ADMIN_URL
-              value: {{ .Values.keycloakAdmin.url | quote }}
+              value: {{ $kc.adminUrl | quote }}
             - name: KEYCLOAK_ADMIN_CLIENT_ID
-              value: {{ .Values.keycloakAdmin.clientId | quote }}
+              value: {{ $kc.adminClientId | quote }}
             - name: KEYCLOAK_ADMIN_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "meho.keycloakAdminSecretName" . | quote }}
-                  key: {{ .Values.keycloakAdmin.clientSecret.secretKey | quote }}
+                  name: {{ $kc.adminSecretName | quote }}
+                  key: {{ $kc.adminSecretKey | quote }}
             {{- end }}
             {{- if .Values.uiConsole.enabled }}
             # #2594 (Goal #336) — operator-console browser BFF confidential

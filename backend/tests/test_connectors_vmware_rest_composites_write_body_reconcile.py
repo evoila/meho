@@ -50,6 +50,9 @@ _EXPECTED_REST_WRITE_OP_IDS = {
     "POST:/vcenter/vm/{vm}?action=relocate",
     "POST:/vcenter/vm-template/library-items/{templateLibraryItem}?action=deploy",
     "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy",
+    # #3697: the un-gated OVF summary read (flat ``{target}`` body) that
+    # supplies the default VM name for a name-less deploy.
+    "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=filter",
     "POST:/content/library?action=find",
     "POST:/content/library/item?action=find",
     # Content-library download-session flow the typed HttpNfcLease import source
@@ -205,6 +208,13 @@ def test_flattened_2973_bodies_are_served_flat_by_the_pinned_spec() -> None:
 # pinned ``vi-json.yaml``.
 
 from meho_backplane.connectors.vmware_rest import ovf_import_control  # noqa: E402
+from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
+    _alarm,
+    _datastore_browse,
+    _read,
+    _snapshot,
+    _teardown_network,
+)
 from meho_backplane.connectors.vmware_rest.vim_body import (  # noqa: E402
     MOREF_TYPE_NAME,
     retrieve_properties_body,
@@ -230,6 +240,9 @@ _EMITTED_VIM_TYPE_NAMES: set[str] = {
     _write._VM_RELOCATE_SPEC_TYPE,
     _write._DVS_CONFIG_SPEC_TYPE,
     _write._DVS_HOST_MEMBER_CONFIG_SPEC_TYPE,
+    # host.evacuate's maintenance spec with the vSAN data option (#4895).
+    _write._HOST_MAINTENANCE_SPEC_TYPE,
+    _write._VSAN_HOST_DECOMMISSION_MODE_TYPE,
     _write._CLUSTER_CONFIG_SPEC_EX_TYPE,
     _write._CLUSTER_RULE_SPEC_TYPE,
     _write._CLUSTER_AFFINITY_RULE_TYPE,
@@ -255,6 +268,19 @@ _EMITTED_VIM_TYPE_NAMES: set[str] = {
     _write._TRUNK_VLAN_SPEC_TYPE,
     _write._VLAN_ID_SPEC_TYPE,
     _write._NUMERIC_RANGE_TYPE,
+    # #3339 teardown reads: the FetchDVPorts criteria and the datastore browse
+    # search spec + its details flags.
+    _teardown_network._DVS_PORT_CRITERIA_TYPE,
+    _datastore_browse._SEARCH_SPEC_TYPE,
+    _datastore_browse._FILE_QUERY_FLAGS_TYPE,
+    # The VM snapshot create's quiesce request.
+    _snapshot._GUEST_QUIESCE_SPEC_TYPE,
+    # #3706 event.tail QueryEvents filter.
+    _read._EVENT_FILTER_SPEC_TYPE,
+    _read._EVENT_FILTER_SPEC_BY_TIME_TYPE,
+    _read._EVENT_FILTER_SPEC_BY_ENTITY_TYPE,
+    # #4383 alarm.reset ClearTriggeredAlarms filter.
+    _alarm._ALARM_FILTER_SPEC_TYPE,
 }
 
 
@@ -361,3 +387,24 @@ def test_every_emitted_vim_type_name_is_a_pinned_vi_json_schema() -> None:
         "rejected (or mis-deserialised) by a live vCenter. "
         "Protocol: docs/decisions/spec-reconcile-guards-standard.md."
     )
+
+
+def test_drs_rule_delete_remove_key_box_is_the_spec_int_alias() -> None:
+    """The DRS rule delete sends ``removeKey`` as ``{"_typeName": "int", "_value": key}``.
+
+    ``ArrayUpdateSpec.removeKey`` is ``Any``-typed in the pinned ``vi-json.yaml``,
+    so the int key travels boxed. ``int`` is an alias in the ``Any``
+    discriminator mapping (to ``PrimitiveInt``), not a component schema, so it
+    is grounded against that mapping instead of the component list above.
+    Skips uniformly without the spec shelf.
+    """
+    from meho_backplane.connectors.vmware_rest.composites import _drs_rule_delete
+
+    body = _drs_rule_delete._remove_rule_body(7)
+    assert body["spec"]["rulesSpec"][0]["removeKey"] == {"_typeName": "int", "_value": 7}
+    spec_path = require_shelf_spec("vcenter-9.0", "vi-json.yaml")
+    spec_text = spec_path.read_text(encoding="utf-8")
+    assert "\n          int: '#/components/schemas/PrimitiveInt'\n" in spec_text, (
+        "the pinned vi-json.yaml Any discriminator no longer maps 'int' to PrimitiveInt"
+    )
+    assert _vi_json_component_schema_exists(spec_text, "PrimitiveInt")

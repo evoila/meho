@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/oauth2"
@@ -71,6 +72,10 @@ func newLoginCmd() *cobra.Command {
 			"--client-id to skip discovery or override either half (e.g. when " +
 			"the backplane URL isn't reachable on the operator's network but " +
 			"the IdP is).\n\n" +
+			"Version check: after login the CLI reads <backplane-url>/version " +
+			"and prints a one-line warning on stderr when the CLI and the " +
+			"backplane versions are too far apart (supported: same minor " +
+			"version, or the CLI one minor version behind).\n\n" +
 			"Split-DNS escape hatch: on workstations where the system resolver " +
 			"can reach the backplane host but returns NXDOMAIN for the Keycloak " +
 			"host (a common VPN split-DNS quirk), pass --resolve " +
@@ -220,6 +225,7 @@ func newLoginCmd() *cobra.Command {
 			}
 
 			fmt.Fprintf(humanOut, "Logged in to %s; token stored in %s.\n", backplaneURL, store.Describe())
+			printVersionSkew(parentCtx, httpClient, backplaneURL, errOut)
 			printMigrationNudge(humanOut)
 
 			// --print-token contract: the freshly minted bearer is the
@@ -470,10 +476,15 @@ func stdoutPrompter(w io.Writer) auth.DeviceFlowPrompter {
 	return func(_ context.Context, resp *oauth2.DeviceAuthResponse) error {
 		fmt.Fprintf(w, "\nTo authenticate, open the following URL:\n  %s\n\nAnd enter the code:\n  %s\n\n",
 			resp.VerificationURI, resp.UserCode)
-		// Print without a trailing newline so the spinner-less wait
-		// for the IdP doesn't leave the cursor mid-line if the
-		// operator inspects the terminal during polling.
-		fmt.Fprintf(w, "Waiting for authorisation…\n")
+		fmt.Fprint(w, "Waiting for authorisation…")
+		// Tell the operator how long the code lives. Keycloak's
+		// default is ten minutes; a person who knows the deadline can
+		// decide whether to hurry or to rerun the login.
+		if !resp.Expiry.IsZero() {
+			fmt.Fprintf(w, " The code is valid for %s, until %s.",
+				time.Until(resp.Expiry).Round(time.Second), resp.Expiry.Local().Format("15:04"))
+		}
+		fmt.Fprintln(w)
 		return nil
 	}
 }

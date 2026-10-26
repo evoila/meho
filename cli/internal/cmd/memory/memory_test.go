@@ -406,31 +406,6 @@ func TestConfirmPromptYesNo(t *testing.T) {
 	}
 }
 
-func TestScopeFromKindStripsPrefix(t *testing.T) {
-	if got := scopeFromKind("memory-user-tenant"); got != "user-tenant" {
-		t.Errorf("scopeFromKind: got %q", got)
-	}
-	if got := scopeFromKind("kb-entry"); got != "kb-entry" {
-		t.Errorf("non-memory kind should round-trip; got %q", got)
-	}
-}
-
-func TestSlugFromSourceIDStripsSegments(t *testing.T) {
-	// The source_id encoding the backend uses for memory rows is
-	// `<scope>:<user_sub or target>:<slug>` for user/target-scoped
-	// and `<scope>:<slug>` for tenant-scoped. The CLI's renderer
-	// only needs the slug (the last segment).
-	if got := slugFromSourceID("user-tenant:abc-def-123:wine-preference"); got != "wine-preference" {
-		t.Errorf("slugFromSourceID 3-segment: got %q", got)
-	}
-	if got := slugFromSourceID("tenant:team-runbook"); got != "team-runbook" {
-		t.Errorf("slugFromSourceID 2-segment: got %q", got)
-	}
-	if got := slugFromSourceID("plain"); got != "plain" {
-		t.Errorf("slugFromSourceID no-segment: got %q", got)
-	}
-}
-
 func TestPluralisePtrRendersNone(t *testing.T) {
 	if got := pluralisePtr(nil); got != "(none)" {
 		t.Errorf("nil pointer should render '(none)'; got %q", got)
@@ -521,23 +496,24 @@ func TestBuildForgetParamsForwardsTarget(t *testing.T) {
 	}
 }
 
-func TestBuildRecallQueryBodyPinsMemorySource(t *testing.T) {
-	got := buildRecallQueryBody(recallOptions{QueryArg: "wine"}, "")
-	if got.Source == nil || *got.Source != "memory" {
-		t.Errorf("expected source=memory pinned; got %+v", got.Source)
+func TestBuildRecallQueryBodyDefaultsToAllScopes(t *testing.T) {
+	got := buildRecallQueryBody(recallOptions{QueryArg: "wine"}, nil)
+	if got.Query != "wine" {
+		t.Errorf("expected query forwarded; got %q", got.Query)
 	}
-	if got.Kind != nil {
-		t.Errorf("expected nil Kind when no kindFilter; got %+v", got.Kind)
+	if got.Scope != nil {
+		t.Errorf("expected nil Scope so the server searches every visible scope; got %+v", got.Scope)
 	}
 	if got.Limit != nil {
 		t.Errorf("expected nil Limit when LimitArg=0; got %+v", got.Limit)
 	}
 }
 
-func TestBuildRecallQueryBodyForwardsKindAndLimit(t *testing.T) {
-	got := buildRecallQueryBody(recallOptions{QueryArg: "wine", LimitArg: 25}, "memory-user-tenant")
-	if got.Kind == nil || *got.Kind != "memory-user-tenant" {
-		t.Errorf("expected kind forwarded; got %+v", got.Kind)
+func TestBuildRecallQueryBodyForwardsScopeAndLimit(t *testing.T) {
+	scope := ScopeUserTenant
+	got := buildRecallQueryBody(recallOptions{QueryArg: "wine", LimitArg: 25}, &scope)
+	if got.Scope == nil || *got.Scope != ScopeUserTenant {
+		t.Errorf("expected scope forwarded; got %+v", got.Scope)
 	}
 	if got.Limit == nil || *got.Limit != 25 {
 		t.Errorf("expected limit=25; got %+v", got.Limit)
@@ -1164,33 +1140,50 @@ func TestRunRecallRequiresExactlyOneMode(t *testing.T) {
 	}
 }
 
-func TestRunRecallByQueryHappyPath(t *testing.T) {
-	var bodyJSON map[string]any
+// fakeMemorySearchHit is one bounded search hit: a snippet and the
+// locator, no full body.
+func fakeMemorySearchHit() api.MemoryEntrySearchHit {
+	entry := fakeMemoryEntry(ScopeUserTenant, "wine", "I prefer dry red wines.")
+	locator := "meho://memory/id/" + entry.Id.String()
+	return api.MemoryEntrySearchHit{
+		Rank:      1,
+		Id:        entry.Id,
+		Scope:     entry.Scope,
+		Slug:      entry.Slug,
+		CreatedAt: entry.CreatedAt,
+		UpdatedAt: entry.UpdatedAt,
+		Snippet:   entry.Body,
+		BodyChars: len(entry.Body),
+		Locator:   &locator,
+	}
+}
+
+func fakeMemorySearchServer(t *testing.T, bodyJSON *map[string]any) *httptest.Server {
+	t.Helper()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/retrieve", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/memory/search", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST; got %s", r.Method)
+		}
 		body, _ := io.ReadAll(r.Body)
-		if err := json.Unmarshal(body, &bodyJSON); err != nil {
+		if err := json.Unmarshal(body, bodyJSON); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		hit := api.RetrievalHit{
-			DocumentId:  uuidFromString(t, "00000000-0000-0000-0000-0000000000aa"),
-			TenantId:    uuidFromString(t, "00000000-0000-0000-0000-0000000000bb"),
-			Source:      "memory",
-			SourceId:    "user-tenant:abc:wine",
-			Kind:        "memory-user-tenant",
-			Body:        "I prefer dry red wines.",
-			DocMetadata: map[string]interface{}{},
-			FusedScore:  0.9,
-			CreatedAt:   time.Now().UTC(),
-			UpdatedAt:   time.Now().UTC(),
-		}
-		_ = json.NewEncoder(w).Encode(api.RetrieveResponse{
-			Hits:            []api.RetrievalHit{hit},
-			QueryDurationMs: 12.5,
+		_ = json.NewEncoder(w).Encode(api.MemorySearchResponse{
+			Hits: []api.MemoryEntrySearchHit{fakeMemorySearchHit()},
 		})
 	})
-	srv := httptest.NewServer(mux)
+	mux.HandleFunc("/api/v1/retrieve", func(w http.ResponseWriter, _ *http.Request) {
+		t.Errorf("recall --query must not call the generic retrieve route")
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	return httptest.NewServer(mux)
+}
+
+func TestRunRecallByQueryHappyPath(t *testing.T) {
+	var bodyJSON map[string]any
+	srv := fakeMemorySearchServer(t, &bodyJSON)
 	defer srv.Close()
 	seedXDGAndToken(t, srv.URL)
 
@@ -1199,22 +1192,59 @@ func TestRunRecallByQueryHappyPath(t *testing.T) {
 	err := runRecall(cmd, recallOptions{
 		QueryArg:          "wine",
 		ScopeFilterArg:    "user-tenant",
+		LimitArg:          5,
 		BackplaneOverride: srv.URL,
 	})
 	if err != nil {
 		t.Fatalf("runRecall --query: %v; stderr=%s", err, stderr.String())
 	}
-	if got := bodyJSON["source"]; got != "memory" {
-		t.Errorf("expected source=memory; got %+v", bodyJSON)
-	}
-	if got := bodyJSON["kind"]; got != "memory-user-tenant" {
-		t.Errorf("expected kind=memory-user-tenant; got %+v", bodyJSON)
+	if got := bodyJSON["scope"]; got != "user-tenant" {
+		t.Errorf("expected scope=user-tenant; got %+v", bodyJSON)
 	}
 	if got := bodyJSON["query"]; got != "wine" {
 		t.Errorf("expected query forwarded; got %+v", bodyJSON)
 	}
-	if !strings.Contains(stdout.String(), "wine") {
-		t.Errorf("expected slug 'wine' in rendered table; got %q", stdout.String())
+	if got := bodyJSON["limit"]; got != float64(5) {
+		t.Errorf("expected limit=5; got %+v", bodyJSON)
+	}
+	if _, ok := bodyJSON["source"]; ok {
+		t.Errorf("memory search body must not carry source; got %+v", bodyJSON)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "wine") || !strings.Contains(out, "user-tenant") {
+		t.Errorf("expected slug and scope in rendered table; got %q", out)
+	}
+	// The snippet is rendered; rank is an order, so no score column.
+	if !strings.Contains(out, "I prefer dry red wines.") || strings.Contains(out, "SCORE") {
+		t.Errorf("expected snippet and no score column; got %q", out)
+	}
+}
+
+func TestRunRecallByQueryDefaultsToAllScopes(t *testing.T) {
+	var bodyJSON map[string]any
+	srv := fakeMemorySearchServer(t, &bodyJSON)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString(""))
+	if err := runRecall(cmd, recallOptions{
+		QueryArg: "wine", JSONOut: true, BackplaneOverride: srv.URL,
+	}); err != nil {
+		t.Fatalf("runRecall --query --json: %v; stderr=%s", err, stderr.String())
+	}
+	if _, ok := bodyJSON["scope"]; ok {
+		t.Errorf("no --scope must leave scope off the wire; got %+v", bodyJSON)
+	}
+	if _, ok := bodyJSON["limit"]; ok {
+		t.Errorf("no --limit must leave limit off the wire; got %+v", bodyJSON)
+	}
+	var decoded api.MemorySearchResponse
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatalf("--json output is not a MemorySearchResponse: %v; out=%q", err, stdout.String())
+	}
+	if len(decoded.Hits) != 1 || decoded.Hits[0].Slug != "wine" {
+		t.Errorf("unexpected --json hits: %+v", decoded.Hits)
 	}
 }
 
@@ -1261,10 +1291,10 @@ func TestRunRecallByKey200WithoutPayloadSurfacesUnexpected(t *testing.T) {
 }
 
 // TestRunRecallByQuery200WithoutPayloadSurfacesUnexpected pins the
-// nil-guard on the retrieve path.
+// nil-guard on the memory search path.
 func TestRunRecallByQuery200WithoutPayloadSurfacesUnexpected(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/retrieve", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v1/memory/search", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"hits":[]}`)) // no content-type → JSON200 nil
 	})
 	srv := httptest.NewServer(mux)
@@ -1279,7 +1309,7 @@ func TestRunRecallByQuery200WithoutPayloadSurfacesUnexpected(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected nil-guard error on missing payload")
 	}
-	if !strings.Contains(stderr.String(), "HTTP 200 without a retrieve response payload") {
+	if !strings.Contains(stderr.String(), "HTTP 200 without a memory search payload") {
 		t.Errorf("expected nil-guard message; got %q", stderr.String())
 	}
 }

@@ -46,8 +46,8 @@ func newDhcpLeasesCmd() *cobra.Command {
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho pfsense dhcp leases --target pfsense-hetzner-dc\n" +
-			"  meho pfsense dhcp leases --target pfsense-hetzner-dc --json | jq '.result.rows[]'",
+		Example: "  meho pfsense dhcp leases --target fw-01\n" +
+			"  meho pfsense dhcp leases --target fw-01 --json | jq '.result.rows[]'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

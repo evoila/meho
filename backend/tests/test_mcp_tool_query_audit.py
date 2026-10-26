@@ -33,6 +33,7 @@ substrate has its own coverage in
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
@@ -41,11 +42,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from meho_backplane.audit_query import (
+    AuditQueryFilters,
     AuditQueryResult,
     InvalidCursorError,
     UnsupportedFilterError,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.db.models import AuditEventClass
 from meho_backplane.mcp.registry import get_tool
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from tests.mcp_test_fixtures import (
@@ -373,6 +376,7 @@ def test_tools_call_handler_returns_result_model_dump(
         agent_session_id=None,
         work_ref=None,
         policy_decision=None,
+        event_class="legacy_request",
         broadcast_event_id=None,
     )
     mock_query = AsyncMock(
@@ -472,9 +476,7 @@ def test_tools_call_unsupported_filter_returns_invalid_params(
     """Substrate-raised :class:`UnsupportedFilterError` maps to ``-32602``."""
     client, _op = client_with_operator
     mock_query = AsyncMock(
-        side_effect=UnsupportedFilterError(
-            "parent_audit_id filter not supported in v0.2 — column lands with G0.6-T7 (#398)",
-        ),
+        side_effect=UnsupportedFilterError("example_column filter not supported"),
     )
     with patch(_PATCH_TARGET, new=mock_query):
         response = post_mcp(
@@ -483,17 +485,143 @@ def test_tools_call_unsupported_filter_returns_invalid_params(
                 "jsonrpc": "2.0",
                 "id": 22,
                 "method": "tools/call",
+                "params": {"name": "query_audit", "arguments": {}},
+            },
+        )
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert "example_column" in body["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_tools_call_parent_audit_id_is_passed_to_the_substrate(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """#4030: ``parent_audit_id`` is a normal filter, scoped to the JWT tenant."""
+    client, op = client_with_operator
+    mock_query = AsyncMock(return_value=_empty_result())
+    parent_id = UUID("11111111-1111-1111-1111-111111111111")
+    with patch(_PATCH_TARGET, new=mock_query):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 23,
+                "method": "tools/call",
+                "params": {
+                    "name": "query_audit",
+                    "arguments": {"parent_audit_id": str(parent_id)},
+                },
+            },
+        )
+    assert "error" not in response.json()
+    filters = mock_query.await_args.args[0]
+    assert filters.parent_audit_id == parent_id
+    assert mock_query.await_args.kwargs["tenant_id"] == op.tenant_id
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_tools_call_event_class_is_passed_to_the_substrate(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """#4807: ``event_class`` passes the schema and reaches the substrate.
+
+    The ``result_status`` help text tells the agent to add ``event_class``
+    to pick one kind of row. The substrate applies it as an exact match on
+    ``audit_log.event_class``, so only rows of that class come back.
+    """
+    client, op = client_with_operator
+    mock_query = AsyncMock(return_value=_empty_result())
+    with patch(_PATCH_TARGET, new=mock_query):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 24,
+                "method": "tools/call",
                 "params": {
                     "name": "query_audit",
                     "arguments": {
-                        "parent_audit_id": "11111111-1111-1111-1111-111111111111",
+                        "result_status": "pending",
+                        "event_class": "operation_execution",
                     },
                 },
             },
         )
     body = response.json()
+    assert "error" not in body, body
+    assert body["result"]["isError"] is False
+    filters = mock_query.await_args.args[0]
+    assert filters.event_class is AuditEventClass.OPERATION_EXECUTION
+    assert filters.result_status == "pending"
+    assert mock_query.await_args.kwargs["tenant_id"] == op.tenant_id
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_tools_call_unknown_event_class_returns_invalid_params(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A value outside the closed ``AuditEventClass`` set fails at the schema."""
+    client, _op = client_with_operator
+    mock_query = AsyncMock(return_value=_empty_result())
+    with patch(_PATCH_TARGET, new=mock_query):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 25,
+                "method": "tools/call",
+                "params": {
+                    "name": "query_audit",
+                    "arguments": {"event_class": "nope"},
+                },
+            },
+        )
+    body = response.json()
     assert body["error"]["code"] == INVALID_PARAMS
-    assert "parent_audit_id" in body["error"]["message"]
+    mock_query.assert_not_awaited()
+
+
+def test_event_class_enum_is_built_from_audit_event_class() -> None:
+    """The schema enum is the ``AuditEventClass`` values plus null, in order."""
+    definition, _handler = get_tool("query_audit")
+    schema = definition.inputSchema["properties"]["event_class"]
+    assert schema["enum"] == [*(c.value for c in AuditEventClass), None]
+    assert schema["type"] == ["string", "null"]
+
+
+def test_every_filter_named_in_the_help_text_is_in_the_input_schema() -> None:
+    """#4807: a substrate filter the help text names must be accepted.
+
+    The texts of ``query_audit`` (tool description and every field
+    description) may tell the caller to add another filter. Each such
+    name must be a property of the input schema, or the call fails with
+    ``-32602`` after the agent followed the advice.
+    """
+    definition, _handler = get_tool("query_audit")
+    properties = definition.inputSchema["properties"]
+    texts = [definition.description, *(p["description"] for p in properties.values())]
+    named = {
+        token
+        for text in texts
+        for token in re.findall(r"`([a-z_]+)`", text)
+        if token in AuditQueryFilters.model_fields
+    }
+    assert named, "expected the help text to name at least one filter"
+    missing = named - set(properties)
+    assert not missing, f"help text names filters the schema refuses: {sorted(missing)}"
 
 
 @pytest.mark.parametrize(

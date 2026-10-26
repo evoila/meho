@@ -21,6 +21,11 @@ if [ -f "$config_file" ]; then
   # shellcheck disable=SC1090
   . "$config_file"
 fi
+# The login guard (lib/login-guard.mjs) is a separate node process and reads
+# only exported variables, so a value set in the config file must be exported.
+if [ -n "${MEHO_MCP_LOGIN_TIMEOUT:-}" ]; then
+  export MEHO_MCP_LOGIN_TIMEOUT
+fi
 
 # Resolve the backplane MCP endpoint. MEHO_MCP_URL wins; otherwise derive
 # it from MEHO_INSTANCE by appending /mcp.
@@ -55,19 +60,28 @@ fi
 # metadata matches what the backplane's token audience mappers expect.
 client_id="${MEHO_MCP_CLIENT_ID:-meho-mcp}"
 
-# OAuth scope metadata presented during the handshake. The default is the
-# working surface (mcp:read mcp:execute). MEHO_MCP_SCOPES lets an operator
-# DELIBERATELY request an elevated surface — append mcp:admin to reach the
-# operator planes — never by default. Requesting a scope the realm does not
-# offer degrades to the default surface: per OAuth 2.1 (RFC 6749 §3.3) the
-# authorization server may ignore an ungranted scope, and Keycloak drops a
-# scope that is not an assigned default/optional client scope, so the token
-# never carries it and the elevated tools simply do not list (realm
-# prerequisite tracked as evoila-bosnia/claude-rdc-hetzner-dc#2734). An
-# empty or whitespace-only value falls back to the default.
-scopes="${MEHO_MCP_SCOPES:-mcp:read mcp:execute}"
+# OAuth scopes requested at login. The default is the working surface
+# (mcp:read mcp:execute) plus offline_access.
+#
+# offline_access makes the login last. Without it, Keycloak issues a normal
+# refresh token, which ends at the realm's SSO idle limit (30 minutes by
+# default). The next tool call after that needs a new browser login. With
+# it, Keycloak issues an offline refresh token, which ends at the offline
+# idle limit instead. The realm docs recommend 48 hours on the meho-mcp
+# client (docs-site/install/keycloak-realm.md).
+#
+# MEHO_MCP_SCOPES replaces the whole list, as written. Use it to add
+# mcp:admin for the operator planes; keep offline_access in the list to
+# keep the long login. An empty or whitespace-only value uses the default.
+#
+# Keycloak refuses a login that asks for a scope the meho-mcp client does
+# not offer as a default or optional client scope: it answers invalid_scope
+# and issues no token. It does not drop the scope silently. So every scope
+# in this list must be assigned to meho-mcp on the realm.
+default_scopes="mcp:read mcp:execute offline_access"
+scopes="${MEHO_MCP_SCOPES:-$default_scopes}"
 if [ -z "${scopes//[[:space:]]/}" ]; then
-  scopes="mcp:read mcp:execute"
+  scopes="$default_scopes"
 fi
 
 # Vendor mcp-remote from the committed lockfile instead of resolving it fresh
@@ -77,8 +91,8 @@ fi
 # resolve mcp-remote's *transitive* graph against upstream semver ranges with
 # no committed integrity check. `npm ci` instead installs the exact tree
 # pinned in package-lock.json — a transitive version cannot change without a
-# reviewed lockfile update (evoila-bosnia/meho-internal#309; mirrors the
-# desktop .mcpb bundle's npm-ci vendoring).
+# reviewed lockfile update (mirrors the desktop .mcpb bundle's npm-ci
+# vendoring).
 if ! command -v npm >/dev/null 2>&1; then
   {
     echo "meho plugin: 'npm' was not found on PATH. It is required to vendor"
@@ -145,10 +159,14 @@ if [ -z "$entry" ] || [ ! -f "$entry" ]; then
   exit 1
 fi
 
-# Hand mcp-remote the same argv the previous `npx` invocation did: the URL
-# plus the static-OAuth client id and scope metadata. mcp-remote reads
-# process.argv.slice(2), so `node <entry> <url> --flags...` preserves the
-# exact contract. mcp-remote owns this process's stdio from here.
-exec node "$entry" "$url" \
+# Run mcp-remote through the login guard (lib/login-guard.mjs, #3961). The
+# guard loads the vendored entry in the same process and hands it the same
+# argv as before: the URL plus the static-OAuth client id and scope
+# metadata. On top, it stops a connect that does not finish within
+# MEHO_MCP_LOGIN_TIMEOUT seconds (default 300), so an unfinished browser
+# login never holds the callback port forever. And when the login expires
+# during a session, the failed call gets a clear message that says what to
+# do. mcp-remote owns this process's stdio from here.
+exec node "$plugin_root/lib/login-guard.mjs" "$entry" "$url" \
   --static-oauth-client-info "{\"client_id\": \"$client_id\"}" \
   --static-oauth-client-metadata "{\"scope\": \"$scopes\"}"

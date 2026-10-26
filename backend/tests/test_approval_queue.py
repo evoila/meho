@@ -45,6 +45,7 @@ import pytest
 from cryptography.fernet import Fernet
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -64,6 +65,9 @@ from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
     ApprovalRequestExpiredError,
+    DelegatedDecisionForbiddenError,
+    DelegatedReasonInvalidError,
+    Delegation,
     NonHumanApprovalError,
     ParamsMismatchError,
     SelfApprovalForbiddenError,
@@ -72,7 +76,9 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
     create_pending_request,
     expire_stale_requests,
+    get_decision_delegation,
     list_pending,
+    parse_delegation,
     reject_request,
     resume_dispatch_after_approval,
 )
@@ -705,6 +711,9 @@ async def test_approve_request_writes_decision_audit_row(session: AsyncSession) 
     assert len(decision_rows) == 1
     assert decision_rows[0].status_code == 200
     assert decision_rows[0].payload["decision"] == "approved"
+    # #3733: the park is a gate decision; the approve is an approval decision.
+    assert request_rows[0].event_class == "policy_decision"
+    assert decision_rows[0].event_class == "approval_decision"
 
 
 @pytest.mark.asyncio
@@ -914,34 +923,20 @@ async def test_approve_request_params_none_skips_hash_check(
         row = await approve_request(s2, pending.id, operator=operator, params=None)
         await s2.commit()
         assert row.status == ApprovalRequestStatus.APPROVED.value
-        # The transient audit_id attr is exposed so callers can publish the
-        # broadcast event AFTER commit, with the real audit row's id.
+        # The transient audit_id attr is exposed so callers can find the
+        # real decision audit row AFTER commit.
         assert isinstance(row._audit_id, uuid.UUID)  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
-async def test_publish_approval_event_audit_id_matches_decision_row(
+async def test_approve_request_audit_id_matches_decision_row(
     session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The broadcast event's ``audit_id`` is the decision row's real id.
+    """``request._audit_id`` is the decision audit row's real id.
 
-    BroadcastEvent.audit_id is documented as the FK to ``audit_log.id``; a
-    subscriber that wants the full row queries audit_log by this id. The
-    helper must therefore receive the audit row's actual id (threaded
-    via ``request._audit_id``) — not a fresh UUID. This test stubs the
-    broadcast publisher, exercises approve_request + the publish call,
-    and asserts the published event's audit_id equals the audit row's
-    primary key.
+    Callers use this id to find the decision row after commit, so it must
+    be the audit row's actual primary key — not a fresh UUID.
     """
-    captured: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        captured.append(event)
-
-    monkeypatch.setattr("meho_backplane.broadcast.publisher.publish_event", _capture)
-    from meho_backplane.operations.approval_queue import publish_approval_event
-
     requester = _make_operator(sub="requester-sub")
     operator = _make_operator(sub="reviewer-sub")
     original_params = {"x": 1}
@@ -961,18 +956,8 @@ async def test_publish_approval_event_audit_id_matches_decision_row(
         row = await approve_request(s2, pending.id, operator=operator, params=None)
         await s2.commit()
         decision_audit_id: uuid.UUID = row._audit_id  # type: ignore[attr-defined]
-        await publish_approval_event(
-            tenant_id=operator.tenant_id,
-            request=row,
-            decision="approved",
-            principal_sub=operator.sub,
-            audit_id=decision_audit_id,
-        )
 
-    # The event's audit_id must be the real decision audit row's id.
-    assert len(captured) == 1
-    assert captured[0].audit_id == decision_audit_id
-    # And the audit_log row at that id must exist.
+    # The audit_log row at that id must exist.
     async with get_sessionmaker()() as s3:
         audited = await s3.get(AuditLog, decision_audit_id)
         assert audited is not None
@@ -1695,29 +1680,15 @@ async def test_expire_stale_requests_respects_tenant_isolation(
 
 
 @pytest.mark.asyncio
-async def test_expire_stale_requests_publishes_approval_expired_broadcast(
+async def test_expire_stale_requests_exposes_decision_audit_id(
     session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Caller publishes one ``approval.expired`` event per expired row with FK audit_id.
+    """Each expired row exposes the real expiry decision audit row id.
 
-    #1114 follow-up to T4: the fourth lifecycle transition (expiry) now
-    surfaces on the broadcast feed alongside pending / approved /
-    rejected. The function exposes ``request._audit_id`` (the real
-    decision row's primary key) so the caller can publish **after
-    commit** — same publish-after-commit invariant the other three
-    transitions follow. The broadcast event's ``audit_id`` field is
-    documented as the FK to ``audit_log.id``; subscribers that want the
-    full row query audit_log by this id.
+    #1114 follow-up to T4: expiry is the fourth lifecycle transition. The
+    function exposes ``request._audit_id`` (the real decision row's
+    primary key) so the caller can find that row **after commit**.
     """
-    captured: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        captured.append(event)
-
-    monkeypatch.setattr("meho_backplane.broadcast.publisher.publish_event", _capture)
-    from meho_backplane.operations.approval_queue import publish_approval_event
-
     operator = _make_operator()
     past = datetime.now(UTC) - timedelta(hours=1)
 
@@ -1741,25 +1712,6 @@ async def test_expire_stale_requests_publishes_approval_expired_broadcast(
     assert expired[0].id == pending.id
     decision_audit_id: uuid.UUID = expired[0]._audit_id  # type: ignore[attr-defined]
     assert isinstance(decision_audit_id, uuid.UUID)
-
-    # Publish AFTER commit, mirroring the dispatcher / REST / MCP sites.
-    for row in expired:
-        await publish_approval_event(
-            tenant_id=operator.tenant_id,
-            request=row,
-            decision="expired",
-            principal_sub=operator.sub,
-            audit_id=row._audit_id,  # type: ignore[attr-defined]
-        )
-
-    # Exactly one ``approval.expired`` event landed with the FK audit_id.
-    assert len(captured) == 1
-    event = captured[0]
-    assert event.op_id == "approval.expired"
-    assert event.audit_id == decision_audit_id
-    assert event.tenant_id == operator.tenant_id
-    assert event.payload["decision"] == "expired"
-    assert event.payload["approval_request_id"] == str(pending.id)
 
     # The audit_log row at that id exists and is the expiry decision row.
     async with get_sessionmaker()() as fresh:
@@ -2175,7 +2127,6 @@ async def test_pause_approve_resume_execute(
     """
     from unittest.mock import AsyncMock
 
-    import meho_backplane.operations._audit as audit_module
     from meho_backplane.connectors.base import Connector
     from meho_backplane.connectors.registry import clear_registry, register_connector_v2
     from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
@@ -2185,18 +2136,10 @@ async def test_pause_approve_resume_execute(
         reset_dispatcher_caches,
     )
 
-    # Stub out broadcast.
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     get_settings.cache_clear()
-
-    captured: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        captured.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
 
     reset_dispatcher_caches()
     clear_registry()
@@ -2315,7 +2258,6 @@ async def test_work_ref_inherited_through_park_approve_redispatch(
     """
     from unittest.mock import AsyncMock
 
-    import meho_backplane.operations._audit as audit_module
     from meho_backplane.connectors.base import Connector
     from meho_backplane.connectors.registry import clear_registry, register_connector_v2
     from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
@@ -2330,11 +2272,6 @@ async def test_work_ref_inherited_through_park_approve_redispatch(
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     get_settings.cache_clear()
-
-    async def _capture(event: Any) -> None:
-        pass
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
 
     reset_dispatcher_caches()
     clear_registry()
@@ -2464,7 +2401,6 @@ async def test_human_requires_approval_queues_not_denies(
     """
     from unittest.mock import AsyncMock
 
-    import meho_backplane.operations._audit as audit_module
     from meho_backplane.connectors.base import Connector
     from meho_backplane.connectors.registry import clear_registry, register_connector_v2
     from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
@@ -2480,11 +2416,6 @@ async def test_human_requires_approval_queues_not_denies(
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     get_settings.cache_clear()
-
-    async def _capture(event: Any) -> None:
-        pass
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
 
     reset_dispatcher_caches()
     clear_registry()
@@ -2622,7 +2553,6 @@ async def test_pause_reject_abort(
     """
     from unittest.mock import AsyncMock
 
-    import meho_backplane.operations._audit as audit_module
     from meho_backplane.connectors.base import Connector
     from meho_backplane.connectors.registry import clear_registry, register_connector_v2
     from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
@@ -2636,11 +2566,6 @@ async def test_pause_reject_abort(
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     get_settings.cache_clear()
-
-    async def _capture(event: Any) -> None:
-        pass
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
 
     reset_dispatcher_caches()
     clear_registry()
@@ -2731,30 +2656,23 @@ async def test_pause_reject_abort(
 # #1503 — parked direct operator op approved via /decide or MCP by-id is
 # re-dispatched using the stored params (execute-after-approve on every
 # surface, not only REST /approve). Must NOT double-execute an agent-run
-# request (the in-process agent runtime resumes those off the broadcast).
+# request (the in-process agent runtime resumes those itself).
 # ---------------------------------------------------------------------------
 
 
 async def _register_recording_requires_approval_op(monkeypatch: pytest.MonkeyPatch) -> None:
     """Register a ``requires_approval`` typed op backed by the recording handler.
 
-    Shared setup for the #1503 surface tests: a clean registry, a stubbed
-    broadcast publisher, and one ``rectest.write`` op whose handler appends
-    to ``_RECORDED_EXECUTIONS`` so a test can assert the approved op ran
-    exactly once.
+    Shared setup for the #1503 surface tests: a clean registry and one
+    ``rectest.write`` op whose handler appends to ``_RECORDED_EXECUTIONS``
+    so a test can assert the approved op ran exactly once.
     """
     from unittest.mock import AsyncMock
 
-    import meho_backplane.operations._audit as audit_module
     from meho_backplane.connectors.base import Connector
     from meho_backplane.connectors.registry import register_connector_v2
     from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
     from meho_backplane.operations import register_typed_operation
-
-    async def _capture(event: Any) -> None:
-        pass
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
 
     class _RecConnector(Connector):
         product = "rectest"
@@ -3019,7 +2937,6 @@ async def test_proposed_effect_carries_catalog_safety_level(
     """
     from unittest.mock import AsyncMock
 
-    import meho_backplane.operations._audit as audit_module
     from meho_backplane.connectors.base import Connector
     from meho_backplane.connectors.registry import clear_registry, register_connector_v2
     from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
@@ -3028,11 +2945,6 @@ async def test_proposed_effect_carries_catalog_safety_level(
         register_typed_operation,
         reset_dispatcher_caches,
     )
-
-    async def _capture(event: Any) -> None:
-        pass
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
 
     reset_dispatcher_caches()
     clear_registry()
@@ -3286,7 +3198,6 @@ async def test_mcp_session_lineage_park_approve_resume_replays_as_tree(
 
     import structlog
 
-    import meho_backplane.operations._audit as audit_module
     from meho_backplane.audit_query.replay import replay_session
     from meho_backplane.connectors.base import Connector
     from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -3306,11 +3217,6 @@ async def test_mcp_session_lineage_park_approve_resume_replays_as_tree(
     monkeypatch.setenv("MCP_REQUIRE_SESSION_ID", "true")
     get_settings.cache_clear()
     assert mcp_session_id_capture_mode() == "enforced"
-
-    async def _capture(event: Any) -> None:
-        pass
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
 
     reset_dispatcher_caches()
     clear_registry()
@@ -3598,3 +3504,293 @@ async def test_resume_dispatch_after_approval_wins_free_claim_and_stamps(
     assert result.status == "ok"
     assert dispatch_calls == 1
     assert await _reload_resumed_at(request.id) is not None
+
+
+# ---------------------------------------------------------------------------
+# #3692 -- delegated-decision reason trailers
+# ---------------------------------------------------------------------------
+
+_DELEGATED_REASON = (
+    "Ran the delete after sign-off in the change window.\n"
+    "\n"
+    "Instructed-by: lead@example.com\n"
+    'Instruction: "please approve the cleanup tonight"\n'
+    "Refs: #12, CHG-9"
+)
+
+
+def test_parse_delegation_returns_none_for_ordinary_reason() -> None:
+    assert parse_delegation("") is None
+    assert parse_delegation("rollback window approved") is None
+    # A key that only looks similar is not the marker.
+    assert parse_delegation("ok\n\nInstructed: lead@example.com") is None
+
+
+def test_parse_delegation_parses_trailer_block() -> None:
+    assert parse_delegation(_DELEGATED_REASON) == Delegation(
+        instructed_by="lead@example.com",
+        instruction="please approve the cleanup tonight",
+        refs=("#12", "CHG-9"),
+    )
+
+
+def test_parse_delegation_keys_are_case_insensitive_and_extra_keys_ignored() -> None:
+    reason = (
+        "INSTRUCTED-BY: lead@example.com\n"
+        "instruction: approve it\n"
+        "Signed-off-by: someone\n"
+        "refs:  #7 ,"
+    )
+    assert parse_delegation(reason) == Delegation(
+        instructed_by="lead@example.com", instruction="approve it", refs=("#7",)
+    )
+
+
+def test_parse_delegation_is_deterministic() -> None:
+    assert parse_delegation(_DELEGATED_REASON) == parse_delegation(_DELEGATED_REASON)
+
+
+@pytest.mark.parametrize(
+    ("reason", "needle"),
+    [
+        ("ok\n\nInstructed-by: lead@example.com\nRefs: #12", "Instruction"),
+        ('ok\n\nInstructed-by: lead@example.com\nInstruction: "go"', "Refs"),
+        ('ok\n\nInstructed-by: lead@example.com\nInstruction: ""\nRefs: #1', "Instruction"),
+        ('ok\n\nInstructed-by:\nInstruction: "go"\nRefs: #1', "Instructed-by"),
+        ('ok\n\nInstructed-by: a\nInstruction: "go"\nRefs: , ,', "Refs"),
+        # Marker not inside the final block.
+        ('Instructed-by: a\nInstruction: "go"\nRefs: #1\n\nmore words', "one block"),
+        # No blank line between the rationale and the trailers.
+        ('Ran it.\nInstructed-by: a\nInstruction: "go"\nRefs: #1', "one block"),
+        (
+            'ok\n\nInstructed-by: a\nInstructed-by: b\nInstruction: "go"\nRefs: #1',
+            "more than once",
+        ),
+    ],
+)
+def test_parse_delegation_rejects_incomplete_block(reason: str, needle: str) -> None:
+    with pytest.raises(DelegatedReasonInvalidError) as excinfo:
+        parse_delegation(reason)
+    assert needle in str(excinfo.value)
+
+
+@pytest.fixture
+def allow_delegation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mark the deployment lab-class so delegated decisions are allowed (#3693)."""
+    monkeypatch.setenv("APPROVAL_ALLOW_DELEGATED_DECISION", "true")
+    get_settings.cache_clear()
+
+
+async def _park_for_delegation(session: AsyncSession) -> uuid.UUID:
+    pending = await create_pending_request(
+        session,
+        operator=_make_operator(sub="agent-sub"),
+        connector_id="vault-1.x",
+        op_id="vault.kv.put",
+        target=None,
+        params={"name": "test"},
+        params_hash=compute_params_hash({"name": "test"}),
+    )
+    await session.commit()
+    return pending.id
+
+
+async def _decision_payloads() -> list[dict[str, Any]]:
+    async with get_sessionmaker()() as s:
+        rows = (
+            (await s.execute(select(AuditLog).where(AuditLog.path == "approval.decision")))
+            .scalars()
+            .all()
+        )
+    return [row.payload for row in rows]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["approved", "rejected"])
+@pytest.mark.usefixtures("allow_delegation")
+async def test_delegated_decision_writes_structured_block_and_warns(
+    session: AsyncSession, decision: str
+) -> None:
+    """A valid delegated decision stores the block on the audit row and logs a WARNING."""
+    request_id = await _park_for_delegation(session)
+    reviewer = _make_operator(sub="reviewer-sub")
+
+    with capture_logs() as captured:
+        async with get_sessionmaker()() as s2:
+            if decision == "approved":
+                row = await approve_request(
+                    s2, request_id, operator=reviewer, reason=_DELEGATED_REASON
+                )
+            else:
+                row = await reject_request(
+                    s2, request_id, operator=reviewer, reason=_DELEGATED_REASON
+                )
+            await s2.commit()
+
+    assert row.status == decision
+    # The approver is still the reviewer of record.
+    assert row.reviewed_by == "reviewer-sub"
+    (payload,) = await _decision_payloads()
+    assert payload["reason"] == _DELEGATED_REASON
+    assert payload["delegation"]["instructed_by"] == "lead@example.com"
+    assert payload["delegation"] == {
+        "instructed_by": "lead@example.com",
+        "instruction": "please approve the cleanup tonight",
+        "refs": ["#12", "CHG-9"],
+    }
+    events = [e for e in captured if e["event"] == "approval_delegated_decision"]
+    assert len(events) == 1
+    assert events[0]["log_level"] == "warning"
+    assert events[0]["instructed_by"] == "lead@example.com"
+    assert events[0]["reviewed_by"] == "reviewer-sub"
+    assert events[0]["decision"] == decision
+
+    async with get_sessionmaker()() as s3:
+        reloaded = await s3.get(ApprovalRequest, request_id)
+        assert reloaded is not None
+        assert await get_decision_delegation(s3, reloaded) == parse_delegation(_DELEGATED_REASON)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["approved", "rejected"])
+async def test_incomplete_delegated_reason_refuses_and_leaves_row_pending(
+    session: AsyncSession, decision: str
+) -> None:
+    """Fail-closed: no state change and no audit row when the block is incomplete."""
+    request_id = await _park_for_delegation(session)
+    reviewer = _make_operator(sub="reviewer-sub")
+    bad = "ok\n\nInstructed-by: lead@example.com\nRefs: #12"
+
+    async with get_sessionmaker()() as s2:
+        with pytest.raises(DelegatedReasonInvalidError):
+            if decision == "approved":
+                await approve_request(s2, request_id, operator=reviewer, reason=bad)
+            else:
+                await reject_request(s2, request_id, operator=reviewer, reason=bad)
+        await s2.rollback()
+
+    async with get_sessionmaker()() as s3:
+        reloaded = await s3.get(ApprovalRequest, request_id)
+        assert reloaded is not None
+        assert reloaded.status == ApprovalRequestStatus.PENDING.value
+    assert await _decision_payloads() == []
+
+
+@pytest.mark.asyncio
+async def test_ordinary_decision_has_no_delegation_block(session: AsyncSession) -> None:
+    request_id = await _park_for_delegation(session)
+    reviewer = _make_operator(sub="reviewer-sub")
+    with capture_logs() as captured:
+        async with get_sessionmaker()() as s2:
+            row = await reject_request(s2, request_id, operator=reviewer, reason="wrong cluster")
+            await s2.commit()
+    (payload,) = await _decision_payloads()
+    assert "delegation" not in payload
+    assert not [e for e in captured if e["event"] == "approval_delegated_decision"]
+    async with get_sessionmaker()() as s3:
+        assert await get_decision_delegation(s3, row) is None
+
+
+# ---------------------------------------------------------------------------
+# #3693 -- delegated decisions only on lab-class deployments
+# ---------------------------------------------------------------------------
+
+
+def test_delegated_decision_setting_defaults_to_false() -> None:
+    """Fail-closed: a deployment is production unless it says otherwise."""
+    assert get_settings().approval_allow_delegated_decision is False
+
+
+async def _decide(request_id: uuid.UUID, decision: str, operator: Operator, reason: str) -> Any:
+    async with get_sessionmaker()() as s2:
+        if decision == "approved":
+            row = await approve_request(
+                s2,
+                request_id,
+                operator=operator,
+                params={"name": "test"},
+                reason=reason,
+            )
+        else:
+            row = await reject_request(s2, request_id, operator=operator, reason=reason)
+        await s2.commit()
+    return row
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["approved", "rejected"])
+@pytest.mark.parametrize(
+    "reviewer",
+    [
+        _make_operator(sub="reviewer-sub"),
+        _make_operator(sub="admin-sub", role=TenantRole.TENANT_ADMIN, approver=True),
+    ],
+    ids=["operator", "tenant-admin-approver"],
+)
+async def test_delegated_decision_refused_on_production(
+    session: AsyncSession, decision: str, reviewer: Operator
+) -> None:
+    """Setting off: a delegated decision is refused, logged, and changes nothing.
+
+    No caller input clears the guard -- not a stronger role, not the
+    ``approver`` capability, not matching params. Only the boot setting does.
+    """
+    request_id = await _park_for_delegation(session)
+
+    with capture_logs() as captured, pytest.raises(DelegatedDecisionForbiddenError) as excinfo:
+        await _decide(request_id, decision, reviewer, _DELEGATED_REASON)
+
+    assert "APPROVAL_ALLOW_DELEGATED_DECISION" in str(excinfo.value)
+    assert excinfo.value.instructed_by == "lead@example.com"
+    events = [e for e in captured if e["event"] == "approval_delegated_decision_refused"]
+    assert len(events) == 1
+    assert events[0]["log_level"] == "warning"
+    assert events[0]["decision"] == decision
+    assert events[0]["operator_sub"] == reviewer.sub
+    assert events[0]["instructed_by"] == "lead@example.com"
+    assert events[0]["approval_request_id"] == str(request_id)
+    assert not [e for e in captured if e["event"] == "approval_delegated_decision"]
+
+    async with get_sessionmaker()() as s3:
+        reloaded = await s3.get(ApprovalRequest, request_id)
+        assert reloaded is not None
+        assert reloaded.status == ApprovalRequestStatus.PENDING.value
+    assert await _decision_payloads() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["approved", "rejected"])
+@pytest.mark.usefixtures("allow_delegation")
+async def test_delegated_decision_allowed_on_lab_class(
+    session: AsyncSession, decision: str
+) -> None:
+    """Setting on: the same delegated decision goes through and is recorded."""
+    request_id = await _park_for_delegation(session)
+
+    with capture_logs() as captured:
+        row = await _decide(request_id, decision, _make_operator(), _DELEGATED_REASON)
+
+    assert row.status == decision
+    (payload,) = await _decision_payloads()
+    assert payload["delegation"]["instructed_by"] == "lead@example.com"
+    assert not [e for e in captured if e["event"] == "approval_delegated_decision_refused"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["approved", "rejected"])
+async def test_ordinary_decision_unaffected_by_delegated_decision_guard(
+    session: AsyncSession, decision: str
+) -> None:
+    """Setting off: a decision without the delegation block is not gated."""
+    request_id = await _park_for_delegation(session)
+    row = await _decide(request_id, decision, _make_operator(), "checked the diff")
+    assert row.status == decision
+
+
+@pytest.mark.asyncio
+async def test_invalid_delegated_decision_reason_wins_over_guard(session: AsyncSession) -> None:
+    """Setting off: an incomplete block is still a 422-class error, not a 403."""
+    request_id = await _park_for_delegation(session)
+    bad = "ok\n\nInstructed-by: lead@example.com\nRefs: #12"
+    with pytest.raises(DelegatedReasonInvalidError):
+        await _decide(request_id, "rejected", _make_operator(), bad)

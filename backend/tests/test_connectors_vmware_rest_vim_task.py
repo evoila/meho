@@ -489,6 +489,40 @@ async def test_poll_fault_flattened_8_0_x_no_text_reports_type_name() -> None:
     assert outcome.error_message == "TaskInProgress"
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        # 8.0.x: the concrete fault flattened onto ``info.error``.
+        {"_typeName": "FileNotFound", "faultstring": "File [ds] x was not found"},
+        # 9.x: a LocalizedMethodFault wrapping the concrete fault.
+        {"localizedMessage": "File [ds] x was not found", "fault": {"_typeName": "FileNotFound"}},
+    ],
+)
+async def test_poll_fault_exposes_the_fault_type_on_both_shapes(error: dict[str, Any]) -> None:
+    """``fault_type`` carries the concrete fault class (#3339 -- a missing folder)."""
+    conn = _SeqTaskConnector([_task_info_result("task-1", state="error", error=error)])
+    outcome = await poll_vim_task(
+        conn,  # type: ignore[arg-type]
+        object(),
+        object(),  # type: ignore[arg-type]
+        task="task-1",
+        poll_interval=0.0,
+    )
+    assert outcome.fault_type == "FileNotFound"
+
+
+async def test_poll_success_has_no_fault_type() -> None:
+    conn = _SeqTaskConnector([_task_info_result("task-1", state="success")])
+    outcome = await poll_vim_task(
+        conn,  # type: ignore[arg-type]
+        object(),
+        object(),  # type: ignore[arg-type]
+        task="task-1",
+        poll_interval=0.0,
+    )
+    assert outcome.fault_type is None
+
+
 async def test_poll_times_out_when_never_terminal() -> None:
     """A zero deadline that observes a non-terminal state returns a ``timeout`` outcome."""
     conn = _SeqTaskConnector([_task_info_result("task-1", state="running", progress=25)])

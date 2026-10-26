@@ -54,6 +54,7 @@ __all__ = [
     "VAULT_MOUNT_EXTRAS_KEY",
     "VAULT_ROLE_EXTRAS_KEY",
     "VaultTargetAuth",
+    "is_vault_target",
     "resolve_vault_target_auth",
     "vault_client_for_target",
 ]
@@ -100,6 +101,11 @@ def _extras_string(extras: Mapping[str, Any], key: str) -> str | None:
     return None
 
 
+def is_vault_target(target: Any) -> bool:
+    """Whether *target* is a vault-family target (the vault connector's product)."""
+    return getattr(target, "product", None) in _VAULT_PRODUCT_FAMILY
+
+
 def resolve_vault_target_auth(target: Target | None) -> VaultTargetAuth:
     """Resolve the per-target Vault role + auth mount off *target*'s extras.
 
@@ -118,7 +124,7 @@ def resolve_vault_target_auth(target: Target | None) -> VaultTargetAuth:
     that does not present a ``Mapping`` ``extras`` simply names no override,
     so the login falls back to the settings-global role — never a crash.
     """
-    if getattr(target, "product", None) not in _VAULT_PRODUCT_FAMILY:
+    if not is_vault_target(target):
         return _NO_OVERRIDE
     extras = getattr(target, "extras", None)
     if not isinstance(extras, Mapping):

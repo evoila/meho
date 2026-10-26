@@ -23,9 +23,13 @@ routes the query to a backend and gates entitlement, but it is a
 router / entitlement key, NOT a metadata filter (it never reaches the
 backend's per-chunk ``metadata`` containment query). ``product`` /
 ``version`` demote to **optional refinements** within the chosen
-collection -- present, they ride ``metadata_filters`` (binary
-containment, the #1178 / #1177 decision, never a ranking weight); absent,
-the collection alone scopes the query.
+collection. Present, they reach the backend only when the collection
+opts in (:func:`~meho_backplane.docs_search.forwarded_scope`, #3912): as
+a soft ``scope`` the backend ranks with and never filters on when its
+``backend.ref["scope"]`` is ``"soft"``, or as ``metadata_filters``
+(binary containment, the #1178 / #1177 decision) when its
+``backend.ref["scope_filters"]`` is ``true``; otherwise they are audited
+and not sent. Absent, the collection alone scopes the query.
 
 Per-collection entitlement + readiness
 --------------------------------------
@@ -131,6 +135,7 @@ from meho_backplane.docs_search import (
     search_docs,
     search_docs_fanout,
 )
+from meho_backplane.docs_search.target_scope import apply_target_default
 
 __all__ = ["router"]
 
@@ -152,7 +157,10 @@ class SearchDocsRequest(BaseModel):
     with a route-shaped 422 naming the absent key (carrying *why* the
     collection is mandatory), rather than Pydantic's generic
     ``field_required``. ``product`` / ``version`` are **optional
-    refinements** within the chosen collection.
+    refinements** within the chosen collection. ``target`` (#3920) names a
+    target; when ``product`` and ``version`` are both absent, its
+    fingerprint product and version become the default soft scope (a
+    ranking hint, never a filter). It is ignored on a fan-out.
 
     ``collections`` is the opt-in **cross-collection fan-out** scope (G4.6-T5
     #1554): an explicit list of collection keys to query and RRF-merge.
@@ -174,6 +182,7 @@ class SearchDocsRequest(BaseModel):
     collections: list[str] | None = Field(default=None, max_length=64)
     product: str | None = Field(default=None, max_length=128)
     version: str | None = Field(default=None, max_length=128)
+    target: str | None = Field(default=None, max_length=256)
     limit: int = Field(default=10, ge=1, le=50)
 
 
@@ -342,6 +351,13 @@ async def _run_fanout_or_http_error(
     "/search_docs",
     response_model=SearchDocsResponse,
     responses={
+        404: {
+            "description": (
+                "``target`` names no target in the tenant "
+                "(``detail.error='no_target'``, with near-miss ``matches``), "
+                "the same error the target routes return."
+            ),
+        },
         403: {
             "description": (
                 "Terminal rejection of an otherwise-resolvable collection, "
@@ -355,7 +371,10 @@ async def _run_fanout_or_http_error(
                 "missing claim) -- or the collection has been ``disabled`` by "
                 "an operator (``detail.error='collection_disabled'``). Neither "
                 "is retryable: the collection exists but the principal cannot "
-                "search it, or an operator switched it off."
+                "search it, or an operator switched it off. Also returned when "
+                "the caller's permission rows deny it the named ``target`` "
+                "(``detail.error='denied'``, with the ``reason``), the same "
+                "denial ``call_operation`` returns."
             ),
         },
         409: {
@@ -365,6 +384,8 @@ async def _run_fanout_or_http_error(
                 "not answerable yet. Retryable once the rebuild finishes. A "
                 "``disabled`` collection is the terminal 403 above, not a "
                 "409."
+                " Also returned when ``target`` matches more than one target "
+                "(``detail.error='ambiguous_target'``)."
             ),
         },
         422: {
@@ -459,6 +480,9 @@ async def _handle_single(
         audit_collection=docs_scope.collection_key,
         audit_product=docs_scope.product,
         audit_version=docs_scope.version,
+    )
+    docs_scope = await apply_target_default(
+        session, operator, docs_scope, body.target, op_id="meho.docs.search"
     )
 
     # Resolve + entitle + readiness gate (each typed failure → its own HTTP

@@ -44,8 +44,9 @@ operators get three faces of the same surface:
   under `/api/v1/doc_collections/{key}/…`),
 - the MCP tools `search_docs`, `ask_docs`, and `list_doc_collections`
   (+ the companion resource
-  `meho://docs/{collection}/{product}/{version}/{chunk_id}` for the full
-  text of a hit), and
+  `meho://docs/{collection}/{chunk_id}` for the full text of a hit;
+  the older `meho://docs/{collection}/{product}/{version}/{chunk_id}`
+  form still works and ignores the `product` / `version` segments), and
 - the CLI verbs `meho docs search`, `meho docs collections list`, and
   the lifecycle verbs `meho docs collections probe|enable|disable`.
 
@@ -181,7 +182,8 @@ Accepted claim shapes (the backplane tolerates all three):
 
 This is the **same realm wiring shape** as the `tenant_id` / `tenant_role`
 mappers — see [`keycloak-tenant-claims.md`](keycloak-tenant-claims.md)
-for the protocol-mapper recipe (group-attribute or script mapper). Drive
+for the protocol-mapper recipe (a User Attribute mapper that reads a
+group attribute). Drive
 the capabilities claim off a tenant/group attribute so a tenant_admin can
 grant or revoke the add-on and individual collections without a code
 change.
@@ -233,6 +235,64 @@ The **backend** record is `{type, ref}`:
   `audience`. A `corpus-http` collection with **no** `backend.ref`
   endpoint falls back to the legacy global settings below — the
   unmigrated single-collection deploy still routes.
+- Two optional `corpus-http` ref keys choose where `ask_docs` answers come
+  from (#3911). `"answer": "upstream"` opts the collection in to the
+  corpus's own grounded-answer endpoint (the optional
+  [Answer](#answer--optional-post-askincludehits-3911) contract below);
+  absent, or any other value, keeps the backplane's own answer pipeline.
+  `"answer_endpoint"` names that endpoint explicitly; without it, the
+  search endpoint with its last path segment replaced by `ask` is used
+  (`…/search` → `…/ask`, `…/v1/search` → `…/v1/ask`). It is screened like
+  `endpoint`. Changing **only** these two keys keeps the collection's
+  readiness (no re-probe needed). **Default off:** opting a collection in
+  moves its answers from the backplane's model to the corpus's answer
+  model, an owner decision per collection, reversible with one
+  `meho docs collections update`.
+- Two optional `corpus-http` ref keys turn on `read_docs` (#3948): reading
+  the text around a hit, its whole page or its section.
+  `"read": "upstream"` (exactly that string) opts the collection in to the
+  corpus's read endpoint (the optional
+  [Read](#read--optional-post-read-3948) contract below); absent, or any
+  other value, keeps read off and `read_docs` answers "not found".
+  `"read_endpoint"` names that endpoint explicitly; without it, the search
+  endpoint with its last path segment replaced by `read` is used
+  (`…/search` → `…/read`, `…/v1/search` → `…/v1/read`). It is screened like
+  `endpoint`. Changing **only** these two keys keeps the collection's
+  readiness. With read on, the collection's hits and citations carry an
+  opaque `read_handle`. **Default off.** The backend record is replaced as a
+  whole, so re-pass the existing ref keys:
+  `meho docs collections update vmware --backend-type corpus-http --backend-ref '{"endpoint":"<current>","scope":"soft","read":"upstream"}'`.
+- `ref.scope` and `ref.scope_filters` (any backend type; both default
+  off) — the two per-collection gates for a query's `product` / `version`
+  refinements (#3912). With neither, the refinements are accepted, logged
+  and audited but never sent.
+  - `"scope": "soft"` (exactly that string) sends them as a **soft scope**,
+    `{"product": …, "version": …, "source": "caller"}`, in the request's
+    `scope` key: the values unchanged (a full release such as
+    `8.0.3.00400` included), a key the agent did not give omitted. The
+    backend ranks with it and labels its answer, never filters on it, and
+    normalises the values itself (evoila-bosnia/MEHO.Knowledge#512).
+  - `"scope_filters": true` (the JSON boolean) sends them as **hard
+    filters**: `metadata_filters` on search, `filters` on the upstream
+    answer call. An exact-match pre-filter, so the values must be the
+    ones the collection stamps (see *Search* below).
+  - **Precedence:** with both set, `scope: "soft"` wins: `scope` is sent
+    and no filters are. Any other value of either key counts as off.
+  - **Both calls.** The same rule (`forwarded_scope`) decides the search
+    request and, for a collection with `"answer": "upstream"`, the answer
+    request (see *Answer* below). With neither gate on, both bodies are
+    exactly what they were before the gates existed.
+  - **When to flip.** The backend refuses unknown request keys
+    (evoila-bosnia/MEHO.Knowledge#496), so `scope` must never reach a
+    release that does not accept it. For the shared `vmware` collection,
+    set `"scope": "soft"` only after the MEHO Knowledge release that
+    accepts `scope` (evoila-bosnia/MEHO.Knowledge#496 +
+    evoila-bosnia/MEHO.Knowledge#509 + evoila-bosnia/MEHO.Knowledge#512) is
+    deployed; `scope_filters` stays off for it. A backend update replaces
+    the whole record and resets the collection to `provisioning`, so
+    re-pass the existing `ref` keys and run `probe` afterwards:
+    `meho docs collections update vmware --backend-type corpus-http --backend-ref '{"endpoint":"<current>","scope":"soft"}'`,
+    then `meho docs collections probe vmware`.
 
 The legacy global corpus settings remain as the `corpus-http` fallback
 (env vars in parentheses):
@@ -242,7 +302,42 @@ The legacy global corpus settings remain as the `corpus-http` fallback
 | `corpus_url` (`CORPUS_URL`) | `""` | Fallback corpus search URL for a `corpus-http` collection without its own `backend.ref` endpoint. Empty **and** no per-collection endpoint → the backend is unconfigured: a query fails closed as `CorpusUnavailable` → 503 at the route / `-32603` at the MCP face. |
 | `corpus_audience` (`CORPUS_AUDIENCE`) | `""` | Optional RFC 8707 resource indicator (`aud`) the backend binds the forwarded token to. Empty forwards no audience. |
 | `corpus_timeout_seconds` (`CORPUS_TIMEOUT_SECONDS`) | `10.0` | Bound on the backend HTTP request. A slow backend raises `CorpusUnavailable` rather than blocking the event loop. |
+| `corpus_answer_timeout_seconds` (`CORPUS_ANSWER_TIMEOUT_SECONDS`) | `60.0` | Bound on the **answer** request of an opted-in collection (#3911): a grounded answer runs retrieval plus model calls on the corpus side. Keep it below any proxy read timeout in front of the corpus. |
 | `corpus_require_filters` (`CORPUS_REQUIRE_FILTERS`) | `true` | Legacy REQUIRE_FILTERS posture. Note: under the catalogue model the **mandatory** scope is `collection`; `product` / `version` are optional refinements within a collection, so the binary anti-drown guarantee now rides `collection`, not product/version. |
+
+#### Which corpus endpoints meho will dial
+
+Every corpus URL — `CORPUS_URL` and every `backend.ref` endpoint — must
+pass the corpus destination screen. Otherwise each `search_docs` /
+`ask_docs` / `read_docs` call fails with 503, and a `backend.ref`
+endpoint is refused with 422 when you create or update the collection.
+
+| Corpus endpoint | Allowed? | What you must do |
+|---|---|---|
+| `https://` + a public host | Yes | Nothing. |
+| `https://` + a private host (RFC 1918, in-cluster service) | Only with the allowlist | Add the host, or its address range, to `MEHO_TARGET_SSRF_ALLOWLIST`. |
+| `http://` + a host listed as an **exact entry** on `MEHO_TARGET_SSRF_ALLOWLIST` | Yes | List the host itself: the service name (for example `docs.corpus-ns.svc.cluster.local`), or the single IP (bare, `/32`, or `/128`). An IP that only falls inside a listed range does not count. |
+| `http://` + any other host | No | Use `https`, or name the host on the allowlist. |
+| Any other scheme | No | Use `https` or `http` as above. |
+
+Notes:
+
+- `MEHO_TARGET_SSRF_ALLOWLIST` is the same list the connector target
+  guard reads (Helm value `config.targetSsrfAllowlist`). It takes
+  address ranges, single IPs, and hostnames, separated by commas.
+- For plain `http`, the host in the URL must itself be an exact entry
+  on the list. An IP inside a listed range does not count, and a
+  hostname that only *resolves* into a listed range does not count.
+  This keeps plain `http` limited to hosts you have named as trusted.
+- Plain `http` sends the corpus service token without TLS. Use it only
+  inside a network you trust, such as the cluster network.
+- The guard stays on for every other destination. You never need to
+  turn it off.
+
+To check the setting, call `GET /ready`. If `CORPUS_URL` would be
+rejected, the `docs_backends` check says so in its `detail` (readiness
+itself stays green — the docs add-on is optional). For a `backend.ref`
+endpoint, run `meho docs collections probe <key>`.
 
 ### 3. Bring the collection to readiness (probe → enable lifecycle)
 
@@ -307,7 +402,7 @@ implemented once in `docs_collections/lifecycle.py`.
 > **external infra** (the collections/services the ops team runs), not an
 > `evoila/meho` change — nothing in this repo was ever named
 > "MEHO.Knowledge". It is tracked on the consumer repo
-> [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)
+> `evoila-bosnia/claude-rdc-hetzner-dc`
 > (consumer-side reference: [#1178](https://github.com/evoila/meho/issues/1178)).
 > The in-repo names (`meho-docs` add-on key, `meho-docs:<collection>`
 > entitlement keys, `search_docs` / `list_doc_collections` surface) are
@@ -362,6 +457,29 @@ entitled to** (`meho-docs:<key>`), so every key shown is one
 - **`product` / `version` are optional refinements** within a single
   collection (a collection *is* a scoped corpus, so the anti-drown
   guarantee holds on `collection` alone). Omitting them still succeeds.
+  They reach the backend only when the collection opts in (#3912): as a
+  soft `scope` with `backend.ref.scope: "soft"`, as `metadata_filters`
+  with `backend.ref.scope_filters: true` (the soft gate wins when both
+  are set). Otherwise they are recorded in the log and audit row and not
+  sent. Use the collection's own product tokens (its `products` in
+  `list_doc_collections`; on the shared `vmware` collection `vsphere`
+  covers vCenter and ESXi, `vcf` covers SDDC Manager) and the release as
+  precisely as you know it (`9.1.1`, `8.0 U3`, `8.0.3.00400`): a soft
+  scope ranks that release first and excludes nothing, so there is no
+  need to leave `version` out for KB, CVE or build-number questions.
+- **`target` is an optional version hint** (#3920). Pass the name of the
+  target you are working on (the name `call_operation` takes). When you
+  give neither `product` nor `version`, its detected product and version
+  go to the backend as a soft `scope` with `source: "default"`, never as
+  filters, and only when the collection sets `backend.ref.scope: "soft"`.
+  Which version wins: your own `product` / `version`, then a version the
+  question names, then the target's. An unknown target is the same
+  `no_target` error `call_operation` returns (REST 404, MCP `-32602`),
+  and a target your permission rows deny you, or make you wait for
+  approval on, is the same `denied` error (REST 403, MCP `-32602`, with
+  the reason naming the verdict). A cross-collection fan-out
+  ignores it. The audit row and the log record
+  the target's name and `scope_source`, never its address.
 - **Entitlement** — searching a collection the tenant is not entitled to
   (`meho-docs:<key>` missing) → **403** / `-32602`, even though the tool
   stays visible via the base `meho-docs` gate.
@@ -389,8 +507,10 @@ meho docs search "config maximums" --collection vmware --json
 `search_docs` returns ranked **cited chunks**, each carrying the chunk
 text, a `source_url`, a `chunk_id`, and a `document_id`. For the full text
 of a hit on a later turn (when the agent kept only the citation), read
-`meho://docs/{collection}/{product}/{version}/{chunk_id}` via
-`resources/read`.
+`meho://docs/{collection}/{chunk_id}` (the ref the citation carries) via
+`resources/read`. This is best effort: there is no fetch-by-id, so the
+backplane searches for the chunk again and may not find it. Keep the
+chunk text from the search result when you still need it.
 
 ### Cross-collection fan-out (`search_docs` only)
 
@@ -421,16 +541,60 @@ pre-scoped corpus).
 
 ### `ask_docs` is single-collection only
 
-`ask_docs` runs the *same* retrieval as `search_docs` (so the collection
-scope, entitlement, backend routing, and forwarded-JWT audit are enforced
-in one place), then composes one grounded, cited answer over the retrieved
-chunks and returns `{answer, citations[]}` — no claim without a citation,
-and a "no grounded answer" rather than a guess on an empty retrieval.
+`ask_docs` enforces the same collection scope, entitlement, backend routing
+and audit as `search_docs`, and returns `{answer, citations[]}` — no claim
+without a citation, and a "no grounded answer" rather than a guess on an
+empty retrieval. The answer comes from the collection's corpus when the
+collection opted in (`backend.ref["answer"] = "upstream"`, #3911): one call
+to the corpus's answer endpoint, mapped into the same shape. Otherwise the
+backplane runs its own pipeline over `search_docs` retrievals (query
+expansion, one search per variant, a merge, and a synthesis call).
 `ask_docs` **requires** `collection` and is **permanently
 single-collection**: a fan-out attempt (`collections=[…]` or
 `collection="all"`) is rejected with `-32602` before any retrieval, so the
 grounded-answer contract never has to reconcile chunks from divergent
 corpora.
+
+### `read_docs` — read more around a hit (#3948)
+
+A hit is one chunk of a page. When the hit's collection has read on, the
+hit (and an `ask_docs` citation) carries a `read_handle`. Pass it to
+`read_docs` with the same `collection` to read the text around the hit
+(`mode` `around`, with `before` / `after` 0-3 chunks), the whole `page`, or
+the hit's `section`. A long reply is cut; read on with `cursor` = the
+reply's `next`.
+
+```bash
+# Get the handle from the JSON hit, then read around it:
+meho docs search "config maximums" --collection vmware --json
+meho docs read '<read_handle>' --collection vmware
+meho docs read '<read_handle>' --collection vmware --mode page
+# Read on from the cursor the last read printed:
+meho docs read '<read_handle>' --collection vmware --cursor '<next>'
+# Or pass - to read the handle from standard input, so it stays out of
+# the shell history and the process list (--cursor - does the same):
+meho docs search "config maximums" --collection vmware --json \
+  | jq -r '.chunks[0].read_handle' \
+  | meho docs read - --collection vmware
+```
+
+- A file whose owner allows only its link returns `text: null`,
+  `disclosure: "link"` and the link in `source_url`.
+- Every refusal is the same "docs source not found" (404 / `-32602`): an
+  unknown or not-entitled collection, a collection without read, an
+  unknown handle. The console page keeps the 404 / 403 of its `GET` view for
+  an unknown or not-entitled collection; every other refusal shows one
+  "not available" note there.
+- A handle expires: "search again" (409 / `-32602` with
+  `data.reason="search_again"`) means run the search again and use the new
+  handle.
+- Reads are limited per person: a rate limit (429 / `-32000`) says how many
+  seconds to wait.
+- The text is untrusted: the MCP tool wraps it in the
+  `<<UNTRUSTED_AGENT_TEXT` envelope; the console escapes it.
+
+The console offers the same read: a search or ask result card whose chunk
+carries a handle shows a "Read around this hit" button.
 
 ## Backend-agnostic routing
 
@@ -491,16 +655,22 @@ Content-Type: application/json
 {
   "query": "config maximums",
   "top_k": 10,
-  "metadata_filters": {"product": "nsx", "version": "9.0"},
+  "scope": {"product": "nsx", "version": "9.0.1", "source": "caller"},
   "audience": "https://corpus.example"
 }
 ```
+
+(A collection with `backend.ref.scope: "soft"`. A collection with
+`backend.ref.scope_filters: true` and no `scope` key sends
+`"metadata_filters": {"product": "nsx", "version": "9.0.1"}` in its place;
+a collection with neither sends neither key.)
 
 | Key | Type | Sent when | Notes |
 |---|---|---|---|
 | `query` | `str` | always | The free-text search query. |
 | `top_k` | `int` | always | Maximum chunks to return. meho sends **`top_k`** (the key MEHO.Knowledge honours, #1732) — **not** `limit` / `k` / `size`. A corpus that reads only some *other* key and ignores `top_k` silently caps at *its* default. Read `top_k`. |
-| `metadata_filters` | `{key: scalar}` | only when non-empty | Binary `{key: value}` narrowing (e.g. `{"product": "vmware"}`). Omitted entirely when meho has no filters — do not require the key. |
+| `metadata_filters` | `{key: scalar}` | only when non-empty, the collection sets `backend.ref.scope_filters: true` and does **not** set `backend.ref.scope: "soft"` | Binary `{key: value}` narrowing (e.g. `{"product": "vsphere"}`), values passed through unchanged. Omitted entirely when meho has no filters to send — do not require the key. |
+| `scope` | `{product?, version?, source}` or `{product?, release?, source}` | only when the collection sets `backend.ref.scope: "soft"` (#3912) and either the agent gave `product` and/or `version`, or the agent named a `target` with a fingerprint and gave neither (#3920) | The soft scope: a ranking / labelling signal, never a filter. Values as given (normalising them is the corpus's job). `source` is `"caller"` for the agent's own values, or `"default"` for a target's detected product and version, sent as `product` and `release` (e.g. `{"product": "vcenter", "release": "8.0.3.00400", "source": "default"}`); the corpus applies a default only when the question names no version itself. Never sent together with `metadata_filters`. A corpus that refuses unknown keys must accept `scope` before a collection turns the gate on. |
 | `audience` | `str` | only when configured | RFC 8707 resource indicator, forwarded **in the request body** here (contrast readiness below). Omitted when no audience is configured. |
 
 - **Auth.** `Authorization: Bearer <operator JWT>` — the **operator's** raw
@@ -542,6 +712,10 @@ meho expects a `2xx` JSON body with a **top-level `results`** array, ranked
 | `text` | `str` | **yes** | The chunk text. Accepted under `text` **or** the legacy alias `content`; speak `text`. **Not** `body` / `snippet`. |
 | `source_uri` | `str` | optional | Citation URL. Accepted under `source_uri` **or** the legacy alias `source_url`; speak `source_uri`. **Not** `url`. |
 | `score` | `float` | optional | Rank score (meho keeps corpus order regardless). |
+| `score_kind` | `"distance"` / `"similarity"` | optional (#3913) | The direction of `score`: `distance` means lower is better, `similarity` higher is better. Passed through to the `search_docs` / `ask_docs` hits; `null` there when not sent (never defaulted). Any other value reads as not sent. |
+| `filename` / `breadcrumb` / `heading_path` | `str` / `str` / `list[str]` | optional (#3913) | Page identity. When no `title` is sent, meho derives one: the section (the last heading, else the `>`-separated breadcrumb tail) joined with the page name (the humanised filename), e.g. `What's New — product 2 1 release notes`. Only the file's own name is read. |
+| `upstream_url` | `str` or `null` | optional (#3913) | A public `http(s)` link to the hit's source page or document; for a PDF with a known page it already ends in `#page=N`. When `source_uri` is not an `https` link, meho shows this link as the hit's `source_url` instead of its opaque `meho://docs/<collection>/<chunk_id>` reference (the `chunk_id` is kept). Any other scheme, no host, a space, a control or bidi character, more than 2048 characters, or a URL that does not parse reads as not sent. |
+| `upstream_page` | `int` or `null` | optional (#3913) | The page in the whole source document. Passed through; anything but a whole number from 1 to 1,000,000 reads as not sent. |
 | `metadata` | `object` | optional | Per-chunk attributes (e.g. `product` / `version`); passed through. |
 
 meho reads the top-level **`results`** envelope and per-chunk **`text`** /
@@ -555,8 +729,12 @@ aliases (#1732): the envelope under `chunks`, the chunk text under
 required field (`chunk_id` / `text`) fails parse and is surfaced as
 `CorpusUnavailable` → 503. `document_id` is the lone exception (#2004): it
 is a citation-label fallback only, so a blank or omitted value normalises
-to `None` rather than failing parse. Source: `CorpusChunk` /
-`CorpusSearchResponse`, `corpus.py:118-204`.
+to `None` rather than failing parse. The #3913 fields (`score_kind`, the
+page identity, `upstream_url`, `upstream_page`) are optional too, and an
+unusable value reads as not sent rather than failing parse: they label and
+link a hit, never ground it. meho sends no `with_rerank` on search: ranking
+is the corpus's decision. Source: `CorpusChunk` / `CorpusSearchResponse` in
+`auth/corpus.py`.
 
 ### Readiness — request + response
 
@@ -604,6 +782,142 @@ key** on `/search` (`corpus.py:267-268`) — a corpus that only reads
 `audience` from one of the two will mis-bind the token on the other path.
 Source: `derive_status_url` `corpus.py:337-350`; `CorpusStatusResponse`
 `:296-334`; audience-as-query-param `:396`.
+
+### Answer — optional (`POST /ask?include=hits`, #3911)
+
+A `corpus-http` backend **may** also serve a grounded answer. meho calls it
+only for a collection that opted in (`backend.ref["answer"] = "upstream"`);
+a corpus without one keeps working, answered by the backplane's own
+pipeline. The URL is `backend.ref["answer_endpoint"]`, else the search URL
+with its last path segment replaced by `ask`. Same screen, credential and
+"body never echoed" rules as search; bounded by
+`corpus_answer_timeout_seconds`.
+
+**Request** — `POST <answer_endpoint>?include=hits`, JSON body:
+
+| Key | Type | Notes |
+|---|---|---|
+| `query` | `str` | The operator's question, verbatim. |
+| `top_k` | `int` | The requested retrieval depth (`ask_docs` `limit`, default 10, cap 50). The corpus **may** cap it lower. |
+| `filters` | `{key: scalar}` | Only when the agent gave `product` and/or `version`, the collection sets `backend.ref.scope_filters: true` and does **not** set `backend.ref.scope: "soft"` (#3912). The answer endpoint's name for search's `metadata_filters`: an exact-match pre-filter, values passed through unchanged. |
+| `scope` | `{product?, version?, source}` or `{product?, release?, source}` | Only when the collection sets `backend.ref.scope: "soft"` (#3912), on the same terms as on search: the agent's `product` / `version` (`source: "caller"`), or a named target's default (`product` / `release`, `source: "default"`, #3920). A ranking / labelling signal, never a filter. Never sent together with `filters`. |
+| `audience` | `str` | Only when an audience is configured, as on search. |
+
+meho sends **no** `with_rerank` (ranking policy is the corpus's). With
+neither scope gate on, the body is exactly `{query, top_k}` (plus
+`audience`): the corpus refuses unknown request keys, so `scope` reaches
+only a corpus release that accepts it, once the collection turns its gate
+on.
+
+**Response** — `2xx` JSON. The fields meho consumes (everything else is
+ignored):
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `answer` | `str` | **yes** (non-empty) | The answer text, claims marked `[N]` with `N` the 0-based `chunk_index` of the cited chunk. meho rewrites each marker to its own 1-based citation number and drops a marker with no citation. |
+| `citations[].chunk_index` | `int` | **yes** | The `N` the answer's markers use. |
+| `citations[].chunk_id` | `str` | **yes** | Matched to a hit **by id** (never by position). A cited id must name exactly one hit: an id not in `hits`, a blank id, or an id several hits share fails the answer (`synthesis_malformed` / `citation_resolution`). Repeated citations collapse. |
+| `hits` | `list` | **yes** | The retrieved chunks (`include=hits`), in any order; each parsed with the search-hit shape above (`chunk_id`, `text`/`content`, `source_uri`/`source_url`, `document_id`, `score`, optional `title`). Empty `hits` (and no citations) is meho's "no grounded answer". |
+| `hits[].filename` / `breadcrumb` / `heading_path`, `score_kind`, `upstream_url`, `upstream_page` | as on search | optional | Read exactly as on a search hit (#3913): the same derived title, score direction and public link. A citation is the hit it names, so it carries them too; the copies on `citations[]` are not read. |
+| `timing.total_ms` / `timing.llm_ms` | `float` | optional | Logged, never returned. |
+
+**Errors** — the corpus's JSON error body `{"error": {"code": …}}` is read
+for two codes only; the body is never echoed:
+
+| Corpus answers | meho leg / cause | REST | MCP |
+|---|---|---|---|
+| transport error / timeout | `corpus_unavailable` / `corpus_unavailable` | 503 | -32603 |
+| 503 `llm_unavailable` | `model_unavailable` / `upstream_answer_unavailable` | 503 | -32603 |
+| 503 `llm_rate_limited` (or 429), `Retry-After` | `model_unavailable` / `upstream_rate_limited` | 503, `Retry-After` forwarded (capped at 3600 s; a garbled value is dropped) | -32603, `data.retry_after` |
+| other 5xx | `corpus_unavailable` / `upstream_error` | 503 | -32603 |
+| 4xx | `corpus_unavailable` / `upstream_rejected` (`upstream_status`) | 502 | -32603 |
+| 2xx, malformed body | `synthesis_malformed` / `parse` | 502 | -32603 |
+
+Source: `ask_corpus` / `UpstreamAnswer` / `CorpusAnswerError` in
+[`auth/corpus.py`](../../backend/src/meho_backplane/auth/corpus.py); the
+mapping in [`docs_search/answer.py`](../../backend/src/meho_backplane/docs_search/answer.py).
+
+### Read — optional (`POST /read`, #3948)
+
+A `corpus-http` backend **may** also serve the text around a hit. meho
+calls it only for a collection that opted in (`backend.ref["read"] =
+"upstream"`); for any other collection `read_docs` answers "not found" and
+everything else works as before. The URL is `backend.ref["read_endpoint"]`,
+else the search URL with its last path segment replaced by `read`. Same
+screen, service credential and "body never echoed" rules as search; bounded
+by `corpus_timeout_seconds`.
+
+**The handle.** For a collection with read on, the corpus puts a
+`read_handle` (a string, or `null`) on every search hit (`results[]`) and on
+every answer hit and citation. It is signed and expiring, and opaque to
+meho: meho passes it back unchanged. It carries a few words of the hit, so
+meho never logs it, never stores it on the audit row and never puts it on
+the broadcast feed; the logs name the `chunk_id`. A handle meho cannot use
+(not a non-empty ASCII string without spaces, or longer than 8,192
+characters) reads as `null`. A PDF hit carries `null`.
+
+**Request** — `POST <read_endpoint>`, JSON body. The corpus refuses unknown
+keys, so meho sends only these:
+
+| Key | Type | Notes |
+|---|---|---|
+| `read_handle` | `str` | **Required.** The hit's handle, unchanged. |
+| `mode` | `"around"` / `"page"` / `"section"` | What to read. meho always sends it (default `around`). |
+| `before` / `after` | `int` 0-3 | Chunks before / after the hit for `around`. meho always sends them (default 1). |
+| `cursor` | `str` | Only when reading on: the `next` (or `up`) cursor of an earlier reply. |
+| `filters` | `{key: scalar}` | Only for a collection with `scope_filters: true` and no soft scope, when the caller gives `product` / `version`: the same hard filters the hit's search sent, because the handle is bound to them. Never a soft `scope`. A cross-collection search sends no filters, so meho's help tells callers to leave `product` / `version` out for its hits. |
+
+No `audience` is sent on a read.
+
+**Caller header.** Every read carries `X-Meho-Caller: <caller id>`, so the
+corpus can limit reads per person instead of per backplane. The caller id is
+a keyed hash (HMAC-SHA256, 32 hex characters) of the signed-in user's
+subject. It is stable for one person and cannot be turned back into the
+user; the raw subject is never sent. The key is the deployment's
+`UI_SESSION_ENCRYPTION_KEY` under its own domain label; without it a read
+fails closed (503). On the corpus side, point its caller-header setting at
+`X-Meho-Caller`.
+
+**Response** — `2xx` JSON. The fields meho reads (everything else is
+ignored):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `mode` | `str` | The mode read. An unknown value fails the parse (503). |
+| `text` | `str` or `null` | The text. meho keeps it only when `disclosure` is `full`. |
+| `title` | `str` or `null` | The source's title. |
+| `source_uri` / `upstream_url` | `str` or `null` | The source. meho returns a public `http(s)` link only (an `https` `source_uri`, else `upstream_url`, else a derivable public link), never a storage path. |
+| `disclosure` | `"full"` / `"link"` | `link`: the content owner allows only the file's link, so meho returns no text, only the link. Any other or missing value reads as `link`. |
+| `reason` | `null` / `"link_only"` / `"pdf_not_supported"` / `"type_not_supported"` | Why there is no text. Another value reads as `null`. |
+| `located` | `bool` or `null` | Whether the corpus found the hit in the file. |
+| `truncated` | `bool` | Whether the reply was cut at the corpus's size cap. |
+| `next` / `up` | `str` or `null` | Opaque cursors to read on / read the enclosing part. |
+
+**Size.** The corpus caps each reply (about 40,000 characters, with a `next`
+cursor beyond it). meho passes the cap through; the delivery budgets of #3641
+will apply once they land.
+
+**Errors** — the body is never echoed:
+
+| Corpus answers | meho MCP `read_docs` | meho REST `POST /api/v1/read_docs` |
+|---|---|---|
+| 404 `not_found` (one body for every refusal) | `-32602` "docs source not found" | 404 `{"error": "not_found"}` |
+| 409 `search_again` | `-32602`, `data.reason = "search_again"` | 409 `{"error": "search_again"}` |
+| 429 `rate_limited`, `Retry-After` | `-32000`, `data.retry_after_seconds` (capped at 3600) | 429, `Retry-After` forwarded (capped at 3600) |
+| 503 `read_unavailable`, any other non-2xx, transport error / timeout, malformed 2xx | `-32603` | 503 `{"error": "read_unavailable"}` |
+
+**The not-found rule.** On MCP, REST and the CLI, meho gives the same "docs
+source not found" answer for every refusal on its side too: an unknown
+collection, a collection the caller is not entitled to, a disabled
+collection, a collection without read, and a corpus 404. So `read_docs` is
+no probe for which collections exist or what they hold. The console's
+cited-source page checks the collection first, as its `GET` view on the same
+URL does: an unknown collection gets a 404 and a not-entitled one a 403. The
+refusals after that check show one "not available" note.
+
+Source: `read_corpus` / `UpstreamRead` / `CorpusReadError` / `read_caller_id`
+in [`auth/corpus.py`](../../backend/src/meho_backplane/auth/corpus.py); the
+service in [`docs_search/read.py`](../../backend/src/meho_backplane/docs_search/read.py).
 
 ### Fail-closed semantics meho enforces
 
@@ -780,6 +1094,6 @@ the answer.
 - Parent Goal: [#215](https://github.com/evoila/meho/issues/215).
 - Consumer side (external collection ingest + the MEHO.Knowledge →
   meho-docs rename + per-collection provisioning):
-  [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc);
+  `evoila-bosnia/claude-rdc-hetzner-dc`;
   consumer-side corpus reference
   [#1178](https://github.com/evoila/meho/issues/1178).

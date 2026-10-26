@@ -14,18 +14,28 @@ without drowning in false positives.
 ## How analysis runs
 
 ```
-push to main ──► CI workflow ──► python-coverage job uploads python-coverage
-                  │               artifact (backend/coverage.xml)   [push only]
-                  │
-                  └─ on success ──► Quality Gate workflow (workflow_run)
-                                       ├─ downloads python-coverage into backend/
-                                       └─ SonarSource/sonarqube-scan-action  ──► SonarCloud
+nightly schedule (06:17 UTC) ──► CI workflow on main
+                                   │   8 python-coverage shards + python-coverage-combine
+                                   │   upload the python-coverage artifact
+                                   │   (backend/coverage.xml)          [schedule only]
+                                   │
+                                   └─ on success ──► Quality Gate workflow (workflow_run,
+                                                       event == 'schedule' only)
+                                                        ├─ downloads python-coverage into backend/
+                                                        └─ SonarSource/sonarqube-scan-action ──► SonarCloud
 ```
 
-The coverage artifact is produced **on push to main only**, by a dedicated
-non-required `python-coverage` job — NOT on PRs, and NOT by the required unit
-lane. PRs therefore see SonarCloud coverage update "one merge late" (the pre-#771
-behaviour). Why: running the unit suite under coverage peaks the pytest tree at
+The coverage artifact is produced **once a night**, by the `schedule` trigger
+in `ci.yml` (#4910), through a dedicated non-required `python-coverage` job —
+NOT on push to `main`, NOT on PRs, NOT in the merge queue, and NOT by the
+required unit lane. SonarCloud therefore gets one analysis a day, of the
+`main` tip at that time. Until #4910 the coverage shards ran after every
+merge: 8 heavy-pool jobs per push, about 3,000 heavy-runner minutes a day,
+most of it cancelled by the next merge, and the merge queue's unit shards
+waited for free runners. A PR that changes the coverage path itself can
+still run the shards before merge with the `ci-coverage-validate` label.
+Why coverage is not in the required unit lane: running the unit suite under
+coverage peaks the pytest tree at
 ~12.5–14 GiB (vs ~7.9 GiB no-cov), which OOM-killed the memory-limited
 `meho-runners-ci-heavy` pod when coverage rode on the required lane (#1982). The
 coverage tax is intrinsic to measuring the whole `meho_backplane` package across
@@ -60,7 +70,7 @@ artifact so the next hang says *where* it hung.
 |---|---|
 | Project + scope config | [`sonar-project.properties`](../../sonar-project.properties) |
 | Scan trigger + coverage handoff | [`.github/workflows/quality-gate.yml`](../../.github/workflows/quality-gate.yml) |
-| Coverage production | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) — `python-coverage` job (push to main only, offline `coverage combine`+`xml`) |
+| Coverage production | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) — `python-coverage` shards + `python-coverage-combine` (nightly `schedule` run only, offline `coverage combine`+`xml`) |
 | Coverage config (CI offline-combine) | [`backend/.coveragerc.ci`](../../backend/.coveragerc.ci) — `parallel`, `source`, `relative_files` |
 | Coverage path portability | `[tool.coverage.run] relative_files` ([`backend/pyproject.toml`](../../backend/pyproject.toml)) + the same key in `.coveragerc.ci` + quality-gate.yml's `Point coverage report at the backend/ source root` step (injects `<source>backend</source>` so paths resolve from the repo root) |
 | Auth | `SONAR_TOKEN` repo secret (write/scan only) |
@@ -75,7 +85,7 @@ new-code-period + scan-trigger section below for why it is kept advisory).
 **Symptom.** The SonarCloud overall-coverage chip drops sharply (e.g. from ~66%
 to ~24%) and stays there, with no matching drop in real test coverage.
 
-**What it means.** The push-only `python-coverage` job (ci.yml) died before
+**What it means.** The nightly `python-coverage` job (ci.yml) died before
 uploading `backend/coverage.xml`, so the Quality Gate scan ran *without* backend
 coverage and SonarCloud imported ~0% for the backend tree — dragging the blended
 Python+Go number down to roughly what Go coverage alone contributes. Because both
@@ -95,9 +105,10 @@ dedicated job was the sole coverage producer and nothing else caught the gap.
 
 **Where to look.**
 
-1. The most recent `python-coverage` job on a main push (CI workflow) — did it
-   reach `Upload Python coverage artifact`, or die/OOM before it?
-2. The Quality Gate run for that push — its `Assert python-coverage artifact
+1. The most recent `python-coverage` job on a nightly run (CI workflow, event
+   `schedule`) — did it reach `Upload Python coverage artifact`, or die/OOM
+   before it?
+2. The Quality Gate run for that night — its `Assert python-coverage artifact
    present (fail-visible)` step emits an **error annotation** naming the missing
    artifact whenever the upload is absent (added in #2513). That annotation is
    the loud signal the 2026-06-20 collapse lacked.
@@ -118,6 +129,59 @@ invocations (`coverage combine` already merges across parallel data files),
 not a bigger limit — 14Gi is this node size's ceiling. The job stays
 non-blocking and the fail-visible annotation above surfaces every skipped
 upload instead of letting it rot silently.
+
+## When coverage reads about 36% with every check green — the missing worker file
+
+**Symptom.** SonarCloud shows backend coverage far below the real number (36%
+on `main` in October 2026, against about 87-93% with the same tests), and the
+number jumps between pushes for no code reason. Unlike the ~24% case above,
+the `python-coverage` artifact **is** there, every shard job is green, and the
+Quality Gate run shows no error annotation.
+
+**What it means.** One or more coverage shards uploaded data without the
+file of their test worker. Each shard's pytest runs with `-n 1`: the pytest
+main process only starts a worker and prints results; the worker runs the
+tests. Coverage measures every process through `COVERAGE_PROCESS_START` and
+writes a process's data file when that process exits. If the worker never
+exits normally, its file is never written, and the shard only contributes
+the code that runs at start-up (about 400 source files instead of about
+1,000). The combine job merges whatever is there and reports a low number.
+Nothing turns red because the coverage jobs are non-blocking by design.
+
+**Why the worker does not exit normally.** Two causes, seen in October 2026
+(#4758):
+
+1. **The controller kills the worker too early.** When the worker reports
+   "finished", the controller asks it to stop, execnet interrupts it after
+   5 seconds (the `KeyboardInterrupt` traceback at the end of a shard log,
+   usually inside weakref or `__del__` clean-up code), and pytest-xdist kills
+   it 10 seconds after the request. Freeing a whole session's objects with
+   coverage switched on can take longer than that. A killed worker writes
+   nothing. **Fix:** the `pytest_sessionfinish` hook in `backend/tests/conftest.py`
+   saves the worker's coverage data (and stops the tracer) before the worker
+   reports "finished". Pinned by `backend/tests/test_ci_coverage_shards.py`.
+2. **The shard hits its 30-minute step limit.** Then all of its processes are
+   killed and every data file of that shard is lost (the shard uploads an
+   empty or missing artifact). With 5 shards on the 7 GiB heavy runner, a
+   shard with about 4,500 tests ran up to 29 minutes. **Fix:** the sweep runs
+   as 8 shards (about 2,700 tests each). Raise the shard count again before
+   any shard gets near the limit; the matrix, `TOTAL`, and the combine job's
+   download steps must move together, and the same test pins that lockstep.
+
+**Where to look.**
+
+1. Download `python-coverage-data-shard-N` from the CI run (kept 1 day). The
+   shard must hold one file of about 250 KB for the worker; the pytest main
+   process file is about 230 KB, and helper processes leave files of about
+   50 KB. To check one file, run in `backend/`:
+   `uv run coverage report --rcfile=.coveragerc.ci --data-file=<file>`.
+   The worker file alone reports about 60% for its shard; the main process
+   file reports under 20%.
+2. The shard's `coverage-pytest-log-shard-N` artifact (kept 7 days): a
+   `KeyboardInterrupt` after the last test, or a step that stopped at the
+   30-minute limit, means the shard lost its worker data.
+3. The `Print peak memory` step of each shard: a peak at the memory limit
+   or a pytest step near 30 minutes means the shard count must go up.
 
 ## New-code period + scan trigger — how they're configured
 
@@ -141,15 +205,18 @@ analyzed commit SHA — see `quality-gate.yml`'s `SonarCloud Scan` step), which 
 > `previous_version` windows accrue from real merges; no manual reference-branch
 > setting is applied.
 
-**Scan trigger = main pushes only.** `quality-gate.yml`'s job carries
-`if: … && github.event.workflow_run.event == 'push'`. CI runs on both `push` and
-`pull_request`, and SonarCloud stores a single analysis per project keyed by
-branch — so before the filter, every PR-branch CI completion triggered a scan that
-**overwrote** the main-branch analysis, churning the activity history and
-misaligning the new-code window with real merges. With the filter, only `main`
-pushes are analyzed; PR completions are skipped (the job shows as skipped in the
-Actions run). PR-level decoration is therefore not produced — an accepted
-trade-off while the gate is advisory.
+**Scan trigger = the nightly run only.** `quality-gate.yml`'s job carries
+`if: … && github.event.workflow_run.event == 'schedule'`. CI runs on `push`,
+`pull_request`, `merge_group` and once a night on `schedule` (`cron: '17 6 * * *'`
+in `ci.yml`, #4910). SonarCloud stores a single analysis per project keyed by
+branch — so before the event filter, every PR-branch CI completion triggered a
+scan that **overwrote** the main-branch analysis, churning the activity history
+and misaligning the new-code window with real merges. Since #4910 only the
+nightly run produces the `python-coverage` artifact, so a scan of a push run
+would import 0% backend coverage. With the filter, only the nightly run is
+analyzed; push, PR and merge-queue completions are skipped (the job shows as
+skipped in the Actions run). PR-level decoration is therefore not produced — an
+accepted trade-off while the gate is advisory.
 
 ## Reading the dashboard without drowning
 

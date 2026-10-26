@@ -124,9 +124,13 @@ func newRetireChecklistCmd() *cobra.Command {
 		Use:   "retire-checklist",
 		Short: "Run the 5-criterion retire-decision checklist per retrieval surface",
 		Long: "retire-checklist combines T2's corpus eval results with T5's " +
-			"audit-log-backed usage telemetry against Goal #215 decision #2's " +
-			"5 criteria, and prints a per-surface green/yellow/red checklist " +
-			"plus an overall verdict (READY TO RETIRE / REVIEW MANUALLY / NOT YET).\n\n" +
+			"usage telemetry (read from request usage events) against Goal " +
+			"#215 decision #2's 5 criteria, and prints a per-surface " +
+			"green/yellow/red checklist plus an overall verdict (READY TO " +
+			"RETIRE / REVIEW MANUALLY / NOT YET).\n\n" +
+			"Usage events are recorded only when the backplane sets " +
+			"REQUEST_USAGE_RETENTION_DAYS; when it is not set, the usage " +
+			"criteria stay unmet and the verdict is NOT YET.\n\n" +
 			"Criterion 5 (zero open `retrieval-migration-blocker` issues) is " +
 			"computed locally: the verb runs `gh issue list --label " +
 			"retrieval-migration-blocker --state open --json number,labels` " +

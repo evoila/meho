@@ -78,6 +78,9 @@ HEADER_ALLOWLIST: Final[frozenset[str]] = frozenset(
         "user-agent",
         "server",
         "via",
+        # RFC 7234 warning text (Kubernetes uses it for deprecation and
+        # admission-webhook notices). The value still gets the shape scrub.
+        "warning",
         # --- caching / conditional --------------------------------------
         "cache-control",
         "pragma",
@@ -102,6 +105,8 @@ HEADER_ALLOWLIST: Final[frozenset[str]] = frozenset(
         "x-ratelimit-limit",
         "x-ratelimit-remaining",
         "x-ratelimit-reset",
+        # Kubernetes API server request UUID (matches its audit log entry).
+        "audit-id",
         # --- response security policy (public directives) ---------------
         "strict-transport-security",
         "x-content-type-options",

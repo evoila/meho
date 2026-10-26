@@ -11,13 +11,16 @@ tool (T4), and the CLI verb (T5):
    scope: a missing or blank value raises :class:`MissingDocsFilterError`,
    which the route renders HTTP 422 (fail-closed) and the MCP face renders
    ``-32602``. ``product`` / ``version`` demote to **optional refinements**
-   within the chosen collection — present, they ride
-   :meth:`DocsScope.as_filters` as ``metadata_filters``; absent, the
-   collection alone scopes the query. The filters are scopes passed
-   verbatim to the backend, never ranking weights (#1178 / #1177). The
-   ``collection`` key is a **router / entitlement key**, not a metadata
-   filter — it is kept out of :meth:`DocsScope.as_filters` so it never
-   leaks into the backend's per-chunk ``metadata`` containment query.
+   within the chosen collection. Whether and how they reach the backend
+   is the collection's choice (:func:`forwarded_scope`, #3912): as a soft
+   ``scope`` (a ranking signal, never a filter) when its
+   ``backend.ref["scope"]`` is ``"soft"``, as ``metadata_filters`` (an
+   exact-match pre-filter) when its ``backend.ref["scope_filters"]`` is
+   ``true``, otherwise not at all; absent, the collection alone scopes the
+   query. Either way the values are passed verbatim. The ``collection``
+   key is a **router / entitlement key**, not a metadata filter — it is
+   kept out of :meth:`DocsScope.as_filters` so it never leaks into the
+   backend's per-chunk ``metadata`` containment query.
 
 2. :func:`search_docs` — call T2's :func:`~meho_backplane.auth.corpus.search_corpus`
    with the operator's forwarded JWT and the binary scope, then project
@@ -35,16 +38,17 @@ touches the raw query beyond forwarding it to the corpus.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
-from meho_backplane.auth.corpus import CorpusChunk
+from meho_backplane.auth.corpus import CorpusChunk, ScoreKind
 from meho_backplane.auth.operator import Operator
 from meho_backplane.docs_search.backends import resolve_backend
-from meho_backplane.docs_search.citation_links import normalize_source_ref
+from meho_backplane.docs_search.call_log import hit_log_fields, note_scoped_zero_hits
+from meho_backplane.docs_search.citation_links import derive_chunk_title, normalize_source_ref
 
 if TYPE_CHECKING:
     from meho_backplane.docs_collections import DocCollection
@@ -53,19 +57,59 @@ __all__ = [
     "DocsChunk",
     "DocsScope",
     "DocsSearchResult",
+    "ForwardedScope",
     "MissingDocsFilterError",
+    "ScopeForwarding",
+    "ScopeSource",
     "build_docs_scope",
+    "forwarded_scope",
     "search_docs",
 ]
 
 _log = structlog.get_logger(__name__)
 
-#: The optional refinement keys forwarded to the backend as
-#: ``metadata_filters`` within the chosen collection. Both are optional
+#: The optional refinement keys within the chosen collection, sent to the
+#: backend as ``metadata_filters`` or inside the soft ``scope`` when the
+#: collection opts in (:func:`forwarded_scope`, #3912). Both are optional
 #: under the collection-scoped posture (T3 #1552); the backend keys its
 #: per-chunk ``metadata`` off these names.
 _PRODUCT_KEY = "product"
 _VERSION_KEY = "version"
+
+#: The ``backend.ref`` key that opts a collection into the **soft scope**
+#: (#3912): the refinements travel as a ``scope`` object the backend ranks
+#: with and never filters on. Only the exact string :data:`_SOFT_SCOPE`
+#: enables it; absent or any other value leaves it off.
+_SCOPE_REF_KEY = "scope"
+_SOFT_SCOPE = "soft"
+
+#: The ``backend.ref`` key that opts a collection into forwarding the
+#: refinements as **hard** ``metadata_filters`` (#3912). Only the JSON
+#: boolean ``true`` enables it; absent, ``false`` or any other value keeps
+#: them out. A collection that also sets ``scope: "soft"`` gets the soft
+#: scope instead (the soft gate wins).
+_SCOPE_FILTERS_REF_KEY = "scope_filters"
+
+#: The ``source`` the soft scope carries: ``"caller"`` when the values came
+#: from the caller's own ``product`` / ``version`` arguments, ``"default"``
+#: when they came from a named target's fingerprint (#3920).
+_SCOPE_SOURCE_KEY = "source"
+_SCOPE_SOURCE_CALLER: Final = "caller"
+_SCOPE_SOURCE_DEFAULT: Final = "default"
+
+#: The soft-scope key that carries a target's version (#3920). The backend
+#: reads a default as a release (``8.0.3.00400``) and normalises it itself.
+_RELEASE_KEY = "release"
+
+#: Where the scope of a docs call came from: the caller's own ``product`` /
+#: ``version`` (``"caller"``) or a named target's fingerprint
+#: (``"default"``, #3920). ``None`` when there is no scope.
+ScopeSource = Literal["caller", "default"]
+
+#: How a backend call carried the requested refinements: ``"soft"`` (the
+#: ``scope`` object), ``"filters"`` (``metadata_filters``) or ``"none"``
+#: (not sent: the collection opts into neither, or nothing was requested).
+ScopeForwarding = Literal["soft", "filters", "none"]
 
 #: The mandatory binary-scope key. ``collection`` is the router /
 #: entitlement key (T3 #1552) — required on every query, but **not** a
@@ -108,6 +152,16 @@ class DocsScope(BaseModel):
     the query, it is not a per-chunk metadata field. Only positively-set
     refinement keys are emitted, so a query with no product/version carries
     no spurious ``None`` values the backend would have to special-case.
+    Whether and how the refinements reach the backend is the collection's
+    choice: :func:`forwarded_scope` (#3912).
+
+    ``target`` is the name of the target the caller named (#3920), and
+    ``target_product`` / ``target_release`` are that target's fingerprint
+    product and version, as reported. They are the **default** scope: used
+    only when the caller gave neither ``product`` nor ``version``, sent only
+    as a soft ``scope`` and never as a filter, so :meth:`as_filters` leaves
+    them out. Set them with
+    :func:`~meho_backplane.docs_search.target_scope.with_target_default`.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -115,6 +169,9 @@ class DocsScope(BaseModel):
     collection_key: str
     product: str | None = Field(default=None)
     version: str | None = Field(default=None)
+    target: str | None = Field(default=None)
+    target_product: str | None = Field(default=None)
+    target_release: str | None = Field(default=None)
 
     def as_filters(self) -> dict[str, str]:
         """Render the optional refinements as a ``{key: scalar}`` filter dict.
@@ -128,6 +185,31 @@ class DocsScope(BaseModel):
         if self.version is not None:
             filters[_VERSION_KEY] = self.version
         return filters
+
+    def default_scope(self) -> dict[str, str]:
+        """Return the target default as ``{product, release}`` (#3920).
+
+        Empty when the caller gave ``product`` or ``version`` (the caller
+        wins), or when no target fingerprint filled a value. A key with no
+        value is left out.
+        """
+        if self.as_filters():
+            return {}
+        default: dict[str, str] = {}
+        if self.target_product is not None:
+            default[_PRODUCT_KEY] = self.target_product
+        if self.target_release is not None:
+            default[_RELEASE_KEY] = self.target_release
+        return default
+
+    @property
+    def source(self) -> ScopeSource | None:
+        """Where the scope came from: ``"caller"``, ``"default"`` or ``None``."""
+        if self.as_filters():
+            return _SCOPE_SOURCE_CALLER
+        if self.default_scope():
+            return _SCOPE_SOURCE_DEFAULT
+        return None
 
 
 class DocsChunk(BaseModel):
@@ -150,12 +232,16 @@ class DocsChunk(BaseModel):
     optional owning-document id (``None`` when the corpus has no document
     concept for a chunk) and is only read as a citation-label fallback.
 
-    ``title`` is the **optional** human-legible chunk title (#2475), passed
-    through from the corpus (``CorpusChunk.title``). It is the *preferred*
-    citation label — every citation face (``ask_docs``, ``/ui/corpus``)
-    feeds it to the ``title -> document_id -> filename -> URL`` label chain
-    — and is ``None`` until the upstream corpus supplies one, so today's
-    corpus (which sends no title) sees no behaviour change.
+    ``title`` is the **optional** human-legible chunk title (#2475). It is
+    the corpus's own ``title`` when it sends one, else a title derived from
+    the hit's page identity (#3913): its section (last heading or breadcrumb
+    tail) joined with its page name (the humanised filename), by
+    :func:`~meho_backplane.docs_search.citation_links.derive_chunk_title`.
+    It is the *preferred* citation label — every citation face
+    (``ask_docs``, ``/ui/corpus``) feeds it to the ``title -> document_id ->
+    filename -> URL`` label chain — and the local synthesis prompt shows it
+    on each evidence line. ``None`` when the corpus sends neither a title
+    nor any page identity.
 
     ``source_url`` is the **backend-agnostic** citation reference (#132): a
     canonical public URL where one is derivable, else an opaque
@@ -164,6 +250,28 @@ class DocsChunk(BaseModel):
     normalizes it via
     :func:`~meho_backplane.docs_search.citation_links.normalize_source_ref`
     so no storage-backend scheme or internal bucket/layout reaches the wire.
+    When the hit's own source is not an ``https`` link and the backend sent
+    an ``upstream_url``, that public link is the ``source_url`` (#3913).
+
+    ``score_kind`` names the direction of ``score`` when the backend sends
+    it: ``distance`` means lower is better, ``similarity`` higher is better.
+    ``None`` when the backend does not say; it is never defaulted.
+
+    ``upstream_url`` / ``upstream_page`` are the backend's optional public
+    link to the hit's source (for a PDF with a known page, ending in
+    ``#page=N``) and that page, counted in the whole source document
+    (#3913). ``None`` when the backend does not send them. ``chunk_id`` is
+    kept either way, so the ``meho://docs`` chunk resource still finds the
+    hit.
+
+    ``read_handle`` (#3948) is the backend's opaque, signed handle for reading
+    more around the hit with ``read_docs``. It is set only when the backend
+    sent one **and** the collection offers read
+    (:meth:`~meho_backplane.docs_search.backends.base.SearchBackend.supports_read`),
+    so a hit that carries it can always be read; otherwise it is ``None`` (a
+    PDF hit gets none from the backend). It is passed through unchanged and
+    never logged: it carries a few words of the hit, so the logs name the
+    ``chunk_id`` instead.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -173,8 +281,12 @@ class DocsChunk(BaseModel):
     title: str | None = None
     content: str
     source_url: str | None = None
+    upstream_url: str | None = None
+    upstream_page: int | None = None
     score: float | None = None
+    score_kind: ScoreKind | None = None
     collection: str | None = None
+    read_handle: str | None = None
 
 
 class DocsSearchResult(BaseModel):
@@ -232,9 +344,10 @@ def build_docs_scope(
     by ``settings.corpus_require_filters`` (the legacy product+version gate),
     because every collection-scoped query *must* name a collection to route
     and entitle on. ``product`` / ``version`` are **optional refinements**
-    within the chosen collection: whatever is provided rides
-    :meth:`DocsScope.as_filters` as ``metadata_filters``, whatever is absent
-    simply widens the search inside the collection. Blank-after-strip values
+    within the chosen collection: whatever is provided reaches the backend
+    when the collection opts in (:func:`forwarded_scope`, #3912), as a soft
+    ``scope`` or as ``metadata_filters``; whatever is absent simply widens
+    the search inside the collection. Blank-after-strip values
     are treated as absent so a ``collection=" "`` cannot smuggle past the
     mandatory gate.
 
@@ -264,11 +377,110 @@ def build_docs_scope(
     )
 
 
+class ForwardedScope(BaseModel):
+    """What one backend call carries for the requested refinements (#3912).
+
+    Built by :func:`forwarded_scope`. At most one of :attr:`filters` and
+    :attr:`soft_scope` is non-empty, and :attr:`mode` names which one.
+    Frozen so the decision cannot drift between the backend call and the
+    log line that reports it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: Which form reached the backend (``"none"`` when nothing did).
+    mode: ScopeForwarding = "none"
+    #: The hard ``{key: scalar}`` filters: ``metadata_filters`` on search,
+    #: ``filters`` on the upstream answer call (#3911). Empty unless
+    #: :attr:`mode` is ``"filters"``.
+    filters: dict[str, str] = Field(default_factory=dict)
+    #: The soft ``scope`` object: the requested ``product`` / ``version``
+    #: unchanged, or the target default ``product`` / ``release`` (#3920),
+    #: plus ``source``. Empty unless :attr:`mode` is ``"soft"``.
+    soft_scope: dict[str, str] = Field(default_factory=dict)
+
+
+def forwarded_scope(
+    scope: DocsScope,
+    backend_ref: Mapping[str, Any] | None,
+) -> ForwardedScope:
+    """Decide how the refinements reach the collection's backend (#3912).
+
+    Two independent per-collection gates, both off by default:
+
+    * ``backend.ref["scope"] == "soft"`` sends the requested ``product`` /
+      ``version`` as a soft ``scope`` object,
+      ``{"product": …, "version": …, "source": "caller"}``. The backend
+      uses it to rank the asked release first and to label its answer;
+      it never filters on it, so version-agnostic documents (KB articles,
+      advisories) stay reachable. The values are sent as given (a full
+      release such as ``8.0.3.00400`` included): normalising them is the
+      backend's job. A key the caller did not give is omitted.
+    * ``backend.ref["scope_filters"] is True`` sends them as hard filters
+      (``metadata_filters`` on search, ``filters`` on the upstream answer
+      call): an exact-match pre-filter over the backend's per-document
+      metadata, so it only helps when the values are in the collection's
+      vocabulary.
+
+    When both are set the soft scope wins: the scope is sent and no
+    filters are. Any other value of either key (``"SOFT"``, the string
+    ``"true"``, ``1``) counts as off. With neither gate on, nothing is
+    sent and the collection alone scopes the query, which is what a
+    backend that refuses unknown request keys needs until it accepts
+    ``scope``. Nothing requested means nothing sent, whatever the gates.
+
+    The target default (#3920): when the caller gave neither ``product``
+    nor ``version`` but named a target with a fingerprint
+    (:meth:`DocsScope.default_scope`), the soft gate sends
+    ``{"product": …, "release": …, "source": "default"}``. The backend
+    applies it only when the question names no version itself. The
+    default is never sent as filters: with only ``scope_filters`` on, it
+    is not sent at all.
+
+    The caller still records the *requested* ``product`` / ``version`` in
+    its log and audit row; only what reaches the backend is gated. This is
+    the one rule every backend call that carries refinements goes through:
+    :func:`search_docs` (every single-collection search, including the
+    local ``ask_docs`` pipeline's per-variant retrieval) and the upstream
+    answer call (:func:`~meho_backplane.docs_search.answer.answer_docs_question`,
+    #3911).
+
+    Args:
+        scope: The validated scope from :func:`build_docs_scope`.
+        backend_ref: The collection's ``backend.ref`` as resolved by the
+            router (``None`` for a collection without one).
+
+    Returns:
+        The :class:`ForwardedScope` for the backend call.
+    """
+    if backend_ref is None:
+        return ForwardedScope()
+    soft = backend_ref.get(_SCOPE_REF_KEY) == _SOFT_SCOPE
+    requested = scope.as_filters()
+    if requested:
+        if soft:
+            return ForwardedScope(
+                mode="soft",
+                soft_scope={**requested, _SCOPE_SOURCE_KEY: _SCOPE_SOURCE_CALLER},
+            )
+        if backend_ref.get(_SCOPE_FILTERS_REF_KEY) is True:
+            return ForwardedScope(mode="filters", filters=requested)
+        return ForwardedScope()
+    default = scope.default_scope()
+    if default and soft:
+        return ForwardedScope(
+            mode="soft",
+            soft_scope={**default, _SCOPE_SOURCE_KEY: _SCOPE_SOURCE_DEFAULT},
+        )
+    return ForwardedScope()
+
+
 def _project_chunk(
     chunk: CorpusChunk,
     *,
     collection: str | None = None,
     collection_key: str | None = None,
+    readable: bool = False,
 ) -> DocsChunk:
     """Project a corpus chunk into MEHO's cited-chunk surface.
 
@@ -286,21 +498,42 @@ def _project_chunk(
     born here) normalize through. *collection_key* is the routing collection
     that namespaces the opaque ref; it falls back to the *collection*
     provenance tag (set on the fan-out path).
+
+    The title is the corpus's ``title``, else one derived from the hit's page
+    identity (``heading_path`` / ``breadcrumb`` / ``filename``, #3913). A hit
+    whose own source is not an ``https`` link uses the backend's
+    ``upstream_url`` as its ``source_url`` when it sent one. ``score_kind``,
+    ``upstream_url`` and ``upstream_page`` pass through unchanged.
+
+    *readable* is whether the chunk's collection offers read (#3948). Only
+    then is the backend's ``read_handle`` kept; otherwise it is dropped, so a
+    handle on the wire always leads to a working ``read_docs`` call.
     """
+    title = derive_chunk_title(
+        title=chunk.title,
+        heading_path=chunk.heading_path,
+        breadcrumb=chunk.breadcrumb,
+        filename=chunk.filename,
+    )
     return DocsChunk(
         chunk_id=chunk.chunk_id,
         document_id=chunk.document_id,
-        title=chunk.title,
+        title=title,
         content=chunk.content,
         source_url=normalize_source_ref(
             chunk.source_url,
             collection_key=collection_key or collection,
             chunk_id=chunk.chunk_id,
-            title=chunk.title,
+            title=title,
             document_id=chunk.document_id,
+            upstream_url=chunk.upstream_url,
         ),
+        upstream_url=chunk.upstream_url,
+        upstream_page=chunk.upstream_page,
         score=chunk.score,
+        score_kind=chunk.score_kind,
         collection=collection,
+        read_handle=chunk.read_handle if readable else None,
     )
 
 
@@ -321,11 +554,19 @@ async def search_docs(
     managed RAG and another on the JWT-forward corpus behind this one
     entrypoint, and the agent never sees which backend answered. The
     operator JWT is forwarded by the adapter (for the JWT-forward corpus
-    backend), the search is scoped by the collection (and the optional
-    product/version refinements), and the cited chunks are projected into
+    backend), the search is scoped by the collection (the optional
+    product/version refinements ride along as a soft ``scope`` or as
+    ``metadata_filters`` only when the collection opts in —
+    :func:`forwarded_scope`), and the cited chunks are projected into
     MEHO's surface. The query itself is never logged here — only its
     presence is implied; the route binds the SHA-256 hash to the audit
-    row.
+    row. The ``docs_search_completed`` log records the *requested*
+    product/version and, as ``scope_forwarded``, how they were sent
+    (``"soft"``, ``"filters"`` or ``"none"``), the scope's ``scope_source``
+    and the named ``target`` (#3920; its name only), and lists the hit
+    chunk ids and source refs (#3915). A search that requested ``product`` or
+    ``version`` but found nothing also logs ``docs_search_scoped_zero_hits``,
+    with the same ``scope_forwarded``.
 
     *collection* is the **required** binary scope (T3 #1552): the caller
     (the REST route / MCP handler) has already resolved the
@@ -355,22 +596,36 @@ async def search_docs(
             or returns a non-2xx / malformed response. The route maps it
             to HTTP 503 (the backend id never appears in the 503).
     """
-    filters = scope.as_filters()
     resolved = resolve_backend(collection)
+    forwarded = forwarded_scope(scope, resolved.ref)
     response = await resolved.backend.search(
         operator,
         query,
         backend_ref=resolved.ref,
-        metadata_filters=filters or None,
+        metadata_filters=forwarded.filters or None,
+        soft_scope=forwarded.soft_scope or None,
         limit=limit,
     )
-    chunks = [_project_chunk(c, collection_key=scope.collection_key) for c in response.chunks]
+    readable = resolved.backend.supports_read(resolved.ref)
+    chunks = [
+        _project_chunk(c, collection_key=scope.collection_key, readable=readable)
+        for c in response.chunks
+    ]
     _log.info(
         "docs_search_completed",
         operator_sub=operator.sub,
         collection_key=scope.collection_key,
         product=scope.product,
         version=scope.version,
+        scope_forwarded=forwarded.mode,
+        scope_source=scope.source,
+        target=scope.target,
+        **hit_log_fields(chunks),
+    )
+    note_scoped_zero_hits(
+        operator_sub=operator.sub,
+        scope=scope,
+        scope_forwarded=forwarded.mode,
         hit_count=len(chunks),
     )
     return DocsSearchResult(chunks=chunks)

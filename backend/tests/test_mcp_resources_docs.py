@@ -5,18 +5,22 @@
 
 Covers the collection-scoped resource acceptance criteria:
 
-* ``meho://docs/{collection}/{product}/{version}/{chunk_id}`` is
-  registered, gated by the SAME ``required_capability="meho-docs"`` as the
-  ``search_docs`` tool: absent from ``resources/templates/list`` and
+* ``meho://docs/{collection}/{chunk_id}`` (the citation form, #3914) and
+  the older ``meho://docs/{collection}/{product}/{version}/{chunk_id}`` are
+  both registered, gated by the SAME ``required_capability="meho-docs"`` as
+  the ``search_docs`` tool: absent from ``resources/templates/list`` and
   403-on-read for a tenant without the base capability; present for one
   with it.
+* **No filters from the URI (#3914):** the 4-segment form's ``product`` /
+  ``version`` segments never reach the backend, even on a collection that
+  enables scope filters or the soft scope.
 * **Per-collection entitlement (#1552):** a tenant with base ``meho-docs``
   but not ``meho-docs:<collection>`` → 403-class read even though the
   template is visible.
 * ``resources/read`` recovers the cited chunk's text (the backend has no
   fetch-by-id endpoint, so the handler re-issues a scoped search and
   matches on ``chunk_id``).
-* A ``(collection, product, version, chunk_id)`` that doesn't resolve
+* A ``(collection, chunk_id)`` that doesn't resolve
   collapses to INVALID_PARAMS "not found" without leaking collection
   contents.
 
@@ -56,9 +60,17 @@ _DOCS_CAPABILITY = "meho-docs"
 _VMWARE_CAP = "meho-docs:vmware"
 #: A provisioned + vmware-entitled capability set.
 _ENTITLED = frozenset({_DOCS_CAPABILITY, _VMWARE_CAP})
-#: URI now carries the leading ``{collection}`` segment.
+#: The older 4-segment form, with real-looking product / version segments.
 _DOCS_URI = "meho://docs/vmware/nsx/9.0/nsx-9.0-maximums-0007"
+#: The 3-segment form a citation's ``source_url`` carries (#1919, #3914).
+_DOCS_URI_SHORT = "meho://docs/vmware/nsx-9.0-maximums-0007"
+#: The 4-segment form with placeholder segments, as an agent fills it in.
+_DOCS_URI_PLACEHOLDERS = "meho://docs/vmware/-/-/nsx-9.0-maximums-0007"
 _DOCS_TEMPLATE = "meho://docs/{collection}/{product}/{version}/{chunk_id}"
+_DOCS_TEMPLATE_SHORT = "meho://docs/{collection}/{chunk_id}"
+_BOTH_TEMPLATES = (_DOCS_TEMPLATE_SHORT, _DOCS_TEMPLATE)
+#: Both URI forms, for the gate tests that must behave the same on each.
+_BOTH_URIS = pytest.mark.parametrize("uri", [_DOCS_URI_SHORT, _DOCS_URI], ids=["short", "long"])
 
 #: The corpus-http backend's transport seam.
 _CORPUS_SEAM = "meho_backplane.docs_search.backends.corpus_http.search_corpus"
@@ -143,7 +155,7 @@ def test_docs_resource_absent_from_templates_list_when_unprovisioned(
     )
     assert response.status_code == 200
     templates = {t["uriTemplate"] for t in response.json()["result"]["resourceTemplates"]}
-    assert _DOCS_TEMPLATE not in templates
+    assert not templates & set(_BOTH_TEMPLATES)
 
 
 @pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
@@ -162,11 +174,18 @@ def test_docs_resource_present_with_stripped_wire_fields_when_provisioned(
     )
     assert response.status_code == 200
     templates = {t["uriTemplate"]: t for t in response.json()["result"]["resourceTemplates"]}
-    template = templates.get(_DOCS_TEMPLATE)
-    assert template is not None
-    assert template["mimeType"] == "text/markdown"
-    assert "required_role" not in template
-    assert "required_capability" not in template
+    for uri_template in _BOTH_TEMPLATES:
+        template = templates.get(uri_template)
+        assert template is not None
+        assert template["mimeType"] == "text/markdown"
+        assert "required_role" not in template
+        assert "required_capability" not in template
+        # #3914: both say the recovery is a best-effort re-search and that
+        # the search / ask results already carry the chunk text.
+        description = template["description"]
+        assert "best effort" in description
+        assert "no fetch-by-id" in description
+        assert "`search_docs` and `ask_docs` results already include the chunk text" in description
 
 
 # ---------------------------------------------------------------------------
@@ -174,8 +193,10 @@ def test_docs_resource_present_with_stripped_wire_fields_when_provisioned(
 # ---------------------------------------------------------------------------
 
 
+@_BOTH_URIS
 def test_resources_read_docs_403_when_unprovisioned(
     docs_client: tuple[TestClient, Operator],
+    uri: str,
 ) -> None:
     """Reading a known docs URI still 403s when the capability is absent.
 
@@ -191,7 +212,7 @@ def test_resources_read_docs_403_when_unprovisioned(
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "resources/read",
-                "params": {"uri": _DOCS_URI},
+                "params": {"uri": uri},
             },
         )
     assert response.status_code == 200
@@ -250,10 +271,12 @@ def test_resources_read_docs_returns_matching_chunk_text(
     assert "NSX 9.0 supports" in chunk["content"]
     assert chunk["source_url"].endswith("/maximums")
 
-    # The optional product/version refinements reached the backend and the
-    # operator identity was forwarded.
+    # The seeded collection enables neither scope gate (#3912), so the URI's
+    # product/version segments do not reach the backend, as filters or as a
+    # soft scope; the operator identity was forwarded.
     captured = fake.captured  # type: ignore[attr-defined]
-    assert captured["metadata_filters"] == {"product": "nsx", "version": "9.0"}
+    assert captured["metadata_filters"] is None
+    assert captured["soft_scope"] is None
     assert captured["operator"].tenant_id == op.tenant_id
 
 
@@ -293,8 +316,10 @@ def test_resources_read_docs_forged_terminator_stays_inside_envelope(
 
 
 @pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
+@_BOTH_URIS
 def test_resources_read_docs_403_when_not_entitled_to_collection(
     docs_client: tuple[TestClient, Operator],
+    uri: str,
 ) -> None:
     """A tenant with base ``meho-docs`` but not ``meho-docs:vmware`` → 403-class read.
 
@@ -311,7 +336,7 @@ def test_resources_read_docs_403_when_not_entitled_to_collection(
                 "jsonrpc": "2.0",
                 "id": 6,
                 "method": "resources/read",
-                "params": {"uri": _DOCS_URI},
+                "params": {"uri": uri},
             },
         )
     assert response.status_code == 200
@@ -327,8 +352,10 @@ def test_resources_read_docs_403_when_not_entitled_to_collection(
 
 
 @pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+@_BOTH_URIS
 def test_resources_read_docs_unknown_chunk_collapses_to_not_found(
     docs_client: tuple[TestClient, Operator],
+    uri: str,
 ) -> None:
     """A chunk id absent from the re-search collapses to INVALID_PARAMS not-found.
 
@@ -348,13 +375,16 @@ def test_resources_read_docs_unknown_chunk_collapses_to_not_found(
                 "jsonrpc": "2.0",
                 "id": 4,
                 "method": "resources/read",
-                "params": {"uri": _DOCS_URI},
+                "params": {"uri": uri},
             },
         )
     assert response.status_code == 200
     body = response.json()
     assert body["error"]["code"] == INVALID_PARAMS
-    assert "not found" in body["error"]["message"].lower()
+    message = body["error"]["message"]
+    assert message == (
+        "docs chunk not found: collection='vmware', chunk_id='nsx-9.0-maximums-0007'"
+    )
 
 
 @pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
@@ -383,8 +413,10 @@ def test_resources_read_docs_backend_unavailable_is_internal_error(
 
 
 @pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+@_BOTH_URIS
 def test_resources_read_docs_disabled_collection_is_invalid_params(
     docs_client: tuple[TestClient, Operator],
+    uri: str,
 ) -> None:
     """A ``disabled`` collection → -32602 terminal (the shared gate's #1567 split).
 
@@ -406,10 +438,106 @@ def test_resources_read_docs_disabled_collection_is_invalid_params(
                 "jsonrpc": "2.0",
                 "id": 6,
                 "method": "resources/read",
-                "params": {"uri": _DOCS_URI},
+                "params": {"uri": uri},
             },
         )
     assert response.status_code == 200
     error = response.json()["error"]
     assert error["code"] == INVALID_PARAMS
     assert error["data"]["reason"] == "collection_disabled"
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+@_BOTH_URIS
+@pytest.mark.parametrize("status", ["provisioning", "rebuilding"])
+def test_resources_read_docs_not_ready_collection_is_internal_error(
+    docs_client: tuple[TestClient, Operator],
+    uri: str,
+    status: str,
+) -> None:
+    """A transiently not-ready collection → -32603 (retryable) on both templates."""
+    client, _op = docs_client
+    _seed_collection_sync(status=status)
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "resources/read",
+                "params": {"uri": uri},
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["error"]["code"] == INTERNAL_ERROR
+    assert "query" not in fake.captured  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# #3914: no filters from the URI; the 3-segment citation ref reads back
+# ---------------------------------------------------------------------------
+
+
+def _read_chunk(client: TestClient, uri: str) -> dict[str, Any]:
+    """Read *uri* and return the decoded chunk payload (asserts success)."""
+    response = post_mcp(
+        client,
+        {"jsonrpc": "2.0", "id": 8, "method": "resources/read", "params": {"uri": uri}},
+    )
+    assert response.status_code == 200
+    contents = response.json()["result"]["contents"]
+    assert contents[0]["uri"] == uri
+    chunk: dict[str, Any] = json.loads(contents[0]["text"])
+    return chunk
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+@pytest.mark.parametrize("uri", [_DOCS_URI_PLACEHOLDERS, _DOCS_URI], ids=["placeholders", "values"])
+@pytest.mark.parametrize(
+    "ref",
+    [
+        pytest.param({"scope_filters": True}, id="filters-on"),
+        pytest.param({"scope": "soft"}, id="soft-scope-on"),
+    ],
+)
+def test_resources_read_docs_long_form_never_forwards_uri_segments(
+    docs_client: tuple[TestClient, Operator],
+    uri: str,
+    ref: dict[str, Any],
+) -> None:
+    """The 4-segment form's product / version never reach the backend.
+
+    Even on a collection that turns on scope filters or the soft scope, the
+    handler scopes by the collection only, so a guessed or placeholder
+    segment cannot hide a chunk that exists.
+    """
+    client, _op = docs_client
+    _seed_collection_sync(backend={"type": "corpus-http", "ref": ref})
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        chunk = _read_chunk(client, uri)
+    assert chunk["chunk_id"] == "nsx-9.0-maximums-0007"
+    assert chunk["content"] == wrap_untrusted_text(_SAMPLE_CHUNK.content)
+    captured = fake.captured  # type: ignore[attr-defined]
+    assert captured["metadata_filters"] is None
+    assert captured["soft_scope"] is None
+    assert captured["query"] == "nsx-9.0-maximums-0007"
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_resources_read_docs_short_form_reads_back_the_citation_ref(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """The 3-segment ref a citation carries resolves through the same handler."""
+    client, _op = docs_client
+    _seed_collection_sync(backend={"type": "corpus-http", "ref": {"scope_filters": True}})
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        chunk = _read_chunk(client, _DOCS_URI_SHORT)
+    assert chunk["chunk_id"] == "nsx-9.0-maximums-0007"
+    assert chunk["content"] == wrap_untrusted_text(_SAMPLE_CHUNK.content)
+    captured = fake.captured  # type: ignore[attr-defined]
+    assert captured["metadata_filters"] is None
+    assert captured["soft_scope"] is None
+    assert captured["query"] == "nsx-9.0-maximums-0007"

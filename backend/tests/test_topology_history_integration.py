@@ -92,9 +92,6 @@ from meho_backplane.topology.query import query_diff, query_history, query_timel
 from meho_backplane.topology.refresh import refresh_target_topology
 from meho_backplane.topology.resolvers import NodeNotFoundError
 
-_PUBLISH_REFRESH = "meho_backplane.topology.refresh.publish_event"
-_PUBLISH_ANNOTATE = "meho_backplane.topology.annotate.publish_event"
-
 #: Name of the composite index the per-resource history walk rides --
 #: declared by migration ``0012`` on ``(tenant_id, node_id, valid_from
 #: DESC)``. The performance criterion asserts the query planner picks
@@ -306,8 +303,7 @@ async def test_refresh_annotate_refresh_chronology_pairs_audit_ids() -> None:
     # --- Operation 1: refresh seeding 3 nodes + 2 edges --------------
     _FakeConnector.hints = _hints_3n2e()
     first_ts = datetime.now(UTC) - timedelta(minutes=5)
-    with _patched_publishers():
-        await refresh_target_topology(target, operator)
+    await refresh_target_topology(target, operator)
     refresh1_audit = (await _audit_ids_for_tenant(tenant_id))[0]
 
     # 5 history rows (3 node + 2 edge) all sharing the refresh's audit_id.
@@ -325,15 +321,14 @@ async def test_refresh_annotate_refresh_chronology_pairs_audit_ids() -> None:
     # triggers no §6 conflict markers (the issue's "1 history row sharing
     # the annotate's audit_id" criterion).
     async with get_sessionmaker()() as s:
-        with _patched_publishers():
-            await annotate_edge(
-                s,
-                operator,
-                NodeRef(name="vm-a", kind="vm"),
-                "depends-on",
-                NodeRef(name="vm-b", kind="vm"),
-                note="curated link for the chronology test",
-            )
+        await annotate_edge(
+            s,
+            operator,
+            NodeRef(name="vm-a", kind="vm"),
+            "depends-on",
+            NodeRef(name="vm-b", kind="vm"),
+            note="curated link for the chronology test",
+        )
     annotate_audit = next(a for a in await _audit_ids_for_tenant(tenant_id) if a != refresh1_audit)
     # The annotate emits exactly one edge-history row, carrying its own
     # audit_id (distinct from the refresh's).
@@ -343,8 +338,7 @@ async def test_refresh_annotate_refresh_chronology_pairs_audit_ids() -> None:
 
     # --- Operation 3: refresh dropping vm-b --------------------------
     _FakeConnector.hints = _hints_2n1e_dropping_vm_b()
-    with _patched_publishers():
-        await refresh_target_topology(target, operator)
+    await refresh_target_topology(target, operator)
     refresh2_audit = next(
         a
         for a in await _audit_ids_for_tenant(tenant_id)
@@ -407,17 +401,15 @@ async def test_every_history_audit_id_joins_to_audit_log_same_tenant_principal()
     operator = _operator(tenant_id, sub="op-linkage-42")
 
     _FakeConnector.hints = _hints_3n2e()
-    with _patched_publishers():
-        await refresh_target_topology(target, operator)
+    await refresh_target_topology(target, operator)
     async with get_sessionmaker()() as s:
-        with _patched_publishers():
-            await annotate_edge(
-                s,
-                operator,
-                NodeRef(name="vm-a", kind="vm"),
-                "authenticates-via",
-                NodeRef(name="ds-1", kind="datastore"),
-            )
+        await annotate_edge(
+            s,
+            operator,
+            NodeRef(name="vm-a", kind="vm"),
+            "authenticates-via",
+            NodeRef(name="ds-1", kind="datastore"),
+        )
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -700,24 +692,6 @@ async def test_high_churn_week_diff_returns_within_1000_row_cap(session: AsyncSe
 # ---------------------------------------------------------------------------
 # Low-level helpers (history-row readers + bulk seeders)
 # ---------------------------------------------------------------------------
-
-
-def _patched_publishers() -> Any:
-    """Patch both refresh + annotate broadcast publishers to no-ops.
-
-    Returned as a single context manager so the call sites read cleanly.
-    The broadcast publish is fail-open by contract; stubbing it keeps the
-    integration test off the network without weakening the audit / history
-    assertions (which run inside the committed transaction, before any
-    publish).
-    """
-    from contextlib import ExitStack
-    from unittest.mock import AsyncMock, patch
-
-    stack = ExitStack()
-    stack.enter_context(patch(_PUBLISH_REFRESH, new=AsyncMock()))
-    stack.enter_context(patch(_PUBLISH_ANNOTATE, new=AsyncMock()))
-    return stack
 
 
 async def _node_history_rows(tenant_id: uuid.UUID) -> list[GraphNodeHistory]:

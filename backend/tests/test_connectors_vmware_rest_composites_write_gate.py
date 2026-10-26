@@ -59,6 +59,7 @@ from meho_backplane.db.models import (
     PermissionVerdict,
 )
 from meho_backplane.settings import get_settings
+from tests._vmware_cluster_config_fake import cluster_config_ex, reject_config_ex_member_paths
 
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000025a6")
 
@@ -753,8 +754,40 @@ class _DeployRecordingConnector:
         extra_headers: Any = None,
         timeout: Any = None,
     ) -> Any:
+        if path.endswith("?action=filter"):
+            # The un-gated OVF summary read (#3697) that supplies the default
+            # VM name when the caller sets none.
+            return {"name": "ovf-default"}
         self.deploy_writes.append((path, json))
         return {"succeeded": True, "resource_id": {"type": "VirtualMachine", "id": "vm-ovf-1"}}
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        """Serve the #3697 rename leg: the ``Rename_Task`` MoRef, then a successful Task poll."""
+        if path.endswith("/Rename_Task"):
+            return {"_typeName": "ManagedObjectReference", "type": "Task", "value": "task-rename"}
+        assert path.endswith("/RetrievePropertiesEx"), path
+        return {
+            "_typeName": "RetrieveResult",
+            "objects": [
+                {
+                    "_typeName": "ObjectContent",
+                    "obj": {
+                        "_typeName": "ManagedObjectReference",
+                        "type": "Task",
+                        "value": "task-rename",
+                    },
+                    "propSet": [
+                        {
+                            "_typeName": "DynamicProperty",
+                            "name": "info",
+                            "val": {"_typeName": "TaskInfo", "state": "success"},
+                        }
+                    ],
+                }
+            ],
+        }
 
 
 def _deploy_gate_params() -> dict[str, Any]:
@@ -858,7 +891,8 @@ class _DrsRuleRecordingConnector:
     collision read + the ``Task.info`` poll (both vmomi ``RetrievePropertiesEx``,
     keyed apart by the request body's ``specSet`` object type) and records every
     ``ReconfigureComputeResource_Task`` write so the tests can assert the
-    mutating vmomi POST never fired when the gate parks / denies.
+    mutating vmomi POST never fired when the gate parks / denies. The cluster
+    read answers like vCenter 8.0.x: a path into ``configurationEx`` fails.
     """
 
     _MOUNT = "/api"
@@ -886,13 +920,14 @@ class _DrsRuleRecordingConnector:
         if path.endswith("/ReconfigureComputeResource_Task"):
             self.reconfig_writes.append(json)
             return {"type": "Task", "value": "task-rule-1"}
+        reject_config_ex_member_paths(json)
         spec_type = json["specSet"][0]["propSet"][0]["type"]
         if spec_type == "ClusterComputeResource":
             return {
                 "objects": [
                     {
                         "obj": {"type": "ClusterComputeResource", "value": "domain-c1"},
-                        "propSet": [{"name": "configurationEx.rule", "val": []}],
+                        "propSet": [{"name": "configurationEx", "val": cluster_config_ex()}],
                     }
                 ]
             }

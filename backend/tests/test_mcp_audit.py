@@ -12,8 +12,9 @@ Covers every acceptance criterion on issue #250:
   ``audit_log`` row with path=/mcp/resources/read/<uri>.
 * ``tools/call`` against an unknown tool writes a row with status_code=404
   and op_class=unknown.
-* ``compute_params_hash`` is deterministic across dict insertion order
-  and equivalent representations.
+* The ``params_hash`` (:func:`compute_audit_params_hash`) is deterministic
+  across dict insertion order, is keyed, and leaves secret-named argument
+  values out.
 * The chassis :class:`~meho_backplane.audit.AuditMiddleware` skips
   ``/mcp`` requests entirely (no duplicate row per JSON-RPC envelope).
 * Audit-write failure converts an otherwise-successful MCP call into a
@@ -35,11 +36,12 @@ from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
-from meho_backplane.mcp.audit import compute_params_hash, write_mcp_audit_row
+from meho_backplane.db.models import AuditEventClass, AuditLog
+from meho_backplane.mcp.audit import write_mcp_audit_row
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.operations._validate import compute_audit_params_hash
 from meho_backplane.operations.ingest.boot_stamp import BOOT_STAMP_OPERATOR_SUB
 from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
@@ -75,35 +77,46 @@ async def _audit_rows() -> list[AuditLog]:
 
 
 # ---------------------------------------------------------------------------
-# compute_params_hash — pure-function determinism
+# params_hash — pure-function determinism
 # ---------------------------------------------------------------------------
 
 
-def test_params_hash_empty_dict_is_stable() -> None:
-    """``compute_params_hash({})`` returns the canonical empty-object hash.
-
-    Regression-locks the hash so a future change to the canonicalisation
-    rule (separators, sort_keys) would surface here loudly instead of
-    silently invalidating every existing payload row's params_hash.
-    """
-    expected = (
-        # SHA-256("{}") — the canonical JSON encoding of an empty dict
-        # under ``sort_keys=True, separators=(",", ":")``.
-        "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
-    )
-    assert compute_params_hash({}) == expected
+def test_params_hash_empty_dict_is_keyed() -> None:
+    """The empty-arguments hash is keyed: not the plain SHA-256 of ``{}``."""
+    plain = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    digest = compute_audit_params_hash({})
+    assert digest != plain
+    assert len(digest) == 64
+    assert digest == compute_audit_params_hash({})
 
 
 def test_params_hash_is_order_independent() -> None:
     """Same dict-keys in different insertion orders → same hash."""
     a = {"foo": 1, "bar": 2}
     b = {"bar": 2, "foo": 1}
-    assert compute_params_hash(a) == compute_params_hash(b)
+    assert compute_audit_params_hash(a) == compute_audit_params_hash(b)
 
 
 def test_params_hash_differs_for_distinct_inputs() -> None:
     """``{x: 1}`` and ``{x: 2}`` produce different digests."""
-    assert compute_params_hash({"x": 1}) != compute_params_hash({"x": 2})
+    assert compute_audit_params_hash({"x": 1}) != compute_audit_params_hash({"x": 2})
+
+
+def test_params_hash_leaves_nested_secret_values_out() -> None:
+    """A ``call_operation`` password inside ``params`` does not change the hash."""
+
+    def arguments(password: str) -> dict[str, Any]:
+        return {
+            "connector_id": "vault-1.x",
+            "op_id": "vault.auth.userpass.update_password",
+            "params": {"username": "user-a", "password": password, "mount": "userpass"},
+        }
+
+    first = compute_audit_params_hash(arguments("first-test-value"))
+    assert first == compute_audit_params_hash(arguments("second-test-value"))
+    other_user = arguments("first-test-value")
+    other_user["params"]["username"] = "user-b"
+    assert first != compute_audit_params_hash(other_user)
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +168,7 @@ async def test_tools_call_meho_status_writes_one_mcp_audit_row(
     assert row.status_code == 200
     assert row.payload["op_id"] == "meho_status"
     assert row.payload["op_class"] == "read"
-    assert row.payload["params_hash"] == compute_params_hash({})
+    assert row.payload["params_hash"] == compute_audit_params_hash({})
 
 
 @pytest.mark.asyncio
@@ -403,6 +416,7 @@ async def test_write_mcp_audit_row_persists_every_field() -> None:
     payload = {"op_id": "test.tool", "params_hash": "abc123", "op_class": "read"}
 
     await write_mcp_audit_row(
+        event_class=AuditEventClass.LEGACY_REQUEST,
         operator=op,
         method="MCP",
         path="/mcp/tools/call/test.tool",
@@ -646,6 +660,7 @@ async def test_write_helper_leaves_agent_session_id_null_without_contextvar() ->
     op = build_operator()
 
     await write_mcp_audit_row(
+        event_class=AuditEventClass.LEGACY_REQUEST,
         operator=op,
         method="MCP",
         path="/mcp/tools/call/test.tool",
@@ -703,6 +718,7 @@ async def test_principal_name_and_email_merged_from_operator() -> None:
     )
 
     await write_mcp_audit_row(
+        event_class=AuditEventClass.LEGACY_REQUEST,
         operator=op,
         method="MCP",
         path="/mcp/tools/call/meho_status",
@@ -749,6 +765,7 @@ async def test_operator_without_name_or_email_writes_no_principal_keys() -> None
     )
 
     await write_mcp_audit_row(
+        event_class=AuditEventClass.LEGACY_REQUEST,
         operator=op,
         method="MCP",
         path="/mcp/tools/call/meho_status",
@@ -788,6 +805,7 @@ async def test_explicit_payload_principal_name_wins_over_operator() -> None:
     )
 
     await write_mcp_audit_row(
+        event_class=AuditEventClass.LEGACY_REQUEST,
         operator=op,
         method="MCP",
         path="/mcp/tools/call/meho_status",
@@ -826,6 +844,7 @@ async def test_target_id_and_name_hoisted_from_contextvars() -> None:
     op = build_operator()
 
     await write_mcp_audit_row(
+        event_class=AuditEventClass.LEGACY_REQUEST,
         operator=op,
         method="MCP",
         path="/mcp/tools/call/call_operation",
@@ -859,6 +878,7 @@ async def test_target_id_malformed_contextvar_logs_and_falls_back_to_null() -> N
     op = build_operator()
 
     await write_mcp_audit_row(
+        event_class=AuditEventClass.LEGACY_REQUEST,
         operator=op,
         method="MCP",
         path="/mcp/tools/call/call_operation",
@@ -887,6 +907,7 @@ async def test_no_target_contextvar_leaves_target_id_null_and_no_name() -> None:
     op = build_operator()
 
     await write_mcp_audit_row(
+        event_class=AuditEventClass.LEGACY_REQUEST,
         operator=op,
         method="MCP",
         path="/mcp/tools/call/meho_status",
@@ -1002,24 +1023,3 @@ async def test_initialize_issued_session_id_round_trips_to_audit_row(
     mcp_rows = [r for r in rows if r.method == "MCP"]
     assert len(mcp_rows) == 1
     assert mcp_rows[0].agent_session_id == session_uuid
-
-
-# ---------------------------------------------------------------------------
-# #1481: broadcast classification of the corrected post-gate status
-# ---------------------------------------------------------------------------
-
-
-def test_classify_mcp_status_403_is_denied_not_error() -> None:
-    """#1481: the 403 a post-gate rejection now records classifies "denied".
-
-    Locks the broadcast half of the fix — once the audit ``status_code``
-    is corrected from the init 500 to 403, ``_classify_mcp_status`` maps
-    it to ``"denied"`` (not ``"error"``), so the live feed event
-    reflects a policy rejection rather than a fake server crash. 500
-    stays ``"error"`` so a genuine handler fault is still surfaced.
-    """
-    from meho_backplane.mcp.handlers import _classify_mcp_status
-
-    assert _classify_mcp_status(403) == "denied"
-    assert _classify_mcp_status(500) == "error"
-    assert _classify_mcp_status(200) == "ok"

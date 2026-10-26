@@ -21,12 +21,13 @@ The authoritative chart gate is ``.github/workflows/chart.yml`` (lint +
 ``helm template`` + ``kubeconform``). This test mirrors the assertion at
 the unit layer so the regression is catchable from ``pytest`` on any
 machine with ``helm`` installed; it skips cleanly where ``helm`` is
-absent (the backend unit-test sandbox does not ship it — the workflow
-gate covers that environment).
+absent. CI's unit shards install ``helm`` and set ``MEHO_REQUIRE_HELM=1``,
+so there a missing ``helm`` fails instead.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -68,8 +69,8 @@ _BASE_OVERRIDES = [
 ]
 
 pytestmark = pytest.mark.skipif(
-    shutil.which("helm") is None,
-    reason="helm not installed in this sandbox; chart.yml workflow gate covers CI",
+    shutil.which("helm") is None and os.environ.get("MEHO_REQUIRE_HELM") != "1",
+    reason="helm not installed; set MEHO_REQUIRE_HELM=1 to fail instead of skip",
 )
 
 

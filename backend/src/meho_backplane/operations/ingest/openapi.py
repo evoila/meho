@@ -86,6 +86,7 @@ from openapi_spec_validator.schemas import (
 )
 
 from meho_backplane.connectors._shared.pinned_transport import build_pinned_sync_transport
+from meho_backplane.delete_names import is_destructive_action_name
 from meho_backplane.operations._rfc6570 import split_path_operator
 from meho_backplane.operations.ingest.exceptions import (
     InvalidSchemaError,
@@ -120,6 +121,7 @@ __all__ = [
     "UnsupportedSpecError",
     "UpstreamNotSpecError",
     "classify_spec_origin",
+    "default_safety_posture",
     "detect_spec_format",
     "parse_openapi",
     "parse_openapi_with_provenance",
@@ -358,15 +360,11 @@ _VERBS = frozenset({"get", "post", "put", "patch", "delete", "head", "options", 
 # Anything outside this set + the ``dangerous`` set below falls into
 # the ``safe`` bucket.
 _CAUTION_VERBS = frozenset({"POST", "PUT", "PATCH"})
+# A ``DELETE`` lands ``dangerous`` and also requires approval (#3827): it
+# usually removes something that cannot be brought back, so it must wait for
+# a second person on every seat, not run at once for a human operator.
 _DANGEROUS_VERBS = frozenset({"DELETE"})
 
-# VIM-over-JSON represents managed-object methods as POST requests such as
-# ``/VirtualMachine/{moId}/Destroy_Task``. Its HTTP verb therefore cannot
-# distinguish an object destroy from an ordinary mutation. These action-name
-# prefixes are deliberately small and auditable; connector-owned safety floors
-# cover vendor-specific additions after this generic parser hint.
-_DESTRUCTIVE_ACTION_PREFIXES = ("Destroy", "Delete", "Remove", "Unregister")
-_ACTION_NAME_SPLIT_RE = re.compile(r"[._/-]")
 _SAFETY_LEVEL_RANK: dict[SafetyLevel, int] = {
     "safe": 0,
     "caution": 1,
@@ -1163,13 +1161,11 @@ def _build_proto(
         _assert_json_serializable(op_id=op_id, field="response_schema", schema=response_schema)
     _assert_parameter_schema_standalone(op_id=op_id, parameter_schema=parameter_schema)
 
-    safety_level = _safety_level_for(method)
-    requires_approval = _has_destructive_action_hint(
-        operation_id=_optional_string(operation.get("operationId")),
+    safety_level, requires_approval = default_safety_posture(
+        method,
         path=path,
+        operation_id=_optional_string(operation.get("operationId")),
     )
-    if requires_approval:
-        safety_level = _raise_safety_level(safety_level, "dangerous")
 
     return EndpointDescriptorProto(
         op_id=op_id,
@@ -1194,6 +1190,26 @@ def _optional_string(value: Any) -> str | None:
     return value or None
 
 
+def default_safety_posture(
+    method: str, *, path: str, operation_id: str | None = None
+) -> tuple[SafetyLevel, bool]:
+    """Return the parser's ``(safety_level, requires_approval)`` for one operation.
+
+    The verb heuristic sets the level. A ``DELETE`` (#3827) or a destructive
+    action name (``Destroy``, ``Delete``, ``Remove``, ``Unregister``) turns
+    approval on and lifts the level to at least ``dangerous``. The review
+    report for stored deletes calls this with the row's method and path to
+    say what a fresh ingest would assign, before any connector floor.
+    """
+    safety_level = _safety_level_for(method)
+    requires_approval = method in _DANGEROUS_VERBS or _has_destructive_action_hint(
+        operation_id=operation_id, path=path
+    )
+    if requires_approval:
+        safety_level = _raise_safety_level(safety_level, "dangerous")
+    return safety_level, requires_approval
+
+
 def _safety_level_for(method: str) -> SafetyLevel:
     """Heuristic safety classification by HTTP verb."""
     if method in _DANGEROUS_VERBS:
@@ -1208,30 +1224,14 @@ def _has_destructive_action_hint(*, operation_id: str | None, path: str) -> bool
 
     OpenAPI's ``operationId`` is the author-provided semantic identifier. A
     VI-JSON path also ends with the managed-object method, so inspect both: a
-    vendor can omit ``operationId`` without bypassing the safety posture.
+    vendor can omit ``operationId`` without bypassing the safety posture. The
+    word list and the rule live in :mod:`meho_backplane.delete_names`, shared
+    with the grant checks, the flight recorder and the stored-delete review.
     """
     candidates = (operation_id, path.rsplit("/", maxsplit=1)[-1])
     return any(
-        candidate is not None and _is_destructive_action_name(candidate) for candidate in candidates
+        candidate is not None and is_destructive_action_name(candidate) for candidate in candidates
     )
-
-
-def _is_destructive_action_name(value: str) -> bool:
-    """Recognise the constrained destructive action-name vocabulary.
-
-    Splitting preserves ``VirtualMachine.Destroy_Task`` while accepting the
-    compound VIM spelling ``DeleteDatastoreFile_Task``. A prefix must end at
-    a separator, an upper-case word boundary, or the end of the segment so a
-    noun such as ``Destroyer`` is not promoted accidentally.
-    """
-    for segment in _ACTION_NAME_SPLIT_RE.split(value):
-        for prefix in _DESTRUCTIVE_ACTION_PREFIXES:
-            if not segment.startswith(prefix):
-                continue
-            suffix = segment[len(prefix) :]
-            if not suffix or suffix.startswith("_") or suffix[:1].isupper():
-                return True
-    return False
 
 
 def _raise_safety_level(current: SafetyLevel, floor: SafetyLevel) -> SafetyLevel:

@@ -20,6 +20,7 @@ import (
 func newReviewCmd() *cobra.Command {
 	var (
 		jsonOut           bool
+		prefer            string
 		backplaneOverride string
 	)
 	cmd := &cobra.Command{
@@ -35,7 +36,12 @@ func newReviewCmd() *cobra.Command {
 			"`meho connector edit-op` before running\n" +
 			"`meho connector enable <connector_id> --confirm`.\n\n" +
 			"--json returns the full machine-readable payload (suitable for\n" +
-			"piping to jq / saving for a review checkpoint).",
+			"piping to jq / saving for a review checkpoint).\n\n" +
+			"If the id matches both a built-in connector and a connector in\n" +
+			"your tenant, the command stops with an error. Pass\n" +
+			"--prefer tenant or --prefer builtin to pick one. Pass\n" +
+			"--prefer legacy to see your tenant's old copy stored under a\n" +
+			"former product name (the copy `meho connector delete` removes first).",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -43,12 +49,14 @@ func newReviewCmd() *cobra.Command {
 			return runReview(cmd, reviewOptions{
 				ConnectorID:       args[0],
 				JSONOut:           jsonOut,
+				Prefer:            prefer,
 				BackplaneOverride: backplaneOverride,
 			})
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit machine-readable JSON to stdout instead of the human render")
+	cmd.Flags().StringVar(&prefer, "prefer", "", preferFlagUsage)
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -57,15 +65,19 @@ func newReviewCmd() *cobra.Command {
 type reviewOptions struct {
 	ConnectorID       string
 	JSONOut           bool
+	Prefer            string
 	BackplaneOverride string
 }
 
 func runReview(cmd *cobra.Command, opts reviewOptions) error {
+	if err := checkPreferFlag(cmd, opts.Prefer, opts.JSONOut); err != nil {
+		return err
+	}
 	backplaneURL, err := resolveBackplane(opts.BackplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
 	}
-	result, err := getReview(cmd.Context(), backplaneURL, opts.ConnectorID)
+	result, err := getReview(cmd.Context(), backplaneURL, opts.ConnectorID, opts.Prefer)
 	if err != nil {
 		var he *httpResponseError
 		if errors.As(err, &he) {
@@ -84,17 +96,23 @@ func runReview(cmd *cobra.Command, opts reviewOptions) error {
 // 401-retry. The route declares `response_model=ConnectorReviewPayload`
 // so JSON200 carries the typed envelope; non-2xx surfaces as
 // *httpResponseError for the caller to route through renderHTTPStatus.
-func getReview(ctx context.Context, backplaneURL, connectorID string) (*api.ConnectorReviewPayload, error) {
+// A non-empty prefer ("tenant", "builtin" or "legacy") is sent as ?prefer=.
+func getReview(ctx context.Context, backplaneURL, connectorID, prefer string) (*api.ConnectorReviewPayload, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
+	}
+	params := &api.GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams{}
+	if prefer != "" {
+		p := api.GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer(prefer)
+		params.Prefer = &p
 	}
 	resp, err := retryOn401(ctx, authed,
 		func(ctx context.Context) (*api.GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse, error) {
 			return authed.GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetWithResponse(
 				ctx,
 				connectorID,
-				&api.GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams{},
+				params,
 			)
 		},
 		func(r *api.GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse) int {
@@ -145,19 +163,32 @@ func printReviewTable(w io.Writer, r *api.ConnectorReviewPayload) {
 			*r.NeedsReingestOpCount,
 		)
 	}
-	// #3681: ungrouped descriptors (group_id IS NULL) never land in any
-	// group's op list below — the grouping pass left them out — so the
-	// per-group render alone hides them. Surface the count here so an
-	// operator can see the gap. A full `connector enable` covers them
-	// (the cascade now reaches ungrouped rows too), as does
-	// `connector enable-reads` for read-class ops; `--json` carries the
-	// reconciling `ungrouped_op_count` for tooling.
+	// #3681 / #3870: ungrouped descriptors (group_id IS NULL) never land
+	// in any group's op list below, yet dispatch serves the enabled ones.
+	// List them after the groups (with their enabled state and safety
+	// level) so the review shows the whole op set; this line points the
+	// operator at that section.
+	hasUngrouped := r.UngroupedOps != nil && len(*r.UngroupedOps) > 0
 	if r.UngroupedOpCount != nil && *r.UngroupedOpCount > 0 {
-		fmt.Fprintf(w, "\nUngrouped ops: %d — not shown in any group above; `connector enable` covers them (per-op `connector edit-op` can still override individual ones). Use --json for the full descriptor universe.\n",
-			*r.UngroupedOpCount,
-		)
+		if r.UngroupedOps == nil {
+			// A server from before the list shipped sends the count
+			// alone. Say the enabled count is unknown rather than print
+			// "0 enabled", which would read as "all disabled".
+			fmt.Fprintf(w, "\nUngrouped ops: %d (enabled count unknown — the server did not send the list) — not in any group. `connector enable` covers them (per-op `connector edit-op` can still override individual ones).\n",
+				*r.UngroupedOpCount,
+			)
+		} else {
+			fmt.Fprintf(w, "\nUngrouped ops: %d (%d enabled) — not in any group; listed under [ungrouped] below. `connector enable` covers them (per-op `connector edit-op` can still override individual ones).\n",
+				*r.UngroupedOpCount, enabledOpCount(*r.UngroupedOps),
+			)
+		}
 	}
-	if len(r.Groups) == 0 {
+	// #3827: stored ingested deletes below the destructive risk level. A
+	// row an earlier ingest left weaker than a fresh ingest would make it
+	// needs a re-ingest or a per-op `connector edit-op`; the full list
+	// (including rows that need no change) rides the --json render.
+	printDeleteReview(w, r)
+	if len(r.Groups) == 0 && !hasUngrouped {
 		fmt.Fprintln(w, "(no groups; the connector has no operations or the grouping pass produced no buckets)")
 		return
 	}
@@ -168,25 +199,82 @@ func printReviewTable(w io.Writer, r *api.ConnectorReviewPayload) {
 		if g.WhenToUse != "" {
 			fmt.Fprintf(w, "  when_to_use: %s\n", g.WhenToUse)
 		}
-		if len(g.Ops) == 0 {
+		printReviewOps(w, g.Ops)
+	}
+	if hasUngrouped {
+		fmt.Fprintf(w, "\n[ungrouped] — %d op(s)\n", len(*r.UngroupedOps))
+		printReviewOps(w, *r.UngroupedOps)
+	}
+}
+
+// printReviewOps renders a compact one-line-per-op table. Operators with
+// a 3000-op vcenter connector cannot scroll through a verbose render;
+// --json carries the full descriptions for the "ok now show me
+// everything" path.
+func printReviewOps(w io.Writer, ops []api.ConnectorReviewOp) {
+	if len(ops) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "  %-42s %-9s %3s %3s  %s\n",
+		"op_id", "safety", "req", "en", "summary",
+	)
+	for _, op := range ops {
+		fmt.Fprintf(w, "  %-42s %-9s %3s %3s  %s\n",
+			truncate(op.OpId, 42),
+			op.SafetyLevel,
+			boolFlag(op.RequiresApproval),
+			boolFlag(op.IsEnabled),
+			truncate(strDeref(op.Summary), 70),
+		)
+	}
+}
+
+// enabledOpCount counts the enabled ops in an op list.
+func enabledOpCount(ops []api.ConnectorReviewOp) int {
+	n := 0
+	for _, op := range ops {
+		if op.IsEnabled {
+			n++
+		}
+	}
+	return n
+}
+
+// printDeleteReview renders the review report for stored ingested deletes
+// below the destructive risk level (#3827). It prints a count line whenever
+// the report has rows, and a WARNING table of the rows that are weaker than
+// a fresh ingest would make them (stored posture next to the expected one).
+func printDeleteReview(w io.Writer, r *api.ConnectorReviewPayload) {
+	if r.DeleteOpsBelowDestructive == nil || len(*r.DeleteOpsBelowDestructive) == 0 {
+		return
+	}
+	rows := *r.DeleteOpsBelowDestructive
+	needing := 0
+	if r.DeleteOpsNeedingCorrectionCount != nil {
+		needing = *r.DeleteOpsNeedingCorrectionCount
+	}
+	fmt.Fprintf(w, "\nDeletes below destructive: %d stored op(s), %d need(s) correction.\n",
+		len(rows), needing,
+	)
+	if needing == 0 {
+		fmt.Fprintln(w, "  All of them wait for approval. Use --json for the full list.")
+		return
+	}
+	fmt.Fprintln(w, "WARNING: these stored ops are weaker than a fresh ingest would make them. Ingest the connector again, or fix each one with `connector edit-op <connector_id> <op_id> --safety <expected> --requires-approval`.")
+	fmt.Fprintf(w, "  %-60s %-9s %3s  %-11s %3s\n",
+		"op_id", "stored", "req", "expected", "req",
+	)
+	for _, op := range rows {
+		if !op.NeedsCorrection {
 			continue
 		}
-		// Compact one-line-per-op render. Operators with a 3000-op
-		// vcenter connector cannot scroll through a verbose render;
-		// --json carries the full descriptions for the "ok now show
-		// me everything" path.
-		fmt.Fprintf(w, "  %-42s %-9s %3s %3s  %s\n",
-			"op_id", "safety", "req", "en", "summary",
+		fmt.Fprintf(w, "  %-60s %-9s %3s  %-11s %3s\n",
+			truncate(op.OpId, 60),
+			op.SafetyLevel,
+			boolFlag(op.RequiresApproval),
+			op.ExpectedSafetyLevel,
+			boolFlag(op.ExpectedRequiresApproval),
 		)
-		for _, op := range g.Ops {
-			fmt.Fprintf(w, "  %-42s %-9s %3s %3s  %s\n",
-				truncate(op.OpId, 42),
-				op.SafetyLevel,
-				boolFlag(op.RequiresApproval),
-				boolFlag(op.IsEnabled),
-				truncate(strDeref(op.Summary), 70),
-			)
-		}
 	}
 }
 

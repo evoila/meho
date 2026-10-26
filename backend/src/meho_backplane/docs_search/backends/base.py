@@ -37,6 +37,23 @@ readiness reporting fails loudly rather than silently claiming "ready";
 overrides it. The collection-probe route persists the result onto the
 ``doc_collections`` row **on success only**, the same write-back split
 ``probe_target`` + ``Target.fingerprint`` use.
+
+:meth:`answer` is the optional grounded-answer seam (#3911), added the way
+:meth:`probe` was: a backend whose service composes its own cited answer
+can serve ``ask_docs`` directly instead of the backplane rebuilding it from
+:meth:`search`. :meth:`supports_answer` gates it per collection and defaults
+to ``False``; the base :meth:`answer` raises :class:`NotImplementedError`. A
+backend without an answer endpoint keeps the backplane's own
+expand -> retrieve -> synthesize pipeline
+(:func:`~meho_backplane.docs_search.answer.answer_docs_question`).
+
+:meth:`read` is the optional read seam (#3948), added the same way: a
+backend whose service can return the text around a hit (the chunks before
+and after it, the whole page, or its section) serves ``read_docs``.
+:meth:`supports_read` gates it per collection and defaults to ``False``; the
+base :meth:`read` raises :class:`NotImplementedError`. For a collection
+without read, ``read_docs`` answers "not found" and every other face works as
+before.
 """
 
 from __future__ import annotations
@@ -48,7 +65,12 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from meho_backplane.auth.corpus import CorpusSearchResponse
+from meho_backplane.auth.corpus import (
+    CorpusSearchResponse,
+    ReadMode,
+    UpstreamAnswer,
+    UpstreamRead,
+)
 from meho_backplane.auth.operator import Operator
 
 __all__ = ["BackendReadiness", "SearchBackend"]
@@ -124,6 +146,7 @@ class SearchBackend(ABC):
         *,
         backend_ref: Mapping[str, Any] | None = None,
         metadata_filters: dict[str, Any] | None = None,
+        soft_scope: Mapping[str, str] | None = None,
         limit: int = 10,
     ) -> CorpusSearchResponse:
         """Search this backend as *operator*, returning corpus-shaped chunks.
@@ -141,9 +164,16 @@ class SearchBackend(ABC):
                 the adapter's legacy / default configuration (the
                 single-collection deploy that predates the registry).
             metadata_filters: Optional binary ``{key: scalar}`` narrowing
-                (e.g. ``{"product": "vmware", "version": "9.0"}``). The
+                (e.g. ``{"product": "vsphere", "version": "8.0"}``). The
                 mandatory-filter posture is enforced by the caller, not
                 here — the adapter forwards whatever it is given.
+            soft_scope: Optional soft scope (#3912), e.g.
+                ``{"product": "vsphere", "version": "8.0.3", "source":
+                "caller"}``: a ranking / labelling signal, never a filter.
+                The caller sends it only to a collection that opts in
+                (``backend.ref["scope"] == "soft"``); ``None`` sends
+                nothing, so a backend that refuses unknown request keys
+                sees the request it always saw.
             limit: Maximum number of chunks to request.
 
         Returns:
@@ -197,6 +227,108 @@ class SearchBackend(ABC):
                 "ready". Concrete adapters override this.
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement readiness probing")
+
+    def supports_answer(self, backend_ref: Mapping[str, Any] | None) -> bool:
+        """Whether :meth:`answer` serves ``ask_docs`` for *backend_ref* (#3911).
+
+        The per-collection opt-in for the backend's own grounded answer. The
+        base default is ``False``: every adapter keeps the backplane's local
+        expand -> retrieve -> synthesize pipeline unless it overrides both
+        this and :meth:`answer`. Synchronous and network-free: it reads the
+        collection's ``backend.ref`` only.
+        """
+        return False
+
+    async def answer(
+        self,
+        operator: Operator,
+        query: str,
+        *,
+        backend_ref: Mapping[str, Any] | None = None,
+        filters: dict[str, Any] | None = None,
+        soft_scope: Mapping[str, str] | None = None,
+        limit: int = 10,
+    ) -> UpstreamAnswer:
+        """Ask the backend for a grounded, cited answer to *query* (#3911).
+
+        Called only when :meth:`supports_answer` is ``True`` for the
+        collection's ``backend.ref``. Returns the backend's answer text, its
+        citations and the hits they resolve against, as an
+        :class:`~meho_backplane.auth.corpus.UpstreamAnswer`; the answer seam
+        maps that into the ``ask_docs`` response shape.
+
+        Args:
+            operator: The verified operator (scoping / logging; an adapter
+                authenticates with its own service credential).
+            query: The operator's question.
+            backend_ref: The collection's ``backend.ref``.
+            filters: Optional hard ``{key: scalar}`` filters (#3912), as on
+                :meth:`search`. The caller passes them only for a collection
+                with ``backend.ref["scope_filters"] is True`` and no soft
+                scope; ``None`` sends none.
+            soft_scope: Optional soft scope (#3912), as on :meth:`search`:
+                a ranking / labelling signal, never a filter, passed only
+                for a collection with ``backend.ref["scope"] == "soft"``.
+                ``None`` sends none, so with both gates off the backend sees
+                the request it always saw.
+            limit: The retrieval depth to request; the backend may cap it.
+
+        Raises:
+            NotImplementedError: the base default. An adapter that offers an
+                answer endpoint overrides this together with
+                :meth:`supports_answer`.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement answer()")
+
+    def supports_read(self, backend_ref: Mapping[str, Any] | None) -> bool:
+        """Whether :meth:`read` serves ``read_docs`` for *backend_ref* (#3948).
+
+        The per-collection opt-in for reading around a hit. The base default
+        is ``False``: a collection reads only when its adapter overrides both
+        this and :meth:`read`. Synchronous and network-free: it reads the
+        collection's ``backend.ref`` only.
+        """
+        return False
+
+    async def read(
+        self,
+        operator: Operator,
+        read_handle: str,
+        *,
+        backend_ref: Mapping[str, Any] | None = None,
+        mode: ReadMode = "around",
+        before: int = 1,
+        after: int = 1,
+        cursor: str | None = None,
+        filters: dict[str, Any] | None = None,
+    ) -> UpstreamRead:
+        """Read more around a hit, named by its *read_handle* (#3948).
+
+        Called only when :meth:`supports_read` is ``True`` for the
+        collection's ``backend.ref``.
+
+        Args:
+            operator: The verified operator. The adapter derives the per-person
+                caller id from it; it authenticates with its own service
+                credential.
+            read_handle: The opaque handle a search hit or a citation carried.
+                Passed on unchanged and never logged.
+            backend_ref: The collection's ``backend.ref``.
+            mode: ``around`` (the chunks before and after the hit), ``page``
+                (the whole page) or ``section`` (the hit's section).
+            before: Chunks before the hit for ``around``, 0-3.
+            after: Chunks after the hit for ``around``, 0-3.
+            cursor: The opaque ``next`` / ``up`` cursor of an earlier reply,
+                to read on. ``None`` reads from the hit.
+            filters: The hard ``{key: scalar}`` filters the hit's search sent
+                (#3912); the handle is bound to them. ``None`` sends none.
+
+        Raises:
+            NotImplementedError: the base default. An adapter that offers a
+                read endpoint overrides this together with
+                :meth:`supports_read`.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement read()")
 
     def is_configured(self) -> bool:
         """Whether this backend has the minimum config to answer at all.

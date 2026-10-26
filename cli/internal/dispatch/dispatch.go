@@ -31,6 +31,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/output"
+	"github.com/evoila/meho/cli/internal/version"
 )
 
 // CallResult mirrors the backend OperationResult Pydantic model.
@@ -39,6 +40,12 @@ import (
 // is the cleanest renderer. Set-shaped responses arrive already
 // reduced to a JSONFlux handle envelope + sample by the dispatcher,
 // so they render verbatim here with the handle hint intact.
+//
+// AuditID is the id of the committed audit row, or nil when the
+// backplane did not commit one (an old backplane, or a call that
+// waits for approval; #3884). The backend sends it for a completed
+// call, a failed call and a refused call (#4230, #4801), so the
+// human render shows it on every status (#4833).
 //
 // Kept hand-typed rather than generator-backed because the FastAPI
 // surface types `/api/v1/operations/call`'s response as
@@ -53,6 +60,7 @@ type CallResult struct {
 	Status     string          `json:"status"`
 	OpID       string          `json:"op_id"`
 	Result     json.RawMessage `json:"result"`
+	AuditID    *string         `json:"audit_id"`
 	Error      *string         `json:"error"`
 	Extras     json.RawMessage `json:"extras,omitempty"`
 	DurationMs float64         `json:"duration_ms"`
@@ -78,7 +86,8 @@ type CallRequestBody struct {
 // SearchHit mirrors the backend OperationSearchHit Pydantic model.
 // Pointer fields are nullable per the backend's frozen pydantic
 // model — preserved so JSON unmarshal keeps the null vs zero-value
-// distinction.
+// distinction. The score fields are only sent to a tenant_admin who
+// asks for them (#3668), so they are omitempty here.
 //
 // Promoted from the 9 per-vendor copies (harbor / hetzner-robot /
 // nsx / sddc-manager / vcf-automation / vcf-fleet / vcf-logs /
@@ -92,9 +101,9 @@ type SearchHit struct {
 	GroupKey         *string  `json:"group_key"`
 	SafetyLevel      string   `json:"safety_level"`
 	RequiresApproval bool     `json:"requires_approval"`
-	FusedScore       float64  `json:"fused_score"`
-	Bm25Score        *float64 `json:"bm25_score"`
-	CosineScore      *float64 `json:"cosine_score"`
+	FusedScore       float64  `json:"fused_score,omitempty"`
+	Bm25Score        *float64 `json:"bm25_score,omitempty"`
+	CosineScore      *float64 `json:"cosine_score,omitempty"`
 }
 
 // SearchResponse is the JSON envelope returned by
@@ -106,7 +115,7 @@ type SearchResponse struct {
 }
 
 // ErrOpError is the sentinel returned when the dispatcher reported a
-// structured failure (status == "error" or "denied"). main translates
+// structured failure (status == "error", "denied" or "rate_limited"). main translates
 // a non-nil RunE error into a non-zero exit; SilenceErrors=true on
 // each command keeps cobra from double-printing the error string.
 var ErrOpError = errors.New("operation status not ok")
@@ -117,6 +126,12 @@ var ErrOpError = errors.New("operation status not ok")
 // row and parked the call; it is a first-class non-error outcome that
 // Render surfaces as a parked dispatch and maps to exit 0.
 const StatusAwaitingApproval = "awaiting_approval"
+
+// StatusRateLimited is the refusal the dispatcher returns when the caller
+// is over its rate or concurrency limit (#3500). The operation did not
+// run. The envelope carries extras.retry_after_seconds; the CLI renders
+// it like "error" / "denied" and exits 1. It never retries by itself.
+const StatusRateLimited = "rate_limited"
 
 // ParkedHint is the operator-facing one-liner Render prints under the
 // status header when a dispatch parks. Exported so the parallel
@@ -163,6 +178,23 @@ func WriteParkedHint(w io.Writer, extras json.RawMessage) {
 	}
 }
 
+// UnknownStatusError is the error for an OperationResult.status this
+// CLI does not know. The usual cause is a backplane that is newer than
+// the CLI and has added a status (a CLI from before the approval flow
+// read "awaiting_approval" as invalid, although the operation had
+// parked fine). So the message names the version gap as the likely
+// cause and warns that the operation may have run or be waiting for
+// approval, instead of calling the response invalid. The exit code
+// stays unexpected_response (4): the CLI cannot say whether it worked.
+func UnknownStatusError(status string) *output.StructuredError {
+	return output.Unexpected(fmt.Sprintf(
+		"backplane returned OperationResult.status %q, which this CLI (%s) does not know. "+
+			"The backplane is probably newer than this CLI. "+
+			"This is not necessarily a failure: the operation may have run or may be waiting for approval, so check before you retry. "+
+			"Run `meho status` to compare versions, then upgrade the CLI.",
+		status, version.Get().Version))
+}
+
 // APIResponseError wraps a non-2xx response from the backplane so
 // per-vendor renderRequestError can pick the right output category
 // (401 → AuthExpired, 403 → InsufficientRole, other non-2xx →
@@ -201,6 +233,12 @@ type operationsAPI interface {
 		params *api.GetSearchApiV1OperationsSearchGetParams,
 		reqEditors ...api.RequestEditorFn,
 	) (*api.GetSearchApiV1OperationsSearchGetResponse, error)
+	PostPreviewApiV1OperationsPreviewPostWithResponse(
+		ctx context.Context,
+		params *api.PostPreviewApiV1OperationsPreviewPostParams,
+		body api.PostPreviewApiV1OperationsPreviewPostJSONRequestBody,
+		reqEditors ...api.RequestEditorFn,
+	) (*api.PostPreviewApiV1OperationsPreviewPostResponse, error)
 	Refresh(ctx context.Context) error
 }
 
@@ -251,11 +289,7 @@ func (c Connector) Call(
 	backplaneURL, opID, targetSlug string,
 	params map[string]any,
 ) (*CallResult, error) {
-	var target map[string]any
-	if targetSlug != "" {
-		target = map[string]any{"name": targetSlug}
-	}
-	return c.CallWithTarget(ctx, backplaneURL, opID, target, params)
+	return c.CallWithTarget(ctx, backplaneURL, opID, slugTarget(targetSlug), params)
 }
 
 // CallWithTarget is Call for connectors that need extra target keys
@@ -271,6 +305,49 @@ func (c Connector) CallWithTarget(
 	target map[string]any,
 	params map[string]any,
 ) (*CallResult, error) {
+	body, err := c.callBody(opID, target, params)
+	if err != nil {
+		return nil, err
+	}
+	return c.postCall(ctx, backplaneURL, body)
+}
+
+// CallWithPreviewHash is Call for an op on the destructive risk level. It
+// also sends previewHash: the hash a prior Preview of the same op, target
+// and params returned. The backplane refuses a destructive op without a
+// matching hash, so a verb runs Preview first and passes its hash here.
+func (c Connector) CallWithPreviewHash(
+	ctx context.Context,
+	backplaneURL, opID, targetSlug string,
+	params map[string]any,
+	previewHash string,
+) (*CallResult, error) {
+	body, err := c.callBody(opID, slugTarget(targetSlug), params)
+	if err != nil {
+		return nil, err
+	}
+	if previewHash != "" {
+		h := previewHash
+		body.PreviewHash = &h
+	}
+	return c.postCall(ctx, backplaneURL, body)
+}
+
+// slugTarget returns the dict-shape target {"name": slug}, or nil for an
+// empty slug (the target field is then sent as JSON null).
+func slugTarget(targetSlug string) map[string]any {
+	if targetSlug == "" {
+		return nil
+	}
+	return map[string]any{"name": targetSlug}
+}
+
+// callBody builds the OperationCall body shared by every Call variant.
+func (c Connector) callBody(
+	opID string,
+	target map[string]any,
+	params map[string]any,
+) (api.CallOperationBody, error) {
 	body := api.CallOperationBody{
 		ConnectorId: c.ID,
 		OpId:        opID,
@@ -278,6 +355,51 @@ func (c Connector) CallWithTarget(
 	if target != nil {
 		var t api.CallOperationBody_Target
 		if err := t.FromCallOperationBodyTarget1(target); err != nil {
+			return body, fmt.Errorf("encode target: %w", err)
+		}
+		body.Target = &t
+	}
+	if params != nil {
+		p := params
+		body.Params = &p
+	}
+	return body, nil
+}
+
+// PreviewResult is the part of the POST /api/v1/operations/preview
+// envelope a vendor verb reads: the status, the preview_hash a destructive
+// call must send, and the error + extras when no preview was made. Raw
+// keeps the whole envelope for --json output. Hand-typed for the same
+// reason as CallResult (the route returns `dict[str, Any]`).
+type PreviewResult struct {
+	Status      string          `json:"status"`
+	OpID        string          `json:"op_id"`
+	PreviewHash string          `json:"preview_hash"`
+	Error       *string         `json:"error"`
+	Extras      json.RawMessage `json:"extras,omitempty"`
+	Raw         json.RawMessage `json:"-"`
+}
+
+// Preview POSTs the same op, target and params a Call would send to the
+// preview route. Nothing is sent to the vendor and nothing waits for
+// approval; the result carries the preview_hash that CallWithPreviewHash
+// needs. Uses the same dict-shape target and 401-refresh dance as Call.
+func (c Connector) Preview(
+	ctx context.Context,
+	backplaneURL, opID, targetSlug string,
+	params map[string]any,
+) (*PreviewResult, error) {
+	client, err := newAuthedClient(ctx, backplaneURL)
+	if err != nil {
+		return nil, err
+	}
+	body := api.PreviewOperationBody{
+		ConnectorId: c.ID,
+		OpId:        opID,
+	}
+	if target := slugTarget(targetSlug); target != nil {
+		var t api.PreviewOperationBody_Target
+		if err := t.FromPreviewOperationBodyTarget1(target); err != nil {
 			return nil, fmt.Errorf("encode target: %w", err)
 		}
 		body.Target = &t
@@ -286,7 +408,29 @@ func (c Connector) CallWithTarget(
 		p := params
 		body.Params = &p
 	}
-	return c.postCall(ctx, backplaneURL, body)
+	apiParams := &api.PostPreviewApiV1OperationsPreviewPostParams{}
+	resp, err := client.PostPreviewApiV1OperationsPreviewPostWithResponse(ctx, apiParams, body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode() == http.StatusUnauthorized {
+		if rerr := client.Refresh(ctx); rerr != nil {
+			return nil, rerr
+		}
+		resp, err = client.PostPreviewApiV1OperationsPreviewPostWithResponse(ctx, apiParams, body)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if resp.StatusCode() != http.StatusOK {
+		return nil, classifyNon2xx(resp.HTTPResponse, resp.Body)
+	}
+	var out PreviewResult
+	if err := json.Unmarshal(resp.Body, &out); err != nil {
+		return nil, fmt.Errorf("decode preview response: %w", err)
+	}
+	out.Raw = append(json.RawMessage(nil), resp.Body...)
+	return &out, nil
 }
 
 // postCall issues the typed POST through the generated *WithResponse
@@ -423,7 +567,7 @@ func isSpace(b byte) bool {
 
 // Render runs the unified post-dispatch path every verb uses: validate
 // the status enum, render the envelope (JSON or human), then map
-// "error" / "denied" to ErrOpError. When prettyPrinter is nil the
+// "error" / "denied" / "rate_limited" to ErrOpError. When prettyPrinter is nil the
 // generic envelope is used.
 //
 // awaiting_approval (parked) is intercepted here — ahead of the
@@ -448,20 +592,16 @@ func (c Connector) Render(
 		w := cmd.OutOrStdout()
 		fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", c.ID, opID, r.Status, r.DurationMs)
 		WriteParkedHint(w, r.Extras)
+		// A multi-step operation that stops for approval already has
+		// its own audit row; show its id like every other status (#4833).
+		WriteAuditReceipt(w, r.AuditID)
 		return nil // parked, not failed — exit 0.
 	}
 	switch r.Status {
-	case "ok", "error", "denied":
+	case "ok", "error", "denied", StatusRateLimited:
 		// fall through.
 	default:
-		return output.RenderError(
-			cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf(
-				"backplane returned invalid OperationResult.status %q (expected one of: ok / error / denied / awaiting_approval)",
-				r.Status,
-			)),
-			jsonOut,
-		)
+		return output.RenderError(cmd.ErrOrStderr(), UnknownStatusError(r.Status), jsonOut)
 	}
 	if jsonOut {
 		if err := output.PrintJSON(cmd.OutOrStdout(), r); err != nil {
@@ -480,8 +620,9 @@ func (c Connector) Render(
 
 // PrintGeneric renders a CallResult in the generic envelope shape: a
 // status line, then the pretty-printed Result on success or the
-// connector error + extras on failure. Used as the default
-// pretty-printer when a verb passes none.
+// connector error + extras + audit receipt on failure (see
+// WriteErrorTrailer). Used as the default pretty-printer when a verb
+// passes none.
 func (c Connector) PrintGeneric(w io.Writer, opID string, r *CallResult) {
 	fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", c.ID, opID, r.Status, r.DurationMs)
 	if r.Status == "ok" {
@@ -495,6 +636,17 @@ func (c Connector) PrintGeneric(w io.Writer, opID string, r *CallResult) {
 		}
 		return
 	}
+	WriteErrorTrailer(w, r)
+}
+
+// WriteErrorTrailer writes the human render of a non-ok envelope
+// (status error, denied or rate_limited): the connector error, the
+// extras blob, then the audit receipt when the backplane committed
+// one. Every vendor package's printErrorTrailer delegates here, so a
+// failed call shows its audit id on every render path (#4833). The
+// receipt is the row that says why the call failed, so it matters
+// most on this branch.
+func WriteErrorTrailer(w io.Writer, r *CallResult) {
 	if r.Error != nil && *r.Error != "" {
 		fmt.Fprintf(w, "meho: connector error: %s\n", *r.Error)
 	} else {
@@ -509,6 +661,18 @@ func (c Connector) PrintGeneric(w io.Writer, opID string, r *CallResult) {
 			fmt.Fprintln(w, string(r.Extras))
 		}
 	}
+	WriteAuditReceipt(w, r.AuditID)
+}
+
+// WriteAuditReceipt writes the `audit receipt: <id>` line, or nothing
+// when auditID is nil. Shared by WriteErrorTrailer and the parallel
+// operation/call.go render path so the line stays byte-identical
+// everywhere.
+func WriteAuditReceipt(w io.Writer, auditID *string) {
+	if auditID == nil || *auditID == "" {
+		return
+	}
+	fmt.Fprintf(w, "audit receipt: %s\n", *auditID)
 }
 
 // PrettyJSON pretty-prints a json.RawMessage with 2-space indent.

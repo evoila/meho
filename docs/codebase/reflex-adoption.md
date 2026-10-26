@@ -20,6 +20,13 @@ seam rather than a parallel mechanism.
 Surface: `GET /api/v1/audit/reflex` (operator role min; `tenant_filter`
 gated behind `platform_admin`) and `meho audit reflex`.
 
+Since #3734, `compute_reflex_report` also takes `source="request_usage"`.
+Then the meta-tool calls come from privacy-bounded request usage events
+(see [request-usage.md](request-usage.md)) instead of the MCP envelope
+rows. Dispatch rows still come from `audit_log`. The route reads
+`source="request_usage"` since #3747; when usage collection is off, the
+meta-tool counts are zero.
+
 ## Key types
 
 ### `compute_reflex_report(...)` (`meho_backplane.reflex.adoption`)
@@ -119,12 +126,15 @@ a per-surface table (or `--json` for the raw envelope). Nil ratios read
 
 ## Known issues
 
-- **Direct-MCP operator writes are attributed to `cli_rest`.** A
-  write op dispatched over a bare MCP session *without* an agent loop
-  gets no `agent_session_id` on its dispatch row (the dispatcher reads
-  `agent_session_id_var`, bound only by the agent-run invoker), so it
-  lands in `cli_rest` and reads as uncovered. Agents running in the
-  bounded loop — the reflex work's target population — are unaffected.
+- **A direct MCP call without an `Mcp-Session-Id` header is attributed
+  to `cli_rest`.** Since #4672 a write op dispatched over MCP gets the
+  MCP session id on its dispatch row (the dispatcher reads
+  `resolve_agent_session_id()`, which uses the agent run id inside an
+  agent loop and the MCP session id otherwise), so it counts on the
+  `agent` side. Only a call that sends no session header still has no
+  `agent_session_id` and lands in `cli_rest`, where it reads as
+  uncovered. Agents running in the bounded loop — the reflex work's
+  target population — are unaffected.
 - **TTL is not yet enforced on announce coverage.** v1 correlates a
   claim by session identity + `created_at <= occurred_at` ("an announce
   earlier in the same session"). The stricter "active claim" reading

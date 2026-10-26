@@ -24,9 +24,9 @@ Coverage matrix (Task #595 acceptance criteria):
   vocabulary).
 * **Tenant boundary** — a tenant-A annotate cannot reference a
   tenant-B node (``NodeNotFoundError``).
-* **Audit + broadcast** — every annotate / unannotate writes exactly
+* **Audit** — every annotate / unannotate writes exactly
   one ``audit_log`` row with the canonical op_id +
-  ``op_class='write'`` and publishes exactly one broadcast event.
+  ``op_class='write'``.
   ``target_id`` is populated when the *from* node has one; null
   otherwise.
 * **Refresh-merge preservation** — ``_reconcile_edges`` running
@@ -48,7 +48,6 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -67,8 +66,6 @@ from meho_backplane.topology import (
     annotate_edge,
     unannotate_edge,
 )
-
-_PUBLISH = "meho_backplane.topology.annotate.publish_event"
 
 
 @pytest.fixture(autouse=True)
@@ -234,17 +231,16 @@ async def test_annotate_creates_curated_edge() -> None:
     vr = await _seed_node(tenant_id, kind="vault-role", name="bar")
 
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            edge = await annotate_edge(
-                session,
-                _operator(tenant_id),
-                NodeRef("foo", "principal"),
-                "authenticates-via",
-                NodeRef("bar", "vault-role"),
-                note="canonical k8s SA → Vault role",
-                evidence_url="https://example.test/inventory#L42",
-            )
+    async with sessionmaker() as session:
+        edge = await annotate_edge(
+            session,
+            _operator(tenant_id),
+            NodeRef("foo", "principal"),
+            "authenticates-via",
+            NodeRef("bar", "vault-role"),
+            note="canonical k8s SA → Vault role",
+            evidence_url="https://example.test/inventory#L42",
+        )
 
     assert edge.source == "curated"
     assert edge.kind == "authenticates-via"
@@ -264,25 +260,24 @@ async def test_annotate_is_idempotent() -> None:
     await _seed_node(tenant_id, kind="vault-role", name="bar")
 
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            first = await annotate_edge(
-                session,
-                _operator(tenant_id),
-                NodeRef("foo", "principal"),
-                "authenticates-via",
-                NodeRef("bar", "vault-role"),
-                note="first",
-            )
-        async with sessionmaker() as session:
-            second = await annotate_edge(
-                session,
-                _operator(tenant_id),
-                NodeRef("foo", "principal"),
-                "authenticates-via",
-                NodeRef("bar", "vault-role"),
-                note="second",
-            )
+    async with sessionmaker() as session:
+        first = await annotate_edge(
+            session,
+            _operator(tenant_id),
+            NodeRef("foo", "principal"),
+            "authenticates-via",
+            NodeRef("bar", "vault-role"),
+            note="first",
+        )
+    async with sessionmaker() as session:
+        second = await annotate_edge(
+            session,
+            _operator(tenant_id),
+            NodeRef("foo", "principal"),
+            "authenticates-via",
+            NodeRef("bar", "vault-role"),
+            note="second",
+        )
 
     # Same row, not a duplicate.
     assert first.id == second.id
@@ -323,17 +318,16 @@ async def test_annotate_over_existing_auto_promotes_to_curated() -> None:
     )
 
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            edge = await annotate_edge(
-                session,
-                _operator(tenant_id, sub="op-promote"),
-                NodeRef("vm-a", "vm"),
-                "runs-on",
-                NodeRef("host-x", "host"),
-                note="adopted from auto-discovery",
-                evidence_url="https://example.test/inventory#L99",
-            )
+    async with sessionmaker() as session:
+        edge = await annotate_edge(
+            session,
+            _operator(tenant_id, sub="op-promote"),
+            NodeRef("vm-a", "vm"),
+            "runs-on",
+            NodeRef("host-x", "host"),
+            note="adopted from auto-discovery",
+            evidence_url="https://example.test/inventory#L99",
+        )
 
     # Same row id — the auto edge was promoted in place, not replaced.
     assert edge.id == auto_edge_id
@@ -449,25 +443,22 @@ async def test_promoted_edge_survives_subsequent_refresh() -> None:
             ).scalar_one()
 
         # First refresh — seeds the auto edge.
-        with patch("meho_backplane.topology.refresh.publish_event", new=AsyncMock()):
-            await refresh_target_topology(target_row, _operator(tenant_id))
+        await refresh_target_topology(target_row, _operator(tenant_id))
 
         # Operator promotes the auto edge to curated via annotate.
-        with patch(_PUBLISH, new=AsyncMock()):
-            async with sessionmaker() as session:
-                curated = await annotate_edge(
-                    session,
-                    _operator(tenant_id, sub="op-promote"),
-                    NodeRef("vm-a", "vm"),
-                    "runs-on",
-                    NodeRef("host-x", "host"),
-                    note="owned by op-promote",
-                )
+        async with sessionmaker() as session:
+            curated = await annotate_edge(
+                session,
+                _operator(tenant_id, sub="op-promote"),
+                NodeRef("vm-a", "vm"),
+                "runs-on",
+                NodeRef("host-x", "host"),
+                note="owned by op-promote",
+            )
 
         # Second refresh — re-sees the same triple. The curated row
         # must survive, not be demoted back to auto.
-        with patch("meho_backplane.topology.refresh.publish_event", new=AsyncMock()):
-            await refresh_target_topology(target_row, _operator(tenant_id))
+        await refresh_target_topology(target_row, _operator(tenant_id))
 
         async with sessionmaker() as session:
             row = (
@@ -479,15 +470,14 @@ async def test_promoted_edge_survives_subsequent_refresh() -> None:
         # Triple-form unannotate now succeeds (was raising
         # AutoEdgeDeletionError before the fix because the post-refresh
         # row was still source='auto').
-        with patch(_PUBLISH, new=AsyncMock()):
-            async with sessionmaker() as session:
-                removed_id = await unannotate_edge(
-                    session,
-                    _operator(tenant_id, sub="op-promote"),
-                    from_ref=NodeRef("vm-a", "vm"),
-                    kind="runs-on",
-                    to_ref=NodeRef("host-x", "host"),
-                )
+        async with sessionmaker() as session:
+            removed_id = await unannotate_edge(
+                session,
+                _operator(tenant_id, sub="op-promote"),
+                from_ref=NodeRef("vm-a", "vm"),
+                kind="runs-on",
+                to_ref=NodeRef("host-x", "host"),
+            )
         assert removed_id == curated.id
     finally:
         clear_registry()
@@ -513,16 +503,15 @@ async def test_annotate_rejects_malformed_kind(bad_kind: str) -> None:
     await _seed_node(tenant_id, kind="vault-role", name="bar")
 
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            with pytest.raises(InvalidEdgeKindError) as excinfo:
-                await annotate_edge(
-                    session,
-                    _operator(tenant_id),
-                    NodeRef("foo", "principal"),
-                    bad_kind,
-                    NodeRef("bar", "vault-role"),
-                )
+    async with sessionmaker() as session:
+        with pytest.raises(InvalidEdgeKindError) as excinfo:
+            await annotate_edge(
+                session,
+                _operator(tenant_id),
+                NodeRef("foo", "principal"),
+                bad_kind,
+                NodeRef("bar", "vault-role"),
+            )
 
     message = str(excinfo.value)
     assert "[a-z0-9]" in message
@@ -551,15 +540,14 @@ async def test_annotate_accepts_novel_kind() -> None:
     await _seed_node(tenant_id, kind="service", name="frontend")
 
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            edge = await annotate_edge(
-                session,
-                _operator(tenant_id),
-                NodeRef("www.example.com", "dns-record"),
-                "resolves-to",
-                NodeRef("frontend", "service"),
-            )
+    async with sessionmaker() as session:
+        edge = await annotate_edge(
+            session,
+            _operator(tenant_id),
+            NodeRef("www.example.com", "dns-record"),
+            "resolves-to",
+            NodeRef("frontend", "service"),
+        )
 
     assert edge.kind == "resolves-to"
     assert edge.source == "curated"
@@ -584,16 +572,15 @@ async def test_annotate_cannot_reference_other_tenant_node() -> None:
     await _seed_node(tenant_b, kind="vault-role", name="bar")
 
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            with pytest.raises(NodeNotFoundError):
-                await annotate_edge(
-                    session,
-                    _operator(tenant_a),
-                    NodeRef("foo", "principal"),
-                    "authenticates-via",
-                    NodeRef("bar", "vault-role"),
-                )
+    async with sessionmaker() as session:
+        with pytest.raises(NodeNotFoundError):
+            await annotate_edge(
+                session,
+                _operator(tenant_a),
+                NodeRef("foo", "principal"),
+                "authenticates-via",
+                NodeRef("bar", "vault-role"),
+            )
 
 
 # Note on bare-name ambiguity: :func:`annotate_edge` propagates
@@ -625,15 +612,14 @@ async def test_same_kind_different_endpoint_marks_auto_superseded() -> None:
     auto_edge_id = await _seed_auto_edge(tenant_id, from_id=vm, to_id=host_x, kind="runs-on")
 
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            curated = await annotate_edge(
-                session,
-                _operator(tenant_id),
-                NodeRef("vm-a", "vm"),
-                "runs-on",
-                NodeRef("host-y", "host"),
-            )
+    async with sessionmaker() as session:
+        curated = await annotate_edge(
+            session,
+            _operator(tenant_id),
+            NodeRef("vm-a", "vm"),
+            "runs-on",
+            NodeRef("host-y", "host"),
+        )
 
     async with sessionmaker() as session:
         auto = (
@@ -654,17 +640,16 @@ async def test_unannotate_clears_supersede_marker() -> None:
     auto_edge_id = await _seed_auto_edge(tenant_id, from_id=vm, to_id=host_x, kind="runs-on")
 
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            curated = await annotate_edge(
-                session,
-                _operator(tenant_id),
-                NodeRef("vm-a", "vm"),
-                "runs-on",
-                NodeRef("host-y", "host"),
-            )
-        async with sessionmaker() as session:
-            await unannotate_edge(session, _operator(tenant_id), edge_id=curated.id)
+    async with sessionmaker() as session:
+        curated = await annotate_edge(
+            session,
+            _operator(tenant_id),
+            NodeRef("vm-a", "vm"),
+            "runs-on",
+            NodeRef("host-y", "host"),
+        )
+    async with sessionmaker() as session:
+        await unannotate_edge(session, _operator(tenant_id), edge_id=curated.id)
 
     async with sessionmaker() as session:
         auto = (
@@ -692,15 +677,14 @@ async def test_incompatible_kinds_bidirectional_markers() -> None:
     auto_edge_id = await _seed_auto_edge(tenant_id, from_id=svc, to_id=db, kind="routes-through")
 
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            curated = await annotate_edge(
-                session,
-                _operator(tenant_id),
-                NodeRef("svc-x", "service"),
-                "depends-on",
-                NodeRef("db-y", "vm"),
-            )
+    async with sessionmaker() as session:
+        curated = await annotate_edge(
+            session,
+            _operator(tenant_id),
+            NodeRef("svc-x", "service"),
+            "depends-on",
+            NodeRef("db-y", "vm"),
+        )
 
     async with sessionmaker() as session:
         auto = (
@@ -727,17 +711,16 @@ async def test_unannotate_clears_reciprocal_conflict_marker() -> None:
     auto_edge_id = await _seed_auto_edge(tenant_id, from_id=svc, to_id=db, kind="routes-through")
 
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            curated = await annotate_edge(
-                session,
-                _operator(tenant_id),
-                NodeRef("svc-x", "service"),
-                "depends-on",
-                NodeRef("db-y", "vm"),
-            )
-        async with sessionmaker() as session:
-            await unannotate_edge(session, _operator(tenant_id), edge_id=curated.id)
+    async with sessionmaker() as session:
+        curated = await annotate_edge(
+            session,
+            _operator(tenant_id),
+            NodeRef("svc-x", "service"),
+            "depends-on",
+            NodeRef("db-y", "vm"),
+        )
+    async with sessionmaker() as session:
+        await unannotate_edge(session, _operator(tenant_id), edge_id=curated.id)
 
     async with sessionmaker() as session:
         auto = (
@@ -759,23 +742,22 @@ async def test_unannotate_triple_selector() -> None:
     await _seed_node(tenant_id, kind="vault-role", name="bar")
 
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            curated = await annotate_edge(
-                session,
-                _operator(tenant_id),
-                NodeRef("foo", "principal"),
-                "authenticates-via",
-                NodeRef("bar", "vault-role"),
-            )
-        async with sessionmaker() as session:
-            removed_id = await unannotate_edge(
-                session,
-                _operator(tenant_id),
-                from_ref=NodeRef("foo", "principal"),
-                kind="authenticates-via",
-                to_ref=NodeRef("bar", "vault-role"),
-            )
+    async with sessionmaker() as session:
+        curated = await annotate_edge(
+            session,
+            _operator(tenant_id),
+            NodeRef("foo", "principal"),
+            "authenticates-via",
+            NodeRef("bar", "vault-role"),
+        )
+    async with sessionmaker() as session:
+        removed_id = await unannotate_edge(
+            session,
+            _operator(tenant_id),
+            from_ref=NodeRef("foo", "principal"),
+            kind="authenticates-via",
+            to_ref=NodeRef("bar", "vault-role"),
+        )
 
     assert removed_id == curated.id
     async with sessionmaker() as session:
@@ -796,10 +778,9 @@ async def test_unannotate_refuses_auto_edge() -> None:
     auto_edge_id = await _seed_auto_edge(tenant_id, from_id=vm, to_id=host, kind="runs-on")
 
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            with pytest.raises(AutoEdgeDeletionError):
-                await unannotate_edge(session, _operator(tenant_id), edge_id=auto_edge_id)
+    async with sessionmaker() as session:
+        with pytest.raises(AutoEdgeDeletionError):
+            await unannotate_edge(session, _operator(tenant_id), edge_id=auto_edge_id)
 
     # Auto row survived the refused delete.
     async with sessionmaker() as session:
@@ -854,28 +835,26 @@ async def test_unannotate_other_tenant_edge_not_found() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Audit + broadcast
+# Audit
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_annotate_writes_audit_row_and_broadcast() -> None:
-    """One ``audit_log`` row + one broadcast event per annotate."""
+async def test_annotate_writes_audit_row() -> None:
+    """One ``audit_log`` row per annotate."""
     tenant_id = await _seed_tenant()
     target_id, _from_node = await _seed_target_node(tenant_id, kind="vm", name="vm-a")
     await _seed_node(tenant_id, kind="host", name="host-x")
 
-    publish_mock = AsyncMock()
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=publish_mock):
-        async with sessionmaker() as session:
-            await annotate_edge(
-                session,
-                _operator(tenant_id),
-                NodeRef("vm-a", "vm"),
-                "runs-on",
-                NodeRef("host-x", "host"),
-            )
+    async with sessionmaker() as session:
+        await annotate_edge(
+            session,
+            _operator(tenant_id),
+            NodeRef("vm-a", "vm"),
+            "runs-on",
+            NodeRef("host-x", "host"),
+        )
 
     async with sessionmaker() as session:
         rows = (
@@ -892,35 +871,25 @@ async def test_annotate_writes_audit_row_and_broadcast() -> None:
     # ``target_id`` populated because the *from* node has one.
     assert row.target_id == target_id
 
-    publish_mock.assert_awaited_once()
-    event = publish_mock.await_args.args[0]
-    assert event.op_id == "topology.annotate"
-    assert event.op_class == "write"
-    assert event.payload["from"]["name"] == "vm-a"
-    assert event.payload["to"]["name"] == "host-x"
-    assert event.payload["kind"] == "runs-on"
-
 
 @pytest.mark.asyncio
-async def test_unannotate_writes_audit_row_and_broadcast() -> None:
-    """One ``audit_log`` row + one broadcast event per unannotate."""
+async def test_unannotate_writes_audit_row() -> None:
+    """One ``audit_log`` row per unannotate."""
     tenant_id = await _seed_tenant()
     await _seed_node(tenant_id, kind="principal", name="foo")
     await _seed_node(tenant_id, kind="vault-role", name="bar")
 
-    publish_mock = AsyncMock()
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=publish_mock):
-        async with sessionmaker() as session:
-            curated = await annotate_edge(
-                session,
-                _operator(tenant_id),
-                NodeRef("foo", "principal"),
-                "authenticates-via",
-                NodeRef("bar", "vault-role"),
-            )
-        async with sessionmaker() as session:
-            await unannotate_edge(session, _operator(tenant_id), edge_id=curated.id)
+    async with sessionmaker() as session:
+        curated = await annotate_edge(
+            session,
+            _operator(tenant_id),
+            NodeRef("foo", "principal"),
+            "authenticates-via",
+            NodeRef("bar", "vault-role"),
+        )
+    async with sessionmaker() as session:
+        await unannotate_edge(session, _operator(tenant_id), edge_id=curated.id)
 
     async with sessionmaker() as session:
         rows = (
@@ -940,44 +909,6 @@ async def test_unannotate_writes_audit_row_and_broadcast() -> None:
     assert rows[1].payload["op_class"] == "write"
     # Non-target from-node → null ``target_id`` per §10 spec.
     assert rows[1].target_id is None
-
-    # Exactly two broadcast events (one per verb call).
-    assert publish_mock.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_annotate_broadcast_failure_does_not_fail_call() -> None:
-    """Broadcast publish is fail-open per the refresh-service pattern."""
-    tenant_id = await _seed_tenant()
-    await _seed_node(tenant_id, kind="principal", name="foo")
-    await _seed_node(tenant_id, kind="vault-role", name="bar")
-
-    sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock(side_effect=RuntimeError("redis down"))):
-        async with sessionmaker() as session:
-            edge = await annotate_edge(
-                session,
-                _operator(tenant_id),
-                NodeRef("foo", "principal"),
-                "authenticates-via",
-                NodeRef("bar", "vault-role"),
-            )
-
-    # Edge + audit row committed despite the publish failure.
-    assert edge.id is not None
-    async with sessionmaker() as session:
-        audit_rows = (
-            (await session.execute(select(AuditLog).where(AuditLog.tenant_id == tenant_id)))
-            .scalars()
-            .all()
-        )
-        edge_rows = (
-            (await session.execute(select(GraphEdge).where(GraphEdge.tenant_id == tenant_id)))
-            .scalars()
-            .all()
-        )
-    assert len(audit_rows) == 1
-    assert len(edge_rows) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1069,8 +1000,7 @@ async def test_reconcile_edges_preserves_superseded_marker() -> None:
             await session.execute(select(Target).where(Target.id == target_id))
         ).scalar_one()
 
-    with patch("meho_backplane.topology.refresh.publish_event", new=AsyncMock()):
-        await refresh_target_topology(target_row, _operator(tenant_id))
+    await refresh_target_topology(target_row, _operator(tenant_id))
 
     # Operator stamps superseded_by on the auto edge (the canonical
     # case is via an annotate of a different host; here we stamp it
@@ -1100,8 +1030,7 @@ async def test_reconcile_edges_preserves_superseded_marker() -> None:
             ),
         ),
     )
-    with patch("meho_backplane.topology.refresh.publish_event", new=AsyncMock()):
-        await refresh_target_topology(target_row, _operator(tenant_id))
+    await refresh_target_topology(target_row, _operator(tenant_id))
 
     async with sessionmaker() as session:
         refreshed = (
@@ -1211,8 +1140,7 @@ async def test_refresh_strips_reserved_markers_from_connector_hints() -> None:
             ).scalar_one()
 
         # First refresh — exercises the *insert* path.
-        with patch("meho_backplane.topology.refresh.publish_event", new=AsyncMock()):
-            await refresh_target_topology(target_row, _operator(tenant_id))
+        await refresh_target_topology(target_row, _operator(tenant_id))
 
         async with sessionmaker() as session:
             edge = (
@@ -1249,8 +1177,7 @@ async def test_refresh_strips_reserved_markers_from_connector_hints() -> None:
                 ),
             ),
         )
-        with patch("meho_backplane.topology.refresh.publish_event", new=AsyncMock()):
-            await refresh_target_topology(target_row, _operator(tenant_id))
+        await refresh_target_topology(target_row, _operator(tenant_id))
 
         async with sessionmaker() as session:
             refreshed = (
@@ -1300,16 +1227,15 @@ async def test_promotion_clears_stale_superseded_by_marker() -> None:
     )
 
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            edge = await annotate_edge(
-                session,
-                _operator(tenant_id, sub="op-reclaim"),
-                NodeRef("vm-a", "vm"),
-                "runs-on",
-                NodeRef("host-x", "host"),
-                note="reclaiming after wrong supersede",
-            )
+    async with sessionmaker() as session:
+        edge = await annotate_edge(
+            session,
+            _operator(tenant_id, sub="op-reclaim"),
+            NodeRef("vm-a", "vm"),
+            "runs-on",
+            NodeRef("host-x", "host"),
+            note="reclaiming after wrong supersede",
+        )
 
     # Same row id — auto→curated promotion is in-place.
     assert edge.id == auto_edge_id

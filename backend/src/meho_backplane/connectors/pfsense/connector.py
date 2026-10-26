@@ -43,11 +43,16 @@ G3.7-T2 (#847) adds 7 read ops (``pfctl``/config.xml reads) via
 :mod:`~meho_backplane.connectors.pfsense.ops_read`. Each op has a
 bound-method shim on :class:`PfSenseConnector` that delegates to the
 pure handler function in that module. The dispatcher shim does not
-change.
+change. #3954 adds the allow-listed config reads ``pfsense.user.list``
+and ``pfsense.route.static.list`` via
+:mod:`~meho_backplane.connectors.pfsense.ops_config_reads`. #3937 adds
+the governed user writes ``pfsense.user.disable`` / ``pfsense.user.enable``
+via :mod:`~meho_backplane.connectors.pfsense.ops_user_write`.
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from datetime import UTC, datetime
@@ -165,10 +170,17 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "firewall": (
         "Use for pfSense firewall operations: reading active filter rules "
         "(``pfsense.firewall.rules``) or the active state table "
-        "(``pfsense.firewall.state``). Call ``pfsense.firewall.rules`` when "
-        "the operator wants to audit the ruleset; call "
-        "``pfsense.firewall.state`` when the operator wants to inspect active "
-        "connections. The state table can be large on busy firewalls."
+        "(``pfsense.firewall.state``), and adding or removing ONE filter rule "
+        "(``pfsense.filter.rule.add`` / ``pfsense.filter.rule.delete``). Call "
+        "``pfsense.firewall.rules`` when the operator wants to audit the "
+        "ruleset; call ``pfsense.firewall.state`` when the operator wants to "
+        "inspect active connections. The state table can be large on busy "
+        "firewalls. ``pfsense.filter.rule.add`` adds a block / pass / match "
+        "rule with a caller-chosen 9-digit ``ridentifier`` (safety_level="
+        "dangerous: it waits for a human approval, unless an operator gave a "
+        "standing grant for this op); ``pfsense.filter.rule.delete`` removes "
+        "it by that id (GOVERNED DESTRUCTIVE delete). Both refuse a change "
+        "that could cut the SSH path MEHO uses to manage the firewall."
     ),
     "nat": (
         "Use for pfSense NAT operations: reading the active NAT ruleset "
@@ -206,11 +218,18 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "configuration from the pfSense config."
     ),
     "config": (
-        "Use for pfSense configuration operations: reading the full "
-        "pfSense configuration (``pfsense.config.show``) or getting a "
-        "structured version summary (``pfsense.version``). Call "
-        "``pfsense.config.show`` when the operator needs to inspect or "
-        "export the complete pfSense config.xml."
+        "Use for pfSense configuration operations: reading the pfSense "
+        "configuration with its known secrets removed "
+        "(``pfsense.config.show``) or getting a structured version summary "
+        "(``pfsense.version``). Call ``pfsense.config.show`` when the "
+        "operator needs to inspect the pfSense config.xml; known secret "
+        "fields and known secret shapes come back redacted, so the output "
+        "is not a restorable backup. Free-text fields (descriptions, notes, "
+        "cron or shell commands, custom config text, URLs) can still hold "
+        "secrets that someone typed in. To check local users or static "
+        "routes, do not read the whole file: call ``pfsense.user.list`` or "
+        "``pfsense.route.static.list``, which return only a short list of "
+        "fields and never read secret fields."
     ),
     "dhcp": (
         "Use for pfSense DHCP lease-state operations: reading the live "
@@ -221,13 +240,17 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "lease start/end, and effective binding state."
     ),
     "routing": (
-        "Use for pfSense routing-plane provisioning and teardown: appending "
+        "Use for pfSense static routes and routing-plane provisioning and "
+        "teardown: listing the static routes (``pfsense.route.static.list``, "
+        "a ``safe`` read of network / gateway / descr / disabled; for a CIDR "
+        "destination its ``network`` is what the delete op takes), appending "
         "a named gateway (``pfsense.gateway.add``) or a static route "
         "(``pfsense.route.static.add``) to ``config.xml``, or reversing "
         "either for a governed teardown -- ``pfsense.route.static.delete`` "
         "(delete one route by canonical network) and ``pfsense.gateway.delete`` "
         "(delete one gateway by name, refused fail-closed while any static "
-        "route / gateway group / default-gateway setting still uses it). The "
+        "route / gateway group / default-gateway setting / filter rule / "
+        "interface binding still uses it). The "
         "two ``add`` ops are ``caution`` / no-approval and idempotent (re-adding "
         "an existing gateway name or route network is a reported no-op); the "
         "two teardown ops are GOVERNED DESTRUCTIVE deletes (``destructive``, "
@@ -236,7 +259,23 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "gateway / static-route config, never interfaces), so they are safe "
         "against a perimeter firewall carrying the operator's own access path. "
         "Read the current state first with ``pfsense.gateway.list`` / "
-        "``pfsense.config.show``."
+        "``pfsense.route.static.list``."
+    ),
+    "users": (
+        "Use for pfSense local-user questions: which local users exist, "
+        "whether an account (for example a VPN user) is disabled, when it "
+        "expires, and which groups it is in. ``pfsense.user.list`` is a "
+        "``safe`` read that returns only name / descr / scope / disabled / "
+        "expires / uid / groups. It never reads secret fields (password "
+        "hashes, keys, the IPsec pre-shared key, SSH authorized keys, "
+        "certificate data), and a returned value with a known secret shape "
+        "is redacted; a secret typed in plain words into ``descr`` can still "
+        "show, the same limit as ``pfsense.config.show``. Use it instead of "
+        "``pfsense.config.show`` for any question about users. To turn one "
+        "user off or on again (for example a VPN user after an event ends), "
+        "use ``pfsense.user.disable`` / ``pfsense.user.enable``: they change "
+        "only that user's ``disabled`` flag, a second person must approve, "
+        "and the built-in admin account is refused."
     ),
 }
 
@@ -263,6 +302,25 @@ class PfSenseConnector(SshConnector):
     product = "pfsense"
     version = "2.7"
     impl_id = "pfsense-ssh"
+
+    def __init__(self) -> None:
+        super().__init__()
+        # One lock per pfSense appliance, held by every op that edits
+        # config.xml (see ``ops_write.serialized_config_write``, #3544).
+        self._config_write_locks: dict[str, asyncio.Lock] = {}
+
+    def config_write_lock(self, target: Target) -> asyncio.Lock:
+        """Return the lock that serializes config.xml edits on *target*'s appliance.
+
+        Keyed on the SSH host, not the target row: two targets that point at
+        the same pfSense must still share one lock. The dict is only read and
+        written between ``await`` points, so it needs no lock of its own.
+        """
+        key = str(getattr(target, "host", None) or "").lower()
+        lock = self._config_write_locks.get(key)
+        if lock is None:
+            lock = self._config_write_locks[key] = asyncio.Lock()
+        return lock
 
     async def _auth_config(
         self, target: Target, operator: Operator | None = None
@@ -661,6 +719,78 @@ class PfSenseConnector(SshConnector):
 
         return await _pfsense_dhcp_leases(self, target, params, operator)
 
+    async def user_list(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.user.list`` (#3954).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_config_reads.pfsense_user_list`.
+        Returns allow-listed fields only -- never hashes, keys or certificates.
+        """
+        from meho_backplane.connectors.pfsense.ops_config_reads import (
+            pfsense_user_list as _pfsense_user_list,
+        )
+
+        return await _pfsense_user_list(self, target, params, operator)
+
+    async def user_disable(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.user.disable`` (#3937).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_user_write.pfsense_user_disable`.
+        Sets the ``disabled`` flag of ONE local user (needs approval).
+        """
+        from meho_backplane.connectors.pfsense.ops_user_write import (
+            pfsense_user_disable as _pfsense_user_disable,
+        )
+
+        return await _pfsense_user_disable(self, target, params, operator)
+
+    async def user_enable(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.user.enable`` (#3937).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_user_write.pfsense_user_enable`.
+        Clears the ``disabled`` flag of ONE local user (needs approval).
+        """
+        from meho_backplane.connectors.pfsense.ops_user_write import (
+            pfsense_user_enable as _pfsense_user_enable,
+        )
+
+        return await _pfsense_user_enable(self, target, params, operator)
+
+    async def route_static_list(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.route.static.list`` (#3954).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_config_reads.pfsense_route_static_list`.
+        Returns allow-listed fields only (network, gateway, descr, disabled).
+        """
+        from meho_backplane.connectors.pfsense.ops_config_reads import (
+            pfsense_route_static_list as _pfsense_route_static_list,
+        )
+
+        return await _pfsense_route_static_list(self, target, params, operator)
+
     async def mgmt_flow_summary(
         self,
         target: Target,
@@ -788,7 +918,8 @@ class PfSenseConnector(SshConnector):
         :func:`~meho_backplane.connectors.pfsense.ops_delete.pfsense_gateway_delete`.
         Governed destructive delete of one gateway by exact name, fail-closed on
         any live reference (static route / gateway group / default-gateway
-        setting) -- the inverse of ``pfsense.gateway.add``
+        setting / filter rule / interface binding) -- the inverse of
+        ``pfsense.gateway.add``
         (``safety_level=destructive`` / ``requires_approval=True``).
         """
         from meho_backplane.connectors.pfsense.ops_delete import (
@@ -817,6 +948,44 @@ class PfSenseConnector(SshConnector):
         )
 
         return await _pfsense_alias_member_remove(self, target, params, operator)
+
+    async def filter_rule_add(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.filter.rule.add`` (#3850).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_filter_rule.pfsense_filter_rule_add`.
+        Adds ONE filter rule by caller-chosen ``ridentifier``
+        (``safety_level=dangerous`` / ``requires_approval=True``).
+        """
+        from meho_backplane.connectors.pfsense.ops_filter_rule import (
+            pfsense_filter_rule_add as _pfsense_filter_rule_add,
+        )
+
+        return await _pfsense_filter_rule_add(self, target, params, operator)
+
+    async def filter_rule_delete(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.filter.rule.delete`` (#3850).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_filter_rule.pfsense_filter_rule_delete`.
+        Governed destructive delete of ONE filter rule by ``ridentifier``
+        (``safety_level=destructive`` / ``requires_approval=True``).
+        """
+        from meho_backplane.connectors.pfsense.ops_filter_rule import (
+            pfsense_filter_rule_delete as _pfsense_filter_rule_delete,
+        )
+
+        return await _pfsense_filter_rule_delete(self, target, params, operator)
 
     @classmethod
     async def register_operations(cls) -> None:

@@ -58,7 +58,7 @@ central-dial / on-site only).
 | `winsrv.feature.remove` | **dangerous** | **yes** | `Uninstall-WindowsFeature` |
 | `winsrv.power.reboot` | **dangerous** | **yes** | `shutdown.exe /r /t <delay>` |
 | `winsrv.power.shutdown` | **dangerous** | **yes** | `shutdown.exe /s /t <delay>` |
-| `winsrv.localuser.list` | safe | no | `Get-LocalUser` |
+| `winsrv.localuser.list` | safe | no | `Get-LocalUser` (+ `PasswordLastSet` / `PasswordExpires` as ISO 8601 text) |
 | `winsrv.localuser.create` | caution | no | `New-LocalUser -NoPassword` |
 | `winsrv.localuser.set` | caution | no | `Set-LocalUser` + `Enable-`/`Disable-LocalUser` |
 | `winsrv.localuser.delete` | **dangerous** | **yes** | `Remove-LocalUser` |
@@ -155,11 +155,16 @@ over the pooled SSH connection:
 
 Operator-supplied strings (service / feature / user names, iSCSI IQN, volume
 label, reboot message) are interpolated only inside **single-quoted** PowerShell
-literals via `ps_single_quote` (embedded `'` doubled — complete escaping inside a
-single-quoted PowerShell string). Integers (delay, disk number, iSCSI port) are
+literals via `ps_single_quote` (every single-quote character PowerShell accepts —
+`'` and the typographic quotes U+2018 to U+201B — is doubled, which is complete
+escaping inside a single-quoted PowerShell string). Integers (delay, disk number, iSCSI port) are
 validated to `int` before interpolation; `filesystem` and `drive_letter` are
 validated against a bounded enum / `^[A-Za-z]$`; booleans render as fixed
 `$true` / `$false` literals, never as interpolated operator text.
+
+The power `message` is also a `shutdown.exe` argument, so the parameter schema
+and the handler both enforce one rule: at most 512 characters; no double
+quotes, backslashes or control characters; and it must not start with `/` or `-`.
 
 ### No plaintext secret on the wire (deliberate)
 
@@ -167,6 +172,12 @@ The `-EncodedCommand` payload lands on the remote process argv and the script
 body is visible to a privileged remote observer, so the shared transport's safety
 contract **forbids credential material in the script**. Two consequences:
 
+- **`localuser.list` shows when each local password was last set and when it
+  expires.** Its rows carry `PasswordLastSet` and `PasswordExpires` as ISO 8601
+  text (`.ToString('o')`, the `system.os-info` way); both are null when Windows
+  has no value, and `PasswordExpires` is null when the password never expires.
+  The domain-account counterpart is `msad.user.password-expiry`
+  (`docs/codebase/connectors-msad.md`).
 - **`localuser.create` is passwordless** (`New-LocalUser -NoPassword`) and
   `localuser.set` never touches the password. Provisioning a password is a
   deferred follow-up (the rke2 `token.rotate` mint-and-stash-in-Vault mold, so no

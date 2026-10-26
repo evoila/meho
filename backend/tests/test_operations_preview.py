@@ -27,21 +27,29 @@ The kubernetes API surface is mocked so the test runs in every CI lane.
 
 from __future__ import annotations
 
+import json
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.kubernetes import KubernetesConnector
 from meho_backplane.operations._preview import (
+    _PERMISSION_PREFLIGHTS,
+    _PREVIEW_BUILDERS,
     PreviewContext,
     build_permission_preflight,
     build_proposed_effect,
     register_permission_preflight,
     register_preview_builder,
 )
+from meho_backplane.settings import get_settings
+
+from ._vault_fakes import install_fake_vault
 
 
 @dataclass
@@ -141,6 +149,213 @@ async def test_k8s_apply_preview_forces_server_dry_run(
     assert "data" not in effect["preview"]["applied"][0]
 
 
+_WEBHOOK_DENIAL = 'admission webhook "machine.example.test" denied the request: not allowed'
+
+
+# Credential fixtures assembled from fragments so gitleaks' built-in
+# rules do not false-positive on the test source (the
+# ``test_operations_connector_error_redaction.py`` posture).
+_PASSWORD_SECRET = "P@ssw0rd" + "!withMore"
+_PASSWORD_DENIAL = (
+    'admission webhook "machine.example.test" denied the request: login failed for admin: '
+    + "password"
+    + "="
+    + _PASSWORD_SECRET
+)
+_BEARER_SECRET = "eyJtoken" + "$value!123" + "abcdef"
+_BEARER_DENIAL = (
+    'admission webhook "machine.example.test" denied the request: header was '
+    + "Bearer "
+    + _BEARER_SECRET
+)
+
+#: The fixed part of the reason ``k8s_apply`` renders for a 403 on
+#: ``_SINGLE_MANIFEST``. The straddle test places a credential across
+#: the 500-char cap relative to it, and asserts the prefix still matches
+#: so the placement math cannot go stale silently.
+_K8S_REASON_PREFIX = (
+    "ApplyRejectedError: the API server rejected the server-side apply of "
+    "apps/v1/Deployment argocd/web (HTTP 403 Forbidden): "
+)
+
+
+class _StatusFailureResponse:
+    """A raw API response carrying a Kubernetes ``Status`` failure body."""
+
+    status = 403
+    reason = "Forbidden"
+
+    def __init__(self, message: str = _WEBHOOK_DENIAL) -> None:
+        self._message = message
+
+    async def text(self) -> str:
+        return json.dumps(
+            {
+                "kind": "Status",
+                "apiVersion": "v1",
+                "status": "Failure",
+                "reason": "Forbidden",
+                "code": 403,
+                "message": self._message,
+            }
+        )
+
+
+async def _k8s_apply_preview_denied_with(
+    monkeypatch: pytest.MonkeyPatch, message: str
+) -> dict[str, Any]:
+    """Run the real ``k8s_apply`` preview against a stub that answers 403 with *message*."""
+    dyn = MagicMock()
+    dyn.resources.get = AsyncMock(return_value=MagicMock())
+    dyn.server_side_apply = AsyncMock(return_value=_StatusFailureResponse(message))
+
+    async def _dynamic_client(_api_client: Any) -> Any:
+        return dyn
+
+    monkeypatch.setattr(
+        "meho_backplane.connectors.kubernetes.ops_write_dangerous.DynamicClient",
+        _dynamic_client,
+    )
+    connector = KubernetesConnector(kubeconfig_loader=None)  # type: ignore[arg-type]
+    monkeypatch.setattr(connector, "_get_api_client", AsyncMock(return_value=MagicMock()))
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="k8s.apply"),  # type: ignore[arg-type]
+        connector_instance=connector,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params={"manifest": _SINGLE_MANIFEST, "dry_run": "none"},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    assert effect["preview_unavailable"] is True
+    return effect
+
+
+@pytest.mark.asyncio
+async def test_k8s_apply_preview_shows_api_server_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dry-run the API server denies is not shown as a clean preview (#3876).
+
+    Runs the real ``k8s_apply`` handler against a stubbed dynamic client
+    that answers 403 with a ``Status`` failure body. The park preview must
+    carry the denial, not a summary with no resourceVersion and no uid.
+    """
+    dyn = MagicMock()
+    dyn.resources.get = AsyncMock(return_value=MagicMock())
+    dyn.server_side_apply = AsyncMock(return_value=_StatusFailureResponse())
+
+    async def _dynamic_client(_api_client: Any) -> Any:
+        return dyn
+
+    monkeypatch.setattr(
+        "meho_backplane.connectors.kubernetes.ops_write_dangerous.DynamicClient",
+        _dynamic_client,
+    )
+    connector = KubernetesConnector(kubeconfig_loader=None)  # type: ignore[arg-type]
+    monkeypatch.setattr(connector, "_get_api_client", AsyncMock(return_value=MagicMock()))
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="k8s.apply"),  # type: ignore[arg-type]
+        connector_instance=connector,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params={"manifest": _SINGLE_MANIFEST, "dry_run": "none"},
+    )
+
+    effect = await build_proposed_effect(ctx)
+
+    assert effect is not None
+    assert "preview" not in effect
+    assert effect["preview_unavailable"] is True
+    assert effect["preview_error"].startswith("ApplyRejectedError: ")
+    assert "HTTP 403 Forbidden" in effect["preview_error"]
+    assert _WEBHOOK_DENIAL in effect["preview_error"]
+    assert dyn.server_side_apply.call_args.kwargs["dry_run"] == "All"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "secret", "marker"),
+    [
+        (_PASSWORD_DENIAL, _PASSWORD_SECRET, "[REDACTED:api_key]"),
+        (_BEARER_DENIAL, _BEARER_SECRET, "[REDACTED:bearer_token]"),
+    ],
+)
+async def test_k8s_apply_preview_redacts_credential_in_denial(
+    monkeypatch: pytest.MonkeyPatch, message: str, secret: str, marker: str
+) -> None:
+    """A denial that quotes a credential does not put it into the approval row (#3876).
+
+    ``preview_error`` is durable and reviewer-facing. The server message
+    is kept, but the credential inside it is replaced by the Tier-1
+    marker, the same way ``extras.upstream_message`` is treated.
+    """
+    effect = await _k8s_apply_preview_denied_with(monkeypatch, message)
+
+    reason = effect["preview_error"]
+    assert reason.startswith(_K8S_REASON_PREFIX)
+    assert "denied the request" in reason
+    assert marker in reason
+    assert secret not in reason
+
+
+@pytest.mark.asyncio
+async def test_k8s_apply_preview_redacts_credential_across_length_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A credential that straddles the 500-char cap leaves no cleartext fragment (#3876).
+
+    Redaction must run before truncation: cutting first would leave the
+    head of the password in the row as a fragment the patterns no longer
+    match.
+    """
+    label = "password" + "="
+    pad_len = 500 - len(_K8S_REASON_PREFIX) - len(label) - 3
+    message = "x" * (pad_len - 1) + " " + label + _PASSWORD_SECRET
+    raw_len = len(_K8S_REASON_PREFIX) + len(message)
+    # The un-redacted reason would be cut three characters into the secret.
+    assert raw_len - len(_PASSWORD_SECRET) < 500 < raw_len
+
+    effect = await _k8s_apply_preview_denied_with(monkeypatch, message)
+
+    reason = effect["preview_error"]
+    assert reason.startswith(_K8S_REASON_PREFIX)
+    assert reason.endswith(" [truncated]")
+    assert len(reason) == 500 + len(" [truncated]")
+    assert "[REDACTED:" in reason
+    assert label not in reason
+    assert _PASSWORD_SECRET[:3] not in reason
+
+
+@pytest.mark.asyncio
+async def test_builder_failure_reason_withholds_message_when_redaction_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the redactor itself fails, the message is withheld rather than stored raw."""
+
+    def _broken_redact(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("redactor down")
+
+    monkeypatch.setattr("meho_backplane.operations._preview.redact", _broken_redact)
+
+    async def _boom(_ctx: PreviewContext) -> dict[str, Any] | None:
+        raise RuntimeError(_PASSWORD_DENIAL)
+
+    register_preview_builder("test.preview.boomredact", _boom)
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="test.preview.boomredact"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params={},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    assert effect["preview_unavailable"] is True
+    assert effect["preview_error"] == "RuntimeError: <message withheld: redaction unavailable>"
+    assert _PASSWORD_SECRET not in effect["preview_error"]
+
+
 @pytest.mark.asyncio
 async def test_k8s_apply_preview_none_without_connector() -> None:
     """No resolved connector instance ⇒ no preview (caller uses default)."""
@@ -159,18 +374,19 @@ async def test_no_builder_credential_class_op_yields_none() -> None:
     """A credential-class op with no builder still parks with no preview.
 
     Since #1856 a no-builder op gets the generic params-echo default, but
-    the credential-class suppression runs *first*: ``vault.auth.userpass.write``
-    is ``credential_write`` with no bespoke builder, so it collapses to the
-    identifier-only default (caller fallback) rather than echoing its
-    (secret-bearing) params. (``vault.kv.put`` now ships a bespoke builder,
-    #2332, so the exemplar here is a still-builderless credential op.)
+    the credential-class suppression runs *first*:
+    ``vmware.composite.vm.guest.env.read`` is ``credential_write`` with no
+    bespoke builder, so it collapses to the identifier-only default (caller
+    fallback) rather than echoing its params. (The userpass writes got
+    bespoke builders in #4850; this ``safe`` read never waits for approval,
+    so it is a still-builderless credential op.)
     """
     ctx = PreviewContext(
-        descriptor=_FakeDescriptor(op_id="vault.auth.userpass.write"),  # type: ignore[arg-type]
+        descriptor=_FakeDescriptor(op_id="vmware.composite.vm.guest.env.read"),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),
-        params={"username": "svc", "password": "s3kret"},
+        params={"vm": "vm-42", "password": "s3kret"},
     )
     assert await build_proposed_effect(ctx) is None
 
@@ -257,6 +473,131 @@ async def test_no_builder_echo_scrubs_secret_param_keys() -> None:
     assert echo["client_secret"] == "***REDACTED***"
     assert echo["profile"]["token"] == "***REDACTED***"
     assert echo["credentials"] == "***REDACTED***"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "key",
+    [
+        # The well-known names the echo always masked.
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "client_secret",
+        "secret_id",
+        "token",
+        "api_key",
+        "apikey",
+        "access_token",
+        "refresh_token",
+        "auth_token",
+        "session_token",
+        "private_key",
+        "credentials",
+        # Longer names the broadcast scrub flags (#3808).
+        "vcsa_root_password",
+        "adminPassword",
+        "nsx-admin-password",
+        "sddcManagerApiKey",
+        "ssh_private_key",
+        "kubeconfig",
+        "PassWord",
+        "passWord",
+    ],
+)
+async def test_no_builder_echo_masks_every_key_the_broadcast_scrub_flags(key: str) -> None:
+    """The echo and the broadcast scrub agree on which params are secret (#3808).
+
+    Both use the same name check, so a param that the broadcast path flags
+    as secret is always masked in the stored echo.
+    """
+    from meho_backplane.broadcast.events import scrub_broadcast_params
+
+    params = {"name": "fake-appliance", key: "FAKE-secret-value-0001"}
+    _scrubbed, secret_detected = scrub_broadcast_params(params)
+    assert secret_detected is True
+
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="holodeck.config.apply"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params=params,
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    assert effect["params_echo"] == {"name": "fake-appliance", key: "***REDACTED***"}
+
+
+@pytest.mark.asyncio
+async def test_no_builder_echo_keeps_scalar_settings_under_secret_names() -> None:
+    """Bare scalars under a secret-shaped name stay visible (#3808).
+
+    The broadcast scrub masks only string, mapping and list values under a
+    secret-shaped name. The echo uses the same rule, so settings like
+    ``bind_secret_id`` or ``secret_id_ttl`` stay readable for the approver
+    while a real string secret is still masked.
+    """
+    from meho_backplane.broadcast.events import scrub_broadcast_params
+
+    params = {
+        "role_name": "fake-role",
+        "bind_secret_id": False,
+        "secret_id_ttl": 600,
+        "secret_id_num_uses": 5,
+        "secret_id": "FAKE-secret-value-0002",
+    }
+    scrubbed, _detected = scrub_broadcast_params(params)
+    assert scrubbed["bind_secret_id"] is False
+    assert scrubbed["secret_id_ttl"] == 600
+
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="vault.auth.approle.write"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params=params,
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    assert effect["params_echo"] == {
+        "role_name": "fake-role",
+        "bind_secret_id": False,
+        "secret_id_ttl": 600,
+        "secret_id_num_uses": 5,
+        "secret_id": "***REDACTED***",
+    }
+
+
+@pytest.mark.asyncio
+async def test_no_builder_echo_scrubs_secrets_nested_in_tuples() -> None:
+    """A secret inside a tuple is masked, like the broadcast scrub does (#3808).
+
+    The echo walks the same container types as the broadcast scrub: any
+    mapping and any sequence other than a string. A tuple of dicts must
+    not slip past the walk and reach the stored echo as a plain list with
+    the secret still inside.
+    """
+    from meho_backplane.broadcast.events import scrub_broadcast_params
+
+    params = {"items": ({"name": "fake-vm", "adminPassword": "FAKE-secret-value-0003"},)}
+    scrubbed, secret_detected = scrub_broadcast_params(params)
+    assert secret_detected is True
+    assert scrubbed["items"][0]["adminPassword"] != "FAKE-secret-value-0003"
+
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="holodeck.config.apply"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params=params,
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    assert effect["params_echo"] == {
+        "items": [{"name": "fake-vm", "adminPassword": "***REDACTED***"}]
+    }
 
 
 @pytest.mark.asyncio
@@ -365,22 +706,22 @@ async def test_credential_class_op_generic_echo_suppressed() -> None:
     The generic params-echo default (#1856) can only do generic key-name /
     value-shape redaction and is not trusted to scrub a connector-specific
     secret shape, so an op classifying credential-class (here
-    ``k8s.secret.create`` → ``credential_write``) with no registered
-    builder collapses to the identifier-only default -- the durable
-    approval row must not carry secret material.
+    ``vmware.composite.vm.guest.env.read`` → ``credential_write``) with no
+    registered builder collapses to the identifier-only default -- the
+    durable approval row must not carry secret material.
     """
     ctx = PreviewContext(
-        descriptor=_FakeDescriptor(op_id="k8s.secret.create"),  # type: ignore[arg-type]
+        descriptor=_FakeDescriptor(op_id="vmware.composite.vm.guest.env.read"),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),
-        params={"name": "creds", "namespace": "ns", "string_data": {"k": "v"}},
+        params={"vm": "vm-42", "guest_secret_ref": "targets/app-vm"},
     )
     assert await build_proposed_effect(ctx) is None
 
 
 @pytest.mark.asyncio
-async def test_credential_class_op_bespoke_builder_runs() -> None:
+async def test_credential_class_op_bespoke_builder_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     """A *bespoke* builder runs even for a credential-class op (#1857).
 
     Unlike the generic echo, a registered builder is trusted to own its
@@ -400,13 +741,15 @@ async def test_credential_class_op_bespoke_builder_runs() -> None:
         # surfaced", not "result blindly trusted".
         return {"username": "svc-meho", "password": "***REDACTED***"}
 
-    register_preview_builder("k8s.secret.create", _scrubbed)
+    # setitem, not register_preview_builder: the stub must not stay in the
+    # process-wide registry after this test.
+    monkeypatch.setitem(_PREVIEW_BUILDERS, "vmware.composite.vm.guest.env.read", _scrubbed)
     ctx = PreviewContext(
-        descriptor=_FakeDescriptor(op_id="k8s.secret.create"),  # type: ignore[arg-type]
+        descriptor=_FakeDescriptor(op_id="vmware.composite.vm.guest.env.read"),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),
-        params={"name": "creds", "namespace": "ns", "string_data": {"k": "v"}},
+        params={"vm": "vm-42", "guest_secret_ref": "targets/app-vm"},
     )
     effect = await build_proposed_effect(ctx)
     assert builder_ran is True, "a bespoke builder must run for a credential-class op"
@@ -421,17 +764,20 @@ async def test_credential_class_op_bespoke_builder_runs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_permission_preflight_runs_for_credential_class_op() -> None:
+async def test_permission_preflight_runs_for_credential_class_op(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A permission preflight runs even when the op classifies credential-class.
 
-    This is the whole point of the separate hook: ``vault.auth.userpass.write``
-    IS ``credential_write`` with no bespoke preview builder (so its
+    This is the whole point of the separate hook:
+    ``vmware.composite.vm.guest.env.read`` IS ``credential_write`` with no
+    bespoke preview builder (so its
     *preview* is suppressed), yet its capability-only *permission* check
     must still run — it carries no secret material, and a credential write
     is exactly the op whose write Vault may deny post-approval. (The
-    exemplar is a builderless credential op because ``vault.kv.put`` now
-    ships a bespoke preview builder, #2332, so its preview is no longer
-    suppressed.)
+    exemplar is a builderless credential op because ``vault.kv.put`` (#2332)
+    and the userpass writes (#4850) now ship bespoke preview builders, so
+    their previews are no longer suppressed.)
     """
     ran = False
 
@@ -440,13 +786,13 @@ async def test_permission_preflight_runs_for_credential_class_op() -> None:
         ran = True
         return {"check": "vault.capabilities-self", "will_be_denied": True}
 
-    register_permission_preflight("vault.auth.userpass.write", _preflight)
+    monkeypatch.setitem(_PERMISSION_PREFLIGHTS, "vmware.composite.vm.guest.env.read", _preflight)
     ctx = PreviewContext(
-        descriptor=_FakeDescriptor(op_id="vault.auth.userpass.write"),  # type: ignore[arg-type]
+        descriptor=_FakeDescriptor(op_id="vmware.composite.vm.guest.env.read"),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),
-        params={"username": "svc", "password": "s3kret"},
+        params={"vm": "vm-42", "password": "s3kret"},
     )
 
     # The preview is suppressed (credential class), proving the preflight
@@ -486,3 +832,100 @@ async def test_permission_preflight_is_fail_soft() -> None:
         params={},
     )
     assert await build_permission_preflight(ctx) is None
+
+
+# ---------------------------------------------------------------------------
+# k8s.secret.read_to_ref preflight (#3844)
+# ---------------------------------------------------------------------------
+
+_READ_TO_REF_PARAMS = {"name": "guest-kubeconfig", "namespace": "ns-a", "register_as": "guest-a"}
+_READ_TO_REF_PATH = "secret/data/tenants/00000000-0000-0000-0000-00000000a0a0/guest-a"
+
+
+@pytest.fixture
+def _vault_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the settings the real Vault probe needs (fake client, no network)."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("VAULT_OIDC_ROLE", "meho-mcp")
+    monkeypatch.setenv("VAULT_OIDC_MOUNT_PATH", "jwt")
+    monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def _read_to_ref_ctx() -> PreviewContext:
+    return PreviewContext(
+        descriptor=_FakeDescriptor(op_id="k8s.secret.read_to_ref"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params=dict(_READ_TO_REF_PARAMS),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_vault_settings_env")
+@pytest.mark.parametrize(
+    ("granted", "will_be_denied"),
+    [(["read"], True), (["create", "update"], False)],
+)
+async def test_read_to_ref_preflight_probes_the_staged_vault_path(
+    monkeypatch: pytest.MonkeyPatch, granted: list[str], will_be_denied: bool
+) -> None:
+    """The op's preflight probes the Vault path the handler writes to.
+
+    ``k8s.secret.read_to_ref`` is credential-class, so its preview is
+    suppressed. The preflight still runs, on the tenant path derived from
+    ``register_as``, so a write Vault would refuse shows ``will_be_denied``
+    before anyone approves it.
+    """
+    fake = install_fake_vault(monkeypatch)
+    fake.sys.capabilities_by_path = {_READ_TO_REF_PATH: granted}
+    ctx = _read_to_ref_ctx()
+
+    assert await build_proposed_effect(ctx) is None
+    result = await build_permission_preflight(ctx)
+
+    assert result is not None
+    assert result["path"] == _READ_TO_REF_PATH
+    assert result["required"] == ["create", "update"]
+    assert result["will_be_denied"] is will_be_denied
+    assert fake.sys.get_capabilities_calls == [
+        {"paths": [_READ_TO_REF_PATH], "token": None, "accessor": None}
+    ]
+    assert fake.secrets.kv.v2.read_calls == []
+
+
+@pytest.mark.asyncio
+async def test_read_to_ref_preflight_uses_the_handler_vault_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe runs with ``target=None``, like the handler's write.
+
+    ``ctx.target`` is the Kubernetes cluster. Passing it on would make the
+    probe pick a role the real write never uses.
+    """
+    from meho_backplane.connectors.vault import ops as vault_ops
+
+    seen: dict[str, Any] = {}
+
+    async def _spy(
+        operator: Operator, op_id: str, params: dict[str, Any], target: Any = None
+    ) -> dict[str, Any]:
+        seen.update(op_id=op_id, params=params, target=target)
+        return {"will_be_denied": False}
+
+    monkeypatch.setattr(vault_ops, "vault_kv_write_capability_preflight", _spy)
+
+    assert await build_permission_preflight(_read_to_ref_ctx()) == {"will_be_denied": False}
+    assert seen == {
+        "op_id": "vault.kv.put",
+        "params": {
+            "mount": "secret",
+            "path": "tenants/00000000-0000-0000-0000-00000000a0a0/guest-a",
+        },
+        "target": None,
+    }

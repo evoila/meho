@@ -4,16 +4,17 @@
 """Park-time ``proposed_effect`` preview builders for the Vault KV-v2 write ops.
 
 G0.31 follow-up (#2332). Wires redaction-safe preview builders for the
-three ``vault.kv.*`` write ops onto the per-op builder hook shipped by
+``vault.kv.*`` write ops onto the per-op builder hook shipped by
 #1437 (:mod:`meho_backplane.operations._preview`):
 
-================  ===================================================
-op_id             preview stored in ``ApprovalRequest.proposed_effect``
-================  ===================================================
-``vault.kv.put``    ``{mount, path, kv_version, semantics: replace, key_names, cas?}``
-``vault.kv.patch``  ``{mount, path, kv_version, semantics: merge, key_names}``
-``vault.kv.delete`` ``{mount, path, kv_version, semantics: soft_delete, versions}``
-================  ===================================================
+============================  ===========================================
+op_id                         preview stored in ``ApprovalRequest.proposed_effect``
+============================  ===========================================
+``vault.kv.put``              ``{mount, path, kv_version, semantics: replace, key_names, cas?}``
+``vault.kv.patch``            ``{mount, path, kv_version, semantics: merge, key_names}``
+``vault.kv.delete``           ``{mount, path, kv_version, semantics: soft_delete, versions}``
+``vault.kv.metadata.delete``  ``{mount, path, kv_version, semantics, blast_radius}``
+============================  ===========================================
 
 Why bespoke builders are required here
 ======================================
@@ -44,6 +45,12 @@ database password" while keeping the value-redaction promise intact.
 the path + version numbers, no secret), so it would already get the
 generic params-echo default. A bespoke builder gives it the same
 resource-centric shape as its siblings for a consistent approval surface.
+
+``vault.kv.metadata.delete`` (#3424) is in the ``destructive`` tier, so a
+builder is required: without a ``blast_radius`` block the call cannot wait
+for approval (``_preview.blast_radius_missing_reason``). Its builder also
+reads only the params (``semantics: permanent_delete``): the approver sees
+the mount and path, never a secret value or the secret's metadata.
 
 Redaction discipline
 ====================
@@ -191,11 +198,39 @@ async def _kv_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
+async def _kv_metadata_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vault.kv.metadata.delete`` — mount + path and what goes with it.
+
+    Pure: reads only the params, so the agent's ``preview_operation`` shows
+    the same block the approver reads. ``children`` names what is removed
+    together with the secret (every version and the metadata). It does not
+    list version numbers, because that would need a Vault read. The removal
+    cannot be undone, so the class is ``permanent``.
+    """
+    mount, path = _mount_and_path(ctx)
+    return {
+        "resource": "kv_secret",
+        "mount": mount,
+        "path": path,
+        "kv_version": _KV_VERSION,
+        "semantics": "permanent_delete",
+        "blast_radius": {
+            "object": {"kind": "kv_secret", "mount": mount, "path": path},
+            "children": [
+                {"kind": "kv_versions", "which": "all"},
+                {"kind": "kv_metadata"},
+            ],
+            "irreversibility": "permanent",
+        },
+    }
+
+
 def _register_vault_kv_write_preview_builders() -> None:
     """Wire the Vault KV-v2 write preview builders. Called at import time."""
     register_preview_builder("vault.kv.put", _kv_put_preview)
     register_preview_builder("vault.kv.patch", _kv_patch_preview)
     register_preview_builder("vault.kv.delete", _kv_delete_preview)
+    register_preview_builder("vault.kv.metadata.delete", _kv_metadata_delete_preview)
 
 
 _register_vault_kv_write_preview_builders()

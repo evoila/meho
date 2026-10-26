@@ -1,0 +1,187 @@
+# Default values for the built-in Keycloak subchart (the login server of the
+# MEHO core). Operators set these under the parent chart's `coreKeycloak:`
+# block; the parent maps that block here through a dependency `alias`.
+#
+# What the subchart renders when `enabled: true`:
+# - a StatefulSet with one Keycloak pod on the official image, pinned by
+#   digest, started with `start --import-realm`;
+# - a ConfigMap with the MEHO realm file (`files/meho-realm.json`). It holds
+#   no secret: the client secrets, the public URL and the first tenant id
+#   are `${...}` placeholders that Keycloak fills from the pod's environment
+#   when it imports the realm at the first start;
+# - a Service `<release>-keycloak` on port 8080 (plain HTTP inside the
+#   namespace; TLS ends at the ingress);
+# - a NetworkPolicy, off by default.
+#
+# Keycloak imports the realm only when it does not exist yet. A changed
+# realm file does not change a running realm; the realm stage of the
+# bootstrap Job owns changes after the first start.
+
+# -- Turns the subchart on. The parent's dependency entry uses
+# `condition: coreKeycloak.enabled`. Off by default: the chart then renders
+# exactly what it rendered before the subchart existed. Needs the built-in
+# PostgreSQL (`corePostgres.enabled: true`) and the Secrets the install's
+# secrets Job creates.
+enabled: false
+
+# -- Public DNS name of MEHO, for example `meho.example.com`. Set it to the
+# same value as the parent's `ingress.host`. Keycloak builds its public
+# address from it: `https://<hostname>/auth`. The `iss` claim of every token
+# is `https://<hostname>/auth/realms/meho`. Required when `enabled: true`.
+hostname: ""
+
+# -- The first tenant's id (a UUID). Every group in the realm carries it as
+# the `tenant_id` attribute, so every login of the first tenant gets it as
+# the `tenant_id` claim. Pick one UUID per install (for example with
+# `uuidgen`) and keep it: a move to a new install must reuse it. Required
+# when `enabled: true`.
+firstTenantId: ""
+
+image:
+  # -- Official Keycloak image (built to run with any user id in group 0).
+  repository: quay.io/keycloak/keycloak
+  # -- Human-readable tag of the pinned image.
+  tag: "26.8.1"
+  # -- Manifest digest. When set it wins over `tag` in the rendered image
+  # reference (`repository@digest`): quay tags can be moved, digests cannot.
+  digest: "sha256:79c623a22abacf3fe6c00a5fb30f5b7843d717b234033b80995891c06116d244"
+  pullPolicy: IfNotPresent
+
+# -- Init container that waits until PostgreSQL accepts connections. Keycloak
+# does not retry a failed database connection at start, so without this wait
+# a fresh install crash-loops while PostgreSQL starts. It uses the same image
+# as the built-in PostgreSQL, which has `pg_isready`.
+waitForDatabase:
+  image:
+    repository: pgvector/pgvector
+    tag: "0.8.7-pg17-bookworm"
+    digest: "sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d"
+    pullPolicy: IfNotPresent
+  # -- The PostgreSQL image has no USER line, so the container needs a user
+  # id that is not root. 999 is the `postgres` user of that image. Removed
+  # when `global.openshift: true`, because OpenShift assigns the user id.
+  securityContext:
+    runAsUser: 999
+    runAsGroup: 999
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  resources:
+    limits:
+      cpu: 100m
+      memory: 64Mi
+      ephemeral-storage: 64Mi
+    requests:
+      cpu: 10m
+      memory: 16Mi
+      ephemeral-storage: 16Mi
+
+database:
+  # -- PostgreSQL host. Empty = `<release>-postgres`, the Service of the
+  # built-in PostgreSQL. Keycloak uses the database `keycloak` as the login
+  # role `keycloak`; the built-in PostgreSQL creates both.
+  host: ""
+  port: 5432
+
+# Keycloak reads five Secrets that the install's secrets Job creates:
+# `<release>-core-postgres-keycloak` (key `password`),
+# `<release>-core-keycloak-bootstrap` (keys `client_id`, `client_secret`),
+# `<release>-core-keycloak-admin`, `<release>-core-ui-auth` and
+# `<release>-core-check-runner` (key `client_secret` each). To use your own
+# value, create the Secret with that name before the install: the Job keeps
+# a Secret that exists. Only the bootstrap Secret can have another name:
+# while the built-in Keycloak is on, leave `corePostgres.existingSecrets.keycloak`,
+# `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` and
+# `checkRunner.clientSecret.secretName` empty (or set them to the core
+# name), because Keycloak reads only the core names.
+existingSecrets:
+  # -- Your own Secret with Keycloak's first-start service account (keys
+  # `client_id` and `client_secret`). Empty =
+  # `<release>-core-keycloak-bootstrap`. The secrets Job reads the same key.
+  bootstrap: ""
+
+# -- User names of the two people the install makes at the first start: the
+# first admin and a second person who can approve. The parent chart's
+# bootstrap Job makes them after Keycloak is up and stores their temporary
+# passwords in `<release>-core-first-login`. The subchart only carries these
+# values; set them under the parent's `coreKeycloak:` block.
+firstLogin:
+  adminUsername: admin
+  approverUsername: approver
+
+# -- A login for automated install proofs (a service client `meho-ci` and a
+# group `MEHO-CI-Admins` for a second tenant), made by the parent chart's
+# bootstrap Job. Off by default; turn it on only on a test install.
+ci:
+  enabled: false
+  # -- The second tenant's id (a UUID). Required when `enabled` is true.
+  tenantId: ""
+
+ingress:
+  # -- The parent chart's Ingress routes only `/auth/realms/meho` and
+  # `/auth/resources` on the MEHO host to Keycloak. Set true to also route
+  # `/auth/admin` and `/auth/realms/master` (the admin console). Default
+  # false: the admin console is then not reachable from outside the
+  # cluster. (A `kubectl port-forward` does not help: the console's login
+  # page uses the public address.) MEHO's own jobs use the Admin REST API
+  # through the Service, which needs no route.
+  exposeAdmin: false
+
+# -- Pod security context. No `runAsUser`: the image runs as user 1000 in
+# group 0, and `runAsNonRoot` checks that number. `global.openshift: true`
+# also removes `runAsUser`, `runAsGroup` and `fsGroup` if you add them here.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container security context. `readOnlyRootFilesystem` is false on
+# purpose: the stock image rebuilds its optimized server under
+# `/opt/keycloak` at every start.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+# -- Container resources. The memory limit holds Keycloak's own sizing
+# (about 1.4 GiB with 10,000 sessions) plus the build at start. The heap is
+# 70 % of the limit (the image default).
+resources:
+  limits:
+    cpu: "1"
+    memory: 2Gi
+    ephemeral-storage: 1Gi
+  requests:
+    cpu: 250m
+    memory: 1Gi
+    ephemeral-storage: 256Mi
+
+service:
+  # -- Service port. Pods reach Keycloak at
+  # `http://<release>-keycloak:<port>/auth`.
+  port: 8080
+
+# -- The subchart's own ingress NetworkPolicy. Off by default. It selects the
+# Keycloak pod and admits port 8080 only from the backplane pods and from the
+# peers in `extraFrom`. When you turn it on, add your ingress controller to
+# `extraFrom`, or browser and CLI logins stop.
+networkPolicy:
+  enabled: false
+  # -- Labels of the backplane pods (the parent chart's selector labels).
+  # The release's `app.kubernetes.io/instance` label is added.
+  backplanePodLabels:
+    app.kubernetes.io/name: meho
+  # -- More allowed peers, written as NetworkPolicy `from` entries (for
+  # example a `namespaceSelector` for the ingress controller).
+  extraFrom: []
+
+# -- Node selector.
+nodeSelector: {}
+# -- Tolerations.
+tolerations: []
+# -- Affinity rules.
+affinity: {}

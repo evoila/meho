@@ -33,6 +33,10 @@ import (
 // StructuredError is present. The named codes start at 2 so the
 // generic 1 stays distinguishable from a known failure mode.
 const (
+	// ExitUsage indicates a wrong command line: an unknown flag or
+	// the wrong number of arguments. It is the generic 1, so the
+	// exit code did not change when these errors started to print.
+	ExitUsage = 1
 	// ExitAuthExpired indicates the operator's stored token is
 	// missing, malformed, or rejected by the backplane (HTTP 401).
 	// The remedy is always `meho login`.
@@ -81,6 +85,10 @@ const (
 // jq-style consumers and dashboards filter on. Keep them stable
 // across CLI releases.
 const (
+	// ErrCodeUsage pairs with ExitUsage. The command line was wrong
+	// (unknown flag, wrong number of arguments); the detail names
+	// the problem and the --help command to run.
+	ErrCodeUsage = "usage_error"
 	// ErrCodeAuthExpired pairs with ExitAuthExpired. The operator
 	// has no usable token; rerunning `meho login` is the remedy.
 	ErrCodeAuthExpired = "auth_expired"
@@ -172,6 +180,16 @@ func AuthExpired(detail string) *StructuredError {
 		Code:   ErrCodeAuthExpired,
 		Detail: detail,
 		Exit:   ExitAuthExpired,
+	}
+}
+
+// Usage builds the canonical usage_error StructuredError for a
+// wrong command line.
+func Usage(detail string) *StructuredError {
+	return &StructuredError{
+		Code:   ErrCodeUsage,
+		Detail: detail,
+		Exit:   ExitUsage,
 	}
 }
 
@@ -318,6 +336,28 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 
 	// DB subsystem. migrated is a tri-state (true, false, nil/unknown).
 	fmt.Fprintf(stdoutW, "  DB:    %s\n", formatDB(resp.Db))
+
+	// Readiness checks, approval settings and gated features (#4830).
+	// An older backplane sends none of these; the lines are skipped
+	// then, so the output stays as it was.
+	if resp.Readiness != nil {
+		fmt.Fprint(stdoutW, formatReadiness(*resp.Readiness))
+	}
+	if resp.Approvals != nil {
+		fmt.Fprintf(stdoutW, "  Approvals: %s\n", formatApprovals(*resp.Approvals))
+	}
+	if resp.Features != nil {
+		if line := formatFeatures(*resp.Features); line != "" {
+			fmt.Fprintf(stdoutW, "  Features: %s\n", line)
+		}
+	}
+
+	// Sandbox mode (#4622): one line when it is on, nothing when it is
+	// off. Older backplanes send no field; the generated decoder leaves
+	// it nil or empty, which reads as off.
+	if resp.SandboxMode != nil && *resp.SandboxMode == "on" {
+		fmt.Fprintln(stdoutW, "  Sandbox mode: on (a standing grant made in the web console may cover deletes by service principals)")
+	}
 	return nil
 }
 
@@ -355,14 +395,141 @@ func formatVault(v api.VaultStatus) string {
 // in the chassis stage before G2.3's migration probe is wired; the
 // CLI surfaces that as-is so operators see the difference between
 // "probed and failed" and "not probed yet".
+//
+// Since #4830 the backplane also sends the database's revision and
+// the revision this version expects, so an operator can confirm an
+// upgrade from this line. A database newer than the running version
+// is the normal state after a rollback (the migration runs before the
+// deployment rolls and survives a rollback), so it still reads as
+// migrated. An older backplane sends neither revision; the line then
+// reads as before.
 func formatDB(db api.DbStatus) string {
 	if db.Migrated == nil {
 		return "unknown"
 	}
+	revision := derefString(db.Revision)
+	head := derefString(db.Head)
 	if *db.Migrated {
-		return "migrated"
+		switch {
+		case revision == "":
+			return "migrated"
+		case head != "" && revision != head:
+			return fmt.Sprintf(
+				"migrated, revision %s (newer than this version, which expects %s; normal after a rollback)",
+				revision, head)
+		default:
+			return fmt.Sprintf("migrated, revision %s", revision)
+		}
 	}
-	return "not migrated"
+	detail := strings.TrimSpace(derefString(db.Detail))
+	switch {
+	case revision != "" && head != "" && revision != head:
+		return fmt.Sprintf("not migrated (database at %s, this version expects %s)", revision, head)
+	case revision == "" && head != "" && !strings.HasPrefix(detail, "check_failed"):
+		return fmt.Sprintf("not migrated (database has no revision, this version expects %s)", head)
+	}
+	return joinDetail("not migrated", db.Detail)
+}
+
+// formatReadiness renders the readiness checks the backplane's own
+// /ready endpoint reports (#4830). One line when everything is ready;
+// otherwise a header plus one indented line per failing check with
+// its detail, and one line naming the checks that passed.
+func formatReadiness(r api.ReadinessStatus) string {
+	var checks []api.ReadinessCheck
+	if r.Checks != nil {
+		checks = *r.Checks
+	}
+	var okNames []string
+	var failing []api.ReadinessCheck
+	for _, c := range checks {
+		if c.Ok {
+			okNames = append(okNames, c.Name)
+		} else {
+			failing = append(failing, c)
+		}
+	}
+	if r.Ready {
+		if len(okNames) == 0 {
+			return "  Readiness: ready\n"
+		}
+		return fmt.Sprintf("  Readiness: ready (%s ok)\n", strings.Join(okNames, ", "))
+	}
+	if len(checks) == 0 {
+		return "  Readiness: not ready (no checks reported)\n"
+	}
+	var b strings.Builder
+	b.WriteString("  Readiness: not ready\n")
+	for _, c := range failing {
+		fmt.Fprintf(&b, "    %s: %s\n", c.Name, joinDetail("failed", c.Detail))
+	}
+	if len(okNames) > 0 {
+		fmt.Fprintf(&b, "    ok: %s\n", strings.Join(okNames, ", "))
+	}
+	return b.String()
+}
+
+// formatApprovals renders the approval settings in force (#4830) in
+// plain words: who must approve, whether a decision made on someone
+// else's instruction is allowed, and the state of the approval key.
+// A value the CLI does not know is printed as the backplane sent it.
+func formatApprovals(a api.ApprovalsStatus) string {
+	var posture, delegated, custody string
+	switch a.EffectivePosture {
+	case "four_eyes_enforced":
+		posture = "a second person must approve"
+	case "single_operator_break_glass":
+		posture = "one operator may approve their own request (break-glass)"
+	default:
+		posture = "approval posture " + a.EffectivePosture
+	}
+	switch a.DelegatedDecisionPosture {
+	case "production_own_hand_only":
+		delegated = "decisions on someone else's instruction are refused"
+	case "lab_class_delegation_allowed":
+		delegated = "decisions on someone else's instruction are allowed"
+	default:
+		delegated = "delegated decisions " + a.DelegatedDecisionPosture
+	}
+	switch a.Custody {
+	case "configured", "missing", "malformed":
+		custody = "approval key " + a.Custody
+	default:
+		custody = "approval key state " + a.Custody
+	}
+	return strings.Join([]string{posture, delegated, custody}, "; ")
+}
+
+// formatFeatures renders the gated features (#4830): "all configured",
+// or the features still missing a setting with the setting names. It
+// returns "" for an empty list so the caller prints no line.
+func formatFeatures(features []api.FeatureStatus) string {
+	if len(features) == 0 {
+		return ""
+	}
+	var missing []string
+	for _, f := range features {
+		if f.Configured {
+			continue
+		}
+		entry := f.Name
+		if f.MissingEnv != nil && len(*f.MissingEnv) > 0 {
+			entry += " (needs " + strings.Join(*f.MissingEnv, ", ") + ")"
+		}
+		missing = append(missing, entry)
+	}
+	if len(missing) == 0 {
+		return "all configured"
+	}
+	return "not configured: " + strings.Join(missing, ", ")
+}
+
+// derefString returns the pointed-to string, or "" for nil.
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // joinDetail appends "(detail)" to a base label only when detail is

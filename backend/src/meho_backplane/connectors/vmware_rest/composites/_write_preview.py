@@ -31,8 +31,8 @@ resolved VM + host group sets).
 ``vmware.composite.*``    preview stored in ``proposed_effect["preview"]``
 ========================  ====================================================
 ``vm.power.bulk``         ``{action, filter, resolved, total_resolved}``
-``host.evacuate``         ``{host, tolerate_partial_failure, resolved,
-                          total_resolved}``
+``host.evacuate``         ``{host, tolerate_partial_failure, vsan_mode,
+                          resolved, total_resolved}``
 ``host.detach_from_vds``  ``{host, dvs, fallback_network, resolved,
                           total_resolved}``
 ``cluster.patch``         ``{cluster, resolved, total_resolved}``
@@ -43,15 +43,22 @@ resolved VM + host group sets).
 ``vm.clone_from_template`` echo: source_template, new_vm_name, folder,
                           resource_pool, datastore, host, power_on,
                           customization_spec_name
-``vm.snapshot.revert``    echo: vm, snapshot_name
+``vm.snapshot.revert``    echo: vm, snapshot_name or snapshot_id
+``vm.snapshot.create``    echo: vm, snapshot_name, memory, quiesce
+``vm.snapshot.delete``    live-read: the mandatory ``blast_radius`` from the
+                          handler's plan -- the snapshot, the snapshots below
+                          it when ``remove_children`` is set
 ``vm.migrate``            echo: vm, cluster, target_host + resolution source
 ``vm.power``              echo: vm, verb, power_kind (hard vs Tools-soft)
 ``vm.disk.grow``          live-read: vm, name, disk, disk_label,
                           current_capacity_bytes, requested_capacity_bytes,
                           delta_bytes
+``vm.resource_``          live-read: ``{vm, name, current, requested}`` --
+``allocation.set``        CPU / memory limit + reservation from->to (#3880)
 ``cluster.drs_rule.create`` live-read: cluster, cluster_name, rule_type,
                           rule_name, enabled, resolved, total_resolved
-``folder.create``         echo: parent_folder, new_folder_name
+``folder.create``         echo: parent_folder / parent_folder_id,
+                          datacenter, new_folder_name
 ``vm.resize``             live-read: ``{vm, name, power_state, current,
                           requested}`` sizing from->to
 ``vm.nic.repoint``        live-read: ``{vm, name, nic, mac_address,
@@ -64,6 +71,13 @@ resolved VM + host group sets).
                           domain-join credentials, #1503)
 ``vm.customize``          live-read: vm, name, power_state, spec_name,
                           applies_on (spec reference carries no secret)
+teardown deletes (#3339)  live-read: the mandatory ``blast_radius`` built from
+                          the handler's own plan (``_teardown.TeardownPlan``)
+                          -- object, children, blockers, refusal
+``cluster.drs_rule.``     live-read: the same ``blast_radius`` from the
+``delete``                handler's plan -- the rule's type, enabled,
+                          mandatory, VMs or groups
+``datastore.dir.create``  echo: datastore, path, create_parents
 ========================  ====================================================
 
 GOSC secret hygiene (#1503) is the load-bearing property of the two
@@ -162,8 +176,28 @@ from typing import Any
 
 import httpx
 
+from meho_backplane.connectors.vmware_rest.composites._alarm import (
+    alarm_acknowledge_preview,
+    alarm_reset_preview,
+)
+from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
+    datastore_dir_create_preview,
+    datastore_file_delete_preview,
+)
+from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
+    cluster_drs_rule_delete_preview,
+)
+from meho_backplane.connectors.vmware_rest.composites._library_delete import (
+    content_library_delete_preview,
+    content_library_item_delete_preview,
+)
+from meho_backplane.connectors.vmware_rest.composites._license import license_assign_preview
 from meho_backplane.connectors.vmware_rest.composites._namespace import (
     _OP_GET_NAMESPACE,
+)
+from meho_backplane.connectors.vmware_rest.composites._snapshot import (
+    vm_snapshot_create_preview,
+    vm_snapshot_delete_preview,
 )
 from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
     _OP_STORAGE_POLICIES_LIST,
@@ -172,9 +206,16 @@ from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
     _resolve_policy_by_name,
     _resolve_tag_in_category,
 )
+from meho_backplane.connectors.vmware_rest.composites._teardown import folder_delete_preview
+from meho_backplane.connectors.vmware_rest.composites._teardown_network import (
+    host_standard_portgroup_delete_preview,
+    network_portgroup_delete_preview,
+)
+from meho_backplane.connectors.vmware_rest.composites._vm_allocation import read_vm_allocation
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _GUEST_POWER_VERBS,
     _NIC_BACKING_DISTRIBUTED_PORTGROUP,
+    _VSAN_MODE_DEFAULT,
     _list_child_resource_pool_ids,
     _read_cdrom,
     _read_ethernet_nic,
@@ -296,6 +337,7 @@ async def _host_evacuate_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return {
         "host": host,
         "tolerate_partial_failure": bool(ctx.params.get("tolerate_partial_failure", False)),
+        "vsan_mode": str(ctx.params.get("vsan_mode") or _VSAN_MODE_DEFAULT),
         **_capped_resolution(rows, _vm_identity),
     }
 
@@ -420,12 +462,13 @@ async def _vm_deploy_from_library_preview(ctx: PreviewContext) -> dict[str, Any]
 
     Param-echo: the params name the blast radius — which library item (id or
     name, plus scoping library), where it lands (resource pool / host / folder
-    / datastore), the OVF-network→portgroup map, provisioning, and whether it
-    powers on. ``ovf_properties`` may carry secret values (appliance
-    passwords), so only its **keys** (property ids) are echoed, never the
-    values (#1503 secret-hygiene). No live read is issued, so the preview
-    cannot drift from the approved dispatch. Declines (``None``) when neither
-    library reference nor the required ``resource_pool`` is a string.
+    / datastore), the OVF-network→portgroup map, provisioning, the OVF
+    deployment option, and whether it powers on. ``ovf_properties`` may
+    carry secret values (appliance passwords), so only its **keys**
+    (property ids) are echoed, never the values (#1503 secret-hygiene). No
+    live read is issued, so the preview cannot drift from the approved
+    dispatch. Declines (``None``) when neither library reference nor the
+    required ``resource_pool`` is a string.
     """
     library_item = ctx.params.get("library_item")
     library_item_name = ctx.params.get("library_item_name")
@@ -462,6 +505,11 @@ async def _vm_deploy_from_library_preview(ctx: PreviewContext) -> dict[str, Any]
         ),
         "ovf_property_keys": (
             sorted(str(k) for k in ovf_properties) if isinstance(ovf_properties, dict) else []
+        ),
+        "deployment_option": (
+            ctx.params.get("deployment_option")
+            if isinstance(ctx.params.get("deployment_option"), str)
+            else None
         ),
         "power_on": bool(ctx.params.get("power_on", False)),
     }
@@ -509,13 +557,18 @@ async def _vm_clone_from_template_preview(ctx: PreviewContext) -> dict[str, Any]
 async def _vm_snapshot_revert_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Preview ``vm.snapshot.revert`` — echo the revert coordinates (no I/O).
 
-    The destructive scope is "this VM reverts to the snapshot named X",
-    which the params fully convey; match/ambiguity resolution stays the
-    handler's job (it refuses ambiguous or missing names safely).
+    The destructive scope is "this VM reverts to the snapshot named X" (or
+    "with id X"), which the params fully convey; match/ambiguity resolution
+    stays the handler's job (it refuses ambiguous or missing snapshots safely).
     """
     vm = ctx.params.get("vm")
     snapshot_name = ctx.params.get("snapshot_name")
-    if not isinstance(vm, str) or not isinstance(snapshot_name, str):
+    snapshot_id = ctx.params.get("snapshot_id")
+    if not isinstance(vm, str):
+        return None
+    if isinstance(snapshot_id, str):
+        return {"vm": vm, "snapshot_id": snapshot_id}
+    if not isinstance(snapshot_name, str):
         return None
     return {"vm": vm, "snapshot_name": snapshot_name}
 
@@ -586,6 +639,9 @@ async def _vm_disk_grow_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """
     vm = ctx.params.get("vm")
     disk = ctx.params.get("disk")
+    # ``disk`` may be the int vim device key as well as the REST string id.
+    if isinstance(disk, int) and not isinstance(disk, bool):
+        disk = str(disk)
     capacity_bytes = ctx.params.get("capacity_bytes")
     if (
         not isinstance(vm, str)
@@ -623,6 +679,53 @@ async def _vm_disk_grow_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "current_capacity_bytes": current_bytes,
         "requested_capacity_bytes": capacity_bytes,
         "delta_bytes": (capacity_bytes - current_bytes if current_bytes is not None else None),
+    }
+
+
+_ALLOCATION_PARAMS = (
+    "cpu_limit_mhz",
+    "cpu_reservation_mhz",
+    "memory_limit_mb",
+    "memory_reservation_mb",
+)
+
+
+async def _vm_resource_allocation_set_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.resource_allocation.set`` -- live-read the current allocation.
+
+    The from->to delta is the decision: reads the VM's current CPU / memory
+    ``{limit, reservation, shares}`` via the handler's own read helper
+    (:func:`._vm_allocation.read_vm_allocation`, one ungated
+    ``RetrievePropertiesEx``) and echoes the requested fields (-1 limit =
+    unlimited). The ``ReconfigVM_Task`` never fires here. Declines (``None``)
+    without a resolved connector or on malformed params.
+    """
+    vm = ctx.params.get("vm")
+    if not isinstance(vm, str) or ctx.connector_instance is None:
+        return None
+    requested = {
+        key: ctx.params[key]
+        for key in _ALLOCATION_PARAMS
+        if isinstance(ctx.params.get(key), int) and not isinstance(ctx.params.get(key), bool)
+    }
+    current = await read_vm_allocation(
+        ctx.connector_instance,  # type: ignore[arg-type]
+        ctx.target,
+        ctx.operator,
+        vm=vm,
+    )
+    return {
+        "vm": vm,
+        "name": current.get("name") if current else None,
+        "current": (
+            {
+                "cpu_allocation": current.get("cpu_allocation"),
+                "memory_allocation": current.get("memory_allocation"),
+            }
+            if current
+            else None
+        ),
+        "requested": requested,
     }
 
 
@@ -700,15 +803,23 @@ async def _folder_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Preview ``folder.create`` — echo the parent + new folder name (no I/O).
 
     Param echo (the ``secret.move`` precedent, #1580): the params fully name
-    the blast radius — one new folder under one named parent. Parent-name
-    resolution and the synchronous ``CreateFolder`` write stay the handler's
-    job at dispatch time.
+    the blast radius — one new folder under one parent. The parent is the
+    ``parent_folder`` name (optionally scoped by ``datacenter``) or the
+    ``parent_folder_id`` folder ID (#3588); whichever were given are echoed.
+    Parent-name resolution and the synchronous ``CreateFolder`` write stay
+    the handler's job at dispatch time.
     """
-    parent_folder = ctx.params.get("parent_folder")
     folder_name = ctx.params.get("folder_name")
-    if not isinstance(parent_folder, str) or not isinstance(folder_name, str):
+    if not isinstance(folder_name, str):
         return None
-    return {"parent_folder": parent_folder, "new_folder_name": folder_name}
+    parent = {
+        key: value
+        for key in ("parent_folder", "parent_folder_id", "datacenter")
+        if isinstance(value := ctx.params.get(key), str)
+    }
+    if "parent_folder" not in parent and "parent_folder_id" not in parent:
+        return None
+    return {**parent, "new_folder_name": folder_name}
 
 
 async def _resource_pool_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
@@ -1620,11 +1731,16 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.vm.deploy_from_library": _vm_deploy_from_library_preview,
     "vmware.composite.vm.clone_from_template": _vm_clone_from_template_preview,
     "vmware.composite.vm.snapshot.revert": _vm_snapshot_revert_preview,
+    "vmware.composite.vm.snapshot.create": vm_snapshot_create_preview,
+    # The snapshot delete is destructive: its blast radius is the handler's own
+    # plan (the snapshot, and the snapshots below it when they go too).
+    "vmware.composite.vm.snapshot.delete": vm_snapshot_delete_preview,
     "vmware.composite.vm.migrate": _vm_migrate_preview,
     "vmware.composite.vm.power": _vm_power_preview,
     "vmware.composite.vm.power.bulk": _vm_power_bulk_preview,
     "vmware.composite.vm.disk.grow": _vm_disk_grow_preview,
     "vmware.composite.vm.disk.attach": _vm_disk_attach_preview,
+    "vmware.composite.vm.resource_allocation.set": _vm_resource_allocation_set_preview,
     "vmware.composite.vm.resize": _vm_resize_preview,
     "vmware.composite.vm.nic.repoint": _vm_nic_repoint_preview,
     "vmware.composite.vm.device.cdrom": _vm_device_cdrom_preview,
@@ -1649,15 +1765,36 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
         _content_library_subscribed_create_preview
     ),
     "vmware.composite.content_library.subscribed.sync": _content_library_subscribed_sync_preview,
+    # #3339 teardown: the destructive deletes register their handler's own
+    # plan as the mandatory blast radius (one planning function per op, so the
+    # approver reads exactly the refusal the handler applies); dir.create is a
+    # param echo.
+    "vmware.composite.network.portgroup.delete": network_portgroup_delete_preview,
+    "vmware.composite.host.standard_portgroup.delete": host_standard_portgroup_delete_preview,
+    "vmware.composite.folder.delete": folder_delete_preview,
+    "vmware.composite.datastore.file.delete": datastore_file_delete_preview,
+    "vmware.composite.datastore.dir.create": datastore_dir_create_preview,
+    "vmware.composite.content_library.delete": content_library_delete_preview,
+    "vmware.composite.content_library.item.delete": content_library_item_delete_preview,
+    # The DRS rule delete is destructive too: its blast radius is the
+    # handler's own plan (the rule, its type, its VMs or groups).
+    "vmware.composite.cluster.drs_rule.delete": cluster_drs_rule_delete_preview,
+    # Licence assign: live-read of the asset's licence now and the licence it
+    # would get, from the handler's own plan. Keys are masked.
+    "vmware.composite.license.assign": license_assign_preview,
+    # #4383 alarm changes: a live read of the alarm, or of the alarms the
+    # reset filter matches now.
+    "vmware.composite.alarm.acknowledge": alarm_acknowledge_preview,
+    "vmware.composite.alarm.reset": alarm_reset_preview,
 }
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 37 write-composite park-time preview builders. Import-time.
+    """Wire the 51 write-composite park-time preview builders. Import-time.
 
-    The 13 read composites register no builder — they are
-    ``requires_approval=False`` and never park, so a preview would be
-    dead code.
+    The read composites register no builder here. The one read that can
+    wait for approval, the ``caution`` ``vm.guest.file.read``, registers
+    its own in :mod:`._guest_file_read_preview` (#4850).
     """
     for op_id, builder in _WRITE_PREVIEW_BUILDERS.items():
         register_preview_builder(op_id, builder)

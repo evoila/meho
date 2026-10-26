@@ -220,11 +220,12 @@ class Operator(BaseModel):
     principal_kind: PrincipalKind = PrincipalKind.USER
     #: The OAuth ``clientId`` of a client-credentials (service-account) token,
     #: recovered from the ``service-account-<clientId>`` username marker
-    #: (#3178). Populated for :attr:`PrincipalKind.SERVICE` principals; ``None``
-    #: for interactive users and any token without the marker. Used by the
-    #: add-on parent-linkage seam (#3028) to match a paired add-on's dispatch
-    #: to its ``addon_pairing.keycloak_client_id`` — linkage is accepted only
-    #: from a paired principal for its own work_refs.
+    #: (#3178) or, for :attr:`PrincipalKind.SERVICE` and
+    #: :attr:`PrincipalKind.AGENT` tokens without the marker, from the verified
+    #: ``azp`` / RFC 9068 ``client_id`` claim (#3795, #3446). ``None`` for
+    #: interactive users and any token carrying neither. Used by the audit
+    #: parent-linkage seam (#3028, #3446) to key a service principal's
+    #: orchestration runs, and by agent grant enforcement (#3795).
     client_id: str | None = None
     capabilities: frozenset[str] = frozenset()
     scopes: frozenset[str] = frozenset()
@@ -239,7 +240,8 @@ class Operator(BaseModel):
 #: carrying no ``principal_kind`` claim); every other kind is a machine
 #: credential — an agent client, a non-MEHO service account, or a satellite
 #: runner. The human-only governance verbs (approval decisions, agent-grant
-#: create / elevate, agent-principal register) refuse these kinds on **every**
+#: create / elevate, standing-grant create / revoke for service principals
+#: (#4616), agent-principal register) refuse these kinds on **every**
 #: transport (meho-internal#289): approval is a human decision (v0.1-spec §7).
 MACHINE_PRINCIPAL_KINDS: frozenset[PrincipalKind] = frozenset(
     {PrincipalKind.AGENT, PrincipalKind.SERVICE, PrincipalKind.RUNNER}

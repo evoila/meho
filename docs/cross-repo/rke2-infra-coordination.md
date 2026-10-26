@@ -6,7 +6,7 @@ Copyright (c) 2026 evoila Group
 # rke2-infra coordination — per-PR ephemeral smoke + `repository_dispatch`
 
 > Cross-repo handshake between `evoila/meho` (this repo, producer) and
-> [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)
+> `evoila-bosnia/claude-rdc-hetzner-dc`
 > (private; consumer of MEHO and operator of the rke2-infra dogfooding
 > cluster).
 >
@@ -18,20 +18,20 @@ Copyright (c) 2026 evoila Group
 
 ## Why this handshake exists
 
-[Goal #11](https://github.com/evoila-bosnia/meho-internal/issues/11)
+Goal #11
 locks the v0.1 release on a single dogfooding consumer (RDC) operating
 MEHO against the consumer's existing rke2-infra Kubernetes cluster.
 Two CI/CD properties from `evoila/meho` cross that repo boundary into
 the consumer:
 
-1. **Per-PR ephemeral-cluster smoke** (G2.7-T2, [#50](https://github.com/evoila-bosnia/meho-internal/issues/50)).
+1. **Per-PR ephemeral-cluster smoke** (G2.7-T2, #50).
    Every PR on `evoila/meho` deploys the chart into a fresh
    `meho-ci-<pr-number>` namespace on rke2-infra, runs the smoke
    script, and tears the namespace down. If the smoke fails the PR
    can't merge. This is the per-PR ephemeral-cluster discipline MEHO.X
    never had — every G2.0–G2.6 PR closes the real-target feedback loop
    before merge against a real (not mocked) Kubernetes API.
-2. **`repository_dispatch` deploy trigger** (G2.7-T3, [#51](https://github.com/evoila-bosnia/meho-internal/issues/51))
+2. **`repository_dispatch` deploy trigger** (G2.7-T3, #51)
    — **RETIRED 2026-07-17** (see Section 3). Every merge to `main` on
    `evoila/meho` still builds, signs, and pushes a new backplane image to GHCR,
    but the producer no longer dispatches a `meho-image-pushed` event: the
@@ -364,20 +364,20 @@ declaring the contract closed.
 
 This is the live tracker for consumer-side acceptance. Bullets here
 mirror the acceptance criteria on
-[evoila-bosnia/meho-internal#53](https://github.com/evoila-bosnia/meho-internal/issues/53).
+evoila-bosnia/meho-internal#53.
 
 | Item | Status | Owner | Notes |
 | --- | --- | --- | --- |
-| Coordination ticket filed on `evoila-bosnia/claude-rdc-hetzner-dc` | pending | RDC maintainers | Linked to this doc + Initiative [#48](https://github.com/evoila-bosnia/meho-internal/issues/48) |
+| Coordination ticket filed on `evoila-bosnia/claude-rdc-hetzner-dc` | pending | RDC maintainers | Linked to this doc + Initiative #48 |
 | kube-apiserver OIDC trust configured (Option A) **OR** `RDC_KUBECONFIG` secret stored (Option B) | pending | RDC maintainers | Prefer Option A; document choice on the coordination ticket |
 | Namespace-scoped RBAC enforcing `meho-ci-*` | pending | RDC maintainers | Includes the admission-policy half of the scoping (see Section 2) |
 | ~~Consumer workflow listening for `meho-image-pushed` repository_dispatch~~ | retired | — | Producer step removed 2026-07-17 (RDC_DISPATCH_TOKEN not renewed); track GHCR tags / Releases instead |
-| `manifests/meho/{values-rdc.yaml,install.sh,smoke.sh,README.md}` landed | pending | RDC maintainers | Also tracked in Goal [#11](https://github.com/evoila-bosnia/meho-internal/issues/11) cross-repo deps |
+| `manifests/meho/{values-rdc.yaml,install.sh,smoke.sh,README.md}` landed | pending | RDC maintainers | Also tracked in Goal #11 cross-repo deps |
 | `claude-rdc-hetzner-dc/CLAUDE.md` documents the MEHO event contract | pending | RDC maintainers | Mirror of this doc's Section 3 |
 
 Move an item to `done` (with the linking PR/commit) only after the
 consumer-side change has merged. When all six are done, close
-[meho-internal#53](https://github.com/evoila-bosnia/meho-internal/issues/53).
+meho-internal#53.
 
 ## Out of scope
 
@@ -392,11 +392,11 @@ consumer-side change has merged. When all six are done, close
 
 ## References
 
-- [Goal #11](https://github.com/evoila-bosnia/meho-internal/issues/11) — Deployable v0.1, cross-repo dependencies section
-- [Initiative #48](https://github.com/evoila-bosnia/meho-internal/issues/48) — G2.7 CI/CD + per-PR ephemeral smoke
-- [Task #50](https://github.com/evoila-bosnia/meho-internal/issues/50) — Per-PR ephemeral cluster deploy
-- [Task #51](https://github.com/evoila-bosnia/meho-internal/issues/51) — `repository_dispatch` trigger
-- [Task #53](https://github.com/evoila-bosnia/meho-internal/issues/53) — This tracker
+- Goal #11 — Deployable v0.1, cross-repo dependencies section
+- Initiative #48 — G2.7 CI/CD + per-PR ephemeral smoke
+- Task #50 — Per-PR ephemeral cluster deploy
+- Task #51 — `repository_dispatch` trigger
+- Task #53 — This tracker
 - GitHub Actions OIDC: <https://docs.github.com/en/actions/concepts/security/openid-connect>
 - `repository_dispatch` API: <https://docs.github.com/en/rest/repos/repos#create-a-repository-dispatch-event>
 - Kubernetes RBAC reference: <https://kubernetes.io/docs/reference/access-authn-authz/rbac/>

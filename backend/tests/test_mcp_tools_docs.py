@@ -18,7 +18,10 @@ Covers the collection-scoped contract layered on the G4.5-T4 capability gate:
   403-class ``-32602`` even though the tool is visible; with it → the
   query routes to the collection's backend.
 * **Collection scope routing:** the query reaches the resolved backend
-  with the optional product/version refinements as ``metadata_filters``;
+  with the optional product/version refinements as a soft ``scope`` when
+  the collection's ``backend.ref["scope"]`` is ``"soft"``, as
+  ``metadata_filters`` when it enables ``scope_filters``, and without them
+  when it enables neither (#3912);
   an unknown collection → ``-32602``, a *transiently* not-ready
   (``provisioning`` / ``rebuilding``) collection → ``-32603`` (retryable),
   a ``disabled`` collection → ``-32602`` (terminal,
@@ -36,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import patch
@@ -45,9 +49,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from meho_backplane.auth.corpus import CorpusChunk, CorpusSearchResponse, CorpusUnavailable
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AgentPermission, AuditLog, Tenant
+from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS
@@ -71,6 +76,13 @@ _ENTITLED = frozenset({_DOCS_CAPABILITY, _VMWARE_CAP})
 #: ``corpus-http`` adapter actually calls. Patching here exercises the
 #: full router → backend → transport path.
 _CORPUS_SEAM = "meho_backplane.docs_search.backends.corpus_http.search_corpus"
+
+#: A ``corpus-http`` binding whose collection opts into forwarding the
+#: product/version refinements as hard filters (#3912). The default seed
+#: has no ``ref``, so both gates are off.
+_SCOPE_FILTERS_ON: dict[str, Any] = {"type": "corpus-http", "ref": {"scope_filters": True}}
+#: A ``corpus-http`` binding whose collection opts into the soft scope (#3912).
+_SOFT_SCOPE_ON: dict[str, Any] = {"type": "corpus-http", "ref": {"scope": "soft"}}
 
 
 async def _mcp_audit_rows() -> list[AuditLog]:
@@ -211,6 +223,7 @@ def test_search_docs_present_with_strict_collection_schema(
         "collections",
         "product",
         "version",
+        "target",
         "limit",
     }
     assert schema["properties"]["collections"]["type"] == "array"
@@ -239,6 +252,48 @@ def test_search_docs_description_names_collection_and_siblings(
     # Companion resource pointer now carries the collection segment.
     assert "meho://docs/{collection}/" in desc
     assert "resources/read" in desc
+    # #3912: the example names the stamped product family, not vCenter.
+    assert "vSphere 8.0" in desc
+    assert "vCenter 8.0" not in desc
+
+
+@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
+@pytest.mark.parametrize("tool_name", ["search_docs", "ask_docs"])
+def test_refinement_descriptions_use_the_collection_vocabulary(
+    docs_client: tuple[TestClient, Operator],
+    tool_name: str,
+) -> None:
+    """``product`` / ``version`` guide the agent to values that work (#3912).
+
+    ``product`` names the collection's own tokens (``vsphere``, never a
+    ``vcenter`` example). ``version`` asks for the release as precisely as
+    the agent knows it (a soft scope ranks it and excludes nothing), so it
+    no longer asks for ``MAJOR.MINOR`` only or says to leave it out for
+    KB / CVE / build-number questions; it carries the caveat that on a
+    ``scope_filters`` collection a precise release is an exact-match
+    filter. Both say the refinements are ignored unless the collection
+    enables scope forwarding.
+    """
+    client, _op = docs_client
+    response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    tools_by_name = {t["name"]: t for t in response.json()["result"]["tools"]}
+    properties = tools_by_name[tool_name]["inputSchema"]["properties"]
+    product = properties["product"]["description"]
+    version = properties["version"]["description"]
+
+    assert "'vsphere'" in product
+    assert "list_doc_collections" in product
+    for release in ("'9.1.1'", "'8.0 U3'", "'8.0.3.00400'"):
+        assert release in version
+    assert "as precisely as you know it" in version
+    assert "MAJOR.MINOR" not in version
+    assert "Omit it for" not in version
+    assert "exact-match filter" in version
+    for description in (product, version):
+        assert "vcenter" not in description
+        assert "scope forwarding" in description
+    # The tool description no longer calls the refinements "not a ranking hint".
+    assert "not a ranking hint" not in tools_by_name[tool_name]["description"]
 
 
 def test_search_docs_hidden_from_provisioned_read_only_operator() -> None:
@@ -344,12 +399,12 @@ def test_tools_call_search_docs_routes_to_collection_backend(
     """An entitled operator's query routes to the collection's backend with refinements.
 
     The handler resolves the ``vmware`` collection, routes through the
-    ``corpus-http`` backend, and the optional product/version refinements
-    reach the transport as ``metadata_filters``. The backend id is absent
-    from the response.
+    ``corpus-http`` backend, and — the collection enabling scope filters
+    (#3912) — the optional product/version refinements reach the transport
+    as ``metadata_filters``. The backend id is absent from the response.
     """
     client, op = docs_client
-    _seed_collection_sync()
+    _seed_collection_sync(backend=_SCOPE_FILTERS_ON)
     fake = _fake_corpus(_SAMPLE_CHUNK)
     with patch(_CORPUS_SEAM, new=fake):
         response = post_mcp(
@@ -390,6 +445,7 @@ def test_tools_call_search_docs_routes_to_collection_backend(
     assert captured["query"] == "config maximums"
     assert captured["limit"] == 5
     assert captured["metadata_filters"] == {"product": "nsx", "version": "9.0"}
+    assert captured["soft_scope"] is None
     assert captured["operator"].tenant_id == op.tenant_id
 
 
@@ -510,6 +566,78 @@ def test_tools_call_search_docs_chunk_carries_upstream_title(
 
 
 @pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_chunk_carries_identity_score_kind_and_link(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """The MCP hit carries the derived title, ``score_kind`` and upstream link (#3913).
+
+    A hit with page identity and no ``title`` gets a derived title; a ``gs://``
+    source takes the backend's ``upstream_url``; ``score_kind`` passes through
+    when sent and is ``null`` (never defaulted) when not; ``chunk_id`` is kept
+    for the ``meho://docs`` chunk resource. No ``gs://`` string is served.
+    """
+    client, _op = docs_client
+    _seed_collection_sync()
+    link = "https://docs.example.com/product/2.1/maximums.pdf#page=12"
+    identified = CorpusChunk.model_validate(
+        {
+            "chunk_id": "product-2.1-maximums-0007",
+            "text": "Product 2.1 supports up to 10,000 widgets per manager.",
+            "source_uri": "gs://example-bucket/docs/product/2.1/maximums.pdf",
+            "score": 0.42,
+            "score_kind": "distance",
+            "breadcrumb": "Product 2.1 > Configuration Maximums > Widgets",
+            "filename": "maximums.pdf",
+            "upstream_url": link,
+            "upstream_page": 12,
+        }
+    )
+    with patch(_CORPUS_SEAM, new=_fake_corpus(identified, _SAMPLE_CHUNK)):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_docs",
+                    "arguments": {"query": "config maximums", "collection": "vmware"},
+                },
+            },
+        )
+    assert response.status_code == 200
+    text = response.json()["result"]["content"][0]["text"]
+    first, second = json.loads(text)["chunks"]
+    assert first["chunk_id"] == "product-2.1-maximums-0007"
+    assert first["title"] == "Widgets \u2014 maximums"
+    assert first["source_url"] == link
+    assert (first["upstream_url"], first["upstream_page"]) == (link, 12)
+    assert first["score_kind"] == "distance"
+    assert second["score_kind"] is None
+    assert (second["upstream_url"], second["upstream_page"]) == (None, None)
+    assert "gs://" not in text
+
+
+@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
+def test_search_docs_description_explains_score_kind(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """The description tells the agent how to read ``score`` (#3913).
+
+    A ``distance`` score is lower-is-better; without the hint an agent can
+    read a distance as a similarity and rank the hits backwards.
+    """
+    client, _op = docs_client
+    response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    tools_by_name = {t["name"]: t for t in response.json()["result"]["tools"]}
+    desc = tools_by_name["search_docs"]["description"]
+
+    assert "`score_kind`" in desc
+    assert "`distance` means LOWER is better" in desc
+    assert "`upstream_page`" in desc
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
 def test_tools_call_search_docs_collection_only_omits_refinements(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
@@ -538,6 +666,84 @@ def test_tools_call_search_docs_collection_only_omits_refinements(
     assert response.json()["result"]["isError"] is False
     # No product/version → no metadata_filters forwarded.
     assert fake.captured["metadata_filters"] is None  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_scope_filters_off_sends_no_refinements(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """Gate off (#3912): product/version are accepted but never reach the backend.
+
+    The seeded collection's ``backend.ref`` has no ``scope_filters``, so a
+    call carrying both refinements still succeeds and the backend sees no
+    ``metadata_filters`` — the collection alone scopes the query.
+    """
+    client, _op = docs_client
+    _seed_collection_sync()
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_docs",
+                    "arguments": {
+                        "query": "snapshot depth",
+                        "collection": "vmware",
+                        "product": "vsphere",
+                        "version": "8.0",
+                    },
+                },
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is False
+    assert fake.captured["metadata_filters"] is None  # type: ignore[attr-defined]
+    assert fake.captured["soft_scope"] is None  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_soft_scope_sends_release_unchanged(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """Soft gate on (#3912): the release travels as the soft scope, as given.
+
+    The collection's ``backend.ref`` sets ``scope: "soft"``, so the backend
+    gets ``{product, version, source: "caller"}`` with the full release
+    unchanged and no ``metadata_filters``.
+    """
+    client, _op = docs_client
+    _seed_collection_sync(backend=_SOFT_SCOPE_ON)
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_docs",
+                    "arguments": {
+                        "query": "snapshot depth",
+                        "collection": "vmware",
+                        "product": "vsphere",
+                        "version": "8.0.3.00400",
+                    },
+                },
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is False
+    assert fake.captured["metadata_filters"] is None  # type: ignore[attr-defined]
+    assert fake.captured["soft_scope"] == {  # type: ignore[attr-defined]
+        "product": "vsphere",
+        "version": "8.0.3.00400",
+        "source": "caller",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -799,3 +1005,309 @@ async def test_query_audit_op_id_filter_catches_mcp_search_docs(
     assert len(result.rows) == 1
     assert result.rows[0].op_id == "meho.docs.search"
     assert result.rows[0].op_class == "read"
+
+
+# ---------------------------------------------------------------------------
+# tools/call — the default scope from a named target (#3920)
+# ---------------------------------------------------------------------------
+
+#: A probed vCenter target's stored fingerprint.
+_VCENTER_FINGERPRINT: dict[str, Any] = {
+    "vendor": "vmware",
+    "product": "vcenter",
+    "version": "8.0.3.00400",
+    "reachable": True,
+    "probed_at": "2026-10-01T00:00:00Z",
+    "probe_method": "vimServiceVersions.xml + appliance/system/version",
+}
+_TARGET_DEFAULT_SCOPE: dict[str, str] = {
+    "product": "vcenter",
+    "release": "8.0.3.00400",
+    "source": "default",
+}
+_TARGET_HOST = "vcenter-01.example.test"
+
+
+async def _seed_target(*, fingerprint: dict[str, Any] | None = _VCENTER_FINGERPRINT) -> uuid.UUID:
+    """Seed the operator's tenant and a ``vcenter-01`` target in it; return its id."""
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(Tenant(id=OPERATOR_TENANT_ID, slug="op-test-tenant", name="Op Test"))
+        target = TargetORM(
+            tenant_id=OPERATOR_TENANT_ID,
+            name="vcenter-01",
+            aliases=["vc1"],
+            product="vcenter",
+            host=_TARGET_HOST,
+            port=443,
+            secret_ref="targets/vcenter-01",
+            auth_model="shared_service_account",
+            fingerprint=fingerprint,
+        )
+        session.add(target)
+        await session.flush()
+        return target.id
+
+
+#: The agent principal the denied-target tests run as: ``sub`` is the
+#: service-account UUID, ``client_id`` the ``agent:<name>`` a grant is keyed on.
+_AGENT_SUB = "99999999-9999-9999-9999-999999999999"
+_AGENT_CLIENT_ID = "agent:docs-test"
+
+
+@pytest.fixture
+def agent_docs_client() -> Iterator[TestClient]:
+    """``TestClient`` whose caller is an entitled **agent** principal."""
+    op = Operator(
+        sub=_AGENT_SUB,
+        name="Docs Test Agent",
+        email=None,
+        raw_jwt="fixture-jwt-not-real",
+        tenant_id=OPERATOR_TENANT_ID,
+        tenant_role=TenantRole.OPERATOR,
+        capabilities=_ENTITLED,
+        principal_kind=PrincipalKind.AGENT,
+        client_id=_AGENT_CLIENT_ID,
+    )
+
+    async def _fake_verify() -> Operator:
+        return op
+
+    app.dependency_overrides[verify_mcp_jwt_and_bind] = _fake_verify
+    try:
+        with TestClient(app) as client:
+            yield client
+    finally:
+        app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
+
+
+async def _deny_target(
+    target_scope: str, *, principal_sub: str = _AGENT_CLIENT_ID, verdict: str = "deny"
+) -> None:
+    """Insert a *verdict* permission row (default ``deny``) for every op on *target_scope*."""
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(
+            AgentPermission(
+                tenant_id=OPERATOR_TENANT_ID,
+                principal_sub=principal_sub,
+                op_pattern="*",
+                verdict=verdict,
+                target_scope=target_scope,
+                created_by_sub="admin:docs-test",
+            )
+        )
+
+
+def _search_call(client: TestClient, arguments: dict[str, Any]) -> Any:
+    return post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "tools/call",
+            "params": {
+                "name": "search_docs",
+                "arguments": {"query": "upgrade pre-check fails", **arguments},
+            },
+        },
+    )
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_target_default_is_a_soft_scope(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """No product/version + a vCenter target: its fingerprint is the soft scope.
+
+    The release is sent as reported and no filters are sent, even with the
+    hard-filter gate also on. An alias resolves like a name.
+    """
+    client, _op = docs_client
+    _seed_collection_sync(
+        backend={"type": "corpus-http", "ref": {"scope": "soft", "scope_filters": True}}
+    )
+    asyncio.run(_seed_target())
+    for name in ("vcenter-01", "vc1"):
+        fake = _fake_corpus(_SAMPLE_CHUNK)
+        with patch(_CORPUS_SEAM, new=fake):
+            response = _search_call(client, {"collection": "vmware", "target": name})
+        assert response.json()["result"]["isError"] is False
+        assert fake.captured["soft_scope"] == _TARGET_DEFAULT_SCOPE  # type: ignore[attr-defined]
+        assert fake.captured["metadata_filters"] is None  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_caller_version_wins_over_target(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """An explicit ``version`` replaces the target default (``source: caller``)."""
+    client, _op = docs_client
+    _seed_collection_sync(backend=_SOFT_SCOPE_ON)
+    asyncio.run(_seed_target())
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = _search_call(
+            client, {"collection": "vmware", "target": "vcenter-01", "version": "9.1"}
+        )
+    assert response.json()["result"]["isError"] is False
+    assert fake.captured["soft_scope"] == {"version": "9.1", "source": "caller"}  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_target_without_fingerprint_sends_no_scope(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """A target that was never probed adds no scope."""
+    client, _op = docs_client
+    _seed_collection_sync(backend=_SOFT_SCOPE_ON)
+    asyncio.run(_seed_target(fingerprint=None))
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = _search_call(client, {"collection": "vmware", "target": "vcenter-01"})
+    assert response.json()["result"]["isError"] is False
+    assert fake.captured["soft_scope"] is None  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_unknown_target_is_the_no_target_error(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """An unknown target gives ``call_operation``'s ``no_target`` code, as ``-32602``."""
+    client, _op = docs_client
+    _seed_collection_sync(backend=_SOFT_SCOPE_ON)
+    asyncio.run(_seed_target())
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = _search_call(client, {"collection": "vmware", "target": "vcenter-0"})
+    error = response.json()["error"]
+    assert error["code"] == INVALID_PARAMS
+    assert "no_target: no target matches 'vcenter-0' in the tenant" in error["message"]
+    assert error["data"]["error_code"] == "no_target"
+    assert [m["name"] for m in error["data"]["matches"]] == ["vcenter-01"]
+    assert fake.captured == {}  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_fanout_ignores_target(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """On a cross-collection fan-out the target is not used and no scope is sent."""
+    client, _op = docs_client
+    _seed_collection_sync(backend=_SOFT_SCOPE_ON)
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = _search_call(client, {"collection": "all", "target": "not-a-target"})
+    assert response.json()["result"]["isError"] is False
+    assert fake.captured["soft_scope"] is None  # type: ignore[attr-defined]
+    assert fake.captured["metadata_filters"] is None  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+async def test_tools_call_search_docs_audit_row_carries_scope_source_and_target(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """The audit row names the scope source and the target, never its address."""
+    client, _op = docs_client
+    await seed_doc_collection(backend=_SOFT_SCOPE_ON)
+    await _seed_target()
+    with patch(_CORPUS_SEAM, new=_fake_corpus(_SAMPLE_CHUNK)):
+        response = _search_call(client, {"collection": "vmware", "target": "vc1"})
+    assert response.json()["result"]["isError"] is False
+
+    rows = await _mcp_audit_rows()
+    assert len(rows) == 1
+    payload = rows[0].payload
+    assert payload["scope_source"] == "default"
+    assert payload["target"] == "vcenter-01"
+    assert _TARGET_HOST not in json.dumps(payload)
+    assert "targets/vcenter-01" not in json.dumps(payload)
+
+
+def test_tools_call_search_docs_denied_target_is_the_denied_error(
+    agent_docs_client: TestClient,
+) -> None:
+    """An agent whose permission rows deny it the target gets ``call_operation``'s denial.
+
+    The target is in the agent's own tenant, so the lookup succeeds; the
+    permission check refuses it as ``-32602`` with ``error_code = "denied"``
+    and the agent-readable reason. No corpus call runs, and the audit row
+    still names the target.
+    """
+    _seed_collection_sync(backend=_SOFT_SCOPE_ON)
+    target_id = asyncio.run(_seed_target())
+    asyncio.run(_deny_target(str(target_id)))
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = _search_call(agent_docs_client, {"collection": "vmware", "target": "vc1"})
+    error = response.json()["error"]
+    assert error["code"] == INVALID_PARAMS
+    assert error["message"].startswith("search_docs: denied: verdict=deny")
+    assert error["data"]["error_code"] == "denied"
+    assert error["data"]["query"] == "vc1"
+    assert "permission row" in error["data"]["reason"]
+    assert fake.captured == {}  # type: ignore[attr-defined]
+
+    rows = asyncio.run(_mcp_audit_rows())
+    assert len(rows) == 1
+    assert rows[0].payload["target"] == "vcenter-01"
+    assert _TARGET_HOST not in json.dumps(rows[0].payload)
+
+
+def test_tools_call_search_docs_needs_approval_target_is_the_denied_error(
+    agent_docs_client: TestClient,
+) -> None:
+    """A ``needs-approval`` row refuses the docs call: only ``auto-execute`` proceeds.
+
+    ``call_operation`` would park this verdict for an operator's decision.
+    The docs tools have no approval path, so the call is refused with the
+    same ``denied`` error, the reason names the verdict, and the target's
+    product and version never reach the corpus.
+    """
+    _seed_collection_sync(backend=_SOFT_SCOPE_ON)
+    target_id = asyncio.run(_seed_target())
+    asyncio.run(_deny_target(str(target_id), verdict="needs-approval"))
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = _search_call(agent_docs_client, {"collection": "vmware", "target": "vc1"})
+    error = response.json()["error"]
+    assert error["code"] == INVALID_PARAMS
+    assert error["message"].startswith("search_docs: denied: verdict=needs-approval")
+    assert error["data"]["error_code"] == "denied"
+    assert error["data"]["query"] == "vc1"
+    assert error["data"]["reason"].startswith("verdict=needs-approval")
+    assert fake.captured == {}  # type: ignore[attr-defined]
+
+    rows = asyncio.run(_mcp_audit_rows())
+    assert len(rows) == 1
+    assert rows[0].payload["target"] == "vcenter-01"
+    assert _TARGET_HOST not in json.dumps(rows[0].payload)
+
+
+def test_tools_call_search_docs_deny_row_for_another_target_does_not_block(
+    agent_docs_client: TestClient,
+) -> None:
+    """A deny row scoped to a different target leaves this target usable."""
+    _seed_collection_sync(backend=_SOFT_SCOPE_ON)
+    asyncio.run(_seed_target())
+    asyncio.run(_deny_target(str(uuid.uuid4())))
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = _search_call(agent_docs_client, {"collection": "vmware", "target": "vcenter-01"})
+    assert response.json()["result"]["isError"] is False
+    assert fake.captured["soft_scope"] == _TARGET_DEFAULT_SCOPE  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_human_operator_is_not_gated_by_agent_rows(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """Agent permission rows gate agents only, as on ``call_operation``."""
+    client, op = docs_client
+    _seed_collection_sync(backend=_SOFT_SCOPE_ON)
+    target_id = asyncio.run(_seed_target())
+    asyncio.run(_deny_target(str(target_id), principal_sub=op.sub))
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = _search_call(client, {"collection": "vmware", "target": "vcenter-01"})
+    assert response.json()["result"]["isError"] is False
+    assert fake.captured["soft_scope"] == _TARGET_DEFAULT_SCOPE  # type: ignore[attr-defined]

@@ -14,6 +14,7 @@ operator JWT must never leak into a structlog event or the 503 detail.
 
 from __future__ import annotations
 
+import ipaddress
 from collections.abc import Iterator
 
 import httpx
@@ -22,12 +23,24 @@ import structlog
 import structlog.testing
 
 import meho_backplane.auth.corpus as corpus_mod
+import meho_backplane.targets.ssrf_guard as guard_mod
 from meho_backplane.auth.corpus import (
+    READ_CALLER_HEADER,
+    CorpusAnswerError,
+    CorpusChunk,
+    CorpusReadError,
     CorpusSearchResponse,
     CorpusStatusResponse,
     CorpusUnavailable,
+    UpstreamAnswer,
+    UpstreamRead,
+    ask_corpus,
     corpus_status,
+    derive_answer_url,
+    derive_read_url,
     derive_status_url,
+    read_caller_id,
+    read_corpus,
     search_corpus,
 )
 from meho_backplane.auth.operator import Operator
@@ -135,7 +148,7 @@ async def test_forwards_configured_service_token_and_posts_query(
                     "text": "vSphere 9.0 supervisor cluster setup.",
                     "source_uri": "https://docs.example/vsphere",
                     "score": 0.91,
-                    "metadata": {"product": "vmware", "version": "9.0"},
+                    "metadata": {"product": "vsphere", "version": "8.0"},
                 }
             ],
             "took_ms": 12,
@@ -154,7 +167,7 @@ async def test_forwards_configured_service_token_and_posts_query(
     # ``content`` / ``source_url`` names downstream callers read.
     assert result.chunks[0].content == "vSphere 9.0 supervisor cluster setup."
     assert result.chunks[0].source_url == "https://docs.example/vsphere"
-    assert result.chunks[0].metadata == {"product": "vmware", "version": "9.0"}
+    assert result.chunks[0].metadata == {"product": "vsphere", "version": "8.0"}
 
     sent = captured[0]
     assert sent.method == "POST"
@@ -235,6 +248,77 @@ async def test_search_screens_endpoint_and_fails_closed(
     assert "not an allowed https public destination" in str(exc.value)
 
 
+@pytest.mark.parametrize(
+    ("allowlist", "url"),
+    [
+        # The in-cluster shape: the service name itself is on the allowlist.
+        ("docs.corpus-ns.svc.cluster.local", "http://docs.corpus-ns.svc.cluster.local:8080/search"),
+        # A private IP literal listed as a single address: bare, /32, or IPv6 /128.
+        ("10.20.30.40", "http://10.20.30.40:8080/search"),
+        ("10.20.30.40/32", "http://10.20.30.40:8080/search"),
+        ("fd00::10/128", "http://[fd00::10]:8080/search"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_search_admits_http_for_allowlisted_host(
+    monkeypatch: pytest.MonkeyPatch, allowlist: str, url: str
+) -> None:
+    """Plain http is allowed when the host is an exact allowlist entry (#3573)."""
+    monkeypatch.setenv("MEHO_TARGET_SSRF_ALLOWLIST", allowlist)
+    _pin_settings(monkeypatch, corpus_url=url)
+    captured: list[httpx.Request] = []
+    transport = _transport_capturing(captured, httpx.Response(200, json={"results": []}))
+    _patch_async_client(monkeypatch, transport, [])
+
+    await search_corpus(_make_operator(), "q")
+
+    assert str(captured[0].url) == url
+
+
+@pytest.mark.parametrize(
+    ("allowlist", "url"),
+    [
+        # Plain http to a public IP stays rejected; another host is allowlisted.
+        ("docs.corpus-ns.svc.cluster.local", "http://8.8.8.8/search"),
+        # Plain http to a public hostname stays rejected.
+        ("10.0.0.0/8", "http://corpus.example.com/search"),
+        # A private IP outside the allowlisted range stays rejected, even on https.
+        ("10.0.0.0/8", "https://192.168.1.5/search"),
+        # Non-http schemes are never allowed, even for an allowlisted host.
+        ("10.0.0.0/8", "ftp://10.20.30.40/search"),
+        # An IP that only falls inside a listed range needs https for the http opt-in.
+        ("10.0.0.0/8", "http://10.20.30.40:8080/search"),
+        ("10.20.30.0/24", "http://10.20.30.40/search"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_search_keeps_rejecting_non_allowlisted_endpoints(
+    monkeypatch: pytest.MonkeyPatch, allowlist: str, url: str
+) -> None:
+    """The http opt-in covers only exact allowlist entries; everything else fails closed."""
+    monkeypatch.setenv("MEHO_TARGET_SSRF_ALLOWLIST", allowlist)
+    _pin_settings(monkeypatch, corpus_url=url)
+
+    with pytest.raises(CorpusUnavailable) as exc:
+        await search_corpus(_make_operator(), "q")
+    assert "not an allowed https public destination" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_http_host_resolving_into_allowlisted_range_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """For http the host itself must be named; resolving into an allowed range is not enough."""
+    monkeypatch.setenv("MEHO_TARGET_SSRF_ALLOWLIST", "10.0.0.0/8")
+    monkeypatch.setattr(
+        guard_mod, "_resolve_addrs", lambda _host: [ipaddress.ip_address("10.20.30.40")]
+    )
+    _pin_settings(monkeypatch, corpus_url="http://docs.corpus-ns.svc.cluster.local/search")
+
+    with pytest.raises(CorpusUnavailable):
+        await search_corpus(_make_operator(), "q")
+
+
 @pytest.mark.asyncio
 async def test_metadata_filters_and_audience_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
     """Given filters + a configured audience, both ride the request body."""
@@ -246,14 +330,50 @@ async def test_metadata_filters_and_audience_forwarded(monkeypatch: pytest.Monke
     await search_corpus(
         _make_operator(),
         "q",
-        metadata_filters={"product": "vmware", "version": "9.0"},
+        metadata_filters={"product": "vsphere", "version": "8.0"},
     )
 
     import json
 
     body = json.loads(captured[0].content.decode())
-    assert body["metadata_filters"] == {"product": "vmware", "version": "9.0"}
+    assert body["metadata_filters"] == {"product": "vsphere", "version": "8.0"}
     assert body["audience"] == "meho-corpus"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("soft_scope", "expected_body"),
+    [
+        # No soft scope (None or empty): the body is exactly what it was
+        # before the key existed — the corpus refuses unknown request keys.
+        (None, {"query": "q", "top_k": 10}),
+        ({}, {"query": "q", "top_k": 10}),
+        (
+            {"product": "vsphere", "version": "8.0.3.00400", "source": "caller"},
+            {
+                "query": "q",
+                "top_k": 10,
+                "scope": {"product": "vsphere", "version": "8.0.3.00400", "source": "caller"},
+            },
+        ),
+    ],
+)
+async def test_soft_scope_rides_the_body_as_scope_only_when_given(
+    monkeypatch: pytest.MonkeyPatch,
+    soft_scope: dict[str, str] | None,
+    expected_body: dict[str, object],
+) -> None:
+    """``soft_scope`` is sent as the ``scope`` object, unchanged (#3912)."""
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL, corpus_audience="")
+    captured: list[httpx.Request] = []
+    transport = _transport_capturing(captured, httpx.Response(200, json={"chunks": []}))
+    _patch_async_client(monkeypatch, transport, [])
+
+    await search_corpus(_make_operator(), "q", soft_scope=soft_scope)
+
+    import json
+
+    assert json.loads(captured[0].content.decode()) == expected_body
 
 
 @pytest.mark.asyncio
@@ -617,6 +737,131 @@ async def test_blank_title_normalises_to_none(
 
 
 @pytest.mark.asyncio
+async def test_page_identity_score_kind_and_upstream_link_thread_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hit's page identity, ``score_kind`` and upstream link parse (#3913).
+
+    ``filename`` / ``breadcrumb`` / ``heading_path`` are what a citation title
+    is derived from; ``score_kind`` names the score's direction;
+    ``upstream_url`` / ``upstream_page`` are the backend's public link to the
+    source and the page in the whole source document.
+    """
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+    link = "https://docs.example/guides/guide.pdf#page=693"
+    response = httpx.Response(
+        200,
+        json={
+            "results": [
+                {
+                    "chunk_id": "c1",
+                    "text": "Pools are capped at 64 per cluster.",
+                    "source_uri": "gs://example-bucket/docs/guide-part02of03.pdf",
+                    "score": 0.31,
+                    "score_kind": "distance",
+                    "filename": "guide-part02of03.pdf",
+                    "breadcrumb": "Widget Guide > Planning",
+                    "heading_path": ["Planning", "Pool limits"],
+                    "upstream_url": link,
+                    "upstream_page": 693,
+                }
+            ],
+        },
+    )
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+
+    (chunk,) = (await search_corpus(_make_operator(), "q")).chunks
+
+    assert chunk.filename == "guide-part02of03.pdf"
+    assert chunk.breadcrumb == "Widget Guide > Planning"
+    assert chunk.heading_path == ["Planning", "Pool limits"]
+    assert chunk.score_kind == "distance"
+    assert chunk.upstream_url == link
+    assert chunk.upstream_page == 693
+
+
+#: An ``upstream_url`` of exactly 2048 characters, the longest one kept.
+_URL_AT_CAP = "https://d.example/" + "x" * (2048 - len("https://d.example/"))
+
+
+def test_absent_page_identity_and_link_fields_read_as_absent() -> None:
+    """A hit without the #3913 fields parses with empty / ``None`` values.
+
+    ``score_kind`` stays ``None`` (never defaulted to a direction), so a
+    caller cannot read a guessed direction into the score.
+    """
+    chunk = CorpusChunk.model_validate({"chunk_id": "c1", "text": "body"})
+
+    assert (chunk.filename, chunk.breadcrumb, chunk.heading_path) == ("", "", [])
+    assert chunk.score_kind is None
+    assert chunk.upstream_url is None
+    assert chunk.upstream_page is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        # upstream_url: only an http(s) URL naming a host is a link.
+        ("upstream_url", "javascript:alert(1)", None),
+        ("upstream_url", "gs://example-bucket/docs/guide.pdf", None),
+        ("upstream_url", "ftp://docs.example/guide.pdf", None),
+        ("upstream_url", "https://", None),
+        ("upstream_url", "/relative/guide.pdf", None),
+        ("upstream_url", "https://docs.example/a b.pdf", None),
+        ("upstream_url", "https://docs.example/a\nb.pdf", None),
+        ("upstream_url", "https://docs.example/a\tb.pdf", None),
+        ("upstream_url", "https://docs.example/a\u00a0b.pdf", None),
+        # A bidi control character could make the link read as another one.
+        ("upstream_url", "https://docs.example/a\u202eb.pdf", None),
+        ("upstream_url", "https://docs.example/a\u2066b.pdf", None),
+        # A URL urlsplit cannot parse reads as absent; it never raises.
+        ("upstream_url", "https://[::1/guide.pdf", None),
+        ("upstream_url", "https://[not-an-ip]/guide.pdf", None),
+        ("upstream_url", "https://docs.example/" + "x" * 2100, None),
+        # Exactly 2048 characters is still a link.
+        ("upstream_url", _URL_AT_CAP, _URL_AT_CAP),
+        ("upstream_url", "", None),
+        ("upstream_url", 42, None),
+        ("upstream_url", "  https://docs.example/kb/1  ", "https://docs.example/kb/1"),
+        ("upstream_url", "http://docs.example/kb/1", "http://docs.example/kb/1"),
+        # upstream_page: a whole number from 1 to 1,000,000. A larger one is
+        # no real page, and a huge one would break the CLI's decoding.
+        ("upstream_page", 0, None),
+        ("upstream_page", -3, None),
+        ("upstream_page", True, None),
+        ("upstream_page", "12", None),
+        ("upstream_page", 1.5, None),
+        ("upstream_page", 1, 1),
+        ("upstream_page", 1_000_000, 1_000_000),
+        ("upstream_page", 1_000_001, None),
+        ("upstream_page", 2**63, None),
+        ("upstream_page", 10**30, None),
+        # score_kind: one of the two known directions.
+        ("score_kind", "cosine", None),
+        ("score_kind", "", None),
+        ("score_kind", ["distance"], None),
+        ("score_kind", "similarity", "similarity"),
+        # Page identity: strings and string lists only.
+        ("filename", 7, ""),
+        ("breadcrumb", None, ""),
+        ("heading_path", "Planning > Pool limits", []),
+        ("heading_path", ["Planning", 3, None, "Pool limits"], ["Planning", "Pool limits"]),
+    ],
+)
+def test_unusable_identity_and_link_values_read_as_absent(
+    field: str, value: object, expected: object
+) -> None:
+    """An unusable optional value reads as absent instead of failing the parse.
+
+    These fields label and link a hit; they never decide whether it is
+    grounded, so a bad value must not turn a good search into a 503.
+    """
+    chunk = CorpusChunk.model_validate({"chunk_id": "c1", "text": "body", field: value})
+
+    assert getattr(chunk, field) == expected
+
+
+@pytest.mark.asyncio
 async def test_unrecognized_envelope_fails_loud_not_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -831,3 +1076,794 @@ async def test_corpus_status_malformed_body_fails_closed(monkeypatch: pytest.Mon
 
     with pytest.raises(CorpusUnavailable):
         await corpus_status(_make_operator())
+
+
+# ---------------------------------------------------------------------------
+# ask_corpus (#3911 upstream grounded-answer transport)
+# ---------------------------------------------------------------------------
+
+_ANSWER_URL = "https://corpus.test/ask"
+
+#: A minimal valid ``POST /ask?include=hits`` body (synthetic text).
+_ANSWER_BODY: dict[str, object] = {
+    "query": "q",
+    "answer": "Widgets are pooled [0].",
+    "citations": [{"chunk_index": 0, "chunk_id": "c1", "quote": "pooled"}],
+    "timing": {"total_ms": 1200.0, "llm_ms": 800.0},
+    "hits": [
+        {
+            "chunk_id": "c1",
+            "document_id": "",
+            "chunk_index": 4,
+            "text": "Widgets are pooled per cluster.",
+            "source_uri": "gs://example-bucket/docs/widgets.html",
+            "filename": "widgets.html",
+            "score": 0.42,
+        }
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    ("search_url", "expected"),
+    [
+        ("https://corpus.test/search", "https://corpus.test/ask"),
+        ("https://corpus.test/v1/search", "https://corpus.test/v1/ask"),
+        ("https://corpus.test/v1/search/", "https://corpus.test/v1/ask"),
+        ("https://corpus.test:9443/search?x=1", "https://corpus.test:9443/ask"),
+        ("https://corpus.test", "https://corpus.test/ask"),
+    ],
+)
+def test_derive_answer_url(search_url: str, expected: str) -> None:
+    """The answer URL replaces the search URL's last path segment with ``ask``."""
+    assert derive_answer_url(search_url) == expected
+
+
+@pytest.mark.asyncio
+async def test_ask_corpus_posts_query_and_top_k_with_include_hits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The answer call carries ``{query, top_k}`` + ``include=hits`` and the service token.
+
+    No ``with_rerank`` (ranking policy is the backend's) and, when the caller
+    passes none, no ``filters`` / ``scope`` (the per-collection gates decide
+    those, #3912) ride the body; the operator JWT is never forwarded.
+    """
+    _pin_settings(monkeypatch, corpus_service_token=_SERVICE_TOKEN)
+    captured: list[httpx.Request] = []
+    transport = _transport_capturing(captured, httpx.Response(200, json=_ANSWER_BODY))
+    _patch_async_client(monkeypatch, transport, [])
+
+    result = await ask_corpus(_make_operator(), "q", limit=7, answer_url=_ANSWER_URL)
+
+    assert isinstance(result, UpstreamAnswer)
+    assert result.citations[0].chunk_id == "c1"
+    assert result.hits[0].content == "Widgets are pooled per cluster."
+    assert result.hits[0].filename == "widgets.html"
+    assert result.timing.total_ms == 1200.0
+
+    (request,) = captured
+    assert request.method == "POST"
+    assert request.url.path == "/ask"
+    assert request.url.params.get("include") == "hits"
+    import json
+
+    body = json.loads(request.content.decode())
+    assert body == {"query": "q", "top_k": 7}
+    assert request.headers["authorization"] == f"Bearer {_SERVICE_TOKEN}"
+    assert _JWT not in str(request.headers)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filters", "soft_scope", "raw_body"),
+    [
+        # Both gates off (None or empty): byte-for-byte the #3911 body, so a
+        # backend that refuses unknown request keys sees what it always saw.
+        pytest.param(None, None, b'{"query":"q","top_k":7}', id="off"),
+        pytest.param({}, {}, b'{"query":"q","top_k":7}', id="off-empty"),
+        pytest.param(
+            {"product": "vsphere", "version": "8.0"},
+            None,
+            b'{"query":"q","top_k":7,"filters":{"product":"vsphere","version":"8.0"}}',
+            id="filters",
+        ),
+        pytest.param(
+            None,
+            {"product": "vsphere", "version": "8.0.3.00400", "source": "caller"},
+            b'{"query":"q","top_k":7,'
+            b'"scope":{"product":"vsphere","version":"8.0.3.00400","source":"caller"}}',
+            id="soft",
+        ),
+    ],
+)
+async def test_ask_corpus_sends_filters_and_soft_scope_only_when_given(
+    monkeypatch: pytest.MonkeyPatch,
+    filters: dict[str, str] | None,
+    soft_scope: dict[str, str] | None,
+    raw_body: bytes,
+) -> None:
+    """``filters`` / ``soft_scope`` ride the answer body as ``filters`` / ``scope`` (#3912).
+
+    Each is omitted when ``None`` or empty; the values are passed through
+    unchanged. The raw request bytes are pinned, so the gate-off body is
+    exactly the one the answer call sent before the gates were wired.
+    """
+    _pin_settings(monkeypatch, corpus_audience="")
+    captured: list[httpx.Request] = []
+    transport = _transport_capturing(captured, httpx.Response(200, json=_ANSWER_BODY))
+    _patch_async_client(monkeypatch, transport, [])
+
+    await ask_corpus(
+        _make_operator(),
+        "q",
+        filters=filters,
+        soft_scope=soft_scope,
+        limit=7,
+        answer_url=_ANSWER_URL,
+    )
+
+    (request,) = captured
+    assert request.content == raw_body
+    assert request.url.params.get("include") == "hits"
+
+
+@pytest.mark.asyncio
+async def test_ask_corpus_forwards_audience(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A configured audience rides the body, as on search."""
+    _pin_settings(monkeypatch, corpus_audience="meho-corpus")
+    captured: list[httpx.Request] = []
+    transport = _transport_capturing(captured, httpx.Response(200, json=_ANSWER_BODY))
+    _patch_async_client(monkeypatch, transport, [])
+
+    await ask_corpus(_make_operator(), "q", answer_url=_ANSWER_URL)
+
+    import json
+
+    assert json.loads(captured[0].content.decode())["audience"] == "meho-corpus"
+
+
+def test_answer_timeout_setting_defaults_to_60(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``CORPUS_ANSWER_TIMEOUT_SECONDS`` defaults to 60 s, independent of search's 10 s."""
+    monkeypatch.delenv("CORPUS_ANSWER_TIMEOUT_SECONDS", raising=False)
+    get_settings.cache_clear()
+    settings = get_settings()
+    assert settings.corpus_answer_timeout_seconds == 60.0
+    assert settings.corpus_timeout_seconds == 10.0
+
+    monkeypatch.setenv("CORPUS_ANSWER_TIMEOUT_SECONDS", "45")
+    get_settings.cache_clear()
+    assert get_settings().corpus_answer_timeout_seconds == 45.0
+
+
+@pytest.mark.asyncio
+async def test_ask_corpus_timeout_is_the_answer_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The answer client is bounded by the answer timeout, not the search one."""
+    _pin_settings(monkeypatch, corpus_timeout_seconds=10.0, corpus_answer_timeout_seconds=42.0)
+    captured_timeout: list[httpx.Timeout] = []
+    transport = _transport_capturing([], httpx.Response(200, json=_ANSWER_BODY))
+    _patch_async_client(monkeypatch, transport, captured_timeout)
+
+    await ask_corpus(_make_operator(), "q", answer_url=_ANSWER_URL)
+
+    assert captured_timeout[0].read == 42.0
+    assert captured_timeout[0].connect == 42.0
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "http://corpus.test/ask",  # plaintext
+        "https://127.0.0.1/ask",  # loopback
+        "https://169.254.169.254/ask",  # cloud metadata
+    ],
+)
+@pytest.mark.asyncio
+async def test_ask_corpus_screens_endpoint_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, bad_url: str
+) -> None:
+    """The answer dial runs the same SSRF screen as search, before any request."""
+    monkeypatch.delenv("MEHO_TARGET_SSRF_ALLOWLIST", raising=False)
+    _pin_settings(monkeypatch)
+
+    with pytest.raises(CorpusUnavailable) as exc:
+        await ask_corpus(_make_operator(), "q", answer_url=bad_url)
+    assert "not an allowed https public destination" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_ask_corpus_unconfigured_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No answer URL is the unavailable arm, never an empty answer."""
+    _pin_settings(monkeypatch)
+    with pytest.raises(CorpusUnavailable):
+        await ask_corpus(_make_operator(), "q", answer_url=None)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadTimeout("too slow"),
+        httpx.ConnectError("connection refused"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_ask_corpus_transport_failure_is_corpus_unavailable(
+    monkeypatch: pytest.MonkeyPatch, error: httpx.HTTPError
+) -> None:
+    """A timeout or connect failure is the transport arm (``CorpusUnavailable``)."""
+    _pin_settings(monkeypatch)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        raise error
+
+    _patch_async_client(monkeypatch, httpx.MockTransport(_handler), [])
+
+    with pytest.raises(CorpusUnavailable) as exc:
+        await ask_corpus(_make_operator(), "q", answer_url=_ANSWER_URL)
+    assert exc.value.status is None
+
+
+@pytest.mark.parametrize(
+    ("response", "kind", "retry_after"),
+    [
+        (
+            httpx.Response(503, json={"error": {"code": "llm_unavailable", "message": "x"}}),
+            CorpusAnswerError.KIND_ANSWER_UNAVAILABLE,
+            None,
+        ),
+        (
+            httpx.Response(
+                503,
+                json={"error": {"code": "llm_rate_limited", "message": "x"}},
+                headers={"Retry-After": "5"},
+            ),
+            CorpusAnswerError.KIND_RATE_LIMITED,
+            5,
+        ),
+        (
+            httpx.Response(429, text="slow down", headers={"Retry-After": "3"}),
+            CorpusAnswerError.KIND_RATE_LIMITED,
+            3,
+        ),
+        (httpx.Response(503, text="proxy unavailable"), CorpusAnswerError.KIND_SERVER_ERROR, None),
+        (httpx.Response(500, json={"detail": "boom"}), CorpusAnswerError.KIND_SERVER_ERROR, None),
+        (httpx.Response(422, json={"detail": "bad"}), CorpusAnswerError.KIND_REJECTED, None),
+        (httpx.Response(401, text="no"), CorpusAnswerError.KIND_REJECTED, None),
+        (httpx.Response(404, text="no such route"), CorpusAnswerError.KIND_REJECTED, None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_ask_corpus_non_2xx_is_typed_by_kind(
+    monkeypatch: pytest.MonkeyPatch,
+    response: httpx.Response,
+    kind: str,
+    retry_after: int | None,
+) -> None:
+    """Each non-2xx outcome is a typed ``CorpusAnswerError`` with status + kind."""
+    _pin_settings(monkeypatch)
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+
+    with pytest.raises(CorpusAnswerError) as exc:
+        await ask_corpus(_make_operator(), "q", answer_url=_ANSWER_URL)
+    assert exc.value.kind == kind
+    assert exc.value.status == response.status_code
+    assert exc.value.retry_after == retry_after
+
+
+@pytest.mark.asyncio
+async def test_ask_corpus_error_never_echoes_the_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neither the upstream body nor an unknown error code reaches the error.
+
+    Logs are captured through a private :class:`structlog.testing.LogCapture`
+    patched onto ``corpus._log`` (the #1254 pattern, see
+    ``test_operator_jwt_and_service_token_never_logged``), never a bare
+    ``capture_logs``, which misses a cached, orphaned module logger and would
+    let the absence check pass against an empty list.
+    """
+    _pin_settings(monkeypatch)
+    secret = "INTERNAL stack trace leaky-token-abc"
+    response = httpx.Response(503, json={"error": {"code": secret, "message": secret}})
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+    capture = structlog.testing.LogCapture()
+    private_log = structlog.wrap_logger(structlog.PrintLogger(), processors=[capture])
+    monkeypatch.setattr(corpus_mod, "_log", private_log)
+
+    with pytest.raises(CorpusAnswerError) as exc:
+        await ask_corpus(_make_operator(), "q", answer_url=_ANSWER_URL)
+    logs = capture.entries
+    assert secret not in str(exc.value)
+    assert secret not in repr(logs)
+    # Canary: the failure is logged (by status + kind, not by body), so the
+    # absence check above cannot pass vacuously against an empty capture.
+    failed = [e for e in logs if e["event"] == "corpus_answer_request_failed"]
+    assert len(failed) == 1
+    assert failed[0]["status"] == 503
+    assert failed[0]["kind"] == CorpusAnswerError.KIND_SERVER_ERROR
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, text="<html>not json</html>"),
+        httpx.Response(200, json={"answer": "x", "citations": []}),  # no hits
+        httpx.Response(200, json={"answer": "", "citations": [], "hits": []}),  # blank answer
+        httpx.Response(200, json={"answer": "x", "hits": [{"chunk_id": "c"}]}),  # hit w/o text
+    ],
+)
+@pytest.mark.asyncio
+async def test_ask_corpus_malformed_2xx_is_typed_malformed(
+    monkeypatch: pytest.MonkeyPatch, response: httpx.Response
+) -> None:
+    """A 2xx body that does not match the answer shape is ``malformed``, not empty."""
+    _pin_settings(monkeypatch)
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+
+    with pytest.raises(CorpusAnswerError) as exc:
+        await ask_corpus(_make_operator(), "q", answer_url=_ANSWER_URL)
+    assert exc.value.kind == CorpusAnswerError.KIND_MALFORMED
+
+
+def test_retry_after_http_date_is_converted_to_seconds() -> None:
+    """An HTTP-date ``Retry-After`` becomes the seconds remaining (never negative)."""
+    from datetime import UTC, datetime, timedelta
+    from email.utils import format_datetime
+
+    future = format_datetime(datetime.now(UTC) + timedelta(seconds=120), usegmt=True)
+    past = format_datetime(datetime.now(UTC) - timedelta(seconds=120), usegmt=True)
+    assert 100 <= (corpus_mod._retry_after_seconds(future) or 0) <= 120
+    assert corpus_mod._retry_after_seconds(past) == 0
+    assert corpus_mod._retry_after_seconds("soon") is None
+    assert corpus_mod._retry_after_seconds(None) is None
+
+
+def test_retry_after_http_date_is_capped() -> None:
+    """An HTTP-date far ahead clamps to the cap; one that overflows is ``None``."""
+    from datetime import UTC, datetime, timedelta
+    from email.utils import format_datetime
+
+    far = format_datetime(datetime.now(UTC) + timedelta(days=2), usegmt=True)
+    assert corpus_mod._retry_after_seconds(far) == corpus_mod._RETRY_AFTER_MAX_S == 3600
+    # A year beyond a C long overflows ``datetime``: dropped, never raised.
+    assert corpus_mod._retry_after_seconds("Mon, 01 Jan 99999999999999999999 00:00:00 GMT") is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("5", 5),
+        (" 7 ", 7),
+        ("0", 0),
+        ("3600", 3600),
+        ("3601", 3600),  # over the cap: clamped
+        ("9" * 4000, 3600),  # within int()'s digit limit, still clamped
+        ("9" * 5000, 3600),  # beyond int()'s 4300-digit limit: clamped, never raised
+        ("0" * 5000 + "5", 5),  # leading zeros are not magnitude
+        ("\u00b2", None),  # superscript two: isdigit() but not an int() digit
+        ("\uff11\uff12", None),  # fullwidth digits: not delta-seconds (ASCII by grammar)
+        ("-5", None),
+        ("+5", None),
+        ("1.5", None),
+        ("", None),
+        ("   ", None),
+    ],
+    ids=[
+        "five",
+        "padded",
+        "zero",
+        "at-cap",
+        "over-cap",
+        "4000-digits",
+        "5000-digits",
+        "leading-zeros",
+        "superscript-two",
+        "fullwidth",
+        "negative",
+        "signed",
+        "fraction",
+        "empty",
+        "blank",
+    ],
+)
+def test_retry_after_delta_seconds_is_ascii_bounded_and_capped(
+    raw: str, expected: int | None
+) -> None:
+    """delta-seconds: ASCII digits only, capped at 3600 s; anything else is ``None``."""
+    assert corpus_mod._retry_after_seconds(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        (b"\xb2", None),  # httpx decodes the raw byte as Latin-1 U+00B2 (superscript two)
+        (b"9" * 5000, 3600),
+        (b"86400", 3600),
+    ],
+    ids=["raw-0xB2", "5000-digits", "over-cap"],
+)
+@pytest.mark.asyncio
+async def test_ask_corpus_garbled_retry_after_stays_typed_rate_limited(
+    monkeypatch: pytest.MonkeyPatch, header: bytes, expected: int | None
+) -> None:
+    """A garbled or huge ``Retry-After`` on a 429 keeps the typed rate-limited error.
+
+    The header is parsed inside the error classification, so a parse that
+    raised would surface as an unclassified 500 / ``-32603`` instead of the
+    typed 503 ``upstream_rate_limited``. It is dropped (``None``) or clamped.
+    """
+    _pin_settings(monkeypatch)
+    response = httpx.Response(429, text="slow down", headers=[(b"retry-after", header)])
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+
+    with pytest.raises(CorpusAnswerError) as exc:
+        await ask_corpus(_make_operator(), "q", answer_url=_ANSWER_URL)
+    assert exc.value.kind == CorpusAnswerError.KIND_RATE_LIMITED
+    assert exc.value.status == 429
+    assert exc.value.retry_after == expected
+
+
+# ---------------------------------------------------------------------------
+# read_corpus (#3948): read around a hit
+# ---------------------------------------------------------------------------
+
+_READ_URL = "https://corpus.test/read"
+#: A fixed UI session key so the caller hash is reproducible in the tests.
+_CALLER_KEY = "test-ui-session-key-for-the-caller-hash"
+_HANDLE = "eyJ2IjoxLCJ0IjoiaCJ9.c2lnbmF0dXJlLWJ5dGVz"
+_READ_BODY = {
+    "mode": "around",
+    "text": "Before.\nThe hit.\nAfter.",
+    "title": "Widget limits",
+    "source_uri": "gs://example-bucket/docs/widgets.html",
+    "upstream_url": "https://docs.example/widgets",
+    "disclosure": "full",
+    "reason": None,
+    "located": True,
+    "truncated": False,
+    "next": "next-cursor",
+    "up": None,
+}
+
+
+def _expected_caller(sub: str, key: str = _CALLER_KEY) -> str:
+    import hashlib
+    import hmac
+
+    mac = hmac.new(
+        key.encode("utf-8"),
+        b"meho-docs-read-caller-v1\x00" + sub.encode("utf-8"),
+        hashlib.sha256,
+    )
+    return mac.hexdigest()[:32]
+
+
+@pytest.mark.parametrize(
+    ("search_url", "expected"),
+    [
+        ("https://corpus.test/search", "https://corpus.test/read"),
+        ("https://corpus.test/v1/search", "https://corpus.test/v1/read"),
+        ("https://corpus.test/v1/search/", "https://corpus.test/v1/read"),
+        ("https://corpus.test:9443/search?x=1#y", "https://corpus.test:9443/read"),
+        ("https://corpus.test", "https://corpus.test/read"),
+    ],
+)
+def test_derive_read_url(search_url: str, expected: str) -> None:
+    """The read URL replaces the search URL's last path segment with ``read``."""
+    assert derive_read_url(search_url) == expected
+
+
+@pytest.mark.asyncio
+async def test_read_corpus_posts_handle_with_service_token_and_hashed_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The read sends only the contract keys, the service token and a keyed caller hash.
+
+    The body is exactly ``{read_handle, mode, before, after}``: the backend
+    refuses unknown keys, so no ``audience`` rides it even when one is
+    configured. ``X-Meho-Caller`` is a keyed hash of the operator's subject,
+    never the subject itself, and the operator JWT is never forwarded.
+    """
+    _pin_settings(
+        monkeypatch,
+        corpus_service_token=_SERVICE_TOKEN,
+        corpus_audience="https://corpus.test",
+        ui_session_encryption_key=_CALLER_KEY,
+    )
+    captured: list[httpx.Request] = []
+    captured_timeout: list[httpx.Timeout] = []
+    transport = _transport_capturing(captured, httpx.Response(200, json=_READ_BODY))
+    _patch_async_client(monkeypatch, transport, captured_timeout)
+
+    result = await read_corpus(
+        _make_operator(), _HANDLE, mode="around", before=2, after=0, read_url=_READ_URL
+    )
+
+    assert isinstance(result, UpstreamRead)
+    assert result.text == "Before.\nThe hit.\nAfter."
+    assert result.upstream_url == "https://docs.example/widgets"
+    assert result.next == "next-cursor"
+    (request,) = captured
+    assert request.method == "POST"
+    assert str(request.url) == _READ_URL
+    import json
+
+    assert json.loads(request.content.decode()) == {
+        "read_handle": _HANDLE,
+        "mode": "around",
+        "before": 2,
+        "after": 0,
+    }
+    assert request.headers["authorization"] == f"Bearer {_SERVICE_TOKEN}"
+    caller = request.headers[READ_CALLER_HEADER]
+    assert caller == _expected_caller("op-1")
+    assert len(caller) == 32
+    assert "op-1" not in caller
+    assert _JWT not in str(request.headers)
+    # The search timeout bounds the read.
+    assert captured_timeout[0].read == get_settings().corpus_timeout_seconds
+
+
+@pytest.mark.asyncio
+async def test_read_corpus_sends_cursor_and_filters_only_when_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``cursor`` / ``filters`` ride the body only when set; ``scope`` never does."""
+    _pin_settings(monkeypatch, ui_session_encryption_key=_CALLER_KEY)
+    captured: list[httpx.Request] = []
+    _patch_async_client(
+        monkeypatch, _transport_capturing(captured, httpx.Response(200, json=_READ_BODY)), []
+    )
+
+    await read_corpus(
+        _make_operator(),
+        _HANDLE,
+        mode="page",
+        cursor="cursor-1",
+        filters={"product": "vsphere", "version": "8.0"},
+        read_url=_READ_URL,
+    )
+    import json
+
+    body = json.loads(captured[0].content.decode())
+    assert body == {
+        "read_handle": _HANDLE,
+        "mode": "page",
+        "before": 1,
+        "after": 1,
+        "cursor": "cursor-1",
+        "filters": {"product": "vsphere", "version": "8.0"},
+    }
+
+
+def test_read_caller_id_is_stable_per_person_and_keyed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same person, same id; another person or another key, another id."""
+    _pin_settings(monkeypatch, ui_session_encryption_key=_CALLER_KEY)
+    alice = read_caller_id(_make_operator())
+    assert alice == read_caller_id(_make_operator())
+    bob = Operator(
+        sub="op-2",
+        name="Bob",
+        email=None,
+        raw_jwt=_JWT,
+        tenant_id="00000000-0000-0000-0000-00000000a0a0",
+        tenant_role="operator",
+    )
+    assert read_caller_id(bob) != alice
+    _pin_settings(monkeypatch, ui_session_encryption_key="another-key")
+    assert read_caller_id(_make_operator()) != alice
+
+
+@pytest.mark.asyncio
+async def test_read_corpus_without_caller_key_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No caller key: the read fails closed, it never sends an unkeyed hash."""
+    _pin_settings(monkeypatch, ui_session_encryption_key="")
+    captured: list[httpx.Request] = []
+    _patch_async_client(
+        monkeypatch, _transport_capturing(captured, httpx.Response(200, json=_READ_BODY)), []
+    )
+    with pytest.raises(CorpusUnavailable):
+        await read_corpus(_make_operator(), _HANDLE, read_url=_READ_URL)
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_read_corpus_unconfigured_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    _pin_settings(monkeypatch, ui_session_encryption_key=_CALLER_KEY)
+    with pytest.raises(CorpusUnavailable):
+        await read_corpus(_make_operator(), _HANDLE, read_url=None)
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    ["http://corpus.test/read", "https://127.0.0.1/read", "https://169.254.169.254/read"],
+)
+@pytest.mark.asyncio
+async def test_read_corpus_screens_endpoint_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, bad_url: str
+) -> None:
+    """A non-https / non-public read endpoint is refused before any dial."""
+    monkeypatch.delenv("MEHO_TARGET_SSRF_ALLOWLIST", raising=False)
+    _pin_settings(monkeypatch, ui_session_encryption_key=_CALLER_KEY)
+    with pytest.raises(CorpusUnavailable) as exc:
+        await read_corpus(_make_operator(), _HANDLE, read_url=bad_url)
+    assert "not an allowed https public destination" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("response", "kind", "retry_after"),
+    [
+        (httpx.Response(404, json={"error": {"code": "not_found"}}), "not_found", None),
+        (httpx.Response(409, json={"error": {"code": "search_again"}}), "search_again", None),
+        (
+            httpx.Response(429, json={"error": {}}, headers={"Retry-After": "12"}),
+            "rate_limited",
+            12,
+        ),
+        (httpx.Response(429, json={"error": {}}), "rate_limited", None),
+        (
+            httpx.Response(429, json={"error": {}}, headers={"Retry-After": "99999"}),
+            "rate_limited",
+            3600,
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_read_corpus_typed_refusals(
+    monkeypatch: pytest.MonkeyPatch,
+    response: httpx.Response,
+    kind: str,
+    retry_after: int | None,
+) -> None:
+    """404 / 409 / 429 are typed ``CorpusReadError``s; ``Retry-After`` is bounded."""
+    _pin_settings(monkeypatch, ui_session_encryption_key=_CALLER_KEY)
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+    with pytest.raises(CorpusReadError) as exc:
+        await read_corpus(_make_operator(), _HANDLE, read_url=_READ_URL)
+    assert exc.value.kind == kind
+    assert exc.value.status == response.status_code
+    assert exc.value.retry_after == retry_after
+
+
+@pytest.mark.parametrize("status", [503, 500, 422, 401, 400])
+@pytest.mark.asyncio
+async def test_read_corpus_other_failures_are_unavailable(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """Every other non-2xx is ``CorpusUnavailable`` with the status."""
+    _pin_settings(monkeypatch, ui_session_encryption_key=_CALLER_KEY)
+    _patch_async_client(
+        monkeypatch, _transport_capturing([], httpx.Response(status, text="err page")), []
+    )
+    with pytest.raises(CorpusUnavailable) as exc:
+        await read_corpus(_make_operator(), _HANDLE, read_url=_READ_URL)
+    assert exc.value.status == status
+    assert "err page" not in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_read_corpus_transport_failure_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _pin_settings(monkeypatch, ui_session_encryption_key=_CALLER_KEY)
+
+    def _boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    _patch_async_client(monkeypatch, httpx.MockTransport(_boom), [])
+    with pytest.raises(CorpusUnavailable):
+        await read_corpus(_make_operator(), _HANDLE, read_url=_READ_URL)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, text="<html>not json</html>"),
+        httpx.Response(200, json={"text": "x"}),  # no mode
+        httpx.Response(200, json={**_READ_BODY, "mode": "everything"}),  # unknown mode
+    ],
+)
+@pytest.mark.asyncio
+async def test_read_corpus_malformed_2xx_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch, response: httpx.Response
+) -> None:
+    _pin_settings(monkeypatch, ui_session_encryption_key=_CALLER_KEY)
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+    with pytest.raises(CorpusUnavailable):
+        await read_corpus(_make_operator(), _HANDLE, read_url=_READ_URL)
+
+
+@pytest.mark.parametrize(
+    ("disclosure", "expected"),
+    [("link", "link"), (None, "link"), ("partial", "link"), ("full", "full")],
+)
+def test_upstream_read_keeps_text_only_for_full_disclosure(
+    disclosure: str | None, expected: str
+) -> None:
+    """A link-only (or unknown / missing) disclosure never keeps text."""
+    body = {**_READ_BODY, "disclosure": disclosure}
+    parsed = UpstreamRead.model_validate(body)
+    assert parsed.disclosure == expected
+    if expected == "full":
+        assert parsed.text == _READ_BODY["text"]
+    else:
+        assert parsed.text is None
+
+
+def test_upstream_read_unusable_optional_values_read_as_absent() -> None:
+    """An unknown reason, a non-bool located, unusable cursors and links are absent."""
+    parsed = UpstreamRead.model_validate(
+        {
+            "mode": "section",
+            "text": 42,
+            "title": "   ",
+            "upstream_url": "javascript:alert(1)",
+            "disclosure": "full",
+            "reason": "who_knows",
+            "located": "yes",
+            "next": "has space",
+            "up": "",
+        }
+    )
+    assert parsed.text is None
+    assert parsed.title is None
+    assert parsed.upstream_url is None
+    assert parsed.reason is None
+    assert parsed.located is None
+    assert parsed.next is None
+    assert parsed.up is None
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (_HANDLE, _HANDLE),
+        ("", None),
+        ("has space", None),
+        ("tab\there", None),
+        ("non-ascii-é", None),
+        ("x" * 8193, None),
+        (12345, None),
+        (None, None),
+    ],
+)
+def test_corpus_chunk_read_handle_is_kept_only_when_usable(
+    value: object, expected: str | None
+) -> None:
+    """A hit's ``read_handle`` is an opaque token; an unusable one reads as absent."""
+    chunk = CorpusChunk.model_validate({"chunk_id": "c1", "text": "t", "read_handle": value})
+    assert chunk.read_handle == expected
+
+
+@pytest.mark.asyncio
+async def test_read_handle_cursor_and_text_are_never_logged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither the handle, the cursor, the caller id nor the service token is logged.
+
+    Uses the private ``LogCapture`` on ``corpus._log`` (the #1254 pattern),
+    with a positive canary on the failure event so the absence checks
+    cannot pass against an empty capture.
+    """
+    _pin_settings(
+        monkeypatch,
+        corpus_service_token=_SERVICE_TOKEN,
+        ui_session_encryption_key=_CALLER_KEY,
+    )
+    capture = structlog.testing.LogCapture()
+    private_log = structlog.wrap_logger(structlog.PrintLogger(), processors=[capture])
+    monkeypatch.setattr(corpus_mod, "_log", private_log)
+
+    _patch_async_client(
+        monkeypatch, _transport_capturing([], httpx.Response(409, json={"error": {}})), []
+    )
+    with pytest.raises(CorpusReadError) as exc:
+        await read_corpus(_make_operator(), _HANDLE, cursor="secret-cursor", read_url=_READ_URL)
+
+    serialised = repr(capture.entries) + str(exc.value)
+    for secret in (_HANDLE, "secret-cursor", _expected_caller("op-1"), _SERVICE_TOKEN, "op-1"):
+        assert secret not in serialised
+    failed = [e for e in capture.entries if e["event"] == "corpus_read_request_failed"]
+    assert len(failed) == 1
+    assert failed[0]["status"] == 409
+    assert failed[0]["kind"] == "search_again"

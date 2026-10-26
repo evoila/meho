@@ -1,73 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Credential loading + target shape for the modern ``fleet-lcm`` connector.
+"""Credentials and login for the modern ``fleet-lcm`` connector.
 
-The hand-rolled
-:class:`~meho_backplane.connectors.fleet_lcm.connector.FleetLcmConnector`
-authenticates against the VCF 9 **Fleet LCM Service** API
-(``https://vcf.broadcom.com/fleet-lcm`` → ``/v1/*``). Per the pinned
-``fleet-lcm-9.0/fleet-lcm-openapi.yaml`` ``securitySchemes``, the global
-scheme is ``bearerToken`` (HTTP Bearer), with ``basicAuth`` (HTTP Basic)
-defined as an alternative — a genuine departure from the legacy
-``fleet-rest`` impl, which is HTTP-Basic-only against the vRSLCM
-``/lcm/*`` surface.
+The VCF 9.1 fleet lifecycle API takes a Bearer token. VCF Operations hands
+out that token in two steps (#4476):
 
-This module mirrors the legacy ``vcf_fleet.session`` shape and reuses the
-shared :mod:`meho_backplane.connectors._shared.vault_creds` scaffolding so
-the two impls share one credential-loading contract:
+1. ``POST /suite-api/api/auth/token/acquire`` with the VCF Operations user
+   and password. The answer carries a VCF Operations token.
+2. ``POST /suite-api/api/auth/token/exchange`` with
+   ``Authorization: OpsToken <token>`` and the body
+   ``{"serviceKeys": ["fleet-lcm"]}``. The answer carries ``jwtToken``,
+   the Bearer token for the fleet lifecycle API.
 
-* :data:`FleetLcmTargetLike` — the minimum target shape the connector
-  reads. Aliased to the shared
-  :class:`~meho_backplane.connectors._shared.vcf_auth.VcfTargetLike`
-  Protocol (``name`` / ``host`` / ``port`` / ``secret_ref`` /
-  ``auth_model`` + the ``id`` / ``tenant_id`` cache-key pair); the
-  concrete ``Target`` model in :mod:`meho_backplane.targets` satisfies it
-  structurally.
-* :data:`FleetLcmCredentialsLoader` — the async ``(target, operator) ->
-  dict[str, str]`` loader type. Injectable on connector construction so
-  unit tests pass a stub, integration tests pass a lab-account loader,
-  and production uses :func:`load_credentials_from_vault`.
-* :func:`load_credentials_from_vault` — the fleet-lcm default loader: a
-  Vault KV-v2 read that surfaces the ``{username, password}`` pair plus an
-  **optional** ``token`` (the token-provisioning seam, below).
+Both paths are in the vendor's VCF Operations 9.1 API file
+(``acquireToken`` and ``exchangeOpsTokenWithJwtToken``).
 
-The Bearer token-provisioning seam (#3047)
-==========================================
+This module holds:
 
-The connector's
-:meth:`~meho_backplane.connectors.fleet_lcm.connector.FleetLcmConnector.auth_headers`
-emits ``Authorization: Bearer <token>`` when the loaded credentials carry
-a non-empty ``"token"`` (the spec's primary ``bearerToken`` scheme), and
-otherwise falls back to ``Authorization: Basic <b64>`` off the
-username/password pair (the spec's ``basicAuth`` alternative, which the
-appliance also accepts).
+* :data:`FleetLcmTargetLike` / :data:`FleetLcmCredentialsLoader` — aliases
+  of the shared VCF target shape and loader type.
+* :func:`load_credentials_from_vault` — reads the target's Vault secret:
+  the VCF Operations ``username`` + ``password`` (required), an optional
+  ``vcf_ops_url`` (where VCF Operations answers, when that is not the
+  target's own address) and an optional stored ``token`` (the old way,
+  kept as a fallback).
+* :func:`mint_fleet_lcm_token` — runs the two login steps on a given
+  client and returns the Bearer token.
 
-:func:`load_credentials_from_vault` is what makes the Bearer path
-reachable in production: it reads the raw KV-v2 payload via
-:func:`~meho_backplane.connectors._shared.vault_creds.load_vault_secret_data`
-and surfaces a ``token`` field **when the operator has staged one**,
-alongside the always-required username/password pair. So an operator opts
-a target into Bearer simply by adding a ``token`` to its Vault secret — no
-target-row / ``auth_model`` change. This mirrors the field-discriminator
-loaders the proxmox (``token_id`` + ``token_secret`` vs ``username`` +
-``password``) and github (App-installation vs PAT) connectors ship, which
-also pick the upstream credential protocol by inspecting which fields the
-operator stored rather than surfacing it on ``auth_model``.
-
-**Seam — the live ``basicAuth`` → mint-``bearerToken`` exchange is
-deferred.** This loader surfaces a *pre-staged* Vault token only; it does
-**not** perform the alternative provisioning path where the connector
-POSTs ``basicAuth`` to the appliance's token endpoint to mint a
-short-lived ``bearerToken`` on the fly (the github-App JWT→installation-
-token shape). That live exchange — and confirming whether the 9.x
-appliance is Bearer-only or also honours ``basicAuth`` — is the #3047
-live-verify follow-up, gated on a reachable Fleet LCM appliance
-(#1002 / #995). Until it lands, a target with no staged token
-authenticates with the Basic alternative.
+No token or password is ever written to a log line or an error text.
 """
 
 from __future__ import annotations
+
+from typing import Any
+from urllib.parse import urlsplit
+
+import httpx
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.vault_creds import (
@@ -76,74 +45,63 @@ from meho_backplane.connectors._shared.vault_creds import (
     strip_credential_value,
 )
 from meho_backplane.connectors._shared.vcf_auth import (
+    SessionLoginError,
     VcfCredentialsLoader,
     VcfTargetLike,
+    session_establish_auth_error,
+    vcf_session_login,
 )
 
 __all__ = [
+    "FLEET_LCM_SERVICE_KEY",
     "FleetLcmCredentialsLoader",
     "FleetLcmTargetLike",
     "load_credentials_from_vault",
+    "mint_fleet_lcm_token",
 ]
 
-#: Minimum target shape :class:`FleetLcmConnector` reads. Aliased to the
-#: shared VCF-family Protocol — the modern impl reads exactly the same
-#: fields the legacy impl does (``name`` / ``host`` / ``port`` /
-#: ``secret_ref`` / ``auth_model`` + the ``(tenant_id, id)`` cache key),
-#: so a bespoke duplicate Protocol would only drift.
+#: Minimum target shape :class:`FleetLcmConnector` reads (the shared
+#: VCF-family Protocol).
 FleetLcmTargetLike = VcfTargetLike
 
 #: Async ``(target, operator) -> dict[str, str]`` credential loader.
-#: Aliased to the shared VCF loader type; re-exported under a
-#: fleet-lcm-flavoured name so ``FleetLcmConnector(credentials_loader=...)``
-#: reads cohesively without exposing the shared module at the boundary.
 FleetLcmCredentialsLoader = VcfCredentialsLoader
 
-#: KV-v2 secret field names the fleet-lcm loader reads. ``username`` +
-#: ``password`` are **required** (the appliance accepts ``basicAuth`` and the
-#: shared ``CredentialsCache`` contract requires the pair); ``token`` is
-#: **optional** and, when present, activates the spec's primary
-#: ``bearerToken`` scheme. Kept as module constants so the loader, the
-#: connector, and the tests share one source of truth for what an operator
-#: stores under ``target.secret_ref``.
+#: VCF Operations login paths (vendor file ``vcf-operations-openapi.json``,
+#: server base ``/suite-api``). The acquire path is also in the 9.0 file; the
+#: exchange path is new in 9.1. The spec-check lane reads these constants.
+_TOKEN_ACQUIRE_PATH = "/suite-api/api/auth/token/acquire"
+_TOKEN_EXCHANGE_PATH = "/suite-api/api/auth/token/exchange"
+
+#: The service key that asks VCF Operations for a fleet lifecycle token.
+FLEET_LCM_SERVICE_KEY = "fleet-lcm"
+
+#: KV-v2 secret field names the loader reads.
 _USERNAME_FIELD = "username"
 _PASSWORD_FIELD = "password"
 _TOKEN_FIELD = "token"
+_VCF_OPS_URL_FIELD = "vcf_ops_url"
+
+_JSON_HEADERS = {"Content-Type": "application/json", "Accept": "application/json"}
 
 
 async def load_credentials_from_vault(
     target: FleetLcmTargetLike,
     operator: Operator,
 ) -> dict[str, str]:
-    """Default fleet-lcm loader — basic pair + optional pre-staged Bearer token.
+    """Read the fleet-lcm credentials from Vault, under the operator's identity.
 
-    Reads ``target.secret_ref`` as a KV-v2 secret **under the operator's
-    identity** (the operator's validated Keycloak JWT is forwarded to
-    Vault's JWT/OIDC auth method) via
-    :func:`~meho_backplane.connectors._shared.vault_creds.load_vault_secret_data`,
-    then surfaces:
+    Returns ``username`` + ``password`` (the VCF Operations account — always
+    required) and, when set:
 
-    * the always-required ``{username, password}`` pair (the ``basicAuth``
-      alternative the appliance accepts, and the shared
-      :class:`~meho_backplane.connectors._shared.vcf_auth.CredentialsCache`
-      contract), and
-    * an **optional** ``token`` when the operator has staged one — which
-      opts the target into the spec's primary ``bearerToken`` scheme
-      (:meth:`FleetLcmConnector.auth_headers` emits
-      ``Authorization: Bearer <token>`` whenever a non-empty ``token`` is
-      present).
+    * ``vcf_ops_url`` — the ``https://host[:port]`` address of VCF
+      Operations. Without it, MEHO logs in at the target's own address.
+    * ``token`` — a stored fleet lifecycle token. When set, MEHO sends it as
+      is and does not log in (the old way, kept as a fallback).
 
-    A missing / blank username-or-password pair raises
+    A missing pair or a bad ``vcf_ops_url`` raises
     :class:`~meho_backplane.connectors._shared.vault_creds.VaultCredentialsReadError`
-    naming the target, so a half-configured secret fails closed with an
-    operator-actionable message rather than a bare ``KeyError`` at request
-    time. Vault login-phase failures
-    (:class:`~meho_backplane.auth.vault.VaultClientError` subclasses)
-    propagate verbatim.
-
-    See the module docstring for the deferred live ``basicAuth`` →
-    mint-``bearerToken`` exchange (the #3047 live-verify follow-up); this
-    loader surfaces a *pre-staged* token only.
+    naming the target, so a half-set secret fails closed.
     """
     secret_data = await load_vault_secret_data(target, operator)
 
@@ -152,31 +110,131 @@ async def load_credentials_from_vault(
     if not (username and password):
         raise VaultCredentialsReadError(
             f"fleet-lcm target {target.name!r}: secret at secret_ref must carry a "
-            f"{_USERNAME_FIELD!r} + {_PASSWORD_FIELD!r} pair (the appliance accepts "
-            f"basicAuth). Optionally add a {_TOKEN_FIELD!r} field to authenticate via "
-            f"the spec's primary Bearer scheme instead."
+            f"{_USERNAME_FIELD!r} + {_PASSWORD_FIELD!r} pair (the VCF Operations "
+            f"account MEHO logs in with). Optionally add {_VCF_OPS_URL_FIELD!r} when "
+            f"VCF Operations has a different address than the target."
         )
 
     credentials = {_USERNAME_FIELD: username, _PASSWORD_FIELD: password}
+    ops_url = _optional_field(secret_data, _VCF_OPS_URL_FIELD)
+    if ops_url:
+        credentials[_VCF_OPS_URL_FIELD] = _check_ops_url(ops_url, target.name)
     token = _optional_field(secret_data, _TOKEN_FIELD)
     if token:
         credentials[_TOKEN_FIELD] = token
     return credentials
 
 
+def _check_ops_url(value: str, target_name: str) -> str:
+    """Return *value* if it is a plain ``https://host[:port]`` address, else raise.
+
+    Only https is allowed: the VCF Operations password travels in the login
+    body. A path, query, fragment or user part is refused so the value
+    cannot point the login anywhere but the root of one host.
+    """
+    if not _is_plain_https_origin(value):
+        raise VaultCredentialsReadError(
+            f"fleet-lcm target {target_name!r}: {_VCF_OPS_URL_FIELD!r} must be an "
+            f"https address with no path, for example https://vcf-ops.example.com"
+        )
+    return value
+
+
+def _is_plain_https_origin(value: str) -> bool:
+    """True when *value* is ``https://host`` or ``https://host:port`` (one ``/`` allowed)."""
+    parts = urlsplit(value)
+    try:
+        _ = parts.port  # a non-numeric or out-of-range port raises ValueError
+    except ValueError:
+        return False
+    return (
+        parts.scheme == "https"
+        and bool(parts.hostname)
+        and parts.username is None
+        and parts.path in ("", "/")
+        and not parts.query
+        and not parts.fragment
+    )
+
+
 def _optional_field(secret_data: dict[str, object], field: str) -> str | None:
     """Return *field* from the KV-v2 payload as a stripped str, or ``None``.
 
-    A missing key, an empty string, or a whitespace-only value all map to
-    ``None`` so the loader treats a blank field as "not configured" rather
-    than a valid-but-empty credential — the proxmox ``_optional_field``
-    shape. Present values run through
-    :func:`~meho_backplane.connectors._shared.vault_creds.strip_credential_value`
-    so a trailing newline (the most common secret-storage artifact) never
-    reaches a Basic-auth header or a ``Bearer`` token verbatim.
+    A missing key, an empty string or a whitespace-only value all count as
+    "not set".
     """
     raw = secret_data.get(field)
     if raw is None:
         return None
     value = strip_credential_value(raw)
     return value or None
+
+
+async def mint_fleet_lcm_token(
+    client: httpx.AsyncClient,
+    *,
+    username: str,
+    password: str,
+    target_name: str,
+    request_extensions: dict[str, Any] | None = None,
+) -> str:
+    """Log in to VCF Operations on *client* and return a fleet lifecycle token.
+
+    Step 1 (acquire) goes through the shared
+    :func:`~meho_backplane.connectors._shared.vcf_auth.vcf_session_login`.
+    Step 2 (exchange) sends the VCF Operations token as
+    ``Authorization: OpsToken <token>`` and asks for the ``fleet-lcm``
+    service key.
+
+    A ``401`` / ``403`` at either step raises
+    :class:`~meho_backplane.connectors._shared.vcf_auth.ConnectorAuthError`
+    (the dispatcher turns it into ``connector_auth_failed``). Any other
+    failure raises :class:`SessionLoginError`. The error text names the
+    target, the path and the HTTP status — never a token.
+    """
+    ops_token = await vcf_session_login(
+        client,
+        _TOKEN_ACQUIRE_PATH,
+        username=username,
+        password=password,
+        target_name=target_name,
+        token_extractor=lambda resp: _body_string(resp, "token"),
+        request_headers=_JSON_HEADERS,
+        request_extensions=request_extensions,
+    )
+    try:
+        resp = await client.post(
+            _TOKEN_EXCHANGE_PATH,
+            json={"serviceKeys": [FLEET_LCM_SERVICE_KEY]},
+            headers={**_JSON_HEADERS, "Authorization": f"OpsToken {ops_token}"},
+            extensions=request_extensions or {},
+        )
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        message = (
+            f"fleet-lcm token exchange failed for target {target_name!r}: "
+            f"POST {_TOKEN_EXCHANGE_PATH} returned HTTP {exc.response.status_code}"
+        )
+        raise (
+            session_establish_auth_error(exc, message=message, target_name=target_name)
+            or SessionLoginError(message)
+        ) from exc
+    token = _body_string(resp, "jwtToken")
+    if not token:
+        raise SessionLoginError(
+            f"fleet-lcm token exchange for target {target_name!r}: "
+            f"POST {_TOKEN_EXCHANGE_PATH} returned {resp.status_code} with no jwtToken"
+        )
+    return token
+
+
+def _body_string(resp: httpx.Response, key: str) -> str | None:
+    """Return the non-empty string *key* of a JSON object body, else ``None``."""
+    try:
+        payload = resp.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get(key)
+    return value if isinstance(value, str) and value else None

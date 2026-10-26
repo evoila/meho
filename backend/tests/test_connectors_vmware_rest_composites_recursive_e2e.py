@@ -46,9 +46,7 @@ import pytest
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
@@ -111,18 +109,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with a recording stub."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -202,7 +188,9 @@ class _DepthRecordingConnector:
         self.depths.append(composite_depth_var.get())
         spec = self._spec(path)
         self.calls.append(("GET", spec))
-        return self.responses.get(spec, {"value": {}})
+        response = self.responses.get(spec, {"value": {}})
+        # An iterator answers one GET after the other (a listing that changes).
+        return next(response) if isinstance(response, Iterator) else response
 
     async def _post_json(
         self,
@@ -260,7 +248,6 @@ class _DepthRecordingConnector:
 async def test_host_evacuate_e2e_through_production_dispatch_audit_tree(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Dispatch ``host.evacuate`` and assert the post-migration audit shape.
 
@@ -276,18 +263,46 @@ async def test_host_evacuate_e2e_through_production_dispatch_audit_tree(
     recorder = _DepthRecordingConnector()
     recorder.responses.update(
         {
-            "/vcenter/vm": {
-                "value": [
-                    {"vm": "vm-aa", "cluster": "cluster-1"},
-                    {"vm": "vm-bb", "cluster": "cluster-1"},
+            # Real ``Vcenter.VM.Summary`` rows: no cluster field (#4895). The
+            # listing after the maintenance task shows the host empty.
+            "/vcenter/vm": iter(
+                [
+                    {
+                        "value": [
+                            {"vm": "vm-aa", "name": "aa", "power_state": "POWERED_ON"},
+                            {"vm": "vm-bb", "name": "bb", "power_state": "POWERED_ON"},
+                        ]
+                    },
+                    {"value": []},
+                ]
+            ),
+            # vim ``HostSystem.parent`` read (#4895): the host's cluster.
+            "HostSystem": {
+                "objects": [
+                    {
+                        "obj": {"type": "HostSystem", "value": "host-source"},
+                        "propSet": [
+                            {
+                                "name": "parent",
+                                "val": {"type": "ClusterComputeResource", "value": "cluster-1"},
+                            }
+                        ],
+                    }
                 ]
             },
-            # vim drsRecommendation property read (#2970), keyed by object type.
+            # vim configurationEx (DRS manual, so MEHO moves the VMs) +
+            # drsRecommendation property reads (#2970), keyed by object type.
             "ClusterComputeResource": {
                 "objects": [
                     {
                         "obj": {"type": "ClusterComputeResource", "value": "cluster-1"},
                         "propSet": [
+                            {
+                                "name": "configurationEx",
+                                "val": {
+                                    "drsConfig": {"enabled": True, "defaultVmBehavior": "manual"}
+                                },
+                            },
                             {
                                 "name": "drsRecommendation",
                                 "val": [
@@ -316,7 +331,7 @@ async def test_host_evacuate_e2e_through_production_dispatch_audit_tree(
                                         ]
                                     }
                                 ],
-                            }
+                            },
                         ],
                     }
                 ]

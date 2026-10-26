@@ -39,7 +39,7 @@ The pinned snapshots are tied to the live registry by
 never drift from reality (a reclassification breaks the per-claim-shape
 pins; an unclassified addition breaks the partition guard). The
 authoritative human-readable enumeration of the same split — name +
-one-liner + surface + gating claim for all 79 tools — lives in
+one-liner + surface + gating claim for all 81 tools — lives in
 ``docs/codebase/mcp.md`` (the dual-surface inventory).
 """
 
@@ -47,9 +47,12 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
+from meho_backplane.api.v1 import service_grants
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.main import app
 from meho_backplane.mcp import registry as mcp_registry
@@ -66,14 +69,16 @@ from tests.mcp_test_fixtures import (
 
 _DOCS_CAPABILITY = "meho-docs"
 
-#: The three working-surface docs tools — visible only to a session that
+#: The four working-surface docs tools — visible only to a session that
 #: ALSO holds the ``meho-docs`` capability (mirrors #3154's set).
-_DOCS_WORKING_TOOLS: frozenset[str] = frozenset({"search_docs", "ask_docs", "list_doc_collections"})
+_DOCS_WORKING_TOOLS: frozenset[str] = frozenset(
+    {"search_docs", "ask_docs", "list_doc_collections", "read_docs"}
+)
 
 #: Every ``meho-docs``-capability-gated tool across BOTH surfaces: the
-#: three working docs tools plus the three operator-surface doc-collection
+#: four working docs tools plus the three operator-surface doc-collection
 #: lifecycle tools. All drop out when the capability is absent, so an
-#: elevated session without ``meho-docs`` loses all six.
+#: elevated session without ``meho-docs`` loses all seven.
 _DOCS_CAP_GATED: frozenset[str] = _DOCS_WORKING_TOOLS | {
     "create_doc_collections",
     "delete_doc_collections",
@@ -101,6 +106,21 @@ _BROADCAST_WORKING_SURFACE_CLI_VERBS: dict[str, str] = {
     "meho_broadcast_watch": "meho broadcast watch",
 }
 
+# The service-principal standing-grants plane is REST + CLI only (no MCP
+# tool). Every REST route must keep a matching `meho service-principals
+# grants` verb. The verbs are checked against the generated CLI reference,
+# which CI rebuilds from the cobra command tree, so a missing verb fails here.
+_SERVICE_GRANTS_PREFIX = "/api/v1/service-principals/grants"
+_SERVICE_GRANTS_CLI_VERBS: dict[tuple[str, str], str] = {
+    ("GET", _SERVICE_GRANTS_PREFIX): "meho service-principals grants list",
+    ("GET", _SERVICE_GRANTS_PREFIX + "/{grant_id}"): "meho service-principals grants show",
+    ("POST", _SERVICE_GRANTS_PREFIX): "meho service-principals grants create",
+    ("DELETE", _SERVICE_GRANTS_PREFIX + "/{grant_id}"): "meho service-principals grants revoke",
+}
+
+# backend/tests/<this> -> parents[2] == repo root
+_CLI_REFERENCE = Path(__file__).resolve().parents[2] / "docs-site" / "reference" / "cli.md"
+
 #: The default working surface, as the exact sorted listing a ``tools/list``
 #: response carries for a session that clears role + capability but is NOT
 #: ``mcp:admin``-elevated. This literal is the conformance snapshot; it is
@@ -126,6 +146,7 @@ WORKING_SURFACE_SORTED: tuple[str, ...] = (
     "meho_status",
     "preview_operation",
     "query_topology",
+    "read_docs",
     "result_query",
     "search_docs",
     "search_knowledge",
@@ -266,6 +287,20 @@ def test_broadcast_working_surface_has_cli_parity() -> None:
     )
 
 
+def test_service_grants_rest_plane_has_cli_parity() -> None:
+    """Every service-principal grants REST route has its `meho` CLI verb."""
+    routes = {
+        (method, route.path)
+        for route in service_grants.router.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods or ()
+    }
+    assert routes == set(_SERVICE_GRANTS_CLI_VERBS)
+    cli_reference = _CLI_REFERENCE.read_text(encoding="utf-8")
+    for verb in _SERVICE_GRANTS_CLI_VERBS.values():
+        assert f"#### `{verb}`" in cli_reference, f"{verb} is missing from the CLI reference"
+
+
 def test_pinned_surfaces_partition_the_live_registry() -> None:
     """The pinned listings partition the whole registry (exhaustive + disjoint).
 
@@ -355,12 +390,12 @@ async def test_elevated_session_wire_listing_is_full_surface() -> None:
     assert await _list_names(op) == list(FULL_SURFACE_SORTED)
 
 
-async def test_elevated_session_without_docs_drops_five_docs_tools() -> None:
+async def test_elevated_session_without_docs_drops_all_docs_tools() -> None:
     """The surface gate AND-composes with the capability gate on the wire path.
 
     An elevated session that has not provisioned ``meho-docs`` lists
-    everything except the five docs-capability-gated tools (three working
-    + two operator), proving the two gates are independent axes end to
+    everything except the seven docs-capability-gated tools (four working
+    + three operator), proving the two gates are independent axes end to
     end — the listing-path analogue of #3154's AC3 registry assertion.
     """
     op = _operator(scopes=frozenset({MCP_ADMIN_SCOPE}))

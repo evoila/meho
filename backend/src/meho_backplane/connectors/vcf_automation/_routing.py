@@ -24,6 +24,7 @@ __all__ = [
     "PROVIDER_TOKEN_HEADER",
     "PROVIDER_VERSION_PATH",
     "TENANT_ACCEPT",
+    "TENANT_CSP_SESSION_PATH",
     "TENANT_SESSION_PATH",
     "TENANT_VERSION_PATH",
     "Plane",
@@ -39,6 +40,15 @@ __all__ = [
 # (provider login: line 381; tenant login: line 439).
 PROVIDER_SESSION_PATH = "/cloudapi/1.0.0/sessions/provider"
 TENANT_SESSION_PATH = "/iaas/api/login"
+
+# Tenant-plane token-exchange step 1 (evoila/meho#3865). On VCF Automation
+# 9.1 ``POST /iaas/api/login`` validates only ``{"refreshToken": ...}`` and
+# 400s a username/password body, so a password-only secret first mints a
+# refresh token from the CSP identity service (``POST`` this path with the
+# valueless ``?access_token`` flag and ``{username, password, domain?}``),
+# then exchanges it at :data:`TENANT_SESSION_PATH`. Same two-step the
+# ``vra8`` connector runs against Aria Automation 8.x.
+TENANT_CSP_SESSION_PATH = "/csp/gateway/am/api/login"
 
 # Per-plane unauthenticated version probes. Verified against
 # scripts/vcf-automation.sh (provider: line 252 GET /api/versions XML;
@@ -111,14 +121,21 @@ def _is_ip_literal(host: str) -> bool:
     return True
 
 
+#: Path prefixes of the tenant plane. The one tenant bearer from
+#: ``POST /iaas/api/login`` also works on the blueprint and deployment APIs,
+#: as on Aria Automation 8 (see ``connectors/vra8/_paths.py``).
+_TENANT_PREFIXES = ("/iaas/api/", "/blueprint/api/", "/deployment/api/")
+
+
 def plane_for_path(path: str) -> Plane:
     """Classify a request path into one of the two auth planes.
 
-    The split is unambiguous: ``/iaas/api/*`` is the tenant plane;
-    everything else (``/cloudapi/*``, ``/api/*``, anything that looks
-    like the vCloud-Director-derived surface) is the provider plane.
+    The split is unambiguous: ``/iaas/api/*``, ``/blueprint/api/*`` and
+    ``/deployment/api/*`` are the tenant plane; everything else
+    (``/cloudapi/*``, ``/api/*``, anything that looks like the
+    vCloud-Director-derived surface) is the provider plane.
     """
-    if path.startswith("/iaas/api/"):
+    if path.startswith(_TENANT_PREFIXES):
         return "tenant"
     return "provider"
 

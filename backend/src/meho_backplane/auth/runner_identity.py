@@ -164,7 +164,7 @@ async def check_runner_jwt() -> str:
             # token's real ``aud`` is realm-side configuration — which is
             # also what a WIF provider's allowed-audience list must match.
             grant = await get_client_credentials_grant(
-                issuer_url=str(settings.keycloak_issuer_url),
+                issuer_url=settings.keycloak_discovery_base,
                 client_id=client_id,
                 client_secret=client_secret,
                 audience=settings.keycloak_audience,

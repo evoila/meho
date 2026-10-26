@@ -56,9 +56,13 @@ from typing import Any
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.tools._call_operation_async import poll_call, submit_async_call
 from meho_backplane.operations.meta_tools import (
+    SEARCH_NARROWING_MAX,
+    SEARCH_OUTCOMES,
     ConnectorNotIngestedError,
     UnknownConnectorError,
+    UnknownOperationError,
     call_operation,
     list_operation_groups,
     preview_operation,
@@ -129,20 +133,39 @@ async def _search_operations_handler(
 
     Shares :func:`_list_operation_groups_handler`'s connector-error
     mapping so both discovery meta-tools surface the same typed
-    ``-32602`` taxonomy (#1482).
+    ``-32602`` taxonomy (#1482). An unknown ``op_id`` in exact-op mode
+    (#3668) maps the same way, with ``data.reason=unknown_op``.
     """
     try:
         return await search_operations(operator, arguments)
     except (UnknownConnectorError, ConnectorNotIngestedError) as exc:
         raise _connector_error_to_invalid_params(exc) from exc
+    except UnknownOperationError as exc:
+        raise McpInvalidParamsError(str(exc), data=exc.as_error_data()) from exc
 
 
 async def _call_operation_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Thin shim over :func:`call_operation`."""
-    return await call_operation(operator, arguments)
+    """Shim over :func:`call_operation`, plus async mode (#3695).
+
+    ``async`` and ``run_id`` are MCP controls, not dispatch arguments, so
+    they are taken out before the call reaches :func:`call_operation`.
+    """
+    call_arguments = dict(arguments)
+    run_async = bool(call_arguments.pop("async", False))
+    run_id = call_arguments.pop("run_id", None)
+    if run_id is not None:
+        if run_async:
+            raise McpInvalidParamsError(
+                "send either `async: true` (start a call) or `run_id` (check a call), not both",
+                data={"reason": "async_with_run_id"},
+            )
+        return await poll_call(operator, call_arguments, str(run_id))
+    if run_async:
+        return await submit_async_call(operator, call_arguments)
+    return await call_operation(operator, call_arguments)
 
 
 async def _preview_operation_handler(
@@ -296,6 +319,111 @@ register_mcp_tool(
 )
 
 
+_SAFETY_LEVEL_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "enum": ["safe", "caution", "dangerous", "destructive"],
+}
+
+#: Ranked mode: slim hits. The three score fields appear only when a
+#: tenant_admin caller sets ``include_scores`` (#3668).
+_SEARCH_RANKED_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "hits": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "op_id": {"type": "string"},
+                    "summary": {"type": ["string", "null"]},
+                    "description": {"type": ["string", "null"]},
+                    "group_key": {"type": ["string", "null"]},
+                    "safety_level": _SAFETY_LEVEL_SCHEMA,
+                    "requires_approval": {"type": "boolean"},
+                    "fused_score": {"type": "number"},
+                    "bm25_score": {"type": ["number", "null"]},
+                    "cosine_score": {"type": ["number", "null"]},
+                },
+                "required": ["op_id", "safety_level", "requires_approval"],
+            },
+        },
+        "query_duration_ms": {"type": "number"},
+        "outcome": {"type": "string", "enum": list(SEARCH_OUTCOMES)},
+        "advisory": {"type": ["string", "null"]},
+        "narrowing": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": SEARCH_NARROWING_MAX,
+        },
+    },
+    "required": ["hits", "query_duration_ms", "outcome", "narrowing"],
+}
+
+#: Exact-op mode: one call contract (``operations._contract.OperationContract``).
+_SEARCH_EXACT_OP_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "operation": {
+            "type": "object",
+            "properties": {
+                "connector_id": {"type": "string"},
+                "op_id": {"type": "string"},
+                "summary": {"type": ["string", "null"]},
+                "description": {"type": ["string", "null"]},
+                "group_key": {"type": ["string", "null"]},
+                "safety_level": _SAFETY_LEVEL_SCHEMA,
+                "requires_approval": {"type": "boolean"},
+                "parameter_schema": {"type": "object"},
+                "examples": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "source": {"type": "string"},
+                            "param": {"type": ["string", "null"]},
+                            "value": {},
+                        },
+                        "required": ["source", "param", "value"],
+                    },
+                },
+                "target": {
+                    "type": "object",
+                    "properties": {
+                        "required": {"type": "boolean"},
+                        "resolves_by": {"type": "string", "enum": ["name"]},
+                        "guidance": {"type": "string"},
+                    },
+                    "required": ["required", "resolves_by", "guidance"],
+                },
+                "result_shape": {
+                    "type": "object",
+                    "properties": {
+                        "envelope_fields": {"type": "array", "items": {"type": "string"}},
+                        "guidance": {"type": "string"},
+                    },
+                    "required": ["envelope_fields", "guidance"],
+                },
+                "pagination_hint": {"type": ["object", "null"]},
+                "recovery": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": [
+                "connector_id",
+                "op_id",
+                "safety_level",
+                "requires_approval",
+                "parameter_schema",
+                "examples",
+                "target",
+                "result_shape",
+                "pagination_hint",
+                "recovery",
+            ],
+        },
+    },
+    "required": ["operation"],
+}
+
+
 register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
@@ -310,16 +438,33 @@ register_mcp_tool(
             "by combined lexical + semantic match. Inspect each hit's "
             "`safety_level` and `requires_approval` before calling "
             "`call_operation` on it. Arguments: `connector_id` (required), "
-            "`query` (required, free-form), `group` (optional, narrows "
+            "`query` (free-form), `group` (optional, narrows "
             "to that group's ops), `limit` (default 10, max 50). "
+            "EXACT-OP MODE: once you have an `op_id`, call again with "
+            "`op_id` (instead of `query`) BEFORE `call_operation`. You get "
+            "back one `operation` object, not ranked hits: the exact "
+            "`parameter_schema` `call_operation` checks `params` against, "
+            "small examples, whether a `target` is needed (pass the "
+            "target's NAME, not the id `list_targets` returns), the result "
+            "shape (large results come back as a `handle` you read with "
+            "`result_query`), and retry rules. An unknown op_id is an "
+            "error (`-32602`, `data.reason=unknown_op`). "
             "`connector_id` is `<impl_id>-<version>` (NOT the bare "
             "product name); an unknown connector_id is an error "
             "(`-32602`, `data.reason=unknown_connector`), and a "
             "registered-but-not-ingested connector is a recoverable error "
             "(`-32602`, `data.reason=connector_not_ingested` + "
-            "`data.next_step.verb` to run, then retry). An unknown group, "
-            "by contrast, narrows the result set to zero hits and is not "
-            "an error."
+            "`data.next_step.verb` to run, then retry). Every other result "
+            "carries `outcome`: `matched` (the top hit matched your words "
+            "and is clearly ahead; call it), `ambiguous` (hits are weak or "
+            "nearly tied: do not call any of them, narrow the search "
+            "first), `no_match` (nothing matched; do "
+            "not call an operation this search did not return), "
+            "`unknown_group` (the group does not exist; `narrowing` lists "
+            "valid group keys), or `zero_enabled_operations` (nothing on "
+            "this connector is enabled; do not call it, an operator must "
+            "enable operations). `advisory` explains any outcome other than "
+            "`matched`; `narrowing` lists next steps."
         ),
         inputSchema={
             "type": "object",
@@ -351,42 +496,43 @@ register_mcp_tool(
                     "default": 10,
                     "description": "Maximum number of ranked hits to return.",
                 },
+                "op_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Exact-op mode: return this one operation's call "
+                        "contract instead of ranked hits. `query`, `group` "
+                        "and `limit` are ignored when it is set."
+                    ),
+                },
+                "include_scores": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Add ranking scores to each ranked hit. Only "
+                        "honoured for a tenant_admin caller; ignored "
+                        "otherwise. For tuning descriptions, not for "
+                        "picking an operation."
+                    ),
+                },
             },
-            "required": ["connector_id", "query"],
+            "required": ["connector_id"],
+            # Either `query` (ranked mode) or `op_id` (exact-op mode) is
+            # needed. `anyOf` is stripped from the wire schema (the
+            # Anthropic Messages API rejects top-level combinators), so
+            # the description carries the rule to agents; the server-side
+            # jsonschema check in mcp/handlers.py still enforces it.
+            "anyOf": [
+                {"required": ["query"]},
+                {"required": ["op_id"]},
+            ],
             "additionalProperties": False,
         },
+        # Two shapes (#3668): ranked hits, or one exact-op contract. Same
+        # top-level ``oneOf`` idiom as ``query_audit``'s flat|replay union.
         outputSchema={
             "type": "object",
-            "properties": {
-                "hits": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "op_id": {"type": "string"},
-                            "summary": {"type": ["string", "null"]},
-                            "description": {"type": ["string", "null"]},
-                            "group_key": {"type": ["string", "null"]},
-                            "safety_level": {
-                                "type": "string",
-                                "enum": ["safe", "caution", "dangerous", "destructive"],
-                            },
-                            "requires_approval": {"type": "boolean"},
-                            "fused_score": {"type": "number"},
-                            "bm25_score": {"type": ["number", "null"]},
-                            "cosine_score": {"type": ["number", "null"]},
-                        },
-                        "required": [
-                            "op_id",
-                            "safety_level",
-                            "requires_approval",
-                            "fused_score",
-                        ],
-                    },
-                },
-                "query_duration_ms": {"type": "number"},
-            },
-            "required": ["hits", "query_duration_ms"],
+            "oneOf": [_SEARCH_RANKED_OUTPUT_SCHEMA, _SEARCH_EXACT_OP_OUTPUT_SCHEMA],
         },
         required_role=TenantRole.OPERATOR,
         op_class="read",
@@ -416,7 +562,12 @@ register_mcp_tool(
             "`query_topology` / `query_audit` -- OR a dict "
             '`{"name": "rdc-vcenter"}`; required for ops that act on a '
             "target), `params` (operation-specific). Returns the full "
-            "OperationResult shape."
+            "OperationResult shape. For a long call (a deploy or another "
+            "multi-step operation that can take minutes) pass `async: true`: "
+            'you get `status="pending"` and `extras.run_id` at once, and the '
+            "call runs in the background. Then call `call_operation` again "
+            "with the same `connector_id`, `op_id` and that `run_id` to check "
+            "it; once it is done you get its normal result."
         ),
         inputSchema={
             "type": "object",
@@ -529,6 +680,44 @@ register_mcp_tool(
                         "Ignored for every non-destructive op."
                     ),
                 },
+                "idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": (
+                        "Optional retry key for a call that waits for approval. "
+                        "Send the same key with the identical call again (for "
+                        "example after a restart) and you get the same "
+                        "`approval_request_id` back "
+                        "(`extras.approval_request_reused: true`) instead of a "
+                        "second approval request. The same key with a different "
+                        "call is refused with `idempotency_key_conflict`."
+                    ),
+                },
+                "async": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Start the call in the background. Use it for long "
+                        "calls (deploys, multi-step operations) that can take "
+                        "minutes. The answer comes at once with "
+                        '`status="pending"` and `extras.run_id`; the policy '
+                        "checks, approvals and audit rows are the same as for "
+                        "a normal call. Check the call later with `run_id`."
+                    ),
+                },
+                "run_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": (
+                        "Check a call you started with `async: true`. Send the "
+                        "same `connector_id` and `op_id` and the `extras.run_id` "
+                        'you got. While it runs: `status="pending"` or '
+                        '`"running"`, with `extras.started_at`. When it is done: '
+                        "the call's normal result. A run that failed or was "
+                        'cancelled gives `status="error"`. Nothing is run again.'
+                    ),
+                },
             },
             "required": ["connector_id", "op_id"],
             "additionalProperties": False,
@@ -545,9 +734,24 @@ register_mcp_tool(
                     # client validating the structured result against this
                     # outputSchema (MCP 2025-06-18: "Clients SHOULD
                     # validate structured results against this schema")
-                    # must accept it. The enum lists only statuses the
-                    # dispatcher actually emits (no ``pending``).
-                    "enum": ["ok", "error", "denied", "awaiting_approval"],
+                    # must accept it. ``rate_limited`` is the refusal the
+                    # dispatcher returns when the caller is over its
+                    # per-principal rate or concurrency cap (#3500); the
+                    # envelope carries ``extras.retry_after_seconds``.
+                    # ``pending`` / ``running`` are the async-mode answers
+                    # (#3695): a call started with ``async: true`` that has
+                    # not finished yet. The enum lists only statuses this
+                    # tool actually emits at this boundary (no
+                    # ``already_resumed`` — that one is approval-resume only).
+                    "enum": [
+                        "ok",
+                        "error",
+                        "denied",
+                        "awaiting_approval",
+                        "rate_limited",
+                        "pending",
+                        "running",
+                    ],
                 },
                 "op_id": {"type": "string"},
                 "result": {
@@ -564,7 +768,10 @@ register_mcp_tool(
                     "type": ["string", "null"],
                     "enum": ["complete", "partial", "unavailable", None],
                     "description": (
-                        "Response delivery state, separate from whether the operation executed."
+                        "Response delivery state, separate from whether the operation executed. "
+                        "`partial`: the response was too large to deliver; read the result "
+                        "through `result_query` with `handle`. `unavailable`: no result was "
+                        "delivered. In both cases the operation already ran; do not re-invoke it."
                     ),
                 },
                 # ``handle`` was missing from the declared properties
@@ -579,7 +786,10 @@ register_mcp_tool(
                     "description": (
                         "JSONFlux result handle. Non-null when the raw "
                         "response was set-shaped and spilled out-of-band; "
-                        "drill in via `result_query` with `handle_id`."
+                        "drill in via `result_query` with `handle_id`. "
+                        "A large response with no single list is kept as one "
+                        "document (`result.result_record` is `document`); "
+                        "read it with `query.path`."
                     ),
                 },
                 "extras": {"type": "object"},
@@ -625,9 +835,26 @@ register_mcp_tool(
             "only a hashed params_hash, so the request shape is otherwise "
             "unrecoverable). Inspection only -- it never sends the request "
             "and never re-dispatches a past one. Covers ingested HTTP ops "
-            "(`source_kind='ingested'`); for a typed/composite op it "
-            'returns `status="unavailable"` (no single literal HTTP '
-            "request to preview). Arguments mirror `call_operation`: "
+            "(`source_kind='ingested'`). A typed/composite op returns "
+            '`status="unavailable"` (no single literal HTTP request), '
+            "except a destructive or approval-gated one: it returns "
+            '`status="ok"`, `method="COMPOSITE"`, the redacted params and '
+            "a `preview_hash`. It shows the plan as `proposed_effect` only "
+            "when the plan can be built without contacting the target; "
+            "otherwise `plan_shown` is false and `plan_note` says the plan "
+            "is shown on the approval request instead. An approval-gated op "
+            "that writes a credential (for example `vault.kv.put`) is NOT "
+            'previewable and stays `status="unavailable"`, so its secret '
+            "params never surface. Every preview whose op resolves (ok, "
+            "unavailable, and the error statuses after the op lookup) also "
+            "says the risk level and whether this call will wait for "
+            "approval: `safety_level`, `requires_approval`, and "
+            "`policy_verdict` (what MEHO would do with the call for THIS "
+            "caller and target: `auto-execute`, `needs-approval` or `deny`, "
+            "with `policy_reason` when it is not auto-execute). The verdict "
+            "is decided the same way `call_operation` decides it, but "
+            "nothing is written. Arguments mirror "
+            "`call_operation`: "
             "`connector_id` (required), `op_id` (required), `target` "
             '(optional; bare string `"rdc-vcenter"` or dict '
             '`{"name": "rdc-vcenter"}`), `params` (operation-specific).'
@@ -725,6 +952,64 @@ register_mcp_tool(
                         "as `call_operation`'s `preview_hash` arg to govern a "
                         "destructive-tier delete."
                     ),
+                },
+                "safety_level": {
+                    "type": "string",
+                    "description": (
+                        "The op's risk level: safe, caution, dangerous, or "
+                        "destructive. Present on every preview whose op "
+                        "resolved (every status except unknown_op / "
+                        "unknown_connector)."
+                    ),
+                },
+                "requires_approval": {
+                    "type": "boolean",
+                    "description": (
+                        "True when the op is marked as needing a human "
+                        "approval before it runs. Present whenever "
+                        "`safety_level` is."
+                    ),
+                },
+                "policy_verdict": {
+                    "type": "string",
+                    "enum": ["auto-execute", "needs-approval", "deny"],
+                    "description": (
+                        "What MEHO would do with this call for this caller "
+                        "and target: run it at once (auto-execute), wait for "
+                        "a second person's approval (needs-approval), or "
+                        "refuse it (deny). Decided the same way "
+                        "`call_operation` decides it; nothing is written. "
+                        "Present whenever `safety_level` is."
+                    ),
+                },
+                "policy_reason": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "The policy gate's reason for the verdict; null when "
+                        "it gives none (a person's call that runs at once)."
+                    ),
+                },
+                "proposed_effect": {
+                    "type": "object",
+                    "description": (
+                        "The plan of what the operation will change, the "
+                        "same block the approval request shows. Present only "
+                        "on a typed/composite preview whose plan can be built "
+                        "without contacting the target."
+                    ),
+                },
+                "plan_shown": {
+                    "type": "boolean",
+                    "description": (
+                        "Typed/composite preview only: true when "
+                        "`proposed_effect` is present. False means the plan "
+                        "needs the target and is shown only on the approval "
+                        "request."
+                    ),
+                },
+                "plan_note": {
+                    "type": "string",
+                    "description": "Plain reason the plan is not shown (when plan_shown is false).",
                 },
                 "error": {"type": ["string", "null"]},
                 "extras": {"type": "object"},

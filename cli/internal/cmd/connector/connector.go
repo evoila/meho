@@ -24,6 +24,10 @@
 //     (G0.25-T7 #1749). Reports the count flipped; idempotent.
 //   - `meho connector disable`    — flip back to disabled without
 //     deleting rows (per-op overrides preserved for rollback).
+//   - `meho connector delete`     — remove a connector's operations
+//     and groups from the operator's own tenant (#4889). Built-in
+//     copies stay; the MCP sibling `meho_connector_delete` removes
+//     those.
 //
 // Each verb is a thin cobra command that POSTs / GETs / PATCHes a
 // single backplane route under `/api/v1/connectors*` (T6 #406).
@@ -85,7 +89,7 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "connector",
-		Short:        "G0.7 spec-ingestion + review workflow (ingest / list / catalog / review / edit / enable / enable-reads / disable)",
+		Short:        "G0.7 spec-ingestion + review workflow (ingest / list / catalog / review / edit / enable / enable-reads / disable / delete)",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newIngestCmd())
@@ -98,6 +102,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newEnableCmd())
 	cmd.AddCommand(newEnableReadsCmd())
 	cmd.AddCommand(newDisableCmd())
+	cmd.AddCommand(newDeleteCmd())
 	return cmd
 }
 
@@ -347,6 +352,27 @@ func renderHTTPStatus(
 			)),
 			jsonOut,
 		)
+	case http.StatusConflict:
+		if connectorID, ok := scopeAmbiguousConnectorID(body); ok {
+			return output.RenderError(cmd.ErrOrStderr(),
+				&output.StructuredError{
+					Code: errCodeScopeAmbiguous,
+					Detail: fmt.Sprintf(
+						"connector %q exists both as a built-in connector and as a connector "+
+							"in your tenant. Run the command again with --prefer tenant (your "+
+							"tenant's connector) or --prefer builtin (the built-in connector)",
+						connectorID,
+					),
+					Exit: output.ExitUnexpected,
+				},
+				jsonOut,
+			)
+		}
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
+				backplaneURL, statusCode, bodyStr)),
+			jsonOut,
+		)
 	default:
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
@@ -354,6 +380,53 @@ func renderHTTPStatus(
 			jsonOut,
 		)
 	}
+}
+
+// errCodeScopeAmbiguous is the error code for a connector id that
+// matches both a built-in row and a row in the operator's tenant. It
+// is the same classifier the backplane sends in its 409 body.
+const errCodeScopeAmbiguous = "connector_scope_ambiguous"
+
+// scopeAmbiguousConnectorID reports whether a 409 body is the
+// backplane's connector_scope_ambiguous error, and returns the
+// connector id it names. Any other 409 (for example an invalid state
+// change on `enable`) returns ok=false.
+func scopeAmbiguousConnectorID(body []byte) (connectorID string, ok bool) {
+	var envelope struct {
+		Detail struct {
+			Detail      string `json:"detail"`
+			ConnectorID string `json:"connector_id"`
+		} `json:"detail"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return "", false
+	}
+	if envelope.Detail.Detail != errCodeScopeAmbiguous {
+		return "", false
+	}
+	return envelope.Detail.ConnectorID, true
+}
+
+// preferFlagUsage is the shared help text for the --prefer flag on
+// the verbs whose route can answer 409 connector_scope_ambiguous
+// (`review` and `enable-reads`).
+const preferFlagUsage = "which connector to use when the id matches both a built-in connector " +
+	"and one in your tenant: tenant, builtin, or legacy (your tenant's old copy stored under a " +
+	"former product name; the copy delete removes first) (default: stop with an error that asks " +
+	"you to pick one)"
+
+// checkPreferFlag rejects a --prefer value other than tenant, builtin
+// or legacy before any network call, so a typo fails fast with a clear
+// message instead of a 422 from the backplane.
+func checkPreferFlag(cmd *cobra.Command, prefer string, jsonOut bool) error {
+	switch prefer {
+	case "", "tenant", "builtin", "legacy":
+		return nil
+	}
+	return output.RenderError(cmd.ErrOrStderr(),
+		output.Unexpected(fmt.Sprintf("--prefer must be one of: tenant, builtin, legacy; got %q", prefer)),
+		jsonOut,
+	)
 }
 
 // loadTextFlag reads a flag value that supports both inline text and

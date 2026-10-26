@@ -4,10 +4,13 @@
 """vcf-installer real-spec reconcile lane — the #2980 harness.
 
 Asserts every hand-coded ``METHOD:/path`` the vcf-installer connector dispatches
-is served by the pinned ``vcf-installer-9.1`` spec on the shelf
-(``vmware/vcf-api-specs``' OpenAPI 3.0.1 document; provenance in the shelf's
-``MANIFEST.md``). Parse-only set compare — no DB, no embeddings, no containers —
-so it lives in the required unit sweep per
+is served by **both** pinned installer specs on the shelf: ``vcf-installer-9.1``
+and ``vcf-installer-9.0`` (``vmware/vcf-api-specs``' OpenAPI 3.0.1 documents;
+provenance in each shelf folder's ``MANIFEST.md``). The connector advertises
+``>=9.0,<10.0``, so a 9.0.x Installer resolves to it; the 9.0 lane is what
+makes that range safe. A path that only 9.1 serves fails the 9.0 lane.
+Parse-only set compare — no DB, no embeddings, no containers — so it lives in
+the required unit sweep per
 ``docs/decisions/spec-reconcile-guards-standard.md``. Uniform skip when the shelf
 is unconfigured (``tests/_spec_shelf.py`` contract).
 
@@ -16,7 +19,8 @@ pattern — never a hardcoded mirror), across the four surfaces that hand-code a
 path:
 
 * :mod:`~meho_backplane.connectors.vcf_installer.typed_reads` — the ``_*_PATH``
-  module constants (the bring-up status and validation status polls). Each
+  module constants (the bring-up status and validation status polls, the
+  id-less bring-up task list, and the depot-lifecycle reads). Each
   typed read dispatches through :meth:`HttpConnector._get_json`, so each
   declares ``GET:``.
 * :mod:`~meho_backplane.connectors.vcf_installer.typed_writes` — the submit
@@ -35,6 +39,8 @@ path:
 
 from __future__ import annotations
 
+import pytest
+
 from meho_backplane.connectors.vcf_installer import bringup as _bringup
 from meho_backplane.connectors.vcf_installer import connector as _connector
 from meho_backplane.connectors.vcf_installer import typed_reads as _typed_reads
@@ -46,9 +52,8 @@ from tests._spec_shelf import (
     require_shelf_spec,
 )
 
-_SPEC_DIR = "vcf-installer-9.1"
+_SPEC_DIRS = ("vcf-installer-9.0", "vcf-installer-9.1")
 _SPEC_FILE = "vcf-installer-openapi.json"
-_SPEC_LABEL = f"{_SPEC_DIR}/{_SPEC_FILE}"
 
 
 def _typed_read_paths() -> dict[str, str]:
@@ -79,7 +84,10 @@ def test_typed_read_path_constants_are_all_discovered() -> None:
     """
     assert sorted(_typed_read_paths()) == [
         "_BUNDLES_PATH",
+        "_BUNDLE_DOWNLOAD_STATUS_PATH",
         "_DEPOT_SETTINGS_PATH",
+        "_DEPOT_SYNC_INFO_PATH",
+        "_SDDC_LIST_PATH",
         "_SDDC_STATUS_PATH",
         "_TRUSTED_CERTIFICATES_PATH",
         "_VALIDATION_STATUS_PATH",
@@ -125,8 +133,9 @@ def test_bringup_declared_op_ids_are_pinned() -> None:
     )
 
 
-def test_declared_op_ids_are_served_by_the_pinned_spec() -> None:
-    """Every hand-coded op_id is served by the pinned vcf-installer-9.1 spec."""
-    spec_path = require_shelf_spec(_SPEC_DIR, _SPEC_FILE)
+@pytest.mark.parametrize("spec_dir", _SPEC_DIRS)
+def test_declared_op_ids_are_served_by_the_pinned_spec(spec_dir: str) -> None:
+    """Every hand-coded op_id is served by the pinned 9.0 and 9.1 installer specs."""
+    spec_path = require_shelf_spec(spec_dir, _SPEC_FILE)
     served = openapi_served_op_ids(spec_path)
-    assert_op_ids_served(_declared_op_ids(), served, spec_label=_SPEC_LABEL)
+    assert_op_ids_served(_declared_op_ids(), served, spec_label=f"{spec_dir}/{_SPEC_FILE}")

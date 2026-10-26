@@ -12,8 +12,8 @@ the "nobody's DB grows surprisingly" surprise the ops report asked the default
 to avoid.
 
 This module ships the physical cleanup: an ``asyncio`` task the FastAPI
-lifespan owns that ticks on a fixed cadence (default 7 days / weekly) and
-deletes rows where
+lifespan owns that runs once per interval (default 7 days / weekly, counted
+from its last recorded run -- see "When it runs" below) and deletes rows where
 ``evaluated_at < now() - checks_evidence_retention_days``. It is the **only**
 place the application issues a DELETE against ``sensor_results``.
 
@@ -42,6 +42,20 @@ on the same setting), so there is nothing to prune -- the tick logs a heartbeat
 and returns. "Grows forever" is the surprise #2756 exists to prevent, so ``0``
 means "off", not "unbounded". ``checks_evidence_prune_enabled=false`` still
 skips starting the loop entirely (an operator running an external sweep).
+
+When it runs
+------------
+
+The interval counts from the **last recorded run**, not from process start.
+Every run writes its ``checks.evidence.prune`` audit row, also when it
+deleted 0 rows, so the newest such row is the last real run. After the
+process starts, the loop waits one minute, reads that row, and runs at once
+if a full interval has passed (or no run is recorded); otherwise it waits
+only for the rest of the interval. After that it runs once per interval. So
+a pod restart never starts the interval again. The steps live in
+:func:`meho_backplane.loop_schedule.wait_until_first_run`. With
+``retention_days == 0`` no row is written, so each start runs the no-op
+heartbeat about one minute after start.
 """
 
 from __future__ import annotations
@@ -56,7 +70,8 @@ import structlog
 from sqlalchemy import delete
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import SensorResult
+from meho_backplane.db.models import AuditEventClass, SensorResult
+from meho_backplane.loop_schedule import FIRST_RUN_DELAY_SECONDS, wait_until_first_run
 from meho_backplane.memory.audit import (
     INTERNAL_METHOD,
     write_internal_audit_row,
@@ -131,6 +146,7 @@ async def _write_prune_audit_row(
     """
     try:
         await write_internal_audit_row(
+            event_class=AuditEventClass.OPERATION_EXECUTION,
             operator_sub=SYSTEM_OPERATOR_SUB,
             tenant_id=EVIDENCE_RETENTION_SYSTEM_TENANT_ID,
             method=INTERNAL_METHOD,
@@ -195,22 +211,29 @@ async def _run_one_prune_tick() -> None:
 
 
 async def _prune_loop() -> None:
-    """The forever loop: sleep one cadence, prune, repeat.
+    """The forever loop: wait until a run is due, prune, repeat.
 
-    Sleep-then-prune (not prune-then-sleep) so the first tick after start does
-    not race the rest of lifespan boot. Per-tick ``try`` / ``except`` means a
-    transient DB blip is logged and the loop continues;
-    ``asyncio.CancelledError`` propagates so lifespan shutdown stops the task
-    cleanly.
+    The first run is timed from the last recorded run, not from process start
+    (see "When it runs" in the module docstring). After that, the loop runs
+    once per interval. Per-tick ``try`` / ``except`` means a transient DB blip
+    is logged and the loop continues; ``asyncio.CancelledError`` propagates so
+    lifespan shutdown stops the task cleanly.
     """
     interval = get_settings().checks_evidence_prune_interval_seconds
     _log.info(
         "checks_evidence_retention_started",
         interval_seconds=interval,
         retention_days=get_settings().checks_evidence_retention_days,
+        first_check_in_seconds=FIRST_RUN_DELAY_SECONDS,
+    )
+    await wait_until_first_run(
+        job="checks_evidence_retention",
+        tenant_id=EVIDENCE_RETENTION_SYSTEM_TENANT_ID,
+        operator_sub=SYSTEM_OPERATOR_SUB,
+        path=EVIDENCE_RETENTION_PRUNE_PATH,
+        interval_seconds=interval,
     )
     while True:
-        await asyncio.sleep(get_settings().checks_evidence_prune_interval_seconds)
         try:
             await _run_one_prune_tick()
         except asyncio.CancelledError:
@@ -221,6 +244,7 @@ async def _prune_loop() -> None:
                 exc_info=True,
             )
         note_loop_tick("evidence_retention", get_settings().checks_evidence_prune_interval_seconds)
+        await asyncio.sleep(get_settings().checks_evidence_prune_interval_seconds)
 
 
 def start_evidence_retention_sweeper() -> asyncio.Task[None]:

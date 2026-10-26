@@ -39,7 +39,9 @@ import pytest
 
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.mcp import registry as mcp_registry
+from meho_backplane.mcp.handlers import _tool_result_is_error
 from meho_backplane.mcp.registry import ToolDefinition
+from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 -- pytest-discovered fixture
     isolated_registry,  # noqa: F401 -- pytest-discovered autouse fixture
@@ -75,6 +77,7 @@ EXPECTED_DECLARING_TOOLS: frozenset[str] = frozenset(
         "query_audit",
         "query_topology",
         "result_query",
+        "search_memory",
         "search_operations",
     }
 )
@@ -209,6 +212,21 @@ def test_declaring_tool_result_carries_matching_structured_content(
     )
     assert result["structuredContent"] == json.loads(result["content"][0]["text"])
 
+    # #3641: the delivery budget measures exactly these two blocks as they
+    # sit in the response body. Both encoded blocks are found verbatim in the
+    # raw bytes, and the measurement is their summed length (no factor).
+    text_block = _body_encode(result["content"][0]["text"])
+    structured_block = _body_encode(result["structuredContent"])
+    assert text_block in response.content
+    assert structured_block in response.content
+    measured = measure_delivered_wire_bytes(result["structuredContent"])
+    assert measured == len(text_block) + len(structured_block)
+
+
+def _body_encode(value: Any) -> bytes:
+    """Encode *value* as the JSON-RPC response body writes it."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
 
 def test_non_declaring_tool_result_has_no_structured_content(
     client_with_operator: Any,  # noqa: F811 — pytest indirect fixture
@@ -228,3 +246,31 @@ def test_non_declaring_tool_result_has_no_structured_content(
     result = body["result"]
     assert result["isError"] is False
     assert "structuredContent" not in result
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "status", "expected"),
+    [
+        ("call_operation", "ok", False),
+        ("call_operation", "awaiting_approval", False),
+        ("call_operation", "error", True),
+        ("call_operation", "denied", True),
+        ("call_operation", "rate_limited", True),
+        ("preview_operation", "ok", False),
+        ("preview_operation", "unavailable", False),
+        ("preview_operation", "error", True),
+        ("meho_runbook_next", "error", False),
+    ],
+)
+def test_is_error_follows_operation_result_status(
+    tool_name: str, status: str, expected: bool
+) -> None:
+    """``isError`` is true only for a failed ``OperationResult`` envelope.
+
+    MCP 2025-06-18 §Tools/Error Handling reports a caught business or API
+    failure as ``isError: true``. A call that waits for approval is a
+    successful hand-off, so it stays ``false``. A tool that does not return
+    an ``OperationResult`` envelope keeps ``false`` even if its payload has
+    a ``status`` key.
+    """
+    assert _tool_result_is_error(tool_name, {"status": status}) is expected

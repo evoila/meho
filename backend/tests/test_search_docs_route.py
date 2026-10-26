@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Iterator
+from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
@@ -59,11 +60,13 @@ from meho_backplane.auth.corpus import CorpusChunk, CorpusSearchResponse, Corpus
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, DocCollection
+from meho_backplane.db.models import AgentPermission, AuditLog, DocCollection, Tenant
+from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
+from ._oidc_jwt_helpers import DEFAULT_TENANT_ID
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
 from ._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from ._oidc_jwt_helpers import mint_token as _mint_token
@@ -115,8 +118,18 @@ def _isolated_jwks_cache() -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
-async def _seed_global_collection(*, collection_key: str = "vmware", status: str = "ready") -> None:
-    """Insert a global (``tenant_id IS NULL``) collection for the route tests."""
+async def _seed_global_collection(
+    *,
+    collection_key: str = "vmware",
+    status: str = "ready",
+    backend: dict[str, Any] | None = None,
+) -> None:
+    """Insert a global (``tenant_id IS NULL``) collection for the route tests.
+
+    The default ``backend`` has no ``ref``, so the collection's scope-filter
+    gate (#3912) is off; pass :data:`_SCOPE_FILTERS_ON` to forward the
+    product/version refinements.
+    """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session, session.begin():
         session.add(
@@ -127,15 +140,22 @@ async def _seed_global_collection(*, collection_key: str = "vmware", status: str
                 products=["vsphere", "nsx"],
                 description="VMware vendor docs.",
                 when_to_use="VMware product questions.",
-                backend={"type": "corpus-http"},
+                backend=backend if backend is not None else {"type": "corpus-http"},
                 status=status,
             ),
         )
 
 
-def _seed_collection_sync(**kwargs: str) -> None:
+def _seed_collection_sync(**kwargs: Any) -> None:
     """Seed a global collection from a sync test via a one-shot loop."""
     asyncio.run(_seed_global_collection(**kwargs))
+
+
+#: A ``corpus-http`` binding whose collection opts into forwarding the
+#: product/version refinements as hard filters (#3912).
+_SCOPE_FILTERS_ON: dict[str, Any] = {"type": "corpus-http", "ref": {"scope_filters": True}}
+#: A ``corpus-http`` binding whose collection opts into the soft scope (#3912).
+_SOFT_SCOPE_ON: dict[str, Any] = {"type": "corpus-http", "ref": {"scope": "soft"}}
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +402,71 @@ def test_search_docs_source_url_never_leaks_gs_backend(client: TestClient) -> No
     assert "gs://" not in json.dumps(response.json())
 
 
+def test_hits_carry_derived_title_score_kind_and_upstream_link(client: TestClient) -> None:
+    """Hits carry a derived title, ``score_kind`` and the upstream link (#3913).
+
+    The corpus sends page identity (``heading_path`` / ``filename``) and no
+    ``title``, so the title is derived: the section joined with the page
+    name. A hit whose own source is a ``gs://`` path takes the backend's
+    ``upstream_url`` as its ``source_url``. ``score_kind`` is passed through
+    when sent and is ``null`` (never defaulted) when not. No ``gs://``
+    string reaches the response.
+    """
+    _seed_collection_sync()
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(
+        key, sub="op-1", tenant_role=TenantRole.OPERATOR.value, capabilities=_ENTITLED_CAPS
+    )
+    link = "https://docs.vendor.test/guides/guide.pdf#page=693"
+    pdf_hit = CorpusChunk.model_validate(
+        {
+            "chunk_id": "pdf-1",
+            "text": "Pools are capped at 64 per cluster.",
+            "source_uri": "gs://example-bucket/docs/guide/guide-part02of03.pdf",
+            "score": 0.31,
+            "score_kind": "distance",
+            "heading_path": ["Planning", "Pool limits"],
+            "filename": "guide-part02of03.pdf",
+            "upstream_url": link,
+            "upstream_page": 693,
+        }
+    )
+    bare_hit = CorpusChunk.model_validate(
+        {
+            "chunk_id": "bare-1",
+            "text": "A chunk with no page identity.",
+            "source_uri": "gs://example-bucket/misc/blob.bin",
+            "score": 0.9,
+        }
+    )
+    with (
+        respx.mock as mock_router,
+        patch(_CORPUS_SEAM, new=_mock_corpus(pdf_hit, bare_hit)),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/search_docs",
+            json={"query": "widget pool limits", "collection": "vmware"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200, response.text
+    first, second = response.json()["chunks"]
+    assert first["chunk_id"] == "pdf-1"
+    assert first["title"] == "Pool limits \u2014 guide part02of03"
+    assert first["source_url"] == link
+    assert first["upstream_url"] == link
+    assert first["upstream_page"] == 693
+    assert first["score_kind"] == "distance"
+    # No identity, no link: no title, the opaque ref, and nothing defaulted.
+    assert second["title"] is None
+    assert second["source_url"] == "meho://docs/vmware/bare-1"
+    assert second["score_kind"] is None
+    assert second["upstream_url"] is None
+    assert second["upstream_page"] is None
+    assert "gs://" not in response.text
+
+
 def test_optional_refinements_forwarded_as_binary_filter_not_weight(
     client: TestClient,
 ) -> None:
@@ -389,10 +474,11 @@ def test_optional_refinements_forwarded_as_binary_filter_not_weight(
 
     The refinements are a binary containment filter (#1178 / #1177), so they
     must arrive on the backend's ``metadata_filters`` kwarg verbatim -- never
-    as a ``weight`` / boost parameter. ``collection`` is the router key and
-    must NOT appear in the metadata filters.
+    as a ``weight`` / boost parameter -- once the collection enables scope
+    filters (#3912). ``collection`` is the router key and must NOT appear in
+    the metadata filters.
     """
-    _seed_collection_sync()
+    _seed_collection_sync(backend=_SCOPE_FILTERS_ON)
     key = _make_rsa_keypair("kid-A")
     token = _mint_token(
         key, sub="op-2", tenant_role=TenantRole.OPERATOR.value, capabilities=_ENTITLED_CAPS
@@ -420,8 +506,50 @@ def test_optional_refinements_forwarded_as_binary_filter_not_weight(
     assert call_kwargs["metadata_filters"] == {"product": "vmware", "version": "8.0"}
     # The collection routes/entitles; it is not a metadata filter.
     assert "collection" not in call_kwargs["metadata_filters"]
+    assert call_kwargs["soft_scope"] is None
     assert "weight" not in call_kwargs
     assert "boost" not in call_kwargs
+
+
+def test_optional_refinements_forwarded_as_soft_scope_when_collection_opts_in(
+    client: TestClient,
+) -> None:
+    """With ``scope: "soft"`` the refinements travel as the soft scope (#3912).
+
+    The values are passed unchanged (a full release included), with
+    ``source: "caller"``, and no ``metadata_filters`` are sent.
+    """
+    _seed_collection_sync(backend=_SOFT_SCOPE_ON)
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(
+        key, sub="op-soft", tenant_role=TenantRole.OPERATOR.value, capabilities=_ENTITLED_CAPS
+    )
+
+    fake_corpus = _mock_corpus()
+    with (
+        respx.mock as mock_router,
+        patch(_CORPUS_SEAM, new=fake_corpus),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/search_docs",
+            json={
+                "query": "esxi upgrade",
+                "collection": "vmware",
+                "product": "vsphere",
+                "version": "8.0.3.00400",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    call_kwargs = fake_corpus.await_args.kwargs
+    assert call_kwargs["metadata_filters"] is None
+    assert call_kwargs["soft_scope"] == {
+        "product": "vsphere",
+        "version": "8.0.3.00400",
+        "source": "caller",
+    }
 
 
 def test_collection_only_omits_metadata_filters(client: TestClient) -> None:
@@ -732,7 +860,9 @@ async def test_audit_row_carries_op_id_hash_and_collection_not_raw_query(
 
     The raw query MUST NOT appear anywhere in the payload -- only its
     SHA-256 digest. ``collection`` / ``product`` / ``version`` and
-    ``hit_count`` are recorded.
+    ``hit_count`` are recorded -- the requested product/version even though
+    the collection does not enable scope filters, so the backend saw none
+    (#3912).
     """
     await _seed_global_collection()
     key = _make_rsa_keypair("kid-A")
@@ -774,6 +904,8 @@ async def test_audit_row_carries_op_id_hash_and_collection_not_raw_query(
     assert payload["product"] == "vmware"
     assert payload["version"] == "9.0"
     assert payload["hit_count"] == 2
+    assert fake_corpus.await_args.kwargs["metadata_filters"] is None
+    assert fake_corpus.await_args.kwargs["soft_scope"] is None
 
     serialised = json.dumps(payload)
     assert raw_query not in serialised
@@ -1013,3 +1145,194 @@ def test_fanout_drops_non_entitled_collection_from_all(client: TestClient) -> No
     assert fake_corpus.await_count == 1
     body = response.json()
     assert {c["collection"] for c in body["chunks"]} == {"vmware"}
+
+
+# ---------------------------------------------------------------------------
+# The default scope from a named target (#3920)
+# ---------------------------------------------------------------------------
+
+_TARGET_HOST = "vcenter-01.example.test"
+
+
+async def _seed_target(*, tenant_id: str = DEFAULT_TENANT_ID) -> UUID:
+    """Seed a probed ``vcenter-01`` target in *tenant_id* (its tenant row too); return its id."""
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(Tenant(id=UUID(tenant_id), slug=f"t-{tenant_id[-4:]}", name="Tenant"))
+        target = TargetORM(
+            tenant_id=UUID(tenant_id),
+            name="vcenter-01",
+            aliases=[],
+            product="vcenter",
+            host=_TARGET_HOST,
+            port=443,
+            secret_ref="targets/vcenter-01",
+            auth_model="shared_service_account",
+            fingerprint={
+                "vendor": "vmware",
+                "product": "vcenter",
+                "version": "8.0.3.00400",
+                "reachable": True,
+                "probed_at": "2026-10-01T00:00:00Z",
+                "probe_method": "vimServiceVersions.xml",
+            },
+        )
+        session.add(target)
+        await session.flush()
+        return target.id
+
+
+async def _deny_target(target_id: UUID, *, principal_sub: str, verdict: str = "deny") -> None:
+    """Insert a *verdict* permission row (default ``deny``) for every op on *target_id*."""
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(
+            AgentPermission(
+                tenant_id=UUID(DEFAULT_TENANT_ID),
+                principal_sub=principal_sub,
+                op_pattern="*",
+                verdict=verdict,
+                target_scope=str(target_id),
+                created_by_sub="admin:docs-test",
+            )
+        )
+
+
+def _post_search(
+    client: TestClient, body: dict[str, Any], *, principal_kind: str | None = None
+) -> tuple[Any, AsyncMock]:
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(
+        key,
+        sub="op-target",
+        tenant_role=TenantRole.OPERATOR.value,
+        capabilities=_ENTITLED_CAPS,
+        principal_kind=principal_kind,
+    )
+    fake_corpus = _mock_corpus(_make_chunk("c1"))
+    with respx.mock as mock_router, patch(_CORPUS_SEAM, new=fake_corpus):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/search_docs",
+            json={"query": "upgrade pre-check fails", "collection": "vmware", **body},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    return response, fake_corpus
+
+
+@pytest.mark.asyncio
+async def test_target_default_forwarded_as_soft_scope_and_audited(client: TestClient) -> None:
+    """``target`` and no product/version: the fingerprint is the soft scope.
+
+    No filters are sent, even with the hard-filter gate also on. The audit
+    row names the scope source and the target, never its address.
+    """
+    await _seed_global_collection(
+        backend={"type": "corpus-http", "ref": {"scope": "soft", "scope_filters": True}}
+    )
+    await _seed_target()
+    response, fake_corpus = _post_search(client, {"target": "vcenter-01"})
+
+    assert response.status_code == 200, response.text
+    assert fake_corpus.await_args.kwargs["metadata_filters"] is None
+    assert fake_corpus.await_args.kwargs["soft_scope"] == {
+        "product": "vcenter",
+        "release": "8.0.3.00400",
+        "source": "default",
+    }
+    async with get_sessionmaker()() as session:
+        rows = (
+            (await session.execute(select(AuditLog).where(AuditLog.path == "/api/v1/search_docs")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    payload = rows[0].payload
+    assert payload["scope_source"] == "default"
+    assert payload["target"] == "vcenter-01"
+    assert _TARGET_HOST not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
+async def test_explicit_version_ignores_the_target_default(client: TestClient) -> None:
+    """With an explicit ``version`` the caller's value is sent (``source: caller``)."""
+    await _seed_global_collection(backend=_SOFT_SCOPE_ON)
+    await _seed_target()
+    response, fake_corpus = _post_search(client, {"target": "vcenter-01", "version": "9.1"})
+
+    assert response.status_code == 200, response.text
+    assert fake_corpus.await_args.kwargs["soft_scope"] == {"version": "9.1", "source": "caller"}
+
+
+@pytest.mark.asyncio
+async def test_target_in_another_tenant_is_404_no_target(client: TestClient) -> None:
+    """A target the caller's tenant does not hold is the target routes' 404."""
+    await _seed_global_collection(backend=_SOFT_SCOPE_ON)
+    await _seed_target(tenant_id="00000000-0000-0000-0000-00000000beef")
+    response, fake_corpus = _post_search(client, {"target": "vcenter-01"})
+
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"]["error"] == "no_target"
+    fake_corpus.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_denied_target_in_own_tenant_is_403_denied(client: TestClient) -> None:
+    """An agent whose permission rows deny it the target gets ``call_operation``'s denial.
+
+    The target is in the agent's tenant, so the lookup succeeds; the shared
+    permission check refuses it as 403 ``{"error": "denied", "query",
+    "reason"}``. No corpus call runs, and the audit row names the target.
+    """
+    await _seed_global_collection(backend=_SOFT_SCOPE_ON)
+    target_id = await _seed_target()
+    await _deny_target(target_id, principal_sub="op-target")
+    response, fake_corpus = _post_search(client, {"target": "vcenter-01"}, principal_kind="agent")
+
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "denied"
+    assert detail["query"] == "vcenter-01"
+    assert detail["reason"].startswith("verdict=deny")
+    fake_corpus.assert_not_awaited()
+
+    async with get_sessionmaker()() as session:
+        rows = (
+            (await session.execute(select(AuditLog).where(AuditLog.path == "/api/v1/search_docs")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].payload["target"] == "vcenter-01"
+    assert _TARGET_HOST not in json.dumps(rows[0].payload)
+
+
+@pytest.mark.asyncio
+async def test_needs_approval_target_is_403_denied(client: TestClient) -> None:
+    """A ``needs-approval`` row refuses the docs call: only ``auto-execute`` proceeds.
+
+    ``call_operation`` would park this verdict for an operator's decision.
+    The docs tools have no approval path, so the call is refused as 403
+    ``denied`` with a reason naming the verdict, and the target's product
+    and version never reach the corpus.
+    """
+    await _seed_global_collection(backend=_SOFT_SCOPE_ON)
+    target_id = await _seed_target()
+    await _deny_target(target_id, principal_sub="op-target", verdict="needs-approval")
+    response, fake_corpus = _post_search(client, {"target": "vcenter-01"}, principal_kind="agent")
+
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "denied"
+    assert detail["query"] == "vcenter-01"
+    assert detail["reason"].startswith("verdict=needs-approval")
+    fake_corpus.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_agent_without_deny_row_uses_the_target_default(client: TestClient) -> None:
+    """An agent with no matching row is allowed: a docs lookup is a safe read."""
+    await _seed_global_collection(backend=_SOFT_SCOPE_ON)
+    await _seed_target()
+    response, fake_corpus = _post_search(client, {"target": "vcenter-01"}, principal_kind="agent")
+
+    assert response.status_code == 200, response.text
+    assert fake_corpus.await_args.kwargs["soft_scope"]["source"] == "default"

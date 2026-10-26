@@ -1,11 +1,12 @@
-# Connector: vcf-installer (VCF Installer 9.1)
+# Connector: vcf-installer (VCF Installer 9.0 and 9.1)
 
 ## Overview
 
 The `vcf-installer` connector is the hand-rolled `HttpConnector` subclass that
 dispatches VMware Cloud Foundation **Installer** operations under the
 `(product="installer", version="9.1", impl_id="installer-rest")` registry triple
-(`connector_id="installer-rest-9.1"`). The Installer is the VCF 9.x bring-up
+(`connector_id="installer-rest-9.1"`). The connector serves Installer 9.0 and
+9.1 (see [Installer 9.0](#installer-90)). The Installer is the VCF 9.x bring-up
 appliance (the successor to Cloud Builder); this connector is the governed
 dispatch surface the automation add-on
 ([evoila-bosnia/meho-internal#223](https://github.com/evoila/meho/issues/2907))
@@ -35,7 +36,8 @@ Source: `backend/src/meho_backplane/connectors/vcf_installer/`.
 
 - **`InstallerConnector`** (`connector.py`) — `HttpConnector` subclass.
   `product="installer"`, `version="9.1"`, `impl_id="installer-rest"`,
-  `supported_version_range=">=9.1,<10.0"`, `priority=1`.
+  `supported_version_range=">=9.0,<10.0"`, `priority=1`. The id keeps `9.1`;
+  only the range starts at 9.0.
 - **`INSTALLER_EXECUTION_PROFILE`** (`profile.py`) — the reviewed declarative
   profile the connector derives its session auth from (the `session_login_token`
   scheme) and its fingerprint recipe (`GET /v1/system/appliance-info` → literal
@@ -99,19 +101,23 @@ machinery exist here.
 | `installer.sddc.bringup.start` | `POST /v1/sddcs` → `SddcTask` | `dangerous` + `requires_approval` |
 | `installer.sddc.bringup.retry` | `PATCH /v1/sddcs/{id}` (`retrySddc`) → `SddcTask` | `dangerous` + `requires_approval` |
 | `installer.sddc.bringup.status` | `GET /v1/sddcs/{id}` → `SddcTask` | `safe` |
+| `installer.sddc.list` | `GET /v1/sddcs` (`getSddcTasks`) → `PageOfSddcTask`, cut down per task | `safe` |
 | `installer.system.depot.get` | `GET /v1/system/settings/depot` → `DepotSettings` (passwords scrubbed) | `safe` |
 | `installer.system.depot.set` | `PUT /v1/system/settings/depot` (sync connection check) | `caution` + `requires_approval` |
+| `installer.system.depot.sync-status` | `GET /v1/system/settings/depot/depot-sync-info` → `DepotSyncInfo` (catalog ingest state) | `safe` |
 | `installer.system.trusted-certificates.list` | `GET /v1/sddc-manager/trusted-certificates` | `safe` |
 | `installer.system.trusted-certificates.add` | `POST /v1/sddc-manager/trusted-certificates` | `caution` + `requires_approval` |
 | `installer.bundles.list` | `GET /v1/bundles` → `PageOfBundle` | `safe` |
+| `installer.bundles.download-status` | `GET /v1/bundles/download-status` → `PageOfBundleDownloadStatusInfo` | `safe` |
 | `installer.bundles.download` | `PATCH /v1/bundles/{id}` per id (one approved batch) | `caution` + `requires_approval` |
 
-The bottom six rows are the **air-gapped depot lifecycle** (#3121, group
+The bottom eight rows are the **air-gapped depot lifecycle** (#3121, group
 `installer-depot`) — the steps that used to force a governed bring-up
 out-of-band: configure the depot (`depot.set` maps the vendor rejection to a
 structured `depot_error`, with inline remediation for the common
 `VMWARE_DEPOT_CONNECT_FAILURE` TLS-trust case → `trusted-certificates.add`,
-then retry), then explicitly download the release bundles
+then retry), wait for the catalog ingest (`depot.sync-status`, below), then
+explicitly download the release bundles
 (`bundles.download`, one approval per batch; per-bundle failures collected as
 `status="partial"`, not fatal) **before** validating a spec — a freshly
 connected installer pins components to the newest catalog versions and
@@ -120,6 +126,34 @@ scrubs every `password` key at every depth before the settings echo crosses
 the governed surface; `depot.set`'s park-time preview echoes
 hostname/port/mode + account username only, `trusted-certificates.add`'s a
 SHA-256 fingerprint, `bundles.download`'s the id batch (truncated past 20).
+`bundles.download-status` ([#3410](https://github.com/evoila/meho/issues/3410))
+explains a `FAILED` row on `bundles.list`, which only carries `downloadStatus`.
+Per bundle it returns the vendor failure `message`, `downloadedSize` (bytes so
+far; compare with `sizeMB` from `bundles.list` for progress), `isDownloadable`
+(can the bundle be downloaded right now), and `downloadId` (the download task
+id). Optional `bundle_id` / `release_version` / `image_type` params map to the
+vendor `bundleId` / `releaseVersion` / `imageType` query filters. A
+release-wide read reduces to a result handle; its `result_digest` hint adds
+per-`downloadStatus` counts and the `IN_PROGRESS` bundle ids inline. `FAILED`
+rows are not copied inline, because a depot outage fails every row; read them
+with `bundle_id` or `result_query`. The vendor schema has no credential
+fields, so nothing is scrubbed.
+
+**Waiting for the catalog ingest (#3406).** `depot.set` returns as soon as the
+depot connection check passes (about a second). The appliance then ingests the
+release catalog in the background, and `bundles.list` stays empty until that
+finishes. `depot.sync-status` reads the vendor `DepotSyncInfo`
+(`syncStatus` / `errorMessage` / `lastSyncCompletionTimestamp`) and returns it
+as sent, with `password` keys scrubbed. The 9.1 spec does not list the
+`syncStatus` values, so MEHO does not interpret them. The documented "catalog
+ready" rule, carried in the op's `llm_instructions` and the group
+`when_to_use`, is: `errorMessage` is empty and `lastSyncCompletionTimestamp`
+is later than the `depot.set` call. A non-empty `errorMessage` means the sync
+failed, so the caller fixes the depot instead of waiting. A non-empty
+`bundles.list` confirms it. The order is `depot.set` → poll
+`depot.sync-status` → `bundles.list` → `bundles.download`. The vendor also
+has `PATCH .../depot-sync-info` to start a new sync; MEHO does not register
+it yet.
 The group's `when_to_use` and the `spec` parameter hint on the submit
 primitives carry the 9.1 field rules proven live (three unique
 `vspClusterSpec` FQDNs outside the pool, ≤20-char core passwords, the
@@ -138,8 +172,21 @@ appliance retries the stored spec as-is — the common transient-failure case;
 provided, it is the vendor's edit-and-retry flow), and its own park-time
 preview leads with the failed task id, appending the blast-radius identity only
 when a spec rides along. `bringup.status` polls the `SddcTask` (`IN_PROGRESS` /
-`COMPLETED_WITH_SUCCESS` / `COMPLETED_WITH_FAILURE`, plus `sddcSubTasks[]` /
-`milestones[]`). Session-expiry recovery for all five rides the dispatcher's
+`COMPLETED_WITH_SUCCESS` / `ROLLBACK_SUCCESS` / `COMPLETED_WITH_FAILURE`, plus
+`sddcSubTasks[]` / `milestones[]`). `ROLLBACK_SUCCESS` is a finished task too:
+the bring-up failed and the appliance undid what it had built, so the AI
+guidance of `bringup.start`, `bringup.retry`, `bringup.status` and the
+composite names it as a stop condition. `installer.sddc.list`
+([#3418](https://github.com/evoila/meho/issues/3418)) lists every bring-up task
+and needs no id. Use it when the id of a running bring-up is lost — for example
+when the result of an approved `bringup.start` was not picked up in time — then
+poll `bringup.status` with the id it returns. Each task is cut down to `id` /
+`name` / `status` / `deploymentType` / `vcfInstanceName` / `creationTimestamp`.
+That list of fields is a whitelist, so the ~260-row `sddcSubTasks[]`,
+`milestones[]` and any field the vendor adds later never reach the result. A
+normal appliance has a few tasks, so the list stays inline; a long list goes
+through the normal JSONFlux reduction and returns a handle whose sample rows
+still carry the ids. Session-expiry recovery for all of these rides the dispatcher's
 #2067 arm (raw `401` → `invalidate_session` → re-dispatch once — safe for the
 POSTs/PATCH too, since a `401` is rejected at auth before the server processes
 the request).
@@ -214,21 +261,96 @@ double-apply.
 
 Shipped as increment 2 of [#3065](https://github.com/evoila/meho/issues/3065).
 
+### Operation contracts
+
+The 14 typed ops and the bring-up composite meet the VMware operation-contract
+check (`backend/tests/test_operation_contracts.py`), with one gap left
+(see below):
+
+- **Response schemas** live in `_response_schemas.py` (split out for the
+  file-size budget). Vendor field names come from the pinned `vcf-installer-9.1`
+  OpenAPI file (`Validation`, `SddcTask`, `DepotSettings`, `DepotSyncInfo`,
+  `PageOfTrustedCertificate`, `PageOfBundle`,
+  `PageOfBundleDownloadStatusInfo`). The envelope keys of the writes and of the
+  composite (`status`, `settings`, `results`, `sddc_task`, ...) are the keys the
+  handlers build. The schemas are informational; the reducer does not read them.
+- **Examples.** Each parameter schema has one example call under `examples`:
+  `{}` for the no-argument reads, a placeholder such as `<validation-id>` for
+  the reads by id, and the short placeholder `SDDC_SPEC_EXAMPLE` for the spec
+  submits.
+- **AI guidance.** Each `llm_instructions` blob has `when_to_call`,
+  `output_shape` and `next_step`; the changes also have `preconditions`. The
+  JSONFlux hints (`result_scalars`, `result_digest`) are unchanged.
+- **One group text.** The `installer-bringup` group text is defined only in
+  `typed_ops.INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP`. `bringup.py` reads it from
+  there, so the group row gets the same text whichever registrar runs first.
+- **Open gap.** `installer.sddc.spec.validate` is `caution` without
+  `requires_approval`. It only checks a spec and deploys nothing; making it wait
+  for approval would change what it does, so it stays on the gap list.
+
+## Installer 9.0
+
+A VCF 9.0.x bring-up uses Installer 9.0.2. Such a target resolves to
+`installer-rest-9.1`, because the range is `>=9.0,<10.0`. There is no separate
+9.0 connector, because MEHO calls no path that 9.0 lacks:
+
+- The pinned 9.0 and 9.1 installer API files were compared with
+  `backend/scripts/diff_vcf_api_contract_catalogs.py`. 9.1 adds 5 operations
+  and removes none. MEHO calls none of the 5 new ones (resources calculation,
+  SDDC Manager discovery, vCenter network discovery, depot machine details).
+- The 9.0 case of the spec-reconcile lane (below) checks this in CI.
+
+**Every installer operation works on 9.0.** That is all 14 typed operations
+(`installer.sddc.spec.validate`, `installer.sddc.validation.status`,
+`installer.sddc.bringup.start`, `installer.sddc.bringup.retry`,
+`installer.sddc.bringup.status`, `installer.sddc.list`,
+`installer.bundles.list`, `installer.bundles.download-status`,
+`installer.bundles.download`, `installer.system.depot.get`,
+`installer.system.depot.set`, `installer.system.depot.sync-status`,
+`installer.system.trusted-certificates.list`,
+`installer.system.trusted-certificates.add`) and the multi-step operation
+`installer.composite.sddc.bringup`. None answers "not available on this
+version".
+
+What is different on 9.0 (from the two API files):
+
+- **SddcSpec.** MEHO sends the spec as it is, so the caller must build it for
+  the Installer's version. A 9.0 SddcSpec has `vcfOperationsFleetManagementSpec`
+  and no `vspClusterSpec`, `vidbSpec`, `fleetLcmSpec`, `sddcLcmSpec`,
+  `saltSpec` or `licenseServerSpec`. The `spec` hint says that rules (1) and
+  (3) are 9.1 only.
+- **Depot settings.** On 9.0, `depotConfiguration` needs `hostname` and `port`
+  and has no `url`. `vmwareAccount` has no `downloadActivationCode`.
+- **Answers.** Some 9.1 fields are not in a 9.0 answer, for example
+  `deploymentType` and `vcfInstanceName` on a bring-up task, and the DNS, NTP
+  and IP fields of `appliance-info`. MEHO reads these fields only when they are
+  there.
+- The token login (`POST /v1/tokens`), the trusted-certificate body and the
+  bundle download body are the same.
+
+A live bring-up of VCF 9.0 with Installer 9.0.2 through MEHO is a separate
+lab proof.
+
 ## Spec-reconcile lane
 
 Every hand-coded `METHOD:/path` — `POST:/v1/tokens`,
 `GET:/v1/system/appliance-info` (fingerprint), the typed reads'
-`GET:/v1/sddcs/{id}` and `GET:/v1/sddcs/validations/{id}` (the `_*_PATH`
-constants of `typed_reads.py`), the submit primitives'
+`GET:/v1/sddcs/{id}`, `GET:/v1/sddcs`, `GET:/v1/sddcs/validations/{id}` and
+the depot-family reads such as `GET:/v1/system/settings/depot/depot-sync-info`
+(the `_*_PATH` constants of `typed_reads.py`, among others), the submit primitives'
 `POST:/v1/sddcs/validations` and `POST:/v1/sddcs` (introspected from
 `typed_writes.TYPED_WRITE_DECLARED_OP_IDS`), and the composite's
 `POST:/v1/sddcs/validations`, `POST:/v1/sddcs`,
 `GET:/v1/sddcs/validations/{id}` (introspected from
-`bringup.BRINGUP_DECLARED_OP_IDS`) — is asserted against the pinned
-`vcf-installer-9.1` shelf spec (vendored from `vmware/vcf-api-specs`) by
+`bringup.BRINGUP_DECLARED_OP_IDS`) — is asserted against **both** pinned
+shelf specs, `vcf-installer-9.0` and `vcf-installer-9.1` (vendored from
+`vmware/vcf-api-specs`; one test case per file), by
 [`backend/tests/test_connectors_vcf_installer_spec_reconcile.py`](../../backend/tests/test_connectors_vcf_installer_spec_reconcile.py)
 (the #2980 harness; parse-only, in the required unit sweep, uniform skip when the
-shelf is unconfigured). Standard:
+shelf is unconfigured). CI checks out both files and fails when one is missing,
+so neither case skips there. A new operation that calls a 9.1-only path fails
+the 9.0 case; such an operation then needs a "not available on this version"
+answer for 9.0 targets before the range can stay at 9.0. Standard:
 [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 
 ## Dependencies

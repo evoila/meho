@@ -27,11 +27,21 @@ import (
 // On `status="ok"` the envelope carries the literal would-be request
 // (`method` / `resolved_path` / `query` / `redacted_body`) plus the
 // `preview_hash` (#3197) — the stable binding a caller presents on the
-// subsequent governed `call_operation` of a `destructive`-tier op. On
+// subsequent governed `call_operation` of a `destructive`-tier op. Every
+// preview whose op resolved also carries `safety_level`,
+// `requires_approval`, `policy_verdict` and `policy_reason` (#3973 /
+// #4923), so the operator sees before the real call whether it runs at
+// once, waits for approval, or is refused. On
 // `status="error"` / `status="unavailable"` the `error` string and the
 // `extras.error_code` describe why no preview (and no hash) was produced.
 // `query` / `redacted_body` / `extras` stay `json.RawMessage` so the
 // renderer pretty-prints them without imposing a per-vendor shape.
+//
+// A destructive or approval-gated typed/composite op previews as
+// `method="COMPOSITE"` (#3198 / #3312). Its envelope carries the plan as
+// `proposed_effect` when the plan can be built without the target, and
+// `plan_shown` / `plan_note` say when it cannot (#4028). Kept here so
+// `--json` does not drop them.
 type PreviewResult struct {
 	Status       string          `json:"status"`
 	OpID         string          `json:"op_id"`
@@ -42,8 +52,20 @@ type PreviewResult struct {
 	Query        json.RawMessage `json:"query,omitempty"`
 	RedactedBody json.RawMessage `json:"redacted_body,omitempty"`
 	PreviewHash  string          `json:"preview_hash"`
-	Error        *string         `json:"error"`
-	Extras       json.RawMessage `json:"extras,omitempty"`
+	// SafetyLevel / RequiresApproval / PolicyVerdict / PolicyReason are
+	// absent when the op did not resolve and on older backplanes, so all
+	// four stay optional.
+	SafetyLevel      string  `json:"safety_level,omitempty"`
+	RequiresApproval *bool   `json:"requires_approval,omitempty"`
+	PolicyVerdict    string  `json:"policy_verdict,omitempty"`
+	PolicyReason     *string `json:"policy_reason,omitempty"`
+	// ProposedEffect is the plan of what the op will change (#4028).
+	ProposedEffect json.RawMessage `json:"proposed_effect,omitempty"`
+	// PlanShown is nil on an ingested preview, which has no plan slot.
+	PlanShown *bool           `json:"plan_shown,omitempty"`
+	PlanNote  string          `json:"plan_note,omitempty"`
+	Error     *string         `json:"error"`
+	Extras    json.RawMessage `json:"extras,omitempty"`
 }
 
 // newPreviewCmd returns the `meho operation preview` command — the
@@ -98,8 +120,22 @@ func newPreviewCmd() *cobra.Command {
 			"input faults (unknown op, invalid params, unresolvable target) ride " +
 			"the envelope as `status=\"error\"` — HTTP is 200. A typed/composite " +
 			"op with no single literal HTTP request to preview comes back " +
-			"`status=\"unavailable\"` (the destructive-tier composite is the " +
-			"exception — it previews a param-bound request tuple).",
+			"`status=\"unavailable\"` (a destructive or approval-gated " +
+			"typed/composite op is the exception — it previews a param-bound " +
+			"request tuple). An approval-gated op that writes a credential " +
+			"(for example `vault.kv.put`) is not previewable and stays " +
+			"`status=\"unavailable\"`, so its secret params never surface.\n\n" +
+			"For such an op the preview prints the plan of what will change " +
+			"(`proposed_effect`) when the plan can be built without contacting " +
+			"the target. When the plan needs the target, the preview says so: " +
+			"the plan is built when you send the call and is shown on the " +
+			"approval request.\n\n" +
+			"Every preview whose op resolved also says the risk level and what " +
+			"MEHO would do with this call for you and this target: run it at " +
+			"once, wait for a second person's approval, or refuse it. The " +
+			"decision is made the same way `meho operation call` makes it, but " +
+			"nothing is written. With --json the fields are `safety_level`, " +
+			"`requires_approval`, `policy_verdict` and `policy_reason`.",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -245,6 +281,9 @@ func postPreview(
 func printPreviewResult(w io.Writer, connectorID, opID string, r *PreviewResult) {
 	fmt.Fprintf(w, "%s %s — status=%s (source_kind=%s)\n",
 		connectorID, opID, r.Status, r.SourceKind)
+	if line := policyLine(r); line != "" {
+		fmt.Fprintln(w, line)
+	}
 	if r.Status != "ok" {
 		// status == "error" / "unavailable": surface the reason + extras.
 		if r.Error != nil && *r.Error != "" {
@@ -266,12 +305,49 @@ func printPreviewResult(w io.Writer, connectorID, opID string, r *PreviewResult)
 		fmt.Fprintln(w, "  body (redacted):")
 		printPrettyOrRaw(w, r.RedactedBody)
 	}
+	if len(r.ProposedEffect) > 0 && string(r.ProposedEffect) != "null" {
+		fmt.Fprintln(w, "  plan (proposed_effect):")
+		printPrettyOrRaw(w, r.ProposedEffect)
+	} else if r.PlanShown != nil && !*r.PlanShown {
+		fmt.Fprintln(w, "  plan: not shown in this preview")
+		if r.PlanNote != "" {
+			fmt.Fprintf(w, "    %s\n", r.PlanNote)
+		}
+	}
 	// The hash is the load-bearing output — print it prominently, last,
 	// with the exact flag to thread it into a governed call.
 	fmt.Fprintf(w, "\npreview_hash: %s\n", r.PreviewHash)
 	fmt.Fprintf(w,
 		"  → pass to a governed dispatch: meho operation call %s %s --preview-hash %s [--target … --params …]\n",
 		connectorID, opID, r.PreviewHash)
+}
+
+// policyLine is the one plain line that says the risk level and what MEHO
+// would do with this call (#4923): "Risk level: dangerous. This call waits
+// for approval." It is empty when the backplane sent no risk level (the op
+// did not resolve, or an older backplane). Without a policy_verdict (an
+// older backplane that only sent requires_approval, #3973) the line falls
+// back to the approval flag.
+func policyLine(r *PreviewResult) string {
+	if r.SafetyLevel == "" {
+		return ""
+	}
+	line := "Risk level: " + r.SafetyLevel + "."
+	switch r.PolicyVerdict {
+	case "auto-execute":
+		return line + " This call runs at once."
+	case "needs-approval":
+		return line + " This call waits for approval."
+	case "deny":
+		if r.PolicyReason != nil && *r.PolicyReason != "" {
+			return line + " This call is refused: " + *r.PolicyReason
+		}
+		return line + " This call is refused."
+	}
+	if r.RequiresApproval != nil && *r.RequiresApproval {
+		return line + " This call waits for approval."
+	}
+	return line
 }
 
 // printPrettyOrRaw pretty-prints a JSON fragment, falling back to the

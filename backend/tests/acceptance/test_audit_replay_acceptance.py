@@ -24,8 +24,8 @@ clause survives the JIT / planner the production engine uses. This module is
 the load-bearing PG gate; it reuses the testcontainer fixtures and JWT mocks
 G8.1-T5 (#469) established.
 
-Coverage matrix (the five #1015 integration scenarios + unit edges)
-==================================================================
+Coverage matrix (the #1015 integration scenarios + unit edges)
+=============================================================
 
 1. **Multi-level session tree.** Seed root → child → grandchild + a
    sibling root (all sharing ``agent_session_id``, linked by
@@ -46,10 +46,6 @@ Coverage matrix (the five #1015 integration scenarios + unit edges)
    and the recursive tree is **not** built for the rejected request (the
    count-first guard runs before ``replay_session``). The Go CLI's 413
    redirect decodes this exact body shape.
-5. **Aggregate-only broadcast.** Invoking the REST replay route emits one
-   ``BroadcastEvent`` to ``meho:feed:{tenant_id}`` whose payload is exactly
-   ``{op_class, result_status, row_count}`` — no ``ReplayNode`` tree, no
-   per-node audit content reaches the SSE / Slack feed (decision #3).
 
 End-to-end CLI → REST → substrate
 =================================
@@ -75,8 +71,6 @@ from typing import Any
 
 import httpx
 import pytest
-import redis.asyncio as redis_async
-import redis.exceptions
 import respx
 import sqlalchemy as sa
 from fastapi import FastAPI
@@ -89,7 +83,6 @@ from meho_backplane.audit import AuditMiddleware
 from meho_backplane.audit_query import replay_session
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.broadcast import client as broadcast_client_module
-from meho_backplane.broadcast.events import BroadcastEvent
 from meho_backplane.db.models import AuditLog
 from meho_backplane.mcp import eager_import_mcp_modules
 from meho_backplane.mcp import router as mcp_router
@@ -140,12 +133,10 @@ _BASE = datetime(2026, 5, 20, 9, 0, 0, tzinfo=UTC)
 async def valkey_url(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[str]:
     """Boot a per-test ``valkey/valkey:8`` container and pin its URL.
 
-    The audit middleware's publish-on-write hook reads
-    ``BROADCAST_REDIS_URL`` from Settings; binding it here routes the
-    aggregate-only replay broadcast into the testcontainer's Valkey so the
-    decision-#3 assertion reads back from the real pipeline rather than a
-    mock. Verbatim copy of the G8.1-T5 acceptance fixture, kept local so
-    this suite's lifecycle is auditable from one place.
+    Binds ``BROADCAST_REDIS_URL`` to the testcontainer's Valkey so the
+    app never reaches for a real broadcast server. Copy of the G8.1-T5
+    acceptance fixture, kept local so this suite's lifecycle is auditable
+    from one place.
     """
     import os
 
@@ -227,31 +218,6 @@ async def _session_for_url(async_url: str) -> AsyncSession:
     engine = create_async_engine(async_url)
     factory = sa_async_sessionmaker(engine, expire_on_commit=False)
     return factory()
-
-
-async def _read_broadcast_event_for_tenant(
-    valkey_url: str,
-    tenant_id: str,
-    *,
-    block_ms: int = 30_000,
-) -> BroadcastEvent | None:
-    """XREAD one event from ``meho:feed:{tenant_id}`` (verbatim from G8.1-T5)."""
-    client = redis_async.from_url(valkey_url, decode_responses=True)
-    stream = f"meho:feed:{tenant_id}"
-    try:
-        try:
-            response = await client.xread(streams={stream: "0-0"}, count=1, block=block_ms)
-        except redis.exceptions.TimeoutError:
-            return None
-        if not response:
-            return None
-        _stream, entries = response[0]
-        _entry_id, fields = entries[0]
-        if "event" in fields:
-            return BroadcastEvent.model_validate_json(fields["event"])
-        return BroadcastEvent.model_validate(fields)
-    finally:
-        await client.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +401,7 @@ async def test_scenario_1_rest_replay_returns_multi_level_tree(
         "tenant_id",
         "row_count",
         "excluded_null_session_count",
+        "loose_row_count",
     }
     assert body["session_id"] == str(agent_session_id)
     assert body["tenant_id"] == TENANT_A_ID
@@ -496,6 +463,7 @@ async def test_scenario_1_mcp_replay_returns_multi_level_tree(
         "tenant_id",
         "row_count",
         "excluded_null_session_count",
+        "loose_row_count",
     }
     assert structured["excluded_null_session_count"] == 0
     assert structured["session_id"] == str(agent_session_id)
@@ -936,105 +904,6 @@ async def test_scenario_4_at_cap_boundary_returns_200(
 
 
 # ===========================================================================
-# Scenario 5 — Aggregate-only broadcast (no ReplayNode reaches the feed)
-# ===========================================================================
-
-
-async def test_scenario_5_replay_broadcast_is_aggregate_only(
-    pg_engine: None,
-    valkey_url: str,
-    async_pg_url: str,
-) -> None:
-    """The REST replay route's broadcast carries no ReplayNode/tree payload.
-
-    Decision #3: invoking ``meho_audit_replay`` emits one BroadcastEvent
-    whose payload is exactly ``{op_class, result_status, row_count}`` — never
-    the replayed tree or any per-node audit content. Reads back from the
-    real Valkey stream the middleware published to.
-    """
-    agent_session_id = uuid.uuid4()
-    async with await _session_for_url(async_pg_url) as session:
-        await _seed_multi_level_session(
-            session,
-            tenant_id=uuid.UUID(TENANT_A_ID),
-            agent_session_id=agent_session_id,
-        )
-        await session.commit()
-
-    app = _build_audit_acceptance_app()
-    key = make_rsa_keypair("kid-A")
-    # #1843: the REST cross-session replay route is tenant_admin-gated.
-    token_a = _mint_operator(keypair=key, tenant_id=TENANT_A_ID, role=TenantRole.TENANT_ADMIN)
-
-    async with _make_async_client(app) as client:
-        with respx.mock as mock_router:
-            mock_discovery_and_jwks(mock_router, public_jwks(key))
-            resp = await client.get(
-                f"/api/v1/audit/sessions/{agent_session_id}/replay",
-                headers=_bearer(token_a),
-            )
-    assert resp.status_code == 200, resp.text
-
-    event = await _read_broadcast_event_for_tenant(valkey_url, TENANT_A_ID)
-    assert event is not None, "no BroadcastEvent landed in Valkey within the 30s window"
-    # Distinct replay op_id, aggregate-only class.
-    assert event.op_id == "meho_audit_replay"
-    assert event.op_class == "audit_query"
-    # Exact key set — no `root`, no `children`, no per-node audit content.
-    assert set(event.payload.keys()) == {"op_class", "result_status", "row_count"}, (
-        f"replay broadcast leaked extra keys: {sorted(event.payload.keys())}"
-    )
-    assert event.payload["row_count"] == 4
-    # Defensive: no ReplayNode field names appear anywhere in the payload.
-    serialised = json.dumps(event.payload)
-    for leaked in ("root", "children", "depth", "ReplayNode", "vsphere.vm"):
-        assert leaked not in serialised, f"replay broadcast leaked '{leaked}'"
-
-
-async def test_scenario_5_over_cap_rejection_broadcast_is_aggregate_only(
-    pg_engine: None,
-    valkey_url: str,
-    async_pg_url: str,
-) -> None:
-    """Even the 413 rejection emits an aggregate-only broadcast with the count.
-
-    The route binds ``audit_row_count`` before raising 413, so the
-    audit-on-replay broadcast reports the rejected cardinality — still
-    aggregate-only, never the (un-built) tree.
-    """
-    over_cap_session = uuid.uuid4()
-    await _bulk_seed_anchor_rows(
-        async_pg_url,
-        tenant_id=uuid.UUID(TENANT_A_ID),
-        agent_session_id=over_cap_session,
-        count=REPLAY_ROW_CAP + 1,
-    )
-
-    app = _build_audit_acceptance_app()
-    key = make_rsa_keypair("kid-A")
-    # #1843: the REST cross-session replay route is tenant_admin-gated.
-    token_a = _mint_operator(keypair=key, tenant_id=TENANT_A_ID, role=TenantRole.TENANT_ADMIN)
-
-    async with _make_async_client(app) as client:
-        with respx.mock as mock_router:
-            mock_discovery_and_jwks(mock_router, public_jwks(key))
-            resp = await client.get(
-                f"/api/v1/audit/sessions/{over_cap_session}/replay",
-                headers=_bearer(token_a),
-            )
-    assert resp.status_code == 413, resp.text
-
-    event = await _read_broadcast_event_for_tenant(valkey_url, TENANT_A_ID)
-    assert event is not None, "no BroadcastEvent landed for the 413-rejected replay"
-    assert event.op_id == "meho_audit_replay"
-    assert event.op_class == "audit_query"
-    assert set(event.payload.keys()) == {"op_class", "result_status", "row_count"}
-    assert event.payload["row_count"] == REPLAY_ROW_CAP + 1
-    # 413 is a client-error status → result_status is not "ok".
-    assert event.payload["result_status"] != "ok"
-
-
-# ===========================================================================
 # End-to-end CLI → REST → substrate (Go-wire-shape seam, G8.1-T5 posture)
 # ===========================================================================
 
@@ -1087,6 +956,7 @@ async def test_e2e_cli_wire_contract_replay_envelope_against_seeded_db(
         "tenant_id",
         "row_count",
         "excluded_null_session_count",
+        "loose_row_count",
     }
     assert isinstance(body["root"], list)
     assert isinstance(body["row_count"], int)

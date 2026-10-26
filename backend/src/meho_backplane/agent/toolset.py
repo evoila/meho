@@ -56,30 +56,91 @@ can grow without a migration — the T2 design constraint):
     }
 
 * ``meta_tools`` — the allow-list of meta-tool names to register. Omitted /
-  ``null`` means "all meta-tools the identity's role admits" (the safe
-  default for a definition that just wants the standard discovery +
-  execution surface). An empty list registers no tools.
+  ``null`` means "all meta-tools the identity's role admits", except the
+  opt-in context tools (see below) — the safe default for a definition that
+  just wants the standard discovery + execution surface. An empty list
+  registers no tools.
 * ``connectors`` — an optional allow-list of ``connector_id`` values the
-  agent may reach through ``call_operation``. Omitted / ``null`` means "no
-  connector-level restriction beyond what dispatch already enforces"
-  (the tenant boundary + per-op RBAC still apply). An empty list forbids
-  every connector — ``call_operation`` is registered but every dispatch
-  is rejected before it reaches the dispatcher.
+  agent may reach through ``call_operation`` (and inspect through
+  ``preview_operation``). ``meho_connector_list`` shows only these
+  connectors, so the agent finds the ones it may use (#4233). Omitted /
+  ``null`` means "no connector-level restriction beyond what dispatch
+  already enforces" (the tenant boundary + per-op RBAC still apply). An
+  empty list forbids every connector — ``call_operation`` is registered
+  but every dispatch is rejected before it reaches the dispatcher.
 
 Unknown keys in the spec are ignored (forward-compat): a future spec field
 must not break an older runtime.
+
+Configured versus legacy surface
+================================
+
+A definition with a toolset spec (even ``{}``) resolves through this module:
+the connector-execution tools, the governed status, discovery and
+result-handle tools (``meho_status`` from #4233; ``meho_connector_list``,
+``list_targets``, ``preview_operation``, ``result_query`` from #3737), and
+the broadcast tools, each subject to the intersection above. A definition
+with **no** spec (``toolset is None``) keeps the legacy two-tool fallback in
+:mod:`meho_backplane.agent.run` until its definition is migrated to a spec.
+Stored definitions always have a spec (the database column defaults to
+``{}``), so every hosted run takes the configured path; ``toolset is None``
+only happens for definitions built in code. Runbook, approval, and admin
+tools are not in the catalog on purpose.
+
+Missing versus disabled tools (#3737)
+=====================================
+
+:func:`resolve_agent_toolset` reports the two cases apart so a definition
+author can tell them from the ``agent_toolset_resolved`` log line:
+
+* **missing** — the spec names a tool this runtime does not ship (a typo or
+  a newer tool). Nothing can be registered for it.
+* **disabled** — the tool exists, but this run does not get it: either the
+  spec's ``meta_tools`` list leaves it out (``not_in_allow_list``) or the
+  run's role is below the tool's floor (``role_below_floor``).
+
+A disabled tool is still not registered, so the model never sees it.
+
+Opt-in context tools (#3759)
+============================
+
+Four tools return stored tenant text: ``query_topology``, ``search_memory``,
+``search_knowledge`` (bridged from MCP by
+:func:`~meho_backplane.agent.toolset_discovery.build_retrieval_meta_tools`)
+and the hosted-only ``read_context_resource``
+(:mod:`meho_backplane.agent.hosted_context`). They are listed in
+:data:`OPT_IN_META_TOOL_NAMES` and register only when the spec's
+``meta_tools`` list names them. An omitted ``meta_tools`` does not add them,
+so existing definitions keep their surface; such a tool is reported
+``not_in_allow_list``.
 """
 
 from __future__ import annotations
 
-from typing import Any
+import hashlib
+import json
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 import structlog
-from pydantic_ai import ModelRetry, RunContext, Tool
+from pydantic_ai import RunContext, Tool
 
 from meho_backplane.agent.approval_wait import resume_or_surface_awaiting_approval
-from meho_backplane.agent.meta_tool import MetaToolSpec
+from meho_backplane.agent.hosted_context import (
+    READ_CONTEXT_RESOURCE,
+    build_read_context_resource_tool,
+)
+from meho_backplane.agent.meta_tool import MetaToolSpec, connector_errors_reach_model
+from meho_backplane.agent.tool_audit import ToolRefusedRetry
 from meho_backplane.agent.toolset_broadcast import build_broadcast_meta_tools
+from meho_backplane.agent.toolset_discovery import (
+    CONNECTOR_LIST,
+    RETRIEVAL_META_TOOL_NAMES,
+    build_discovery_meta_tools,
+    build_retrieval_meta_tools,
+    keep_allowed_connectors,
+)
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import role_at_least
 from meho_backplane.operations.meta_tools import (
@@ -91,9 +152,14 @@ from meho_backplane.settings import get_settings
 
 __all__ = [
     "META_TOOL_NAMES",
+    "OPT_IN_META_TOOL_NAMES",
     "RUNBOOK_EXECUTION_META_TOOL_NAMES",
+    "DisabledReason",
     "MetaToolSpec",
+    "ToolsetResolution",
+    "capability_versions",
     "resolve_agent_tools",
+    "resolve_agent_toolset",
     "toolset_admits_runbook_execution",
 ]
 
@@ -104,6 +170,12 @@ _log = structlog.get_logger(__name__)
 #: the dispatch targets. Lifted to a constant so the connector allow-list
 #: check and the schema stay in lock-step.
 _CONNECTOR_ID_ARG = "connector_id"
+
+#: Meta-tools that name a connector to run (or preview) an operation on. The
+#: spec's ``connectors`` allow-list is checked for these before the handler
+#: runs, so ``preview_operation`` cannot look at a connector the agent may
+#: not call.
+_CONNECTOR_SCOPED_TOOLS: frozenset[str] = frozenset({"call_operation", "preview_operation"})
 
 
 #: The connector-execution meta-tools. These three form the agent's working
@@ -152,6 +224,9 @@ _OPERATIONS_META_TOOLS: tuple[MetaToolSpec, ...] = (
             "the surface to one group, or directly when the query is specific "
             "enough. Returns ranked operations; inspect each hit's "
             "`safety_level` and `requires_approval` before calling it. "
+            "Check `outcome` first: call a hit only when it is `matched`. "
+            "For any other outcome, including `ambiguous`, do not call; "
+            "follow `advisory` and `narrowing` and narrow the search first. "
             "Arguments: `connector_id` (required), `query` (required, "
             "free-form), `group` (optional group_key), `limit` (default 10, "
             "max 50)."
@@ -205,13 +280,24 @@ _OPERATIONS_META_TOOLS: tuple[MetaToolSpec, ...] = (
 )
 
 
-#: The full agent meta-tool catalog: the connector-execution tools plus the
-#: broadcast coordination tools (#2548,
-#: :mod:`meho_backplane.agent.toolset_broadcast`). Catalog order is the order
-#: tools are advertised to the model.
+#: The full agent meta-tool catalog: the connector-execution tools, the
+#: governed discovery and result-handle tools (#3737,
+#: :mod:`meho_backplane.agent.toolset_discovery`), the broadcast
+#: coordination tools (#2548, :mod:`meho_backplane.agent.toolset_broadcast`),
+#: and the opt-in context tools (#3759).
+#: Catalog order is the order tools are advertised to the model.
 _META_TOOL_CATALOG: tuple[MetaToolSpec, ...] = (
     *_OPERATIONS_META_TOOLS,
+    *build_discovery_meta_tools(),
     *build_broadcast_meta_tools(),
+    *build_retrieval_meta_tools(),
+    build_read_context_resource_tool(),
+)
+
+#: Catalog tools a spec must name in ``meta_tools`` to get (#3759). They
+#: return stored tenant text, so an omitted allow-list does not add them.
+OPT_IN_META_TOOL_NAMES: frozenset[str] = frozenset(
+    {*RETRIEVAL_META_TOOL_NAMES, READ_CONTEXT_RESOURCE},
 )
 
 #: The set of meta-tool names the agent surface knows about. Public so a
@@ -306,10 +392,24 @@ def _make_meta_tool(
     keyword arguments are repacked into the ``arguments`` dict the handler
     reads.
 
-    For ``call_operation`` with a connector allow-list, the wrapper performs
-    a pre-dispatch connector check and raises :class:`ModelRetry` — an
-    agent-reasonable structured error, not a crash — when the requested
-    connector is outside the spec's ``connectors`` list.
+    Every call re-checks the tool's role floor against the operator of that
+    call (``ctx.deps``). The resolver already left out tools the role does
+    not admit; the re-check makes sure a tool call can never run under an
+    identity the floor refuses (#3737).
+
+    For ``call_operation`` and ``preview_operation`` with a connector
+    allow-list, the wrapper performs a pre-dispatch connector check and
+    raises :class:`ModelRetry` — an agent-reasonable structured error, not a
+    crash — when the requested connector is outside the spec's
+    ``connectors`` list.
+
+    An unknown or not-yet-ingested ``connector_id`` from the handler goes
+    back to the model as a failed tool result (#4232), so the model can pick
+    another id and the run goes on.
+
+    For ``meho_connector_list`` with a connector allow-list, the wrapper
+    keeps only the rows whose ``connector_id`` is in the list (#4233), so
+    the agent is not shown connectors it cannot call.
 
     For ``call_operation`` specifically the wrapper also threads the G11.1-T9
     (#1117) approval-resume substrate: when the dispatch returns
@@ -327,9 +427,21 @@ def _make_meta_tool(
 
     handler = meta.handler
     is_call_operation = meta.name == "call_operation"
+    is_connector_scoped = meta.name in _CONNECTOR_SCOPED_TOOLS
+    is_connector_list = meta.name == CONNECTOR_LIST
 
     async def _tool(ctx: RunContext[Operator], **arguments: Any) -> dict[str, Any]:
-        if is_call_operation and allowed_connectors is not None:
+        if not role_at_least(ctx.deps.tenant_role, meta.required_role):
+            _log.warning(
+                "agent_tool_role_denied",
+                meta_tool=meta.name,
+                operator_sub=ctx.deps.sub,
+                tenant_id=str(ctx.deps.tenant_id),
+            )
+            raise ToolRefusedRetry(
+                f"forbidden: {meta.name!r} requires a higher role. Do not retry it."
+            )
+        if is_connector_scoped and allowed_connectors is not None:
             connector_id = arguments.get(_CONNECTOR_ID_ARG)
             if connector_id not in allowed_connectors:
                 # Mirror the dispatcher's `denied` envelope shape but raise
@@ -338,17 +450,21 @@ def _make_meta_tool(
                 # connector) rather than a tool-execution crash.
                 _log.info(
                     "agent_tool_connector_denied",
+                    meta_tool=meta.name,
                     connector_id=connector_id,
                     operator_sub=ctx.deps.sub,
                     tenant_id=str(ctx.deps.tenant_id),
                 )
-                raise ModelRetry(
+                raise ToolRefusedRetry(
                     f"connector_id {connector_id!r} is not in this agent's "
                     f"allowed connectors {sorted(allowed_connectors)!r}. Pick "
                     f"an allowed connector or stop."
                 )
         call_arguments = dict(arguments)
-        result = await handler(ctx.deps, call_arguments)
+        with connector_errors_reach_model():
+            result = await handler(ctx.deps, call_arguments)
+        if is_connector_list and allowed_connectors is not None:
+            result = keep_allowed_connectors(result, allowed_connectors)
         if is_call_operation and result.get("status") == "awaiting_approval":
             settings = get_settings()
             return await resume_or_surface_awaiting_approval(
@@ -368,40 +484,60 @@ def _make_meta_tool(
     )
 
 
-def resolve_agent_tools(
+#: Why a catalog tool was not registered for a run.
+DisabledReason = Literal["not_in_allow_list", "role_below_floor"]
+
+
+@dataclass(frozen=True)
+class ToolsetResolution:
+    """The outcome of resolving one toolset spec for one operator.
+
+    * ``tools`` — the :class:`pydantic_ai.Tool` objects to register, in
+      catalog order.
+    * ``missing`` — names the spec asked for that this runtime does not ship.
+    * ``disabled`` — catalog tools that exist but were not registered, with
+      the reason: left out of the spec's ``meta_tools`` list, or the role is
+      below the tool's floor.
+    """
+
+    tools: list[Tool[Operator]]
+    missing: tuple[str, ...] = ()
+    disabled: dict[str, DisabledReason] = field(default_factory=dict)
+
+
+def resolve_agent_toolset(
     toolset: dict[str, Any] | None,
     operator: Operator,
-) -> list[Tool[Operator]]:
-    """Resolve the toolset spec ∩ identity permissions into Pydantic AI tools.
+) -> ToolsetResolution:
+    """Resolve the toolset spec ∩ identity permissions, with the reasons.
 
-    Returns the list of :class:`pydantic_ai.Tool` objects to register on the
-    loop's :class:`~pydantic_ai.Agent`. The set is the intersection of:
+    The registered set is the intersection of:
 
-    * the spec's ``meta_tools`` allow-list (or all meta-tools when omitted),
+    * the spec's ``meta_tools`` allow-list (or, when omitted, every
+      meta-tool except the opt-in ones in :data:`OPT_IN_META_TOOL_NAMES`),
       and
     * the meta-tools the *operator*'s role admits (via
       :func:`~meho_backplane.mcp.registry.role_at_least`).
 
-    A meta-tool failing either side is absent from the result — the
-    least-privilege default. A meta-tool name in the spec that the catalog
-    does not know is ignored with a warning (forward-compat: an allow-list
-    may name a tool a newer runtime ships; an older runtime simply can't
+    A meta-tool failing either side is absent from ``tools`` (the
+    least-privilege default) and listed in ``disabled`` with the side it
+    failed. A name in the spec that the catalog does not know is listed in
+    ``missing`` and logged as a warning (forward-compat: an allow-list may
+    name a tool a newer runtime ships; an older runtime simply can't
     register it).
 
     The spec's ``connectors`` allow-list (when present) is threaded into the
-    ``call_operation`` tool so a dispatch to a connector outside the list is
-    rejected with a structured, agent-reasonable error before it reaches the
-    dispatcher.
+    ``call_operation`` and ``preview_operation`` tools so a request to a
+    connector outside the list is rejected with a structured,
+    agent-reasonable error before it reaches the dispatcher.
 
     Args:
         toolset: the definition's toolset spec (``AgentDefinition.toolset``),
-            or ``None`` for the default surface. See the module docstring for
-            the shape.
+            or ``None`` for the whole catalog. See the module docstring for
+            the shape. (The legacy two-tool fallback for a definition with no
+            toolset lives in :mod:`meho_backplane.agent.run`, not here.)
         operator: the run's principal; its ``tenant_role`` is the identity
             permission the meta-tool floors are intersected against.
-
-    Returns:
-        The meta-tools to register, in catalog order.
 
     Raises:
         ValueError: when ``meta_tools`` or ``connectors`` is present but not
@@ -414,24 +550,33 @@ def resolve_agent_tools(
 
     # An unknown name in the spec is forward-compat noise, not an error;
     # log it once so a definition author sees the typo / version gap.
+    missing: tuple[str, ...] = ()
     if requested_names is not None:
-        for name in requested_names:
-            if name not in META_TOOL_NAMES:
-                _log.warning(
-                    "agent_toolset_unknown_meta_tool",
-                    meta_tool=name,
-                    known=sorted(META_TOOL_NAMES),
-                )
+        missing = tuple(name for name in requested_names if name not in META_TOOL_NAMES)
+        for name in missing:
+            _log.warning(
+                "agent_toolset_unknown_meta_tool",
+                meta_tool=name,
+                known=sorted(META_TOOL_NAMES),
+            )
 
     tools: list[Tool[Operator]] = []
+    disabled: dict[str, DisabledReason] = {}
     for meta in _META_TOOL_CATALOG:
         # Side 1 — toolset spec: omitted allow-list means "all"; a present
         # list must contain the name.
-        if requested_names is not None and meta.name not in requested_names:
+        # Opt-in tools additionally need an explicit allow-list entry.
+        if requested_names is None:
+            if meta.name in OPT_IN_META_TOOL_NAMES:
+                disabled[meta.name] = "not_in_allow_list"
+                continue
+        elif meta.name not in requested_names:
+            disabled[meta.name] = "not_in_allow_list"
             continue
         # Side 2 — identity permissions: the role must meet the tool's floor.
         # A tool the identity can't call is simply not registered.
         if not role_at_least(operator.tenant_role, meta.required_role):
+            disabled[meta.name] = "role_below_floor"
             continue
         tools.append(_make_meta_tool(meta, allowed_connectors=allowed_connectors))
 
@@ -442,6 +587,41 @@ def resolve_agent_tools(
         tenant_id=str(operator.tenant_id),
         tenant_role=operator.tenant_role.value,
         registered=[t.name for t in tools],
+        missing=list(missing),
+        disabled=disabled,
         connector_allow_list=connector_allow_list,
     )
-    return tools
+    return ToolsetResolution(tools=tools, missing=missing, disabled=disabled)
+
+
+def resolve_agent_tools(
+    toolset: dict[str, Any] | None,
+    operator: Operator,
+) -> list[Tool[Operator]]:
+    """Return only the tools of :func:`resolve_agent_toolset`.
+
+    The run loop needs just the tools to register; callers that want the
+    missing / disabled report call :func:`resolve_agent_toolset`.
+    """
+    return resolve_agent_toolset(toolset, operator).tools
+
+
+def capability_versions(tools: Iterable[Tool[Operator]]) -> dict[str, str]:
+    """Return ``{tool name: version}`` for *tools* (#3763).
+
+    The version is the first 12 hex characters of a SHA-256 over the
+    name, description, and input schema the model is shown. It changes
+    when any of them changes, so a delivery receipt can say which shape
+    of each tool a run had without copying the text.
+    """
+    versions: dict[str, str] = {}
+    for tool in tools:
+        definition = tool.tool_def
+        shown = {
+            "name": definition.name,
+            "description": definition.description,
+            "parameters": definition.parameters_json_schema,
+        }
+        encoded = json.dumps(shown, sort_keys=True, separators=(",", ":")).encode()
+        versions[definition.name] = hashlib.sha256(encoded).hexdigest()[:12]
+    return versions

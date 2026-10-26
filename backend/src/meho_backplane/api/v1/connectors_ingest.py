@@ -227,6 +227,7 @@ from meho_backplane.operations.ingest import (
     InvalidSchemaError,
     InvalidSpecError,
     InvalidStateTransitionError,
+    LegacyTenantConnectorCopyError,
     LlmClientFactory,
     LlmClientUnavailable,
     LlmOutputInvalid,
@@ -242,6 +243,7 @@ from meho_backplane.operations.ingest import (
     build_catalog_entry_not_found_detail,
     build_catalog_entry_typed_connector_detail,
     build_catalog_entry_upstream_not_spec_detail,
+    build_connector_legacy_tenant_copy_detail,
     build_connector_scope_ambiguous_detail,
     build_invalid_schema_detail,
     build_invalid_spec_detail,
@@ -292,7 +294,7 @@ _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 #: the #1801 fail-loud ambiguity 409. Shared by ``GET /{id}/review``
 #: and ``POST /{id}/enable-reads``; the resolver enforces the same
 #: ``tenant_admin`` gate on the built-in scope it always has.
-ConnectorScopePreference = Literal["tenant", "builtin"]
+ConnectorScopePreference = Literal["tenant", "builtin", "legacy"]
 
 #: Module-level :func:`Query` default — a call in a default-argument
 #: position is disallowed under the project's ruff config, the same
@@ -303,8 +305,10 @@ _PREFER_QUERY = Query(
         "Disambiguate a connector_id that resolves to BOTH a "
         "tenant-curated row and a built-in (tenant_id IS NULL) row. "
         "'tenant' targets the operator's tenant row; 'builtin' the "
-        "built-in scope (tenant_admin only). Omit for the default "
-        "fail-loud 409 connector_scope_ambiguous response."
+        "built-in scope (tenant_admin only); 'legacy' the tenant's old "
+        "copy stored under a former product name (the copy a delete "
+        "removes first). Omit for the default fail-loud 409 "
+        "connector_scope_ambiguous response."
     ),
 )
 
@@ -410,7 +414,8 @@ def get_llm_client_factory() -> LlmClientFactory:
             "description": (
                 "The body's ``tenant_id`` is neither omitted/null "
                 "(built-in / global scope) nor the caller's own tenant "
-                "UUID. Rejected synchronously on both the sync and "
+                "UUID, and the caller does not hold platform_admin. "
+                "Rejected synchronously on both the sync and "
                 "async branches; no job row is created."
             ),
             "content": {
@@ -682,7 +687,7 @@ async def _spawn_async_ingest(
             job.job_id,
             pipeline_call=_pipeline_call,
             dispatchability_check=partial(
-                _ingest_result_dispatchable, tenant_id=operator.tenant_id
+                _ingest_result_dispatchable, tenant_id=resolved.tenant_id or operator.tenant_id
             ),
         ),
         name=f"ingest-job-{job.job_id}",
@@ -717,11 +722,13 @@ async def _ingest_result_dispatchable(
     ``False`` persisted nothing the dispatcher can route, so the job
     ends ``degraded`` rather than lying with ``succeeded``.
 
-    ``tenant_id`` is the calling operator's JWT tenant (not the
-    body-resolved write scope): ``connector_exists`` unions built-ins
-    (``tenant_id IS NULL``) with the operator's own rows, so both
-    write scopes #2085 permits are inside the probed set. Bound via
-    :func:`functools.partial` at the :func:`run_ingest_job` call.
+    ``tenant_id`` is the body-resolved write scope when one was named,
+    else the calling operator's JWT tenant: ``connector_exists`` unions
+    built-ins (``tenant_id IS NULL``) with that tenant's rows, so the
+    built-in scope, the operator's own tenant, and a ``platform_admin``
+    write into another tenant (#3800) are all inside the probed set.
+    Bound via :func:`functools.partial` at the :func:`run_ingest_job`
+    call.
     """
     probe_product, probe_version, probe_impl_id = parse_connector_id(result.connector_id)
     return await connector_exists(
@@ -789,6 +796,7 @@ async def get_ingest_job_endpoint(
             job_id,
             tenant_id=operator.tenant_id,
             is_tenant_admin=operator.tenant_role is TenantRole.TENANT_ADMIN,
+            is_platform_admin=operator.platform_admin,
         )
     except IngestJobNotFoundError as exc:
         raise HTTPException(
@@ -1304,6 +1312,25 @@ async def catalog_endpoint(
     return CatalogListResponse(catalog=load_catalog().entries)
 
 
+def _legacy_tenant_copy_409(exc: LegacyTenantConnectorCopyError) -> HTTPException:
+    """``409 connector_legacy_tenant_copy`` for an old tenant copy (#4889).
+
+    Raised by the review / enable / enable-reads / disable / edit routes
+    when the operator's tenant holds rows for the id only under a former
+    product name. The copy can never be called, so the service refuses
+    instead of falling back to the built-in row or answering the
+    ``connector_not_ingested`` 404; the structured detail names the old
+    copy and the ``prefer=legacy`` / ``DELETE`` way out. Same 409 class
+    as the ambiguous-scope sibling: the id resolves, but not to a row the
+    route may act on. The DELETE route needs no mapping — it removes the
+    old copy.
+    """
+    return HTTPException(
+        status_code=http_status.HTTP_409_CONFLICT,
+        detail=build_connector_legacy_tenant_copy_detail(exc),
+    )
+
+
 def _not_ingested_404_if_registered(connector_id: str) -> HTTPException | None:
     """Structured ``connector_not_ingested`` 404 iff *connector_id* is a registered class (#137).
 
@@ -1365,7 +1392,9 @@ async def get_review_endpoint(
     makes that 409 actionable: it resolves directly to the named scope
     and skips the ambiguity probe, so an operator who has both rows can
     target the tenant-curated one (``prefer=tenant``) or the built-in
-    one (``prefer=builtin``). Omitted → the fail-loud default.
+    one (``prefer=builtin``). ``prefer=legacy`` shows the tenant's old
+    copy stored under a former product name (#4889), the copy ``DELETE``
+    removes first. Omitted → the fail-loud default.
     """
     service = ReviewService(operator)
     try:
@@ -1384,6 +1413,8 @@ async def get_review_endpoint(
             status_code=http_status.HTTP_409_CONFLICT,
             detail=build_connector_scope_ambiguous_detail(exc),
         ) from exc
+    except LegacyTenantConnectorCopyError as exc:
+        raise _legacy_tenant_copy_409(exc) from exc
     except ConnectorNotFoundError as exc:
         # #137: a registered-but-not-ingested built-in gets the structured
         # ``connector_not_ingested`` 404 (mirroring /operations/groups); a
@@ -1432,6 +1463,8 @@ async def edit_group_endpoint(
             status_code=http_status.HTTP_403_FORBIDDEN,
             detail=exc.detail,
         ) from exc
+    except LegacyTenantConnectorCopyError as exc:
+        raise _legacy_tenant_copy_409(exc) from exc
     except ConnectorNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
@@ -1507,6 +1540,8 @@ async def edit_op_endpoint(
             status_code=http_status.HTTP_403_FORBIDDEN,
             detail=exc.detail,
         ) from exc
+    except LegacyTenantConnectorCopyError as exc:
+        raise _legacy_tenant_copy_409(exc) from exc
     except ConnectorNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
@@ -1551,6 +1586,8 @@ async def enable_endpoint(
             status_code=http_status.HTTP_403_FORBIDDEN,
             detail=exc.detail,
         ) from exc
+    except LegacyTenantConnectorCopyError as exc:
+        raise _legacy_tenant_copy_409(exc) from exc
     except ConnectorNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
@@ -1636,6 +1673,8 @@ async def enable_reads_endpoint(
             status_code=http_status.HTTP_409_CONFLICT,
             detail=build_connector_scope_ambiguous_detail(exc),
         ) from exc
+    except LegacyTenantConnectorCopyError as exc:
+        raise _legacy_tenant_copy_409(exc) from exc
     except ConnectorNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
@@ -1673,6 +1712,8 @@ async def disable_endpoint(
             status_code=http_status.HTTP_403_FORBIDDEN,
             detail=exc.detail,
         ) from exc
+    except LegacyTenantConnectorCopyError as exc:
+        raise _legacy_tenant_copy_409(exc) from exc
     except ConnectorNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,

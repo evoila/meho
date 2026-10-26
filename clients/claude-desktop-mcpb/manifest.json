@@ -14,7 +14,11 @@
     "entry_point": "server/index.mjs",
     "mcp_config": {
       "command": "node",
-      "args": ["${__dirname}/server/index.mjs", "${user_config.backplane_url}"],
+      "args": [
+        "${__dirname}/server/index.mjs",
+        "${user_config.backplane_url}",
+        "${user_config.ca_cert}"
+      ],
       "env": {
         "NODE_EXTRA_CA_CERTS": "${user_config.ca_cert}",
         "MEHO_MCP_CLIENT_ID": "${user_config.client_id}",
@@ -32,7 +36,7 @@
     "ca_cert": {
       "type": "file",
       "title": "Internal CA bundle (optional)",
-      "description": "PEM bundle for the internal CA that signs the backplane's TLS certificate. Leave empty for public-CA deploys.",
+      "description": "PEM bundle for the internal CA that signs the backplane's TLS certificate; the extension adds it to its trust store. Pick the file with the file picker; a typed path must be absolute or start with ~/. Alternatively leave this empty and trust the root CA in your OS trust store (on macOS, the login keychain): current Claude Desktop runs extensions with the OS trust store enabled. Leave empty for public-CA deploys. No CA file yet? See \"Before you start: trust your deployment's CA\" on the MEHO docs page for Claude Desktop.",
       "required": false
     },
     "client_id": {
@@ -45,8 +49,8 @@
     "scopes": {
       "type": "string",
       "title": "OAuth scopes (advanced)",
-      "description": "Space-separated OAuth scopes the shim requests during login. Leave as the default working surface; add an elevated scope (e.g. \"mcp:read mcp:execute mcp:admin\") only to deliberately opt into operator mode. Requesting a scope your realm does not grant degrades to the default surface.",
-      "default": "mcp:read mcp:execute",
+      "description": "Space-separated OAuth scopes the shim requests during login. Leave the default: the working surface plus offline_access, which keeps the login alive between uses (up to 48 hours with no use, with the recommended realm setting). Add mcp:admin (e.g. \"mcp:read mcp:execute offline_access mcp:admin\") only to deliberately opt into operator mode. Every scope must be offered by your realm's meho-mcp client, or the login fails with invalid_scope.",
+      "default": "mcp:read mcp:execute offline_access",
       "required": false
     }
   },

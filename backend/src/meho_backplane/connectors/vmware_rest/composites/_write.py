@@ -89,14 +89,17 @@ from __future__ import annotations
 
 import asyncio
 import re
+import secrets
 import time
 from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 import httpx
+import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest import library_download, ovf_import_control
+from meho_backplane.connectors.vmware_rest.composite_issues import issue
 from meho_backplane.connectors.vmware_rest.ovf_import import (
     ImportPlacement,
     LeaseImportResult,
@@ -104,15 +107,27 @@ from meho_backplane.connectors.vmware_rest.ovf_import import (
 )
 from meho_backplane.connectors.vmware_rest.vim_body import (
     VIM_TYPE_NAME_KEY,
+    fault_message,
+    fault_type_name,
     retrieve_properties_body,
     unwrap_vim_value,
     vim_moref,
 )
-from meho_backplane.connectors.vmware_rest.vim_task import TASK_STATE_ERROR, poll_vim_task
-from meho_backplane.operations.composite import DispatchChild, enforce_subop_policy
+from meho_backplane.connectors.vmware_rest.vim_retrieve import retrieve_all_pages
+from meho_backplane.connectors.vmware_rest.vim_task import (
+    TASK_STATE_ERROR,
+    VimTaskResult,
+    poll_vim_task,
+)
+from meho_backplane.operations.composite import (
+    DispatchChild,
+    composite_resume_scope_var,
+    composite_resume_state,
+    enforce_subop_policy,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Coroutine
 
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
@@ -143,6 +158,8 @@ __all__ = [
     "vm_resize_composite",
     "vm_snapshot_revert_composite",
 ]
+
+_log = structlog.get_logger(__name__)
 
 
 # Connector_id every write composite governs its sub-ops against (fed to
@@ -213,6 +230,10 @@ _OP_DEPLOY_LIBRARY_VM = (
 # id strings and mutate nothing, so they run un-gated like the REST listing
 # reads.
 _OP_DEPLOY_OVF_LIBRARY_ITEM = "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy"
+# #3697: the OVF summary (``Vcenter.Ovf.LibraryItem_filter``) gives the default
+# VM name when the caller sets none. It reads the package and mutates nothing,
+# so it runs un-gated like the content-library finds.
+_OP_FILTER_OVF_LIBRARY_ITEM = "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=filter"
 # Per-request timeout for the two *synchronous* library-item deploys
 # (``_OP_DEPLOY_LIBRARY_VM`` / ``_OP_DEPLOY_OVF_LIBRARY_ITEM``). Both hold the
 # POST connection open for the entire multi-GB disk copy with no
@@ -230,10 +251,11 @@ _OP_DEPLOY_OVF_LIBRARY_ITEM = "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}
 # 30-min window live, faulting mid-transfer while vCenter kept copying.
 # Widening the read cap is a *bounded mitigation*, not the durable fix — a
 # still-larger item or a slower fabric can outrun any fixed ceiling, and on
-# this synchronous path a caller that disconnects mid-wait still aborts + rolls
-# the deploy back. The durable fixes are orthogonal and live elsewhere: async
-# governed dispatch (#3079) decouples completion from the request connection so
-# a dropped caller no longer cancels the in-flight deploy (the supported mode
+# this synchronous path a caller that disconnects mid-wait never gets the
+# answer (the deploy still runs to the end; the audit row records
+# ``caller_gone_at``, #3696). The durable fixes are orthogonal and live
+# elsewhere: async governed dispatch (#3079) decouples completion from the
+# request connection so a dropped caller loses nothing (the supported mode
 # for multi-GB items — see ``vm_deploy_from_library_composite``'s docstring),
 # and a typed pyvmomi ``HttpNfcLease`` import (#2890) would uncouple completion
 # from a single blocking read entirely.
@@ -249,6 +271,11 @@ _OVF_LIBRARY_ITEM_TYPE = "ovf"
 # mount); a single ``PropertyParams`` entry carries the operator's
 # ``ovf_properties`` map as ``{id, value}`` rows.
 _OVF_PROPERTY_PARAMS_TYPE = "PropertyParams"
+# ``Vcenter.Ovf.OvfParams`` subtype for the OVF deployment option (the size
+# profile of an appliance). The ``?action=filter`` summary lists the keys in
+# ``deployment_options[].key``; the deploy takes the choice as
+# ``selected_key`` (#4035).
+_OVF_DEPLOYMENT_OPTION_PARAMS_TYPE = "DeploymentOptionParams"
 _OP_GET_TASK = "GET:/cis/tasks/{task}"
 # Per-host vLCM remediation (``Esx.Settings.Hosts.Software_apply$Task``).
 # The pinned spec serves no ``POST:/vcenter/host/{host}?action=patch``
@@ -334,6 +361,18 @@ _OP_GET_CLUSTER = "GET:/vcenter/cluster/{cluster}"
 # form the ingest parser emits and the pinned-spec reconcile asserts).
 _OP_RECONFIG_VM_TASK = "POST:/VirtualMachine/{moId}/ReconfigVM_Task"
 _OP_RETRIEVE_PROPERTIES = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+# A read of many objects in one call follows the continuation pages vCenter
+# may send (#4862, ``vim_retrieve.retrieve_all_pages``). Listed on the
+# manifest of every composite that reads that way.
+_OP_CONTINUE_RETRIEVE_PROPERTIES = "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx"
+# #3697: vm.deploy_from_library deploys under a unique name and renames the
+# finished VM or vApp to the requested name through the core vim
+# ``ManagedEntity.Rename_Task`` (no REST rename exists in the pinned spec).
+_OP_RENAME_VM_TASK = "POST:/VirtualMachine/{moId}/Rename_Task"
+_OP_RENAME_VAPP_TASK = "POST:/VirtualApp/{moId}/Rename_Task"
+# A failed vApp deploy is cleaned up with the vApp's own ``Destroy_Task``,
+# which destroys the vApp and every VM in it (no REST vApp delete exists).
+_OP_DESTROY_VAPP_TASK = "POST:/VirtualApp/{moId}/Destroy_Task"
 # Concrete runtime path for the config read: the PropertyCollector is a
 # singleton whose moId is the literal ``propertyCollector`` (the same
 # concrete path the typed reads + read composites POST). ``ReconfigVM_Task``
@@ -700,18 +739,19 @@ _CLUSTER_VM_GROUP_TYPE = "ClusterVmGroup"
 _CLUSTER_HOST_GROUP_TYPE = "ClusterHostGroup"
 _CLUSTER_GROUP_SPEC_TYPE = "ClusterGroupSpec"
 _CLUSTER_COMPUTE_RESOURCE_MO_TYPE = "ClusterComputeResource"
-# ``ClusterComputeResource.configurationEx.group`` — the array of existing
-# ``ClusterGroupInfo`` (VM + host) groups; read for the VM-Host rule's
-# group-name collision check. The root resource pool of a cluster is read off
+# The root resource pool of a cluster is read off
 # ``ClusterComputeResource.resourcePool`` (a single MoRef) for the #3505
 # resource-pool create's ``cluster`` convenience parent resolution.
-_PROP_CONFIGURATION_EX_GROUP = "configurationEx.group"
 _PROP_CLUSTER_RESOURCE_POOL = "resourcePool"
-# Property path the collision / idempotence read queries on the cluster:
-# ``ClusterComputeResource.configurationEx`` is a ``ClusterConfigInfoEx``
-# whose ``rule`` array holds the existing ``ClusterRuleInfo`` rules
-# (spec-verified). Read un-gated via the shared ``RetrievePropertiesEx``.
-_PROP_CONFIGURATION_EX_RULE = "configurationEx.rule"
+# The cluster's whole configuration. On a cluster the value is a
+# ``ClusterConfigInfoEx``: its ``rule`` array holds the ``ClusterRuleInfo``
+# rules and its ``group`` array the ``ClusterGroupInfo`` (VM + host) groups.
+# The vim API declares the property as the base type
+# ``ComputeResourceConfigInfo``, which has no ``rule`` / ``group`` /
+# ``drsConfig`` member, and vCenter 8.0.x rejects a path into those members
+# (``configurationEx.rule``) with an HTTP 500 ``InvalidProperty`` (#3617).
+# So every read asks for the whole object and picks the member in code.
+_PROP_CONFIGURATION_EX = "configurationEx"
 
 # operator-facing ``rule_type`` -> vim rule-info ``_typeName``.
 _DRS_RULE_TYPE_TYPE_NAMES: dict[str, str] = {
@@ -796,6 +836,22 @@ _PROP_DVS_CONFIG_VERSION = "config.configVersion"
 # Required int ``timeout`` on the maintenance request types; ``0`` defers
 # entirely to the poll's wall-clock bound below.
 _MAINTENANCE_VIM_TIMEOUT: Final[int] = 0
+# host.evacuate (#4895): the host's ``parent`` is the cluster it is in (a
+# ``ClusterComputeResource`` MoRef); a host outside a cluster has a plain
+# ``ComputeResource`` parent, so the read doubles as the "in a cluster" check.
+_PROP_PARENT = "parent"
+# ``ClusterDrsConfigInfo.defaultVmBehavior`` value under which vCenter carries
+# out its own DRS moves -- including the ones maintenance mode needs.
+_DRS_BEHAVIOR_FULLY_AUTOMATED = "fullyAutomated"
+# ``Vcenter.VM.Summary.power_state`` value of a running VM; only running VMs
+# are moved (MEHO does not send ``evacuatePoweredOffVms``).
+_VM_POWER_STATE_ON = "POWERED_ON"
+# ``EnterMaintenanceModeRequestType.maintenanceSpec`` DataObjects (#3103:
+# every DataObject carries its ``_typeName``) and vCenter's own default for
+# ``VsanHostDecommissionMode.objectAction`` when the spec is left out.
+_HOST_MAINTENANCE_SPEC_TYPE = "HostMaintenanceSpec"
+_VSAN_HOST_DECOMMISSION_MODE_TYPE = "VsanHostDecommissionMode"
+_VSAN_MODE_DEFAULT = "ensureObjectAccessibility"
 
 # Wall-clock bounds for the #2970 vim task polls + the cluster.patch cis
 # task poll -- the 600s ``vm.disk.grow`` / ``vm.clone_from_template``
@@ -989,6 +1045,8 @@ _OP_COMPOSITE_VM_MIGRATE = "vmware.composite.vm.migrate"
 # Composite op_ids -- retained as the canonical documentation anchor.
 _COMPOSITE_OP_ID_VM_CREATE = "vmware.composite.vm.create"
 _COMPOSITE_OP_ID_VM_CLONE = "vmware.composite.vm.clone"
+_COMPOSITE_OP_ID_VM_DEPLOY_FROM_LIBRARY = "vmware.composite.vm.deploy_from_library"
+_COMPOSITE_OP_ID_VM_IMPORT_FROM_LIBRARY = "vmware.composite.vm.import_from_library"
 _COMPOSITE_OP_ID_VM_SNAPSHOT_REVERT = "vmware.composite.vm.snapshot.revert"
 _COMPOSITE_OP_ID_VM_MIGRATE = "vmware.composite.vm.migrate"
 _COMPOSITE_OP_ID_VM_POWER_BULK = "vmware.composite.vm.power.bulk"
@@ -1059,6 +1117,24 @@ _SUB_OPS_VM_DEPLOY_FROM_LIBRARY: tuple[str, ...] = (
     _OP_FIND_LIBRARY_ITEM,
     _OP_DEPLOY_OVF_LIBRARY_ITEM,
     _power_vm_op_id("start"),
+    # #3697 self-clean on a failed deploy: the OVF summary that supplies the
+    # default VM name when ``name`` is not set, the listing that finds the VM
+    # by its unique deploy name, and the DELETE that removes it.
+    _OP_FILTER_OVF_LIBRARY_ITEM,
+    _OP_LIST_VMS,
+    _OP_DELETE_VM,
+)
+#: vm.deploy_from_library's vim leg (#3697): the ``Rename_Task`` that gives
+#: the finished VM (or vApp) its requested name, the ``Destroy_Task`` that
+#: removes a vApp a failed deploy left (with its VMs), and the property
+#: read that polls the tasks and finds such a vApp by its deploy name (with
+#: the continuation pages of the vApp name read, #4862).
+_VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY: tuple[str, ...] = (
+    _OP_RETRIEVE_PROPERTIES,
+    _OP_CONTINUE_RETRIEVE_PROPERTIES,
+    _OP_RENAME_VM_TASK,
+    _OP_RENAME_VAPP_TASK,
+    _OP_DESTROY_VAPP_TASK,
 )
 # vm.import_from_library (#3229) REST sub-ops: the shared name-resolution find
 # actions, the optional power-on, and the content-library download-session flow
@@ -1139,6 +1215,12 @@ _SUB_OPS_VM_RESIZE: tuple[str, ...] = (
     _OP_GET_VM,
     _OP_UPDATE_VM_CPU,
     _OP_UPDATE_VM_MEMORY,
+)
+#: vm.destroy's 9.0+ REST arm (#3198): the fail-closed power-state read plus
+#: the synchronous delete. The pre-9.0 vim arm is ``_VIM_SUB_OPS_VM_DESTROY``.
+_SUB_OPS_VM_DESTROY: tuple[str, ...] = (
+    _OP_GET_VM,
+    _OP_DELETE_VM,
 )
 _SUB_OPS_VM_NIC_REPOINT: tuple[str, ...] = (
     _OP_GET_VM_NIC,
@@ -1224,6 +1306,8 @@ async def _write_sub_op(
     params: dict[str, Any],
     *,
     timeout: Any = httpx.USE_CLIENT_DEFAULT,
+    resume_state: dict[str, Any] | None = None,
+    after_main_effect: bool = False,
 ) -> tuple[OperationResult | None, Any]:
     """Gate then issue one *write* sub-call directly on the connector session.
 
@@ -1248,6 +1332,10 @@ async def _write_sub_op(
     every write sub-op keeps the connector's 30s client default unchanged;
     only the two synchronous library-item deploys pass an explicit long
     ceiling (:data:`_LIBRARY_ITEM_DEPLOY_TIMEOUT`, #3076).
+
+    ``resume_state`` and ``after_main_effect`` go to the seam unchanged
+    (#4217): the state a park saves for its resume, and the mark for a write
+    that runs after the composite's main change exists.
     """
     gate = await enforce_subop_policy(
         operator=operator,
@@ -1257,6 +1345,7 @@ async def _write_sub_op(
         requires_approval=_WRITE_REQUIRES_APPROVAL,
         target=target,
         params=params,
+        **_resume_kwargs(resume_state, after_main_effect),
     )
     if gate is not None:
         return gate, None
@@ -1277,6 +1366,8 @@ async def _write_vmomi_sub_op(
     vmomi_path: str,
     body: dict[str, Any],
     params: dict[str, Any],
+    resume_state: dict[str, Any] | None = None,
+    after_main_effect: bool = False,
 ) -> tuple[OperationResult | None, Any]:
     """Gate then issue one *mutating* vim (VI-JSON) sub-call on the connector session.
 
@@ -1310,6 +1401,9 @@ async def _write_vmomi_sub_op(
     substituted, e.g. ``/VirtualMachine/vm-1/ReconfigVM_Task``); ``op_id``
     is the placeholder governance key so a per-``(principal, op, target)``
     grant matches regardless of which VM the write targets.
+
+    ``resume_state`` and ``after_main_effect`` work as on
+    :func:`_write_sub_op` (#4217).
     """
     gate = await enforce_subop_policy(
         operator=operator,
@@ -1319,6 +1413,7 @@ async def _write_vmomi_sub_op(
         requires_approval=_WRITE_REQUIRES_APPROVAL,
         target=target,
         params=params,
+        **_resume_kwargs(resume_state, after_main_effect),
     )
     if gate is not None:
         return gate, None
@@ -1326,19 +1421,61 @@ async def _write_vmomi_sub_op(
     return None, payload
 
 
+def _task_timeout_issue(task_kind: str, task_moid: str) -> dict[str, Any]:
+    """``error`` issue for a vim task that did not finish in time (#3813).
+
+    The change may still land later, but the operation did not confirm it,
+    so the dispatcher must record a failure, not ``ok``.
+    """
+    return issue(
+        "connector",
+        "error",
+        f"{task_kind} {task_moid} did not finish in time; the change is not confirmed",
+    )
+
+
+def _resume_kwargs(resume_state: dict[str, Any] | None, after_main_effect: bool) -> dict[str, Any]:
+    """The seam's resume keywords, only when set (#4217).
+
+    Leaving them out on the default path keeps the many test doubles that
+    stand in for :func:`enforce_subop_policy` with the original keywords
+    working.
+    """
+    kwargs: dict[str, Any] = {}
+    if resume_state is not None:
+        kwargs["resume_state"] = resume_state
+    if after_main_effect:
+        kwargs["after_main_effect"] = True
+    return kwargs
+
+
 def _rolled_back(
     *,
     steps: list[str],
     failed_step: str,
     reason: str,
+    rollback_note: str | None = None,
 ) -> dict[str, Any]:
-    """Build the canonical rolled_back response envelope for :func:`vm_create_composite`."""
+    """Build the canonical rolled_back response envelope for :func:`vm_create_composite`.
+
+    A rollback means the create did not finish, so the envelope carries an
+    ``error``-severity issue and the dispatcher records a failure (#3813).
+    *rollback_note* says what happened to a VM the run had created (#4057).
+    It comes before the cause, so a shortened error line still shows it.
+    """
+    if rollback_note is None:
+        message = f"vm.create failed at step {failed_step!r}" + (f": {reason}" if reason else "")
+    else:
+        message = f"vm.create failed at step {failed_step!r}; {rollback_note}" + (
+            f" Cause: {reason}" if reason else ""
+        )
     return {
         "status": "rolled_back",
         "vm_id": None,
         "steps_succeeded": steps,
         "failed_step": failed_step,
         "rollback_reason": reason,
+        "issues": [issue("connector", "error", message)],
     }
 
 
@@ -1605,25 +1742,79 @@ async def _resolve_folder_moid(
     )
 
 
-async def _rollback_created_vm(
+async def _roll_back_created_vm(
     *,
     connector: VmwareRestConnector,
     target: Any,
     operator: Operator,
     vm_id: str,
-) -> None:
-    """Issue ``DELETE:/vcenter/vm/{vm}`` to remove a half-created VM.
+    steps: list[str],
+    failed_step: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Remove a half-created VM with ``DELETE:/vcenter/vm/{vm}``; the ``rolled_back`` envelope.
 
-    Best-effort: rollback faults are swallowed -- the operator already knows
-    the create flow failed, and a denied/queued rollback sub-op or a
-    transport error must not mask the original failure. A gate result from
-    the seam is ignored here for the same reason (the rollback DELETE is a
-    cleanup, not an operator-requested action).
+    A failed, denied or waiting rollback DELETE does not replace the
+    original failure: the envelope is still ``rolled_back`` with the failed
+    step and its cause. The ``rollback`` field and the error message say
+    what happened to the VM (#4057): ``removed``, ``awaiting_approval``
+    (the VM still exists until someone approves the DELETE) or
+    ``not_removed`` (the operator must delete it by hand). The VM exists by
+    now, so a DELETE that waits for approval saves the rollback as its
+    resume state (#4217): approving it re-runs ``vm.create``, which then
+    only runs this rollback (:func:`_resumed_vm_create_rollback`) and
+    creates no VM.
     """
+    rollback = {"vm_id": vm_id, "steps": steps, "failed_step": failed_step, "reason": reason}
     try:
-        await _write_sub_op(connector, target, operator, _OP_DELETE_VM, {"vm": vm_id})
-    except httpx.HTTPError:
-        return
+        gate, _ = await _write_sub_op(
+            connector,
+            target,
+            operator,
+            _OP_DELETE_VM,
+            {"vm": vm_id},
+            resume_state={"rollback": rollback},
+            after_main_effect=True,
+        )
+    except httpx.HTTPError as exc:
+        outcome = "not_removed"
+        note = (
+            f"the rollback could not remove the VM it created ({vm_id}): "
+            f"{_vsphere_fault_detail(exc).rstrip('.')}. Delete the VM by hand."
+        )
+    else:
+        if gate is None:
+            outcome = "removed"
+            note = f"the rollback removed the VM it created ({vm_id})."
+        elif gate.status == "awaiting_approval":
+            outcome = "awaiting_approval"
+            note = (
+                f"removing the VM it created ({vm_id}) waits for approval. "
+                "The VM exists until then."
+            )
+        else:
+            outcome = "not_removed"
+            note = (
+                f"the rollback was not allowed to remove the VM it created ({vm_id}). "
+                "Delete the VM by hand."
+            )
+    envelope = _rolled_back(steps=steps, failed_step=failed_step, reason=reason, rollback_note=note)
+    envelope["rollback"] = {"vm_id": vm_id, "outcome": outcome}
+    return envelope
+
+
+def _resumed_vm_create_rollback() -> dict[str, Any] | None:
+    """The rollback a waiting ``vm.create`` DELETE saved, during its resume (#4217)."""
+    saved = composite_resume_state(_COMPOSITE_OP_ID_VM_CREATE)
+    rollback = saved.get("rollback") if saved is not None else None
+    if not isinstance(rollback, dict) or not isinstance(rollback.get("vm_id"), str):
+        return None
+    return {
+        "vm_id": rollback["vm_id"],
+        "steps": [str(step) for step in rollback.get("steps") or []],
+        "failed_step": str(rollback.get("failed_step") or ""),
+        "reason": str(rollback.get("reason") or ""),
+    }
 
 
 async def _enable_nested_hv(
@@ -1671,7 +1862,7 @@ async def _enable_nested_hv(
             timeout_seconds=_VM_CREATE_VHV_TASK_TIMEOUT_SECONDS,
         )
     except httpx.HTTPError as exc:
-        return None, f"nested_hv reconfigure failed: {exc}"
+        return None, f"nested_hv reconfigure failed: {_vsphere_fault_detail(exc)}"
     if outcome.state == TASK_STATE_ERROR:
         return None, (
             f"nested_hv ReconfigVM_Task on vm {vm_id!r} faulted: "
@@ -2113,7 +2304,7 @@ async def _issue_vim_create(
             timeout_seconds=_VM_CREATE_TASK_TIMEOUT_SECONDS,
         )
     except httpx.HTTPError as exc:
-        return None, None, f"create via CreateVM_Task failed: {exc}"
+        return None, None, f"create via CreateVM_Task failed: {_vsphere_fault_detail(exc)}"
     if outcome.state == TASK_STATE_ERROR:
         return (
             None,
@@ -2159,7 +2350,7 @@ async def _power_on_created_vm(
             connector, target, operator, _power_vm_op_id("start"), {"vm": vm_id}
         )
     except httpx.HTTPError as exc:
-        return None, f"power_on failed: {exc}"
+        return None, f"power_on failed: {_vsphere_fault_detail(exc)}"
     return gate, None
 
 
@@ -2341,10 +2532,15 @@ async def _vm_create_via_vim(
         if gate is not None:
             return gate
         if power_failure is not None:
-            await _rollback_created_vm(
-                connector=connector, target=target, operator=operator, vm_id=vm_id
+            return await _roll_back_created_vm(
+                connector=connector,
+                target=target,
+                operator=operator,
+                vm_id=vm_id,
+                steps=steps,
+                failed_step="power_on",
+                reason=power_failure,
             )
-            return _rolled_back(steps=steps, failed_step="power_on", reason=power_failure)
         steps.append("power_on")
 
     created: dict[str, Any] = {
@@ -2415,7 +2611,29 @@ async def vm_create_composite(
     ``resource_pool`` + ``datastore`` pins; absent them it refuses with the
     structured ``placement_params`` ``rolled_back`` before any write. All
     knobs at default keep the REST path below byte-identical.
+
+    A rollback DELETE that waits for approval saves the rollback as its
+    resume state (#4217). Approving it re-runs this composite, which then
+    only deletes the VM the first run created and returns the same
+    ``rolled_back`` envelope: no second VM is created. An approved rollback
+    DELETE with no saved rollback (a request saved before #4217) is refused
+    before anything runs.
     """
+    rollback = _resumed_vm_create_rollback()
+    refusal = _refuse_resume_without_state(
+        composite_op_id=_COMPOSITE_OP_ID_VM_CREATE,
+        write_ops=frozenset({_OP_DELETE_VM}),
+        has_state=rollback is not None,
+        nothing_done="no VM was created",
+        remediation="Nothing ran. Delete the VM named in the approval request by hand.",
+    )
+    if refusal is not None:
+        return refusal
+    if rollback is not None:
+        return await _roll_back_created_vm(
+            connector=connector, target=target, operator=operator, **rollback
+        )
+
     about_version = await connector._about_version(target, operator)
     if _vim_create_required(about_version) or _shared_disk_knobs_requested(params):
         return await _vm_create_via_vim(
@@ -2478,7 +2696,9 @@ async def vm_create_composite(
         )
     except httpx.HTTPError as exc:
         # Create failed; nothing to roll back.
-        return _rolled_back(steps=steps, failed_step="create", reason=f"create failed: {exc}")
+        return _rolled_back(
+            steps=steps, failed_step="create", reason=f"create failed: {_vsphere_fault_detail(exc)}"
+        )
     if gate is not None:
         return gate
     vm_id = _unwrap_value(create_payload)
@@ -2509,13 +2729,17 @@ async def vm_create_composite(
                 connector, target, operator, _OP_CREATE_VM_NIC, {"vm": vm_id, **nic_spec}
             )
         except httpx.HTTPError as exc:
-            await _rollback_created_vm(
-                connector=connector, target=target, operator=operator, vm_id=vm_id
-            )
-            return _rolled_back(
+            return await _roll_back_created_vm(
+                connector=connector,
+                target=target,
+                operator=operator,
+                vm_id=vm_id,
                 steps=steps,
                 failed_step="nic_attach",
-                reason=f"nic attach for network={nic.get('network')!r} failed: {exc}",
+                reason=(
+                    f"nic attach for network={nic.get('network')!r} failed: "
+                    f"{_vsphere_fault_detail(exc)}"
+                ),
             )
         if gate is not None:
             return gate
@@ -2529,10 +2753,15 @@ async def vm_create_composite(
         if gate is not None:
             return gate
         if vhv_failure is not None:
-            await _rollback_created_vm(
-                connector=connector, target=target, operator=operator, vm_id=vm_id
+            return await _roll_back_created_vm(
+                connector=connector,
+                target=target,
+                operator=operator,
+                vm_id=vm_id,
+                steps=steps,
+                failed_step="nested_hv",
+                reason=vhv_failure,
             )
-            return _rolled_back(steps=steps, failed_step="nested_hv", reason=vhv_failure)
         steps.append("nested_hv")
 
     if power_on:
@@ -2542,10 +2771,15 @@ async def vm_create_composite(
         if gate is not None:
             return gate
         if power_failure is not None:
-            await _rollback_created_vm(
-                connector=connector, target=target, operator=operator, vm_id=vm_id
+            return await _roll_back_created_vm(
+                connector=connector,
+                target=target,
+                operator=operator,
+                vm_id=vm_id,
+                steps=steps,
+                failed_step="power_on",
+                reason=power_failure,
             )
-            return _rolled_back(steps=steps, failed_step="power_on", reason=power_failure)
         steps.append("power_on")
 
     created: dict[str, Any] = {
@@ -2686,11 +2920,6 @@ async def vm_clone_composite(
 # the pinned ``vcenter.yaml``), un-gated reads that mutate nothing.
 
 
-def _deploy_issue(category: str, severity: str, message: str) -> dict[str, Any]:
-    """Build one issue projection ``{category, severity, message}``."""
-    return {"category": category, "severity": severity, "message": message}
-
-
 def _deploy_failure(
     status: str,
     *,
@@ -2753,7 +2982,7 @@ def _extract_ovf_issues(error_report: Any) -> list[dict[str, Any]]:
             if isinstance(entry, dict):
                 category = entry.get("category")
                 issues.append(
-                    _deploy_issue(
+                    issue(
                         category if isinstance(category, str) else "unknown",
                         severity,
                         _ovf_message(entry),
@@ -2820,7 +3049,7 @@ async def _resolve_deploy_library_item(
         return None, _deploy_failure(
             "invalid_reference",
             issues=[
-                _deploy_issue(
+                issue(
                     "input",
                     "error",
                     "supply library_item (id) or library_item_name to identify the OVF item",
@@ -2837,16 +3066,14 @@ async def _resolve_deploy_library_item(
         if not library_ids:
             return None, _deploy_failure(
                 "library_not_found",
-                issues=[
-                    _deploy_issue("input", "error", f"library {library_name!r} matched no library")
-                ],
+                issues=[issue("input", "error", f"library {library_name!r} matched no library")],
             )
         if len(library_ids) > 1:
             return None, _deploy_failure(
                 "ambiguous_library",
                 candidates=library_ids,
                 issues=[
-                    _deploy_issue(
+                    issue(
                         "input",
                         "error",
                         f"library {library_name!r} matched {len(library_ids)} libraries",
@@ -2864,18 +3091,14 @@ async def _resolve_deploy_library_item(
     if not item_ids:
         return None, _deploy_failure(
             "item_not_found",
-            issues=[
-                _deploy_issue("input", "error", f"OVF item {item_name!r} matched no library item")
-            ],
+            issues=[issue("input", "error", f"OVF item {item_name!r} matched no library item")],
         )
     if len(item_ids) > 1:
         return None, _deploy_failure(
             "ambiguous_item",
             candidates=item_ids,
             issues=[
-                _deploy_issue(
-                    "input", "error", f"OVF item {item_name!r} matched {len(item_ids)} items"
-                )
+                issue("input", "error", f"OVF item {item_name!r} matched {len(item_ids)} items")
             ],
         )
     return item_ids[0], None
@@ -2901,38 +3124,54 @@ def _deploy_eula_field_name(about_version: str | None) -> str:
     return "accept_all_eula"
 
 
-def _build_ovf_deploy_body(params: dict[str, Any], eula_field: str) -> dict[str, Any]:
+def _build_ovf_deploy_target(params: dict[str, Any]) -> dict[str, Any]:
+    """Build the OVF ``DeploymentTarget``: ``resource_pool`` plus optional ``host`` / ``folder``."""
+    deploy_target: dict[str, Any] = {"resource_pool_id": params["resource_pool"]}
+    _put_if_str(deploy_target, "host_id", params.get("host"))
+    _put_if_str(deploy_target, "folder_id", params.get("folder"))
+    return deploy_target
+
+
+def _build_ovf_deploy_body(params: dict[str, Any], eula_field: str, *, name: str) -> dict[str, Any]:
     """Build the ``{deployment_spec, target}`` OVF deploy request body.
 
     ``resource_pool`` is the required deploy-target anchor; ``host`` / ``folder``
     refine it. ``network_mappings`` is sent verbatim as the OVF-key → network-moid
     map (the pinned 9.0 spec models it as a map, not an array). ``ovf_properties``
-    folds into a single ``PropertyParams`` entry in ``additional_parameters``.
+    folds into a single ``PropertyParams`` entry in ``additional_parameters``,
+    and ``deployment_option`` into a ``DeploymentOptionParams`` entry with
+    ``selected_key`` (#4035).
     The EULA-accept flag defaults to true (deploying a curated item accepts its
     EULA) and is keyed by *eula_field* — the version-aware wire name resolved by
-    :func:`_deploy_eula_field_name`.
+    :func:`_deploy_eula_field_name`. *name* is the unique deploy name from
+    :func:`_deploy_vm_name`, never the caller's ``name`` (#3697).
     """
     deployment_spec: dict[str, Any] = {eula_field: bool(params.get("accept_all_eula", True))}
-    _put_if_str(deployment_spec, "name", params.get("name"))
+    deployment_spec["name"] = name
     network_mappings = params.get("network_mappings")
     if isinstance(network_mappings, dict) and network_mappings:
         deployment_spec["network_mappings"] = {str(k): str(v) for k, v in network_mappings.items()}
     _put_if_str(deployment_spec, "storage_provisioning", params.get("storage_provisioning"))
     _put_if_str(deployment_spec, "storage_profile_id", params.get("storage_profile"))
     _put_if_str(deployment_spec, "default_datastore_id", params.get("datastore"))
+    additional_parameters: list[dict[str, Any]] = []
     ovf_properties = params.get("ovf_properties")
     if isinstance(ovf_properties, dict) and ovf_properties:
-        deployment_spec["additional_parameters"] = [
+        additional_parameters.append(
             {
                 "type": _OVF_PROPERTY_PARAMS_TYPE,
                 "properties": [{"id": str(k), "value": str(v)} for k, v in ovf_properties.items()],
             }
-        ]
+        )
+    deployment_option = params.get("deployment_option")
+    if isinstance(deployment_option, str) and deployment_option:
+        additional_parameters.append(
+            {"type": _OVF_DEPLOYMENT_OPTION_PARAMS_TYPE, "selected_key": deployment_option}
+        )
+    if additional_parameters:
+        deployment_spec["additional_parameters"] = additional_parameters
 
-    deploy_target: dict[str, Any] = {"resource_pool_id": params["resource_pool"]}
-    _put_if_str(deploy_target, "host_id", params.get("host"))
-    _put_if_str(deploy_target, "folder_id", params.get("folder"))
-    return {"deployment_spec": deployment_spec, "target": deploy_target}
+    return {"deployment_spec": deployment_spec, "target": _build_ovf_deploy_target(params)}
 
 
 async def _power_on_deployed_vm(
@@ -2940,27 +3179,610 @@ async def _power_on_deployed_vm(
     target: Any,
     operator: Operator,
     vm_id: str,
+    *,
+    resume_state: dict[str, Any],
 ) -> tuple[bool, dict[str, Any] | None]:
     """Best-effort power-on of a freshly deployed VM; ``(powered_on, issue?)``.
 
-    A power-on fault (or, defensively, a parked gate that cannot occur once
-    the deploy write cleared the same posture) never demotes the already-
+    A power-on fault or a parked / denied gate never demotes the already-
     successful deploy — it returns ``(False, issue)`` so the caller keeps
-    ``status='deployed'`` and folds the issue into the report.
+    ``status='deployed'`` and folds the issue into the report. The VM exists
+    by now, so a power-on that waits for approval saves *resume_state*
+    (#4217): approving it re-runs the composite at this step, which only
+    starts this VM.
     """
     try:
         gate, _ = await _write_sub_op(
-            connector, target, operator, _power_vm_op_id("start"), {"vm": vm_id}
+            connector,
+            target,
+            operator,
+            _power_vm_op_id("start"),
+            {"vm": vm_id},
+            resume_state=resume_state,
+            after_main_effect=True,
         )
     except httpx.HTTPError as exc:
-        return False, _deploy_issue(
-            "power_on", "warning", f"deploy succeeded but power-on failed: {exc}"
-        )
+        return False, issue("power_on", "warning", f"deploy succeeded but power-on failed: {exc}")
     if gate is not None:
-        return False, _deploy_issue(
-            "power_on", "warning", "deploy succeeded but the follow-on power-on was not authorized"
+        return False, issue(
+            "power_on",
+            "warning",
+            f"deploy succeeded but the follow-on power-on {_gate_outcome(gate)}",
         )
     return True, None
+
+
+def _gate_outcome(gate: OperationResult) -> str:
+    """Plain words for a parked or denied follow-on write, for an issue message.
+
+    A park names its approval request so the operator can find it (#3697).
+    Approving that request runs only this step, on what the deploy already
+    created, and nothing before it (#4217).
+    """
+    request_id = gate.extras.get("approval_request_id")
+    if gate.status == "awaiting_approval" and request_id is not None:
+        return (
+            f"waits for approval request {request_id}; approving it runs only this "
+            "step and does not deploy again"
+        )
+    return "was not authorized"
+
+
+#: vCenter caps a VM display name at 80 characters.
+_VM_NAME_MAX_LENGTH: Final[int] = 80
+#: The ``DeploymentResult.resource_id.type`` of a deployed vApp; anything else
+#: is treated as a ``VirtualMachine``.
+_VAPP_RESOURCE_TYPE: Final[str] = "VirtualApp"
+# Default wall-clock bound for the deploy's Rename_Task and the cleanup's
+# vApp Destroy_Task polls (#3697) — the 600s convention; module-global so
+# tests can zero it.
+_VM_DEPLOY_TASK_TIMEOUT_SECONDS = 600.0
+#: ``ResourcePool.resourcePool`` — the child resource pools, which is where
+#: a vApp deployed into a pool shows up (a vApp is a kind of resource pool).
+_PROP_RESOURCE_POOL_CHILDREN: Final[str] = "resourcePool"
+
+
+def _new_deploy_token() -> str:
+    """Random hex token that makes one deploy's VM name unique (#3697)."""
+    return secrets.token_hex(5)
+
+
+def _deploy_vm_name(name: str, token: str) -> str:
+    """The unique name the VM carries while the deploy runs (#3697).
+
+    ``<name>-meho-<token>``, with *name* cut so the whole string fits the
+    vCenter name limit. No other caller creates a VM with this name, so a
+    listing by it after a failed deploy finds exactly the VM this deploy
+    created — never an older VM, never another caller's same-name VM. A
+    successful deploy renames the VM to *name* (:func:`_rename_deployed_vm`).
+    """
+    suffix = f"-meho-{token}"
+    return f"{name[: _VM_NAME_MAX_LENGTH - len(suffix)]}{suffix}"
+
+
+async def _read_ovf_summary(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    item_id: str,
+    params: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Read the OVF summary of *item_id* (``?action=filter``, un-gated).
+
+    Returns ``(summary, None)``, or ``({}, envelope)`` with a
+    ``resolve_error`` envelope when the call faulted. A summary that is not
+    an object comes back as ``{}``.
+    """
+    method, path, body = _split_sub_op(
+        _OP_FILTER_OVF_LIBRARY_ITEM,
+        {"ovfLibraryItemId": item_id, "target": _build_ovf_deploy_target(params)},
+    )
+    try:
+        mounted = await connector.mount_op_path(target, path, operator)
+        payload = await connector._post_json(
+            target, mounted, operator=operator, verb=method, json=body
+        )
+    except httpx.HTTPError as exc:
+        return {}, _deploy_failure(
+            "resolve_error",
+            library_item_id=item_id,
+            issues=[
+                issue(
+                    "resolve",
+                    "error",
+                    f"OVF summary lookup faulted: {_vsphere_fault_detail(exc)}",
+                )
+            ],
+        )
+    summary = _unwrap_value(payload)
+    return (summary if isinstance(summary, dict) else {}), None
+
+
+def _ovf_deployment_option_keys(summary: dict[str, Any]) -> list[str]:
+    """The deployment-option keys the OVF summary lists, in its order (#4035)."""
+    keys: list[str] = []
+    for entry in summary.get("additional_params") or []:
+        if not isinstance(entry, dict) or entry.get("type") != _OVF_DEPLOYMENT_OPTION_PARAMS_TYPE:
+            continue
+        for option in entry.get("deployment_options") or []:
+            key = option.get("key") if isinstance(option, dict) else None
+            if isinstance(key, str) and key:
+                keys.append(key)
+    return keys
+
+
+def _check_deployment_option(
+    option: str, summary: dict[str, Any], item_id: str
+) -> dict[str, Any] | None:
+    """Refuse a ``deployment_option`` the OVF item does not offer (#4035).
+
+    Returns ``None`` when *option* is one of the keys the summary lists.
+    Otherwise an ``invalid_reference`` envelope whose ``candidates`` are the
+    keys the item offers (empty when it offers none). The refusal comes
+    before any VM is created.
+    """
+    keys = _ovf_deployment_option_keys(summary)
+    if option in keys:
+        return None
+    offered = ", ".join(repr(key) for key in keys) if keys else "none"
+    return _deploy_failure(
+        "invalid_reference",
+        library_item_id=item_id,
+        candidates=keys,
+        issues=[
+            issue(
+                "input",
+                "error",
+                f"deployment_option {option!r} is not offered by this OVF item; "
+                f"its deployment options are: {offered}",
+            )
+        ],
+    )
+
+
+async def _resolve_deploy_vm_name(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    item_id: str,
+    params: dict[str, Any],
+) -> tuple[str | None, dict[str, Any] | None]:
+    """The name the deployed VM must end up with, after the pre-deploy checks.
+
+    The name is ``name``, or the OVF default. Without ``name`` vCenter would
+    take the VM name from the OVF descriptor. The composite needs that name
+    before the deploy (#3697): the VM is deployed under a unique name and
+    renamed afterwards. So the default is read from the un-gated
+    ``?action=filter`` summary (``OvfSummary.name``). The same summary read
+    checks ``deployment_option`` against the keys the item offers (#4035);
+    with ``name`` set and no ``deployment_option`` no summary is read.
+    Returns ``(name, None)``, or ``(None, envelope)`` when the summary call
+    faulted (``resolve_error``), the option is not offered
+    (``invalid_reference``) or the descriptor names nothing
+    (``invalid_reference`` — the caller must set ``name``). Every refusal
+    happens before any VM is created.
+    """
+    name = params.get("name")
+    has_name = isinstance(name, str) and bool(name)
+    option = params.get("deployment_option")
+    has_option = isinstance(option, str) and bool(option)
+    if has_name and not has_option:
+        return name, None
+    summary, summary_error = await _read_ovf_summary(
+        connector, target, operator, item_id=item_id, params=params
+    )
+    if summary_error is not None:
+        return None, summary_error
+    if has_option:
+        option_error = _check_deployment_option(str(option), summary, item_id)
+        if option_error is not None:
+            return None, option_error
+    if has_name:
+        return name, None
+    default = summary.get("name")
+    if not isinstance(default, str) or not default:
+        return None, _deploy_failure(
+            "invalid_reference",
+            library_item_id=item_id,
+            issues=[
+                issue(
+                    "input",
+                    "error",
+                    "the OVF descriptor names no VM; set name so the deploy can find "
+                    "and clean up the VM it creates",
+                )
+            ],
+        )
+    return default, None
+
+
+async def _rename_deployed_vm(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    vm_id: str,
+    resource_type: Any,
+    deploy_name: str,
+    name: str,
+    resume_state: dict[str, Any],
+) -> tuple[dict[str, Any] | None, bool]:
+    """Rename the deployed VM (or vApp) from *deploy_name* to *name* (#3697).
+
+    Core vim ``ManagedEntity.Rename_Task`` through the governed vmomi write
+    seam (:func:`_write_vmomi_sub_op`), task-polled. Best-effort like the
+    power-on: a parked/denied gate, a transport fault, an unavailable VI-JSON
+    API (the connector raises :exc:`RuntimeError` when both of its mounts
+    404), a response that is not JSON from the rename or from its task poll
+    (:exc:`ValueError`, which :exc:`json.JSONDecodeError` is), a task fault
+    or a poll timeout returns a ``rename`` warning issue that names both
+    names, and the composite still reports ``deployed`` — the VM is
+    complete, it only carries the deploy name.
+
+    Returns ``(issue, waits)``; *waits* is ``True`` when the rename waits
+    for approval. That park saves *resume_state* (#4217): approving it
+    re-runs the composite at the rename, on this VM, without a new deploy.
+    """
+    if resource_type == _VAPP_RESOURCE_TYPE:
+        op_id, mo_type = _OP_RENAME_VAPP_TASK, _VAPP_RESOURCE_TYPE
+    else:
+        op_id, mo_type = _OP_RENAME_VM_TASK, "VirtualMachine"
+    prefix = f"deployed as {deploy_name!r}; rename to {name!r}"
+    body = {"newName": name}
+    try:
+        gate, task_payload = await _write_vmomi_sub_op(
+            connector,
+            target,
+            operator,
+            op_id=op_id,
+            vmomi_path=f"/{mo_type}/{vm_id}/Rename_Task",
+            body=body,
+            params={"moId": vm_id, "body": body},
+            resume_state=resume_state,
+            after_main_effect=True,
+        )
+        if gate is not None:
+            gate_issue = issue("rename", "warning", f"{prefix} {_gate_outcome(gate)}")
+            return gate_issue, gate.status == "awaiting_approval"
+        outcome = await poll_vim_task(
+            connector,
+            target,
+            operator,
+            task=_unwrap_value(task_payload),
+            timeout_seconds=_VM_DEPLOY_TASK_TIMEOUT_SECONDS,
+        )
+    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+        return issue("rename", "warning", f"{prefix} failed: {exc}"), False
+    if outcome.state == TASK_STATE_ERROR:
+        fault = outcome.error_message or "<no fault reported>"
+        return issue("rename", "warning", f"{prefix} faulted: {fault}"), False
+    if outcome.timed_out:
+        bound = int(_VM_DEPLOY_TASK_TIMEOUT_SECONDS)
+        return issue("rename", "warning", f"{prefix} did not finish within {bound}s"), False
+    return None, False
+
+
+async def _clean_up_failed_deploy(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    deploy_name: str,
+    resource_pool_id: str,
+    reported: tuple[str, str] | None,
+    resume_state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Delete what a failed deploy left behind; return one issue per entity (#3697).
+
+    The deploy ran under the unique *deploy_name*, so two name lookups find
+    exactly what this deploy created: one ``GET:/vcenter/vm`` listing for a
+    VM, and one read of the target pool's child resource pools for a vApp
+    (an OVF with several VMs deploys as a vApp that carries the deploy name;
+    its VMs carry the OVF's own names, so the VM listing alone would miss
+    them). The entity the ``DeploymentResult`` names (*reported*, as
+    ``(id, type)``) is added when present. A VM is removed with
+    ``DELETE:/vcenter/vm/{vm}``; a vApp with its own ``Destroy_Task``, which
+    destroys the vApp and every VM in it. Both are governed writes. The
+    issues say what was removed (``info``) and what is still there
+    (``warning``). A faulted lookup is a ``warning`` too, naming
+    *deploy_name* so the operator can look for it by hand, and the other
+    lookup and the removals still run: an unavailable VI-JSON API (the
+    connector raises :exc:`RuntimeError` when both of its mounts 404) or a
+    response that is not JSON (:exc:`ValueError`, which
+    :exc:`json.JSONDecodeError` is) must not stop the delete of a VM the
+    listing already found. A removal whose response fails the same way is
+    a ``warning`` for that entity, and the other removals still run.
+
+    A removal that waits for approval saves *resume_state* plus the object
+    it removes (#4217, :func:`_removal_resume_state`): approving it re-runs
+    the composite, which removes only that object
+    (:func:`_resume_failed_deploy_removal`), with no new lookup and never
+    the deploy.
+    """
+    issues: list[dict[str, Any]] = []
+    vm_ids: set[str] = set()
+    vapp_ids: set[str] = set()
+    if reported is not None:
+        reported_id, reported_type = reported
+        (vapp_ids if reported_type == _VAPP_RESOURCE_TYPE else vm_ids).add(reported_id)
+    try:
+        rows = await _resolve_vm_list(
+            connector=connector,
+            target=target,
+            operator=operator,
+            filter_dict={"names": [deploy_name]},
+        )
+    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+        issues.append(
+            issue(
+                "cleanup",
+                "warning",
+                f"could not list VMs named {deploy_name!r} after the failed deploy "
+                f"({type(exc).__name__}); look for it by hand",
+            )
+        )
+    else:
+        vm_ids |= {row["vm"] for row in rows if isinstance(row.get("vm"), str)}
+    try:
+        vapp_ids |= set(
+            await _find_vapps_named(
+                connector, target, operator, resource_pool_id=resource_pool_id, name=deploy_name
+            )
+        )
+    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+        issues.append(
+            issue(
+                "cleanup",
+                "warning",
+                f"could not list vApps named {deploy_name!r} under resource pool "
+                f"{resource_pool_id!r} after the failed deploy ({type(exc).__name__}); "
+                "look for it by hand",
+            )
+        )
+    for vm_id in sorted(vm_ids):
+        issues.append(
+            await _delete_leftover_vm(
+                connector, target, operator, vm_id=vm_id, resume_state=resume_state
+            )
+        )
+    for vapp_id in sorted(vapp_ids):
+        issues.append(
+            await _destroy_leftover_vapp(
+                connector, target, operator, vapp_id=vapp_id, resume_state=resume_state
+            )
+        )
+    return issues
+
+
+async def _find_vapps_named(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    resource_pool_id: str,
+    name: str,
+) -> list[str]:
+    """Ids of the vApps directly under *resource_pool_id* whose name is *name* (#3697).
+
+    Two un-gated ``RetrievePropertiesEx`` reads: the pool's ``resourcePool``
+    children (a vApp is a child resource pool of the pool it was deployed
+    into), then the ``name`` of every child that is a ``VirtualApp``, with
+    every continuation page vCenter sends (#4862). No read leaves the named
+    objects (no traversal). An unexpected shape yields no match; a
+    transport fault, a failed page, the connector's :exc:`RuntimeError` for
+    an unavailable VI-JSON API, or a response that is not JSON raises for
+    the caller.
+    """
+    children_read = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=_build_single_prop_retrieve_params(
+            _RESOURCE_POOL_MO_TYPE, resource_pool_id, _PROP_RESOURCE_POOL_CHILDREN
+        ),
+    )
+    children = _extract_single_prop(children_read, _PROP_RESOURCE_POOL_CHILDREN)
+    vapp_ids = [
+        child["value"]
+        for child in (children if isinstance(children, list) else [])
+        if isinstance(child, dict)
+        and child.get("type") == _VAPP_RESOURCE_TYPE
+        and isinstance(child.get("value"), str)
+    ]
+    if not vapp_ids:
+        return []
+    names_read = await retrieve_all_pages(
+        connector,
+        target,
+        operator,
+        retrieve_properties_body(_VAPP_RESOURCE_TYPE, vapp_ids, ["name"]),
+    )
+    return [moid for moid, vapp_name in _entity_names(names_read).items() if vapp_name == name]
+
+
+def _entity_names(retrieve_result: Any) -> dict[str, str]:
+    """``{moid: name}`` off a multi-object ``RetrievePropertiesEx`` result reading ``name``."""
+    payload = _unwrap_value(retrieve_result)
+    objects = payload.get("objects", []) if isinstance(payload, dict) else payload
+    names: dict[str, str] = {}
+    if not isinstance(objects, list):
+        return names
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        ref = obj.get("obj")
+        moid = ref.get("value") if isinstance(ref, dict) else None
+        if not isinstance(moid, str):
+            continue
+        for entry in obj.get("propSet", []) or []:
+            if isinstance(entry, dict) and entry.get("name") == "name":
+                value = unwrap_vim_value(entry.get("val"))
+                if isinstance(value, str):
+                    names[moid] = value
+    return names
+
+
+async def _delete_leftover_vm(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    vm_id: str,
+    resume_state: dict[str, Any],
+) -> dict[str, Any]:
+    """Delete one VM a failed deploy left; the ``cleanup`` issue for it (#3697).
+
+    The same best-effort ``DELETE:/vcenter/vm/{vm}`` ``vm.create`` uses for
+    its rollback. A response that is not JSON (:exc:`ValueError`) is a
+    warning like a transport fault, so the other removals still run. A
+    delete that waits for approval saves *resume_state* with this VM as the
+    object to remove (#4217).
+    """
+    what = f"VM {vm_id} left by the failed deploy"
+    try:
+        gate, _ = await _write_sub_op(
+            connector,
+            target,
+            operator,
+            _OP_DELETE_VM,
+            {"vm": vm_id},
+            resume_state=_removal_resume_state(resume_state, vm_id, _VIRTUAL_MACHINE_MO_TYPE),
+            after_main_effect=True,
+        )
+    except (httpx.HTTPError, ValueError) as exc:
+        return issue(
+            "cleanup",
+            "warning",
+            f"could not remove {what} ({type(exc).__name__}); delete it by hand",
+        )
+    if gate is not None:
+        return issue(
+            "cleanup", "warning", f"{what} is still there; its removal {_gate_outcome(gate)}"
+        )
+    return issue("cleanup", "info", f"removed {what}")
+
+
+async def _destroy_leftover_vapp(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    vapp_id: str,
+    resume_state: dict[str, Any],
+) -> dict[str, Any]:
+    """Destroy one vApp a failed deploy left, with its VMs; the issue for it (#3697).
+
+    The governed vim ``VirtualApp.Destroy_Task`` (``_write_vmomi_sub_op``),
+    task-polled under the deploy's task bound. A fresh deploy is powered off,
+    so the destroy needs no power-off first. An unavailable VI-JSON API (the
+    connector's :exc:`RuntimeError`) or a response that is not JSON
+    (:exc:`ValueError`) is a warning like a transport fault. A destroy that
+    waits for approval saves *resume_state* with this vApp as the object to
+    remove (#4217).
+    """
+    what = f"vApp {vapp_id} and its VMs left by the failed deploy"
+    try:
+        gate, task_payload = await _write_vmomi_sub_op(
+            connector,
+            target,
+            operator,
+            op_id=_OP_DESTROY_VAPP_TASK,
+            vmomi_path=f"/{_VAPP_RESOURCE_TYPE}/{vapp_id}/Destroy_Task",
+            body={},
+            params={"moId": vapp_id, "body": {}},
+            resume_state=_removal_resume_state(resume_state, vapp_id, _VAPP_RESOURCE_TYPE),
+            after_main_effect=True,
+        )
+        if gate is not None:
+            return issue(
+                "cleanup", "warning", f"{what} are still there; their removal {_gate_outcome(gate)}"
+            )
+        outcome = await poll_vim_task(
+            connector,
+            target,
+            operator,
+            task=_unwrap_value(task_payload),
+            timeout_seconds=_VM_DEPLOY_TASK_TIMEOUT_SECONDS,
+        )
+    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+        return issue(
+            "cleanup",
+            "warning",
+            f"could not remove {what} ({type(exc).__name__}); delete them by hand",
+        )
+    if outcome.state == TASK_STATE_ERROR:
+        return issue(
+            "cleanup",
+            "warning",
+            f"could not remove {what}: {outcome.error_message or '<no fault reported>'}; "
+            "delete them by hand",
+        )
+    if outcome.timed_out:
+        return issue(
+            "cleanup",
+            "warning",
+            f"removal of {what} did not finish within "
+            f"{int(_VM_DEPLOY_TASK_TIMEOUT_SECONDS)}s; check vCenter by hand",
+        )
+    return issue("cleanup", "info", f"removed {what}")
+
+
+async def _drain_deploy_cleanup(
+    cleanup: Coroutine[Any, Any, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Run a deploy cleanup to the end even while the caller is cancelled (#3697).
+
+    Same drain pattern as the audit middleware's disconnect path: the cleanup
+    runs as its own task under :func:`asyncio.shield`, and the wait is
+    repeated when a cancellation is delivered again, so a level-triggered
+    cancel scope cannot stop the listing or the DELETE half-way. Every
+    failure path of the deploy uses it: the HTTP fault, ``succeeded=false``
+    and the cancel itself. A cancellation seen during the drain is re-raised
+    once the cleanup is done, so the disconnect stays honoured; the cleanup
+    outcome is logged then, because no envelope reaches the caller. A
+    cleanup fault is never raised over the deploy's result: the shield
+    re-raises the task's exception, which is caught here and becomes a
+    ``cleanup`` warning issue (a cancel seen before it is still re-raised).
+    """
+    caller = asyncio.current_task()
+    entry_cancellations = caller.cancelling() if caller is not None else 0
+    task = asyncio.ensure_future(cleanup)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Both tasks may be cancelled before this wait resumes. A cancel
+            # caught before entry still belongs to the outer caller.
+            if not task.cancelled() or (
+                caller is not None and caller.cancelling() > entry_cancellations
+            ):
+                cancelled = True
+        except Exception:  # the task failed; its exception is read below
+            break
+    if task.cancelled():
+        issues = [issue("cleanup", "warning", "the cleanup was cancelled; check vCenter by hand")]
+    elif (exc := task.exception()) is not None:
+        _log.warning(
+            "vmware_deploy_from_library_cleanup_failed",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        issues = [
+            issue(
+                "cleanup",
+                "warning",
+                f"the cleanup failed ({type(exc).__name__}); check vCenter by hand",
+            )
+        ]
+    else:
+        issues = task.result()
+    if cancelled:
+        _log.warning("vmware_deploy_from_library_cancelled_during_cleanup", issues=issues)
+        raise asyncio.CancelledError
+    return issues
 
 
 async def vm_deploy_from_library_composite(
@@ -2988,12 +3810,88 @@ async def vm_deploy_from_library_composite(
     on the default sync path, but a **multi-GB installer OVA should be
     dispatched in async mode** (``call_operation`` with ``async=true`` → HTTP
     202 + a durable run handle, #3079): the deploy then runs on a background
-    task that owns the vCenter POST, so a caller that disconnects mid-transfer
-    no longer cancels the in-flight deploy — on the sync path a dropped caller
-    propagates cancellation into the POST and vCenter rolls the half-created VM
-    back. The sync ceiling stays a bounded mitigation; an item large enough to
+    task that owns the vCenter POST, so the caller does not have to keep the
+    connection open. On the sync path a caller that disconnects never gets the
+    answer; the deploy still runs to the end, and the audit row records
+    ``caller_gone_at`` (#3696). The sync ceiling stays a bounded mitigation; an item large enough to
     outrun 3 h still needs the typed ``HttpNfcLease`` import (#2890).
+
+    **No partial VM after a failed deploy (#3697).** vCenter's own rollback of
+    an interrupted deploy depends on timing, so the composite cleans up
+    itself, like ``import_from_library`` aborting its lease. The VM is
+    deployed under a unique name (``<name>-meho-<token>``,
+    :func:`_deploy_vm_name`); without ``name`` the OVF default name is read
+    first, and the deploy is refused when there is none. When the deploy
+    faults, answers with a body that is not JSON, reports ``succeeded=false``,
+    or is cancelled, the composite looks up that unique name twice — the VM
+    listing, and the target pool's child vApps (a multi-VM OVF deploys as a
+    vApp whose VMs carry other names) —
+    deletes what it finds plus the entity the ``DeploymentResult`` names (a
+    vApp is destroyed with its VMs), and adds a ``cleanup`` issue per entity
+    (``info`` = removed, ``warning`` = still there). The cleanup is shielded
+    from a caller cancel on every failure path. A success renames the VM to
+    the requested name (vim ``Rename_Task``, best-effort — a ``rename``
+    warning when it fails) and never deletes anything.
+
+    **Approvals do not deploy twice (#4217).** A governed write that waits
+    for approval saves resume state on its approval row, and approving it
+    re-runs this composite with that state
+    (:func:`~meho_backplane.operations.composite.composite_resume_state`):
+
+    * a deploy that waited runs again with the deploy parameters its first
+      run resolved (the same library item, the same deploy name), so the
+      approved deploy matches what the person approved even when a name
+      lookup would now answer differently (:func:`_deploy_library_item`);
+    * a rename or power-on that waited continues at that step on the VM
+      that exists (:func:`_finish_deploy`); a waiting rename stops the
+      first run before the power-on, so the power-on runs after the rename
+      is approved;
+    * a cleanup removal that waited removes exactly the object the park
+      saved, with no new lookup by deploy name
+      (:func:`_resume_failed_deploy_removal`).
+
+    The rename, power-on and cleanup steps are marked ``after_main_effect``,
+    so the seam refuses any earlier write the resume would repeat. A resume
+    with no saved state is refused (:func:`_refuse_deploy_resume`).
     """
+    saved = _resumed_deploy_state()
+    refusal = _refuse_deploy_resume(saved)
+    if refusal is not None:
+        return refusal
+    if "deploy" in saved:
+        return await _deploy_library_item(
+            connector,
+            target,
+            operator,
+            params=params,
+            deploy_name=saved["deploy_name"],
+            deploy_params=dict(saved["deploy"]["params"]),
+            name=str(saved["deploy"]["name"]),
+        )
+    if "deployed" in saved:
+        deployed = saved["deployed"]
+        return await _finish_deploy(
+            connector,
+            target,
+            operator,
+            params=params,
+            deploy_name=saved["deploy_name"],
+            vm_id=str(deployed["vm_id"]),
+            resource_type=deployed.get("resource_type"),
+            item_id=str(deployed["library_item_id"]),
+            name=str(deployed["name"]),
+            issues=list(deployed["issues"]),
+            step=str(deployed["step"]),
+        )
+    if "failed" in saved:
+        return await _resume_failed_deploy_removal(
+            connector,
+            target,
+            operator,
+            deploy_name=saved["deploy_name"],
+            failed=saved["failed"],
+        )
+
     try:
         item_id, resolution_error = await _resolve_deploy_library_item(
             connector=connector, target=target, operator=operator, params=params
@@ -3006,7 +3904,7 @@ async def vm_deploy_from_library_composite(
         return _deploy_failure(
             "resolve_error",
             issues=[
-                _deploy_issue(
+                issue(
                     "resolve",
                     "error",
                     f"content-library lookup faulted: {_vsphere_fault_detail(exc)}",
@@ -3019,7 +3917,53 @@ async def vm_deploy_from_library_composite(
 
     about_version = await connector._about_version(target, operator)
     eula_field = _deploy_eula_field_name(about_version)
-    deploy_params = {"ovfLibraryItemId": item_id, **_build_ovf_deploy_body(params, eula_field)}
+    name, name_error = await _resolve_deploy_vm_name(
+        connector, target, operator, item_id=item_id, params=params
+    )
+    if name_error is not None:
+        return name_error
+    assert name is not None  # name_error is None ⇒ name resolved
+    # #3697: deploy under a unique name, so a failed deploy can find the VM it
+    # created — and only that one. A successful deploy renames it to ``name``.
+    deploy_name = _deploy_vm_name(name, _new_deploy_token())
+    deploy_params = {
+        "ovfLibraryItemId": item_id,
+        **_build_ovf_deploy_body(params, eula_field, name=deploy_name),
+    }
+    return await _deploy_library_item(
+        connector,
+        target,
+        operator,
+        params=params,
+        deploy_name=deploy_name,
+        deploy_params=deploy_params,
+        name=name,
+    )
+
+
+async def _deploy_library_item(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    params: dict[str, Any],
+    deploy_name: str,
+    deploy_params: dict[str, Any],
+    name: str,
+) -> dict[str, Any] | OperationResult:
+    """Issue the governed OVF deploy with *deploy_params*, then finish or clean up.
+
+    *deploy_params* are the deploy's resolved sub-op parameters (the library
+    item id and the deploy body under the unique *deploy_name*); *name* is
+    the final VM name. A deploy that waits for approval saves both on its
+    approval row (#4217): the resume calls this again with the saved values,
+    so the approved deploy reaches the seam with the parameters the person
+    approved and matches its stored hash. Nothing is resolved again during
+    that resume; a ``library_item_name`` that now names another item does
+    not change what deploys.
+    """
+    item_id = str(deploy_params["ovfLibraryItemId"])
+    resource_pool_id = str(params["resource_pool"])
     try:
         gate, deploy_payload = await _write_sub_op(
             connector,
@@ -3029,19 +3973,60 @@ async def vm_deploy_from_library_composite(
             deploy_params,
             # Synchronous deploy — the POST is held open for the whole copy (#3076).
             timeout=_LIBRARY_ITEM_DEPLOY_TIMEOUT,
+            resume_state={
+                "deploy_name": deploy_name,
+                "deploy": {"params": deploy_params, "name": name},
+            },
         )
-    except httpx.HTTPError as exc:
-        return _deploy_failure(
-            "deploy_error",
-            library_item_id=item_id,
+    except (httpx.HTTPError, ValueError) as exc:
+        # A transport fault, or a 200 whose body is not JSON (``ValueError``,
+        # which ``json.JSONDecodeError`` is): the DeploymentResult is unknown
+        # either way and vCenter may have created the VM, so clean up (#3697).
+        return await _fail_deploy(
+            connector,
+            target,
+            operator,
+            status="deploy_error",
+            item_id=item_id,
+            deploy_name=deploy_name,
+            resource_pool_id=resource_pool_id,
+            reported=None,
             issues=[
-                _deploy_issue(
+                issue(
                     "placement",
                     "error",
-                    f"OVF deploy call faulted: {_vsphere_fault_detail(exc)}",
+                    f"OVF deploy call faulted: {_deploy_call_fault_detail(exc)}",
                 )
             ],
         )
+    except asyncio.CancelledError:
+        # The deploy was cancelled mid-way. Remove a partial VM before the
+        # cancellation unwinds (#3697); no envelope reaches the caller, so
+        # the outcome is logged.
+        cancelled = [issue("deploy", "error", "the deploy was cancelled")]
+        cleanup_issues = await _drain_deploy_cleanup(
+            _clean_up_failed_deploy(
+                connector,
+                target,
+                operator,
+                deploy_name=deploy_name,
+                resource_pool_id=resource_pool_id,
+                reported=None,
+                resume_state=_failed_deploy_state(
+                    deploy_name,
+                    status="deploy_error",
+                    item_id=item_id,
+                    reported=None,
+                    issues=cancelled,
+                ),
+            )
+        )
+        _log.warning(
+            "vmware_deploy_from_library_cancelled",
+            deploy_name=deploy_name,
+            issues=cleanup_issues,
+        )
+        raise
     if gate is not None:
         return gate
 
@@ -3053,28 +4038,384 @@ async def vm_deploy_from_library_composite(
             "200 body is a DeploymentResult structure"
         )
     issues = _extract_ovf_issues(result.get("error"))
-    if not result.get("succeeded"):
-        return _deploy_failure("deploy_failed", library_item_id=item_id, issues=issues)
-
     resource = result.get("resource_id")
     vm_id = resource.get("id") if isinstance(resource, dict) else None
     resource_type = resource.get("type") if isinstance(resource, dict) else None
+    if not result.get("succeeded"):
+        reported = (
+            (vm_id, resource_type)
+            if isinstance(vm_id, str) and isinstance(resource_type, str)
+            else None
+        )
+        return await _fail_deploy(
+            connector,
+            target,
+            operator,
+            status="deploy_failed",
+            item_id=item_id,
+            deploy_name=deploy_name,
+            resource_pool_id=resource_pool_id,
+            reported=reported,
+            issues=issues,
+        )
     if not isinstance(vm_id, str):
         raise RuntimeError(
             "vm.deploy_from_library: deploy reported succeeded=true but no "
             f"resource_id.id (resource_id={resource!r})"
         )
+    return await _finish_deploy(
+        connector,
+        target,
+        operator,
+        params=params,
+        deploy_name=deploy_name,
+        vm_id=vm_id,
+        resource_type=resource_type if isinstance(resource_type, str) else None,
+        item_id=item_id,
+        name=name,
+        issues=issues,
+    )
 
+
+#: Every governed write of ``vm.deploy_from_library``. A resume for one of
+#: them that brings no saved state is refused (:func:`_refuse_deploy_resume`).
+_DEPLOY_WRITE_OPS: Final[frozenset[str]] = frozenset(
+    {
+        _OP_DEPLOY_OVF_LIBRARY_ITEM,
+        _power_vm_op_id("start"),
+        _OP_DELETE_VM,
+        _OP_RENAME_VM_TASK,
+        _OP_RENAME_VAPP_TASK,
+        _OP_DESTROY_VAPP_TASK,
+    }
+)
+
+
+def _refuse_deploy_resume(saved: dict[str, Any]) -> OperationResult | None:
+    """Refuse a resume with no saved state; ``None`` otherwise.
+
+    An approved sub-op re-runs its parent composite (#3351), with
+    :data:`~meho_backplane.operations.composite.composite_resume_scope_var`
+    naming the approved sub-op for the whole re-run. Every governed write
+    of this composite saves the state its resume continues from (#4217).
+    An approval request without that state (*saved* is empty; such rows
+    were written before #4217) could only re-run the composite from the
+    start: a write after the deploy would deploy a second VM first, and a
+    resumed deploy would draw a fresh deploy name. So that re-run stops
+    here, before any read or write.
+    """
+    return _refuse_resume_without_state(
+        composite_op_id=_COMPOSITE_OP_ID_VM_DEPLOY_FROM_LIBRARY,
+        write_ops=_DEPLOY_WRITE_OPS,
+        has_state=bool(saved),
+        nothing_done="no VM was deployed",
+        remediation=(
+            "Nothing ran. For a rename, power-on or delete, do the step by hand on the "
+            "VM named in the approval request. For the deploy itself, run the operation "
+            "again with a standing grant for its deploy write."
+        ),
+    )
+
+
+def _refuse_resume_without_state(
+    *,
+    composite_op_id: str,
+    write_ops: frozenset[str],
+    has_state: bool,
+    nothing_done: str,
+    remediation: str,
+) -> OperationResult | None:
+    """Refuse the re-run for an approved write in *write_ops* that saved no state (#4217).
+
+    ``None`` on an ordinary dispatch, when the approved write is not in
+    *write_ops*, or when *has_state*. Otherwise the approval request was
+    saved before #4217 and the composite could only run again from the
+    start, which would repeat its main change. So the re-run stops here,
+    before any read or write, with a ``composite_resume_unsupported`` error.
+    """
+    resumed = composite_resume_scope_var.get()
+    if resumed is None or resumed[0] not in write_ops or has_state:
+        return None
+    approved_op_id = resumed[0]
+    _log.warning(
+        "vmware_composite_resume_refused",
+        composite_op_id=composite_op_id,
+        approved_op_id=approved_op_id,
+    )
+    short_name = composite_op_id.removeprefix("vmware.composite.")
+    return OperationResult(
+        status="error",
+        op_id=composite_op_id,
+        error=(
+            f"composite_resume_unsupported: approving the waiting step {approved_op_id!r} "
+            f"cannot continue {short_name}, because the approval request has "
+            f"no saved state; the operation did not run again and {nothing_done}. "
+            f"{remediation}"
+        ),
+        duration_ms=0.0,
+        extras={
+            "error_code": "composite_resume_unsupported",
+            "composite_op_id": composite_op_id,
+            "approved_op_id": approved_op_id,
+            "remediation": remediation,
+        },
+    )
+
+
+def _deploy_call_fault_detail(exc: httpx.HTTPError | ValueError) -> str:
+    """Detail for a deploy call that faulted, or answered with a body that is not JSON.
+
+    An :exc:`httpx.HTTPError` renders through :func:`_vsphere_fault_detail`.
+    A :exc:`ValueError` (which :exc:`json.JSONDecodeError` is) means vCenter
+    answered but the ``DeploymentResult`` could not be read; the type name
+    is folded in like a transport fault's, because the text alone does not
+    say what went wrong.
+    """
+    if isinstance(exc, httpx.HTTPError):
+        return _vsphere_fault_detail(exc)
+    return f"response is not JSON ({type(exc).__name__}): {exc}"
+
+
+async def _fail_deploy(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    status: str,
+    item_id: str,
+    deploy_name: str,
+    resource_pool_id: str,
+    reported: tuple[str, str] | None,
+    issues: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Clean up a failed deploy (shielded) and build its failure envelope (#3697).
+
+    Runs on the deploy's fault (``deploy_error``) and ``succeeded=false``
+    (``deploy_failed``) paths. *reported* is the ``(id, type)`` the
+    ``DeploymentResult`` named, if any; *issues* are the issues before the
+    cleanup, which the cleanup's own issues follow. A removal that waits
+    for approval saves these values and the object it removes (#4217); its
+    resume runs :func:`_resume_failed_deploy_removal`, not this function.
+    """
+    resume_state = _failed_deploy_state(
+        deploy_name, status=status, item_id=item_id, reported=reported, issues=issues
+    )
+    cleanup_issues = await _drain_deploy_cleanup(
+        _clean_up_failed_deploy(
+            connector,
+            target,
+            operator,
+            deploy_name=deploy_name,
+            resource_pool_id=resource_pool_id,
+            reported=reported,
+            resume_state=resume_state,
+        )
+    )
+    return _deploy_failure(status, library_item_id=item_id, issues=[*issues, *cleanup_issues])
+
+
+def _failed_deploy_state(
+    deploy_name: str,
+    *,
+    status: str,
+    item_id: str,
+    reported: tuple[str, str] | None,
+    issues: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """The failed deploy a cleanup removal saves, without the object it removes (#4217).
+
+    :func:`_removal_resume_state` adds that object before the removal
+    reaches the seam.
+    """
+    return {
+        "deploy_name": deploy_name,
+        "failed": {
+            "status": status,
+            "library_item_id": item_id,
+            "reported": list(reported) if reported is not None else None,
+            "issues": list(issues),
+        },
+    }
+
+
+def _removal_resume_state(
+    failed_state: dict[str, Any], entity_id: str, entity_type: str
+) -> dict[str, Any]:
+    """*failed_state* plus the one object (``removal``: id and type) a removal targets (#4217).
+
+    The resume of that removal removes exactly this object. It does not look
+    the deploy name up again: by then the object may carry another name,
+    and another object may carry the deploy name.
+    """
+    return {
+        **failed_state,
+        "failed": {**failed_state["failed"], "removal": [entity_id, entity_type]},
+    }
+
+
+async def _resume_failed_deploy_removal(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    deploy_name: str,
+    failed: dict[str, Any],
+) -> dict[str, Any]:
+    """Run again only the removal of a failed deploy that waited for approval (#4217).
+
+    *failed* is what the park saved (:func:`_removal_resume_state`): the
+    deploy's outcome, its issues and the object the removal targets. The
+    removal reaches the seam with the same parameters and the same saved
+    state, so the approved step matches its stored hash and runs. No
+    lookup by *deploy_name* happens, so a renamed leftover is still removed
+    and an object that took the deploy name since is never touched. The
+    envelope is the failed deploy's, with this removal's issue last.
+    """
+    entity_id, entity_type = (str(part) for part in failed["removal"])
+    status = str(failed["status"])
+    item_id = str(failed["library_item_id"])
+    issues = list(failed["issues"])
+    reported = failed.get("reported")
+    resume_state = _failed_deploy_state(
+        deploy_name,
+        status=status,
+        item_id=item_id,
+        reported=(str(reported[0]), str(reported[1])) if reported else None,
+        issues=issues,
+    )
+    removal_issues = await _drain_deploy_cleanup(
+        _remove_leftover(
+            connector,
+            target,
+            operator,
+            entity_id=entity_id,
+            entity_type=entity_type,
+            resume_state=resume_state,
+        )
+    )
+    return _deploy_failure(status, library_item_id=item_id, issues=[*issues, *removal_issues])
+
+
+async def _remove_leftover(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    entity_id: str,
+    entity_type: str,
+    resume_state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Remove one saved leftover of a failed deploy: a vApp by type, a VM otherwise."""
+    if entity_type == _VAPP_RESOURCE_TYPE:
+        issue = await _destroy_leftover_vapp(
+            connector, target, operator, vapp_id=entity_id, resume_state=resume_state
+        )
+    else:
+        issue = await _delete_leftover_vm(
+            connector, target, operator, vm_id=entity_id, resume_state=resume_state
+        )
+    return [issue]
+
+
+def _resumed_deploy_state() -> dict[str, Any]:
+    """The state a waiting ``vm.deploy_from_library`` write saved, during its resume (#4217).
+
+    Empty on an ordinary dispatch, and when the state is not one this
+    composite can continue from: it needs a deploy name and one of
+    ``"deploy"`` (run the deploy again with its resolved parameters),
+    ``"deployed"`` (continue at the rename or power-on of the VM that
+    exists) or ``"failed"`` with the object to remove (run that one removal
+    again). Anything else is refused as missing state, before any read or
+    write, rather than run from the start.
+    """
+    saved = composite_resume_state(_COMPOSITE_OP_ID_VM_DEPLOY_FROM_LIBRARY)
+    if saved is None or not isinstance(saved.get("deploy_name"), str):
+        return {}
+    if not any(key in saved for key in ("deploy", "deployed", "failed")):
+        return {}
+    failed = saved.get("failed")
+    if isinstance(failed, dict):
+        removal = failed.get("removal")
+        if not (isinstance(removal, list) and len(removal) == 2):
+            return {}
+    return saved
+
+
+async def _finish_deploy(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    params: dict[str, Any],
+    deploy_name: str,
+    vm_id: str,
+    resource_type: str | None,
+    item_id: str,
+    name: str,
+    issues: list[dict[str, Any]],
+    step: str = "rename",
+) -> dict[str, Any]:
+    """Rename, then power on when asked, the deployed VM; the ``deployed`` envelope (#3697).
+
+    Both steps are best-effort: a failed or denied rename leaves the VM
+    under *deploy_name* with a ``rename`` warning, and the power-on still
+    runs. Each step saves where to continue when it waits for approval
+    (#4217); the resume of that park calls this again from *step*
+    (``"rename"`` or ``"power_on"``). A rename that waits ends this run
+    before the power-on: the power-on then runs after the rename is
+    approved, so one approval finishes the deploy.
+    """
+    deployed = {
+        "vm_id": vm_id,
+        "resource_type": resource_type,
+        "library_item_id": item_id,
+        "name": name,
+    }
+    power_on = bool(params.get("power_on", False))
+    if step == "rename":
+        rename_issue, rename_waits = await _rename_deployed_vm(
+            connector,
+            target,
+            operator,
+            vm_id=vm_id,
+            resource_type=resource_type,
+            deploy_name=deploy_name,
+            name=name,
+            resume_state={
+                "deploy_name": deploy_name,
+                "deployed": {**deployed, "step": "rename", "issues": list(issues)},
+            },
+        )
+        if rename_issue is not None:
+            issues.append(rename_issue)
+        if rename_waits and power_on:
+            power_on = False
+            issues.append(
+                issue(
+                    "power_on",
+                    "warning",
+                    "the VM is not powered on yet; the power-on runs after the rename's "
+                    "approval request is approved",
+                )
+            )
     powered_on = False
-    if bool(params.get("power_on", False)):
-        powered_on, power_issue = await _power_on_deployed_vm(connector, target, operator, vm_id)
+    if power_on:
+        powered_on, power_issue = await _power_on_deployed_vm(
+            connector,
+            target,
+            operator,
+            vm_id,
+            resume_state={
+                "deploy_name": deploy_name,
+                "deployed": {**deployed, "step": "power_on", "issues": list(issues)},
+            },
+        )
         if power_issue is not None:
             issues.append(power_issue)
-
     return {
         "status": "deployed",
         "vm_id": vm_id,
-        "resource_type": resource_type if isinstance(resource_type, str) else None,
+        "resource_type": resource_type,
         "library_item_id": item_id,
         "powered_on": powered_on,
         "issues": issues,
@@ -3210,7 +4551,26 @@ async def vm_import_from_library_composite(
     #3079): the import then runs on a background task, so a caller that
     disconnects mid-transfer no longer cancels it -- and, unlike the sync REST
     deploy, there is no single blocking read to bound completion at all.
+
+    A power-on that waits for approval saves the import's envelope as its
+    resume state (#4217): approving it re-runs this composite, which then
+    only powers on the imported VM (:func:`_power_on_imported_vm`) and does
+    not import again. An approved power-on with no saved envelope (a request
+    saved before #4217) is refused before anything runs.
     """
+    imported = _resumed_import_envelope()
+    refusal = _refuse_resume_without_state(
+        composite_op_id=_COMPOSITE_OP_ID_VM_IMPORT_FROM_LIBRARY,
+        write_ops=frozenset({_power_vm_op_id("start")}),
+        has_state=imported is not None,
+        nothing_done="nothing was imported",
+        remediation="Nothing ran. Power on the VM named in the approval request by hand.",
+    )
+    if refusal is not None:
+        return refusal
+    if imported is not None:
+        return await _power_on_imported_vm(connector, target, operator, envelope=imported)
+
     try:
         item_id, resolution_error = await _resolve_deploy_library_item(
             connector=connector, target=target, operator=operator, params=params
@@ -3219,7 +4579,7 @@ async def vm_import_from_library_composite(
         return _deploy_failure(
             "resolve_error",
             issues=[
-                _deploy_issue(
+                issue(
                     "resolve",
                     "error",
                     f"content-library lookup faulted: {_vsphere_fault_detail(exc)}",
@@ -3251,13 +4611,38 @@ async def vm_import_from_library_composite(
 
     envelope = _import_envelope(result, item_id)
     if result.status == "imported" and result.vm_id and bool(params.get("power_on", False)):
-        powered_on, power_issue = await _power_on_deployed_vm(
-            connector, target, operator, result.vm_id
-        )
-        envelope["powered_on"] = powered_on
-        if power_issue is not None:
-            envelope["issues"].append(power_issue)
+        return await _power_on_imported_vm(connector, target, operator, envelope=envelope)
     return envelope
+
+
+def _resumed_import_envelope() -> dict[str, Any] | None:
+    """The envelope a waiting ``vm.import_from_library`` power-on saved, during its resume."""
+    saved = composite_resume_state(_COMPOSITE_OP_ID_VM_IMPORT_FROM_LIBRARY)
+    imported = saved.get("imported") if saved is not None else None
+    if not isinstance(imported, dict) or not isinstance(imported.get("vm_id"), str):
+        return None
+    return imported
+
+
+async def _power_on_imported_vm(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    envelope: dict[str, Any],
+) -> dict[str, Any]:
+    """Power on the imported VM in *envelope* (best-effort) and report it there (#4217)."""
+    powered_on, power_issue = await _power_on_deployed_vm(
+        connector,
+        target,
+        operator,
+        str(envelope["vm_id"]),
+        resume_state={"imported": envelope},
+    )
+    finished = {**envelope, "powered_on": powered_on}
+    if power_issue is not None:
+        finished["issues"] = [*envelope["issues"], power_issue]
+    return finished
 
 
 # ===========================================================================
@@ -3335,16 +4720,18 @@ async def vm_snapshot_revert_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any] | OperationResult:
-    """Revert a VM to a named snapshot. Idempotent; ambiguity-rejecting.
+    """Revert a VM to a snapshot, by name or by id. Idempotent; ambiguity-rejecting.
 
     Op-id: ``vmware.composite.vm.snapshot.revert``. Multiple snapshots
     sharing the name -> ``status='ambiguous'``; missing -> ``not_found``.
-    Revert never dispatches on either. The revert is a vim ``*_Task``:
-    a task fault raises (the dispatcher wraps it ``connector_error``);
-    a poll timeout returns ``status='timeout'`` with the task id.
+    A ``snapshot_id`` must be in the VM's own snapshot tree, else
+    ``not_found``. Revert never dispatches on any of these. The revert is a
+    vim ``*_Task``: a task fault raises (the dispatcher wraps it
+    ``connector_error``); a poll timeout returns ``status='timeout'`` with
+    the task id.
     """
     vm_moid = params["vm"]
-    snapshot_name = params["snapshot_name"]
+    snapshot_id = params.get("snapshot_id")
 
     tree_result = await connector._post_vmomi_json(
         target,
@@ -3355,13 +4742,21 @@ async def vm_snapshot_revert_composite(
     snapshot_info = _extract_single_prop(tree_result, _PROP_SNAPSHOT)
     root_list = snapshot_info.get("rootSnapshotList") if isinstance(snapshot_info, dict) else None
     entries = _flatten_snapshot_tree(root_list)
-    matches = [e for e in entries if e["name"] == snapshot_name]
+    if isinstance(snapshot_id, str):
+        matches = [e for e in entries if e["snapshot"] == snapshot_id]
+        missing = (
+            f"vm {vm_moid!r} has no snapshot {snapshot_id!r}; list its snapshots with "
+            "vmware.snapshot.list"
+        )
+    else:
+        matches = [e for e in entries if e["name"] == params["snapshot_name"]]
+        missing = f"no snapshot named {params['snapshot_name']!r} on vm {vm_moid!r}"
     if not matches:
         return {
             "status": "not_found",
             "snapshot_id": None,
             "candidates": [],
-            "guidance": f"no snapshot named {snapshot_name!r} on vm {vm_moid!r}",
+            "guidance": missing,
         }
     if len(matches) > 1:
         return {
@@ -3381,7 +4776,7 @@ async def vm_snapshot_revert_composite(
         op_id=_OP_REVERT_TO_SNAPSHOT_TASK,
         vmomi_path=f"/{_VM_SNAPSHOT_MO_TYPE}/{snapshot_moid}/RevertToSnapshot_Task",
         body={},
-        params={"vm": vm_moid, "snapshot_name": snapshot_name, "snapshot": snapshot_moid},
+        params={"vm": vm_moid, "snapshot_name": matches[0]["name"], "snapshot": snapshot_moid},
     )
     if gate is not None:
         return gate
@@ -3407,6 +4802,7 @@ async def vm_snapshot_revert_composite(
                 f"within {int(_SNAPSHOT_REVERT_TASK_TIMEOUT_SECONDS)}s; poll the task -- "
                 "the revert may still complete in the background"
             ),
+            "issues": [_task_timeout_issue("RevertToSnapshot_Task", outcome.task)],
         }
     return {
         "status": "reverted",
@@ -3481,10 +4877,10 @@ async def vm_destroy_composite(
     Op-id: ``vmware.composite.vm.destroy``. The FIRST governed destructive
     delete (#3198) — ``safety_level="destructive"``, so it rides the hardest
     gate MEHO has (decision ``docs/decisions/governed-delete-operations.md``):
-    mandatory human approval (no agent path, no standing grant, no
-    self-approval even under break-glass), a mandatory preview-hash binding,
-    and a mandatory blast-radius statement (built by
-    :func:`._write_preview._vm_destroy_preview`).
+    mandatory human approval (no agent path, no standing grant except on an
+    instance in sandbox mode, no self-approval even under break-glass), a
+    mandatory preview-hash binding, and a mandatory blast-radius statement
+    (built by :func:`._write_preview._vm_destroy_preview`).
 
     **Fail-closed on a running VM.** vSphere faults a destroy on a VM that is
     not powered off, so the composite live-re-reads the power state and
@@ -3573,6 +4969,7 @@ async def vm_destroy_composite(
                     f"within {int(_VM_DESTROY_TASK_TIMEOUT_SECONDS)}s; poll the task — "
                     "the destroy may still complete in the background"
                 ),
+                "issues": [_task_timeout_issue("Destroy_Task", outcome.task)],
             }
         return {
             "status": "destroyed",
@@ -3751,11 +5148,21 @@ async def vm_power_bulk_composite(
             return gate
         results.append({"vm": vm_moid, "status": "ok", "error": None})
         ok_count += 1
-    return {
+    envelope: dict[str, Any] = {
         "results": results,
         "summary": {"ok": ok_count, "error": err_count},
         "aborted_on_failure": aborted,
     }
+    if err_count:
+        # Any per-VM failure means the batch did not fully apply (#3813).
+        envelope["issues"] = [
+            issue(
+                "connector",
+                "error",
+                f"power action {action!r} failed on {err_count} of {ok_count + err_count} VMs",
+            )
+        ]
+    return envelope
 
 
 # ===========================================================================
@@ -3800,9 +5207,12 @@ def _vsphere_fault_detail(exc: httpx.HTTPError) -> str:
     otherwise left the surfaced detail an empty ``transport fault:`` tail
     (#3076); a non-empty ``str(exc)`` is appended after it. The helper owns
     the whole rendered detail for both fault classes, so callers interpolate
-    it directly without a redundant ``: {exc}`` suffix. Body parsing is
-    defensive — a non-JSON or unexpectedly-shaped body drops the missing parts,
-    never raises.
+    it directly without a redundant ``: {exc}`` suffix. A VI-JSON method
+    fault (HTTP 500 whose body is the fault DataObject itself: ``_typeName``
+    plus ``faultstring`` / ``faultMessage`` / ``localizedMessage``) renders
+    the same way, with the vim fault class in place of ``error_type`` (#4057).
+    Body parsing is defensive — a non-JSON or unexpectedly-shaped body drops
+    the missing parts, never raises.
     """
     if not isinstance(exc, httpx.HTTPStatusError):
         base = f"transport fault ({type(exc).__name__})"
@@ -3813,17 +5223,37 @@ def _vsphere_fault_detail(exc: httpx.HTTPError) -> str:
         body = exc.response.json()
     except (ValueError, httpx.HTTPError):
         body = None
-    if isinstance(body, dict):
-        error_type = body.get("error_type")
-        if isinstance(error_type, str) and error_type:
-            detail += f" ({error_type})"
-        for message in body.get("messages") or []:
-            if isinstance(message, dict):
-                default = message.get("default_message")
-                if isinstance(default, str) and default:
-                    detail += f": {default}"
-                    break
+    if not isinstance(body, dict):
+        return detail
+    if VIM_TYPE_NAME_KEY in body:
+        return detail + _vim_fault_suffix(body)
+    error_type = body.get("error_type")
+    if isinstance(error_type, str) and error_type:
+        detail += f" ({error_type})"
+    for message in body.get("messages") or []:
+        if isinstance(message, dict):
+            default = message.get("default_message")
+            if isinstance(default, str) and default:
+                detail += f": {default}"
+                break
     return detail
+
+
+def _vim_fault_suffix(body: dict[str, Any]) -> str:
+    """`` (<fault class>): <text>`` of a VI-JSON method-fault body.
+
+    :func:`fault_message` prefixes a flattened fault's text with its class
+    (``InvalidArgument: ...``); the class already sits in the parentheses
+    here, so that prefix is dropped to keep the REST-error shape.
+    """
+    type_name = fault_type_name(body)
+    text = fault_message(body)
+    suffix = f" ({type_name})" if type_name else ""
+    if text and type_name and text.startswith(f"{type_name}: "):
+        text = text[len(type_name) + 2 :]
+    if text and text != type_name:
+        suffix += f": {text}"
+    return suffix
 
 
 def _guest_tools_unavailable(status: int | None, error_type: str | None) -> bool:
@@ -3880,6 +5310,13 @@ async def vm_power_composite(
                 "error": str(exc),
                 "error_type": error_type,
                 "guest_tools": "unavailable",
+                "issues": [
+                    issue(
+                        "connector",
+                        "error",
+                        f"{verb} on vm {vm_moid!r} failed: VMware Tools is not running",
+                    )
+                ],
             }
         return {
             "vm": vm_moid,
@@ -3888,6 +5325,7 @@ async def vm_power_composite(
             "error": str(exc),
             "error_type": error_type,
             "guest_tools": "unavailable" if is_guest_verb else None,
+            "issues": [issue("connector", "error", f"{verb} on vm {vm_moid!r} failed: {exc}")],
         }
     if gate is not None:
         return gate
@@ -3906,6 +5344,68 @@ async def vm_power_composite(
 # ===========================================================================
 
 
+async def _run_host_maintenance_task(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    host_moid: str,
+    op_id: str,
+    maintenance_spec: dict[str, Any] | None = None,
+) -> OperationResult | VimTaskResult:
+    """Gate, send and poll one vim maintenance transition on a host.
+
+    The pinned vcenter.yaml serves no host-maintenance REST path (#2970);
+    enter / exit are the vim ``HostSystem.EnterMaintenanceMode_Task`` /
+    ``ExitMaintenanceMode_Task`` methods, whose request types carry a
+    required int ``timeout`` (``<= 0`` = no vim-side bound -- the poll's
+    wall clock is the bound here). *maintenance_spec* is the optional
+    ``HostMaintenanceSpec`` of the enter call (the vSAN data option,
+    #4895); ``None`` leaves the body at ``{"timeout": 0}``, so vCenter
+    applies its own defaults. Returns the governance seam's
+    :class:`OperationResult` when it parks/denies the write, else the
+    polled :class:`VimTaskResult` (success, fault or poll timeout).
+    """
+    method_name = op_id.rsplit("/", 1)[-1]
+    body: dict[str, Any] = {"timeout": _MAINTENANCE_VIM_TIMEOUT}
+    if maintenance_spec is not None:
+        body["maintenanceSpec"] = maintenance_spec
+    gate, task_payload = await _write_vmomi_sub_op(
+        connector,
+        target,
+        operator,
+        op_id=op_id,
+        vmomi_path=f"/{_HOST_SYSTEM_MO_TYPE}/{host_moid}/{method_name}",
+        body=body,
+        params={"host": host_moid},
+    )
+    if gate is not None:
+        return gate
+    return await poll_vim_task(
+        connector,
+        target,
+        operator,
+        task=_unwrap_value(task_payload),
+        timeout_seconds=_MAINTENANCE_TASK_TIMEOUT_SECONDS,
+    )
+
+
+def _maintenance_task_failure(outcome: VimTaskResult, op_id: str, host_moid: str) -> str | None:
+    """Why a maintenance task did not succeed, or ``None`` when it did."""
+    method_name = op_id.rsplit("/", 1)[-1]
+    if outcome.state == TASK_STATE_ERROR:
+        return (
+            f"{method_name} on host {host_moid!r} faulted: "
+            f"{outcome.error_message or '<no fault reported>'}"
+        )
+    if outcome.timed_out:
+        return (
+            f"{method_name} task {outcome.task} on host {host_moid!r} did not reach a "
+            f"terminal state within {int(_MAINTENANCE_TASK_TIMEOUT_SECONDS)}s"
+        )
+    return None
+
+
 async def _host_maintenance_vim_step(
     *,
     connector: VmwareRestConnector,
@@ -3916,46 +5416,20 @@ async def _host_maintenance_vim_step(
 ) -> tuple[OperationResult | None, str | None]:
     """Run one governed vim maintenance transition on a host, polled to terminal.
 
-    The pinned vcenter.yaml serves no host-maintenance REST path (#2970);
-    enter / exit are the vim ``HostSystem.EnterMaintenanceMode_Task`` /
-    ``ExitMaintenanceMode_Task`` methods, whose request types carry a
-    required int ``timeout`` (``<= 0`` = no vim-side bound -- the poll's
-    wall clock is the bound here). Returns ``(gate, None)`` when the
-    governance seam parks/denies the write, ``(None, reason)`` when the
-    returned Task faults or the poll deadline elapses, ``(None, None)`` on
-    success. Shared by :func:`host_evacuate_composite` (enter) and
-    :func:`cluster_patch_composite` (enter + exit).
+    Returns ``(gate, None)`` when the governance seam parks/denies the
+    write, ``(None, reason)`` when the returned Task faults or the poll
+    deadline elapses, ``(None, None)`` on success. Used by
+    :func:`cluster_patch_composite` (enter + exit) with the plain
+    ``{"timeout": 0}`` body; :func:`host_evacuate_composite` drives
+    :func:`_run_host_maintenance_task` itself because it reports a poll
+    timeout as a status, not a failure.
     """
-    method_name = op_id.rsplit("/", 1)[-1]
-    gate, task_payload = await _write_vmomi_sub_op(
-        connector,
-        target,
-        operator,
-        op_id=op_id,
-        vmomi_path=f"/{_HOST_SYSTEM_MO_TYPE}/{host_moid}/{method_name}",
-        body={"timeout": _MAINTENANCE_VIM_TIMEOUT},
-        params={"host": host_moid},
+    outcome = await _run_host_maintenance_task(
+        connector=connector, target=target, operator=operator, host_moid=host_moid, op_id=op_id
     )
-    if gate is not None:
-        return gate, None
-    outcome = await poll_vim_task(
-        connector,
-        target,
-        operator,
-        task=_unwrap_value(task_payload),
-        timeout_seconds=_MAINTENANCE_TASK_TIMEOUT_SECONDS,
-    )
-    if outcome.state == TASK_STATE_ERROR:
-        return None, (
-            f"{method_name} on host {host_moid!r} faulted: "
-            f"{outcome.error_message or '<no fault reported>'}"
-        )
-    if outcome.timed_out:
-        return None, (
-            f"{method_name} task {outcome.task} on host {host_moid!r} did not reach a "
-            f"terminal state within {int(_MAINTENANCE_TASK_TIMEOUT_SECONDS)}s"
-        )
-    return None, None
+    if isinstance(outcome, OperationResult):
+        return outcome, None
+    return None, _maintenance_task_failure(outcome, op_id, host_moid)
 
 
 def _classify_vm_migrate_outcome(
@@ -3971,6 +5445,245 @@ def _classify_vm_migrate_outcome(
     return False, str(inner_status or "unknown")
 
 
+async def _resolve_host_cluster(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    host_moid: str,
+) -> str | None:
+    """The moid of the cluster *host_moid* is in, or ``None`` for a host outside a cluster.
+
+    One ``RetrievePropertiesEx`` read of the host's ``parent`` (the same
+    vim path the vm.migrate DRS read uses). All VMs on a host share its
+    cluster, so one read serves every per-VM move. The vCenter VM listing
+    rows carry no cluster field (``Vcenter.VM.Summary``: ``vm``, ``name``,
+    ``power_state``, ``cpu_count``, ``memory_size_mib``), which is why the
+    cluster cannot be read per VM (#4895).
+    """
+    payload = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=_build_single_prop_retrieve_params(_HOST_SYSTEM_MO_TYPE, host_moid, _PROP_PARENT),
+    )
+    parent = _extract_single_prop(payload, _PROP_PARENT)
+    if not isinstance(parent, dict) or parent.get("type") != _CLUSTER_COMPUTE_RESOURCE_MO_TYPE:
+        return None
+    cluster_moid = parent.get("value")
+    return cluster_moid if isinstance(cluster_moid, str) and cluster_moid else None
+
+
+async def _read_cluster_drs_config(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    cluster_moid: str,
+) -> dict[str, Any]:
+    """The cluster's ``ClusterDrsConfigInfo`` (``{}`` when vCenter has none set).
+
+    Reads the whole ``configurationEx`` and picks ``drsConfig`` in code, as
+    :func:`._read.cluster_drs_recommendations_composite` does -- vCenter
+    8.0 refuses the nested path ``configurationEx.drsConfig`` (#3617).
+    """
+    payload = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=_build_single_prop_retrieve_params(
+            _CLUSTER_COMPUTE_RESOURCE_MO_TYPE, cluster_moid, _PROP_CONFIGURATION_EX
+        ),
+    )
+    config_ex = _extract_single_prop(payload, _PROP_CONFIGURATION_EX)
+    drs_config = config_ex.get("drsConfig") if isinstance(config_ex, dict) else None
+    return drs_config if isinstance(drs_config, dict) else {}
+
+
+def _drs_moves_running_vms(drs_config: dict[str, Any]) -> bool:
+    """Whether vCenter's DRS moves the running VMs itself when the host enters maintenance."""
+    return (
+        bool(drs_config.get("enabled"))
+        and drs_config.get("defaultVmBehavior") == _DRS_BEHAVIOR_FULLY_AUTOMATED
+    )
+
+
+def _vsan_maintenance_spec(vsan_mode: str) -> dict[str, Any]:
+    """``HostMaintenanceSpec`` carrying the vSAN data option (``vsanMode.objectAction``)."""
+    return {
+        VIM_TYPE_NAME_KEY: _HOST_MAINTENANCE_SPEC_TYPE,
+        "vsanMode": {
+            VIM_TYPE_NAME_KEY: _VSAN_HOST_DECOMMISSION_MODE_TYPE,
+            "objectAction": vsan_mode,
+        },
+    }
+
+
+def _vm_rows_by_moid(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Listing rows keyed by VM moid, in listing order; rows without a moid are dropped."""
+    return {row["vm"]: row for row in rows if isinstance(row.get("vm"), str)}
+
+
+_REASON_STILL_LISTED_AFTER_MOVE = "still_listed_after_move"
+
+
+def _failure_reasons(failed: list[dict[str, str]]) -> dict[str, str]:
+    """Move error by VM moid."""
+    return {entry["vm"]: entry["error"] for entry in failed}
+
+
+def _remaining_vm_rows(
+    rows: dict[str, dict[str, Any]],
+    reasons: dict[str, str],
+    default_reason: str,
+) -> list[dict[str, Any]]:
+    """Every VM of *rows* (the VMs still on the host), each with the reason it stayed.
+
+    The reason is *reasons*[vm] when the caller knows one (the move error,
+    or the note that a move vm.migrate reported as done did not take the VM
+    off the host), else the power state when the VM was not running (MEHO
+    moves only running VMs), else *default_reason*.
+    """
+    remaining: list[dict[str, Any]] = []
+    for vm_moid, row in rows.items():
+        power_state = row.get("power_state")
+        if vm_moid in reasons:
+            reason = reasons[vm_moid]
+        elif isinstance(power_state, str) and power_state != _VM_POWER_STATE_ON:
+            reason = power_state.lower()
+        else:
+            reason = default_reason
+        remaining.append(
+            {"vm": vm_moid, "name": row.get("name"), "power_state": power_state, "reason": reason}
+        )
+    return remaining
+
+
+def _evacuate_envelope(
+    *,
+    status: str,
+    host_moid: str,
+    migrated: list[str],
+    failed: list[dict[str, str]],
+    remaining: list[dict[str, Any]],
+    maintenance_entered: bool,
+    moved_by: str,
+    maintenance_task: str | None = None,
+    guidance: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "host": host_moid,
+        "migrated_vms": migrated,
+        "failed_vms": failed,
+        "remaining_vms": remaining,
+        "maintenance_entered": maintenance_entered,
+        "maintenance_task": maintenance_task,
+        "moved_by": moved_by,
+        "guidance": guidance,
+    }
+
+
+def _evacuate_aborted(
+    host_moid: str,
+    vms: list[dict[str, Any]],
+    migrated: list[str],
+    failed: list[dict[str, str]],
+) -> dict[str, Any]:
+    """``aborted`` envelope: a VM could not be moved and partial failure is not tolerated.
+
+    The host is not listed again here, so the VMs vm.migrate reported as
+    moved count as migrated and the other VMs of the listing as remaining.
+    """
+    still_on_host = {vm: row for vm, row in _vm_rows_by_moid(vms).items() if vm not in migrated}
+    envelope = _evacuate_envelope(
+        status="aborted",
+        host_moid=host_moid,
+        migrated=migrated,
+        failed=failed,
+        remaining=_remaining_vm_rows(still_on_host, _failure_reasons(failed), "not_attempted"),
+        maintenance_entered=False,
+        moved_by="meho",
+    )
+    envelope["issues"] = [
+        issue(
+            "connector",
+            "error",
+            f"evacuation of host {host_moid!r} stopped: {len(failed)} VM(s) could not "
+            "be migrated; maintenance mode was not entered",
+        )
+    ]
+    return envelope
+
+
+def _evacuate_finished(
+    *,
+    host_moid: str,
+    vms_before: list[dict[str, Any]],
+    vms_after: list[dict[str, Any]],
+    migrated: list[str],
+    failed: list[dict[str, str]],
+    outcome: VimTaskResult,
+    moved_by: str,
+) -> dict[str, Any]:
+    """The truthful answer after the maintenance task ended or MEHO stopped waiting.
+
+    The listing after the task decides: every VM of the first listing that
+    is gone left the host (moved by MEHO or by vCenter), every VM still
+    listed stayed, with its reason. A VM that left is never reported as
+    failed, and a VM vm.migrate reported as moved but that the host still
+    lists is remaining (``still_listed_after_move``), not migrated.
+    """
+    after = _vm_rows_by_moid(vms_after)
+    left = [vm for vm in _vm_rows_by_moid(vms_before) if vm not in after]
+    failed_still_on_host = [entry for entry in failed if entry["vm"] in after]
+    reasons = {vm: _REASON_STILL_LISTED_AFTER_MOVE for vm in migrated if vm in after}
+    reasons.update(_failure_reasons(failed_still_on_host))
+    remaining = _remaining_vm_rows(after, reasons, "not_moved")
+    running_left_behind = [row for row in remaining if row["power_state"] == _VM_POWER_STATE_ON]
+    if outcome.timed_out:
+        status = "timeout"
+    elif running_left_behind:
+        status = "partial"
+    else:
+        status = "evacuated"
+    envelope = _evacuate_envelope(
+        status=status,
+        host_moid=host_moid,
+        migrated=left,
+        failed=failed_still_on_host,
+        remaining=remaining,
+        maintenance_entered=outcome.succeeded,
+        moved_by=moved_by,
+        maintenance_task=outcome.task,
+    )
+    if status == "timeout":
+        envelope["guidance"] = (
+            f"MEHO stopped waiting after {int(_MAINTENANCE_TASK_TIMEOUT_SECONDS)}s, but the "
+            f"maintenance-mode task {outcome.task} still runs on vCenter. The call did not "
+            "fail. Check the task (vmware.tasks.recent) before you work on the host."
+        )
+        envelope["issues"] = [
+            issue(
+                "connector",
+                "warning",
+                f"maintenance-mode task {outcome.task} on host {host_moid!r} still runs "
+                f"after {int(_MAINTENANCE_TASK_TIMEOUT_SECONDS)}s; the host is not yet in "
+                "maintenance mode",
+            )
+        ]
+    elif status == "partial":
+        envelope["issues"] = [
+            issue(
+                "connector",
+                "error",
+                f"host {host_moid!r} entered maintenance but {len(running_left_behind)} "
+                "running VM(s) stayed on it",
+            )
+        ]
+    return envelope
+
+
 async def host_evacuate_composite(
     *,
     operator: Operator,
@@ -3979,89 +5692,105 @@ async def host_evacuate_composite(
     connector: VmwareRestConnector,
     dispatch_child: DispatchChild,
 ) -> dict[str, Any] | OperationResult:
-    """Migrate every VM off a host (via recursive vm.migrate) then enter maintenance.
+    """Move every running VM off a host, then put the host into maintenance mode.
 
-    Op-id: ``vmware.composite.host.evacuate``. First production composite
-    that calls another composite via ``dispatch_child`` -- that recursion
-    into ``vmware.composite.vm.migrate`` stays on the ``dispatch_child`` path
-    (a registrar-guaranteed ``source_kind="composite"`` row, #2248), while
-    the host's own VM listing read and the maintenance-enter write run
-    directly on the injected ``connector`` session.
+    Op-id: ``vmware.composite.host.evacuate``. Steps (#4895):
+
+    1. Read the host's cluster from its ``parent`` (vim). A host outside a
+       cluster is refused before any change (``not_in_cluster``).
+    2. Read the cluster's DRS config. When DRS is on and fully automated,
+       vCenter moves the running VMs itself as part of the maintenance-mode
+       task, so MEHO sends no per-VM move. Otherwise every running VM is
+       moved through the recursive ``vmware.composite.vm.migrate``
+       (``dispatch_child``, a registrar-guaranteed ``source_kind="composite"``
+       row, #2248) with the cluster from step 1; a VM DRS has no suggestion
+       for is ``no_recommendation`` and, unless ``tolerate_partial_failure``
+       is set, stops the operation before maintenance mode.
+    3. Send ``EnterMaintenanceMode_Task`` with the vSAN data option
+       (``vsan_mode``) and poll it.
+    4. Read the host's VM list again and report which VMs left, which
+       stayed and why, and whether the host is in maintenance mode. A poll
+       timeout is the ``timeout`` status with the task id, not a failure.
     """
     host_moid = params["host"]
     tolerate_partial = bool(params.get("tolerate_partial_failure", False))
+    vsan_mode = str(params.get("vsan_mode") or _VSAN_MODE_DEFAULT)
 
-    vms = await _resolve_vm_list(
+    cluster_moid = await _resolve_host_cluster(
+        connector=connector, target=target, operator=operator, host_moid=host_moid
+    )
+    if cluster_moid is None:
+        return _evacuate_envelope(
+            status="not_in_cluster",
+            host_moid=host_moid,
+            migrated=[],
+            failed=[],
+            remaining=[],
+            maintenance_entered=False,
+            moved_by="none",
+            guidance=(
+                f"host {host_moid!r} is not in a cluster, so there is no DRS to move its VMs. "
+                "Nothing was changed. Move the VMs with vm.migrate and a target_host first, "
+                "or put the host into maintenance mode without moving VMs."
+            ),
+        )
+    drs_config = await _read_cluster_drs_config(
+        connector=connector, target=target, operator=operator, cluster_moid=cluster_moid
+    )
+    drs_moves_vms = _drs_moves_running_vms(drs_config)
+    moved_by = "drs" if drs_moves_vms else "meho"
+
+    vms_before = await _resolve_vm_list(
         connector=connector, target=target, operator=operator, filter_dict={"hosts": [host_moid]}
     )
 
     migrated: list[str] = []
     failed: list[dict[str, str]] = []
-    for vm_entry in vms:
-        vm_moid = vm_entry.get("vm")
-        if not isinstance(vm_moid, str):
-            continue
-        # Resolve the cluster per-VM rather than once from ``vms[0]``. The
-        # vCenter listing row reports each VM's containing cluster; VMs on
-        # the same host can belong to different clusters when the host
-        # straddles a federation (and the listing payload may simply omit
-        # the field for a row mid-flight). Treat a missing cluster as a
-        # per-VM failure so the recursive migrate doesn't fire against an
-        # empty target — that would short-circuit to ``no_recommendation``
-        # without surfacing the underlying data gap.
-        vm_cluster = vm_entry.get("cluster")
-        if not isinstance(vm_cluster, str) or not vm_cluster:
-            failed.append({"vm": vm_moid, "error": "missing_cluster"})
+    if not drs_moves_vms:
+        for vm_moid, vm_entry in _vm_rows_by_moid(vms_before).items():
+            if vm_entry.get("power_state") != _VM_POWER_STATE_ON:
+                continue
+            migrate_result = await dispatch_child(
+                connector_id=_CONNECTOR_ID,
+                op_id=_OP_COMPOSITE_VM_MIGRATE,
+                params={"vm": vm_moid, "cluster": cluster_moid},
+            )
+            succeeded, err_text = _classify_vm_migrate_outcome(migrate_result)
+            if succeeded:
+                migrated.append(vm_moid)
+                continue
+            failed.append({"vm": vm_moid, "error": err_text})
             if not tolerate_partial:
-                return {
-                    "status": "aborted",
-                    "host": host_moid,
-                    "migrated_vms": migrated,
-                    "failed_vms": failed,
-                    "maintenance_entered": False,
-                }
-            continue
-        migrate_result = await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_COMPOSITE_VM_MIGRATE,
-            params={"vm": vm_moid, "cluster": vm_cluster},
-        )
-        succeeded, err_text = _classify_vm_migrate_outcome(migrate_result)
-        if succeeded:
-            migrated.append(vm_moid)
-            continue
-        failed.append({"vm": vm_moid, "error": err_text})
-        if not tolerate_partial:
-            return {
-                "status": "aborted",
-                "host": host_moid,
-                "migrated_vms": migrated,
-                "failed_vms": failed,
-                "maintenance_entered": False,
-            }
+                return _evacuate_aborted(host_moid, vms_before, migrated, failed)
 
-    gate, reason = await _host_maintenance_vim_step(
+    outcome = await _run_host_maintenance_task(
         connector=connector,
         target=target,
         operator=operator,
         host_moid=host_moid,
         op_id=_OP_ENTER_MAINTENANCE_TASK,
+        maintenance_spec=_vsan_maintenance_spec(vsan_mode),
     )
-    if gate is not None:
-        return gate
-    if reason is not None:
-        # The maintenance-enter is the load-bearing final step; a task
-        # fault / poll timeout raises so the dispatcher wraps it
-        # ``connector_error`` (mirrors the pre-#2970 propagate-on-HTTPError
-        # semantics of the synchronous REST fiction).
+    if isinstance(outcome, OperationResult):
+        return outcome
+    if outcome.state == TASK_STATE_ERROR:
+        # A faulted maintenance task is a failed call; the dispatcher wraps
+        # it ``connector_error`` (unchanged from #2970). A poll timeout is
+        # reported below instead.
+        reason = _maintenance_task_failure(outcome, _OP_ENTER_MAINTENANCE_TASK, host_moid)
         raise RuntimeError(f"host.evacuate: {reason}")
-    return {
-        "status": "partial" if failed else "evacuated",
-        "host": host_moid,
-        "migrated_vms": migrated,
-        "failed_vms": failed,
-        "maintenance_entered": True,
-    }
+    vms_after = await _resolve_vm_list(
+        connector=connector, target=target, operator=operator, filter_dict={"hosts": [host_moid]}
+    )
+    return _evacuate_finished(
+        host_moid=host_moid,
+        vms_before=vms_before,
+        vms_after=vms_after,
+        migrated=migrated,
+        failed=failed,
+        outcome=outcome,
+        moved_by=moved_by,
+    )
 
 
 # ===========================================================================
@@ -4178,6 +5907,14 @@ async def host_detach_from_vds_composite(
             "host": host_moid,
             "vm_migration_failures": migration_failures,
             "vms_migrated": vms_migrated,
+            "issues": [
+                issue(
+                    "connector",
+                    "error",
+                    f"{len(migration_failures)} VM(s) could not be moved off the switch; "
+                    f"host {host_moid!r} was not removed from it",
+                )
+            ],
         }
 
     # ``DVSConfigSpec.configVersion`` must echo the switch's current
@@ -4241,6 +5978,7 @@ async def host_detach_from_vds_composite(
                 f"{int(_DVS_RECONFIGURE_TASK_TIMEOUT_SECONDS)}s; poll the task -- the "
                 "detach may still complete in the background"
             ),
+            "issues": [_task_timeout_issue("ReconfigureDvs_Task", outcome.task)],
         }
     return {
         "status": "detached",
@@ -4418,6 +6156,7 @@ async def network_portgroup_create_composite(
                 f"{int(_NETWORK_PORTGROUP_TASK_TIMEOUT_SECONDS)}s; poll the task or re-read the "
                 "switch's portgroups -- the create may still complete in the background"
             ),
+            "issues": [_task_timeout_issue("CreateDVPortgroup_Task", outcome.task)],
         }
 
     portgroup_moid = _moref_value(outcome.result)
@@ -4616,6 +6355,7 @@ async def network_portgroup_security_set_composite(
                 "re-read the portgroup's security policy -- the change may still complete "
                 "in the background"
             ),
+            "issues": [_task_timeout_issue("ReconfigureDVPortgroup_Task", outcome.task)],
         }
 
     observed = await _read_portgroup_security_policy(
@@ -4881,6 +6621,7 @@ async def network_portgroup_vlan_set_composite(
                 "re-read the portgroup's VLAN config -- the change may still complete "
                 "in the background"
             ),
+            "issues": [_task_timeout_issue("ReconfigureDVPortgroup_Task", outcome.task)],
         }
 
     post_read = await connector._post_vmomi_json(
@@ -5231,7 +6972,8 @@ async def vm_disk_grow_composite(
        returns ``status="timeout"`` with the task id for the operator.
     """
     vm_moid = params["vm"]
-    disk_id = params["disk"]
+    # The REST disk id is a string, the vim device key an int (#3789).
+    disk_id = str(params["disk"])
     requested = int(params["capacity_bytes"])
 
     devices_result = await connector._post_vmomi_json(
@@ -5328,6 +7070,7 @@ async def vm_disk_grow_composite(
                 f"{int(_DISK_GROW_TASK_TIMEOUT_SECONDS)}s; poll the task or re-read the disk "
                 "capacity — the grow may still complete in the background"
             ),
+            "issues": [_task_timeout_issue("ReconfigVM_Task", outcome.task)],
         }
     return {
         "status": "grown",
@@ -6042,25 +7785,36 @@ async def vm_clone_from_template_composite(
 # seam + the ``poll_vim_task`` helper (the reconfigure returns a ``*_Task``).
 
 
-def _build_cluster_rules_retrieve_params(cluster_moid: str) -> dict[str, Any]:
-    """Build the ``RetrievePropertiesEx`` body reading a cluster's DRS rules.
+def _build_cluster_config_retrieve_params(cluster_moid: str) -> dict[str, Any]:
+    """Build the ``RetrievePropertiesEx`` body reading a cluster's ``configurationEx``.
 
     A single ``PropertyFilterSpec`` scoped to the ClusterComputeResource
-    object requesting ``configurationEx.rule`` — the array of existing
-    ``ClusterRuleInfo`` rules, each carrying its ``name``. The idempotence /
-    name-collision check reads this before any write so a duplicate rule
-    name returns a structured status instead of a raw vim ``DuplicateName``
-    fault. The singleton ``propertyCollector`` moId rides the path, so the
-    body is only the method args (the shape the typed reads send),
-    ``_typeName``-annotated via the shared trio helper (#3103).
+    object requesting the whole ``configurationEx`` (see
+    :data:`_PROP_CONFIGURATION_EX` for why not ``configurationEx.rule``). The
+    idempotence / name-collision checks pick the existing rule and group
+    names from it before any write, so a duplicate name returns a structured
+    status instead of a raw vim ``DuplicateName`` fault. The singleton
+    ``propertyCollector`` moId rides the path, so the body is only the
+    method args (the shape the typed reads send), ``_typeName``-annotated
+    via the shared trio helper (#3103).
     """
     return retrieve_properties_body(
-        _CLUSTER_COMPUTE_RESOURCE_MO_TYPE, [cluster_moid], [_PROP_CONFIGURATION_EX_RULE]
+        _CLUSTER_COMPUTE_RESOURCE_MO_TYPE, [cluster_moid], [_PROP_CONFIGURATION_EX]
     )
 
 
-def _extract_cluster_rule_names(retrieve_result: Any) -> set[str]:
-    """Pull the existing DRS rule names off a ``RetrievePropertiesEx`` result."""
+def _cluster_config_items(config_ex: Any, member: str) -> list[dict[str, Any]]:
+    """The ``rule`` or ``group`` entries of an un-boxed ``ClusterConfigInfoEx``.
+
+    vim leaves an empty array out of the object, so an absent member (or an
+    absent ``configurationEx``) is an empty list.
+    """
+    items = config_ex.get(member) if isinstance(config_ex, dict) else None
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+
+def _extract_cluster_config_names(retrieve_result: Any, member: str) -> set[str]:
+    """Names of the ``member`` entries in a ``configurationEx`` read result."""
     payload = _unwrap_value(retrieve_result)
     objects = payload.get("objects", []) if isinstance(payload, dict) else payload
     names: set[str] = set()
@@ -6070,13 +7824,17 @@ def _extract_cluster_rule_names(retrieve_result: Any) -> set[str]:
         if not isinstance(obj, dict):
             continue
         for prop in obj.get("propSet", []) or []:
-            if not isinstance(prop, dict) or prop.get("name") != _PROP_CONFIGURATION_EX_RULE:
+            if not isinstance(prop, dict) or prop.get("name") != _PROP_CONFIGURATION_EX:
                 continue
-            rules = unwrap_vim_value(prop.get("val"))
-            for rule in rules if isinstance(rules, list) else []:
-                if isinstance(rule, dict) and isinstance(rule.get("name"), str):
-                    names.add(rule["name"])
+            for item in _cluster_config_items(unwrap_vim_value(prop.get("val")), member):
+                if isinstance(item.get("name"), str):
+                    names.add(item["name"])
     return names
+
+
+def _extract_cluster_rule_names(retrieve_result: Any) -> set[str]:
+    """Pull the existing DRS rule names off a ``configurationEx`` read result."""
+    return _extract_cluster_config_names(retrieve_result, "rule")
 
 
 async def _resolve_cluster_name(
@@ -6155,10 +7913,10 @@ async def cluster_drs_rule_create_composite(
     1. Resolve the rule's VM *names* to MoRefs, scoped to the cluster (a
        *read*, un-gated). Fewer than two resolve → ``status="insufficient_vms"``
        before any write (an affinity / anti-affinity rule needs >=2 VMs).
-    2. Read the cluster's existing rules (``configurationEx.rule``, a *read*)
-       for the idempotence / name-collision check: a duplicate name returns
-       ``status="rule_exists"`` — a structured status, not a raw vim
-       ``DuplicateName`` fault.
+    2. Read the cluster's whole ``configurationEx`` (a *read*) and pick the
+       existing rules (``rule``) for the idempotence / name-collision check:
+       a duplicate name returns ``status="rule_exists"`` — a structured
+       status, not a raw vim ``DuplicateName`` fault.
     3. Issue the single ``ReconfigureComputeResource_Task`` add through the
        governed vmomi write seam (:func:`_write_vmomi_sub_op` → the #2254
        gate); a parked/denied gate returns the :class:`OperationResult`
@@ -6203,7 +7961,7 @@ async def cluster_drs_rule_create_composite(
         target,
         _VMOMI_RETRIEVE_PROPERTIES_PATH,
         operator=operator,
-        json=_build_cluster_rules_retrieve_params(cluster_moid),
+        json=_build_cluster_config_retrieve_params(cluster_moid),
     )
     if rule_name in _extract_cluster_rule_names(existing):
         return {
@@ -6281,6 +8039,7 @@ async def cluster_drs_rule_create_composite(
                 f"within {int(_DRS_RULE_TASK_TIMEOUT_SECONDS)}s; poll the task or re-read the "
                 "cluster's DRS rules — the rule add may still complete in the background"
             ),
+            "issues": [_task_timeout_issue("ReconfigureComputeResource_Task", outcome.task)],
         }
     return {
         "status": "created",
@@ -6325,33 +8084,80 @@ async def _resolve_parent_vm_folder(
     target: Any,
     operator: Operator,
     parent_name: str,
-) -> tuple[str | None, str | None]:
+    datacenter_moid: str | None,
+) -> tuple[str | None, str | None, list[str]]:
     """Resolve a VM-folder parent by display name to its moid.
 
     Read-only ``GET:/vcenter/folder`` filtered by ``names`` + the
     ``VIRTUAL_MACHINE`` folder type (the same listing ``vm.create`` resolves
-    its placement folder from). Returns ``(moid, None)`` on a unique match,
-    ``(None, "parent_not_found")`` on no match, or ``(None,
-    "ambiguous_parent")`` when the name resolves to more than one VM folder —
-    a structured status the caller surfaces instead of guessing a parent.
+    its placement folder from), plus ``datacenters`` when *datacenter_moid*
+    is given. Returns ``(moid, None, [])`` on a unique match, ``(None,
+    "parent_not_found", [])`` on no match, or ``(None, "ambiguous_parent",
+    candidates)`` when the name resolves to more than one VM folder. The
+    caller never guesses a parent.
     """
-    listing = await _read_sub_op(
-        connector,
-        target,
-        operator,
-        _OP_LIST_FOLDERS,
-        {"filter.names": [parent_name], "filter.type": "VIRTUAL_MACHINE"},
-    )
+    query: dict[str, Any] = {"filter.names": [parent_name], "filter.type": "VIRTUAL_MACHINE"}
+    if datacenter_moid is not None:
+        query["filter.datacenters"] = [datacenter_moid]
+    listing = await _read_sub_op(connector, target, operator, _OP_LIST_FOLDERS, query)
     entries = _unwrap_value(listing)
-    rows = [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
-    if not rows:
-        return None, "parent_not_found"
-    if len(rows) > 1:
-        return None, "ambiguous_parent"
-    moid = rows[0].get("folder")
-    if not isinstance(moid, str):
-        return None, "parent_not_found"
-    return moid, None
+    rows = entries if isinstance(entries, list) else []
+    moids = [
+        row["folder"]
+        for row in rows
+        if isinstance(row, dict) and isinstance(row.get("folder"), str)
+    ]
+    if not moids:
+        return None, "parent_not_found", []
+    if len(moids) > 1:
+        return None, "ambiguous_parent", moids
+    return moids[0], None, []
+
+
+def _folder_create_refusal(
+    *,
+    status: str,
+    parent_name: str,
+    datacenter_moid: str | None,
+    new_name: str,
+    candidates: list[str],
+) -> dict[str, Any]:
+    """The failed ``folder.create`` envelope for an unresolved parent (#3588).
+
+    Carries an ``error``-severity issue so the dispatcher records the
+    operation as failed (``result_status='error'``), not as an ``ok`` no-op.
+    The message names only the match *count*; the ids live in
+    ``candidate_folders``, which the dispatcher's reducer puts behind a result
+    handle when the list is large (#4223) — the message must stay short
+    because it also becomes the result's ``error`` line.
+    """
+    scope = f" in datacenter {datacenter_moid}" if datacenter_moid else ""
+    if status == "ambiguous_parent":
+        message = (
+            f"parent VM folder name {parent_name!r}{scope} matched {len(candidates)} VM folders"
+        )
+        guidance = (
+            "pick the intended folder ID from `candidate_folders` and pass it as "
+            "`parent_folder_id`, or scope the name with `datacenter`; no folder "
+            "was created"
+        )
+    else:
+        message = f"parent VM folder name {parent_name!r}{scope} matched no VM folder"
+        guidance = (
+            "check the parent name (it must be a VM folder, not a datacenter) or pass "
+            "`parent_folder_id`; no folder was created"
+        )
+    return {
+        "status": status,
+        "parent_folder": parent_name,
+        "parent_folder_id": None,
+        "datacenter": datacenter_moid,
+        "new_folder_name": new_name,
+        "folder": None,
+        "candidate_folders": candidates,
+        "issues": [{"category": "input", "severity": "error", "message": message}],
+        "guidance": guidance,
+    }
 
 
 async def folder_create_composite(
@@ -6361,7 +8167,7 @@ async def folder_create_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any] | OperationResult:
-    """Create a VM folder under a named parent via the synchronous vim CreateFolder.
+    """Create a VM folder under a parent via the synchronous vim CreateFolder.
 
     Op-id: ``vmware.composite.folder.create``. ``/vcenter/folder`` is
     GET-only (spec-verified), so the create rides vim ``Folder.CreateFolder``,
@@ -6369,35 +8175,40 @@ async def folder_create_composite(
     ``ManagedObjectReference`` directly, not a ``*_Task``, so (unlike
     drs_rule / disk-grow) the returned MoRef is **not** polled.
 
-    Flow: resolve the parent folder *name* to a moid (a *read*; no match →
-    ``status="parent_not_found"``, >1 match → ``status="ambiguous_parent"``),
-    then issue the single ``CreateFolder`` through the governed vmomi write
-    seam (:func:`_write_vmomi_sub_op` → the #2254 gate). A parked/denied gate
-    returns the :class:`OperationResult` verbatim and no folder is created;
-    otherwise the new folder MoRef is unwrapped into ``status="created"``.
+    Flow: take the ``parent_folder_id`` folder ID as is, or resolve the
+    ``parent_folder`` *name* to a moid (a *read*, scoped to ``datacenter``
+    when given). No match → ``status="parent_not_found"``, >1 match →
+    ``status="ambiguous_parent"``; both carry an ``error`` issue so the
+    operation fails instead of auditing ``ok`` for a write that never
+    happened (#3588). Then issue the single ``CreateFolder`` through the
+    governed vmomi write seam (:func:`_write_vmomi_sub_op` → the #2254 gate).
+    A parked/denied gate returns the :class:`OperationResult` verbatim and no
+    folder is created; otherwise the new folder MoRef is unwrapped into
+    ``status="created"``.
     """
-    parent_name = params["parent_folder"]
+    parent_name = params.get("parent_folder")
+    parent_moid = params.get("parent_folder_id")
+    datacenter_moid = params.get("datacenter")
     new_name = params["folder_name"]
 
-    parent_moid, resolve_error = await _resolve_parent_vm_folder(
-        connector=connector, target=target, operator=operator, parent_name=parent_name
-    )
     if parent_moid is None:
-        return {
-            "status": resolve_error,
-            "parent_folder": parent_name,
-            "parent_folder_id": None,
-            "new_folder_name": new_name,
-            "folder": None,
-            "guidance": (
-                f"parent VM folder name {parent_name!r} "
-                + (
-                    "resolved to more than one folder — pass a unique parent name"
-                    if resolve_error == "ambiguous_parent"
-                    else "did not resolve to a VM folder"
-                )
-            ),
-        }
+        # The schema's anyOf makes ``parent_folder`` present when there is no pin.
+        lookup_name: str = params["parent_folder"]
+        parent_moid, resolve_error, candidates = await _resolve_parent_vm_folder(
+            connector=connector,
+            target=target,
+            operator=operator,
+            parent_name=lookup_name,
+            datacenter_moid=datacenter_moid,
+        )
+        if parent_moid is None:
+            return _folder_create_refusal(
+                status=resolve_error or "parent_not_found",
+                parent_name=lookup_name,
+                datacenter_moid=datacenter_moid,
+                new_name=new_name,
+                candidates=candidates,
+            )
 
     gate, folder_payload = await _write_vmomi_sub_op(
         connector,
@@ -6416,8 +8227,11 @@ async def folder_create_composite(
         "status": "created",
         "parent_folder": parent_name,
         "parent_folder_id": parent_moid,
+        "datacenter": datacenter_moid,
         "new_folder_name": new_name,
         "folder": new_folder_moid,
+        "candidate_folders": [],
+        "issues": [],
         "guidance": None,
     }
 
@@ -6745,29 +8559,14 @@ async def resource_pool_delete_composite(
 
 
 def _extract_cluster_group_names(retrieve_result: Any) -> set[str]:
-    """Pull the existing DRS group names off a ``RetrievePropertiesEx`` result.
+    """Pull the existing DRS group names off a ``configurationEx`` read result.
 
     The host / VM group names share one flat namespace with each other (a
-    ``ClusterGroupInfo.name`` is unique within the cluster), read off
-    ``configurationEx.group`` — the collision check for the VM-Host rule's two
-    new groups. Mirrors :func:`_extract_cluster_rule_names`.
+    ``ClusterGroupInfo.name`` is unique within the cluster), picked from the
+    ``group`` array of the cluster's ``configurationEx`` — the collision check
+    for the VM-Host rule's two new groups.
     """
-    payload = _unwrap_value(retrieve_result)
-    objects = payload.get("objects", []) if isinstance(payload, dict) else payload
-    names: set[str] = set()
-    if not isinstance(objects, list):
-        return names
-    for obj in objects:
-        if not isinstance(obj, dict):
-            continue
-        for prop in obj.get("propSet", []) or []:
-            if not isinstance(prop, dict) or prop.get("name") != _PROP_CONFIGURATION_EX_GROUP:
-                continue
-            groups = unwrap_vim_value(prop.get("val"))
-            for group in groups if isinstance(groups, list) else []:
-                if isinstance(group, dict) and isinstance(group.get("name"), str):
-                    names.add(group["name"])
-    return names
+    return _extract_cluster_config_names(retrieve_result, "group")
 
 
 async def _resolve_named_hosts_in_cluster(
@@ -6827,8 +8626,8 @@ async def cluster_drs_vm_host_rule_create_composite(
     1. Resolve the VM + host names to MoRefs, scoped to the cluster (*reads*,
        un-gated). Zero VMs → ``status='insufficient_vms'``; zero hosts →
        ``status='insufficient_hosts'`` (both before any write).
-    2. Read the cluster's existing rule + group names
-       (``configurationEx.rule`` / ``.group``) for the collision check: a
+    2. Read the cluster's whole ``configurationEx`` and pick the existing
+       rule + group names (``rule`` / ``group``) for the collision check: a
        duplicate rule name → ``status='rule_exists'``; a duplicate VM- or
        host-group name → ``status='group_exists'``.
     3. Issue the single ``ReconfigureComputeResource_Task`` through the
@@ -6900,11 +8699,7 @@ async def cluster_drs_vm_host_rule_create_composite(
         target,
         _VMOMI_RETRIEVE_PROPERTIES_PATH,
         operator=operator,
-        json=retrieve_properties_body(
-            _CLUSTER_COMPUTE_RESOURCE_MO_TYPE,
-            [cluster_moid],
-            [_PROP_CONFIGURATION_EX_RULE, _PROP_CONFIGURATION_EX_GROUP],
-        ),
+        json=_build_cluster_config_retrieve_params(cluster_moid),
     )
     if rule_name in _extract_cluster_rule_names(existing):
         return _envelope(
@@ -7334,6 +9129,9 @@ async def vm_resize_composite(
                     "status": "partial",
                     "applied": {"cpu": True, "memory": False},
                     "guidance": f"CPU applied; memory update failed: {exc}",
+                    "issues": [
+                        issue("connector", "error", f"CPU applied; memory update failed: {exc}")
+                    ],
                 }
             raise
         if gate is not None:
@@ -7542,39 +9340,35 @@ async def vm_device_cdrom_composite(
         "guidance": None,
     }
 
+    cdrom_params: dict[str, Any] = {"vm": vm_moid, "cdrom": cdrom_id}
+    done: dict[str, Any]
     if action == "remove":
-        gate, _ = await _write_sub_op(
-            connector, target, operator, _OP_DELETE_VM_CDROM, {"vm": vm_moid, "cdrom": cdrom_id}
+        sub_op, done = _OP_DELETE_VM_CDROM, {"status": "removed"}
+    elif action == "disconnect":
+        sub_op, done = _OP_DISCONNECT_VM_CDROM, {"status": "disconnected"}
+    else:
+        backing = params.get("backing")
+        if not isinstance(backing, dict):
+            return {
+                **base,
+                "status": "invalid_request",
+                "guidance": (
+                    "action='update' needs a 'backing' object, e.g. {'type': 'CLIENT_DEVICE'}"
+                ),
+            }
+        sub_op, done = _OP_UPDATE_VM_CDROM, {"status": "updated", "requested_backing": backing}
+        cdrom_params["backing"] = backing
+    try:
+        gate, _ = await _write_sub_op(connector, target, operator, sub_op, cdrom_params)
+    except httpx.TimeoutException:
+        from meho_backplane.connectors.vmware_rest.vm_wait_state import (
+            device_change_result_unknown,
         )
-        if gate is not None:
-            return gate
-        return {**base, "status": "removed"}
 
-    if action == "disconnect":
-        gate, _ = await _write_sub_op(
-            connector, target, operator, _OP_DISCONNECT_VM_CDROM, {"vm": vm_moid, "cdrom": cdrom_id}
-        )
-        if gate is not None:
-            return gate
-        return {**base, "status": "disconnected"}
-
-    backing = params.get("backing")
-    if not isinstance(backing, dict):
-        return {
-            **base,
-            "status": "invalid_request",
-            "guidance": "action='update' needs a 'backing' object, e.g. {'type': 'CLIENT_DEVICE'}",
-        }
-    gate, _ = await _write_sub_op(
-        connector,
-        target,
-        operator,
-        _OP_UPDATE_VM_CDROM,
-        {"vm": vm_moid, "cdrom": cdrom_id, "backing": backing},
-    )
+        return {**base, **await device_change_result_unknown(connector, operator, target, vm_moid)}
     if gate is not None:
         return gate
-    return {**base, "status": "updated", "requested_backing": backing}
+    return {**base, **done}
 
 
 # ===========================================================================

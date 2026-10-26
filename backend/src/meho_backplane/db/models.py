@@ -253,6 +253,7 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -276,21 +277,28 @@ from sqlalchemy.types import TypeDecorator, TypeEngine
 # enum. The import is safe against a cycle: the ``checks`` package is
 # dependency-pure (stdlib + pydantic + itself) and never imports ``db``.
 from meho_backplane.checks.assertions import CheckState
+from meho_backplane.sandbox_mode import sandbox_mode_active
 
 __all__ = [
+    "AUDIT_EVENT_CLASSES",
     "EVENT_OUTBOX_NOTIFY_CHANNEL",
+    "KB_REVISION_ORIGINS",
     "KIND_SLUG_MAX_LENGTH",
     "KIND_SLUG_MIN_LENGTH",
     "KIND_SLUG_PATTERN",
     "KIND_SLUG_RE",
+    "SOURCE_SCOPE_GLOBAL",
+    "SOURCE_SCOPE_PATTERN",
     "WELL_KNOWN_NODE_KINDS",
     "AgentRun",
     "AgentRunStatus",
     "AgentRunTrigger",
+    "AuditEventClass",
     "AuditLog",
     "Base",
     "BroadcastOverride",
     "BudgetWindowKind",
+    "ConventionHistoryChangeKind",
     "DispatchTrace",
     "DispatchTraceSpan",
     "Document",
@@ -303,7 +311,9 @@ __all__ = [
     "GraphNode",
     "GraphNodeHistory",
     "IdentityBudget",
+    "KbRevision",
     "OperationGroup",
+    "RequestUsageEvent",
     "RunbookRun",
     "RunbookRunStepState",
     "RunbookTemplate",
@@ -412,14 +422,56 @@ class Base(DeclarativeBase):
     """
 
 
-class AuditLog(Base):
-    """One row per authenticated request, written synchronously before response.
+class AuditEventClass(StrEnum):
+    """What kind of accountable event one ``audit_log`` row records (#3733).
 
-    The :class:`~meho_backplane.audit.AuditMiddleware` constructs an
-    instance, populates every field from the request / response /
-    contextvars, and commits before yielding the response back to
-    the ASGI send chain. Read-only by every other consumer in v0.1
-    (no UPDATE / DELETE paths exist).
+    The set is closed. The database CHECK ``ck_audit_log_event_class``
+    rejects any other value, so a new class needs a code change and a
+    migration together.
+
+    * :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation
+      (success or failure), or a MEHO-internal action such as a topology
+      edit, a retention sweep or a reaper.
+    * :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:
+      a policy deny, a rate-limit refusal, or a park for approval.
+    * :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,
+      rejected, or let an approval request expire.
+    * :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
+      refresh-token replay or a broken satellite effect chain.
+    * :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
+      row written before migration ``0106`` reads as this class; it is never
+      guessed from ``method`` / ``path``. The REST and MCP request wrapper
+      rows also keep this class while ``AUDIT_WRAPPER_ROWS_RETIRED`` is off;
+      with it on they write a decision or execution class, or no row
+      (#3757, :mod:`meho_backplane.audit_cutover`).
+    """
+
+    OPERATION_EXECUTION = "operation_execution"
+    POLICY_DECISION = "policy_decision"
+    APPROVAL_DECISION = "approval_decision"
+    SECURITY_EVENT = "security_event"
+    LEGACY_REQUEST = "legacy_request"
+
+
+#: Closed tuple mirrored in migration ``0106``'s CHECK constraint.
+AUDIT_EVENT_CLASSES: tuple[str, ...] = tuple(c.value for c in AuditEventClass)
+
+
+def _ck_event_class_in(values: tuple[str, ...]) -> str:
+    """Render the ``event_class IN (...)`` CHECK body for ``audit_log``."""
+    return f"event_class IN ({', '.join(f"'{v}'" for v in values)})"
+
+
+class AuditLog(Base):
+    """One durable accountability record, written synchronously.
+
+    Every writer declares its :class:`AuditEventClass` on ``event_class``
+    (see ``tests/test_audit_event_class.py`` for the writer inventory).
+    The :class:`~meho_backplane.audit.AuditMiddleware` writes one row per
+    authenticated request (class ``legacy_request``) until
+    ``AUDIT_WRAPPER_ROWS_RETIRED`` is on (#3757); the dispatcher,
+    the approval queue and the domain writers write classified rows.
+    Read-only by every other consumer (no UPDATE / DELETE paths exist).
 
     Field semantics are documented on the module docstring; this
     class deliberately ships with no helper methods — the audit row
@@ -593,8 +645,41 @@ class AuditLog(Base):
         nullable=True,
         default=None,
     )
+    # What kind of accountable event this row records (#3733). Closed
+    # vocabulary :class:`AuditEventClass`, DB-enforced by the CHECK below.
+    # NOT NULL. The server default ``legacy_request`` is what every row
+    # written before migration ``0106`` reads as, and what a row from an
+    # older MEHO version writes during a rolling upgrade. There is no
+    # Python-side default on purpose: every writer in this codebase passes
+    # the class it knows, and the writer-inventory test fails on any
+    # ``AuditLog(...)`` call that does not.
+    event_class: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=sa.text("'legacy_request'"),
+    )
+    # Whether the instance ran in sandbox mode when it wrote the row
+    # (#4622, ``docs/decisions/sandbox-mode.md``). One default sets it for
+    # every writer: the ``before_insert`` hook below reads the process flag
+    # set at boot, so no writer names the mark. It is an ORM hook, not a
+    # Core column default, on purpose: a Core default would be added to
+    # every ``insert(AuditLog)`` statement, also against a database at an
+    # older revision (the migration tests do that). The database default
+    # ``false`` covers a row written by an older build that does not know
+    # the column, and every row from before migration ``0115``. The whole
+    # database has one mode, but rows leave it (exports, log stores), and
+    # the mark goes with them.
+    sandbox_mode: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=sa.false(),
+    )
 
     __table_args__ = (
+        sa.CheckConstraint(
+            _ck_event_class_in(AUDIT_EVENT_CLASSES),
+            name="ck_audit_log_event_class",
+        ),
         # Verdict vocabulary is the closed ``PermissionVerdict`` set. The
         # literal mirrors ``_PERMISSION_VERDICTS`` (defined later in this
         # module, after the enum) rather than referencing it — this
@@ -653,6 +738,18 @@ class AuditLog(Base):
             postgresql_using="btree",
         ),
     )
+
+
+@sa.event.listens_for(AuditLog, "before_insert")
+def _stamp_audit_sandbox_mode(_mapper: object, _connection: object, row: AuditLog) -> None:
+    """The one default for ``audit_log.sandbox_mode`` (#4622).
+
+    Runs for every ``AuditLog`` row the ORM inserts. A writer that set the
+    mark itself keeps its value (none does today; the writer inventory
+    test checks that).
+    """
+    if row.sandbox_mode is None:
+        row.sandbox_mode = sandbox_mode_active()
 
 
 class Tenant(Base):
@@ -983,6 +1080,86 @@ class Document(Base):
             "documents_body_hash_idx",
             "body_hash",
             postgresql_using="btree",
+        ),
+    )
+
+
+#: Closed set for :attr:`KbRevision.origin`. ``write`` rows were stored
+#: by a kb write. ``backfill-current`` rows were copied from the current
+#: kb entry by migration ``0110``; they are not historical versions.
+KB_REVISION_ORIGINS: tuple[str, ...] = ("write", "backfill-current")
+
+
+class KbRevision(Base):
+    """One retained, immutable body of a kb entry.
+
+    The :class:`Document` row with ``source="kb"`` stays the latest
+    head: it is what search and ``meho://kb/{slug}`` read, and a new
+    body overwrites it. Each time a kb write changes the body, the
+    service also adds one row here in the same transaction. The row
+    is never updated, so an older body stays readable by its revision
+    id after the head moves on. It ends only when the entry is
+    deleted (explicit delete, or a cascade from the ``documents`` row).
+
+    Columns:
+
+    * ``id`` -- the revision UUID used in
+      ``meho://kb/id/{entry}/revision/{revision}``.
+    * ``tenant_id`` -- owning tenant; every read filters on it.
+    * ``entry_id`` -- the ``documents.id`` of the kb entry (the entry
+      UUID). ``ON DELETE CASCADE`` so no revision outlives its entry.
+    * ``revision_number`` -- 1, 2, 3, ... per entry. The highest number
+      is the current revision. Unique per entry.
+    * ``body`` / ``body_hash`` -- the stored text and its SHA-256 hex.
+    * ``provenance`` -- the provenance block of the write (see
+      :mod:`meho_backplane.kb.provenance`); ``None`` when not recorded.
+    * ``origin`` -- one of :data:`KB_REVISION_ORIGINS`.
+    * ``embedding_model`` / ``chunker_version`` -- which embedding
+      model and chunking rule indexed this body. ``None`` on backfill
+      rows, because the migration cannot know them.
+    * ``created_at`` -- when the revision was stored.
+    """
+
+    __tablename__ = "kb_revision"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    entry_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    body_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    # ``none_as_null`` stores ``None`` as SQL ``NULL``, matching migration 0110.
+    provenance: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+    )
+    origin: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    chunker_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "kb_revision_entry_number_idx",
+            "entry_id",
+            "revision_number",
+            unique=True,
+        ),
+        sa.CheckConstraint(
+            "origin IN ('write', 'backfill-current')",
+            name="ck_kb_revision_origin",
         ),
     )
 
@@ -1991,6 +2168,48 @@ def _ck_in(column: str, values: tuple[str, ...]) -> str:
     return f"{column} IN ({', '.join(f"'{v}'" for v in values)})"
 
 
+#: :attr:`GraphNode.source_scope` value for a node whose name means the
+#: same thing for the whole tenant, whichever source reported it (#3739).
+SOURCE_SCOPE_GLOBAL: Final[str] = "global"
+
+#: The full :attr:`GraphNode.source_scope` grammar (#3739). Three forms:
+#:
+#: * ``global`` -- the name is tenant-wide (see :data:`SOURCE_SCOPE_GLOBAL`).
+#: * ``target:<uuid>`` -- the name is only unique inside one target; the
+#:   UUID is that target's ``targets.id``.
+#: * ``legacy:<uuid>`` -- a pre-migration row kept apart from scoped rows;
+#:   the UUID is the row's own ``graph_node.id``, so two legacy rows never
+#:   collide.
+#:
+#: UUIDs are canonical lowercase text. ``NULL`` means "not resolved yet".
+SOURCE_SCOPE_PATTERN: Final[str] = (
+    r"^(?:global|(?:target|legacy):"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
+)
+
+
+def _ck_source_scope(column: str) -> str:
+    """Render the portable CHECK body for :data:`SOURCE_SCOPE_PATTERN`.
+
+    Regex CHECKs are not portable, so the UUID form is checked in four
+    portable steps: the 7-character prefix (``=`` is case-sensitive on
+    both dialects, unlike SQLite ``LIKE``); the ``LIKE`` layout (length
+    and hyphen positions); exactly four hyphens (``_`` in ``LIKE`` also
+    matches a hyphen); and ``ltrim`` with the lowercase hex alphabet
+    (anything left over is a bad character). ``substr`` / ``replace`` /
+    ``ltrim`` mean the same on PostgreSQL and SQLite. Mirrored verbatim
+    in migration ``0108``.
+    """
+    return (
+        f"{column} IS NULL "
+        f"OR {column} = 'global' "
+        f"OR (substr({column}, 1, 7) IN ('target:', 'legacy:') "
+        f"AND {column} LIKE '_______________-____-____-____-____________' "
+        f"AND length(replace({column}, '-', '')) = 39 "
+        f"AND ltrim(substr({column}, 8), '0123456789abcdef-') = '')"
+    )
+
+
 def _ck_kind_shape(column: str) -> str:
     """Render the portable minimal shape CHECK for an open kind column.
 
@@ -2083,6 +2302,20 @@ class GraphNode(Base):
       out once a node has been absent past the configured threshold
       (the spec's soft-delete signal -- the row stays queryable for
       G9.3 history replay but is filtered out of default queries).
+    * ``source_scope`` -- Text NULL with the portable
+      ``ck_graph_node_source_scope`` CHECK (migration ``0108``,
+      #3739). Says where the node's name is unique: ``global``,
+      ``target:<uuid>`` or ``legacy:<uuid>`` (see
+      :data:`SOURCE_SCOPE_PATTERN`). ``NULL`` means not resolved yet:
+      the row predates source-qualified identity, and ``target_id``
+      only names the last target that saw it, so readers must not
+      treat it as the scope. Writers fill it only after the staged
+      scope cut-over (#3749, :mod:`meho_backplane.topology.scope_repair`),
+      which also makes it ``NOT NULL`` at the database level. This
+      declaration keeps the pre-cut-over shape that fresh installs have.
+    * ``source_scope_provenance`` -- Text NULL. What set
+      ``source_scope`` (``migration:0108`` for the backfill). Lets the
+      later repair tell a mechanical value from a rediscovered one.
 
     Indexes on :class:`GraphNode`:
 
@@ -2090,7 +2323,15 @@ class GraphNode(Base):
       ``(tenant_id, kind, name)``. Enforces the "one (kind, name) per
       tenant" invariant at the DB layer. Named index only; no
       ``unique=True`` on the column triple to avoid PG auto-generating
-      a duplicate anonymous index alongside it.
+      a duplicate anonymous index alongside it. It stays in place until
+      the staged cut-over: PostgreSQL treats NULLs as distinct in a
+      unique index, so adding ``source_scope`` as a fourth key column
+      would let two unresolved rows share a name. The cut-over (#3749)
+      drops it and makes ``graph_node_tenant_scope_kind_name_idx``
+      unique instead.
+    * ``graph_node_tenant_scope_kind_name_idx`` -- non-unique b-tree on
+      ``(tenant_id, source_scope, kind, name)`` (migration ``0108``).
+      Serves per-scope lookups and the "unresolved rows" scan.
 
     The model deliberately ships with no helper methods -- write paths
     land in T3's refresh service, read paths in T4's recursive-CTE
@@ -2134,6 +2375,12 @@ class GraphNode(Base):
         nullable=True,
         default=None,
     )
+    source_scope: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    source_scope_provenance: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
@@ -2144,6 +2391,14 @@ class GraphNode(Base):
             unique=True,
             postgresql_using="btree",
         ),
+        Index(
+            "graph_node_tenant_scope_kind_name_idx",
+            "tenant_id",
+            "source_scope",
+            "kind",
+            "name",
+            postgresql_using="btree",
+        ),
         sa.CheckConstraint(
             _ck_kind_shape("kind"),
             name="ck_graph_node_kind",
@@ -2151,6 +2406,10 @@ class GraphNode(Base):
         sa.CheckConstraint(
             _ck_in("source", _GRAPH_SOURCES),
             name="ck_graph_node_source",
+        ),
+        sa.CheckConstraint(
+            _ck_source_scope("source_scope"),
+            name="ck_graph_node_source_scope",
         ),
     )
 
@@ -2745,8 +3004,9 @@ class AgentAnnouncement(Base):
     (``meho_broadcast_recent`` backfills from here when the requested
     window predates the stream's oldest surviving entry).
 
-    Append-only by contract: the application never issues an UPDATE
-    against this table, and the only DELETE is the retention prune
+    Append-only by contract: the application never changes a stored
+    step. The one UPDATE it issues sets ``stream_entry_id`` after the
+    step reached the feed (#3736), and the only DELETE is the retention prune
     (:mod:`meho_backplane.broadcast.announcement_retention`) which drops
     rows older than ``broadcast_announcement_retention_days`` in one
     audited bounded batch per tick -- the same mold as
@@ -2815,9 +3075,77 @@ class AgentAnnouncement(Base):
       ``(tenant_id, work_ref)``. Drives the exact-match ``work_ref``
       filter, mirroring :class:`AgentRun`'s
       ``agent_run_tenant_work_ref_idx``.
+
+    Trusted claim columns (#3736, migration ``0112``). All nullable; a
+    row written before trusted admission keeps NULL in all six and is
+    history only, never an active claim:
+
+    * ``claim_id`` -- the logical claim UUID shared by a claim's
+      ``start`` / ``update`` / ``completion`` rows.
+    * ``owner_sub`` -- the trusted agent identity that owns the claim.
+    * ``actor_sub`` -- the RFC 8693 actor of a delegated hosted run.
+    * ``admission`` -- how the identity was checked (``hosted_run`` /
+      ``agent_principal``).
+    * ``idempotency_key`` -- the caller's retry key for this step.
+    * ``stream_entry_id`` -- the Valkey stream entry id, set after the
+      ``XADD`` succeeded. NULL on a row whose stream write failed; a
+      retry with the same ``idempotency_key`` writes the stream entry
+      then, without a second row.
+
+    Three partial unique indexes enforce the claim rules in the database,
+    so two racing requests cannot both win (declared here and in the
+    migration):
+
+    * ``agent_announcement_idempotency_uq`` --
+      ``(tenant_id, owner_sub, idempotency_key)`` where the key is set.
+    * ``agent_announcement_claim_start_uq`` -- ``(tenant_id, claim_id)``
+      where ``phase = 'start'``: one start per claim.
+    * ``agent_announcement_claim_completion_uq`` --
+      ``(tenant_id, claim_id)`` where ``phase = 'completion'``: a claim
+      completes once.
+
+    Archive order (#3748, migration ``0114``):
+
+    * ``seq`` -- the per-tenant archive sequence number. The publisher
+      takes it from the tenant's :class:`AgentAnnouncementSequence` row
+      in the same transaction as the INSERT, so ``seq`` follows commit
+      order and has no holes from rolled-back writes. Readers page and
+      watch by ``seq``. Nullable only so a pod running the older code
+      during a rolling upgrade can still write; the next read gives such
+      a row the next number (``archive_sequence.number_unnumbered_rows``).
+    * ``agent_announcement_tenant_seq_uq`` -- ``(tenant_id, seq)``
+      unique: one row per sequence number per tenant.
     """
 
     __tablename__ = "agent_announcement"
+    __table_args__ = (
+        Index(
+            "agent_announcement_idempotency_uq",
+            "tenant_id",
+            "owner_sub",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=sa.text("idempotency_key IS NOT NULL"),
+            sqlite_where=sa.text("idempotency_key IS NOT NULL"),
+        ),
+        Index(
+            "agent_announcement_claim_start_uq",
+            "tenant_id",
+            "claim_id",
+            unique=True,
+            postgresql_where=sa.text("phase = 'start' AND claim_id IS NOT NULL"),
+            sqlite_where=sa.text("phase = 'start' AND claim_id IS NOT NULL"),
+        ),
+        Index(
+            "agent_announcement_claim_completion_uq",
+            "tenant_id",
+            "claim_id",
+            unique=True,
+            postgresql_where=sa.text("phase = 'completion' AND claim_id IS NOT NULL"),
+            sqlite_where=sa.text("phase = 'completion' AND claim_id IS NOT NULL"),
+        ),
+        Index("agent_announcement_tenant_seq_uq", "tenant_id", "seq", unique=True),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid(),
@@ -2847,6 +3175,46 @@ class AgentAnnouncement(Base):
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(UTC),
+    )
+    claim_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
+    owner_sub: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    actor_sub: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    admission: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    stream_entry_id: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+
+
+class AgentAnnouncementSequence(Base):
+    """The per-tenant counter behind :attr:`AgentAnnouncement.seq` (#3748).
+
+    One row per tenant. ``last_seq`` is the sequence number of the
+    newest committed announcement. The publisher raises it with
+    ``UPDATE ... SET last_seq = last_seq + 1 RETURNING last_seq`` in the
+    same transaction as the announcement INSERT. The UPDATE locks the row
+    until commit, so a second writer in the same tenant waits and gets
+    the next number only after the first one committed or rolled back.
+    That makes ``seq`` follow commit order, which is what lets a reader
+    use "the highest ``seq`` I have seen" as a safe resume point.
+
+    The lock is held only for the INSERT and the commit. It orders
+    writes; it is not a lease or a claim on any resource.
+
+    The row is created on the first announcement of a tenant
+    (``INSERT ... ON CONFLICT DO NOTHING``). The retention prune never
+    touches it, so ``last_seq`` keeps counting after old rows are
+    deleted, and a reader can tell how many events it missed.
+    """
+
+    __tablename__ = "agent_announcement_sequence"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        primary_key=True,
+    )
+    last_seq: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=sa.text("0")
     )
 
 
@@ -3110,6 +3478,19 @@ class TenantConvention(Base):
     )
 
 
+class ConventionHistoryChangeKind(StrEnum):
+    """What one :class:`TenantConventionHistory` row records (#3747).
+
+    Mirrored by the CHECK ``ck_tenant_convention_history_change_kind``
+    (migration ``0109``). Rows written before ``0109`` have ``NULL``; the
+    kind is never guessed for them.
+    """
+
+    CREATED = "created"
+    UPDATED = "updated"
+    DELETED = "deleted"
+
+
 class TenantConventionHistory(Base):
     """One row per edit to a :class:`TenantConvention`.
 
@@ -3184,17 +3565,29 @@ class TenantConventionHistory(Base):
         nullable=False,
         default=lambda: datetime.now(UTC),
     )
-    # Nullable -- migration-seeded rows have no audit_log row to point
-    # at. T2's CRUD writes populate ``audit_id`` from the audit
-    # middleware's contextvar so G8's audit-query path can join
-    # history back to the originating request.
+    # Nullable. Legacy link to the REST request wrapper row: rows written
+    # before #3747 carry it; new rows leave it ``NULL`` because the
+    # history row itself is the record of the edit (see ``change_kind``
+    # and ``request_id``). Migration-seeded rows never had one.
     audit_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(),
         nullable=True,
         default=None,
     )
+    # Nullable (#3747, migration ``0109``). ``created`` / ``updated`` /
+    # ``deleted`` -- what this edit was. ``NULL`` on rows written before
+    # ``0109``; never guessed.
+    change_kind: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Nullable (#3747). The request correlation id of the call that made
+    # the edit; links the row to the request usage event. ``NULL`` when
+    # the call had no usable request id, and on rows before ``0109``.
+    request_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
 
     __table_args__ = (
+        sa.CheckConstraint(
+            "change_kind IN ('created', 'updated', 'deleted')",
+            name="ck_tenant_convention_history_change_kind",
+        ),
         Index(
             "tenant_convention_history_convention_idx",
             "convention_id",
@@ -3941,8 +4334,9 @@ class OperationRun(Base):
       the poll surface so an operator sees what a run executed.
     * ``target_name`` -- the submitted target name (NULL for target-less
       ops); the *name*, not the resolved id, mirroring the ``/call`` body.
-    * ``params_hash`` -- hex SHA-256 of the submitted params (secret-safe
-      correlation to the dispatch audit row's ``params_hash``); NULL for
+    * ``params_hash`` -- the keyed audit hash of the submitted params
+      (:func:`~meho_backplane.operations._validate.compute_audit_params_hash`,
+      computed like the dispatch audit row's ``params_hash``); NULL for
       a param-less op.
     * ``approval_request_id`` -- soft-FK to ``approval_request.id`` for an
       ``approval_resume`` run; NULL for a ``direct`` run.
@@ -4655,9 +5049,11 @@ class AddonOrchestrationRun(Base):
     Schema decisions
     ----------------
 
-    * ``keycloak_client_id`` -- Text NOT NULL. The paired principal's OAuth
-      clientId, equal to :attr:`AddonPairing.keycloak_client_id`. The linkage
-      key: a run belongs to exactly one paired principal.
+    * ``keycloak_client_id`` -- Text NOT NULL. The service principal's OAuth
+      clientId (for a paired add-on, equal to
+      :attr:`AddonPairing.keycloak_client_id`; unpaired client-credential
+      principals open runs too since #3446). The linkage key: a run belongs to
+      exactly one principal.
     * ``work_ref`` -- Text NOT NULL. The external change-ticket ref the run
       groups under. Together with ``keycloak_client_id`` it uniquely names a
       run (``addon_orchestration_run_client_work_ref_idx``), which is both the
@@ -5181,7 +5577,135 @@ class AgentPermission(Base):
     )
 
 
-class ServicePrincipalGrant(Base):
+class _StandingGrantColumns:
+    """Columns shared by the two standing-grant tables (#4622).
+
+    :class:`ServicePrincipalGrant` holds ordinary grants.
+    :class:`SandboxDeleteGrant` holds delete grants, which only an instance
+    in sandbox mode creates or reads. The two tables have one shape so the
+    grant service runs the same lookup, list and revoke code over either.
+    """
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # JWT ``sub`` of the service principal the grant authorises. Soft
+    # reference (no FK) -- same discipline as AgentPermission.principal_sub.
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # Exactly one operation id (no glob). Raw HTTP ops are ``"POST:/path"``;
+    # typed / composite ops are dotted (``"vmware.composite.vm.create"``).
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The ``"<impl_id>-<version>"`` connector string the dispatcher resolves
+    # (same shape as ApprovalRequest.connector_id).
+    connector_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL keys a targetless / tenant-wide op; a UUID keys exactly one
+    # target. Matched exactly at dispatch (no any-target wildcard).
+    target_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    # Target *selector* (#3349), an alternative to a concrete ``target_id``:
+    # a grant with a selector matches any dispatch whose target fingerprint
+    # satisfies it, so an operator can authorise an op on targets that do
+    # not yet exist (a blueprint that registers its own appliances mid-run).
+    # ``target_product`` matches the target's ``product`` exactly;
+    # ``target_name_pattern`` is an ``fnmatch`` glob over the target ``name``.
+    # A selector grant keys ``target_id IS NULL`` with at least one of these
+    # non-NULL; a pure targetless grant keys all three NULL. The wildcard is
+    # requested explicitly here (never implied by a NULL ``target_id``), and
+    # matching is still exact on ``(tenant, principal_sub, op_id,
+    # connector_id)`` — deny-by-default is preserved.
+    target_product: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_name_pattern: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Operator's upfront justification (the review flow requires it).
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    # NULL = a standing (permanent) grant; a future UTC timestamp bounds it.
+    # The dispatch lookup ignores rows past their ``expires_at``.
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    # Soft-delete marker: NULL = live, non-NULL = revoked at that time.
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    revoked_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Optional reason the operator gave when revoking (#3489). NULL when the
+    # revoke carried no reason, and on every live row.
+    revoked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+def _standing_grant_table_args(table: str) -> tuple[Index, ...]:
+    """The four indexes every standing-grant table carries, named per table.
+
+    * ``<table>_lookup_idx`` -- b-tree on ``(tenant_id, principal_sub,
+      op_id)`` -- the dispatch-time query.
+    * ``uq_<table>_targeted`` / ``uq_<table>_targetless`` -- two **partial**
+      unique indexes enforcing "at most one active grant per fully-scoped
+      key". Split because the nullable ``target_id`` would otherwise defeat
+      a single unique index on the targetless case (``NULL != NULL``), and
+      scoped to ``revoked_at IS NULL`` so a revoked scope can be re-granted.
+      Since #3349 the ``…_targetless`` index is narrowed to *pure*
+      targetless grants (``target_product`` and ``target_name_pattern`` both
+      NULL); selector grants (#3349) also key ``target_id IS NULL`` but
+      carry their own CRUD-layer uniqueness check.
+    * ``<table>_expires_at_idx`` -- b-tree on ``expires_at``.
+    """
+    targetless_where = (
+        "target_id IS NULL AND target_product IS NULL "
+        "AND target_name_pattern IS NULL AND revoked_at IS NULL"
+    )
+    return (
+        Index(
+            f"{table}_lookup_idx",
+            "tenant_id",
+            "principal_sub",
+            "op_id",
+            postgresql_using="btree",
+        ),
+        Index(
+            f"uq_{table}_targeted",
+            "tenant_id",
+            "principal_sub",
+            "op_id",
+            "connector_id",
+            "target_id",
+            unique=True,
+            postgresql_where=sa.text("target_id IS NOT NULL AND revoked_at IS NULL"),
+            sqlite_where=sa.text("target_id IS NOT NULL AND revoked_at IS NULL"),
+        ),
+        Index(
+            f"uq_{table}_targetless",
+            "tenant_id",
+            "principal_sub",
+            "op_id",
+            "connector_id",
+            unique=True,
+            postgresql_where=sa.text(targetless_where),
+            sqlite_where=sa.text(targetless_where),
+        ),
+        Index(
+            f"{table}_expires_at_idx",
+            "expires_at",
+            postgresql_using="btree",
+        ),
+    )
+
+
+class ServicePrincipalGrant(_StandingGrantColumns, Base):
     """Standing scoped auto-approval grant for a service principal (#3151 / #3152).
 
     A paired consumer add-on drives long multi-step workflows through the
@@ -5245,112 +5769,51 @@ class ServicePrincipalGrant(Base):
     """
 
     __tablename__ = "service_principal_grant"
+    __table_args__ = _standing_grant_table_args("service_principal_grant")
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(),
-        primary_key=True,
-        default=uuid.uuid4,
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(),
-        ForeignKey("tenant.id"),
-        nullable=False,
-    )
-    # JWT ``sub`` of the service principal the grant authorises. Soft
-    # reference (no FK) -- same discipline as AgentPermission.principal_sub.
-    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
-    # Exactly one operation id (no glob). Raw HTTP ops are ``"POST:/path"``;
-    # typed / composite ops are dotted (``"vmware.composite.vm.create"``).
-    op_id: Mapped[str] = mapped_column(Text, nullable=False)
-    # The ``"<impl_id>-<version>"`` connector string the dispatcher resolves
-    # (same shape as ApprovalRequest.connector_id).
-    connector_id: Mapped[str] = mapped_column(Text, nullable=False)
-    # NULL keys a targetless / tenant-wide op; a UUID keys exactly one
-    # target. Matched exactly at dispatch (no any-target wildcard).
-    target_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
-    # Target *selector* (#3349), an alternative to a concrete ``target_id``:
-    # a grant with a selector matches any dispatch whose target fingerprint
-    # satisfies it, so an operator can authorise an op on targets that do
-    # not yet exist (a blueprint that registers its own appliances mid-run).
-    # ``target_product`` matches the target's ``product`` exactly;
-    # ``target_name_pattern`` is an ``fnmatch`` glob over the target ``name``.
-    # A selector grant keys ``target_id IS NULL`` with at least one of these
-    # non-NULL; a pure targetless grant keys all three NULL. The wildcard is
-    # requested explicitly here (never implied by a NULL ``target_id``), and
-    # matching is still exact on ``(tenant, principal_sub, op_id,
-    # connector_id)`` — deny-by-default is preserved.
-    target_product: Mapped[str | None] = mapped_column(Text, nullable=True)
-    target_name_pattern: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Operator's upfront justification (the review flow requires it).
-    reason: Mapped[str] = mapped_column(Text, nullable=False)
-    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        default=lambda: datetime.now(UTC),
-    )
-    # NULL = a standing (permanent) grant; a future UTC timestamp bounds it.
-    # The dispatch lookup ignores rows past their ``expires_at``.
-    expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-        default=None,
-    )
-    # Soft-delete marker: NULL = live, non-NULL = revoked at that time.
-    revoked_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-        default=None,
-    )
-    revoked_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    __table_args__ = (
-        Index(
-            "service_principal_grant_lookup_idx",
-            "tenant_id",
-            "principal_sub",
-            "op_id",
-            postgresql_using="btree",
-        ),
-        Index(
-            "uq_service_principal_grant_targeted",
-            "tenant_id",
-            "principal_sub",
-            "op_id",
-            "connector_id",
-            "target_id",
-            unique=True,
-            postgresql_where=sa.text("target_id IS NOT NULL AND revoked_at IS NULL"),
-            sqlite_where=sa.text("target_id IS NOT NULL AND revoked_at IS NULL"),
-        ),
-        Index(
-            "uq_service_principal_grant_targetless",
-            "tenant_id",
-            "principal_sub",
-            "op_id",
-            "connector_id",
-            unique=True,
-            # Narrowed (#3349) to *pure* targetless grants (no selector) so a
-            # selector grant — which also keys ``target_id IS NULL`` — is not
-            # forced into the single-targetless-grant slot. Selector-grant
-            # uniqueness is enforced in the CRUD layer (``create``), not by a
-            # partial index, to sidestep NULL-vs-NULL on the nullable selector
-            # columns portably across Postgres / SQLite.
-            postgresql_where=sa.text(
-                "target_id IS NULL AND target_product IS NULL "
-                "AND target_name_pattern IS NULL AND revoked_at IS NULL"
-            ),
-            sqlite_where=sa.text(
-                "target_id IS NULL AND target_product IS NULL "
-                "AND target_name_pattern IS NULL AND revoked_at IS NULL"
-            ),
-        ),
-        Index(
-            "service_principal_grant_expires_at_idx",
-            "expires_at",
-            postgresql_using="btree",
-        ),
-    )
+class SandboxDeleteGrant(_StandingGrantColumns, Base):
+    """A standing grant that covers a delete; sandbox mode only (#4622).
+
+    Same shape as :class:`ServicePrincipalGrant`, in its own table. A
+    delete grant is a grant for an operation with a delete sign (the
+    ``destructive`` safety level, the HTTP verb ``DELETE``, the
+    ``destructive`` tag, a delete name such as ``*.delete``, or a vendor
+    delete action name such as ``Destroy_Task``), or for a delete step of
+    a multi-step operation. Only a tenant admin creates one, only in the
+    web console, only on an instance in sandbox mode, and it expires within
+    30 days (``docs/decisions/sandbox-mode.md``).
+
+    **Why a separate table.** An older MEHO build never reads this table,
+    and MEHO with the mode off never reads or writes it either. So after a
+    rollback to an older build, and on every instance that is not a
+    sandbox, a delete grant has no effect: every delete waits for a person
+    again. The ordinary grant table stays the only grant table those builds
+    read.
+    """
+
+    __tablename__ = "sandbox_delete_grant"
+    __table_args__ = _standing_grant_table_args("sandbox_delete_grant")
+
+
+class SandboxModeState(Base):
+    """The stored sandbox mode: exactly one row, fixed for the database (#4622).
+
+    MEHO writes the row at its first start with one insert that only one
+    process can win, then reads it back at every start and refuses to run
+    when the stored mode differs from ``MEHO_SANDBOX_MODE``
+    (:mod:`meho_backplane.sandbox_mode`). Migration ``0115`` stores
+    ``false`` in every database that existed before it, so only a database
+    created from empty by this release or a later one can hold ``true``.
+    """
+
+    __tablename__ = "sandbox_mode_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    sandbox_mode: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    stored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (sa.CheckConstraint("id = 1", name="ck_sandbox_mode_state_single_row"),)
 
 
 class ScheduledTriggerKind(StrEnum):
@@ -5921,11 +6384,15 @@ class ApprovalRequest(Base):
       dispatch was scoped to; NULL for tenant-wide ops. Same discipline as
       ``audit_log.target_id`` (0004).
 
-    * ``params_hash`` -- SHA-256 hex hash of the canonicalised params
+    * ``params_hash`` -- keyed hash (HMAC-SHA256, 64 hex characters) of the
+      canonicalised params, every value included
       (from :func:`~meho_backplane.operations._validate.compute_params_hash`).
       The swap-defence value: a caller-supplied params dict on the REST
       ``/approve`` path is re-hashed against this to detect substitution
-      between request and approval.
+      between request and approval. A request parked before the keyed hash
+      holds the plain SHA-256;
+      :func:`~meho_backplane.operations._validate.params_hash_matches`
+      accepts both.
 
     * ``preview_hash`` -- Text nullable. The preview-result-hash binding
       for the ``destructive`` tier (#3197, decision requirement 2). SHA-256
@@ -6032,7 +6499,14 @@ class ApprovalRequest(Base):
       to re-enter when this row is a parked composite **sub-op** (#3351):
       ``{"op_id": <composite op_id>, "params": <composite params>}``, captured
       at park time from
-      :data:`~meho_backplane.operations.composite.composite_dispatch_var`.
+      :data:`~meho_backplane.operations.composite.composite_dispatch_var`,
+      plus two optional keys (#4217): ``"state"``, the JSON the composite
+      saved for the re-entry (read back with
+      :func:`~meho_backplane.operations.composite.composite_resume_state`),
+      and ``"after_main_effect": true`` when the parked step runs after the
+      composite's main change exists. Such a re-entry continues at the
+      parked step instead of running the composite from the start, and may
+      wait for approval again.
       A composite's governed sub-op parks under its sub-op governance key +
       identity-only gate params, which is not a dispatchable descriptor call,
       so the shared resume path re-dispatches this parent composite
@@ -6045,7 +6519,8 @@ class ApprovalRequest(Base):
       in that single pass; a composite that would open a *second* governed gate
       is unsupported and fails closed
       (``composite_resume_multi_gate_unsupported``) rather than re-park (#3351
-      review B1). NULL for every non-composite (direct-op) park — those keep
+      review B1), unless that gate is an ``after_main_effect`` step with saved
+      state (#4217). NULL for every non-composite (direct-op) park — those keep
       the unchanged generic re-dispatch of ``op_id`` — and on pre-0099 rows.
       Internal resume input only; like ``params`` it is never projected onto a
       read view or a broadcast frame. Added by migration ``0099``.
@@ -6223,6 +6698,13 @@ class ApprovalRequest(Base):
         nullable=True,
         default=None,
     )
+    # Client-chosen retry key (#3486). Sent as ``idempotency_key`` on
+    # ``call_operation``. While this row is ``pending`` or ``approved``, the
+    # same principal sending the same key gets this row back instead of a
+    # new one. The partial unique index below enforces it, so two racing
+    # requests cannot both insert. NULL when no key was sent and on pre-0105
+    # rows. Added by migration ``0105``.
+    idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # Parent composite to re-enter on resume when this row parks a composite
     # sub-op (#3351). ``{"op_id": ..., "params": ...}`` captured at park time;
     # NULL for direct-op parks (generic re-dispatch of ``op_id``) and pre-0099
@@ -6254,6 +6736,22 @@ class ApprovalRequest(Base):
             "approval_request_work_ref_idx",
             "work_ref",
             postgresql_using="btree",
+        ),
+        # Matches migration 0105 (#3486): at most one live (pending or
+        # approved) row per (tenant, principal, idempotency_key).
+        Index(
+            "approval_request_idempotency_key_idx",
+            "tenant_id",
+            "principal_sub",
+            "idempotency_key",
+            unique=True,
+            postgresql_using="btree",
+            postgresql_where=sa.text(
+                "idempotency_key IS NOT NULL AND status IN ('pending', 'approved')"
+            ),
+            sqlite_where=sa.text(
+                "idempotency_key IS NOT NULL AND status IN ('pending', 'approved')"
+            ),
         ),
         sa.CheckConstraint(
             _ck_in("status", _APPROVAL_REQUEST_STATUSES),
@@ -6382,8 +6880,10 @@ class GatewayCommand(Base):
     Capability binding (#2500, migration ``0061``)
     ----------------------------------------------
 
-    * ``params_hash`` -- Text NOT NULL. ``compute_params_hash(params)`` at
-      mint. The delivery path re-hashes the stored ``params`` against it
+    * ``params_hash`` -- Text NOT NULL.
+      :func:`~meho_backplane.runner.work_item_signing.params_digest` of the
+      params at mint (a plain SHA-256: the runner checks it again and holds
+      no server key). The delivery path re-hashes the stored ``params`` against it
       and refuses delivery on mismatch (post-mint substitution defence,
       moulded on ``approve_request``). The migration sentinel default
       ``''`` only satisfies the NOT NULL ADD COLUMN on the empty
@@ -8449,3 +8949,55 @@ class DispatchTraceSpan(Base):
             postgresql_using="btree",
         ),
     )
+
+
+class RequestUsageEvent(Base):
+    """One privacy-bounded usage event at the REST or MCP boundary (#3734).
+
+    Routine activity (a list, a search, a resource read) is usage, not an
+    accountable action. This table keeps it apart from ``audit_log``. It is
+    written by :mod:`meho_backplane.request_usage.collector` and only when
+    ``REQUEST_USAGE_RETENTION_DAYS`` is set; the retention job deletes rows
+    older than that window. During the dual-write phase the wrapper
+    ``audit_log`` rows are still written too.
+
+    The row holds only opaque ids and bounded labels. It never holds a
+    request body, a query string, tool arguments, a prompt, a token, or a
+    target name. ``route`` is a route template or a registered MCP tool /
+    resource template / method name, never a concrete path.
+
+    * ``kind`` -- ``request_finished`` (one per boundary) or
+      ``context_selected`` (optional; says context was picked, never that
+      it was followed).
+    * ``tenant_id`` -- soft reference, same as ``audit_log.tenant_id``.
+    * ``outcome`` -- bounded code (``ok`` / ``client_error`` / ``denied``
+      / ``not_found`` / ``rate_limited`` / ``server_error``); ``NULL`` on
+      ``context_selected``.
+    * ``correlation_id`` -- opaque id that links a ``context_selected``
+      event to later evaluation data; ``NULL`` on ``request_finished``.
+
+    Indexes are declared in migrations ``0107`` and ``0113``:
+    ``(tenant_id, occurred_at)`` for tenant-scoped window reads,
+    ``occurred_at`` for the retention delete, and ``session_id`` for the
+    reflex advisory's "did this session read the feed" check (#3757).
+    """
+
+    __tablename__ = "request_usage_event"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    request_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    correlation_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    transport: Mapped[str] = mapped_column(Text, nullable=False)
+    route: Mapped[str] = mapped_column(Text, nullable=False)
+    outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_ms: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)

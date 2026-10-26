@@ -73,6 +73,7 @@ operator's-tenant rows when both exist.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
@@ -99,12 +100,17 @@ from meho_backplane.operations.ingest._internals import (
     count_needs_reingest_in_scope,
     count_ops_in_scope,
     enable_time_auto_shim_warnings,
+    legacy_tenant_products,
     load_group,
     load_groups,
+    load_ingested_writes_in_scope,
     load_op,
     load_ops_in_groups,
+    load_ops_outside_groups,
     operator_disabled_op_ids,
     scope_has_groups,
+    scope_has_rows,
+    select_groups,
     validate_edit_op_args,
     write_audit_row,
 )
@@ -115,13 +121,16 @@ from meho_backplane.operations.ingest.delete_connector import (
     deregister_staged_auto_shims,
     stage_connector_delete,
 )
+from meho_backplane.operations.ingest.delete_review import build_delete_review
 from meho_backplane.operations.ingest.exceptions import (
     AmbiguousConnectorScopeError,
     BuiltinConnectorWriteForbiddenError,
     ConnectorNotFoundError,
     ConnectorScopeCandidate,
     InvalidStateTransitionError,
+    LegacyTenantConnectorCopyError,
 )
+from meho_backplane.operations.ingest.group_truth import build_group_advisory
 from meho_backplane.operations.ingest.parser import parse_connector_id
 from meho_backplane.operations.ingest.payload import (
     ConnectorReviewGroup,
@@ -132,12 +141,30 @@ from meho_backplane.operations.ingest.payload import (
 from meho_backplane.operations.ingest.spec_provenance import load_spec_provenance
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from meho_backplane.connectors.base import Connector
+    from meho_backplane.db.models import EndpointDescriptor
     from meho_backplane.operations.ingest.api_schemas import ConnectorAuthoringKind
 
 __all__ = ["ReviewService"]
 
 _log = structlog.get_logger(__name__)
+
+
+def _review_op(op: EndpointDescriptor) -> ConnectorReviewOp:
+    """Project one descriptor row into its review-payload shape."""
+    return ConnectorReviewOp(
+        op_id=op.op_id,
+        summary=op.summary,
+        description=op.description,
+        custom_description=op.custom_description,
+        safety_level=op.safety_level,
+        requires_approval=op.requires_approval,
+        is_enabled=op.is_enabled,
+        tags=list(op.tags),
+        needs_reingest=op.needs_reingest,
+    )
 
 
 def _authoring_kind_for_payload(
@@ -164,6 +191,33 @@ def _authoring_kind_for_payload(
         enabled_operation_count=enabled_op_count,
         has_code_shipped_op=has_code_shipped_op,
     )
+
+
+def _render_groups(groups: list[Any], ops: list[Any]) -> list[ConnectorReviewGroup]:
+    """Pack *ops* under their group rows for the review payload.
+
+    Each group also gets its review advice (#3671), built from the ops
+    already loaded here, so it costs no extra query.
+    """
+    ops_by_group: dict[UUID, list[Any]] = {group.id: [] for group in groups}
+    for op in ops:
+        if op.group_id is not None and op.group_id in ops_by_group:
+            ops_by_group[op.group_id].append(op)
+    rendered: list[ConnectorReviewGroup] = []
+    for group in groups:
+        group_ops = [_review_op(op) for op in ops_by_group[group.id]]
+        rendered.append(
+            ConnectorReviewGroup(
+                group_key=group.group_key,
+                name=group.name,
+                when_to_use=group.when_to_use,
+                review_status=group.review_status,
+                op_count=len(group_ops),
+                ops=group_ops,
+                advisory=build_group_advisory(group.when_to_use, group_ops),
+            )
+        )
+    return rendered
 
 
 class ReviewService:
@@ -206,6 +260,8 @@ class ReviewService:
         self,
         connector_id: str,
         tenant_id: UUID | None,
+        *,
+        allow_platform_admin_cross_tenant: bool = False,
     ) -> None:
         """Raise :class:`ConnectorNotFoundError` if the operator can't act on the scope.
 
@@ -215,6 +271,11 @@ class ReviewService:
         at the DB-query site). The unified exception class prevents
         an unprivileged operator from enumerating other tenants
         via status-code differential.
+
+        ``allow_platform_admin_cross_tenant`` lets a ``platform_admin``
+        act on another tenant's scope. Only :meth:`record_profile_stamp`
+        sets it: the ingest pipeline has already allowed that write
+        (#3800). Every review and enable path keeps the strict check.
         """
         if tenant_id is None:
             if self._operator.tenant_role is not TenantRole.TENANT_ADMIN:
@@ -222,6 +283,8 @@ class ReviewService:
                     connector_id=connector_id,
                     tenant_id=tenant_id,
                 )
+            return
+        if allow_platform_admin_cross_tenant and self._operator.platform_admin:
             return
         if tenant_id != self._operator.tenant_id:
             raise ConnectorNotFoundError(
@@ -233,6 +296,8 @@ class ReviewService:
         self,
         connector_id: str,
         tenant_id: UUID | None,
+        *,
+        allow_platform_admin_cross_tenant: bool = False,
     ) -> ConnectorScope:
         """Authorise + parse a ``(connector_id, tenant_id)`` pair.
 
@@ -241,7 +306,11 @@ class ReviewService:
         perspective, an unparseable identifier is indistinguishable
         from a non-existent connector.
         """
-        self._authorize_scope(connector_id, tenant_id)
+        self._authorize_scope(
+            connector_id,
+            tenant_id,
+            allow_platform_admin_cross_tenant=allow_platform_admin_cross_tenant,
+        )
         try:
             product, version, impl_id = parse_connector_id(connector_id)
         except ValueError:
@@ -260,6 +329,56 @@ class ReviewService:
             tenant_id=tenant_id,
         )
 
+    async def _find_legacy_tenant_copy(
+        self,
+        scope: ConnectorScope,
+        session: AsyncSession,
+    ) -> ConnectorScope | None:
+        """Return the tenant's old copy of *scope* stored under a former product name.
+
+        Most callers have already found no tenant rows under
+        ``scope.product``; :meth:`delete_connector` asks first, because it
+        removes an old copy before the current one. The probe keys on
+        ``(tenant_id, version, impl_id)`` only
+        (:func:`legacy_tenant_products`); when it finds rows under another
+        product, the same scope with that product is returned so review
+        and delete can reach the copy (#4889). ``None`` for the built-in
+        scope or when no such rows exist. Should more than one former
+        product exist (not seen in practice), the first in sorted order
+        is used; a delete of that copy exposes the next one.
+        """
+        products = await legacy_tenant_products(session, scope)
+        if not products:
+            return None
+        return replace(scope, product=products[0])
+
+    async def _refuse_legacy_tenant_copy(
+        self,
+        connector_id: str,
+        scope: ConnectorScope,
+        session: AsyncSession,
+    ) -> None:
+        """Raise :class:`LegacyTenantConnectorCopyError` when the tenant's only copy is an old one.
+
+        A no-op when *scope* is built-in, when the tenant has rows under
+        the current product (its own copy is then the one to act on), or
+        when no rows exist under a former product name. Otherwise the
+        caller must not fall back to the built-in row or answer a
+        "not ingested" 404: the operator has an old copy that can never
+        be called, and the error says how to review or delete it (#4889).
+        """
+        if scope.tenant_id is None or await scope_has_rows(session, scope):
+            return
+        legacy = await self._find_legacy_tenant_copy(scope, session)
+        if legacy is None:
+            return
+        raise LegacyTenantConnectorCopyError(
+            connector_id=connector_id,
+            legacy_product=legacy.product,
+            product=scope.product,
+            tenant_id=scope.tenant_id,
+        )
+
     async def _resolve_preferred_scope(
         self,
         connector_id: str,
@@ -267,7 +386,8 @@ class ReviewService:
         scope: ConnectorScope,
         session: AsyncSession,
         *,
-        prefer: Literal["tenant", "builtin"],
+        prefer: Literal["tenant", "builtin", "legacy"],
+        allow_legacy_tenant_copy: bool,
     ) -> ConnectorScope:
         """Resolve a connector to the explicitly-``prefer``-named scope (#2029).
 
@@ -282,7 +402,21 @@ class ReviewService:
           tenant row must hold rows or :class:`ConnectorNotFoundError` is
           raised. There is **no** built-in fall-back: an explicit
           ``prefer=tenant`` against a built-in-only label is a genuine
-          miss, not a silent slide to the built-in row.
+          miss, not a silent slide to the built-in row. When the tenant
+          has rows for the id only under a former product name (#4889),
+          *allow_legacy_tenant_copy* decides: ``True`` (the review read)
+          resolves to that old copy so the operator can look at it;
+          ``False`` (``enable_reads``) raises
+          :class:`LegacyTenantConnectorCopyError`, because enabling ops
+          on a copy dispatch never uses would only mislead.
+        * ``prefer == "legacy"`` — the tenant's old copy under a former
+          product name, and only that (#4889). ``prefer="tenant"`` cannot
+          reach it once the tenant also has a copy under the current
+          product, yet :meth:`delete_connector` removes the old copy
+          first, so the operator needs a selector that shows the copy
+          the delete will remove. No old copy (or ``tenant_id is None``)
+          is a :class:`ConnectorNotFoundError`; *allow_legacy_tenant_copy*
+          decides between the copy and the refusal exactly as above.
         * ``prefer == "builtin"`` — the built-in (``tenant_id IS NULL``)
           scope, which must hold rows or :class:`ConnectorNotFoundError`.
           No scope selection happens beyond naming the built-in row:
@@ -304,17 +438,29 @@ class ReviewService:
                 impl_id=scope.impl_id,
                 tenant_id=None,
             )
-            if await scope_has_groups(session, builtin_scope):
+            if await scope_has_rows(session, builtin_scope):
                 return builtin_scope
             raise ConnectorNotFoundError(
                 connector_id=connector_id,
                 tenant_id=None,
             )
-        # prefer == "tenant"
-        if tenant_id is not None and await scope_has_groups(session, scope):
+        # prefer == "tenant" or "legacy"
+        if tenant_id is None:
+            raise ConnectorNotFoundError(connector_id=connector_id, tenant_id=None)
+        if prefer == "tenant" and await scope_has_rows(session, scope):
             return scope
-        raise ConnectorNotFoundError(
+        legacy = await self._find_legacy_tenant_copy(scope, session)
+        if legacy is None:
+            raise ConnectorNotFoundError(
+                connector_id=connector_id,
+                tenant_id=tenant_id,
+            )
+        if allow_legacy_tenant_copy:
+            return legacy
+        raise LegacyTenantConnectorCopyError(
             connector_id=connector_id,
+            legacy_product=legacy.product,
+            product=scope.product,
             tenant_id=tenant_id,
         )
 
@@ -324,7 +470,8 @@ class ReviewService:
         tenant_id: UUID | None,
         session: AsyncSession,
         *,
-        prefer: Literal["tenant", "builtin"] | None = None,
+        prefer: Literal["tenant", "builtin", "legacy"] | None = None,
+        allow_legacy_tenant_copy: bool = False,
     ) -> ConnectorScope:
         """Resolve ``(connector_id, tenant_id)`` to the one row-scope to act on.
 
@@ -356,6 +503,17 @@ class ReviewService:
         probe + fail-loud raise below is byte-identical to the pre-#2029
         resolver.
 
+        An old tenant copy under a former product name (#4889) is
+        neither of the two scopes: the tenant has no rows under the
+        parsed product, so without a guard the probe would fall back to
+        the built-in row and hide the copy. When ``prefer`` is ``None``
+        and such a copy exists, :class:`LegacyTenantConnectorCopyError`
+        is raised instead (whether or not a built-in row exists). With
+        ``prefer="tenant"`` (no current tenant copy) or
+        ``prefer="legacy"`` (always), *allow_legacy_tenant_copy* decides
+        between resolving to the old copy (the review read) and refusing
+        (``enable_reads``); see :meth:`_resolve_preferred_scope`.
+
         A cross-tenant ``tenant_id`` (≠ the operator's, not ``None``)
         never reaches this method: :meth:`_resolve_scope` ->
         :meth:`_authorize_scope` already collapsed it into
@@ -370,24 +528,34 @@ class ReviewService:
                 scope,
                 session,
                 prefer=prefer,
+                allow_legacy_tenant_copy=allow_legacy_tenant_copy,
             )
-        if tenant_id is None:
-            # Explicit built-in probe (admin path) — single-pass, no
-            # fallback, no ambiguity.
-            if await scope_has_groups(session, scope):
+        return await self._resolve_probed_scope(connector_id, scope, session)
+
+    async def _resolve_probed_scope(
+        self,
+        connector_id: str,
+        scope: ConnectorScope,
+        session: AsyncSession,
+    ) -> ConnectorScope:
+        """The un-preferred half of :meth:`_resolve_existing_scope`.
+
+        Built-in *scope* (``tenant_id is None``): single-pass, no
+        fall-back. Tenant *scope*: probe both the tenant row and the
+        built-in row; both → :class:`AmbiguousConnectorScopeError`, one →
+        that row, neither → :class:`ConnectorNotFoundError`. A missing
+        tenant row is first checked for an old copy under a former product
+        name (#4889), which raises instead of sliding to the built-in row.
+        """
+        if scope.tenant_id is None:
+            if await scope_has_rows(session, scope):
                 return scope
-            raise ConnectorNotFoundError(
-                connector_id=connector_id,
-                tenant_id=tenant_id,
-            )
-        builtin_scope = ConnectorScope(
-            product=scope.product,
-            version=scope.version,
-            impl_id=scope.impl_id,
-            tenant_id=None,
-        )
-        tenant_exists = await scope_has_groups(session, scope)
-        builtin_exists = await scope_has_groups(session, builtin_scope)
+            raise ConnectorNotFoundError(connector_id=connector_id, tenant_id=None)
+        builtin_scope = replace(scope, tenant_id=None)
+        tenant_exists = await scope_has_rows(session, scope)
+        if not tenant_exists:
+            await self._refuse_legacy_tenant_copy(connector_id, scope, session)
+        builtin_exists = await scope_has_rows(session, builtin_scope)
         if tenant_exists and builtin_exists:
             raise AmbiguousConnectorScopeError(
                 connector_id=connector_id,
@@ -410,10 +578,7 @@ class ReviewService:
             return scope
         if builtin_exists:
             return builtin_scope
-        raise ConnectorNotFoundError(
-            connector_id=connector_id,
-            tenant_id=tenant_id,
-        )
+        raise ConnectorNotFoundError(connector_id=connector_id, tenant_id=scope.tenant_id)
 
     def _require_platform_admin_for_builtin(
         self,
@@ -441,6 +606,8 @@ class ReviewService:
         connector_id: str,
         tenant_id: UUID | None,
         session: AsyncSession,
+        *,
+        probe: Callable[[AsyncSession, ConnectorScope], Awaitable[bool]] = scope_has_groups,
     ) -> ConnectorScope:
         """Resolve ``(connector_id, tenant_id)`` for a mutating state/edit action.
 
@@ -477,17 +644,39 @@ class ReviewService:
         the ``platform_admin`` gate). A cross-tenant ``tenant_id`` never
         reaches here: :meth:`_resolve_scope` -> :meth:`_authorize_scope`
         already collapsed it into :class:`ConnectorNotFoundError`.
+
+        *probe* decides what counts as "the scope holds rows". The
+        default :func:`scope_has_groups` fits the group transitions and
+        :meth:`edit_group`, which have nothing to act on without group
+        rows. :meth:`edit_op` passes :func:`scope_has_rows` (a group row
+        **or** an operation row) because a per-op edit needs only the
+        op row: a connector whose grouping pass produced no groups still
+        has its reads enabled by :meth:`enable_reads` and served by
+        dispatch, so an operator must be able to disable one of them
+        again (#3870). With the group-only probe that edit either
+        ``404``'d or slid to the built-in row while the tenant op stayed
+        enabled.
+
+        When the tenant has rows for the id only under a former product
+        name (#4889), :class:`LegacyTenantConnectorCopyError` is raised
+        before the built-in fall-back: the old copy can never be called,
+        so enabling or editing the built-in row in its place would hide it
+        and, for a ``platform_admin``, change a row every tenant shares.
         """
         scope = self._resolve_scope(connector_id, tenant_id)
-        if tenant_id is not None and await scope_has_groups(session, scope):
-            return scope
+        if tenant_id is not None:
+            if await probe(session, scope):
+                return scope
+            # #4889: an old tenant copy under a former product name must
+            # not slide to the built-in row; refuse with the way out.
+            await self._refuse_legacy_tenant_copy(connector_id, scope, session)
         builtin_scope = ConnectorScope(
             product=scope.product,
             version=scope.version,
             impl_id=scope.impl_id,
             tenant_id=None,
         )
-        if await scope_has_groups(session, builtin_scope):
+        if await probe(session, builtin_scope):
             self._require_platform_admin_for_builtin(connector_id, builtin_scope)
             return builtin_scope
         raise ConnectorNotFoundError(
@@ -502,7 +691,7 @@ class ReviewService:
         connector_id: str,
         tenant_id: UUID | None,
         *,
-        prefer: Literal["tenant", "builtin"] | None = None,
+        prefer: Literal["tenant", "builtin", "legacy"] | None = None,
     ) -> ConnectorReviewPayload:
         """Return the review payload for *connector_id* in *tenant_id*.
 
@@ -511,9 +700,11 @@ class ReviewService:
         ``group_key`` and ops by ``op_id`` so consecutive calls
         produce identical payloads.
 
-        Empty group set → :class:`ConnectorNotFoundError`. A group
-        with zero ops is legal and renders as ``op_count=0,
-        ops=[]``.
+        No group row **and** no descriptor row →
+        :class:`ConnectorNotFoundError`. A group with zero ops is legal
+        and renders as ``op_count=0, ops=[]``; a connector with ops but
+        no groups renders ``groups=[]`` and lists every op in
+        ``ungrouped_ops`` (#3870).
 
         No audit row is written; the surrounding HTTP / MCP request
         already audits the read at the chassis layer.
@@ -540,6 +731,14 @@ class ReviewService:
         row directly, ``prefer="builtin"`` the built-in row, and
         ``prefer=None`` (the default) keeps the fail-loud probe. See
         :meth:`_resolve_existing_scope`.
+
+        An old tenant copy stored under a former product name (#4889) is
+        reviewable with ``prefer="legacy"``, also when the tenant has a
+        current copy too; ``prefer="tenant"`` reaches it only while no
+        current copy exists. The payload then carries the former name in
+        ``product``. Without ``prefer`` the resolver raises
+        :class:`LegacyTenantConnectorCopyError` rather than showing the
+        built-in row as if the tenant had nothing.
         """
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
@@ -548,6 +747,7 @@ class ReviewService:
                 tenant_id,
                 session,
                 prefer=prefer,
+                allow_legacy_tenant_copy=True,
             )
             return await self._render_payload(connector_id, scope, session)
 
@@ -559,47 +759,29 @@ class ReviewService:
     ) -> ConnectorReviewPayload:
         """Load groups + ops for *scope* and pack them into the payload.
 
-        Raises :class:`ConnectorNotFoundError` when no group rows
-        exist under *scope* (a defensive guard — the caller resolves
-        the scope via :meth:`_resolve_existing_scope` first, so on the
-        normal path rows are present). The caller owns the open
-        *session* / transaction so scope resolution and payload
-        rendering observe one consistent snapshot.
+        A scope with descriptor rows but no group rows (the grouping
+        pass produced no buckets) renders ``groups=[]`` with every op
+        in ``ungrouped_ops`` (#3870); the caller has already checked
+        via :meth:`_resolve_existing_scope` that the scope holds rows.
+        The caller owns the open *session* / transaction so scope
+        resolution and payload rendering observe one consistent
+        snapshot.
         """
-        groups = await load_groups(session, scope, connector_id)
+        groups = await select_groups(session, scope)
         ops = await load_ops_in_groups(
             session,
             scope,
             [group.id for group in groups],
         )
-        ops_by_group: dict[UUID, list[Any]] = {group.id: [] for group in groups}
-        for op in ops:
-            if op.group_id is not None and op.group_id in ops_by_group:
-                ops_by_group[op.group_id].append(op)
-        rendered_groups = [
-            ConnectorReviewGroup(
-                group_key=group.group_key,
-                name=group.name,
-                when_to_use=group.when_to_use,
-                review_status=group.review_status,
-                op_count=len(ops_by_group[group.id]),
-                ops=[
-                    ConnectorReviewOp(
-                        op_id=op.op_id,
-                        summary=op.summary,
-                        description=op.description,
-                        custom_description=op.custom_description,
-                        safety_level=op.safety_level,
-                        requires_approval=op.requires_approval,
-                        is_enabled=op.is_enabled,
-                        tags=list(op.tags),
-                        needs_reingest=op.needs_reingest,
-                    )
-                    for op in ops_by_group[group.id]
-                ],
-            )
-            for group in groups
-        ]
+        rendered_groups = _render_groups(groups, ops)
+        # #3870: list every op outside the rendered groups too, with its
+        # enabled state and safety level, so the review shows the whole
+        # op set dispatch can serve — not only the grouped part.
+        ungrouped_ops = await load_ops_outside_groups(
+            session,
+            scope,
+            [group.id for group in groups],
+        )
         has_code_shipped_op = any(op.source_kind in ("typed", "composite") for op in ops)
         kind, dispatchable = _authoring_kind_for_payload(
             scope, rendered_groups, has_code_shipped_op=has_code_shipped_op
@@ -616,6 +798,12 @@ class ReviewService:
         # a same-spec re-ingest" signal, including ungrouped ops the
         # rendered groups never show.
         needs_reingest_op_count = await count_needs_reingest_in_scope(session, scope)
+        # #3827: the stored deletes below ``destructive``, with the posture a
+        # fresh ingest would give, so an operator sees which rows still run
+        # without approval before one of them is hit live.
+        delete_review = build_delete_review(
+            await load_ingested_writes_in_scope(session, scope), scope
+        )
         # #2291: durable per-spec provenance for this connector scope,
         # ordered by ``uri``. Empty for connectors ingested before the
         # provenance table landed — the surfaces render that gap rather
@@ -636,7 +824,12 @@ class ReviewService:
             groups=rendered_groups,
             total_op_count=grouped_op_count,
             ungrouped_op_count=max(all_op_count - grouped_op_count, 0),
+            ungrouped_ops=[_review_op(op) for op in ungrouped_ops],
             needs_reingest_op_count=needs_reingest_op_count,
+            delete_ops_below_destructive=delete_review,
+            delete_ops_needing_correction_count=sum(
+                1 for entry in delete_review if entry.needs_correction
+            ),
             kind=kind,
             dispatchable=dispatchable,
             provenance=[
@@ -738,19 +931,17 @@ class ReviewService:
         :meth:`enable_connector` consults the audit log to find
         operator-set False rows and skips them.
 
-        ``llm_instructions`` is the agent-facing per-op guidance blob
-        ingested rows land with as ``NULL``. The typed connectors
-        populate it at ``register_typed_operation`` time
-        (see e.g. :mod:`meho_backplane.connectors.vault.ops` and
-        :mod:`meho_backplane.connectors.bind9.ops_zone`); for
-        ingested connectors the operator-review pass writes the same
-        shape via this method so :func:`search_operations` and the
-        agent's ``call_operation`` see populated guidance once the
-        op is enabled. The argument is a plain ``dict`` (the model's
-        ``llm_instructions`` column is ``JSON``); the helper persists
-        it as-is. Passing ``{}`` clears the column to an empty
-        mapping rather than re-deleting it — operators wanting to
-        un-author the field should disable the op instead.
+        ``llm_instructions`` is the agent-facing per-op guidance blob ingested rows
+        land with as ``NULL``. The typed connectors populate it at
+        ``register_typed_operation`` time (see e.g.
+        :mod:`meho_backplane.connectors.vault.ops` and
+        :mod:`meho_backplane.connectors.bind9.ops_zone`); for ingested connectors the
+        operator-review pass writes the same shape via this method so
+        :func:`search_operations` and the agent's ``call_operation`` see populated
+        guidance once the op is enabled. The argument is a plain ``dict`` (the model's
+        ``llm_instructions`` column is ``JSON``); the helper persists it as-is. Passing
+        ``{}`` clears the column to an empty mapping rather than re-deleting it —
+        operators wanting to un-author the field should disable the op instead.
 
         Writes one audit row with payload
         ``{connector_id, op_id, fields_updated, is_enabled_set_to?}``.
@@ -770,7 +961,9 @@ class ReviewService:
         )
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
-            scope = await self._resolve_writable_scope(connector_id, tenant_id, session)
+            scope = await self._resolve_writable_scope(
+                connector_id, tenant_id, session, probe=scope_has_rows
+            )
             op_row = await load_op(session, scope, connector_id, op_id)
             fields_updated = apply_op_overrides(
                 op_row,
@@ -854,7 +1047,7 @@ class ReviewService:
                 f"(shim_kind == {shim_kind(connector_class)!r})"
             )
 
-        scope = self._resolve_scope(connector_id, tenant_id)
+        scope = self._resolve_scope(connector_id, tenant_id, allow_platform_admin_cross_tenant=True)
         triple = (scope.product, scope.version, scope.impl_id)
         if triple in all_connectors_v2():
             # Already stamped (or a hand-coded/bare class occupies the
@@ -923,7 +1116,7 @@ class ReviewService:
         connector_id: str,
         *,
         tenant_id: UUID | None,
-        prefer: Literal["tenant", "builtin"] | None = None,
+        prefer: Literal["tenant", "builtin", "legacy"] | None = None,
     ) -> int:
         """Enable every read-class (GET/HEAD) ingested op in one pass (G0.25-T7 #1749).
 
@@ -966,6 +1159,13 @@ class ReviewService:
         ``prefer="builtin"`` to the built-in row (still behind the
         ``platform_admin`` gate this method applies after resolution),
         and ``prefer=None`` (the default) keeps the fail-loud raise.
+
+        An old tenant copy under a former product name (#4889) is refused
+        with :class:`LegacyTenantConnectorCopyError` for ``prefer=None``,
+        ``prefer="tenant"`` and ``prefer="legacy"``: its reads can never
+        be dispatched, so flipping them on would only mislead. An explicit
+        ``prefer="builtin"`` still works (behind the ``platform_admin``
+        gate) because the built-in row is the one calls actually use.
         """
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
@@ -1045,11 +1245,14 @@ class ReviewService:
         Allowed source states: ``staged`` or ``disabled``. Cascade
         matches :meth:`enable_connector` but applies only to the
         single group's children. Idempotent on a group already in
-        ``enabled``.
+        ``enabled``. A group that exists only on an old tenant copy under
+        a former product name is refused with
+        :class:`LegacyTenantConnectorCopyError` (#4889), not a bare 404.
         """
         scope = self._resolve_scope(connector_id, tenant_id)
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
+            await self._refuse_legacy_tenant_copy(connector_id, scope, session)
             group = await load_group(session, scope, connector_id, group_key)
             if group.review_status == "enabled":
                 return
@@ -1119,10 +1322,25 @@ class ReviewService:
         (warnings never block the write — the
         :meth:`edit_op` discipline). Re-ingesting the same triple
         afterwards re-registers the connector from scratch.
+
+        When the tenant has rows for the id under a former product name
+        (#4889), the delete targets that old copy first, even when the
+        tenant also has a copy under the current product. The old copy
+        can never be called, so removing it first never takes away a
+        working operation; it is also the operator's only way to reach
+        rows no other route can see, and the listing's clean-up hint
+        relies on this order. ``review`` with ``prefer="legacy"`` shows
+        the copy this delete removes. A second delete then removes the
+        current tenant copy. The built-in row is untouched either way, so the
+        tenant keeps using it for calls.
         """
         scope = self._resolve_scope(connector_id, tenant_id)
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
+            if tenant_id is not None:
+                legacy = await self._find_legacy_tenant_copy(scope, session)
+                if legacy is not None:
+                    scope = legacy
             staged = await stage_connector_delete(session, scope, connector_id)
             await write_audit_row(
                 session,

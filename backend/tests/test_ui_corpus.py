@@ -52,7 +52,7 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 
-from meho_backplane.auth.corpus import CorpusUnavailable
+from meho_backplane.auth.corpus import CorpusChunk, CorpusSearchResponse, CorpusUnavailable
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
@@ -99,6 +99,9 @@ _RESOLVE_OPERATOR = "meho_backplane.ui.routes.corpus.routes._resolve_operator"
 #: The route-module symbol the search handler calls; mocked to control the
 #: returned chunk list / raised failure without a live corpus.
 _SEARCH_DOCS = "meho_backplane.ui.routes.corpus.routes.search_docs"
+#: The ``corpus-http`` adapter's search transport: patched instead of
+#: ``search_docs`` when a test needs the real projection (#3913).
+_CORPUS_TRANSPORT = "meho_backplane.docs_search.backends.corpus_http.search_corpus"
 
 
 # ---------------------------------------------------------------------------
@@ -805,6 +808,61 @@ def test_corpus_search_degrades_community_gs_source_to_non_clickable() -> None:
     # as provenance text (not a link).
     assert "williamlam-quiesce" in body
     assert community_url in body
+
+
+def test_corpus_search_card_links_upstream_url_under_derived_title() -> None:
+    """A hit with an upstream link renders it as the card's outbound link (#3913).
+
+    The corpus hit has a ``gs://`` source, page identity and no ``title``,
+    plus the backend's ``upstream_url``. Through the real projection, the
+    card heading is the derived title (section + page name), linked to the
+    public source; neither ``gs://`` text nor the internal cited-source view
+    link is rendered for it.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(
+        tenant_id=_TENANT_A,
+        capabilities=frozenset({"meho-docs", "meho-docs:vmware"}),
+    )
+    link = "https://docs.vendor.test/guides/guide.pdf#page=693"
+    hit = CorpusChunk.model_validate(
+        {
+            "chunk_id": "pdf-1",
+            "text": "Pools are capped at 64 per cluster.",
+            "source_uri": "gs://example-bucket/docs/guide/guide-part02of03.pdf",
+            "score": 0.31,
+            "score_kind": "distance",
+            "heading_path": ["Planning", "Pool limits"],
+            "filename": "guide-part02of03.pdf",
+            "upstream_url": link,
+            "upstream_page": 693,
+        }
+    )
+    transport = AsyncMock(return_value=CorpusSearchResponse(chunks=[hit]))
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_CORPUS_TRANSPORT, new=transport),
+        ):
+            response = client.post(
+                "/ui/corpus/search",
+                data={"collection": "vmware", "q": "widget pool limits"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert transport.await_count == 1
+    assert f'href="{link}"' in body
+    assert "Pool limits \u2014 guide part02of03" in body
+    assert "gs://" not in body
+    assert "/ui/corpus/chunks/vmware/pdf-1" not in body
 
 
 def test_corpus_search_renders_collection_tag_on_fanout_chunk() -> None:

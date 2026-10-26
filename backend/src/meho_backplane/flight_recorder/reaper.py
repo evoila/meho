@@ -48,7 +48,7 @@ import structlog
 from sqlalchemy import delete, select
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import DispatchTrace, DispatchTraceSpan
+from meho_backplane.db.models import AuditEventClass, DispatchTrace, DispatchTraceSpan
 from meho_backplane.memory.audit import INTERNAL_METHOD, write_internal_audit_row
 from meho_backplane.metrics import note_loop_tick
 from meho_backplane.settings import get_settings
@@ -136,6 +136,7 @@ async def _write_prune_audit_row(
     """
     try:
         await write_internal_audit_row(
+            event_class=AuditEventClass.OPERATION_EXECUTION,
             operator_sub=SYSTEM_OPERATOR_SUB,
             tenant_id=FLIGHT_RECORDER_SYSTEM_TENANT_ID,
             method=INTERNAL_METHOD,

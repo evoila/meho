@@ -25,11 +25,11 @@ func newRecentCmd() *cobra.Command {
 	var opts recentOptions
 	cmd := &cobra.Command{
 		Use:   "recent",
-		Short: "Read recent broadcast events for the operator's tenant",
+		Short: "Read recent agent announcements for the operator's tenant",
 		Args:  cobra.NoArgs, SilenceUsage: true, SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error { return runRecent(cmd, opts) },
 	}
-	cmd.Flags().StringVar(&opts.Cursor, "cursor", "", "forward cursor (ISO-8601 timestamp or stream id)")
+	cmd.Flags().StringVar(&opts.Cursor, "cursor", "", "ISO-8601 window start, or next_cursor from a previous page")
 	cmd.Flags().StringVar(&opts.OpClass, "op-class", "", "exact op class filter")
 	cmd.Flags().StringVar(&opts.Principal, "principal", "", "exact principal filter")
 	cmd.Flags().StringVar(&opts.Target, "target", "", "exact target filter")
@@ -120,6 +120,11 @@ func recentBroadcast(ctx context.Context, client *api.AuthedClient, params *api.
 }
 
 func printRecent(w io.Writer, response *map[string]interface{}) error {
+	if gap, ok := (*response)["gap"].(map[string]interface{}); ok {
+		if _, err := fmt.Fprintf(w, "warning: history is incomplete: %s\n", gapText(gap)); err != nil {
+			return err
+		}
+	}
 	events, _ := (*response)["events"].([]interface{})
 	if len(events) == 0 {
 		_, err := fmt.Fprintln(w, "(no broadcast events in this page)")
@@ -133,6 +138,18 @@ func printRecent(w io.Writer, response *map[string]interface{}) error {
 	return nil
 }
 
+// gapText is the one-line reason the backplane gives for a page that
+// skips announcements, for example because archive retention removed them.
+func gapText(gap map[string]interface{}) string {
+	if detail, _ := gap["detail"].(string); detail != "" {
+		return detail
+	}
+	if reason, _ := gap["reason"].(string); reason != "" {
+		return reason
+	}
+	return "some announcements before this page were removed"
+}
+
 func newAnnounceCmd() *cobra.Command {
 	var opts announceOptions
 	cmd := &cobra.Command{
@@ -141,12 +158,14 @@ func newAnnounceCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&opts.Target, "target", "", "target name")
 	cmd.Flags().StringVar(&opts.Scope, "scope", "", "announcement scope")
-	cmd.Flags().StringVar(&opts.Phase, "phase", "update", "start, update, or completion")
+	cmd.Flags().StringVar(&opts.Phase, "phase", "start", "start, update, or completion")
+	cmd.Flags().StringVar(&opts.ClaimID, "claim-id", "", "claim UUID returned by the start (needed for update and completion)")
+	cmd.Flags().StringVar(&opts.IdempotencyKey, "idempotency-key", "", "retry key for this step (needed for update and completion)")
 	cmd.Flags().StringSliceVar(&opts.Targets, "targets", nil, "target names")
 	cmd.Flags().StringVar(&opts.PlannedOpClass, "planned-op-class", "", "declared operation class")
 	cmd.Flags().IntVar(&opts.TTLMinutes, "ttl-minutes", 0, "claim TTL in minutes (1-1440)")
 	cmd.Flags().StringVar(&opts.WorkRef, "work-ref", "", "external work reference")
-	cmd.Flags().StringVar(&opts.RunID, "run-id", "", "agent run UUID")
+	cmd.Flags().StringVar(&opts.RunID, "run-id", "", "deprecated: the server sets the agent run")
 	cmd.Flags().BoolVar(&opts.JSONOut, "json", false, "emit JSON")
 	cmd.Flags().StringVar(&opts.BackplaneOverride, "backplane", "", "backplane URL")
 	return cmd
@@ -154,6 +173,7 @@ func newAnnounceCmd() *cobra.Command {
 
 type announceOptions struct {
 	Activity, Target, Scope, Phase, PlannedOpClass, WorkRef, RunID, BackplaneOverride string
+	ClaimID, IdempotencyKey                                                           string
 	Targets                                                                           []string
 	TTLMinutes                                                                        int
 	JSONOut                                                                           bool
@@ -204,6 +224,20 @@ func runAnnounce(cmd *cobra.Command, opts announceOptions) error {
 		}
 		body.RunId = &runID
 	}
+	if opts.ClaimID != "" {
+		claimID, err := uuid.Parse(opts.ClaimID)
+		if err != nil {
+			return output.RenderError(
+				cmd.ErrOrStderr(),
+				output.Unexpected("--claim-id must be a UUID"),
+				opts.JSONOut,
+			)
+		}
+		body.ClaimId = &claimID
+	}
+	if opts.IdempotencyKey != "" {
+		body.IdempotencyKey = &opts.IdempotencyKey
+	}
 	response, err := announceBroadcast(cmd.Context(), client, body)
 	if err != nil {
 		return routeRequestError(cmd, backplaneURL, err, opts.JSONOut)
@@ -214,7 +248,11 @@ func runAnnounce(cmd *cobra.Command, opts announceOptions) error {
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), response)
 	}
-	_, err = fmt.Fprintf(cmd.OutOrStdout(), "announcement published: event_id=%s cursor=%s\n", response.EventId, response.Cursor)
+	checkpoint := ""
+	if response.WatchCheckpoint != nil {
+		checkpoint = *response.WatchCheckpoint
+	}
+	_, err = fmt.Fprintf(cmd.OutOrStdout(), "announcement published: event_id=%s claim_id=%s watch_checkpoint=%s replayed=%t delivery_pending=%t\n", response.EventId, response.ClaimId, checkpoint, response.Replayed, response.DeliveryPending)
 	return err
 }
 
@@ -274,6 +312,7 @@ func runBroadcastWatch(cmd *cobra.Command, opts watchOptions) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+client.AccessToken())
 	req.Header.Set("Accept", "text/event-stream")
+	api.SetWorkRefHeader(req)
 	resp, err := client.HTTPClient().Do(req)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)), opts.JSONOut)

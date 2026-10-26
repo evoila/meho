@@ -122,10 +122,20 @@ production traffic cannot reach that branch.
 | `jwt` | `ey<base64url>.<base64url>.<base64url>` three-segment tokens |
 | `api_key` | Labelled credential pairs: `api_key`, `access_token`, `refresh_token`, `auth_token`, `session_token`, `token` (bare), `secret` / `secret_key` / `secret_id`, `private_key`, `password`, `passwd`, `pwd`, `client_secret` — each followed by `=` or `:` and an 8+ char value |
 | `kubeconfig` | YAML kubeconfig blobs (`apiVersion: v1` + `kind: Config`) |
+| `bind_key_secret` | The quoted value after the `secret` keyword in a BIND `key` block (`secret "<base64>";`, TSIG and rndc keys), also when BIND comments (`/* */`, `//`, `#`) sit between the keyword and the value; the keyword and the comments stay so the file stays readable. The value must be base64, and the keyword may not follow a quote, a hyphen, or a word character, so a key *name* like `"transfer-secret"` is not taken for the directive (#4617) |
 | `uuid` | RFC 4122 canonical 8-4-4-4-12 hex |
 | `ipv4` | Dotted-quad with 0-255 per-octet bounds |
 | `ipv6` | Full + compressed RFC 5952 forms |
 | `fqdn` | ≥2 labels with non-numeric TLD start |
+
+The `api_key` rule skips a value that already is a complete
+`[REDACTED:...]` placeholder (`password: [REDACTED:param_name]`), so an
+earlier pass (the engine itself, or the shared API file check of
+`connectors-shared-api-file-secrets.md`) is not redacted a second time
+and loses its label. Only a complete placeholder is skipped: a name
+between `[REDACTED:` and `]`, and the value ends there. A value that
+only starts like one (`[REDACTED:made-up`) or goes on after the `]`
+(`[REDACTED:x]made-up`) is redacted whole.
 
 The secret-*value* part of `authorization_header`, `bearer_token`,
 and `api_key` consumes any non-whitespace, non-quote byte
@@ -137,6 +147,14 @@ matched only partially (tail leaked) or not at all (whole value
 leaked). The labelled-context requirement, not the value alphabet, is
 what keeps opaque IDs (Git SHAs, build hashes) from false-positiving.
 
+The engine replaces the whole match (group 0) of a pattern. One
+exception: a pattern that must look past variable-width context before
+the secret names the secret part `value` (a Python look-behind cannot
+skip variable-width text). The engine then replaces only that group,
+keeps the rest of the match in the output, and reports the span of the
+group in the manifest. `bind_key_secret` uses this so the `secret`
+keyword and any BIND comments before the value stay readable.
+
 Calibration notes (over-match vs under-match) are inline in
 `patterns.py`. The Tier-1 posture deliberately leans toward
 **over-redaction**: a false positive on a benign UUID is recoverable
@@ -146,11 +164,13 @@ via a scoped rule, but a missed secret is the failure the parent goal
 Beyond the connector-*result* boundary, the dispatch **error
 builders** (`operations/_errors.py`) route every free-text diagnostic
 they emit — `extras.exception_message`, `extras.upstream_message`,
+`extras.upstream_fault.type` / `.faultstring`,
 `extras.detail`, and the `error` summary tails built from them —
 through `_sanitize_free_text`: a Tier-1 pass with the packaged
 default policy (pinned via `get_default_policy()`, deliberately
 bypassing the resolver override table so a registered shadow-mode
-policy cannot disable it), followed by the 256-char cap. Redaction
+policy cannot disable it), followed by the length cap (256 chars, or
+2 KB for upstream body text, #3567). Redaction
 runs **before** the cap so a secret straddling the cap boundary
 cannot survive truncation as an unmatchable cleartext fragment.
 
@@ -201,7 +221,7 @@ falls through to the packaged **default-safe** policy
 The default-safe policy is the load-bearing guarantee: a connector
 landing without a registered override **still gets credentials
 stripped** (`authorization_header`, `bearer_token`, `jwt`, `api_key`,
-`kubeconfig`). Identifier patterns (`uuid` / `ipv4` / `ipv6` / `fqdn`)
+`kubeconfig`, `bind_key_secret`). Identifier patterns (`uuid` / `ipv4` / `ipv6` / `fqdn`)
 are deliberately not in the default — most connector responses are
 mostly identifiers, and a global default that redacts them would
 blank operator-facing summaries. Operators wanting them at the global
@@ -423,7 +443,7 @@ as "the gate is broken" -- the meta-tests rule out the second case.
 **Where the gate runs.** The harness is a standard pytest file
 under `backend/tests/`, so it is picked up by the required unit
 sweep in `.github/workflows/ci.yml` — since #3251 the
-`python-unit-shard` matrix (whichever stride slice its file lands
+`python-unit-shard` matrix (whichever shard its file lands
 in), reported through the `python-unit-lane` fan-in that carries
 the branch-protection required context. That check is in the
 required-status-checks set, so a round-trip mismatch blocks merge
@@ -599,6 +619,11 @@ No new runtime dependencies were added by Task #1070, #1071, or #1073.
   rules in policy order; a later rule sees the already-redacted
   output of earlier rules. Place narrow patterns (`api_key`,
   `bearer_token`) before wide ones (`fqdn`, `uuid`) in the YAML.
+  `bind_key_secret` must come first: it needs the BIND comment between
+  the `secret` keyword and the value to be whole, and `api_key` or a
+  header rule can redact a credential inside that comment and take
+  the closing `*/` with it. The packaged policies list it first and
+  `test_redaction_patterns.py` checks that order (#4620 review).
 - **Multiple matches collapse into one manifest entry per leaf.** The
   manifest tracks `count` and the span of the *first* match; if an
   audit consumer needs per-match spans, that is a Tier-1 extension
@@ -641,10 +666,12 @@ The propagation hook is a pair of contextvars in
 `operations/_audit.py`:
 
 - `agent_session_id_var` — bound by the `AgentInvoker` around the
-  loop; read by `write_audit_row` straight into the real
-  `audit_log.agent_session_id` column (already on the schema via
-  migration `0014`, G8.2-T1 #1009). `None` outside an agent run, so
-  the chassis HTTP / MCP dispatch path is unchanged.
+  loop. `write_audit_row` reads it through `resolve_agent_session_id()`
+  into the real `audit_log.agent_session_id` column (already on the
+  schema via migration `0014`, G8.2-T1 #1009). Inside an agent run the
+  run id wins; outside one the helper falls back to the MCP session id
+  of a direct MCP call (#4672), and to `None` for a chassis HTTP call
+  with no session.
 - `agent_run_audit_meta_var` — carries `AgentRunAuditMeta(model,
   provider, cost)`. The dispatcher's `_build_audit_payload` writes
   the three fields into the audit row's JSON payload under
@@ -753,8 +780,16 @@ signed-URL/client-identity header is absent by construction:
 | `content-type`, `content-length`, `content-encoding`, `content-language`, `content-range` | `authorization`, `proxy-authorization`, `www-authenticate`, `proxy-authenticate` |
 | `accept*`, `connection`, `transfer-encoding`, `host`, `user-agent`, `server`, `via`, `allow` | `cookie`, `set-cookie` |
 | `cache-control`, `date`, `age`, `expires`, `etag`, `vary`, `if-*`, `range`, `retry-after` | every `x-*-token`, `x-api-key`, `x-csrf-token`, `x-xsrf-token`, `x-vault-token`, `x-amz-security-token` |
-| `x-request-id`, `x-correlation-id`, `traceparent`, `tracestate`, `x-ratelimit-*` | `location`, `content-location`, `referer` (signed URLs / tokens) |
+| `x-request-id`, `x-correlation-id`, `traceparent`, `tracestate`, `x-ratelimit-*`, `audit-id` (Kubernetes request id), `warning` (RFC 7234; Kubernetes deprecation and admission notices) | `location`, `content-location`, `referer` (signed URLs / tokens) |
 | `strict-transport-security`, `x-content-type-options`, `x-frame-options`, `referrer-policy`, `content-security-policy` | `forwarded`, `x-forwarded-*`, `x-real-ip` (client identity / PII) |
+
+**Query strings** (`query.py`, #3841). The vendor-call seam drops the
+query from a recorded URL. A transport that needs the query on the span
+(Kubernetes: `dryRun`, `fieldManager`) passes it to `redact_query(params,
+safe_names)`. Every parameter name is kept. A value is kept only when its
+name is on the caller's safe list, and it still gets the credential-shape
+scrub. Every other value becomes `[redacted]` without being read. A query
+shape the engine cannot walk records nothing and is uncertain.
 
 As defense-in-depth the value of every *surviving* header is still run
 through the credential-shape net (`_content.py`), so a `Bearer …` pasted
@@ -773,13 +808,35 @@ the **whole subtree**. Underneath, the same credential-shape net runs
 over every surviving leaf, so a shaped secret at an *undeclared* nested
 path is still caught. JSON is the only structurally-redactable shape:
 a str/bytes body is parsed when the content-type is JSON or unknown;
-anything else fails closed (see F2 uncertainty). One structural rule runs
+anything else fails closed (see F2 uncertainty). An XML body (`text/xml`,
+`application/xml`, `*+xml`, for example a vim25 SOAP answer) is never
+recorded either, but it is not dropped bare: `_xml_digest.py` records a
+digest in its place — `{"omitted": <marker>, "content_sha256": <hex>,
+"fault_types": {<type name>: <count>}}` (#3708). The fault types come
+from each vim `fault` element (`missingSet[].fault`, task errors) and each
+`soapenv:Fault/detail` child; the `LocalizedMethodFault` wrapper is
+skipped. Only type names are read, never fault text, and a name that is
+not identifier-shaped is dropped. The parse uses `defusedxml` and streams,
+so a body cut at the size cap still counts the faults before the cut. This
+lets an operator see, for example, that every property of a host came back
+in `missingSet` with `NoPermission`. One structural rule runs
 without any per-connector config: every property `value` inside an OVF
 `PropertyParams` block (`additional_parameters[] {type: "PropertyParams",
 properties: [{id, value}]}`) is redacted — those are OVF property inputs
 which commonly carry appliance credentials under a vendor-specific `id` no
 key-name heuristic or shape net can place — keeping the `id` and every
 non-secret field (network mappings, name, placement) intact.
+
+A connector can also mask a body itself before the span is recorded.
+`HttpConnector.trace_response_body(response)` returns the body the trace
+records in place of the raw bytes, or `None` for the raw bytes (the
+default). The shared engine still runs on what it returns. This is for a
+vendor answer that carries a secret in a field the shape net cannot place
+and the op family does not exclude: the HCX connector masks every
+secret-named field (`password`, `vcPassword`, `token`, ...) of every
+answer this way, so a stored pairing password never reaches the trace
+(`docs/codebase/connectors-hcx.md`). The hook runs only while a trace is
+being captured.
 
 **F2.3 — hard-excluded op families** (`families.py`). Some op families
 carry secrets *as their body* — credential reads, session mints, token
@@ -813,20 +870,41 @@ exhaust; under-exclusion leaks.
 | --- | --- | --- |
 | secret-bearing (credential-read / -mint / -write) | **single-sourced** with `broadcast.events.classify_op` (`_CREDENTIAL_*_OPS`) | never |
 | secret-bearing (generic / tag-declared) | broadening `SECRET_FAMILY_PATTERNS` globs + token-split `SECRET_FAMILY_TAGS` | never |
-| destructive / delete-shaped | **single-sourced** with the grant guard's `Settings.service_grant_delete_shaped_patterns` + HTTP `DELETE` + `destructive` tag | never |
+| destructive / delete-shaped | **single-sourced** with the grant guard's `Settings.service_grant_delete_shaped_patterns` + HTTP `DELETE` + `destructive` tag + a vendor delete action name (`Destroy`, `Delete`, `Remove`, `Unregister`; the ingest parser's word list in `meho_backplane/delete_names.py`, #4632) | never |
 | everything else | — | yes (subject to F2.2) |
 
 The destructive family is **single-sourced** with the delete-shaped
 classifier at `operations/service_grants.py` (`_delete_shaped_reason_by_pattern`
 / `_delete_shaped_reason_by_descriptor`) so the two lists cannot drift;
 `classify_body_exclusion` reads the same `Settings` tuple rather than
-re-declaring it. This honours the pending cross-ref amendment to
+re-declaring it. The vendor action name is the third sign (#4632): a
+VI-JSON delete such as `POST:/VirtualMachine/{moId}/Destroy_Task` is a
+`POST`, so neither the method nor a pattern catches it. The classifier
+reads the parser's word list from `meho_backplane/delete_names.py` (a module
+that imports nothing from MEHO) and puts such an op in the `destructive`
+family, so its body is never recorded. This honours the pending cross-ref amendment to
 [`governed-delete-operations.md`](../decisions/governed-delete-operations.md)
 noted in the flight-recorder decision's "Interactions with sibling
 decisions" section — the destructive family joins the hard-exclusion set
 now; the reciprocal pointer back from that doc is the deferred edit. When
 the `destructive` safety tier ([#3196](https://github.com/evoila/meho/issues/3196))
 lands, the classifier already covers it via the tag it promotes.
+
+Deployment specs and depot credentials are kept out of trace bodies like
+credential writes: the operations that send a domain spec, an SddcSpec or the
+depot password (`sddc.domain.validate` / `create`,
+`installer.sddc.spec.validate`, `installer.sddc.bringup.start` / `retry`,
+`installer.composite.sddc.bringup`, `installer.system.depot.set`) carry the
+tag `credential`, a secret tag word (`SECRET_FAMILY_TAGS`).
+
+The dispatcher's error path uses the same secret check (#4854). For an
+operation that `classify_op` pins as `credential_write`, or whose tags
+have a word from `SECRET_FAMILY_TAGS`, the vendor's text in an error
+result is replaced with one fixed text before the audit row is written
+(`operations/_vendor_text.py`, through the shared
+`families.secret_tag_tokens`). So the error result and the audit row of
+such an operation keep no vendor text either. The details are in
+`docs/codebase/error-message-shape.md` ("The info-leak boundary").
 
 **F2 uncertainty (the F5 degrade)**. Any state the engine cannot *prove*
 fully redacted returns `uncertain=True`, which the caller must map to
@@ -836,6 +914,7 @@ operator-only visibility. Uncertainty triggers:
 | --- | --- |
 | headers not a mapping | no headers recorded, uncertain |
 | unparseable / binary / unknown non-JSON body | body omitted, uncertain |
+| XML body | body omitted, fault-type digest + SHA-256 recorded, uncertain |
 | malformed JSON | body omitted, uncertain |
 | truncated mid-token (`truncated=True`) | parsed prefix scrubbed, still uncertain (a split secret matches no shape) |
 | body-path config fault at match time | body omitted, uncertain |
@@ -869,7 +948,7 @@ new structure, matched to that connector's payload contract.
 | --- | --- | --- |
 | keycloak | `connectors/keycloak/redaction.py` | `ClientRepresentation.secret`, `UserRepresentation.credentials`, and the generic credential key names, recursively (#1394). |
 | rabbitmq | `connectors/rabbitmq/redact.py` | `amqp://user:pass@` URI userinfo + any `*password*` / `*secret*` key (#2233). |
-| kubernetes | `connectors/kubernetes/redaction.py` | Every `data` / `stringData` value of a `kind: Secret` object — replaced with a fixed placeholder + a `sha256:` digest, key names kept — in single-object, list, and dynamic `k8s.cr.*` reads (#3501). |
+| kubernetes | `connectors/kubernetes/redaction.py` | Every `data` / `stringData` value of a `kind: Secret` object — replaced with a fixed placeholder + a `sha256:` digest, key names kept — in single-object, list, and dynamic `k8s.cr.*` reads (#3501). Also the kind-less items of a `SecretList` envelope and the `kubectl.kubernetes.io/last-applied-configuration` annotation of a Secret, which repeats its values (#3841). |
 | argocd | `connectors/argocd/redaction.py` | Repository credential fields (`password` / `sshPrivateKey` / `tlsClientCertKey` / `bearerToken` / `githubAppPrivateKey`) on `argocd.repo.list` (#3501). ArgoCD destination-cluster creds are dropped separately by `argocd.cluster.list`'s whole-`config` strip (#2855). |
 
 The kubernetes redactor is deliberately **structural, not pattern-based**:
@@ -879,6 +958,21 @@ so a read still answers "which keys does this Secret carry?" without ever
 returning the bytes. It leaves `k8s.secret.read_to_ref` (#3496) untouched
 — that op returns only a Vault `secret_ref` + a SHA-256, never a `data`
 map, so there is nothing for the walk to match.
+
+The flight recorder reuses the same walk (#3841). The Kubernetes transport
+hook (`connectors/kubernetes/_wire_span.py`) parses every JSON request and
+response body and runs `redact_kubernetes_payload` over it before the body
+reaches the shared F2 redaction path. The F2 engine on its own keys on
+labelled shapes and would keep an opaque base64 Secret value, and ops such
+as `k8s.apply` or `k8s.cr.info` are not secret-bearing families, so the
+structural pass is what masks a Secret manifest or a Secret read on the
+`vendor_call` span. The span's `response_object` summary is then built from
+the redacted body, never from the raw response. A response body over the
+64 KiB span cap is not handed to the F2 path at all: the hook passes an
+explicit omission reason (`record_sdk_vendor_call(response_body_omitted=...)`),
+the span stores `BODY_OMITTED_MARKER`, and the trace is marked uncertain.
+This closes the case where the F2 cap cuts only a trailing newline, the cut
+body still parses, and an unmasked Secret value would otherwise be kept.
 
 ## References
 

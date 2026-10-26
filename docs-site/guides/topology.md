@@ -115,6 +115,26 @@ node it hangs off and the exact edge walked — so the whole dependency
 the walk with `--depth N` (default 16, ceiling 64) and
 `--kind <edge_kind>` to follow one relationship kind only.
 
+Over MCP the walk also stops at a node limit (2000), a byte limit
+(4 MiB) and a time limit (5 s). Every answer has a `completeness`
+block:
+
+- `state: complete` — every node is in the answer.
+- `state: incomplete` — a limit cut the answer. You have the first part,
+  in `(depth, name, id)` order. `limits_hit` says which limit, for
+  example `hop_limit` (more nodes exist past `depth`).
+- `state: unavailable` — no nodes can be read, for example because the
+  walk ran out of time. If even the lookup of the start node ran out of
+  time, the answer has no `root` block.
+
+The whole walk reads one state of the graph, so a refresh that lands
+while the walk runs does not mix into the answer.
+
+Do not read an `incomplete` or `unavailable` answer as everything that
+is affected. `guidance` says how to narrow the query. A large answer
+has no inline `nodes`: it has a `handle`, and you read the rows with
+`result_query`. `history` answers work the same way.
+
 `dependencies` is the mirror image — same shape, same flags, forward
 direction:
 

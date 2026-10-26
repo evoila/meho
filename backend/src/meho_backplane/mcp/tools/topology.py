@@ -53,7 +53,7 @@ CLAUDE.md "What MEHO is NOT" bullet 2: CLI, MCP, and REST are sibling
 fronts on one backplane — none is a thin wrapper of another.
 ``query_topology`` calls the T4 :mod:`meho_backplane.topology.query`
 service functions directly; ``list_targets`` runs the same
-tenant-scoped ``select(TargetORM)`` the T5 REST route runs. This
+tenant-scoped query over ``targets`` the T5 REST route runs. This
 mirrors the established ``query_audit`` (#468) precedent which dispatches
 straight through the T1 audit substrate rather than the REST router.
 
@@ -96,7 +96,7 @@ rejected at the schema layer before the handler runs.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Final
 
 from sqlalchemy import select
@@ -117,13 +117,28 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphEdgeKind, Tenant
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
-from meho_backplane.mcp.server import McpInternalError, McpInvalidParamsError
+from meho_backplane.mcp.server import (
+    McpInternalError,
+    McpInvalidParamsError,
+    McpPermissionDeniedError,
+)
+from meho_backplane.mcp.tools._topology_answer import COMPLETENESS_SCHEMA, bounded_answer
 from meho_backplane.operations._lookup import parse_connector_id
 from meho_backplane.operations.dispatcher import dispatch
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.settings import get_settings
+from meho_backplane.topology.evidence import (
+    FRESHNESS_COPY,
+    OBSERVATION_NOTE,
+    RELATION_CLASSES,
+    STALE_SHOWN_COPY,
+    Freshness,
+    classify_freshness,
+    stale_rows_evidence,
+)
 from meho_backplane.topology.query import (
     AmbiguousNodeError,
-    find_dependencies,
-    find_dependents,
+    bounded_closure,
     find_path,
     list_edges,
     query_diff,
@@ -131,6 +146,7 @@ from meho_backplane.topology.query import (
     query_timeline,
 )
 from meho_backplane.topology.resolvers import NodeNotFoundError
+from meho_backplane.topology.schemas import PathDirection, TopologyEdge, TopologyNode
 from meho_backplane.topology.timeline_cursor import InvalidTimelineCursorError
 
 __all__: list[str] = []
@@ -184,6 +200,9 @@ _HISTORY_LIMIT_MAX: Final[int] = 5000
 #: (T1 #2534): the write schemas constrain `kind` by slug pattern,
 #: not by membership, and this list is advisory.
 _EDGE_KIND_VALUES: Final[list[str]] = sorted(k.value for k in GraphEdgeKind)
+
+#: ``path_direction`` values (#3760); the first is the default.
+_PATH_DIRECTIONS: Final[tuple[PathDirection, ...]] = ("undirected", "forward", "reverse")
 
 
 _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
@@ -377,6 +396,35 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "Ignored for the closure kinds."
             ),
         },
+        "path_direction": {
+            "type": "string",
+            "enum": list(_PATH_DIRECTIONS),
+            "default": "undirected",
+            "description": (
+                "How `kind=path` walks stored edges. Every edge is stored "
+                "as `from --kind--> to`. `undirected` (the default) walks "
+                "edges both ways: 'is there any route?'. `forward` follows "
+                "edges only from `from` to `to`, starting at `from_name`. "
+                "`reverse` follows them only from `to` to `from`. The "
+                "response echoes the direction it used. Ignored for the "
+                "other kinds."
+            ),
+        },
+        "relation_class": {
+            "type": ["string", "null"],
+            "enum": [None, *RELATION_CLASSES],
+            "description": (
+                "Keep only edges of one relation class. For `dependents` "
+                "/ `dependencies` / `path` / `edges`. `containment` = "
+                "`belongs-to` (a member of a group, for example a pod in "
+                "a namespace); `placement` = `runs-on` (where a workload "
+                "runs); `dependency` = `authenticates-via` (needs another "
+                "system to work); `unknown` = every other edge kind. Only "
+                "these three kinds are mapped; MEHO never guesses that "
+                "another kind is a dependency. Containment and placement "
+                "are not service dependencies."
+            ),
+        },
         "include_stale": {
             "type": "boolean",
             "default": True,
@@ -540,13 +588,53 @@ _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
     "ambiguous in the tenant (same name as both, e.g., a target and a "
     "vm) pass `node_kind` to pin the anchor; an ambiguous bare name "
     "returns -32602 naming the candidate kinds.\n\n"
-    "Returns `{kind, nodes: [TopologyNode, ...]}` for the closure kinds "
-    "(root at depth 0, so a one-element list means 'exists but nothing "
-    "depends on it'). Each non-root node carries `parent_node_id` + "
+    "EDGE MEANING: closures follow stored edge direction (`dependents` "
+    "walks `reverse`, `dependencies` walks `forward`), and every edge "
+    "kind counts, so a closure can mix group membership, placement and "
+    "real dependencies. Each row says which: `via_relation_class` (and "
+    "`relation_class` on `edges` rows) is `containment` (`belongs-to`), "
+    "`placement` (`runs-on`), `dependency` (`authenticates-via`) or "
+    "`unknown` (every other kind). Only `dependency` is a service "
+    "dependency. Pass `relation_class` to keep one class.\n\n"
+    "FRESHNESS: rows carry `source` (`auto` = found by a refresh, "
+    "`curated` = stated by an operator), `source_scope` (which source "
+    "the node belongs to), `last_seen` and a `freshness` value "
+    "(`via_edge_freshness` for the edge walked): `observed`, "
+    "`old_observation` (last seen more than two refresh cycles ago), "
+    "`stale` (the latest refresh no longer reported it) or `asserted` "
+    "(curated). `last_seen` is MEHO's own time, not the vendor's: the "
+    "last refresh that reported an `auto` row, or when an operator "
+    "entered a `curated` row (a later refresh that also observes it "
+    "moves it forward). Rows from different systems are not one "
+    "consistent snapshot. The `evidence` block says which stale view "
+    "the answer used (`stale_rows`, `stale_rows_note`) and explains each "
+    "freshness value in the answer.\n\n"
+    "Returns `{kind, direction, relation_class, query, root, node_count, "
+    "edge_count, nodes: [TopologyNode, ...], completeness, delivery, "
+    "evidence}` for the closure kinds "
+    "(root at depth 0, so a one-element list with `completeness.state: "
+    "complete` means 'exists but nothing depends on it'). Rows are ordered "
+    "(depth, name, id).\n\n"
+    "LIMITS: a closure stops at a node limit, a byte limit and a time "
+    "limit, as well as at `depth`. `completeness.state` says `complete`, "
+    "`incomplete` (a limit cut the answer; you have the first part in "
+    "row order) or `unavailable` (no rows can be read; for "
+    "`time_budget` the traversal ran out of time). `completeness."
+    "limits_hit` names each limit (`hop_limit` = more nodes exist past "
+    "`depth`) and `guidance` says how to narrow the query. Never read an "
+    "`incomplete` or `unavailable` answer as everything that is affected. "
+    "A large answer has no inline `nodes`: it has `handle` and a short "
+    "preview in `handle.sample_rows`; read every row with `result_query` "
+    "and `handle_id`. `kind=history` answers work the same way, with "
+    "`rows` instead of `nodes`, and the handle preview leaves out "
+    "`snapshot`.\n\n"
+    "Each non-root node carries `parent_node_id` + "
     "`via_edge_id` — the node it hangs off and the exact edge walked — "
     "so the dependency chain reconstructs from the flat list without "
     "extra calls. Soft-deleted rows stay reachable by default; pass "
-    "`include_stale: false` to walk live rows only. When the anchor is "
+    "`include_stale: false` to walk live rows only (the anchor you "
+    "named is always returned, even when stale; the `evidence` block "
+    "says so). When the anchor is "
     "not tracked in the topology "
     'graph for this tenant, returns `{kind, status: "node_untracked", '
     "name, nodes: []}` (and `node_kind` when `node_kind=` was supplied) "
@@ -558,10 +646,19 @@ _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
     "The recovery is `meho topology refresh <target>` for a k8s "
     "target or `meho_topology_annotate` for cross-system relationships "
     "the probes can't infer (G0.18-T4 #1357, RDC #789 N2). "
-    '`{kind: "path", path: TopologyPath|null}` for `path` '
-    "(null = unreachable within `max_hops`, a valid answer, not an "
-    'error); `{kind: "edges", edges: [TopologyEdge, ...]}` for `edges` '
-    "(flat list, ordered by `last_seen DESC NULLS LAST, id`).\n\n"
+    'For `path`: `{kind: "path", status, direction, relation_class, '
+    "path: TopologyPath|null, evidence}`. `status` is `found`, "
+    "`node_untracked` (an endpoint is not in the graph; `name` says "
+    "which) or `no_route` (both ends exist but there is no route within "
+    "`max_hops` under the selected direction, relation class and stale "
+    "view). `detail` explains the last two. Every outcome carries "
+    "`evidence`, so the stale view the search used is never implicit. "
+    "`path_direction` picks `undirected` (default, edges both ways), "
+    "`forward` or `reverse`. "
+    '`{kind: "edges", relation_class, edges: [TopologyEdge, ...], '
+    "evidence}` for `edges` "
+    "(flat list, ordered by `last_seen DESC NULLS LAST, id`; stale "
+    "edges are never listed).\n\n"
     "For `kind=timeline`: tenant-wide chronological feed of graph "
     "changes -- 'what changed in the graph since 9am?' → "
     "`query_topology {kind: timeline, since: 2026-05-22T09:00:00Z}`. "
@@ -598,7 +695,8 @@ _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
     "this change?' questions. Unknown / cross-tenant target returns "
     '-32602 `node_not_found`. Returns `{kind: "history", rows: '
     "[TopologyHistoryEntry, ...], anchor_node_id: <uuid>, "
-    "include_edges: <bool>}`."
+    "include_edges: <bool>, completeness, delivery}` (`handle` "
+    "instead of `rows` when the answer is large; see LIMITS)."
 )
 
 
@@ -626,7 +724,14 @@ async def _query_topology_handler(
             return await _closure_facet(operator, kind, arguments)
         if kind == "edges":
             edges = await _list_edges_facet(operator, arguments)
-            return {"kind": kind, "edges": [e.model_dump(mode="json") for e in edges]}
+            shaper = _RowShaper()
+            return {
+                "kind": kind,
+                "relation_class": arguments.get("relation_class"),
+                "edges": [shaper.edge(e) for e in edges],
+                # ``list_edges`` never returns soft-deleted edges.
+                "evidence": shaper.evidence(include_stale=False, named_rows=None),
+            }
         if kind == "timeline":
             return await _timeline_facet(operator, arguments)
         if kind == "diff":
@@ -634,33 +739,148 @@ async def _query_topology_handler(
         if kind == "history":
             return await _history_facet(operator, arguments)
         # kind == "path" — the enum + schema guarantee no other value.
+        return await _path_facet(operator, arguments)
+    except AmbiguousNodeError as exc:
+        raise McpInvalidParamsError(str(exc)) from exc
+    except NodeNotFoundError as exc:
+        # Reached only when the substrate verb that surfaces a missing
+        # anchor as :class:`NodeNotFoundError` runs and is not the
+        # closure pair or path handled in their facets. Today that's
+        # ``kind=history`` (resolves the anchor and raises on miss).
+        raise McpInvalidParamsError(str(exc)) from exc
+
+
+class _RowShaper:
+    """Add freshness to topology rows and build the ``evidence`` block (#3760).
+
+    One instance per response, so every row is judged against the same
+    ``now`` and the ``evidence`` block explains only the freshness
+    values that actually appear.
+    """
+
+    def __init__(self) -> None:
+        self.now = datetime.now(UTC)
+        self._interval = get_settings().topology_refresh_interval_seconds
+        self._seen: set[Freshness] = set()
+
+    def _classify(self, source: str | None, last_seen: datetime | None) -> Freshness:
+        value = classify_freshness(
+            source, last_seen, now=self.now, refresh_interval_seconds=self._interval
+        )
+        self._seen.add(value)
+        return value
+
+    def node(self, node: TopologyNode) -> dict[str, Any]:
+        row = node.model_dump(mode="json")
+        row["freshness"] = self._classify(node.source, node.last_seen)
+        row["via_edge_freshness"] = (
+            None
+            if node.via_edge_id is None
+            else self._classify(node.via_edge_source, node.via_edge_last_seen)
+        )
+        return row
+
+    def edge(self, edge: TopologyEdge) -> dict[str, Any]:
+        row = edge.model_dump(mode="json")
+        row["freshness"] = self._classify(edge.source, edge.last_seen)
+        return row
+
+    def evidence(self, *, include_stale: bool, named_rows: str | None) -> dict[str, Any]:
+        """Build the ``evidence`` block for one answer.
+
+        *named_rows* names the rows the caller asked for by name, which
+        the query returns even when stale (see
+        :func:`~meho_backplane.topology.evidence.stale_rows_evidence`).
+        """
+        meaning = {value: FRESHNESS_COPY[value] for value in sorted(self._seen)}
+        if "stale" in meaning:
+            meaning["stale"] = f"{meaning['stale']} {STALE_SHOWN_COPY[include_stale]}"
+        return {
+            **stale_rows_evidence(include_stale=include_stale, named_rows=named_rows),
+            "observation_note": OBSERVATION_NOTE,
+            "freshness_meaning": meaning,
+        }
+
+
+#: The rows a closure / path query returns even when stale (#2538), named
+#: in the ``evidence`` block so the answer does not contradict its rows.
+_CLOSURE_NAMED_ROWS = "the root you named"
+_PATH_NAMED_ROWS = "the two endpoints you named"
+
+
+async def _path_facet(operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Run ``kind=path`` and say which of three outcomes happened (#3760).
+
+    ``status`` is ``found``, ``node_untracked`` (an endpoint is not in
+    the graph) or ``no_route`` (both ends exist, no route within
+    ``max_hops`` in the chosen direction, relation class and stale
+    view). The three used to share one ``path: null`` answer. Every
+    outcome carries ``evidence`` with the stale view the search used,
+    so a ``no_route`` caused by an excluded stale edge is not read as
+    "no route at all".
+    """
+    direction: PathDirection = arguments.get("path_direction", "undirected")
+    relation_class = arguments.get("relation_class")
+    include_stale = bool(arguments.get("include_stale", True))
+    max_hops = int(arguments.get("max_hops", _MAX_HOPS_DEFAULT))
+    shaper = _RowShaper()
+    envelope: dict[str, Any] = {
+        "kind": "path",
+        "direction": direction,
+        "relation_class": relation_class,
+    }
+    try:
         result = await find_path(
             operator,
             arguments["from_name"],
             arguments["to_name"],
             from_kind=arguments.get("node_kind"),
             to_kind=arguments.get("to_node_kind"),
-            max_hops=int(arguments.get("max_hops", _MAX_HOPS_DEFAULT)),
-            include_stale=bool(arguments.get("include_stale", True)),
+            max_hops=max_hops,
+            include_stale=include_stale,
+            direction=direction,
+            relation_class=relation_class,
+            missing_endpoint_raises=True,
         )
-    except AmbiguousNodeError as exc:
-        raise McpInvalidParamsError(str(exc)) from exc
     except NodeNotFoundError as exc:
-        # Reached only when the substrate verb that surfaces a missing
-        # anchor as :class:`NodeNotFoundError` runs and is not the
-        # closure pair handled above. Today that's ``kind=history``
-        # (resolves the anchor and raises on miss). ``find_path``
-        # keeps its G9.1 silent-on-miss contract — an unreachable /
-        # missing endpoint is the verb's ``None`` answer, not an
-        # exception. The closure verbs (G0.18-T4 #1357) intercept
-        # their own :class:`NodeNotFoundError` upstream and translate
-        # it to the typed ``node_untracked`` envelope rather than
-        # -32602, so a closure miss never lands here.
-        raise McpInvalidParamsError(str(exc)) from exc
-    return {
-        "kind": kind,
-        "path": None if result is None else result.model_dump(mode="json"),
-    }
+        envelope.update(
+            status="node_untracked",
+            name=exc.name,
+            path=None,
+            detail=(
+                f"{exc.name!r} is not in the topology graph for this tenant. "
+                "This does not say whether a route exists."
+            ),
+        )
+        if exc.kind is not None:
+            envelope["node_kind"] = exc.kind
+        envelope["evidence"] = shaper.evidence(
+            include_stale=include_stale, named_rows=_PATH_NAMED_ROWS
+        )
+        return envelope
+    if result is None:
+        stale_view = "included" if include_stale else "excluded"
+        class_view = "any" if relation_class is None else relation_class
+        envelope.update(
+            status="no_route",
+            path=None,
+            detail=(
+                f"Both ends are in the graph, but MEHO found no {direction} route "
+                f"within {max_hops} hops under the selected filters (stale rows "
+                f"{stale_view}, relation class {class_view}). A route may still "
+                "exist under other filters, or outside what MEHO has discovered."
+            ),
+            evidence=shaper.evidence(include_stale=include_stale, named_rows=_PATH_NAMED_ROWS),
+        )
+        return envelope
+    path = result.model_dump(mode="json")
+    path["nodes"] = [shaper.node(n) for n in result.nodes]
+    envelope.update(
+        status="found",
+        path=path,
+        evidence=shaper.evidence(include_stale=include_stale, named_rows=_PATH_NAMED_ROWS),
+    )
+    return envelope
 
 
 async def _closure_facet(
@@ -684,29 +904,80 @@ async def _closure_facet(
     untracked path is handled here because the typed envelope it
     returns is a successful tool call, not an exception.
     """
-    target = arguments["target"]
-    node_kind = arguments.get("node_kind")
-    depth = int(arguments.get("depth", _DEPTH_DEFAULT))
-    kind_filter = arguments.get("kind_filter")
-    include_stale = bool(arguments.get("include_stale", True))
-    verb = find_dependents if kind == "dependents" else find_dependencies
+    query = {
+        "target": arguments["target"],
+        "node_kind": arguments.get("node_kind"),
+        "depth": int(arguments.get("depth", _DEPTH_DEFAULT)),
+        "kind_filter": arguments.get("kind_filter"),
+        "relation_class": arguments.get("relation_class"),
+        "include_stale": bool(arguments.get("include_stale", True)),
+    }
     try:
-        nodes = await verb(
+        answer = await bounded_closure(
             operator,
-            target,
-            kind=node_kind,
-            depth=depth,
-            kind_filter=kind_filter,
-            include_stale=include_stale,
+            query["target"],
+            reverse=kind == "dependents",
+            kind=query["node_kind"],
+            depth=query["depth"],
+            kind_filter=query["kind_filter"],
+            relation_class=query["relation_class"],
+            include_stale=query["include_stale"],
         )
     except NodeNotFoundError as exc:
-        return _node_untracked_envelope(kind, exc)
-    return {"kind": kind, "nodes": [n.model_dump(mode="json") for n in nodes]}
+        return _node_untracked_envelope(
+            kind, exc, relation_class=query["relation_class"], include_stale=query["include_stale"]
+        )
+    shaper = _RowShaper()
+    rows = [shaper.node(n) for n in answer.nodes]
+    envelope: dict[str, Any] = {
+        "kind": kind,
+        "direction": _closure_direction(kind),
+        "relation_class": query["relation_class"],
+        "query": query,
+        "snapshot_at": shaper.now.isoformat(),
+    }
+    # The root is unknown only when the lookup itself ran out of time.
+    if answer.root is not None:
+        envelope["root"] = {
+            "id": str(answer.root.id),
+            "kind": answer.root.kind,
+            "name": answer.root.name,
+            "source_scope": answer.root.source_scope,
+        }
+    envelope |= {
+        "ordering": "depth, name, id",
+        "node_count": len(rows),
+        "edge_count": max(len(rows) - 1, 0),
+        "evidence": shaper.evidence(
+            include_stale=query["include_stale"], named_rows=_CLOSURE_NAMED_ROWS
+        ),
+    }
+    return await bounded_answer(
+        operator,
+        envelope,
+        "nodes",
+        rows,
+        query_limit=answer.limit_hit,
+        limits={
+            "max_depth": answer.depth,
+            "max_nodes": answer.budget.max_nodes,
+            "max_bytes": answer.budget.max_bytes,
+            "time_budget_ms": answer.budget.time_budget_ms,
+        },
+    )
+
+
+def _closure_direction(kind: str) -> str:
+    """Closures always follow stored edges one way (#3760)."""
+    return "reverse" if kind == "dependents" else "forward"
 
 
 def _node_untracked_envelope(
     kind: str,
     exc: NodeNotFoundError,
+    *,
+    relation_class: str | None,
+    include_stale: bool,
 ) -> dict[str, Any]:
     """Build the closure-kind ``node_untracked`` typed envelope.
 
@@ -731,12 +1002,22 @@ def _node_untracked_envelope(
     recovery path. Includes the substrate's resolved ``name`` and,
     when supplied, the ``kind`` pin so the front can render a
     diagnostic without a second round-trip.
+
+    Like every other closure answer it also carries ``direction``,
+    ``relation_class`` and ``evidence`` (#3760), so the caller can see
+    which stale view and filters the lookup used even though no rows
+    came back.
     """
     envelope: dict[str, Any] = {
         "kind": kind,
         "status": "node_untracked",
         "name": exc.name,
+        "direction": _closure_direction(kind),
+        "relation_class": relation_class,
         "nodes": [],
+        "evidence": _RowShaper().evidence(
+            include_stale=include_stale, named_rows=_CLOSURE_NAMED_ROWS
+        ),
     }
     if exc.kind is not None:
         envelope["node_kind"] = exc.kind
@@ -939,6 +1220,7 @@ async def _history_facet(
                 f"query_topology(kind=history): 'until' is not ISO-8601: {until_str!r}",
             ) from exc
 
+    limit = int(arguments.get("limit", _HISTORY_LIMIT_MAX))
     result = await query_history(
         operator,
         target_name,
@@ -946,20 +1228,32 @@ async def _history_facet(
         since=since_dt,
         until=until_dt,
         include_edges=bool(arguments.get("include_edges", False)),
-        limit=int(arguments.get("limit", _HISTORY_LIMIT_MAX)),
+        limit=limit,
     )
-    return {
+    rows = [r.model_dump(mode="json") for r in result.rows]
+    envelope = {
         "kind": "history",
         "anchor_node_id": str(result.anchor_node_id),
         "include_edges": result.include_edges,
-        "rows": [r.model_dump(mode="json") for r in result.rows],
+        "snapshot_at": datetime.now(UTC).isoformat(),
+        "ordering": "valid_from DESC, history_id DESC",
     }
+    # A full page may hide older rows, so it is never reported complete.
+    return await bounded_answer(
+        operator,
+        envelope,
+        "rows",
+        rows,
+        query_limit="row_limit" if len(rows) >= limit else None,
+        limits={"limit": limit},
+        preview_omits=("snapshot",),
+    )
 
 
 async def _list_edges_facet(
     operator: Operator,
     arguments: dict[str, Any],
-) -> list[Any]:
+) -> list[TopologyEdge]:
     """Dispatch the ``kind="edges"`` facet to the G9.2-T4 substrate.
 
     Opens a session and forwards the optional filters
@@ -987,6 +1281,7 @@ async def _list_edges_facet(
             conflicts_only=bool(arguments.get("conflicts", False)),
             limit=int(arguments.get("limit", _EDGES_LIMIT_DEFAULT)),
             offset=int(arguments.get("offset", 0)),
+            relation_class=arguments.get("relation_class"),
         )
 
 
@@ -1016,9 +1311,11 @@ register_mcp_tool(
                     "type": "array",
                     "items": {"type": "object"},
                     "description": (
-                        "Present for the closure kinds. TopologyNode rows "
-                        "ordered (depth, name); root at depth 0. See "
+                        "Present for the closure kinds when the answer is "
+                        "small. TopologyNode rows ordered (depth, name, id); "
+                        "root at depth 0. See "
                         "`meho_backplane.topology.schemas.TopologyNode`. "
+                        "A larger answer has `handle` instead. "
                         "When the anchor is untracked the array is empty "
                         "and `status` carries `node_untracked` (G0.18-T4 "
                         "#1357)."
@@ -1026,24 +1323,68 @@ register_mcp_tool(
                 },
                 "status": {
                     "type": "string",
-                    "enum": ["node_untracked"],
+                    "enum": ["node_untracked", "found", "no_route"],
                     "description": (
-                        "Present for the closure kinds **only** when the "
-                        "anchor name does not resolve to a "
-                        "`graph_node` row in this tenant. Distinct from "
-                        "a tracked-but-no-dependents response (which "
-                        "omits `status` and carries the one-element "
-                        "`[root]` in `nodes`). Auto-discovery is "
-                        "k8s-only today; non-k8s targets surface here "
+                        "Closure kinds: present **only** as "
+                        "`node_untracked` when the anchor name does not "
+                        "resolve to a `graph_node` row in this tenant. "
+                        "Distinct from a tracked-but-no-dependents "
+                        "response (which omits `status` and carries the "
+                        "one-element `[root]` in `nodes`). Auto-discovery "
+                        "is k8s-only today; non-k8s targets surface here "
                         "until a populator or curated annotation lands. "
-                        "(G0.18-T4 #1357, RDC #789 N2.)"
+                        "(G0.18-T4 #1357, RDC #789 N2.) `kind=path`: "
+                        "always present — `found`, `node_untracked` (an "
+                        "endpoint is not in the graph) or `no_route` "
+                        "(both ends exist, no route) (#3760)."
+                    ),
+                },
+                "detail": {
+                    "type": "string",
+                    "description": (
+                        "Present for `kind=path` when `status` is "
+                        "`node_untracked` or `no_route`: a plain-language "
+                        "explanation of what the answer does and does "
+                        "not say."
+                    ),
+                },
+                "direction": {
+                    "type": "string",
+                    "enum": list(_PATH_DIRECTIONS),
+                    "description": (
+                        "The edge direction the answer used: the applied "
+                        "`path_direction` for `kind=path`; `reverse` for "
+                        "`dependents` and `forward` for `dependencies`."
+                    ),
+                },
+                "relation_class": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Echo of the `relation_class` filter for the "
+                        "closure kinds, `path` and `edges`; null when no "
+                        "filter was applied."
+                    ),
+                },
+                "evidence": {
+                    "type": "object",
+                    "description": (
+                        "Present on closure, `edges` and every `path` "
+                        "answer (all three statuses). `stale_rows` is "
+                        "`included` or `excluded`; `stale_rows_note` "
+                        "says what that means, including that a named "
+                        "root or endpoint is always shown even when "
+                        "stale; `observation_note` says what `last_seen` "
+                        "means (MEHO's own time, not the vendor's, not "
+                        "one consistent snapshot); `freshness_meaning` "
+                        "explains each `freshness` value that appears in "
+                        "the rows."
                     ),
                 },
                 "name": {
                     "type": "string",
                     "description": (
-                        "Present for the closure kinds when "
-                        "`status=node_untracked` — echoes the anchor "
+                        "Present for the closure kinds and `path` when "
+                        "`status=node_untracked` — echoes the missing "
                         "name the operator passed so a multi-call "
                         "consumer can pair the response with its "
                         "request without re-parsing the argument bag."
@@ -1052,7 +1393,7 @@ register_mcp_tool(
                 "node_kind": {
                     "type": "string",
                     "description": (
-                        "Present for the closure kinds when "
+                        "Present for the closure kinds and `path` when "
                         "`status=node_untracked` **and** the caller "
                         "supplied `node_kind=` on the request. Echoes "
                         "the kind pin so the diagnostic is "
@@ -1062,8 +1403,8 @@ register_mcp_tool(
                 "path": {
                     "type": ["object", "null"],
                     "description": (
-                        "Present for `kind=path`. A TopologyPath, or null "
-                        "when the target is unreachable within `max_hops`."
+                        "Present for `kind=path`. A TopologyPath when "
+                        "`status=found`, null otherwise (see `status`)."
                     ),
                 },
                 "edges": {
@@ -1080,9 +1421,10 @@ register_mcp_tool(
                     "items": {"type": "object"},
                     "description": (
                         "Present for `kind=timeline` (TopologyTimelineEntry "
-                        "rows, summary only) and `kind=history` "
-                        "(TopologyHistoryEntry rows, full snapshot.before/"
-                        "after payload). Both ordered (valid_from DESC, "
+                        "rows, summary only) and for a small `kind=history` "
+                        "answer (TopologyHistoryEntry rows, full snapshot."
+                        "before/after payload; a larger one has `handle` "
+                        "instead). Both ordered (valid_from DESC, "
                         "history_id DESC). See "
                         "`meho_backplane.topology.schemas`."
                     ),
@@ -1137,6 +1479,99 @@ register_mcp_tool(
                         "edge rows are expected to appear in `rows`."
                     ),
                 },
+                "completeness": COMPLETENESS_SCHEMA,
+                "delivery": {
+                    "type": "string",
+                    "enum": ["complete", "partial", "unavailable"],
+                    "description": (
+                        "Closure and `history` answers. `complete`: the "
+                        "answer was sent whole. `partial`: it was too large, "
+                        "so the inline preview was left out; read the rows "
+                        "with `result_query` and `handle`. `unavailable`: it "
+                        "was too large and there is no readable handle; "
+                        "narrow the query. The finished answer is measured "
+                        "on the wire and made smaller until it fits; the "
+                        "smallest form keeps only `kind`, `completeness` and "
+                        "`delivery`."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Closure and `history` answers with a `handle` whose "
+                        "rows the result store did not keep: why. "
+                        "`admission_limit_exceeded` means the rows were too "
+                        "large or too deeply nested to profile; narrow the "
+                        "query."
+                    ),
+                },
+                "handle": {
+                    "type": "object",
+                    "description": (
+                        "Closure and `history` answers over the JSONFlux "
+                        "threshold: the rows are kept behind this result "
+                        "handle instead of inline. Read them with "
+                        "`result_query` and `handle_id`, in the order named "
+                        "by `ordering`. Only you can read it, until it "
+                        "expires."
+                    ),
+                },
+                "row_count": {"type": "integer"},
+                "total": {"type": "integer"},
+                "sample_rows_returned": {"type": "integer"},
+                "sample_bytes": {"type": "integer"},
+                "source_key": {"type": "string"},
+                "preview_omits": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "`history` with a handle: row fields left out of "
+                        "`handle.sample_rows` (`snapshot`). They are kept "
+                        "behind the handle."
+                    ),
+                },
+                "root": {
+                    "type": "object",
+                    "description": (
+                        "Closure kinds: the anchor the traversal started "
+                        "from (`id`, `kind`, `name`, `source_scope`), shown "
+                        "even when no nodes came back. Missing only when "
+                        "the time budget ran out before the anchor was found."
+                    ),
+                },
+                "query": {
+                    "type": "object",
+                    "description": (
+                        "Closure kinds: the target and filters the answer "
+                        "used (`target`, `node_kind`, `depth`, "
+                        "`kind_filter`, `relation_class`, `include_stale`)."
+                    ),
+                },
+                "snapshot_at": {
+                    "type": "string",
+                    "description": (
+                        "Closure and `history` answers: when MEHO ran the "
+                        "query. Rows behind `handle` are this answer, not a "
+                        "later re-run."
+                    ),
+                },
+                "ordering": {
+                    "type": "string",
+                    "description": "Closure and `history` answers: the row order.",
+                },
+                "node_count": {
+                    "type": "integer",
+                    "description": "Closure kinds: nodes found, root included.",
+                },
+                "edge_count": {
+                    "type": "integer",
+                    "description": (
+                        "Closure kinds: edges walked to reach the nodes "
+                        "(one per node after the root)."
+                    ),
+                },
+                "delivered_bytes": {"type": "integer"},
+                "delivery_max_bytes": {"type": "integer"},
             },
             "required": ["kind"],
         },
@@ -1236,8 +1671,41 @@ _LIST_TARGETS_DESCRIPTION: Final[str] = (
     "operator's own tenant unless a `platform_admin` passes `tenant`.\n\n"
     "Returns `{targets: [{id, name, aliases, product, host}, ...], "
     "next_cursor: <name|null>}` ordered by name; `next_cursor` is the "
-    "last name on the page when more rows may exist, else null."
+    "last name on the page when more rows may exist, else null.\n\n"
+    "LARGE PAGES: a page over the JSONFlux threshold (more than 50 rows "
+    "or 4 KB) is not inlined. `targets` is then absent and the response "
+    "carries `row_count` (rows on this page), `next_cursor`, and a "
+    "`handle` (the same result handle `call_operation` returns, with a "
+    "short preview in `handle.sample_rows`). Read the page's rows with "
+    "`result_query` and `handle_id=<handle.handle_id>`, e.g. "
+    '`query={"select": ["name", "product"]}`. To get inline rows instead, '
+    "narrow with `connector_id` or pass a smaller `limit`."
 )
+
+#: Same reducer class and default thresholds (more than 50 rows or 4 KB)
+#: the dispatcher applies to every ``call_operation`` result (CLAUDE.md
+#: postulate 6, #3858).
+_LIST_TARGETS_REDUCER: Final[JsonFluxReducer] = JsonFluxReducer()
+
+#: ``fetch_more.native_pagination`` for a reduced page: how to re-call
+#: ``list_targets`` for an inline page or the next page.
+_LIST_TARGETS_PAGINATION_HINT: Final[dict[str, Any]] = {
+    "params": {
+        "connector_id": (
+            "Narrow to one connector's product (e.g. `vmware-rest-9.0`); "
+            "a page at or under the threshold comes back inline as `targets`."
+        ),
+        "limit": "Page size (1..500). A smaller page can come back inline.",
+        "cursor": (
+            "Pass the response's `next_cursor` to fetch the next page; "
+            "null means this page was the last."
+        ),
+    },
+    "example_next_call": {
+        "tool": _LIST_TARGETS_NAME,
+        "args": {"connector_id": "vmware-rest-9.0"},
+    },
+}
 
 
 async def _resolve_tenant_scope(operator: Operator, tenant_arg: str | None) -> Any:
@@ -1289,7 +1757,7 @@ async def _resolve_tenant_scope(operator: Operator, tenant_arg: str | None) -> A
     if resolved == operator.tenant_id:
         return resolved
     if not operator.platform_admin:
-        raise McpInvalidParamsError(
+        raise McpPermissionDeniedError(
             "list_targets: the `tenant_id` argument (cross-tenant scope) "
             "requires the platform_admin capability",
         )
@@ -1302,10 +1770,13 @@ async def _list_targets_handler(
 ) -> dict[str, Any]:
     """Enumerate targets for the resolved tenant, optionally product-filtered.
 
-    Runs the same tenant-scoped, name-keyset-paginated
-    ``select(TargetORM)`` the T5 REST ``GET /api/v1/targets`` route runs
-    — CLI / MCP / REST are sibling fronts on one backplane, so this is a
-    direct substrate query, not a REST-route wrapper. The optional
+    Runs the same tenant-scoped, name-keyset-paginated query over
+    ``targets`` the T5 REST ``GET /api/v1/targets`` route runs — CLI /
+    MCP / REST are sibling fronts on one backplane, so this is a direct
+    substrate query, not a REST-route wrapper. It selects only the five
+    projected columns: hydrating whole rows would decode every target's
+    ``fingerprint`` / ``extras`` JSON and CA pin just to discard them
+    (#3858). The optional
     ``connector_id`` is canonicalised through
     :func:`~meho_backplane.operations._lookup.parse_connector_id` and
     only its product component drives a ``TargetORM.product`` exact-match
@@ -1322,6 +1793,9 @@ async def _list_targets_handler(
     the field name on ``meho_connector_*`` / ``meho_scheduler_create``.
     ``tenant`` (v0.8.0 wire shape) is retained as a deprecated alias;
     the two are mutually exclusive (passing both rejects with -32602).
+
+    The page is returned through :func:`_reduce_target_page`, so a page
+    over the JSONFlux threshold comes back as a result handle.
     """
     tenant_id_arg = arguments.get("tenant_id")
     legacy_tenant_arg = arguments.get("tenant")
@@ -1333,7 +1807,13 @@ async def _list_targets_handler(
     tenant_arg = tenant_id_arg if tenant_id_arg is not None else legacy_tenant_arg
     scope_tenant_id = await _resolve_tenant_scope(operator, tenant_arg)
 
-    stmt = select(TargetORM).where(
+    stmt = select(
+        TargetORM.id,
+        TargetORM.name,
+        TargetORM.aliases,
+        TargetORM.product,
+        TargetORM.host,
+    ).where(
         TargetORM.tenant_id == scope_tenant_id,
         TargetORM.deleted_at.is_(None),
     )
@@ -1353,7 +1833,7 @@ async def _list_targets_handler(
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         result = await session.execute(stmt)
-        rows = list(result.scalars().all())
+        rows = result.all()
 
     targets = [
         {
@@ -1368,7 +1848,38 @@ async def _list_targets_handler(
     # A full page implies there *may* be more rows; surface the last
     # name as the keyset cursor. A short page is definitively the end.
     next_cursor = targets[-1]["name"] if len(targets) == limit else None
-    return {"targets": targets, "next_cursor": next_cursor}
+    return await _reduce_target_page(operator, {"targets": targets, "next_cursor": next_cursor})
+
+
+async def _reduce_target_page(operator: Operator, page: dict[str, Any]) -> dict[str, Any]:
+    """Return *page* unchanged, or its JSONFlux summary + ``handle`` above the threshold.
+
+    Below the threshold the reducer passes the page through and the
+    ``{targets, next_cursor}`` shape is unchanged. Above it, the page's
+    rows are spilled to the result-handle store and the response is the
+    reducer summary (``row_count`` / ``total`` / ``sample_rows_returned``
+    / ``sample_bytes`` / ``source_key``, plus ``next_cursor`` kept as a
+    preserved scalar) with the serialized ``handle`` beside it.
+
+    The spill is keyed to the *caller's* tenant and subject even when a
+    ``platform_admin`` listed another tenant: ``result_query`` reads a
+    handle back under the JWT's tenant + subject, so that is the only key
+    the caller can drill into.
+    """
+    summary, handle = await _LIST_TARGETS_REDUCER.reduce(
+        page,
+        None,
+        {
+            "op_id": _LIST_TARGETS_NAME,
+            "tenant_id": str(operator.tenant_id),
+            "operator_sub": operator.sub,
+            "pagination_hint": _LIST_TARGETS_PAGINATION_HINT,
+            "result_scalars": {"keys": ["next_cursor"]},
+        },
+    )
+    if handle is None:
+        return page
+    return {**summary, "handle": handle.model_dump(mode="json")}
 
 
 register_mcp_tool(
@@ -1386,6 +1897,10 @@ register_mcp_tool(
             "properties": {
                 "targets": {
                     "type": "array",
+                    "description": (
+                        "The page's rows, inline. Absent when the page was "
+                        "over the JSONFlux threshold; see `handle`."
+                    ),
                     "items": {
                         "type": "object",
                         "properties": {
@@ -1408,8 +1923,27 @@ register_mcp_tool(
                         "null when the page is the end of the set."
                     ),
                 },
+                "row_count": {
+                    "type": "integer",
+                    "description": (
+                        "Present when the page was reduced: rows on this "
+                        "page, all readable through `handle`."
+                    ),
+                },
+                "total": {"type": "integer"},
+                "sample_rows_returned": {"type": "integer"},
+                "sample_bytes": {"type": "integer"},
+                "source_key": {"type": "string"},
+                "handle": {
+                    "type": "object",
+                    "description": (
+                        "JSONFlux result handle, present when the page was "
+                        "over the threshold: read the rows with "
+                        "`result_query` and `handle_id`."
+                    ),
+                },
             },
-            "required": ["targets", "next_cursor"],
+            "required": ["next_cursor"],
         },
         required_role=TenantRole.OPERATOR,
         op_class="read",

@@ -27,6 +27,7 @@ same shape ``test_api_v1_targets`` does. The chassis settings
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -43,15 +44,16 @@ from meho_backplane.api.v1.operations import router as operations_router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
-from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
-from meho_backplane.connectors.result_handle_store import SpilledRowSet, SpilledWindow
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations._errors import result_connector_not_found
 from meho_backplane.operations.result_query import MAX_LIMIT
-from meho_backplane.settings import get_settings
+from meho_backplane.settings import RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES, get_settings
+from tests._result_store_helpers import MemoryResultStore
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import (
@@ -175,6 +177,7 @@ async def _seed_descriptor(
     tenant_id: uuid.UUID | None = None,
     group_id: uuid.UUID | None = None,
     llm_instructions: dict[str, Any] | None = None,
+    parameter_schema: dict[str, Any] | None = None,
 ) -> uuid.UUID:
     sessionmaker = get_sessionmaker()
     descriptor_id = uuid.uuid4()
@@ -195,7 +198,7 @@ async def _seed_descriptor(
                 description=description,
                 group_id=group_id,
                 tags=[],
-                parameter_schema={"type": "object"},
+                parameter_schema=parameter_schema or {"type": "object"},
                 response_schema=None,
                 llm_instructions=llm_instructions,
                 safety_level="safe",
@@ -490,6 +493,72 @@ def test_get_search_rejects_limit_over_50(client: TestClient) -> None:
     assert response.status_code == 422
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("admin", "expect_scores"),
+    [(False, False), (True, True)],
+)
+async def test_get_search_scores_only_for_admin_opt_in(
+    client: TestClient,
+    stub_embedding_service: AsyncMock,
+    admin: bool,
+    expect_scores: bool,
+) -> None:
+    """#3668: ``include_scores`` adds ranking scores only for a tenant_admin."""
+    await _seed_descriptor(op_id="vault.kv.read", summary="Read a secret.")
+    key = make_rsa_keypair("kid-A")
+    token = _admin_token(key) if admin else _operator_token(key)
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            "/api/v1/operations/search?connector_id=vault-1.x&q=read&include_scores=true",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 200
+    hit = response.json()["hits"][0]
+    assert ("fused_score" in hit) is expect_scores
+    assert ("bm25_score" in hit) is expect_scores
+    assert ("cosine_score" in hit) is expect_scores
+
+
+@pytest.mark.asyncio
+async def test_get_search_exact_op_returns_contract(client: TestClient) -> None:
+    """#3668: ``op_id`` returns one call contract; no ``q`` needed."""
+    await _seed_descriptor(op_id="vault.kv.read", summary="Read a secret.")
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            "/api/v1/operations/search?connector_id=vault-1.x&op_id=vault.kv.read",
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert "hits" not in body
+    assert body["operation"]["op_id"] == "vault.kv.read"
+    assert body["operation"]["parameter_schema"] == {"type": "object"}
+
+
+@pytest.mark.asyncio
+async def test_get_search_exact_op_unknown_op_returns_structured_404(
+    client: TestClient,
+) -> None:
+    """#3668: an unknown op on a known connector is a 404 with ``reason=unknown_op``."""
+    await _seed_descriptor(op_id="vault.kv.read")
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            "/api/v1/operations/search?connector_id=vault-1.x&op_id=vault.nope",
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert detail["reason"] == "unknown_op"
+    assert detail["op_id"] == "vault.nope"
+    assert detail["connector_id"] == "vault-1.x"
+
+
 # ---------------------------------------------------------------------------
 # POST /api/v1/operations/call
 # ---------------------------------------------------------------------------
@@ -693,8 +762,51 @@ async def test_post_call_absent_target_rides_target_required_envelope(
     assert body["extras"]["error_code"] == "target_required"
 
 
-def test_post_call_unknown_op_returns_200_with_error_envelope(client: TestClient) -> None:
+def test_post_call_refuses_undeliverable_receipt_before_dispatch(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3641: an op_id whose receipt cannot fit the wire ceiling never runs.
+
+    The ceiling is set to its floor. A 256-character non-ASCII op_id is
+    escaped twice in the MCP text block, so even the receipt of a completed
+    run would be over the ceiling. The REST twin shares ``call_operation``,
+    so it returns the same ``receipt_too_large`` envelope (HTTP 200, the
+    dispatcher contract) and the dispatcher is never called.
+    """
+    monkeypatch.setenv(
+        "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES", str(RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES)
+    )
+    get_settings.cache_clear()
+    dispatch_mock = AsyncMock()
+    monkeypatch.setattr("meho_backplane.operations.meta_tools.dispatch", dispatch_mock)
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/call",
+            json={
+                "connector_id": "ghost-rest-9.0",
+                "op_id": "\u00e9" * 256,
+                "target": None,
+                "params": {},
+            },
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["extras"]["error_code"] == "receipt_too_large"
+    assert body["extras"]["receipt_bytes"] > RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
+    assert body["extras"]["delivery_max_bytes"] == RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
+    assert body["audit_id"] is None
+    assert "did not run" in body["error"]
+    dispatch_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_post_call_unknown_op_returns_200_with_error_envelope(client: TestClient) -> None:
     """The dispatcher's structured-error envelope rides on a 200 body."""
+    await _seed_descriptor(op_id="vault.kv.read")
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
@@ -712,6 +824,130 @@ def test_post_call_unknown_op_returns_200_with_error_envelope(client: TestClient
     body = response.json()
     assert body["status"] == "error"
     assert body["error"].startswith("unknown_op:")
+
+
+def test_post_call_not_found_result_rides_200_envelope(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3653: a missing resource is a ``not_found`` envelope on HTTP 200.
+
+    When a typed op raises ``ConnectorResourceNotFoundError`` (for example
+    ``vmware.vm.info`` with a VM name that does not exist), the dispatcher
+    returns the structured ``not_found`` result. The route delivers it the
+    same way as every other dispatcher result: HTTP 200 with the envelope
+    in the body. The HTTP code never says 404 here; callers read
+    ``status`` and ``extras.error_code``.
+    """
+    missing = ConnectorResourceNotFoundError(
+        ["missing-vm"], "vmware.vm.info: no VM named 'missing-vm'"
+    )
+    dispatch_mock = AsyncMock(
+        return_value=result_connector_not_found("vmware.vm.info", missing, duration_ms=1.0)
+    )
+    monkeypatch.setattr("meho_backplane.operations.meta_tools.dispatch", dispatch_mock)
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/call",
+            json={
+                "connector_id": "vmware-rest-9.0",
+                "op_id": "vmware.vm.info",
+                "target": None,
+                "params": {"name": "missing-vm"},
+            },
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "not_found"
+    assert body["error"].startswith("not_found:")
+    assert body["extras"]["error_code"] == "not_found"
+    assert body["extras"]["resource_id"] == "missing-vm"
+    dispatch_mock.assert_awaited_once()
+    assert dispatch_mock.await_args.kwargs["op_id"] == "vmware.vm.info"
+
+
+@pytest.mark.asyncio
+async def test_post_call_rate_limited_rides_200_envelope(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3500: a rate-limited dispatch is a ``rate_limited`` envelope on HTTP 200.
+
+    The real dispatcher runs with the per-principal rate limit forced over
+    its cap. The route keeps the #136/#2110 always-200 contract: no HTTP
+    429 on ``/call``. The agent's back-off signal is the envelope itself,
+    ``status="rate_limited"`` with ``extras.retry_after_seconds``.
+    """
+    import meho_backplane.operations.dispatcher as dispatcher
+
+    await _seed_descriptor(op_id="vault.kv.read")
+    monkeypatch.setattr(dispatcher, "resolve_dispatch_rate_limit", lambda s, t: 5)
+    monkeypatch.setattr(dispatcher, "check_dispatch_rate_limit", AsyncMock(return_value=30))
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/call",
+            json={
+                "connector_id": "vault-1.x",
+                "op_id": "vault.kv.read",
+                "target": None,
+                "params": {},
+            },
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "rate_limited", body
+    assert body["extras"]["error_code"] == "rate_limited"
+    assert body["extras"]["retry_after_seconds"] == 30
+
+
+@pytest.mark.asyncio
+async def test_post_call_invalid_params_rides_enriched_envelope(client: TestClient) -> None:
+    """#3669: REST returns the same enriched ``invalid_params`` entries.
+
+    The route returns the dispatcher's ``OperationResult`` as is, so each
+    ``validation_errors`` entry carries ``path``, ``validator``,
+    ``expected`` and ``remediation``, plus the ``validation_errors_suppressed``
+    count. The CLI prints ``extras`` verbatim, so it shows the same keys.
+    """
+    await _seed_descriptor(
+        op_id="vault.kv.read",
+        parameter_schema={
+            "type": "object",
+            "properties": {"version": {"type": "integer"}},
+            "additionalProperties": False,
+        },
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/call",
+            json={
+                "connector_id": "vault-1.x",
+                "op_id": "vault.kv.read",
+                "target": None,
+                "params": {"version": "not-a-number"},
+            },
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["extras"]["error_code"] == "invalid_params"
+    assert body["extras"]["validation_errors"] == [
+        {
+            "path": "$.version",
+            "validator": "type",
+            "expected": "type: integer",
+            "remediation": "send a value of type integer at this path",
+        }
+    ]
+    assert body["extras"]["validation_errors_suppressed"] == 0
+    assert "not-a-number" not in response.text
 
 
 @pytest.mark.asyncio
@@ -753,6 +989,7 @@ async def test_post_call_accepts_bare_string_target(
                 updated_at=datetime.now(UTC),
             )
         )
+    await _seed_descriptor(op_id="vault.kv.read")
 
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:
@@ -833,66 +1070,10 @@ def test_get_descriptor_unknown_id_returns_404(client: TestClient) -> None:
 # ---------------------------------------------------------------------------
 
 
-class _FakeResultStore:
-    """In-memory result-handle store the route reads windows out of.
-
-    Keyed by ``(tenant_id, operator_sub, handle_id)`` so the tests can assert
-    the route threads the operator identity from the JWT — never the body —
-    exactly as the MCP ``result_query`` tool's fake does. The two surfaces
-    share the transport-neutral core, so mirroring the fake keeps their
-    scoping + not-found behaviour provably identical.
-    """
-
-    def __init__(self) -> None:
-        self._rows: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
-
-    def seed(
-        self,
-        *,
-        tenant_id: uuid.UUID,
-        operator_sub: str,
-        handle_id: uuid.UUID,
-        rows: list[dict[str, Any]],
-    ) -> None:
-        self._rows[(str(tenant_id), operator_sub, str(handle_id))] = rows
-
-    async def fetch_window(
-        self,
-        *,
-        tenant_id: uuid.UUID,
-        operator_sub: str,
-        handle_id: uuid.UUID,
-        offset: int,
-        limit: int,
-    ) -> SpilledWindow | None:
-        rows = self._rows.get((str(tenant_id), operator_sub, str(handle_id)))
-        if rows is None:
-            return None
-        window = rows[offset : offset + limit] if limit > 0 else []
-        return SpilledWindow(
-            rows=window,
-            total_rows=len(rows),
-            stored_rows=len(rows),
-            truncated=False,
-        )
-
-    async def fetch_rows(
-        self,
-        *,
-        tenant_id: uuid.UUID,
-        operator_sub: str,
-        handle_id: uuid.UUID,
-    ) -> SpilledRowSet | None:
-        rows = self._rows.get((str(tenant_id), operator_sub, str(handle_id)))
-        if rows is None:
-            return None
-        return SpilledRowSet(rows=rows, total_rows=len(rows), stored_rows=len(rows))
-
-
 @pytest.fixture
-def fake_result_store(monkeypatch: pytest.MonkeyPatch) -> _FakeResultStore:
+def fake_result_store(monkeypatch: pytest.MonkeyPatch) -> MemoryResultStore:
     """Replace the production store getter (on the shared core) with a fake."""
-    store = _FakeResultStore()
+    store = MemoryResultStore()
     monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: store)
     return store
 
@@ -908,7 +1089,7 @@ def test_post_result_query_requires_authentication(client: TestClient) -> None:
 
 def test_post_result_query_returns_window_beyond_inline_sample(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """A >50-row spilled set is fully retrievable over REST by paging.
 
@@ -952,7 +1133,7 @@ def test_post_result_query_returns_window_beyond_inline_sample(
 
 def test_post_result_query_defaults_offset_and_limit(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """Omitting offset/limit windows [0:50] — the documented defaults."""
     handle = uuid.uuid4()
@@ -981,7 +1162,7 @@ def test_post_result_query_defaults_offset_and_limit(
 
 def test_post_result_query_paging_over_budget_returns_422(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A paging window over the byte budget -> 422 with reason=output_too_large.
@@ -1014,9 +1195,144 @@ def test_post_result_query_paging_over_budget_returns_422(
     assert "limit" in detail["message"].lower()
 
 
+def _nested_app_row(i: int, pad: int = 0) -> dict[str, Any]:
+    """One row shaped like a full nested object (metadata / spec / status)."""
+    return {
+        "metadata": {"name": f"app-{i}", "namespace": "apps", "labels": {"team": "a"}},
+        "spec": {
+            "source": {"repoURL": "https://example.invalid/repo.git", "path": f"apps/{i}"},
+            "destination": {"namespace": f"ns-{i}"},
+        },
+        "status": {
+            "sync": {"status": "Synced"},
+            "health": {"status": "Healthy"},
+            "resources": [{"kind": "Deployment", "name": f"d-{i}", "note": "x" * pad}],
+        },
+    }
+
+
+def test_post_result_query_default_page_returns_nested_object_rows(
+    client: TestClient,
+    fake_result_store: MemoryResultStore,
+) -> None:
+    """A collection of deeply nested objects pages back on the default page (#3704).
+
+    No offset, no limit, no query: the 43 nested rows come back verbatim.
+    """
+    handle = uuid.uuid4()
+    rows = [_nested_app_row(i) for i in range(43)]
+    fake_result_store.seed(
+        tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+        operator_sub="op-1",
+        handle_id=handle,
+        rows=rows,
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(handle)},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["returned_rows"] == 43
+    assert body["total_rows"] == 43
+    assert body["rows"] == rows
+
+
+def test_post_result_query_default_page_too_large_nested_rows_says_how_to_read(
+    client: TestClient,
+    fake_result_store: MemoryResultStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Over-budget nested rows on the default page get a readable 422 (#3704).
+
+    ``detail`` is an object with ``reason`` and ``message``. The message names
+    the shape (large nested objects), the largest ``limit`` that fits, and the
+    top-level fields a ``select`` query can return.
+    """
+    monkeypatch.setenv("RESULT_QUERY_MAX_OUTPUT_BYTES", "20000")
+    get_settings.cache_clear()
+    handle = uuid.uuid4()
+    rows = [_nested_app_row(i, pad=1500) for i in range(43)]
+    fake_result_store.seed(
+        tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+        operator_sub="op-1",
+        handle_id=handle,
+        rows=rows,
+    )
+    fit = max(
+        n
+        for n in range(1, 44)
+        if len(json.dumps(rows[:n], separators=(",", ":")).encode()) <= 20000
+    )
+    assert 1 < fit < 43
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(handle)},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert detail["reason"] == "output_too_large"
+        message = detail["message"]
+        assert "large nested objects" in message
+        assert f"set `limit` to {fit}" in message
+        assert f"`offset` {fit}" in message
+        assert "metadata, spec, status" in message
+
+        # Following the advice works.
+        retry = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(handle), "limit": fit},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert retry.status_code == 200
+    assert retry.json()["rows"] == rows[:fit]
+
+
+def test_post_result_query_over_wire_ceiling_returns_422(
+    client: TestClient,
+    fake_result_store: MemoryResultStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read under the row budget but over the wire ceiling -> 422 (#3641).
+
+    ``detail.reason`` is ``output_too_large`` and ``detail.delivery`` is
+    ``unavailable``: the read was refused whole, not cut.
+    """
+    monkeypatch.setenv("RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES", "1024")
+    get_settings.cache_clear()
+    handle = uuid.uuid4()
+    fake_result_store.seed(
+        tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+        operator_sub="op-1",
+        handle_id=handle,
+        rows=[{"i": i, "note": 'a "quoted" value'} for i in range(40)],
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(handle), "offset": 0, "limit": 40},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["reason"] == "output_too_large"
+    assert detail["delivery"] == "unavailable"
+    assert "1024-byte delivery limit" in detail["message"]
+
+
 def test_post_result_query_unknown_handle_returns_typed_404(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """An unknown/expired handle -> 404 with reason=handle_not_found.
 
@@ -1041,7 +1357,7 @@ def test_post_result_query_unknown_handle_returns_typed_404(
 
 def test_post_result_query_cross_operator_is_a_miss(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """A handle spilled by a different operator in the same tenant -> 404.
 
@@ -1070,7 +1386,7 @@ def test_post_result_query_cross_operator_is_a_miss(
 
 def test_post_result_query_cross_tenant_is_a_miss(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """A handle spilled under a different tenant -> 404 (tenant scoping).
 
@@ -1099,7 +1415,7 @@ def test_post_result_query_cross_tenant_is_a_miss(
 
 def test_post_result_query_invalid_uuid_returns_422(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """A malformed handle_id is a 422 at the Pydantic layer (before the handler)."""
     key = make_rsa_keypair("kid-A")
@@ -1115,7 +1431,7 @@ def test_post_result_query_invalid_uuid_returns_422(
 
 def test_post_result_query_negative_offset_returns_422(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """offset < 0 is rejected at the Pydantic bound (ge=0)."""
     key = make_rsa_keypair("kid-A")
@@ -1131,7 +1447,7 @@ def test_post_result_query_negative_offset_returns_422(
 
 def test_post_result_query_zero_limit_returns_422(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """limit < 1 is rejected at the Pydantic bound (ge=1)."""
     key = make_rsa_keypair("kid-A")
@@ -1147,7 +1463,7 @@ def test_post_result_query_zero_limit_returns_422(
 
 def test_post_result_query_over_max_limit_returns_422(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """limit above the shared MAX_LIMIT ceiling is rejected (le=MAX_LIMIT)."""
     key = make_rsa_keypair("kid-A")
@@ -1163,7 +1479,7 @@ def test_post_result_query_over_max_limit_returns_422(
 
 def test_post_result_query_rejects_extra_body_field(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """#3366 relaxed this to reject only *genuinely* unknown body fields.
 
@@ -1197,7 +1513,7 @@ def test_post_result_query_rejects_extra_body_field(
 
 def test_post_result_query_query_mode_filters_server_side(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """A ``query`` body filters + aggregates server-side (REST twin of MCP)."""
     handle = uuid.uuid4()
@@ -1240,7 +1556,7 @@ def test_post_result_query_query_mode_filters_server_side(
 
 def test_post_result_query_query_mode_unknown_field_is_422(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """A field not on the handle's schema is a 422 with reason=invalid_query."""
     handle = uuid.uuid4()
@@ -1264,7 +1580,7 @@ def test_post_result_query_query_mode_unknown_field_is_422(
 
 def test_post_result_query_query_mode_bad_operator_is_422(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """An operator outside the allow-list fails Pydantic body validation (422)."""
     key = make_rsa_keypair("kid-A")
@@ -1354,3 +1670,75 @@ def test_governed_subops_404_for_unregistered_op(
         )
     assert response.status_code == 404, response.text
     assert response.json()["detail"]["reason"] == "no_governed_subops"
+
+
+def _post_document_read(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, body: dict[str, Any]
+) -> Any:
+    store = MemoryResultStore()
+    store.seed_document(
+        tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+        operator_sub="op-1",
+        handle_id=uuid.UUID(body["handle_id"]),
+        document={"name": "pod-1", "items": [{"i": i} for i in range(5)]},
+    )
+    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: store)
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        return client.post(
+            "/api/v1/operations/result-query",
+            json=body,
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+
+
+def test_post_result_query_path_pages_an_array(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `path` read over REST pages an array value with offset/limit (#3633)."""
+    body = {"handle_id": str(uuid.uuid4()), "query": {"path": "/items"}, "offset": 3, "limit": 2}
+    response = _post_document_read(client, monkeypatch, body)
+    assert response.status_code == 200
+    assert response.json()["rows"] == [{"i": 3}, {"i": 4}]
+    assert response.json()["total_rows"] == 5
+
+
+@pytest.mark.parametrize(
+    ("query", "reason"),
+    [
+        ({"path": "/name", "limit": 5}, None),
+        ({"path": "/missing"}, "invalid_query"),
+        (None, "invalid_query"),
+    ],
+    ids=["path-with-limit", "unresolvable", "paging-a-document"],
+)
+def test_post_result_query_document_errors_are_422(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    query: dict[str, Any] | None,
+    reason: str | None,
+) -> None:
+    """Path misuse is a 422 on REST, like the MCP `-32602` (#3633)."""
+    body: dict[str, Any] = {"handle_id": str(uuid.uuid4())}
+    if query is not None:
+        body["query"] = query
+    response = _post_document_read(client, monkeypatch, body)
+    assert response.status_code == 422
+    if reason is not None:
+        assert response.json()["detail"]["reason"] == reason
+
+
+def test_post_result_query_path_over_wire_ceiling_returns_422(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `path` read over the wire ceiling -> 422 output_too_large (#3641)."""
+    monkeypatch.setenv("RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES", "256")
+    get_settings.cache_clear()
+    body = {"handle_id": str(uuid.uuid4()), "query": {"path": "/items"}}
+    response = _post_document_read(client, monkeypatch, body)
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["reason"] == "output_too_large"
+    assert detail["delivery"] == "unavailable"
+    assert "256-byte delivery limit" in detail["message"]

@@ -181,6 +181,151 @@ database id rather than its number. Per-handler unit tests live in
 `test_connectors_github_composites_sub_issues.py`; registration/posture
 assertions are in `test_connectors_github_composites_register.py`.
 
+### One repository (`gh.composite.repo_view`)
+
+`gh.composite.repo_view` reads one repository with
+`GET /repos/{owner}/{repo}` and returns a short summary, not the full
+vendor answer: `name`, `full_name`, `owner`, `owner_type`, `visibility`,
+`default_branch`, `archived`, `topics`, `open_issues_count`, `pushed_at`
+and `permissions`. `permissions` maps GitHub's `pull` / `push` / `admin`
+flags to `read` / `write` / `admin`, and is `null` when GitHub does not
+report them. `open_issues_count` counts open issues and open pull
+requests together, as GitHub does.
+
+- Handler: `repo_view_composite` in `composites/_read.py`. Same
+  direct-session substrate as the other reads (`connector._get_json`
+  through `mount_op_path`, no `endpoint_descriptor` lookup). A non-2xx
+  answer (404 for a repository the identity cannot see) propagates as an
+  `httpx.HTTPStatusError`; a payload that is not a JSON object raises
+  `RuntimeError`. Both reach the dispatcher's `connector_error` branch.
+- Group: `repos`, with its own "when to use" text.
+- Posture: `safety_level="safe"`, `requires_approval=False`. It runs at
+  once.
+- Contract: the registrar row carries `llm_instructions` (`when_to_call`,
+  `output_shape`, `next_step`) and one example call with placeholder
+  values, so the operation contract check passes with no gap.
+- Tests: `test_connectors_github_composites_read.py` drives the handler
+  with the saved answer in `tests/data/github_repo_view_response.json`;
+  `test_connectors_github_composites_register.py` checks the posture and
+  runs the contract rules against the registered row.
+
+### Create a repository in an organisation (`gh.composite.repo_create`)
+
+`gh.composite.repo_create` creates one repository in a GitHub
+organisation with `POST /orgs/{org}/repos`. Parameters: `org`, `name`,
+optional `description`, `visibility` (`private` when omitted; `public`
+only when the caller asks for it by name) and `with_readme` (when true,
+GitHub makes a first commit with an empty README, so the default branch
+exists at once). The result is small: `status`, `name`, `full_name`,
+`owner`, `url`, `visibility`, `default_branch` and a one-sentence
+`guidance`.
+
+- Safe to run twice: the handler reads `GET /repos/{org}/{name}` first.
+  When the repository exists, it returns `status="unchanged"` with the
+  existing repository's facts and writes nothing. Only a 404 on that
+  read leads to the create call. Any other error on the read (403, for
+  example) propagates, as does an error on the create call (403 when the
+  identity may not create repositories there, 422 when GitHub rejects
+  the name).
+- Names in the request path: `org` and `name` become path parts of the
+  two requests. The parameter schema allows letters, digits, `.`, `-`
+  and `_` only, so the dispatcher refuses anything else as
+  `invalid_params`. The handler checks both again before the first
+  request, refuses `.` and `..` (they would point at another API path),
+  and percent-encodes the values. `.github` is a valid name.
+- Handler: `repo_create_composite` in `composites/_repos.py`. Same
+  direct-session substrate as the other composites (`connector._get_json`
+  / `connector._post_json` through `mount_op_path`, no
+  `endpoint_descriptor` lookup).
+- Group: `repos`, shared with `repo_view`.
+- Posture: `safety_level="caution"`, `requires_approval=True`. Every
+  call waits for approval, from a person or from an agent.
+- Contract: the registrar row carries `llm_instructions` (`when_to_call`,
+  `preconditions`, `output_shape`, `next_step`) and one example call
+  (`example-org` / `example-repo`, values that pass the name rule), so
+  the operation contract check passes with no gap.
+- Tests: `test_connectors_github_composites_repos.py` drives the handler
+  with the saved answer in `tests/data/github_repo_create_response.json`
+  (and the saved `repo_view` answer for the existing-name path), checks
+  the exact request paths, and proves that an unsafe `org` or `name`
+  sends no request and fails the parameter schema;
+  `test_connectors_github_composites_register.py` checks the posture and
+  runs the contract rules against the registered row.
+
+### Git composites: read a branch, read a file tree, commit files
+
+Three hand-written operations in the `git` group replace the raw git calls
+people chained by hand (most raw branch reads failed, because the raw call
+needs the exact `heads/<branch>` form). All three live in
+`composites/_git.py` and use the direct-session substrate, so they work on a
+fresh deploy with no gh catalog ingest. Their contracts (parameter schemas,
+response schemas, agent guidance and one example each) live in
+`composites/schemas_git.py`.
+
+| Operation | What it does | Vendor calls | Risk level |
+|---|---|---|---|
+| `gh.composite.git_ref_view` | The commit a branch or tag points to. Takes `owner`, `repo`, `name` and `kind` (`branch`, the default, or `tag`). MEHO builds the ref (`heads/<name>` or `tags/<name>`) itself. A missing branch or tag answers `found: false`, not an error. | `GET /repos/{owner}/{repo}/git/ref/{ref}` | `safe`, runs at once |
+| `gh.composite.git_tree_view` | The files and folders of a tree: path, type, mode, SHA-1 and size. One level by default; every file with its full path when `recursive` is true. `tree` takes a branch name, a tag name, a commit SHA or a tree SHA. A long list comes back behind a result handle; the agent reads it with `result_query`. `truncated: true` means GitHub cut the list. | `GET /repos/{owner}/{repo}/git/trees/{tree_sha}` (`recursive=1` when asked) | `safe`, runs at once |
+| `gh.composite.branch_commit_files` | Write one or more text files to an existing branch as one new commit on top of `base_sha`. Takes `owner`, `repo`, `branch`, `base_sha` (the sha `git_ref_view` returned), `message` and `files` (`path` + full `content`). | `GET .../git/ref/heads/{branch}`, `GET /repos/{owner}/{repo}` (node id), `GET .../git/commits/{sha}`, `POST .../git/trees`, `POST .../git/commits`, then the GraphQL `updateRefs` mutation with `beforeOid: base_sha` and `force: false` | `dangerous`, `requires_approval: true`: every call waits for approval |
+
+**How the write stays safe.**
+
+- It builds on `base_sha`, the commit the caller read with `git_ref_view`
+  and the approver saw. It never forces. It reads the branch and stops
+  unless the branch is at `base_sha`; builds the tree and the commit on
+  top of `base_sha`; then moves the branch with GitHub's `updateRefs`
+  GraphQL mutation, passing `base_sha` as `beforeOid`. GitHub checks that
+  the branch is still at `base_sha` in the same step that moves it, so a
+  push or a reset that lands after MEHO's read (for example while the
+  call waited for approval) is caught on the server, not by a second read
+  that could already be stale. A reset to an older commit is caught too:
+  a plain fast-forward check would let the new commit through and put the
+  removed commits back. If GitHub rejects the update (stale `beforeOid`,
+  or a branch rule), the call reads the branch once more to name where it
+  is now and returns `status: precondition_failed` with the reason; the
+  branch is not touched. A tree or commit object that was already created
+  is unreachable and harmless.
+- It checks the request before any call: `owner` and `repo` must be
+  GitHub names (letters, digits, `.`, `-` and `_`; not `.` or `..`, so
+  `.github` is fine), `branch` must be a safe git ref name (git's
+  ref-name rules, no `..`), `base_sha` must be a 40-character SHA-1, and the files must be at
+  most 100, 256 KiB per file, 1 MiB in total, UTF-8 text only, with no
+  path that starts with `/` or has a `.` or `..` part, and no path twice.
+  A bad request returns `status: invalid_request` and nothing is called.
+- Every name that goes into a URL path (owner, repo, branch, tag, tree) is
+  checked this way in all three operations and then percent-encoded,
+  so a branch like `fix#1` reaches GitHub as `heads/fix%231` and a value
+  can never point at another API path. The reads raise a `ValueError` on
+  a bad name; the write returns `invalid_request`.
+- The second read of the commit object (`GET .../git/commits/{sha}`) is
+  needed to get the base tree SHA; the create-tree call takes a tree SHA,
+  not a commit SHA.
+- The approval preview (`composites/_git_preview.py`, registered with
+  `register_preview_builder`) shows the repository, the branch, `base_sha`,
+  the commit the branch points to right now (one live read), the message,
+  and each file's path, size and SHA-256. When the branch is not at
+  `base_sha`, the preview says so under `problems`. The preview does not
+  show the file content. The approval row keeps the call's parameters,
+  content included, only so the call can run after approval; no read view
+  shows them. The handler and the preview share `check_commit_request`,
+  so the approver reads exactly the list the commit writes and exactly
+  the problems that would stop it.
+
+**Result shape of the write.** `{status: committed|precondition_failed|
+invalid_request, reason, branch, base_sha, tree_sha, commit_sha, html_url,
+file_count, files: [{path, size, sha256}]}`. The scalars are listed under
+`llm_instructions.result_scalars`, so they stay in the direct answer when
+the file list goes behind a result handle.
+
+**Tests.** `backend/tests/test_connectors_github_composites_git.py` drives
+the handlers and the preview with saved responses (no live GitHub),
+including the branch-not-at-base_sha, branch-moved, branch-reset-to-an-
+older-commit, refused-update and unsafe-name cases.
+`backend/tests/test_connectors_github_composites_git_register.py` checks the
+risk level and approval flag of each operation, the `git` group, the
+preview builder, and that each operation passes the operation contract
+rules of `test_operation_contracts.py` with no gap.
+
 ## Key types
 
 - **`GitHubRestConnector`** (`connector.py`) — `HttpConnector` subclass
@@ -300,6 +445,31 @@ operator can branch programmatically.
 canonical `unknown_op` envelope (via `result_unknown_op` in
 `operations/_errors.py`). T3 ships the catalog rows + their dispatcher
 wiring.
+
+### Pagination hint for ingested issue lists (#3676)
+
+`pagination_hints.py` holds `GH_ISSUE_LIST_PAGINATION_HINT`, a curated
+`PaginationHint` for the ingested op `GET:/repos/{owner}/{repo}/issues`
+(`GH_ISSUE_LIST_OP_ID`). GitHub returns one page per call (`per_page`
+default 30, max 100; `page` default 1) and names the next page only in
+the `Link` header. Ingested rows have no `llm_instructions`, so a
+reduced issue list would otherwise tell the agent nothing about paging.
+
+The hint is not applied automatically. An operator adds it to the
+deployment's ingested row through the operator-review `edit_op` path, as
+`llm_instructions["pagination_hint"]`. Result reduction then puts its
+`params` (`per_page`, `page`, `state`, `since`) and `example_next_call`
+into `fetch_more.native_pagination`. The hint only says how to ask for
+the next page. The stored handle keeps `source_coverage=unknown` (see
+[result-spill.md](result-spill.md)).
+
+The `example_next_call` is a template, not a ready call. It names every
+argument `call_operation` needs (`connector_id`, `op_id`, `params`) with
+placeholders for `connector_id`, `owner` and `repo`. Its `assumes` text
+says the example stands for a first call with `state=open` and
+`per_page=100`. The agent must repeat its own first call unchanged and
+add 1 to `page` only. Changing `per_page` or a filter between pages
+skips or repeats rows.
 
 ## Dependencies
 

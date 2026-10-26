@@ -19,7 +19,7 @@ The tests live in a dedicated file (not appended to
 (resolver-override reset, capturing audit row's redaction columns) and
 the file's purpose stay focused. Shares the same plumbing the main
 dispatcher tests use: typed-op registration against an in-memory
-SQLite, recording broadcast publisher, autouse-reset.
+SQLite, autouse-reset.
 """
 
 from __future__ import annotations
@@ -35,9 +35,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -93,18 +91,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with a recording stub."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -242,7 +228,6 @@ async def _handler_returning_refresh_token(
 @pytest.mark.asyncio
 async def test_user_path_redacts_response_and_audits_raw(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """User-path dispatch:
 
@@ -311,7 +296,6 @@ async def test_user_path_redacts_response_and_audits_raw(
 @pytest.mark.asyncio
 async def test_agent_path_redacts_response_and_audits_raw(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Agent-path dispatch (``PrincipalKind.AGENT``) walks the same
     redaction middleware: the agent / LLM never sees the raw bearer,
@@ -368,7 +352,6 @@ async def test_agent_path_redacts_response_and_audits_raw(
 @pytest.mark.asyncio
 async def test_per_connector_id_policy_override_takes_effect(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A policy registered for the call's connector_id replaces the
     default-safe answer. The override here only redacts UUIDs, so the
@@ -437,7 +420,6 @@ async def test_per_connector_id_policy_override_takes_effect(
 @pytest.mark.asyncio
 async def test_default_safe_is_not_pass_through(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Without any override registered, a credential-shaped response
     is still redacted. The default policy must apply the named-pattern
@@ -478,7 +460,6 @@ async def test_default_safe_is_not_pass_through(
 @pytest.mark.asyncio
 async def test_refresh_token_label_redacted_in_caller_view_raw_retained_in_audit(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Regression: a connector response embedding ``refresh_token: <value>``
     must be redacted in the caller view AND the raw value must be retained in

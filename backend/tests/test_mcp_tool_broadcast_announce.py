@@ -12,9 +12,9 @@ Acceptance-criteria coverage (per issue body):
 * Cross-tenant isolation: tenant-A's announcement is NOT visible to
   tenant-B's ``meho_broadcast_recent``; the stream key is derived
   exclusively from ``operator.tenant_id``.
-* Valkey unreachable during publish → handler raises (NOT fail-open);
-  error propagates as ``-32603`` Internal Error (distinct from the
-  audit-driven publisher's silent swallow).
+* Archive first (#3748): Valkey unreachable after the archive commit →
+  success with ``delivery_pending=true``; an archive (DB) failure
+  propagates (``-32603`` on the wire).
 * The ``broadcast_agent_announcements_total{phase}`` Prometheus counter
   increments per successful publish, labelled by the call's ``phase``.
 * Round-trip: an announce → recent pull surfaces the new event with the
@@ -22,11 +22,11 @@ Acceptance-criteria coverage (per issue body):
   agent-authored fields intact.
 
 The mocked-client suite covers the wire surface (registration, schema,
-validation, handler glue, metric increment, fail-loud propagation). The
+validation, handler glue, metric increment, failure split). The
 Docker-gated ``TestBroadcastAnnounceIntegration`` suite spins up
-``valkey/valkey:8`` via testcontainers and drives the full publish →
-xrange → tool-handler seam, including the cross-tenant isolation
-guarantee and the announce → recent round-trip.
+``valkey/valkey:8`` via testcontainers and drives announce → recent
+against a real stream, including the cross-tenant isolation guarantee
+and a stream wipe.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -47,19 +47,23 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import (
     ACTIVITY_MAX_CHARS,
     BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL,
-    AgentAnnouncementEvent,
     dispose_broadcast_client,
     get_broadcast_client,
     publish_agent_announcement,
     reset_broadcast_client_for_testing,
 )
-from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS
+from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.mcp.tools.broadcast import (
     _handler_announce,
     _handler_recent,
 )
 from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import wrap_untrusted_text
+from tests.broadcast_admission_helpers import (
+    fake_stream_write,
+    patch_agent_admission,
+    trusted_event,
+)
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     build_operator,
@@ -122,6 +126,10 @@ def _disable_announce_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
         "meho_backplane.mcp.tools.broadcast.enforce_announce_rate_limit",
         AsyncMock(return_value=None),
     )
+    # Publishing needs a trusted agent identity (#3736). These wire tests
+    # are not about admission, so every caller is admitted as an agent
+    # principal; admission is tested in test_broadcast_agent_admission.py.
+    patch_agent_admission(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +208,7 @@ def test_tools_list_exposes_announce_for_operator(
     assert schema["properties"]["activity"]["minLength"] == 1
     # Phase enum exposed verbatim.
     assert schema["properties"]["phase"]["enum"] == ["start", "update", "completion"]
-    assert schema["properties"]["phase"]["default"] == "update"
+    assert schema["properties"]["phase"]["default"] == "start"
 
 
 def test_tools_list_hides_announce_from_read_only(
@@ -250,7 +258,7 @@ def test_activity_at_exactly_cap_is_accepted(
     """``activity`` of exactly 500 chars publishes cleanly."""
     client, _op = client_with_operator
     bc = get_broadcast_client()
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")):
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-0")):
         resp = post_mcp(
             client,
             _tools_call(
@@ -364,27 +372,19 @@ def test_stream_key_derived_from_operator_tenant_id(
     another tenant's stream. Asserting the xadd key is the right shape
     proves the structural property holds.
 
-    The audit-driven publish-on-write hook
-    (:func:`meho_backplane.mcp.handlers._publish_after_dispatch` /
-    :func:`meho_backplane.broadcast.publisher.publish_event`) ALSO
-    calls ``xadd`` for the ``meho_broadcast_announce`` invocation
-    itself -- the MCP call is an audited operation, so two xadd
-    calls land per request: one for the announcement content (this
-    handler), one for the audit-driven sibling event. Both target
-    the same per-tenant key, but the assertion below pins the
-    announcement-side call distinctly by matching against the
-    JSON wire shape (``event_kind = "agent_announcement"``).
+    Since #3758 the MCP call itself publishes nothing: exactly one
+    stream write lands per request, the announcement.
     """
     client, op = client_with_operator
     bc = get_broadcast_client()
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")) as xa:
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-0")) as xa:
         post_mcp(
             client,
             _tools_call("meho_broadcast_announce", {"activity": "investigating"}),
         )
     expected_key = f"meho:feed:{op.tenant_id}"
-    # Every xadd MUST target the operator's tenant -- structural
-    # tenancy holds for the announcement AND the audit-driven sibling.
+    # Only the announcement is written; the MCP call adds no sibling event.
+    assert xa.await_count == 1
     keys_written = {call.args[0] for call in xa.await_args_list}
     assert keys_written == {expected_key}
     # And at least one of those calls carried the agent-announcement
@@ -423,7 +423,7 @@ async def test_handler_with_distinct_operator_writes_distinct_stream() -> None:
     )
 
     bc = get_broadcast_client()
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")) as xa:
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-0")) as xa:
         await _handler_announce(op_a, {"activity": "alpha"})
         await _handler_announce(op_b, {"activity": "beta"})
 
@@ -432,7 +432,7 @@ async def test_handler_with_distinct_operator_writes_distinct_stream() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Fail-loud publish (Valkey unreachable propagates)
+# Archive first: a stream failure is delivery_pending, an archive failure raises
 # ---------------------------------------------------------------------------
 
 
@@ -441,67 +441,70 @@ async def test_handler_with_distinct_operator_writes_distinct_stream() -> None:
     [TenantRole.OPERATOR],
     indirect=True,
 )
-def test_valkey_unreachable_surfaces_as_internal_error(
+def test_valkey_unreachable_returns_delivery_pending(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """A redis-py ConnectionError on xadd surfaces as JSON-RPC -32603.
+    """A redis-py ConnectionError after the archive commit is not an error (#3748).
 
-    The fail-loud contract is the load-bearing difference from
-    :func:`publish_event` (audit-driven, fail-open). The agent
-    explicitly emitted the announcement and must know whether it
-    landed -- a swallowed error would leave the agent thinking it
-    told the team while the team never saw it.
+    The archive row is the record readers use, so the agent gets a
+    success with ``delivery_pending=true`` instead of ``-32603``.
     """
     from redis import exceptions as redis_exceptions
 
     client, _op = client_with_operator
     bc = get_broadcast_client()
-    with patch.object(
+    with fake_stream_write(
         bc,
-        "xadd",
-        new=AsyncMock(side_effect=redis_exceptions.ConnectionError("refused")),
+        AsyncMock(side_effect=redis_exceptions.ConnectionError("refused")),
     ):
         resp = post_mcp(
             client,
             _tools_call("meho_broadcast_announce", {"activity": "investigating"}),
         )
-    body = resp.json()
-    assert "error" in body
-    # JSON-RPC -32603 Internal Error -- the dispatcher's generic
-    # exception handler maps non-McpInvalidParamsError exceptions here.
-    assert body["error"]["code"] == INTERNAL_ERROR
+    result = _result_dict(resp)
+    assert result["delivery_pending"] is True
+    assert result["watch_checkpoint"].startswith("w1.")
+    assert UUID(result["event_id"]).version == 4
 
 
-async def test_publish_agent_announcement_propagates_exception() -> None:
-    """``publish_agent_announcement`` directly raises on Valkey errors.
-
-    Unit-level companion to the dispatcher test above -- asserts the
-    publisher entry point itself is fail-loud, independent of MCP
-    plumbing. This is the contract the announce handler depends on;
-    the audit-driven :func:`publish_event` has the opposite contract
-    (silent swallow) and the test guards against an accidental
-    refactor that would unify them.
-    """
+async def test_stream_failure_keeps_the_archive_row() -> None:
+    """The publisher reports ``delivery_pending`` and the row stays stored."""
     from datetime import UTC, datetime
 
     from redis import exceptions as redis_exceptions
 
-    event = AgentAnnouncementEvent(
-        tenant_id=OPERATOR_TENANT_ID,
-        principal_sub="op-test",
-        activity="investigating",
-        phase="start",
-        ts=datetime.now(UTC),
-    )
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import AgentAnnouncement
+
+    event = trusted_event(tenant_id=OPERATOR_TENANT_ID, ts=datetime.now(UTC))
     bc = get_broadcast_client()
-    with (
-        patch.object(
-            bc,
-            "xadd",
-            new=AsyncMock(side_effect=redis_exceptions.ConnectionError("refused")),
-        ),
-        pytest.raises(redis_exceptions.ConnectionError),
+    with fake_stream_write(
+        bc,
+        AsyncMock(side_effect=redis_exceptions.ConnectionError("refused")),
     ):
+        result = await publish_agent_announcement(event)
+    assert result.delivery_pending is True
+    assert result.stream_entry_id is None
+    assert result.seq == 1
+    async with get_sessionmaker()() as session:
+        row = await session.get(AgentAnnouncement, event.event_id)
+    assert row is not None
+    assert row.seq == 1
+    assert row.stream_entry_id is None
+
+
+async def test_archive_failure_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A database failure is fail-loud: nothing was stored, so the caller must know."""
+    from datetime import UTC, datetime
+
+    from meho_backplane.broadcast import publisher
+
+    def _broken() -> Any:
+        raise RuntimeError("database down")
+
+    monkeypatch.setattr(publisher, "get_sessionmaker", _broken)
+    event = trusted_event(tenant_id=OPERATOR_TENANT_ID, ts=datetime.now(UTC))
+    with pytest.raises(RuntimeError, match="database down"):
         await publish_agent_announcement(event)
 
 
@@ -518,25 +521,24 @@ async def test_publish_agent_announcement_propagates_exception() -> None:
 def test_successful_publish_returns_event_id(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """On success the ack carries a real UUID ``event_id`` + stream ``cursor``.
+    """On success the ack carries a real UUID ``event_id`` + a watch checkpoint.
 
-    T2 (#2547) mints a genuine per-announcement UUID at publish: the ack's
-    ``event_id`` is that UUID (equal to the durable ``agent_announcement``
-    row's id), while ``cursor`` remains the Valkey stream entry id. The two
-    are now distinct values (#2479 contract) -- historically both carried
-    the mislabelled stream cursor.
+    T2 (#2547) mints a genuine per-announcement UUID at publish (equal to
+    the durable ``agent_announcement`` row's id). #3748 replaces the
+    Valkey stream id in the ack with ``watch_checkpoint``, a watch cursor
+    just after this announcement in the archive order.
     """
     client, _op = client_with_operator
     bc = get_broadcast_client()
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-7")):
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-7")):
         resp = post_mcp(
             client,
             _tools_call("meho_broadcast_announce", {"activity": "investigating"}),
         )
     result = _result_dict(resp)
-    assert result["cursor"] == "1747800000000-7"
-    # event_id is a genuine UUID, distinct from the stream cursor.
-    assert result["event_id"] != result["cursor"]
+    assert "cursor" not in result
+    assert result["watch_checkpoint"].startswith("w1.")
+    assert result["delivery_pending"] is False
     assert UUID(result["event_id"]).version == 4
 
 
@@ -561,15 +563,16 @@ def test_metric_increments_per_phase(
     """
     client, _op = client_with_operator
     bc = get_broadcast_client()
-    baseline = _counter_value(BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL, phase=phase_label)
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")):
-        post_mcp(
-            client,
-            _tools_call(
-                "meho_broadcast_announce",
-                {"activity": "x", "phase": phase_label},
-            ),
-        )
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-0")):
+        arguments: dict[str, Any] = {"activity": "x", "phase": phase_label}
+        if phase_label != "start":
+            # update / completion continue a claim: open one first.
+            opened = _result_dict(
+                post_mcp(client, _tools_call("meho_broadcast_announce", {"activity": "x"}))
+            )
+            arguments |= {"claim_id": opened["claim_id"], "idempotency_key": f"k-{phase_label}"}
+        baseline = _counter_value(BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL, phase=phase_label)
+        post_mcp(client, _tools_call("meho_broadcast_announce", arguments))
     after = _counter_value(BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL, phase=phase_label)
     assert after - baseline == 1
 
@@ -579,19 +582,19 @@ def test_metric_increments_per_phase(
     [TenantRole.OPERATOR],
     indirect=True,
 )
-def test_phase_defaults_to_update(
+def test_phase_defaults_to_start(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """When ``phase`` is omitted the publish credits the ``update`` counter."""
+    """When ``phase`` is omitted the publish opens a claim (#3736: default ``start``)."""
     client, _op = client_with_operator
     bc = get_broadcast_client()
-    baseline = _counter_value(BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL, phase="update")
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")):
+    baseline = _counter_value(BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL, phase="start")
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-0")):
         post_mcp(
             client,
             _tools_call("meho_broadcast_announce", {"activity": "investigating"}),
         )
-    assert _counter_value(BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL, phase="update") - baseline == 1
+    assert _counter_value(BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL, phase="start") - baseline == 1
 
 
 @pytest.mark.parametrize(
@@ -608,10 +611,9 @@ def test_failed_publish_does_not_increment_metric(
     client, _op = client_with_operator
     bc = get_broadcast_client()
     baseline = _counter_value(BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL, phase="start")
-    with patch.object(
+    with fake_stream_write(
         bc,
-        "xadd",
-        new=AsyncMock(side_effect=redis_exceptions.ConnectionError("refused")),
+        AsyncMock(side_effect=redis_exceptions.ConnectionError("refused")),
     ):
         post_mcp(
             client,
@@ -646,7 +648,7 @@ def test_published_event_carries_agent_announcement_kind(
     """
     client, op = client_with_operator
     bc = get_broadcast_client()
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")) as xa:
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-0")) as xa:
         post_mcp(
             client,
             _tools_call(
@@ -703,7 +705,7 @@ def test_target_and_scope_default_to_none(
     """Omitting ``target`` / ``scope`` lands ``None`` on the published event."""
     client, _op = client_with_operator
     bc = get_broadcast_client()
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")) as xa:
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-0")) as xa:
         post_mcp(
             client,
             _tools_call("meho_broadcast_announce", {"activity": "investigating"}),
@@ -801,21 +803,17 @@ class TestBroadcastAnnounceIntegration:
                 "phase": "start",
             },
         )
-        assert "event_id" in result
-        # T2 (#2547): event_id is a genuine UUID minted at publish,
-        # distinct from the stream cursor (#2479 contract).
-        assert result["cursor"] != result["event_id"]
+        assert result["delivery_pending"] is False
         assert UUID(result["event_id"]).version == 4
 
         recent = await _handler_recent(op, {})
         assert len(recent["events"]) == 1
         event = recent["events"][0]
         assert event["event_kind"] == "agent_announcement"
-        assert event["cursor"] == result["cursor"]
         # The durable event UUID round-trips on the read as ``event_id``,
-        # equal to the announce ack's event_id and distinct from cursor.
+        # and the read's checkpoint matches the ack's.
         assert event["event_id"] == result["event_id"]
-        assert event["event_id"] != event["cursor"]
+        assert recent["watch_checkpoint"] == result["watch_checkpoint"]
         # dump_event_wire re-serves agent-authored free text inside the
         # untrusted-content envelope (_ANNOUNCEMENT_UNTRUSTED_FIELDS).
         assert event["activity"] == wrap_untrusted_text("investigating")
@@ -869,13 +867,10 @@ class TestBroadcastAnnounceIntegration:
         self,
         valkey_url: str,
     ) -> None:
-        """T2 (#2547) AC1: announce -> FLUSHALL -> recent still returns it from DB.
+        """T2 (#2547) AC1: announce -> FLUSHALL -> recent still returns it.
 
-        The durable ``agent_announcement`` row is the archive: after the
-        Valkey stream is wiped, a wide-window ``recent`` backfills the
-        announcement from the DB, wrapped per the T1 trust rule, and the
-        event's UUID ``event_id`` (equal to the durable row id) round-trips
-        distinct from the (now null) stream ``cursor``.
+        Since #3748 ``recent`` reads the archive only, so wiping the
+        Valkey stream changes nothing for readers.
         """
         op = build_operator(TenantRole.OPERATOR)
         ack = await _handler_announce(
@@ -894,6 +889,5 @@ class TestBroadcastAnnounceIntegration:
         assert len(recent["events"]) == 1, "announcement must survive the flush via the DB"
         event = recent["events"][0]
         assert event["event_id"] == ack["event_id"]
-        assert event["cursor"] is None  # DB-sourced row, no stream cursor
         assert event["event_kind"] == "agent_announcement"
         assert event["activity"] == wrap_untrusted_text("rotating tokens")

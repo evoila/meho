@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Final
 import structlog
 from pydantic import BaseModel, ConfigDict
 
+from meho_backplane.docs_search.call_log import hit_log_fields
 from meho_backplane.docs_search.service import (
     DocsChunk,
     DocsScope,
@@ -245,7 +246,9 @@ async def _search_one(
     Holds *semaphore* across the backend round-trip so the number of
     simultaneous backend calls stays bounded. Resolves the collection's
     backend and projects the corpus chunks into MEHO's surface tagged with
-    the source ``collection`` key.
+    the source ``collection`` key. A fan-out carries no product/version
+    refinements, so it sends neither ``metadata_filters`` nor a soft
+    ``scope``, whatever the collection's gates (#3912).
     """
     # Imported lazily to keep the module-import graph identical to the
     # single-collection path (service.py already owns the backend resolve).
@@ -258,9 +261,14 @@ async def _search_one(
             query,
             backend_ref=resolved.ref,
             metadata_filters=None,
+            soft_scope=None,
             limit=limit,
         )
-    return [_project_chunk(c, collection=collection.collection_key) for c in response.chunks]
+    readable = resolved.backend.supports_read(resolved.ref)
+    return [
+        _project_chunk(c, collection=collection.collection_key, readable=readable)
+        for c in response.chunks
+    ]
 
 
 async def search_docs_fanout(
@@ -318,7 +326,7 @@ async def search_docs_fanout(
         "docs_search_fanout_completed",
         operator_sub=operator.sub,
         collections=[c.collection_key for c in collections],
-        hit_count=len(merged),
+        **hit_log_fields(merged, with_collections=True),
     )
     return DocsSearchResult(chunks=merged)
 
@@ -396,7 +404,7 @@ async def retrieve_multi_query(
         operator_sub=operator.sub,
         collection_key=scope.collection_key,
         variant_count=len(queries),
-        hit_count=len(merged),
+        **hit_log_fields(merged),
     )
     return DocsSearchResult(chunks=merged)
 

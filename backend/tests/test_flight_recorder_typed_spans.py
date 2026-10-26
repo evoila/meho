@@ -36,9 +36,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.base import Connector
@@ -381,6 +379,45 @@ async def test_ssh_command_emits_typed_span_with_omitted_bodies() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ssh_span_never_keeps_raw_pfsense_config_stdout() -> None:
+    """``pfsense.config.show`` reads ``config.xml`` over SSH *before* its handler
+    removes the secrets, so the SSH transport span sees the raw file. That raw
+    stdout must never land in a trace: the plain-text body is dropped
+    fail-closed, and the handler's own result carries no secret either.
+    Synthetic values only (a fake bcrypt-shaped hash).
+    """
+    from meho_backplane.connectors.pfsense.connector import PfSenseConnector
+
+    fake_hash = "$2y$10$" + "q" * 53
+    stdout = (
+        '<?xml version="1.0"?>\n<pfsense><system><user><name>u1</name>'
+        f"<bcrypt-hash>{fake_hash}</bcrypt-hash></user></system></pfsense>\n"
+    )
+    conn = PfSenseConnector()
+    fake = _FakeConn(_FakeSshResult(stdout=stdout, exit_status=0))
+    conn._connect = AsyncMock(return_value=fake)  # type: ignore[method-assign]
+    op = _op_ctx(
+        op_id="pfsense.config.show",
+        connector_id="pfsense-ssh-2.7",
+        impl_id="pfsense-ssh",
+        product="pfsense",
+        tags=("read-only", "config", "pfsense"),
+    )
+    with _active_scope(op) as scope:
+        result = await conn.config_show(_Target("fw-test"), {})
+    assert fake.commands == ["cat /cf/conf/config.xml"]
+    (span,) = _typed_spans(scope)
+    assert span.attributes["transport"] == "ssh"
+    assert span.attributes["request_body"] == BODY_OMITTED_MARKER
+    assert span.attributes["response_body"] == BODY_OMITTED_MARKER
+    assert fake_hash not in repr(span.attributes)
+    assert scope.redaction_uncertain is True
+    # The handler removed the hash before returning.
+    assert fake_hash not in repr(result)
+    assert result["redacted_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_ssh_span_failure_never_breaks_the_command() -> None:
     """A raising recorder never propagates into the SSH dispatch path (F7)."""
     conn = _StubSshConnector(_FakeSshResult(stdout="ok", exit_status=0))
@@ -420,11 +457,13 @@ async def test_ssh_span_capture_off_is_noop() -> None:
 _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
     {
         "argocd-api",
+        "audit-integrity",
         "bind9-ssh",
         "fleet-lcm",
         "fleet-rest",
         "gcloud-rest",
         "harbor-rest",
+        "hcx-rest",
         "holodeck-ssh",
         "hyperv-ssh",
         "installer-rest",
@@ -444,9 +483,11 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "proxmox-api",
         "rabbitmq-management",
         "rke2-ssh",
+        "salt-raas",
         "sddc-rest",
         "sddc-vcf5",
         "secret-broker",
+        "srm-rest",
         "targets-registry",
         "tempo-api",
         "topology-graph",
@@ -455,10 +496,12 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "vcfa-rest",
         "vcfa-vra8",
         "vmware-rest",
+        "vr-rest",
         "vrli-rest",
         "vrli-vrli8",
         "vrops-rest",
         "vrops-vrops8",
+        "vro-rest",
         "windns-ssh",
         "winsrv-ssh",
         "wsfc-ssh",
@@ -605,17 +648,6 @@ def _reset_dispatch_state() -> Iterator[None]:
     clear_registry()
 
 
-@pytest.fixture
-def _capture_broadcast(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
 class _NoOpVaultConnector(Connector):
     product = "vault"
     version = "1.x"
@@ -739,7 +771,6 @@ async def test_composite_children_span_but_composite_does_not_double_record(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
     _reset_dispatch_state: None,
-    _capture_broadcast: list[BroadcastEvent],
 ) -> None:
     """A composite's typed children each get a ``typed`` span; the composite
     parent (routed via ``dispatch_composite``) records only its

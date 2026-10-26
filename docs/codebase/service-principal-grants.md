@@ -92,6 +92,9 @@ op and records the use; absent a match, the op parks for a human decision.
 The one exception is the `destructive` tier: `consult_and_record_grant`
 refuses it **before** any grant lookup, so even a stale grant row cannot
 auto-approve a destructive op — the tier always parks for a human.
+Parking is not refusal: a service principal can still propose a
+destructive op and read its result after a human approves. The steps are in
+[`approvals.md`](approvals.md#an-add-on-proposes-a-governed-destroy-3478).
 
 ### The grant (`db/models.py::ServicePrincipalGrant`, `operations/service_grants.py`)
 
@@ -179,6 +182,12 @@ those composites always parked for service principals.
   honoured **at dispatch time** by the lookup filter (`revoked_at IS NULL
   AND (expires_at IS NULL OR expires_at > now)`); no sweeper is needed — an
   expired / revoked row simply stops matching.
+- **`revoked_reason`** (#3489) — an optional reason the operator gives when
+  revoking. This mirrors create: create *requires* a `reason`, revoke
+  *accepts* one. When given, it is stored on the grant row and also lands
+  as `reason` in the `service_grant.revoke` audit row payload (the route
+  binds `audit_reason`). A revoke without a reason stays valid; the column
+  is then NULL and the audit payload has no `reason` key.
 
 Uniqueness ("at most one active grant per fully-scoped key") is enforced by
 two **partial** unique indexes — `uq_service_principal_grant_targeted`
@@ -195,6 +204,47 @@ layer (`ServicePrincipalGrantService.create`, NULL-safe on the nullable
 selector columns) rather than by a partial index, sidestepping the awkward
 NULL-vs-NULL portability across Postgres / SQLite.
 
+### Orphaned grants — the target was deleted or registered again (#3430)
+
+A grant with a concrete `target_id` matches only that exact target id. When
+the target is deleted (`DELETE /api/v1/targets/{name}` stamps `deleted_at`)
+or torn down and registered again (the new registration gets a **new** id),
+the old grant can never match again. The run then waits for approval on
+every op the grant was meant to cover. Deleting a target does not touch its
+grants, so before #3430 nothing showed this.
+
+Now every grant read (list, show, and the create response) marks such a grant
+as **orphaned**:
+
+- `orphaned: true` — the grant is not revoked, it has a concrete `target_id`,
+  and no live (`deleted_at IS NULL`) target with that id exists in the tenant.
+  A target id with no row at all counts too.
+- `orphan_remediation` — a plain-language fix: create a new grant with a
+  target selector (`target_name_pattern` set to the old target name when MEHO
+  still knows it, or `target_product`), which matches by name or product and
+  so survives a new registration; then revoke the orphaned grant. The
+  suggested pattern escapes `*`, `?` and `[` in the old name (`glob.escape`),
+  so it matches that name literally and not a look-alike target.
+
+Rules:
+
+- **Read-time check only.** `orphaned` is not a stored column. It is worked
+  out on each read by `service_grants.classify_orphaned_grants` (one query for
+  live targets, plus one for old names only when something is orphaned).
+- **Never auto-revoked.** MEHO does not revoke or change an orphaned grant.
+  Cleanup stays an operator decision.
+- **Selector and targetless grants are never orphaned** — they do not point
+  at one target id. Revoked grants are not flagged either (they are already
+  cleaned up).
+- **Surfaces.** REST returns the two fields on `ServiceGrantRead`. The CLI
+  `grants list` adds an `ORPHANED` column and a count line; `grants show`
+  prints `orphaned: yes` and the remediation. The console `/ui/grants` shows
+  an `orphaned` status badge with the remediation under it.
+
+A named grant profile attached at target registration (so a grant set is
+applied again by name on a new registration) is **not built**. The selector
+grant already survives a new registration, so it covers the same need.
+
 ### Delete-shaped guardrail
 
 A grant is the **floor** of what runs unattended, never a bypass of a
@@ -203,17 +253,37 @@ delete-shaped ops:
 
 - **by configured pattern** (`Settings.service_grant_delete_shaped_patterns`,
   env `SERVICE_GRANT_DELETE_SHAPED_PATTERNS`, `fnmatchcase` over the op id;
-  default `DELETE:*`, `*.delete`, `*.destroy`, `*.remove`, `*.purge`), and
+  default `DELETE:*`, `*.delete`, `*.destroy`, `*.remove`, `*.purge`,
+  `POST:/vswitch/*`),
+- **by vendor action name** (#4632): an ingested op id whose last path part
+  starts with `Destroy`, `Delete`, `Remove` or `Unregister`, for example
+  `POST:/VirtualMachine/{moId}/Destroy_Task`. VI-JSON (the JSON form of
+  vCenter's older object API) sends every method as a `POST`, so neither
+  the HTTP method nor a pattern sees these deletes. The word list and the
+  rule are the ingest parser's, in `meho_backplane/delete_names.py`; the
+  parser, the grant service, the flight recorder and the stored-delete
+  review all import that one module. This sign does **not** depend on the
+  pattern setting: a changed `SERVICE_GRANT_DELETE_SHAPED_PATTERNS` keeps
+  it. Lookalikes such as `Destroyer_Task` or `Reset_Task` stay grantable,
+  and
 - **by descriptor** (best-effort when a descriptor resolves via
   `lookup_descriptor`): the `destructive` safety tier (#3183), the HTTP
   `DELETE` verb, or a hand-authored `destructive` tag on a typed op.
 
-`_delete_shaped_reason_by_descriptor` single-sources that descriptor-level
-classification and is consulted at **both** ends: create-time (above) and
-dispatch-time (`consult_and_record_grant`, so a stale grant predating an
-op's promotion into the `destructive` tier can never satisfy it). That is
-what makes "a standing grant can never satisfy a destructive op" hold
-whether the grant is being created or consulted.
+The first two signs need only the op id (`delete_shaped_refusal_reason`),
+so they also work for an op with no stored row. The action-name sign and
+`_delete_shaped_reason_by_descriptor` are consulted at **both** ends:
+create-time (above) and dispatch-time (`consult_and_record_grant`, so a
+stale grant predating an op's promotion into the `destructive` tier, or a
+grant row written for a VI-JSON delete, can never satisfy it). An inner
+step of a multi-step operation reaches the gate as an in-memory record with
+only its declared level — no method, no tags — so for it the op id is the
+only sign, and the action name is what catches `Destroy_Task`. That is what
+makes "a standing grant can never satisfy a destructive op" hold whether
+the grant is being created or consulted. A grant row that already exists
+for such an op stays in the list but never lets the op run; revoke it with
+`meho service-principals grants revoke <id>`. The one exception is an
+instance in sandbox mode; see [Sandbox mode](#sandbox-mode-4622) below.
 
 Ops the workflow models as its human gate (e.g. a bring-up start) are
 expected to stay ungranted — the grant list is the floor, not a bypass.
@@ -234,6 +304,106 @@ carries `matched_by="selector"` and the selector predicate under
 `target_selector`, so the ledger shows the op ran on a runtime-created target
 the selector authorised (a concrete / targetless match records
 `matched_by="target"`).
+
+The row also carries lineage ids (#3695): `request_id` (the same value the
+call's `DISPATCH` row carries), `agent_session_id` (agent-run or MCP
+session; NULL for a plain REST call) and `parent_audit_id` (the multi-step
+parent's audit id when a child step was cleared). Details:
+[`approvals.md`](approvals.md#service-principal-standing-grants--safety_level-gate-3151--3152).
+
+## Sandbox mode (#4622)
+
+Decision record: [`docs/decisions/sandbox-mode.md`](../decisions/sandbox-mode.md).
+Sandbox mode is one setting for the whole instance. It says that the
+instance holds only disposable test systems: systems built for one test
+and deleted after it. On such an instance a tenant admin may give a
+service principal a **delete grant**: a standing grant for an operation
+with a delete sign (the `destructive` level, the HTTP verb `DELETE`, the
+`destructive` tag, a delete name, or a vendor delete action name), or for
+a delete step of a multi-step operation. So an automated test run can
+build, change and delete its own systems with no wait for a person. Every
+other instance keeps the rules above.
+
+What the code does:
+
+- **The switch.** `MEHO_SANDBOX_MODE` and `MEHO_SANDBOX_MODE_CONFIRM` are
+  `Settings` fields read at boot only. `meho_backplane/sandbox_mode.py`
+  checks them (`check_sandbox_settings`): the mode on needs the confirm
+  value, it must equal the host of the MCP resource URI, and that host
+  needs a dot-separated part that is exactly `sandbox`. Then the mode is
+  stored in the one-row table `sandbox_mode_state` with one insert that
+  only one process can win, and read back (`store_or_check_sandbox_mode`);
+  a stored mode that differs from the setting refuses the start. The mode
+  is fixed for the life of the database. Every runtime reader uses the
+  process flag `sandbox_mode_active()`, set once at boot. Migration `0115`
+  stores `false` in every database that existed before it.
+- **Where delete grants live.** In their own table, `sandbox_delete_grant`
+  (`SandboxDeleteGrant`, same shape and indexes as the ordinary table). An
+  older build never reads it, and MEHO with the mode off never reads or
+  writes it (`_grant_models()` returns the ordinary table alone). So after
+  a rollback, and on every other instance, every delete and every delete
+  step waits for a person again.
+- **Creating one.** `ServicePrincipalGrantService.create(...,
+  from_console=True)`. With the mode on, an op with a delete sign
+  (`delete_grant_reason`) becomes a delete grant instead of a refusal. It
+  needs the console mark, which only the console route sets in server code
+  (no request field, header or token claim can set it; otherwise
+  `DeleteGrantConsoleOnlyError`, HTTP 403 `delete_grant_console_only` on
+  REST), and an expiry within 30 days (`SANDBOX_DELETE_GRANT_MAX_DAYS`).
+  The CLI refuses a delete op before it calls the server. The console
+  route itself runs only for a tenant admin who is a person
+  (`is_human_principal`): a console session that holds an agent, service
+  or runner token gets 403 `human_principal_required`, as on REST.
+  Ordinary grants keep today's rules in every mode. List, get, revoke, the
+  orphan check and the console page cover both tables; a read entry
+  carries `delete_grant=True` for a delete grant.
+- **Renewing a set.** `ServicePrincipalGrantService.renew_delete_grants(...,
+  from_console=True)` renews the live delete grants (not revoked, not
+  expired) of one service principal together, with one new expiry. Each
+  grant passes the same review as a new grant (`_review`): the mode is
+  on, the call comes from the console, the op still has a delete sign,
+  and the expiry is within 30 days. One failed check renews nothing. Then,
+  in one transaction, each old row is revoked with the reason `renewed`
+  and a new row takes its place. The console grant page shows the form
+  (`grants/_renew.html`, `POST /ui/grants/service/renew-delete-grants`)
+  only with the mode on; there is no REST or CLI path. MEHO never renews
+  a grant by itself.
+- **Using one.** `consult_and_record_grant` gets the call's `preview_hash`
+  and `params` from the gate (`policy_gate(..., preview_hash, params)`,
+  passed by the dispatcher; the step gate passes the params only). With
+  the mode on and a delete sign on the op, `_consult_delete_grant` looks
+  up a live delete grant first. A `destructive` call then runs the same
+  two checks the park path runs (`dispatcher.destructive_binding_evidence`:
+  the preview hash must match a fresh server-side preview, and the blast
+  radius must be valid) **before** the grant-use row is written; a failed
+  check writes no row and the park path returns the exact refusal
+  (`preview_binding_required`, `preview_hash_mismatch`,
+  `blast_radius_required`). A step gate or a child call presents no hash,
+  so a `destructive` step or child stays refused. A delete below
+  `destructive` needs no hash. With no delete grant the call falls through
+  to the rules above, so an ordinary grant never changes its verdict.
+- **The grant-use row.** `payload.delete_grant = true`, plus
+  `preview_hash` and `blast_radius` for a `destructive` call, or
+  `proposed_effect` for a delete below it. A step's row names its
+  multi-step operation through `parent_audit_id`.
+- **The step list.** `GET /api/v1/operations/governed-subops` marks delete
+  steps grantable with the mode on.
+- **Display.** `/ready` has a top-level `sandbox_mode` (`"on"` / `"off"`)
+  for every caller and `features.approval_queue.sandbox_mode`;
+  `GET /api/v1/health` has `sandbox_mode`; `meho status` prints one line
+  when it is on; every console page shows a banner, with the number of
+  delete grants that expire within 7 days.
+- **The audit mark.** `audit_log.sandbox_mode` (boolean, not null,
+  database default `false`). One model default reads the process flag, so
+  every writer stamps it.
+- **Chart.** `sandboxMode.enabled` and `sandboxMode.confirmHost`; the
+  render fails when the host is not `ingress.host`; the notes warn.
+
+Tests: `test_sandbox_mode_boot.py`, `test_sandbox_mode_grants.py`,
+`test_sandbox_mode_calls.py`, `test_sandbox_mode_verdict_table.py` (with
+the checked-in mode-off table `tests/data/sandbox_mode_verdict_table_off.json`),
+`test_sandbox_mode_audit_mark.py`, `test_sandbox_mode_display.py`,
+`test_chart_sandbox_mode.py`, `migrations/test_migration_0115_add_sandbox_mode.py`.
 
 ## Governed-subop discovery (#3349)
 
@@ -259,7 +429,9 @@ id, the manifest tuples it fans out to via
 `connectors/vmware_rest/composites/_governed_subops.py`, referencing the
 `_SUB_OPS_*` constants, never re-typing them) — not hand-maintained. A
 **delete-shaped** rollback / delete leg (e.g. `vm.create`'s
-`DELETE:/vcenter/vm/{vm}`, which rides `_SUB_OPS_VM_CREATE`) is flagged
+`DELETE:/vcenter/vm/{vm}`, which rides `_SUB_OPS_VM_CREATE`, or
+`vm.destroy`'s VI-JSON step `POST:/VirtualMachine/{moId}/Destroy_Task`,
+which only its action name marks as a delete, #4632) is flagged
 `grantable=false` with the same refusal reason `create` would raise, so the
 operator knows up front that a **partial failure of that composite still
 requires a human** (the delete rollback can never run unattended). Grantable
@@ -272,16 +444,40 @@ Role: **`operator`** (not `tenant_admin`) — a standing grant is the
 persistent form of the approve decision an operator already makes on the
 approval queue.
 
+Create and revoke need a person. A token of an agent, a service principal
+or a runner gets 403 `human_principal_required` (the same check
+`require_human_principal` in `auth/rbac.py` that the approval decision
+routes and the agent-grant create / elevate routes use, #4616). List and
+show keep the role check alone.
+
 | Verb | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/v1/service-principals/grants` | List (`principal_sub`, `include_revoked`, `limit`, `offset`). |
+| `GET` | `/api/v1/service-principals/grants` | List (`principal_sub`, `include_revoked`, `include_expired` (default `true`), `limit`, `offset`). |
 | `GET` | `/api/v1/service-principals/grants/{id}` | Show one. 404 cross-tenant. |
 | `POST` | `/api/v1/service-principals/grants` | Create (the review; `reason` required). 422 on wildcard / delete-shaped / past expiry / duplicate / `target_id`+selector. |
-| `DELETE` | `/api/v1/service-principals/grants/{id}` | Revoke (soft-delete). 404 when absent / already revoked / cross-tenant. |
+| `DELETE` | `/api/v1/service-principals/grants/{id}` | Revoke (soft-delete). Optional `reason` query parameter (1–2048 chars, same limit as create), stored as `revoked_reason` and on the audit row. 404 when absent / already revoked / cross-tenant. |
 
 The route surface (grants + `GET /api/v1/operations/governed-subops`) enters
 `cli/api/openapi.json` and the generated Go client (regenerate with `cd cli
 && make snapshot-openapi && make generate` after any signature change).
+
+## CLI surface (`cli/internal/cmd/service-principal/`)
+
+Each REST route has one `meho service-principals grants` verb. The verbs
+call the generated client bindings, so they use the same `operator` role,
+audit, and error rules as REST. There is no MCP tool for this plane.
+
+| CLI verb | REST route | Notes |
+|---|---|---|
+| `meho service-principals grants list` | `GET /api/v1/service-principals/grants` | `--principal`, `--include-revoked`, `--include-expired`, `--limit`, `--offset`, `--json`. Shows only active grants unless you pass `--include-expired` (REST includes expired grants by default). |
+| `meho service-principals grants show <grant-id>` | `GET /api/v1/service-principals/grants/{id}` | `--json`. |
+| `meho service-principals grants create` | `POST /api/v1/service-principals/grants` | `--principal`, `--op-id`, `--connector-id`, `--reason` (all required); either `--target`, or `--target-product` and/or `--target-name-pattern`, or none (targetless); `--expires`; `--json`. A 422 from the server is shown as a one-line error. |
+| `meho service-principals grants revoke <grant-id>` | `DELETE /api/v1/service-principals/grants/{id}` | Asks before it revokes; `--confirm` skips the question. `--json`. |
+
+The full flag list is in the generated CLI reference
+(`docs-site/reference/cli.md`). `test_service_grants_rest_plane_has_cli_parity`
+in `backend/tests/test_mcp_surface_conformance.py` fails CI when a REST
+route on this router has no matching CLI verb in that reference.
 
 ## Scope boundaries (this PR)
 
@@ -307,6 +503,7 @@ The route surface (grants + `GET /api/v1/operations/governed-subops`) enters
   (#3349) — selector columns + narrowed targetless partial unique index.
 - `operations/service_grants.py` — CRUD service + `find_live_grant`
   (selector matching) + `null_target_only_park_hint` (#3349) +
+  `classify_orphaned_grants` (#3430, read-time orphan flag) +
   `consult_and_record_grant` + delete-shaped classification
   (`delete_shaped_refusal_reason` public alias).
 - `operations/service_grant_schemas.py` — REST request / response shapes

@@ -210,7 +210,7 @@ type clientRep struct {
 }
 
 // protocolMapperRep mirrors ProtocolMapperRepresentation closely
-// enough for the five mapper shapes the bootstrap recipe needs.
+// enough for the mapper shapes the bootstrap recipe needs.
 type protocolMapperRep struct {
 	ID              string            `json:"id,omitempty"`
 	Name            string            `json:"name"`
@@ -228,11 +228,17 @@ type scopeRep struct {
 }
 
 // groupRep / userRep / credentialRep are the minimum shape we set or
-// read for the meho-admins group + admin-user provisioning at Step 5
-// of the recipe.
+// read for the five MEHO role groups and the first admin user.
+//
+// Attributes and Description are only filled by GET /groups/{id}: the
+// group list and search endpoints return a short form without them.
+// Description is carried back on update because newer Keycloak versions
+// clear it when a PUT leaves it out.
 type groupRep struct {
-	ID   string `json:"id,omitempty"`
-	Name string `json:"name"`
+	ID          string              `json:"id,omitempty"`
+	Name        string              `json:"name"`
+	Description string              `json:"description,omitempty"`
+	Attributes  map[string][]string `json:"attributes,omitempty"`
 }
 
 type userRep struct {
@@ -564,6 +570,35 @@ func (c *adminClient) addClientOptionalScope(
 	return nil
 }
 
+// clientScopeRep is the slice of ClientScopeRepresentation we send
+// when creating a realm-level client scope.
+type clientScopeRep struct {
+	Name        string            `json:"name"`
+	Description string            `json:"description,omitempty"`
+	Protocol    string            `json:"protocol"`
+	Attributes  map[string]string `json:"attributes,omitempty"`
+}
+
+// createClientScope POSTs a new realm-level client scope. Keycloak
+// answers 201 on success and 409 when a scope with that name already
+// exists; callers check the realm's scope list first, so a 409 here is
+// returned as an error like any other unexpected status.
+func (c *adminClient) createClientScope(
+	ctx context.Context, rep clientScopeRep,
+) error {
+	status, body, err := c.do(ctx, http.MethodPost, "client-scopes", rep)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusCreated {
+		return &errKeycloakAPI{
+			method: http.MethodPost, url: "client-scopes",
+			statusCode: status, body: string(body),
+		}
+	}
+	return nil
+}
+
 // findGroup queries /groups?search=<name> and returns the
 // top-level group that exactly matches by name. The Keycloak admin
 // GET /groups endpoint does not currently support `exact=true` on all
@@ -596,14 +631,16 @@ func (c *adminClient) findGroup(
 	return nil, nil
 }
 
-// createGroup POSTs a new top-level group; returns its UUID.
+// createGroup POSTs a new top-level group with its attributes; returns
+// its UUID.
 func (c *adminClient) createGroup(
-	ctx context.Context, name string,
+	ctx context.Context, rep groupRep,
 ) (string, error) {
+	name := rep.Name
 	endpoint := fmt.Sprintf(
 		"%s/admin/realms/%s/groups", c.baseURL, c.realm)
 
-	buf, err := json.Marshal(groupRep{Name: name})
+	buf, err := json.Marshal(rep)
 	if err != nil {
 		return "", fmt.Errorf("marshal createGroup body: %w", err)
 	}
@@ -651,6 +688,47 @@ func (c *adminClient) createGroup(
 			"createGroup: malformed Location header %q", loc)
 	}
 	return loc[idx+1:], nil
+}
+
+// getGroup GETs one group by UUID. Unlike findGroup, the answer carries
+// the group's attributes.
+func (c *adminClient) getGroup(
+	ctx context.Context, groupUUID string,
+) (*groupRep, error) {
+	status, body, err := c.do(ctx, http.MethodGet, "groups/"+groupUUID, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, &errKeycloakAPI{
+			method: http.MethodGet, url: "groups/" + groupUUID,
+			statusCode: status, body: string(body),
+		}
+	}
+	var got groupRep
+	if err := json.Unmarshal(body, &got); err != nil {
+		return nil, fmt.Errorf("decode getGroup: %w", err)
+	}
+	return &got, nil
+}
+
+// updateGroup PUTs a group. Keycloak replaces the whole attribute map:
+// a key missing from rep.Attributes is deleted. Callers send the full
+// map they want to keep.
+func (c *adminClient) updateGroup(
+	ctx context.Context, rep groupRep,
+) error {
+	status, body, err := c.do(ctx, http.MethodPut, "groups/"+rep.ID, rep)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusNoContent {
+		return &errKeycloakAPI{
+			method: http.MethodPut, url: "groups/" + rep.ID,
+			statusCode: status, body: string(body),
+		}
+	}
+	return nil
 }
 
 // findUserByUsername GETs /users?username=<n>&exact=true and returns

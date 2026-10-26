@@ -38,13 +38,23 @@ The fail-loud posture matches every other public v1 request schema.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from meho_backplane.audit_query import AuditEntry, AuditQueryResult, ReplayNode
+from meho_backplane.audit_query import (
+    AuditEntry,
+    AuditQueryFilters,
+    AuditQueryResult,
+    ReplayNode,
+    parse_duration,
+)
+from meho_backplane.db.models import AuditEventClass
 from meho_backplane.flight_recorder import TraceSpanView, TraceView
 
 __all__ = [
+    "AuditClassCounts",
+    "AuditClassCountsRequest",
     "AuditEntry",
     "AuditQueryRequest",
     "AuditQueryResult",
@@ -56,20 +66,13 @@ __all__ = [
 ]
 
 
-class AuditQueryRequest(BaseModel):
-    """POST body for ``/api/v1/audit/query``.
-
-    Mirrors :class:`~meho_backplane.audit_query.AuditQueryFilters`
-    except ``since`` / ``until`` are strings parsed by
-    :func:`~meho_backplane.audit_query.parse_duration` at the router
-    layer. All other fields pass through to the substrate filter
-    object unchanged. The empty body shape ``{}`` is the no-filter
-    case — every field defaults to None or the substrate-side default.
+class _AuditFilterFields(BaseModel):
+    """Filter fields shared by the query and the class-counts bodies.
 
     ``extra="forbid"`` rejects unknown fields with 422
     ``extra_forbidden`` so a typo or a client passing ``tenant_id``
-    in the body fails loud at the framework boundary — the route
-    always uses ``operator.tenant_id`` from the JWT, never the body.
+    in the body fails loud at the framework boundary — the routes
+    always use ``operator.tenant_id`` from the JWT, never the body.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -85,8 +88,66 @@ class AuditQueryRequest(BaseModel):
     parent_audit_id: uuid.UUID | None = None
     agent_session_id: uuid.UUID | None = None
     work_ref: str | None = Field(default=None, max_length=256)
+
+    def to_filters(self) -> AuditQueryFilters:
+        """Return the substrate filters, with ``since`` / ``until`` parsed.
+
+        Raises :class:`~meho_backplane.audit_query.DurationParseError` on a
+        bad duration; the routes map it to 400.
+        """
+        now = datetime.now(UTC)
+        since = parse_duration(self.since, now=now) if self.since is not None else None
+        until = parse_duration(self.until, now=now) if self.until is not None else None
+        fields = self.model_dump(exclude={"since", "until"})
+        return AuditQueryFilters(**fields, since=since, until=until)
+
+
+class AuditQueryRequest(_AuditFilterFields):
+    """POST body for ``/api/v1/audit/query``.
+
+    Mirrors :class:`~meho_backplane.audit_query.AuditQueryFilters`
+    except ``since`` / ``until`` are strings parsed by
+    :func:`~meho_backplane.audit_query.parse_duration` at the router
+    layer. All other fields pass through to the substrate filter
+    object unchanged. The empty body shape ``{}`` is the no-filter
+    case — every field defaults to None or the substrate-side default.
+    """
+
+    # Optional class filter (#3733). An unknown value fails with 422.
+    event_class: AuditEventClass | None = None
+    # ``true``: only operation runs with a stored flight-recorder trace,
+    # the rows ``GET /{audit_id}/trace`` returns a trace for. ``false``:
+    # the other rows. Not set: no filter (#4855).
+    has_trace: bool | None = None
     limit: int = Field(default=100, ge=1, le=1000)
     cursor: str | None = Field(default=None, max_length=512)
+
+
+class AuditClassCountsRequest(_AuditFilterFields):
+    """POST body for ``/api/v1/audit/class-counts`` (#3747).
+
+    The same filters as :class:`AuditQueryRequest`, without
+    ``event_class``, ``limit`` and ``cursor``: the answer counts every
+    class for the whole matching set, not one page.
+    """
+
+
+class AuditClassCounts(BaseModel):
+    """200 body for ``POST /api/v1/audit/class-counts`` (#3747).
+
+    ``counts`` has one key per event class (``operation_execution``,
+    ``policy_decision``, ``approval_decision``, ``security_event``,
+    ``legacy_request``), ``0`` when a class has no rows. Old rows count
+    as ``legacy_request``; they are never reclassified. ``total`` is the
+    sum. ``since`` is the start of the counted window: the request's
+    ``since``, or 24 hours ago when the request set none.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    counts: dict[str, int]
+    total: int
+    since: datetime
 
 
 class AuditReplayResult(BaseModel):
@@ -128,6 +189,15 @@ class AuditReplayResult(BaseModel):
     rows belong to no session), and mirrors the honest
     ``when_negotiated`` capture label the deploy's ``/status`` reports.
 
+    ``loose_row_count`` (#4670) is the number of nodes in ``root`` whose
+    ``parent_audit_id`` names a row that does not exist in the tenant. A
+    multi-step operation saves its own row last, so such a node belongs
+    to an operation that is still running, or to one that stopped before
+    that save (``docs/decisions/composite-audit-when-a-step-waits.md``).
+    Such rows render as roots; this count tells them apart from real
+    chain starts. A root whose parent lives in another session is not
+    counted.
+
     Frozen like the substrate models it carries.
     """
 
@@ -138,6 +208,7 @@ class AuditReplayResult(BaseModel):
     tenant_id: uuid.UUID
     row_count: int
     excluded_null_session_count: int
+    loose_row_count: int
 
 
 class AuditTraceResult(BaseModel):
@@ -161,6 +232,11 @@ class AuditTraceResult(BaseModel):
       normal state an operator must be able to observe, not an error. The
       console pane renders a "no trace captured" empty state for this case.
 
+    Only an ``operation_execution`` row resolves to the flight recorder
+    (#3747). A decision, security or legacy row is not an execution, so it
+    answers ``trace_present=False`` and the route never reads a trace for
+    it. ``event_class`` echoes the row's class so the reason is visible.
+
     ``trace.redaction_uncertain`` surfaces the F5 degrade flag so an operator
     (and a paired add-on reading over this route with its operator principal)
     can see when a trace was withheld from the agent handle. The operator plane
@@ -174,3 +250,7 @@ class AuditTraceResult(BaseModel):
     audit_id: uuid.UUID
     trace_present: bool
     trace: TraceView | None = None
+    # The row's event class (#3747). Only an ``operation_execution`` row
+    # resolves to the flight recorder; any other class answers
+    # ``trace_present=False`` without reading a trace.
+    event_class: str | None = None

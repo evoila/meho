@@ -39,7 +39,7 @@ from fastapi.testclient import TestClient
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
-from meho_backplane.db.models import AuditLog, Tenant
+from meho_backplane.db.models import AuditEventClass, AuditLog, Tenant
 from meho_backplane.flight_recorder import SpanInput, record_trace
 from meho_backplane.flight_recorder.config import reset_flight_recorder_config_cache_for_testing
 from meho_backplane.redaction.flight_recorder.verdict import BODY_OMITTED_MARKER
@@ -112,7 +112,12 @@ def _seed_tenant(tenant_id: uuid.UUID, slug: str) -> None:
     asyncio.run(_do())
 
 
-def _seed_audit_row(*, tenant_id: uuid.UUID, row_id: uuid.UUID | None = None) -> uuid.UUID:
+def _seed_audit_row(
+    *,
+    tenant_id: uuid.UUID,
+    row_id: uuid.UUID | None = None,
+    event_class: AuditEventClass = AuditEventClass.OPERATION_EXECUTION,
+) -> uuid.UUID:
     resolved_id = row_id or uuid.uuid4()
 
     async def _do() -> uuid.UUID:
@@ -129,6 +134,7 @@ def _seed_audit_row(*, tenant_id: uuid.UUID, row_id: uuid.UUID | None = None) ->
                     status_code=200,
                     duration_ms=Decimal("1.0"),
                     payload={"op_id": "vsphere.vm.list", "op_class": "read"},
+                    event_class=event_class,
                 )
             )
         return resolved_id
@@ -289,6 +295,38 @@ def test_drawer_trace_pane_empty_state_when_no_trace() -> None:
     body = response.text
     assert "Flight recorder" in body
     assert "No trace captured" in body
+
+
+@pytest.mark.parametrize(
+    "event_class",
+    [
+        AuditEventClass.POLICY_DECISION,
+        AuditEventClass.APPROVAL_DECISION,
+        AuditEventClass.SECURITY_EVENT,
+        AuditEventClass.LEGACY_REQUEST,
+    ],
+)
+def test_drawer_offers_no_trace_for_a_non_execution_row(event_class: AuditEventClass) -> None:
+    """Only an execution row resolves to the flight recorder (#3747).
+
+    Even when a trace exists under the row's id, a decision, security or
+    legacy row shows the "not an operation run" note and no spans.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    audit_id = _seed_audit_row(tenant_id=_TENANT_A, event_class=event_class)
+    _seed_trace(audit_id=audit_id, tenant_id=_TENANT_A, spans=_vendor_and_flux_spans())
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(f"/ui/audit/show/{audit_id}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "data-trace-not-applicable" in body
+    assert "vendor_call" not in body
+    assert "h-abc-123" not in body
+    assert f'data-event-class="{event_class.value}"' in body
 
 
 def test_drawer_trace_body_is_html_escaped() -> None:

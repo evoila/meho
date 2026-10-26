@@ -153,9 +153,62 @@ Migrations that INSERT, UPDATE, or DELETE rows. Rules:
 Some invariants belong at the datastore, not in application code — the load-bearing
 example is `audit_log` being **append-only** (CLAUDE.md postulate 7 / v0.1-spec
 section 6). Migration `0100` installs a `BEFORE UPDATE OR DELETE ... FOR EACH ROW`
-trigger that `RAISE`s, so a direct `UPDATE` / `DELETE` fails at the datastore under
-every role — including the app DB role and a superuser — while `INSERT` / `SELECT`
-stay untouched. Rules for this kind of migration:
+trigger (`audit_log_append_only`, calling `audit_log_reject_mutation()`) that
+`RAISE`s on a direct `UPDATE` / `DELETE`, while `INSERT` / `SELECT` stay untouched.
+
+What the trigger does and does not stop:
+
+- It fires for every role. It stops mistakes, and roles that have no ownership,
+  `TRIGGER` or `TRUNCATE` right on the table.
+- It does not stop the table owner or a superuser. They can disable the trigger,
+  replace the function, or `TRUNCATE` the table. In the default chart the app and
+  the migration job use the same database login, so the app role owns `audit_log`.
+- It does not stop a role with the `TRUNCATE` right (row triggers do not fire on
+  `TRUNCATE`), or a role with the `TRIGGER` right. Such a role can add its own
+  trigger, which can change a row after the guard has allowed the update, or run
+  code as the role that writes the next audit row.
+- So treat `TRIGGER` and `TRUNCATE` on `audit_log` like ownership: do not grant
+  them (`GRANT ALL` includes both). All of this was already true with `0100`.
+
+Migration `0103` replaces the function to allow **one** kind of `UPDATE`: the
+weekly `raw_payload` age-off (`meho_backplane.audit_retention`). What the guard
+accepts today:
+
+| Statement | Result |
+|---|---|
+| `INSERT`, `SELECT` | allowed (the trigger does not fire) |
+| `UPDATE` that sets `raw_payload` from a value to SQL `NULL` and leaves every other column value unchanged, byte for byte | allowed, on any row of any age, for any role with `UPDATE`. The same value written again is allowed too, even when the disk holds it in another form (for example with other compression) |
+| `UPDATE` that changes any other column, even together with `raw_payload = NULL`. This includes a value that only means the same (`json` key order or spaces, `1` vs `1.0`, SQL `NULL` vs JSON `null`) | rejected |
+| `UPDATE` that sets `raw_payload` to a value (including the JSON literal `'null'`), or touches a row whose `raw_payload` is already `NULL` | rejected |
+| `DELETE` | rejected, always |
+
+How the `0103` check works:
+
+- It compares `NEW` with `OLD` (with `raw_payload` set to `NULL`) using `*=`
+  (`record_image_eq`). That operator compares every column value byte for byte.
+- It never parses `json`. So a value that `jsonb` cannot hold (such as
+  `\u0000`) does not break the age-off.
+- A column added later is covered without a new migration. One exception: a
+  `STORED` generated column is still empty in `NEW` when a `BEFORE` trigger runs,
+  so it would make the age-off fail until the function is changed.
+- The function pins `search_path = pg_catalog, pg_temp` and writes its operators
+  as `OPERATOR(pg_catalog.=)` and `OPERATOR(pg_catalog.*=)`. So a caller cannot
+  change the check by putting its own functions or operators (for example a fake
+  `to_jsonb(audit_log)`) on its `search_path`.
+- At the end, `0103` checks that the trigger really calls the new function (the
+  new body and the pinned `search_path`). The `CREATE OR REPLACE FUNCTION` has no
+  schema name, so with an unexpected `search_path` it could make a second, unused
+  function in another schema. Then the migration fails instead of reporting
+  success.
+
+A rejected write raises the same text as before: `audit_log is append-only:
+<UPDATE|DELETE> is not permitted (governance invariant, v0.1-spec section 6)`.
+Before `0103`, the age-off `UPDATE` was rejected too, so `raw_payload` was never
+emptied on PostgreSQL. The testcontainers tests in
+`tests/migrations/test_migration_0103_audit_log_raw_payload_ageoff.py` run the real
+age-off tick on PostgreSQL and pin every row of this table.
+
+Rules for this kind of migration:
 
 1. **Postgres-only, dialect-guarded.** plpgsql trigger DDL is not portable to the
    SQLite dev/test lane. Guard the body with an early return so `upgrade()` and
@@ -167,15 +220,120 @@ stay untouched. Rules for this kind of migration:
        return
    ```
 
-   The unit lanes assert the app-level convention (no code path mutates the row);
+   The unit lanes assert the app-level convention (no code path mutates the row,
+   except the `raw_payload` age-off);
    the trigger is the production-datastore backstop, exercised by the
-   testcontainers slice in `tests/migrations/test_migration_rollback.py`.
+   testcontainers slices in `tests/migrations/test_migration_rollback.py` and
+   `tests/migrations/test_migration_0103_audit_log_raw_payload_ageoff.py`. A code
+   path that writes to a guarded table needs a test on PostgreSQL: the SQLite lane
+   has no trigger and passes even when the datastore would reject the write.
 2. **Additive and forward-compatible.** `CREATE TRIGGER` / `CREATE OR REPLACE
    FUNCTION` are not on the compat guard's banned list, and they keep the rollback
    contract: an older image against the newer schema only ever `INSERT`s the row it
    already knew how to write, so the trigger never fires on the hot path.
 3. **Reversible.** `downgrade()` drops the trigger then the function (reverse of
-   create order), also Postgres-guarded.
+   create order), also Postgres-guarded. A migration that only changes the function
+   (like `0103`) restores the previous function in `downgrade()` instead.
+   `CREATE OR REPLACE FUNCTION` resets every setting it does not name, so the
+   restored function also loses a pinned `search_path`.
+4. **Pin the function's `search_path`.** A trigger function that is not
+   `SECURITY DEFINER` runs with the caller's `search_path`. Add
+   `SET search_path = pg_catalog, pg_temp` and write operators and types with the
+   `pg_catalog` schema, so a caller cannot swap in its own functions or operators.
+
+## One chain, one head (the single-head check, #4204)
+
+The app expects exactly one newest migration (one "head").
+`backend/src/meho_backplane/db/migrations.py` calls `get_current_head()`,
+and that raises when two migrations share the same parent. Two pull
+requests made at the same time often take the same next number and the
+same `down_revision`. Git sees no conflict, because the file names
+differ. Without a guard the clash shows up only in the merge queue, where
+every database-backed job fails with hundreds of `Multiple head
+revisions` errors.
+
+`scripts/ci/check_migration_heads.py` finds the clash first. It reads
+`revision` and `down_revision` from every file in
+`backend/alembic/versions/` with the `ast` module. No database, no
+Alembic install, well under a minute. It fails when:
+
+- two files use the same `revision`,
+- a `down_revision` names a revision that does not exist,
+- more than one revision is a head.
+
+`.github/workflows/migration-heads.yml` runs it as the check
+**Migration chain (single head)**:
+
+- on every pull request (no path filter, so the check can be required),
+- in every merge-queue run (`merge_group`),
+- on a push to `main` that changes a migration. That run first checks
+  `main` itself. Then `scripts/ci/recheck_migration_prs.py` runs the
+  check again for every open pull request that adds a migration, against
+  the new `main`, and posts the result as a fresh check run on the pull
+  request's head commit under the same check name. A branch that is
+  behind `main` turns red before it can enter the merge queue.
+
+The re-check works for every pull request: from a branch in this repo or
+from a fork, with or without the workflow file on the branch. It runs
+from a checkout of `main` on a GitHub-hosted runner. It fetches the pull
+request's head commit, copies only `backend/alembic/versions/` out of it,
+and reads those files. No code from the pull request runs. It reads the
+whole list of open pull requests, page by page, and every page of a pull
+request's changed files, so no pull request is too old or too big to be
+re-checked. A pull request whose head moved since the listing is
+skipped; its new head has its own pull request run. A pull request whose
+list of changed files cannot be read, whose fetch fails or takes too
+long, or whose migration files cannot be unpacked (for example a link
+that points outside the work directory) is reported and skipped; the
+other pull requests still get their result.
+
+### What to do when the check fails
+
+The last line of the check output says what to change. Example:
+
+```
+Migration chain check FAILED:
+  - revision 0108 is used by 2 files: 0108_add_claims.py, 0108_add_scope.py
+What to do: main is at 0108. Rename your migration to 0109 and set down_revision to '0108'.
+```
+
+1. Rename your migration file to the number the message gives
+   (`0109_<slug>.py`) and set `revision` to that number.
+2. Set `down_revision` to the number `main` is at.
+3. Update the `Revision ID:` and `Revises:` lines in the docstring.
+4. Push. The check runs again on the pull request.
+
+If the message says only "Set down_revision ... to ...", your numbers are
+already right and only the named parent links are stale. If a migration on `main`
+merges after you fixed it, the check runs again on your branch by itself
+and tells you if you need to move once more.
+
+Run it locally before you push (from the repo root):
+
+```bash
+python3 scripts/ci/check_migration_heads.py
+```
+
+To see the result as the check will see it after a merge with `main`,
+pass `main`'s copy of the directory:
+
+```bash
+git fetch origin main
+rm -rf /tmp/main-versions && mkdir -p /tmp/main-versions
+git archive origin/main backend/alembic/versions | tar -x -C /tmp/main-versions
+python3 scripts/ci/check_migration_heads.py --main /tmp/main-versions/backend/alembic/versions
+```
+
+Tests: `backend/tests/migrations/test_migration_heads.py` covers one head,
+two heads, two files with the same number, a stale parent, a branch that
+adds several migrations, and compares the script's heads with Alembic's
+own `ScriptDirectory.get_heads()` on the real tree.
+`backend/tests/migrations/test_recheck_migration_prs.py` covers the
+re-check: a fork pull request and a branch without the workflow file both
+get a check run on their head commit, a migration after the first 100
+changed files is still found, and a pull request whose head moved, whose
+files cannot be read, or that cannot be fetched or unpacked is reported
+and skipped while the next one still gets its result.
 
 ## Additive-only constraint
 
@@ -217,7 +375,8 @@ Job (`deploy/charts/meho/templates/migration-job.yaml`), so the schema moves
 release). After any rollback across a migration the database is therefore
 *ahead* of the running image, by design.
 
-Two enforced invariants make that state safe instead of an outage:
+Two enforced invariants make that state safe instead of an outage (and
+one more rule for data an older build must not act on, below):
 
 1. **Additive-only `upgrade()`** (above, CI-gated by
    `scripts/ci/check_migration_compat.py` via `migration-compat.yml`) — the
@@ -230,6 +389,21 @@ Two enforced invariants make that state safe instead of an outage:
    newer release's migration Job can have stamped it). A revision the image
    *does* know that differs from head means the DB is **behind** — that
    still fails readiness, as does a fresh unmigrated DB.
+
+**Data an older build must not use (#4622).** A rollback replaces the
+program, not the database, so a table a newer build writes stays in place
+and an older build reads whatever tables it knows. Where that would change
+a safety decision, the newer build keeps the data in a table of its own
+that older builds never read. The first case: delete grants in sandbox
+mode live in `sandbox_delete_grant` (migration `0115`), not in
+`service_principal_grant`. So after a rollback to a build from before
+sandbox mode, **an older build sees no delete grant**, and every delete
+and every delete step waits for a person again. The same holds while old
+and new builds run side by side during an update, and on a newer build
+with the mode off. The stored mode in `sandbox_mode_state` and the audit
+column `audit_log.sandbox_mode` (database default `false`) are additive,
+so an older build still starts and writes audit rows against the newer
+schema; its rows carry the mark `false`.
 
 Before #1607 the probe demanded strict `current == head` equality, which
 poisoned the deploy lifecycle twice over (live 2026-06-08, v0.12.0): the
@@ -256,7 +430,9 @@ failed-release window. Automatic downgrades stay banned.
   a failure, so a corrupted or foreign `alembic_version` value passes
   readiness. The dangerous direction (DB behind the code — expected tables
   or columns missing) still fails closed, and the tolerated state stays
-  visible on `/ready` as `db_ahead=true`.
+  visible on `/ready` as `db_ahead=true`, and in `meho status` /
+  `meho_status` as a database revision newer than the one this version
+  expects (`db.revision` vs `db.head` on `/api/v1/health`, #4830).
 - The tolerance ships *in the image being rolled back to*. Rolling back to
   a pre-tolerance image (strict-equality probe) across a migration still
   bricks readiness — recover by rolling forward.
@@ -296,3 +472,5 @@ avoid "event loop already running" errors.
 - `backend/tests/migrations/test_alembic_uuid_param_consistency.py`: drift-guard test.
 - `backend/tests/migrations/test_alembic_seed_rdc_conventions.py`: 0018 behavioural tests.
 - `backend/tests/migrations/test_migration_compat.py`: additive-only CI guard tests.
+- `backend/tests/migrations/test_migration_heads.py`: single-head CI guard tests (#4204).
+- `backend/tests/migrations/test_recheck_migration_prs.py`: re-check of open migration pull requests after `main` moved (#4204).

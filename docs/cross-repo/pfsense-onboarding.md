@@ -12,7 +12,7 @@ Copyright (c) 2026 evoila Group
 > [`backend/src/meho_backplane/connectors/pfsense/`](../../backend/src/meho_backplane/connectors/pfsense/);
 > the engineering-facing companion is
 > [`docs/codebase/connectors-pfsense.md`](../codebase/connectors-pfsense.md)
-> (if present). This doc is the cookbook every RDC operator reads when
+> (if present). This doc is the cookbook every operator reads when
 > retiring the bash wrapper in favour of `meho pfsense …`.
 
 ## What this surface is
@@ -38,7 +38,7 @@ working set operators use for daily firewall and network diagnostics:
 | `firewall` | `pfsense.firewall.rules`, `pfsense.firewall.state` | read-only |
 | `nat` | `pfsense.nat.rules` | read-only |
 | `network` | `pfsense.interface.list`, `pfsense.gateway.list` | read-only |
-| `config` | `pfsense.config.show` | read-only XML dump |
+| `config` | `pfsense.config.show` | read-only XML dump, known secrets removed |
 
 Eight ops total. Every op dispatches through the same
 `POST /api/v1/operations/call` route the agent surface uses — auth,
@@ -109,10 +109,10 @@ exposes the credential in the SSH handshake log and in `auth.log`.
 ### Generating the SSH key pair
 
 ```console
-$ ssh-keygen -t ed25519 -f ~/.ssh/meho-pfsense-hetzner-dc -C "meho-pfsense@rdc-hetzner-dc" -N ""
+$ ssh-keygen -t ed25519 -f ~/.ssh/meho-fw-01 -C "meho-pfsense@fw-01" -N ""
 ```
 
-The public key (`~/.ssh/meho-pfsense-hetzner-dc.pub`) goes into
+The public key (`~/.ssh/meho-fw-01.pub`) goes into
 pfSense's user manager (step 4 above). The private key is stored in
 Vault.
 
@@ -122,8 +122,8 @@ Use the tenant's KV-v2 path convention:
 `secret/<tenant>/pfsense/<host>`. Example via `meho vault kv put`:
 
 ```console
-$ meho vault kv put --target rdc-vault secret \
-    rdc-hetzner-dc/pfsense/pfsense-01 \
+$ meho vault kv put --target vault-01 secret \
+    example-tenant/pfsense/pfsense-01 \
     --data @pfsense_secret_ref.json
 ```
 
@@ -137,7 +137,7 @@ $ meho vault kv put --target rdc-vault secret \
 ```
 
 The `ssh_private_key` value is the contents of the private-key file
-(e.g. `~/.ssh/meho-pfsense-hetzner-dc`) as a single JSON string with
+(e.g. `~/.ssh/meho-fw-01`) as a single JSON string with
 literal `\n` newlines, `BEGIN` / `END` headers, and the trailing
 newline. `asyncssh`'s `import_private_key` parses Ed25519, ECDSA, RSA,
 and OpenSSH-format PEM keys.
@@ -147,11 +147,11 @@ and OpenSSH-format PEM keys.
 ```yaml
 # targets.yaml
 targets:
-  - name: pfsense-hetzner-dc
+  - name: fw-01
     product: pfsense
-    host: 10.5.1.1
+    host: 192.0.2.1
     port: 22
-    secret_ref: secret/rdc-hetzner-dc/pfsense/pfsense-01
+    secret_ref: secret/example-tenant/pfsense/pfsense-01
     auth_model: shared_service_account
 ```
 
@@ -162,10 +162,10 @@ $ meho targets import targets.yaml
 Verify the target is reachable:
 
 ```console
-$ meho targets probe pfsense-hetzner-dc
+$ meho targets probe fw-01
 ok — pfsense 2.7.2-RELEASE reachable; shell access confirmed
 
-$ meho pfsense about --target pfsense-hetzner-dc
+$ meho pfsense about --target fw-01
 pfsense-ssh-2.7 pfsense.about — status=ok (83ms)
   vendor:     netgate
   product:    pfsense
@@ -218,7 +218,7 @@ the dispatcher; the CLI's human render caps at 20 rows. Use `--json` and
 pipe through `jq` for filtering:
 
 ```console
-$ meho pfsense firewall state --target pfsense-hetzner-dc --json \
+$ meho pfsense firewall state --target fw-01 --json \
     | jq '.result.rows[] | select(.proto=="tcp") | .dst' | sort -u
 ```
 
@@ -226,13 +226,21 @@ When the JSONFlux reducer is configured with a row-count threshold, the
 dispatcher will produce a `ResultHandle` for large state tables (the
 agent can then page it with `result_query(handle_id, offset, limit)`).
 
-### config.xml contains sensitive data
+### config.xml secrets are removed
 
-`pfsense.config.show` returns the full `/cf/conf/config.xml` as a string
-field in the OperationResult. The config includes VPN keys, user password
-hashes, and pre-shared secrets. The CLI's human render caps at 40 lines;
-`--json` returns the full content. Treat the JSON output as sensitive and
-avoid persisting it in plain text.
+`/cf/conf/config.xml` holds the firewall's secrets: VPN keys, certificate
+private keys, user password hashes, pre-shared keys and service passwords.
+`pfsense.config.show` returns the file with known secret fields and known
+secret shapes replaced by `***REDACTED***`, and reports how many values it
+replaced in `redacted_count`. Everything else is unchanged. If the secrets
+cannot be removed safely, the op returns no XML and an error instead.
+Because the secrets are gone, the output is **not** a restorable backup —
+use the pfSense backup page for that. The CLI's human render caps at 40
+lines; `--json` returns the full (cleaned) content.
+
+Free-text fields (descriptions, notes, cron or shell commands, custom config
+text, URLs) can still hold secrets that someone typed in. Treat the output
+as sensitive.
 
 ## The CLI verb surface
 
@@ -246,8 +254,8 @@ Exit codes mirror `meho operation call` (0=ok, 1=error/denied,
 ### Identity — `meho pfsense about`
 
 ```console
-$ meho pfsense about --target pfsense-hetzner-dc
-$ meho pfsense about --target pfsense-hetzner-dc --json | jq .result
+$ meho pfsense about --target fw-01
+$ meho pfsense about --target fw-01 --json | jq .result
 ```
 
 Returns vendor / product / version / build / kernel from `/etc/version`.
@@ -256,8 +264,8 @@ Use before issuing higher-level ops to confirm reachability and version.
 ### Version — `meho pfsense version`
 
 ```console
-$ meho pfsense version --target pfsense-hetzner-dc
-$ meho pfsense version --target pfsense-hetzner-dc --json | jq .result.version
+$ meho pfsense version --target fw-01
+$ meho pfsense version --target fw-01 --json | jq .result.version
 ```
 
 Returns version / build / kernel without the full FingerprintResult
@@ -267,13 +275,13 @@ envelope. Prefer `about` when vendor + product confirmation is needed.
 
 ```console
 # List filter rules (pfctl -sr)
-$ meho pfsense firewall rules --target pfsense-hetzner-dc
+$ meho pfsense firewall rules --target fw-01
 
 # List connection state table (pfctl -ss; cap at 20 rows in human mode)
-$ meho pfsense firewall state --target pfsense-hetzner-dc
+$ meho pfsense firewall state --target fw-01
 
 # Pipe JSON through jq for filtering
-$ meho pfsense firewall rules --target pfsense-hetzner-dc --json \
+$ meho pfsense firewall rules --target fw-01 --json \
     | jq '.result.rows[] | select(.action=="block")'
 ```
 
@@ -283,8 +291,8 @@ $ meho pfsense firewall rules --target pfsense-hetzner-dc --json \
 ### NAT — `meho pfsense nat rules`
 
 ```console
-$ meho pfsense nat rules --target pfsense-hetzner-dc
-$ meho pfsense nat rules --target pfsense-hetzner-dc --json | jq '.result.rows[]'
+$ meho pfsense nat rules --target fw-01
+$ meho pfsense nat rules --target fw-01 --json | jq '.result.rows[]'
 ```
 
 Parses `pfctl -sn` into `{action, direction, rule}` rows. Actions:
@@ -294,11 +302,11 @@ Parses `pfctl -sn` into `{action, direction, rule}` rows. Actions:
 
 ```console
 # List interfaces (ifconfig -a)
-$ meho pfsense network interface --target pfsense-hetzner-dc
+$ meho pfsense network interface --target fw-01
 
 # List gateways (from config.xml)
-$ meho pfsense network gateway --target pfsense-hetzner-dc
-$ meho pfsense network gateway --target pfsense-hetzner-dc --json \
+$ meho pfsense network gateway --target fw-01
+$ meho pfsense network gateway --target fw-01 --json \
     | jq '.result.rows[] | select(.defaultgw)'
 ```
 
@@ -309,14 +317,17 @@ $ meho pfsense network gateway --target pfsense-hetzner-dc --json \
 
 ```console
 # Print first 40 lines of config.xml with length summary
-$ meho pfsense config show --target pfsense-hetzner-dc
+$ meho pfsense config show --target fw-01
 
-# Extract full XML to a file
-$ meho pfsense config show --target pfsense-hetzner-dc --json \
-    | jq -r .result.config_xml > pfsense-backup-$(date +%Y%m%d).xml
+# Extract the full XML (known secrets removed) to a file
+$ meho pfsense config show --target fw-01 --json \
+    | jq -r .result.config_xml > pfsense-config-$(date +%Y%m%d).xml
 ```
 
-Returns the raw `/cf/conf/config.xml` content and its character length.
+Returns the `/cf/conf/config.xml` content with known secret fields and known
+secret shapes replaced by `***REDACTED***`, its character length and
+`redacted_count`. Free-text fields can still hold secrets that someone typed
+in.
 For structured gateway data, prefer `meho pfsense network gateway`.
 
 ## The agent meta-tool path
@@ -330,7 +341,7 @@ meta-tools used for every other connector:
 search_operations(connector_id="pfsense-ssh-2.7", query="firewall rules")
 → [{"op_id": "pfsense.firewall.rules", "summary": "List the active pfSense firewall filter rules from pfctl.", ...}]
 
-call_operation(op_id="pfsense.firewall.rules", target={"name": "pfsense-hetzner-dc"}, params={})
+call_operation(op_id="pfsense.firewall.rules", target={"name": "fw-01"}, params={})
 → OperationResult{status="ok", result={"rows": [...], "total": 2}}
 ```
 
@@ -355,21 +366,21 @@ over SSH with hard-coded credentials. Replace each invocation with the
 
 | Old `pfsense.sh` invocation | New `meho pfsense` equivalent |
 | --- | --- |
-| `./scripts/pfsense.sh --about` | `meho pfsense about --target pfsense-hetzner-dc` |
-| `./scripts/pfsense.sh --version` | `meho pfsense version --target pfsense-hetzner-dc` |
-| `./scripts/pfsense.sh --firewall-rules` | `meho pfsense firewall rules --target pfsense-hetzner-dc` |
-| `./scripts/pfsense.sh --firewall-state` | `meho pfsense firewall state --target pfsense-hetzner-dc` |
-| `./scripts/pfsense.sh --nat-rules` | `meho pfsense nat rules --target pfsense-hetzner-dc` |
-| `./scripts/pfsense.sh --interfaces` | `meho pfsense network interface --target pfsense-hetzner-dc` |
-| `./scripts/pfsense.sh --gateways` | `meho pfsense network gateway --target pfsense-hetzner-dc` |
-| `./scripts/pfsense.sh --config-show` | `meho pfsense config show --target pfsense-hetzner-dc` |
+| `./scripts/pfsense.sh --about` | `meho pfsense about --target fw-01` |
+| `./scripts/pfsense.sh --version` | `meho pfsense version --target fw-01` |
+| `./scripts/pfsense.sh --firewall-rules` | `meho pfsense firewall rules --target fw-01` |
+| `./scripts/pfsense.sh --firewall-state` | `meho pfsense firewall state --target fw-01` |
+| `./scripts/pfsense.sh --nat-rules` | `meho pfsense nat rules --target fw-01` |
+| `./scripts/pfsense.sh --interfaces` | `meho pfsense network interface --target fw-01` |
+| `./scripts/pfsense.sh --gateways` | `meho pfsense network gateway --target fw-01` |
+| `./scripts/pfsense.sh --config-show` | `meho pfsense config show --target fw-01` |
 
-Once every calling site in `evoila-bosnia/claude-rdc-hetzner-dc` is
+Once every calling site in the consumer repo is
 migrated:
 
 1. Add the pfSense target with `meho targets import` (see above).
 2. Store the SSH key in Vault with `meho vault kv put`.
-3. Run `meho targets probe pfsense-hetzner-dc` to confirm end-to-end
+3. Run `meho targets probe fw-01` to confirm end-to-end
    connectivity.
 4. Remove `scripts/pfsense.sh` from the consumer repo and update any
    CI or runbook references.

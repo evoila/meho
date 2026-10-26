@@ -19,11 +19,13 @@
       inline error fragment into ``#conventions-write-result`` -- no
       redirect, the operator's input survives.
 
-  Token-cost preview: the body textarea + kind selector both drive a
-  debounced ``hx-post`` to ``/ui/conventions/preview``
-  (``keyup changed delay:300ms`` on the body, ``change`` on the kind
-  selector). The preview fragment shows ``estimate_tokens(body)`` vs the
-  600-token budget, red when an operational body is over.
+  Token-cost preview: the title input, the body textarea and the kind
+  selector all drive a debounced ``hx-post`` to
+  ``/ui/conventions/preview`` (``keyup changed delay:300ms`` on the
+  title and body, ``change`` on the kind selector). The title counts
+  towards the rendered cost, so a title edit must refresh the preview
+  too. The preview fragment shows the rendered estimate vs the
+  600-token budget, red when an operational entry is over.
 
   CSRF posture: the form declares its own ``hx-headers`` echo of the
   token THIS render minted; the route set the matching ``meho_csrf``
@@ -101,6 +103,11 @@
           required
           maxlength="{{ title_max_length }}"
           class="input input-bordered input-sm w-full"
+          hx-post="/ui/conventions/preview"
+          hx-trigger="keyup changed delay:300ms"
+          hx-target="#conventions-token-preview"
+          hx-swap="outerHTML"
+          hx-include="closest form"
           placeholder="Confirm before applying a destructive change"
         />
       </label>

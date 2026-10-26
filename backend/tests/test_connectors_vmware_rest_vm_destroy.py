@@ -37,15 +37,19 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
-from meho_backplane.connectors.vmware_rest.composites import register_vmware_composite_operations
+from meho_backplane.connectors.vmware_rest.composites import (
+    _write,
+    register_vmware_composite_operations,
+)
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
+from meho_backplane.db.models import ApprovalRequest, AuditLog, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
@@ -631,6 +635,57 @@ async def test_vim_arm_pre_9_0_destroy_task(stub_embedding_service: AsyncMock) -
     assert ("DELETE", "/vcenter/vm/vm-1") not in recorder.calls
 
 
+@pytest.mark.asyncio
+async def test_vim_arm_destroy_task_timeout_is_error(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Destroy_Task that does not finish in time is an error, not ok (#3813).
+
+    The VM may not be gone, so the approver's resume result and the audit row
+    must both say the destroy failed.
+    """
+    monkeypatch.setattr(_write, "_VM_DESTROY_TASK_TIMEOUT_SECONDS", 0.0)
+    recorder = _RecordingVmwareConnector(about_version="8.0.3")
+    _seed_vm_reads(recorder)
+    recorder.vmomi_responses[f"/VirtualMachine/{_VM}/Destroy_Task"] = _task_moref("task-78")
+    recorder.vmomi_responses["Task"] = _retrieve_result(
+        "Task", "task-78", "info", {"state": "running"}
+    )
+    await _bootstrap(recorder, stub_embedding_service)
+    await _seed_target()
+
+    requester = _make_operator(sub="op-requester")
+    args = {
+        "connector_id": _CONNECTOR_ID,
+        "op_id": _OP_ID,
+        "target": "test-vcenter",
+        "params": _PARAMS,
+    }
+    preview = await preview_operation(requester, args)
+    call = await call_operation(requester, {**args, "preview_hash": preview["preview_hash"]})
+    request_id = UUID(call["extras"]["approval_request_id"])
+
+    approver = _make_operator(sub="op-approver")
+    async with get_sessionmaker()() as s:
+        await approve_request(s, request_id, operator=approver, params=None)
+        await s.commit()
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        resume = await resume_dispatch_after_approval(operator=approver, request=row, params=None)
+
+    assert resume.status == "error", resume.result
+    assert resume.extras["error_code"] == "timeout"
+    assert resume.result["task_id"] == "task-78"
+    assert any(i["severity"] == "error" for i in resume.result["issues"])
+
+    async with get_sessionmaker()() as s:
+        rows = (await s.execute(select(AuditLog).where(AuditLog.path == _OP_ID))).scalars().all()
+    statuses = [r.payload.get("result_status") for r in rows]
+    assert "error" in statuses, statuses
+    assert "ok" not in statuses, statuses
+
+
 # ---------------------------------------------------------------------------
 # Structural gap 1 — registration fail-fast: destructive ⇒ requires_approval
 # ---------------------------------------------------------------------------
@@ -731,3 +786,89 @@ async def test_composite_preview_hash_is_param_sensitive(stub_embedding_service:
     assert p1["status"] == "ok"
     assert p1["preview_hash"] == p1b["preview_hash"]  # stable for identical args
     assert p1["preview_hash"] != p2["preview_hash"]  # a different delete → different hash
+
+
+# ---------------------------------------------------------------------------
+# A VM name where a moid belongs fails as invalid_params (#3479)
+# ---------------------------------------------------------------------------
+
+
+def _assert_vm_pattern_error(extras: dict[str, Any]) -> None:
+    assert extras["error_code"] == "invalid_params"
+    errors = extras["validation_errors"]
+    assert [(e["path"], e["validator"]) for e in errors] == [("$.vm", "pattern")]
+
+
+@pytest.mark.asyncio
+async def test_destroy_with_vm_name_is_invalid_params_not_blast_radius_denial(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A name fails schema validation before the preview reads vCenter."""
+    recorder = _RecordingVmwareConnector(about_version="9.0.0")
+    _seed_vm_reads(recorder)
+    await _bootstrap(recorder, stub_embedding_service)
+    await _seed_target()
+
+    requester = _make_operator(sub="op-requester")
+    args = {
+        "connector_id": _CONNECTOR_ID,
+        "op_id": _OP_ID,
+        "target": "test-vcenter",
+        "params": {"vm": "doomed-vm"},
+    }
+
+    preview = await preview_operation(requester, args)
+    assert preview["status"] == "error", preview
+    _assert_vm_pattern_error(preview["extras"])
+
+    call = await call_operation(requester, {**args, "preview_hash": "0" * 64})
+    assert call["status"] == "error", call
+    _assert_vm_pattern_error(call["extras"])
+    assert recorder.calls == []
+    assert await _pending_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_power_with_vm_name_is_invalid_params(stub_embedding_service: AsyncMock) -> None:
+    """vm.power refuses a name at dispatch instead of failing at vCenter with a 404."""
+    recorder = _RecordingVmwareConnector(about_version="9.0.0")
+    await _bootstrap(recorder, stub_embedding_service)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.power",
+        target=_FakeVmwareTarget(),
+        params={"vm": "web-01", "verb": "off"},
+    )
+    assert result.status == "error"
+    _assert_vm_pattern_error(result.extras)
+    assert recorder.calls == []
+
+
+@pytest.mark.parametrize("value", ["vm-42", "vm-1001"])
+def test_vm_moid_pattern_accepts_moids(value: str) -> None:
+    from meho_backplane.connectors.vmware_rest.composites.schemas import (
+        VM_DESTROY_PARAMETER_SCHEMA,
+        VM_POWER_PARAMETER_SCHEMA,
+    )
+    from meho_backplane.operations._validate import validate_params
+
+    assert validate_params(VM_DESTROY_PARAMETER_SCHEMA, {"vm": value}) == []
+    assert validate_params(VM_POWER_PARAMETER_SCHEMA, {"vm": value, "verb": "on"}) == []
+
+
+@pytest.mark.parametrize("value", ["web-01", "vm-", "vm-abc", "VM-42", "host-42"])
+def test_vm_moid_pattern_rejects_non_moids(value: str) -> None:
+    from meho_backplane.connectors.vmware_rest.composites.schemas import (
+        VM_DESTROY_PARAMETER_SCHEMA,
+        VM_POWER_PARAMETER_SCHEMA,
+    )
+    from meho_backplane.operations._validate import validate_params
+
+    for schema, params in (
+        (VM_DESTROY_PARAMETER_SCHEMA, {"vm": value}),
+        (VM_POWER_PARAMETER_SCHEMA, {"vm": value, "verb": "on"}),
+    ):
+        errors = validate_params(schema, params)
+        assert [(e["path"], e["validator"]) for e in errors] == [("$.vm", "pattern")]

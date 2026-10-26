@@ -47,27 +47,40 @@ Coverage matrix (mirrors the Task #451 acceptance criteria):
 * #2538 staleness: ``include_stale=True`` (default) keeps soft-deleted
   nodes/edges walkable on all three verbs; ``False`` excludes them —
   including the reversed ``bi_edge`` leg of ``find_path``.
+* #3760: ``find_path`` keeps undirected as the default and applies
+  ``forward`` / ``reverse``; ``relation_class`` keeps only reviewed
+  kinds; rows carry ``last_seen`` and the walked edge's source and
+  ``last_seen``; a missing endpoint can be told apart from no route.
 """
 
 from __future__ import annotations
 
+import json
+import secrets
 import time
 import uuid
 from collections import Counter
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from sqlalchemy import delete, event, select, text
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.db import engine as engine_module
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import GraphEdge, GraphNode
+from meho_backplane.db.models import GraphEdge, GraphNode, Target
+from meho_backplane.topology import query as query_module
+from meho_backplane.topology.evidence import classify_freshness
 from meho_backplane.topology.query import (
     AmbiguousNodeError,
+    ClosureBudget,
+    bounded_closure,
     find_dependencies,
     find_dependents,
     find_path,
+    list_edges,
 )
 from meho_backplane.topology.resolvers import NodeNotFoundError
 from tests.integration.conftest import DOCKER_AVAILABLE, SKIP_REASON
@@ -590,6 +603,26 @@ async def test_include_stale_false_exempts_both_path_endpoints(
 
 
 @_skip_no_docker
+async def test_include_stale_false_still_returns_a_stale_closure_root(
+    stale_chain: dict[str, uuid.UUID],
+) -> None:
+    """The closure root is never filtered by ``include_stale`` (#2538): a
+    soft-deleted root still comes back at depth 0 with ``last_seen``
+    NULL, so the MCP ``evidence`` block has to name that exception
+    (#3760). Reached as a non-root row, the same stale node is dropped.
+    """
+    op = _operator(TENANT_A_ID)
+    await _soft_delete_node(stale_chain["root"])
+
+    dependents = await find_dependents(op, "root", include_stale=False)
+    assert [n.name for n in dependents] == ["root", "mid", "leaf"]
+    assert dependents[0].depth == 0 and dependents[0].last_seen is None
+
+    dependencies = await find_dependencies(op, "leaf", include_stale=False)
+    assert {n.name for n in dependencies} == {"leaf", "mid"}
+
+
+@_skip_no_docker
 async def test_find_dependents_untracked_vs_tracked_no_deps(
     known_graph: dict[str, uuid.UUID],
 ) -> None:
@@ -1034,6 +1067,271 @@ async def test_guard_does_not_drop_non_superseded_edges(
     assert path.total_hops == 2
 
 
+def _closure_shape(nodes: Any) -> list[tuple[Any, ...]]:
+    """The pre-#3739 fields of a closure, in result order."""
+    return [
+        (n.id, n.kind, n.name, n.source, n.depth, n.via_edge_kind, n.parent_node_id, n.via_edge_id)
+        for n in nodes
+    ]
+
+
+@_skip_no_docker
+async def test_legacy_rows_read_back_unresolved_and_results_unchanged(
+    known_graph: dict[str, uuid.UUID],
+) -> None:
+    """#3739 expand step: readers label legacy rows and never pick a scope.
+
+    Every seeded row has ``source_scope`` NULL, the legacy shape. Readers
+    must return it as ``unresolved``. Setting scopes afterwards must not
+    change which rows come back, their order or their chain provenance --
+    the scope is reported, not used to choose a source.
+    """
+    op = _operator(TENANT_A_ID)
+    legacy_closure = await find_dependencies(op, "app")
+    legacy_path = await find_path(op, "app", "ds1")
+    assert legacy_path is not None
+    assert all(n.source_scope is None for n in legacy_closure)
+    assert {n.scope_status for n in legacy_closure} == {"unresolved"}
+    assert {n.scope_status for n in legacy_path.nodes} == {"unresolved"}
+
+    target_scope = f"target:{uuid.uuid4()}"
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        app = await session.get(GraphNode, known_graph["app"])
+        vm1 = await session.get(GraphNode, known_graph["vm1"])
+        assert app is not None
+        assert vm1 is not None
+        app.source_scope = "global"
+        vm1.source_scope = target_scope
+
+    scoped_closure = await find_dependencies(op, "app")
+    scoped_path = await find_path(op, "app", "ds1")
+    assert scoped_path is not None
+    assert _closure_shape(scoped_closure) == _closure_shape(legacy_closure)
+    assert _closure_shape(scoped_path.nodes) == _closure_shape(legacy_path.nodes)
+    status = {n.name: (n.source_scope, n.scope_status) for n in scoped_closure}
+    assert status["app"] == ("global", "global")
+    assert status["vm1"] == (target_scope, "target")
+    assert status["host1"] == (None, "unresolved")
+    path_status = {n.name: n.scope_status for n in scoped_path.nodes}
+    assert path_status["app"] == "global"
+
+
+@_skip_no_docker
+async def test_last_observed_target_is_not_read_as_scope(pg_engine: None) -> None:
+    """A legacy row with ``target_id`` set still reads as ``unresolved``."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        target = Target(
+            id=uuid.uuid4(),
+            tenant_id=TENANT_A_ID,
+            name=f"cluster-{uuid.uuid4().hex[:8]}",
+            aliases=[],
+            product="kubernetes",
+            host="k8s.example.test",
+        )
+        session.add(target)
+        await session.flush()
+        session.add(
+            GraphNode(
+                id=uuid.uuid4(),
+                tenant_id=TENANT_A_ID,
+                kind="namespace",
+                name="default",
+                target_id=target.id,
+                source="auto",
+                properties={},
+                discovered_by="kubernetes",
+            )
+        )
+
+    nodes = await find_dependents(_operator(TENANT_A_ID), "default", kind="namespace")
+
+    assert [(n.name, n.source_scope, n.scope_status) for n in nodes] == [
+        ("default", None, "unresolved")
+    ]
+
+
+# ---------------------------------------------------------------------------
+# #3760 — path direction, relation class, source and freshness
+# ---------------------------------------------------------------------------
+
+
+@_skip_no_docker
+async def test_undirected_path_is_the_default_and_keeps_legacy_reachability(
+    known_graph: dict[str, uuid.UUID],
+) -> None:
+    """With no direction, edges are walked both ways, as before."""
+    op = _operator(TENANT_A_ID)
+    path = await find_path(op, "ds1", "app")
+    assert path is not None
+    assert path.direction == "undirected"
+    assert [n.name for n in path.nodes] == ["ds1", "vm1", "app"]
+    # vm1 and vm2 only meet against edge direction (both run on host1).
+    sibling = await find_path(op, "vm1", "vm2")
+    assert sibling is not None and sibling.total_hops == 2
+    explicit = await find_path(op, "vm1", "vm2", direction="undirected")
+    assert explicit is not None and explicit.total_hops == 2
+
+
+@_skip_no_docker
+async def test_forward_and_reverse_paths_follow_edge_direction(
+    known_graph: dict[str, uuid.UUID],
+) -> None:
+    """``forward`` follows ``from -> to`` only; ``reverse`` the other way."""
+    op = _operator(TENANT_A_ID)
+
+    forward = await find_path(op, "app", "ds1", direction="forward")
+    assert forward is not None
+    assert forward.direction == "forward"
+    assert [n.name for n in forward.nodes] == ["app", "vm1", "ds1"]
+    # Every edge points away from ds1, so nothing leads forward from it.
+    assert await find_path(op, "ds1", "app", direction="forward") is None
+
+    reverse = await find_path(op, "ds1", "app", direction="reverse")
+    assert reverse is not None
+    assert reverse.direction == "reverse"
+    assert [n.name for n in reverse.nodes] == ["ds1", "vm1", "app"]
+    assert await find_path(op, "app", "ds1", direction="reverse") is None
+
+    # The siblings only meet when both directions are allowed.
+    assert await find_path(op, "vm1", "vm2", direction="forward") is None
+    assert await find_path(op, "vm1", "vm2", direction="reverse") is None
+
+
+@_skip_no_docker
+async def test_relation_class_filter_keeps_only_mapped_kinds(
+    known_graph: dict[str, uuid.UUID],
+) -> None:
+    """Containment is ``belongs-to`` only; ``mounts`` is ``unknown``."""
+    op = _operator(TENANT_A_ID)
+
+    contained = await find_dependencies(op, "app", relation_class="containment")
+    assert {n.name for n in contained} == {"app", "vm1", "vm2"}
+    assert {n.via_relation_class for n in contained if n.depth} == {"containment"}
+
+    placed = await find_dependents(op, "host1", relation_class="placement")
+    assert {n.name for n in placed} == {"host1", "vm1", "vm2"}
+    assert {n.via_relation_class for n in placed if n.depth} == {"placement"}
+
+    unknown = await find_dependencies(op, "vm1", relation_class="unknown")
+    assert {n.name for n in unknown} == {"vm1", "ds1"}
+    assert {n.via_relation_class for n in unknown if n.depth} == {"unknown"}
+
+    # No ``authenticates-via`` edge exists, so no dependency is claimed.
+    assert [n.name for n in await find_dependencies(op, "app", relation_class="dependency")] == [
+        "app"
+    ]
+
+    # The filter applies to path search too.
+    assert await find_path(op, "app", "ds1", relation_class="containment") is None
+    via_host = await find_path(op, "vm1", "vm2", relation_class="placement")
+    assert via_host is not None
+    assert [n.name for n in via_host.nodes] == ["vm1", "host1", "vm2"]
+
+
+@_skip_no_docker
+async def test_edge_listing_carries_relation_class_and_endpoint_scope(
+    pg_engine: None,
+) -> None:
+    """``list_edges`` filters by relation class and reports endpoint scopes."""
+    now = datetime.now(UTC)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        ids = {
+            name: await _seed_node(
+                session, tenant_id=TENANT_A_ID, kind=kind, name=name, last_seen=now
+            )
+            for name, kind in (
+                ("sa-1", "serviceaccount"),
+                ("role-1", "vault-role"),
+                ("pod-1", "pod"),
+                ("ns-1", "namespace"),
+            )
+        }
+        role = await session.get(GraphNode, ids["role-1"])
+        assert role is not None
+        role.source_scope = "global"
+        for frm, to, kind in (
+            ("sa-1", "role-1", "authenticates-via"),
+            ("pod-1", "ns-1", "belongs-to"),
+            ("pod-1", "sa-1", "depends-on"),
+        ):
+            await _seed_edge(
+                session,
+                tenant_id=TENANT_A_ID,
+                from_id=ids[frm],
+                to_id=ids[to],
+                kind=kind,
+                last_seen=now,
+            )
+
+    async with sessionmaker() as session:
+        dependency = await list_edges(session, TENANT_A_ID, relation_class="dependency")
+        unknown = await list_edges(session, TENANT_A_ID, relation_class="unknown")
+        everything = await list_edges(session, TENANT_A_ID)
+
+    assert [(e.kind, e.relation_class) for e in dependency] == [("authenticates-via", "dependency")]
+    assert dependency[0].from_endpoint.source_scope is None
+    assert dependency[0].to_endpoint.source_scope == "global"
+    # ``depends-on`` is not a reviewed kind, so it stays unknown.
+    assert [(e.kind, e.relation_class) for e in unknown] == [("depends-on", "unknown")]
+    assert {e.relation_class for e in everything} == {"dependency", "containment", "unknown"}
+
+
+@_skip_no_docker
+async def test_missing_endpoint_and_no_route_are_told_apart(
+    known_graph: dict[str, uuid.UUID],
+) -> None:
+    """``missing_endpoint_raises`` separates "not in the graph" from "no route"."""
+    op = _operator(TENANT_A_ID)
+    with pytest.raises(NodeNotFoundError) as excinfo:
+        await find_path(op, "app", "no-such-node", missing_endpoint_raises=True)
+    assert excinfo.value.name == "no-such-node"
+    # Both ends exist; the route is just too long for one hop.
+    assert await find_path(op, "app", "ds1", max_hops=1, missing_endpoint_raises=True) is None
+
+
+@_skip_no_docker
+async def test_stale_edge_and_old_observation_read_differently(
+    stale_chain: dict[str, uuid.UUID],
+) -> None:
+    """Rows carry ``last_seen`` and edge facts, so freshness can be told apart."""
+    op = _operator(TENANT_A_ID)
+    await _soft_delete_edge(stale_chain["e_mid_root"])
+    long_ago = datetime.now(UTC) - timedelta(days=3)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        leaf = await session.get(GraphNode, stale_chain["leaf"])
+        assert leaf is not None
+        leaf.last_seen = long_ago
+
+    rows = {n.name: n for n in await find_dependents(op, "root")}
+    path = await find_path(op, "root", "leaf")
+    assert path is not None
+    now = datetime.now(UTC)
+
+    def freshness(source: str | None, last_seen: datetime | None) -> str:
+        return classify_freshness(source, last_seen, now=now, refresh_interval_seconds=3600)
+
+    mid, leaf_row = rows["mid"], rows["leaf"]
+    # The edge into mid was dropped by the latest refresh: stale.
+    assert mid.via_edge_source == "auto"
+    assert mid.via_edge_last_seen is None
+    assert freshness(mid.via_edge_source, mid.via_edge_last_seen) == "stale"
+    assert freshness(mid.source, mid.last_seen) == "observed"
+    # leaf is still readable but was last seen days ago: old.
+    assert leaf_row.last_seen == long_ago
+    assert freshness(leaf_row.source, leaf_row.last_seen) == "old_observation"
+    assert freshness(leaf_row.via_edge_source, leaf_row.via_edge_last_seen) == "observed"
+    # Path rows carry the same facts per hop.
+    by_name = {n.name: n for n in path.nodes}
+    assert by_name["root"].via_edge_last_seen is None and by_name["root"].via_edge_source is None
+    assert by_name["mid"].via_edge_last_seen is None
+    assert by_name["mid"].via_edge_source == "auto"
+    assert by_name["leaf"].last_seen == long_ago
+
+
 def test_module_imports_cleanly() -> None:
     """Cheap collection-time smoke that runs on no-Docker sandboxes.
 
@@ -1050,3 +1348,579 @@ def test_module_imports_cleanly() -> None:
     assert issubclass(query.AmbiguousNodeError, ValueError)
     assert schemas.TopologyNode.model_config["frozen"] is True
     assert schemas.TopologyPath.model_config["frozen"] is True
+
+
+# ---------------------------------------------------------------------------
+# #3764 — bounded closure answers. New fixtures: the star (one hub, many
+# dependents) and the dense mesh (layers fully linked to the next layer).
+# ---------------------------------------------------------------------------
+
+
+def _incompressible_pad(size: int) -> str:
+    """A random string PostgreSQL cannot compress, so it is stored out of line."""
+    return secrets.token_hex(size // 2)
+
+
+async def _seed_new_star_fixture(
+    *, leaves: int, pad_bytes: int = 0, children: int = 0, random_pad: bool = False
+) -> None:
+    """New #3764 fixture: ``star-hub`` with *leaves* dependents ``star-leaf-NNNN``.
+
+    Each leaf ``runs-on`` the hub, so a dependents walk from the hub has
+    one level with *leaves* nodes. *pad_bytes* adds a string of that size
+    to every leaf's properties, for the byte-limit test; *random_pad*
+    makes it a random string that stays large on disk. *children* adds
+    that many ``star-child-NNNN-MMMM`` nodes under every leaf, a second
+    level that a walk cut at the first level must never ask for.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        hub = await _seed_node(session, tenant_id=TENANT_A_ID, kind="host", name="star-hub")
+        leaf_nodes = [
+            GraphNode(
+                id=uuid.uuid4(),
+                tenant_id=TENANT_A_ID,
+                kind="vm",
+                name=f"star-leaf-{i:04d}",
+                source="auto",
+                properties={
+                    "pad": _incompressible_pad(pad_bytes) if random_pad else "x" * pad_bytes
+                },
+                discovered_by="test",
+            )
+            for i in range(leaves)
+        ]
+        child_nodes = [
+            (
+                leaf,
+                GraphNode(
+                    id=uuid.uuid4(),
+                    tenant_id=TENANT_A_ID,
+                    kind="app",
+                    name=f"star-child-{i:04d}-{j:04d}",
+                    source="auto",
+                    discovered_by="test",
+                ),
+            )
+            for i, leaf in enumerate(leaf_nodes)
+            for j in range(children)
+        ]
+        session.add_all(leaf_nodes)
+        session.add_all(child for _leaf, child in child_nodes)
+        await session.flush()
+        session.add_all(
+            GraphEdge(
+                id=uuid.uuid4(),
+                tenant_id=TENANT_A_ID,
+                from_node_id=leaf.id,
+                to_node_id=hub,
+                kind="runs-on",
+                source="auto",
+                discovered_by="test",
+            )
+            for leaf in leaf_nodes
+        )
+        session.add_all(
+            GraphEdge(
+                id=uuid.uuid4(),
+                tenant_id=TENANT_A_ID,
+                from_node_id=child.id,
+                to_node_id=leaf.id,
+                kind="runs-on",
+                source="auto",
+                discovered_by="test",
+            )
+            for leaf, child in child_nodes
+        )
+
+
+class _HopStatements:
+    """Record the statements the bounded walk sends to PostgreSQL; count the hops."""
+
+    def __init__(self) -> None:
+        self.hops = 0
+        self.statements: list[str] = []
+
+    def __enter__(self) -> _HopStatements:
+        event.listen(engine_module._engine.sync_engine, "before_cursor_execute", self._record)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        event.remove(engine_module._engine.sync_engine, "before_cursor_execute", self._record)
+
+    def _record(self, conn: Any, cursor: Any, statement: str, *rest: Any) -> None:
+        self.statements.append(statement)
+        if "WITH RECURSIVE reached AS NOT MATERIALIZED" in statement:
+            self.hops += 1
+
+
+async def _graph_node_toast_blocks(conn: Any) -> int:
+    """Blocks read so far from ``graph_node``'s out-of-line storage (large properties).
+
+    PostgreSQL keeps a value larger than about 2 kB out of line, so these
+    blocks are read only when a statement loads such a value. The backend
+    publishes its counts when it goes idle; ``pg_stat_force_next_flush``
+    makes that happen right after the next commit.
+    """
+    await conn.execute(text("SELECT pg_stat_force_next_flush()"))
+    await conn.commit()
+    await conn.execute(text("SELECT pg_stat_clear_snapshot()"))
+    blocks = (
+        await conn.execute(
+            text(
+                "SELECT COALESCE(toast_blks_hit, 0) + COALESCE(toast_blks_read, 0)"
+                " FROM pg_statio_user_tables WHERE relname = 'graph_node'"
+            )
+        )
+    ).scalar_one()
+    await conn.commit()
+    return int(blocks)
+
+
+def _plan_sort_space_kb(plan: dict[str, Any]) -> int:
+    """Memory or disk every sort in the plan used, in kB."""
+    own = int(plan.get("Sort Space Used", 0))
+    return own + sum(_plan_sort_space_kb(child) for child in plan.get("Plans", []))
+
+
+async def _explain(conn: Any, sql: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Run *sql* under ``EXPLAIN ANALYZE`` and return the top plan node."""
+    raw = (await conn.execute(text("EXPLAIN (ANALYZE, FORMAT JSON) " + sql), params)).scalar_one()
+    plan = raw if isinstance(raw, list) else json.loads(raw)
+    return dict(plan[0]["Plan"])
+
+
+async def _seed_new_dense_mesh_fixture(*, layers: int, width: int) -> None:
+    """New #3764 fixture: ``mesh-root`` plus *layers* layers of *width* nodes.
+
+    Every node of a layer depends on every node of the layer above it, so
+    the number of distinct walks grows as ``width ** layers``. The
+    recursive CTE behind the unbounded verbs follows each walk, which is
+    the dense fan-out a depth limit alone does not bound. The bounded walk
+    expands each node once, so it visits ``layers * width`` nodes.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        root = await _seed_node(session, tenant_id=TENANT_A_ID, kind="host", name="mesh-root")
+        above = [root]
+        for layer in range(layers):
+            current = [
+                await _seed_node(
+                    session, tenant_id=TENANT_A_ID, kind="vm", name=f"mesh-{layer}-{i}"
+                )
+                for i in range(width)
+            ]
+            for lower in current:
+                for upper in above:
+                    await _seed_edge(
+                        session,
+                        tenant_id=TENANT_A_ID,
+                        from_id=lower,
+                        to_id=upper,
+                        kind="runs-on",
+                    )
+            above = current
+
+
+@_skip_no_docker
+async def test_bounded_closure_new_star_fixture_stops_at_node_limit(pg_engine: None) -> None:
+    """A dense star stops at the node limit and returns the first part in order."""
+    await _seed_new_star_fixture(leaves=300)
+    operator = _operator(TENANT_A_ID)
+
+    answer = await bounded_closure(
+        operator, "star-hub", reverse=True, budget=ClosureBudget(max_nodes=40)
+    )
+
+    assert answer.limit_hit == "node_limit"
+    assert len(answer.nodes) == 40
+    full = await find_dependents(operator, "star-hub")
+    assert len(full) == 301
+    # The cut answer is the first part of the full closure, in its order.
+    assert [n.id for n in answer.nodes] == [n.id for n in full[:40]]
+    assert answer.root is not None
+    assert answer.root.name == "star-hub"
+
+
+@_skip_no_docker
+async def test_bounded_closure_new_star_fixture_stops_at_byte_limit(pg_engine: None) -> None:
+    """Large node properties stop the walk at the byte limit, not the node limit."""
+    await _seed_new_star_fixture(leaves=50, pad_bytes=1000)
+
+    answer = await bounded_closure(
+        _operator(TENANT_A_ID),
+        "star-hub",
+        reverse=True,
+        budget=ClosureBudget(max_bytes=10_000),
+    )
+
+    assert answer.limit_hit == "byte_limit"
+    assert 1 < len(answer.nodes) < 12
+    # Every kept node arrives whole; the row past the budget is not kept.
+    assert all(len(n.properties["pad"]) == 1000 for n in answer.nodes[1:])
+
+
+@_skip_no_docker
+async def test_bounded_closure_new_star_fixture_stops_asking_past_the_node_limit(
+    pg_engine: None,
+) -> None:
+    """A walk cut at the first hop never asks for the second hop at all."""
+    await _seed_new_star_fixture(leaves=50, children=20)  # 1000 nodes at depth 2
+    operator = _operator(TENANT_A_ID)
+
+    with _HopStatements() as statements:
+        answer = await bounded_closure(
+            operator, "star-hub", reverse=True, budget=ClosureBudget(max_nodes=10)
+        )
+
+    assert answer.limit_hit == "node_limit"
+    assert len(answer.nodes) == 10
+    assert all(n.depth <= 1 for n in answer.nodes)
+    assert statements.hops == 1
+
+
+@_skip_no_docker
+async def test_bounded_closure_new_star_fixture_hop_reads_properties_for_kept_nodes_only(
+    pg_engine: None,
+) -> None:
+    """A wide hop sorts ids and names only and reads properties for the kept rows alone."""
+    leaves, pad_bytes, row_limit = 300, 32_768, 10
+    await _seed_new_star_fixture(leaves=leaves, pad_bytes=pad_bytes, random_pad=True)
+    hop_sql = query_module._CLOSURE_STEP_SQL_REVERSE
+    all_properties_sql = text(
+        "SELECT sum(octet_length(CAST(properties AS text))) FROM graph_node"
+        " WHERE tenant_id = :tenant_id AND kind = 'vm'"
+    )
+    async with engine_module._engine.connect() as conn:
+        hub = (
+            await conn.execute(select(GraphNode.id).where(GraphNode.name == "star-hub"))
+        ).scalar_one()
+        params = {
+            "tenant_id": str(TENANT_A_ID),
+            "frontier": [str(hub)],
+            "visited": [str(hub)],
+            "kind_filter": None,
+            "class_kinds": None,
+            "class_excluded_kinds": None,
+            "include_stale": True,
+            "byte_budget": 1 << 30,
+            "bytes_before": 0,
+            "depth": 1,
+            "row_limit": row_limit,
+        }
+        hop_plan = await _explain(conn, hop_sql.text, params)
+        before = await _graph_node_toast_blocks(conn)
+        rows = (await conn.execute(hop_sql, params)).fetchall()
+        after_hop = await _graph_node_toast_blocks(conn)
+        # Reading every leaf's properties is the work the hop must not do.
+        total = (
+            await conn.execute(all_properties_sql, {"tenant_id": str(TENANT_A_ID)})
+        ).scalar_one()
+        after_all = await _graph_node_toast_blocks(conn)
+
+    assert len(rows) == row_limit
+    assert all(len(row._mapping["properties"]["pad"]) == pad_bytes for row in rows)
+    assert total >= leaves * pad_bytes
+    hop_blocks, all_blocks = after_hop - before, after_all - after_hop
+    # The hop read the kept rows' properties, and a small part of all of them.
+    assert hop_blocks > 0
+    assert hop_blocks * 10 < all_blocks, (hop_blocks, all_blocks)
+    # The hop's sorts hold ids and names, not the leaves' 9.6 MB of properties.
+    assert _plan_sort_space_kb(hop_plan) < 1024, hop_plan
+
+
+@_skip_no_docker
+async def test_bounded_closure_new_star_fixture_hop_reads_properties_within_the_byte_budget_only(
+    pg_engine: None,
+) -> None:
+    """With room for every node but not every byte, a hop loads the properties it returns."""
+    leaves, pad_bytes, kept = 300, 32_768, 4
+    await _seed_new_star_fixture(leaves=leaves, pad_bytes=pad_bytes, random_pad=True)
+    hop_sql = query_module._CLOSURE_STEP_SQL_REVERSE
+    all_properties_sql = text(
+        "SELECT sum(octet_length(CAST(properties AS text))) FROM graph_node"
+        " WHERE tenant_id = :tenant_id AND kind = 'vm'"
+    )
+    async with engine_module._engine.connect() as conn:
+        hub = (
+            await conn.execute(select(GraphNode.id).where(GraphNode.name == "star-hub"))
+        ).scalar_one()
+        params = {
+            "tenant_id": str(TENANT_A_ID),
+            "frontier": [str(hub)],
+            "visited": [str(hub)],
+            "kind_filter": None,
+            "class_kinds": None,
+            "class_excluded_kinds": None,
+            "include_stale": True,
+            # Room for 2000 nodes, bytes for a few of them: each leaf row is a
+            # little over ``pad_bytes``, so ``kept`` rows fit and the next does not.
+            "byte_budget": (kept + 1) * pad_bytes,
+            "bytes_before": 0,
+            "depth": 1,
+            "row_limit": 2001,
+        }
+        hop_plan = await _explain(conn, hop_sql.text, params)
+        before = await _graph_node_toast_blocks(conn)
+        rows = (await conn.execute(hop_sql, params)).fetchall()
+        after_hop = await _graph_node_toast_blocks(conn)
+        # Reading every leaf's properties is the work the hop must not do.
+        total = (
+            await conn.execute(all_properties_sql, {"tenant_id": str(TENANT_A_ID)})
+        ).scalar_one()
+        after_all = await _graph_node_toast_blocks(conn)
+
+    # The rows within the budget come back whole, plus one past it without properties.
+    assert len(rows) == kept + 1
+    assert [row._mapping["name"] for row in rows] == [f"star-leaf-{i:04d}" for i in range(kept + 1)]
+    assert all(len(row._mapping["properties"]["pad"]) == pad_bytes for row in rows[:kept])
+    assert rows[-1]._mapping["properties"] is None
+    assert rows[-1]._mapping["cumulative_bytes"] > params["byte_budget"]
+    assert total >= leaves * pad_bytes
+    hop_blocks, all_blocks = after_hop - before, after_all - after_hop
+    # The hop read the returned rows' properties, and a small part of all of them.
+    assert hop_blocks > 0
+    assert hop_blocks * 20 < all_blocks, (hop_blocks, all_blocks)
+    # The hop's sorts hold ids and names, not the leaves' 9.6 MB of properties.
+    assert _plan_sort_space_kb(hop_plan) < 1024, hop_plan
+
+
+@_skip_no_docker
+async def test_bounded_closure_reads_one_snapshot_while_edges_change_between_hops(
+    pg_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Edges written during the walk stay out of the answer; the next walk sees them."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        root = await _seed_node(session, tenant_id=TENANT_A_ID, kind="host", name="snap-root")
+        middle = await _seed_node(session, tenant_id=TENANT_A_ID, kind="vm", name="snap-a")
+        old_leaf = await _seed_node(session, tenant_id=TENANT_A_ID, kind="app", name="snap-b")
+        await _seed_edge(session, tenant_id=TENANT_A_ID, from_id=middle, to_id=root, kind="runs-on")
+        old_edge = await _seed_edge(
+            session, tenant_id=TENANT_A_ID, from_id=old_leaf, to_id=middle, kind="belongs-to"
+        )
+
+    real_execute = query_module._execute_within_deadline
+    changed = False
+
+    async def _execute_then_change_the_graph(
+        session: Any, sql: Any, params: dict[str, Any], deadline: float
+    ) -> Any:
+        rows = await real_execute(session, sql, params, deadline)
+        nonlocal changed
+        if not changed and "frontier" in params and params["depth"] == 1:
+            changed = True
+            async with sessionmaker() as other, other.begin():
+                new_leaf = await _seed_node(other, tenant_id=TENANT_A_ID, kind="app", name="snap-c")
+                await _seed_edge(
+                    other, tenant_id=TENANT_A_ID, from_id=new_leaf, to_id=middle, kind="belongs-to"
+                )
+                await other.execute(delete(GraphEdge).where(GraphEdge.id == old_edge))
+        return rows
+
+    monkeypatch.setattr(query_module, "_execute_within_deadline", _execute_then_change_the_graph)
+    operator = _operator(TENANT_A_ID)
+
+    during = await bounded_closure(operator, "snap-root", reverse=True)
+
+    assert changed
+    assert during.limit_hit is None
+    assert [n.name for n in during.nodes] == ["snap-root", "snap-a", "snap-b"]
+    after = await bounded_closure(operator, "snap-root", reverse=True)
+    assert [n.name for n in after.nodes] == ["snap-root", "snap-a", "snap-c"]
+
+
+@_skip_no_docker
+async def test_bounded_closure_names_an_oversized_root_without_loading_its_properties(
+    pg_engine: None,
+) -> None:
+    """A root over the byte budget is named; its properties never reach Python."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        fat_root = GraphNode(
+            id=uuid.uuid4(),
+            tenant_id=TENANT_A_ID,
+            kind="host",
+            name="fat-root",
+            source="auto",
+            properties={"pad": _incompressible_pad(65_536)},
+            discovered_by="test",
+        )
+        session.add(fat_root)
+        await session.flush()
+        leaf = await _seed_node(session, tenant_id=TENANT_A_ID, kind="vm", name="fat-leaf")
+        await _seed_edge(
+            session, tenant_id=TENANT_A_ID, from_id=leaf, to_id=fat_root.id, kind="runs-on"
+        )
+
+    with _HopStatements() as statements:
+        answer = await bounded_closure(
+            _operator(TENANT_A_ID), "fat-root", reverse=True, budget=ClosureBudget(max_bytes=1000)
+        )
+
+    assert answer.limit_hit == "byte_limit"
+    assert answer.root is not None
+    assert answer.root.name == "fat-root"
+    assert answer.root.properties == {}
+    assert [n.name for n in answer.nodes] == ["fat-root"]
+    assert answer.nodes[0].properties == {}
+    assert statements.hops == 0
+    lookup = next(stmt for stmt in statements.statements if "graph_node.name" in stmt)
+    assert "properties" not in lookup
+
+
+@_skip_no_docker
+async def test_bounded_closure_reports_time_budget_when_the_root_lookup_is_slow(
+    pg_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow lookup ends at the time budget with no root; the pool stays usable."""
+    await _seed_new_star_fixture(leaves=3)
+    operator = _operator(TENANT_A_ID)
+    monkeypatch.setattr(
+        query_module, "node_identity_statement", lambda *args, **kwargs: text("SELECT pg_sleep(5)")
+    )
+
+    started = time.monotonic()
+    answer = await bounded_closure(
+        operator, "star-hub", reverse=True, budget=ClosureBudget(time_budget_ms=100)
+    )
+
+    assert time.monotonic() - started < 3
+    assert answer.limit_hit == "time_budget"
+    assert answer.root is None
+    assert answer.nodes == ()
+    monkeypatch.undo()
+    recovered = await bounded_closure(operator, "star-hub", reverse=True)
+    assert recovered.limit_hit is None
+    assert len(recovered.nodes) == 4
+
+
+@_skip_no_docker
+async def test_bounded_closure_new_dense_mesh_fixture_expands_each_node_once(
+    pg_engine: None,
+) -> None:
+    """The dense mesh costs one hop statement per layer, not one walk per path."""
+    await _seed_new_dense_mesh_fixture(layers=8, width=6)
+    operator = _operator(TENANT_A_ID)
+
+    with _HopStatements() as statements:
+        answer = await bounded_closure(operator, "mesh-root", reverse=True)
+
+    assert answer.limit_hit is None
+    assert len(answer.nodes) == 1 + 8 * 6
+    assert [n.depth for n in answer.nodes] == sorted(n.depth for n in answer.nodes)
+    # Eight layers plus the empty probe one hop past the last layer.
+    assert statements.hops == 9
+    assert [n.id for n in answer.nodes] == [
+        n.id for n in await find_dependents(operator, "mesh-root")
+    ]
+
+
+@_skip_no_docker
+async def test_bounded_closure_new_dense_mesh_fixture_stops_at_time_budget(
+    pg_engine: None,
+) -> None:
+    """A walk that runs out of time has no nodes; the answer says so."""
+    await _seed_new_dense_mesh_fixture(layers=8, width=6)
+    operator = _operator(TENANT_A_ID)
+
+    answer = await bounded_closure(
+        operator, "mesh-root", reverse=True, budget=ClosureBudget(time_budget_ms=1)
+    )
+
+    assert answer.limit_hit == "time_budget"
+    assert answer.nodes == ()
+    # With one millisecond the root lookup itself may be the statement that
+    # runs out; the two tests below pin each case on its own.
+    assert answer.root is None or answer.root.name == "mesh-root"
+    # A cancelled statement leaves the pool usable for the next query.
+    shallow = await bounded_closure(operator, "mesh-root", reverse=True, depth=1)
+    assert shallow.limit_hit == "hop_limit"
+    assert len(shallow.nodes) == 7
+
+
+@_skip_no_docker
+async def test_bounded_closure_names_the_root_when_a_hop_runs_out_of_time(
+    pg_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the lookup finished but a hop did not, the root is still named."""
+    await _seed_new_dense_mesh_fixture(layers=2, width=2)
+    monkeypatch.setattr(query_module, "_CLOSURE_STEP_SQL_REVERSE", text("SELECT pg_sleep(5)"))
+
+    started = time.monotonic()
+    answer = await bounded_closure(
+        _operator(TENANT_A_ID), "mesh-root", reverse=True, budget=ClosureBudget(time_budget_ms=300)
+    )
+
+    assert time.monotonic() - started < 3
+    assert answer.limit_hit == "time_budget"
+    assert answer.nodes == ()
+    assert answer.root is not None
+    assert answer.root.name == "mesh-root"
+
+
+@_skip_no_docker
+async def test_bounded_closure_keeps_the_anchor_contract(known_graph: dict[str, uuid.UUID]) -> None:
+    """An untracked anchor raises, like the unbounded verbs; nothing is walked."""
+    with _HopStatements() as statements, pytest.raises(NodeNotFoundError):
+        await bounded_closure(_operator(TENANT_A_ID), "ghost", reverse=True)
+    assert statements.hops == 0
+    # Another tenant's node is untracked here too.
+    with pytest.raises(NodeNotFoundError):
+        await bounded_closure(_operator(TENANT_B_ID), "host1", reverse=True)
+
+
+@_skip_no_docker
+async def test_bounded_closure_reports_hop_limit_only_when_more_nodes_exist(
+    known_graph: dict[str, uuid.UUID],
+) -> None:
+    """``hop_limit`` means nodes exist past the depth; a full answer has no limit."""
+    operator = _operator(TENANT_A_ID)
+
+    cut = await bounded_closure(operator, "ds1", reverse=True, depth=1)
+    assert cut.limit_hit == "hop_limit"
+    assert [n.name for n in cut.nodes] == ["ds1", "host1", "vm1"]
+
+    full = await bounded_closure(operator, "ds1", reverse=True, depth=2)
+    assert full.limit_hit is None
+    assert [n.name for n in full.nodes] == ["ds1", "host1", "vm1", "app", "vm2"]
+
+
+@_skip_no_docker
+async def test_bounded_closure_complete_answer_continues_through_shared_handle(
+    pg_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A complete large closure is kept behind a handle only its owner can read."""
+    import meho_backplane.operations.jsonflux_reducer as reducer_module
+    import meho_backplane.operations.result_query as result_query_core
+    from meho_backplane.mcp.tools.topology import _query_topology_handler
+    from tests._result_store_helpers import MemoryResultStore
+
+    store = MemoryResultStore()
+    monkeypatch.setattr(reducer_module, "get_result_handle_store", lambda: store)
+    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: store)
+    await _seed_new_star_fixture(leaves=120)
+    operator = _operator(TENANT_A_ID)
+
+    answer = await _query_topology_handler(operator, {"kind": "dependents", "target": "star-hub"})
+
+    assert answer["completeness"]["state"] == "complete"
+    assert answer["completeness"]["limits_hit"] == []
+    assert answer["completeness"]["found"] == answer["completeness"]["retained"] == 121
+    assert answer["delivery"] == "complete"
+    assert "nodes" not in answer
+    assert answer["node_count"] == 121
+    assert answer["edge_count"] == 120
+    handle_id = uuid.UUID(answer["handle"]["handle_id"])
+
+    window = await result_query_core.read_result_window(operator, handle_id, 0, 500)
+    full = await find_dependents(operator, "star-hub")
+    assert [row["id"] for row in window["rows"]] == [str(n.id) for n in full]
+    assert window["rows"][1]["parent_node_id"] == answer["root"]["id"]
+    assert all(row["via_relation_class"] == "placement" for row in window["rows"][1:])
+
+    other_caller = operator.model_copy(update={"sub": "someone-else"})
+    other_tenant = _operator(TENANT_B_ID)
+    for intruder in (other_caller, other_tenant):
+        with pytest.raises(result_query_core.ResultHandleNotFoundError):
+            await result_query_core.read_result_window(intruder, handle_id, 0, 50)

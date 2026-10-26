@@ -47,6 +47,7 @@ from uuid import UUID
 import httpx
 import pytest
 import respx
+from jsonschema import Draft202012Validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -604,11 +605,30 @@ def test_each_non_credential_op_is_safe_no_approval_and_read_only(op_id: str) ->
 
 
 @pytest.mark.parametrize("op_id", sorted(_EXPECTED_OP_IDS))
-def test_each_op_has_llm_instructions_with_when_to_use_and_output_shape(op_id: str) -> None:
+def test_each_op_has_llm_instructions_with_when_to_call_and_output_shape(op_id: str) -> None:
     op = next(o for o in SDDC_TYPED_OPS if o.op_id == op_id)
     assert op.llm_instructions is not None
-    assert op.llm_instructions.get("when_to_use", "").strip() != ""
+    assert op.llm_instructions.get("when_to_call", "").strip() != ""
     assert "output_shape" in op.llm_instructions
+
+
+@pytest.mark.parametrize("op", SDDC_TYPED_OPS, ids=lambda op: op.op_id)
+def test_each_op_example_validates_against_its_parameter_schema(op: Any) -> None:
+    """Every op ships one example call, and it is a valid call (Draft 2020-12)."""
+    examples = op.parameter_schema.get("examples")
+    assert isinstance(examples, list) and examples, op.op_id
+    Draft202012Validator.check_schema(op.parameter_schema)
+    validator = Draft202012Validator(op.parameter_schema)
+    for example in examples:
+        assert list(validator.iter_errors(example)) == [], (op.op_id, example)
+
+
+@pytest.mark.parametrize("op", SDDC_TYPED_OPS, ids=lambda op: op.op_id)
+def test_each_op_response_schema_names_its_fields(op: Any) -> None:
+    """No response schema is a bare "any object"."""
+    schema = op.response_schema
+    assert schema is not None, op.op_id
+    assert schema.get("properties"), op.op_id
 
 
 @pytest.mark.parametrize("op_id", sorted(_EXPECTED_OP_IDS))

@@ -38,14 +38,20 @@ from functools import lru_cache
 from typing import Final
 from uuid import UUID
 
-from pydantic import BaseModel, Field, HttpUrl, field_validator
+from pydantic import BaseModel, Field, HttpUrl, ValidationInfo, field_validator
 
+from meho_backplane.delete_names import DELETE_SHAPED_OP_ID_PATTERNS
 from meho_backplane.retrieval.embedding import (
     BAKED_MODEL_CACHE_DIR,
     DEFAULT_EMBEDDING_MODEL,
 )
 
-__all__ = ["Settings", "get_settings", "parse_bool_env"]
+__all__ = [
+    "RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES",
+    "Settings",
+    "get_settings",
+    "parse_bool_env",
+]
 
 #: Driver schemes accepted on ``DATABASE_URL``. Both are async — the
 #: backplane refuses to construct a sync engine because every database
@@ -77,6 +83,17 @@ _SUPPORTED_BROADCAST_URL_SCHEMES: Final[tuple[str, ...]] = (
 #: so a misconfigured env var never silently enables a guarded surface.
 _TRUTHY_ENV_VALUES: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
 
+#: Floor for ``RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`` (#3641). A completed
+#: operation must always deliver its receipt (``status``, ``op_id``,
+#: ``audit_id``, ``delivery`` and the remediation text), so the ceiling can
+#: never be set below the size that receipt takes on the wire. 2 KiB holds
+#: the receipt for an ASCII ``op_id`` of 256 characters with room to spare;
+#: a test in ``tests/test_operations_delivery_budget.py`` pins that. An
+#: ``op_id`` whose receipt would not fit (longer, or escaped non-ASCII
+#: text) is refused before the operation runs
+#: (``operations/delivery_budget.py``, ``refuse_undeliverable_receipt``).
+RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES: Final[int] = 2048
+
 
 def parse_bool_env(value: str | None) -> bool:
     """Return ``True`` only for the canonical truthy spellings.
@@ -95,16 +112,16 @@ def parse_bool_env(value: str | None) -> bool:
 
 
 #: Default delete-shaped op-id patterns a service-principal standing grant
-#: may never cover (#3151). Case-sensitive ``fnmatchcase`` globs over the
-#: exact op id: raw HTTP DELETE ops (``DELETE:*``) plus the dotted typed
-#: delete/destroy/remove/purge families. Overridable via
+#: may never cover (#3151). The delete signs live in
+#: :mod:`meho_backplane.delete_names` so the contract check and the grant
+#: check read the same signs. ``POST:/vswitch/*`` (#3973) adds the Hetzner
+#: Robot vSwitch writes sent as POST (add servers, rename or change the
+#: VLAN): each changes a private network that several servers share, so it
+#: always waits for a human, like a delete. Overridable via
 #: ``SERVICE_GRANT_DELETE_SHAPED_PATTERNS`` (comma-separated).
 _DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS: tuple[str, ...] = (
-    "DELETE:*",
-    "*.delete",
-    "*.destroy",
-    "*.remove",
-    "*.purge",
+    *DELETE_SHAPED_OP_ID_PATTERNS,
+    "POST:/vswitch/*",
 )
 
 
@@ -118,16 +135,44 @@ def _parse_service_grant_delete_shaped_patterns(raw: str) -> tuple[str, ...]:
     return parts or _DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS
 
 
+#: The five MEHO login groups (``docs/decisions/login-role-groups.md``).
+#: A person must be in exactly one of them. Override with
+#: ``JWT_ROLE_GROUPS`` (comma-separated).
+_DEFAULT_JWT_ROLE_GROUPS: tuple[str, ...] = (
+    "MEHO-Readers",
+    "MEHO-Operators",
+    "MEHO-SA-Operators",
+    "MEHO-Admins",
+    "MEHO-Approvers",
+)
+
+
+def _parse_jwt_role_groups(raw: str) -> tuple[str, ...]:
+    """Parse the comma-separated override, falling back to the five default groups.
+
+    An empty / whitespace-only value keeps the built-in default groups so
+    the one-group check never silently disappears on a blank env var.
+    """
+    parts = tuple(chunk.strip() for chunk in raw.split(",") if chunk.strip())
+    return parts or _DEFAULT_JWT_ROLE_GROUPS
+
+
 class Settings(BaseModel):
     """Process-wide configuration knobs.
 
     Attributes
     ----------
     keycloak_issuer_url:
-        The Keycloak realm's issuer URL — typically
-        ``https://<host>/realms/<realm>``. Must match the ``iss`` claim
-        of every accepted JWT exactly. Required (no default); the
-        backplane refuses to start without it.
+        The OIDC issuer URL — for Keycloak typically
+        ``https://<host>/realms/<realm>``, for authentik
+        ``https://<host>/application/o/<slug>/``. The ``iss`` claim of
+        every accepted JWT must equal this value, with or without a
+        trailing slash; any other issuer is rejected. Use the form the
+        login server publishes in its discovery document: the metadata
+        routes (``/.well-known/oauth-protected-resource`` and
+        ``/api/v1/auth-config``) return the value unchanged, and strict
+        clients compare it byte-for-byte (RFC 8414 §3.3). Required (no
+        default); the backplane refuses to start without it.
     keycloak_audience:
         The OIDC ``aud`` claim every accepted JWT must carry. The
         backplane is registered as a Keycloak client (e.g.
@@ -148,6 +193,14 @@ class Settings(BaseModel):
         but the CLI surfaces an actionable error rather than silently
         misusing ``audience`` (which is the confidential resource-
         server identifier, not a public client).
+    keycloak_discovery_url:
+        Realm base URL the backplane uses for its own calls to Keycloak:
+        the discovery document and the token endpoint. For example the
+        in-cluster Service address
+        ``http://<release>-keycloak:8080/auth/realms/meho``. The issuer
+        check keeps ``keycloak_issuer_url``, because tokens carry the
+        public address. Empty (the default) means the issuer URL, as
+        before (#4591).
     keycloak_jwks_cache_ttl_seconds:
         Maximum age of a cached JWKS document before it must be
         refetched. The cache also refreshes on a kid-miss (key
@@ -273,6 +326,21 @@ class Settings(BaseModel):
         ``tenant_role`` matches the same protocol-mapper recipe.
         Override only when the realm exposes the role under a
         different attribute.
+    jwt_role_groups:
+        Names of the login groups that give a person their tenant and
+        role (``docs/decisions/login-role-groups.md``). Default: the
+        five groups ``MEHO-Readers``, ``MEHO-Operators``,
+        ``MEHO-SA-Operators``, ``MEHO-Admins`` and ``MEHO-Approvers``.
+        A person must be in exactly one of them: in two, Keycloak copies
+        ``tenant_role`` from whichever group it finds first, so the role
+        is unpredictable. ``verify_jwt`` reads the token's ``groups``
+        claim and refuses a token that names two or more of these
+        groups with ``401 multiple_role_groups`` (#4594). A token with
+        no ``groups`` claim (service accounts, agents, check runners) is
+        not checked. A name with and without a leading ``/`` is the
+        same group, because the group-membership mapper can send full
+        group paths. Override with ``JWT_ROLE_GROUPS`` (comma-separated)
+        when a site renames the groups; a blank value keeps the default.
     jwt_principal_kind_claim_name:
         Name of the JWT claim that carries the principal-kind
         discriminator (``user`` / ``service`` / ``agent``) added by
@@ -571,6 +639,26 @@ class Settings(BaseModel):
         (no writes, nothing to prune) while a running loop still heartbeats;
         ``enabled=False`` skips starting the loop entirely. Read once at
         lifespan startup; toggling post-start requires a pod restart.
+    request_usage_retention_days:
+        How many days request usage events are kept (#3734). These are the
+        privacy-bounded ``request_usage_event`` rows written at the REST and
+        MCP boundary. **Unset (the default) turns collection off**: no
+        events are written and requests are never slowed or blocked by it.
+        When set, one event is written per request and a daily job deletes
+        events older than this many days. Range ``[1, 3650]``. Env var
+        ``REQUEST_USAGE_RETENTION_DAYS``; an empty value counts as unset.
+    audit_wrapper_rows_retired:
+        Stop writing the routine REST and MCP request rows into
+        ``audit_log`` (#3757). Default ``False``: every authenticated
+        request still writes one ``legacy_request`` row. When ``True``,
+        reads, searches, lists, resource reads and ordinary validation
+        failures write only a request usage event; a refused request
+        (401 / 403) writes a ``policy_decision`` row; a MEHO change with no
+        record of its own writes an ``operation_execution`` row. See
+        :mod:`meho_backplane.audit_cutover`. Needs
+        ``REQUEST_USAGE_RETENTION_DAYS``: without usage collection, routine
+        activity would leave no record at all, so the pod refuses to start.
+        Env var ``AUDIT_WRAPPER_ROWS_RETIRED``.
     result_handle_max_spill_rows:
         Upper bound on how many rows the reducer spills into the
         :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
@@ -587,6 +675,25 @@ class Settings(BaseModel):
         genuinely larger sets raise it via
         ``RESULT_HANDLE_MAX_SPILL_ROWS``. Read once per reduce through
         :func:`get_settings`'s cache.
+    result_cache_redis_url:
+        Connection URL for the dedicated result-cache Valkey that holds
+        result-handle rows, apart from the broadcast store. Env
+        ``RESULT_CACHE_REDIS_URL``. When unset, :func:`get_settings` uses
+        ``broadcast_redis_url`` (and its password), so reads and writes stay
+        on the broadcast store until the result-cache pod is deployed. Same
+        scheme rules as ``broadcast_redis_url``.
+    result_cache_redis_password:
+        Optional ``requirepass`` for the result-cache store. Env
+        ``RESULT_CACHE_REDIS_PASSWORD`` (chart secretKeyRef). ``None`` means
+        no auth.
+    result_cache_writer_enabled:
+        Writer gate for the result-cache move. ``False`` (default): new
+        result handles are written to the broadcast store under the old key.
+        ``True``: they are written to the result-cache store under the
+        ``meho:reshandle:v2`` keys. Reads always check the result-cache store
+        first and then the broadcast store, so turn this on only after every
+        backplane replica runs that reader code. Env
+        ``RESULT_CACHE_WRITER_ENABLED``.
     result_query_max_output_rows:
         Output-row ceiling on the ``result_query`` structured query surface
         (#3366): a compiled ``SELECT`` over a handle returns at most this many
@@ -597,20 +704,62 @@ class Settings(BaseModel):
         ``result_handle_max_spill_rows`` (how many rows are *stored*): this
         bounds how many a single query *returns*.
     result_query_max_output_bytes:
-        Serialized-output ceiling, in JSON bytes, applied to a
-        ``result_query`` query result **after** the row cap. A wide or
-        deeply-nested projection can blow the MCP result token budget even
+        Query-domain shaping budget: a ceiling, in JSON bytes, on the
+        ``rows`` of a ``result_query`` read (query and paging), checked
+        **before** the response is encoded for the wire and **after** the
+        row cap. A wide or deeply-nested projection can be too large even
         under 500 rows, so an over-budget result fails closed with an
         actionable error (narrow ``select``, add a ``filter``, or lower
-        ``limit``) rather than returning a giant envelope. Default 262144
+        ``limit``) rather than returning a giant envelope. Distinct from,
+        and lower than, the terminal ``result_query_response_wire_max_bytes``
+        ceiling, which measures the whole encoded response. Default 262144
         (256 KB). Env ``RESULT_QUERY_MAX_OUTPUT_BYTES``.
+    result_complete_response_wire_max_bytes:
+        Terminal wire ceiling, in bytes, for a completed ``call_operation``
+        response (#3641). Measured after encoding, on the real MCP
+        ``tools/call`` wire: the text block plus the ``structuredContent``
+        copy, escaping included. An ``ok`` response over the ceiling keeps
+        ``status="ok"`` and is returned with ``delivery="partial"`` (receipt
+        plus result handle) or ``delivery="unavailable"`` (receipt only),
+        never as an error. The default is generous on purpose; a load
+        benchmark may tune it. Must be at least
+        :data:`RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES` (2048) so the
+        receipt always fits; a smaller value fails at startup. A call whose
+        receipt could not fit the ceiling (an unusually long ``op_id``) is
+        refused before it runs with ``error_code="receipt_too_large"``.
+        Default 262144 (256 KiB). Env ``RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES``.
+    result_query_response_wire_max_bytes:
+        Terminal wire ceiling, in bytes, for a ``result_query`` response
+        (query, paging and path reads), measured the same way (#3641). A
+        response over it fails with the recoverable ``output_too_large``
+        error. Higher than ``result_query_max_output_bytes`` because it
+        counts the whole encoded response, not just the rows. The default is generous on
+        purpose; a load benchmark may tune it. Default 2097152 (2 MiB). Env
+        ``RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES``.
     result_query_timeout_seconds:
-        Wall-time budget for a single ``result_query`` compiled ``SELECT``.
-        DuckDB exposes no native Python query timeout, so the core runs
-        ``conn.execute()`` on a worker thread and calls ``conn.interrupt()``
-        on expiry (raising ``InterruptException``), surfaced to the caller as
-        a recoverable "narrow and retry" error. Default 5 seconds. Env
+        Wall-time budget for a whole ``result_query`` read (#3640): the
+        store fetch plus the catalog, compile, ``SELECT``, and encode steps
+        on the worker thread. DuckDB exposes no native Python query timeout,
+        so the core calls ``conn.interrupt()`` on expiry and returns a
+        recoverable "narrow and retry" error at once; a worker that is still
+        busy keeps its slot until it finishes. Default 10 seconds. Env
         ``RESULT_QUERY_TIMEOUT_SECONDS``.
+    result_query_executor_workers:
+        Size of the dedicated worker pool that runs ``result_query`` work,
+        and of the process-wide gate both result reads (paging and query)
+        must pass before the store is read (#3640). The gate does not queue:
+        when every slot is busy a read is refused with a recoverable
+        "capacity" error. Default 4. Env ``RESULT_QUERY_EXECUTOR_WORKERS``.
+    result_query_tenant_concurrency:
+        Most result reads one tenant may run at the same time in this
+        process (#3640). Only binds when it is lower than
+        ``result_query_executor_workers``. Default 4. Env
+        ``RESULT_QUERY_TENANT_CONCURRENCY``.
+    result_query_rate_per_minute:
+        Per-``(tenant, principal)`` fixed-window cap on result reads, shared
+        by paging and query and checked before the store is read (#3640).
+        ``0`` (the default) turns the check off, with no Valkey round-trip.
+        Env ``RESULT_QUERY_RATE_PER_MINUTE``.
     jsonflux_sample_byte_budget:
         Upper bound, in serialized JSON bytes, on the inline sample the
         JSONFlux reducer carries on a reduced ``ResultHandle`` (#134).
@@ -885,8 +1034,14 @@ class Settings(BaseModel):
         ``docs/architecture/audit.md``. Range ``[0, 3650]`` (10y ceiling is
         functionally permanent for a v0.2 chassis). Read once per tick.
     raw_payload_prune_interval_seconds:
-        Cadence of the #307 raw-payload age-off loop, in seconds. The task
-        (registered in the FastAPI lifespan) sleeps this long between sweeps.
+        How often the #307 raw-payload age-off runs, in seconds. The interval
+        counts from the **last recorded run** (the newest
+        ``audit.raw_payload.prune`` audit row; every run writes one), not
+        from process start, so a pod restart does not start it again. After
+        a start the task (registered in the FastAPI lifespan) waits one
+        minute, then runs at once if a full interval has passed since the
+        last run or no run is recorded; otherwise it waits only for the
+        rest of the interval. After that it runs once per interval.
         Default 604800 (7d / weekly) matches the topology-history prune.
         Range ``[60, 604800]``: below one minute competes with write load;
         the ceiling is the weekly cadence -- operators wanting a tighter
@@ -919,6 +1074,16 @@ class Settings(BaseModel):
         (``anthropic:claude-sonnet-4-6``), never a moving ``-latest`` tag,
         so a model swap is a deliberate config push. Set via
         ``AGENT_DEFAULT_MODEL``.
+    agent_max_output_tokens:
+        Most output tokens the agent asks the model for in one answer
+        (``max_tokens`` on each request). Output tokens are the text the
+        model writes back. Used by the two Anthropic agent builders only;
+        the Bedrock and OpenAI-compatible backends keep their model's own
+        default. Default 4096, the value MEHO has always sent. Range
+        [1, 128000]; a value outside it stops the start. A higher value
+        costs more and can make one answer take much longer; above about
+        21,000 the request is sent as a stream. Set via
+        ``AGENT_MAX_OUTPUT_TOKENS``.
     bedrock_region:
         AWS region the Bedrock backend builder
         (:func:`meho_backplane.agent.models.bedrock_backend_builder`)
@@ -980,6 +1145,34 @@ class Settings(BaseModel):
         ``docs/codebase/approvals.md``. Reject is always allowed
         regardless of this flag — an operator withdrawing their own
         pending request is never a privilege escalation.
+    approval_allow_delegated_decision:
+        Lab-class switch for **delegated** approval decisions (#3693).
+        A delegated decision is an approve or reject whose ``reason``
+        ends with an ``Instructed-by:`` block (#3692): the approver acts
+        on another person's written instruction. Default ``False``
+        (fail-closed, production): every delegated decision is refused
+        with
+        :class:`~meho_backplane.operations.approval_queue.DelegatedDecisionForbiddenError`,
+        so on production an approve or reject is always the approver's
+        own call. Set ``APPROVAL_ALLOW_DELEGATED_DECISION=true`` only on
+        a lab-class deployment. Ordinary decisions are never affected.
+        Read at boot only; no request field can change it.
+    sandbox_mode:
+        Sandbox mode (#4622, ``docs/decisions/sandbox-mode.md``). Only for
+        an instance that holds disposable test systems. When on, a tenant
+        admin may give a service principal a standing grant that also
+        covers deletes (a delete grant), made in the web console and
+        expiring within 30 days. Default ``False``: every other instance
+        keeps today's rules. Read at boot only, from ``MEHO_SANDBOX_MODE``.
+        The mode is stored in the database at the first start and checked
+        at every start; see :mod:`meho_backplane.sandbox_mode`.
+    sandbox_mode_confirm:
+        The host name that confirms sandbox mode, from
+        ``MEHO_SANDBOX_MODE_CONFIRM``. With the mode on, it must equal the
+        host of the MCP resource URI (the public address of the instance),
+        and one dot-separated part of that host must be exactly
+        ``sandbox``. Otherwise MEHO refuses to start. Ignored when the
+        mode is off.
     openai_api_key:
         Bearer token the OpenAI-compatible backend builder
         (G11.5-T3 #1077) authenticates with. Empty (the default) is
@@ -1115,10 +1308,12 @@ class Settings(BaseModel):
     keycloak_issuer_url: HttpUrl
     keycloak_audience: str = Field(min_length=1)
     keycloak_cli_client_id: str = ""
+    keycloak_discovery_url: HttpUrl | None = None
     keycloak_jwks_cache_ttl_seconds: int = Field(default=300, gt=0)
     keycloak_jwt_leeway_seconds: int = Field(default=30, ge=0)
     jwt_tenant_claim_name: str = Field(default="tenant_id", min_length=1)
     jwt_tenant_role_claim_name: str = Field(default="tenant_role", min_length=1)
+    jwt_role_groups: tuple[str, ...] = _DEFAULT_JWT_ROLE_GROUPS
     jwt_principal_kind_claim_name: str = Field(default="principal_kind", min_length=1)
     jwt_service_account_username_claim: str = Field(default="preferred_username", min_length=1)
     jwt_service_account_username_prefix: str = Field(default="service-account-")
@@ -1379,7 +1574,16 @@ class Settings(BaseModel):
     checks_evidence_retention_days: int = Field(default=7, ge=0, le=3650)
     checks_evidence_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
     checks_evidence_prune_enabled: bool = True
+    # Request usage events (#3734). ``None`` = collection off. There is no
+    # default window on purpose: the operator chooses how long to keep them.
+    request_usage_retention_days: int | None = Field(default=None, ge=1, le=3650)
+    # #3757: off by default. Must stay declared after
+    # ``request_usage_retention_days``: its validator reads that value.
+    audit_wrapper_rows_retired: bool = False
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
+    result_cache_redis_url: str = Field(default="redis://localhost:6379", min_length=1)
+    result_cache_redis_password: str | None = Field(default=None)
+    result_cache_writer_enabled: bool = Field(default=False)
     result_handle_max_record_bytes: int = Field(default=16777216, gt=0)
     # Bounds captured-JSON catalog work before the reducer serializes or
     # profiles a detected collection. These are deliberately separate from
@@ -1391,8 +1595,18 @@ class Settings(BaseModel):
     # are the query interface's own resource ceilings; it inherits neither the
     # spill row cap above nor the reducer's hardcoded TTL.
     result_query_max_output_rows: int = Field(default=500, gt=0)
+    # Query-domain shaping budget (rows only, checked before encoding).
     result_query_max_output_bytes: int = Field(default=262144, gt=0)
-    result_query_timeout_seconds: int = Field(default=5, gt=0)
+    result_query_timeout_seconds: int = Field(default=10, gt=0)
+    # #3640 -- admission for the two result-read paths.
+    result_query_executor_workers: int = Field(default=4, gt=0)
+    result_query_tenant_concurrency: int = Field(default=4, gt=0)
+    result_query_rate_per_minute: int = Field(default=0, ge=0)
+    # #3641 -- terminal wire ceilings, measured after encoding on the MCP
+    # wire (text block + structuredContent). Generous defaults; a benchmark
+    # may tune them.
+    result_complete_response_wire_max_bytes: int = Field(default=262144, gt=0)
+    result_query_response_wire_max_bytes: int = Field(default=2097152, gt=0)
     jsonflux_sample_byte_budget: int = Field(default=4096, gt=0)
     composite_max_depth: int = Field(default=8, gt=0)
     agent_invoke_max_depth: int = Field(default=4, gt=0)
@@ -1420,6 +1634,14 @@ class Settings(BaseModel):
     # docs/codebase/approvals.md "Single-operator tenants: use an
     # agent-requester, not break-glass".
     approval_allow_self_approval: bool = False
+    # #3693 -- delegated approval decisions (an ``Instructed-by:`` block in
+    # the reason, #3692) are allowed only on lab-class deployments. Default
+    # False is fail-closed: production refuses them.
+    approval_allow_delegated_decision: bool = False
+    # #4622 -- sandbox mode: a standing grant may also cover deletes, only
+    # on an instance for disposable test systems. Both read at boot only.
+    sandbox_mode: bool = False
+    sandbox_mode_confirm: str = ""
     # #2322 (G0.31 #2364) -- approval-TTL lifecycle. Every parked approval
     # is stamped ``expires_at = created_at + APPROVAL_DEFAULT_TTL_SECONDS``
     # (default 14 days); an explicit caller override is honoured but capped
@@ -1601,6 +1823,11 @@ class Settings(BaseModel):
     # not override it (full id in config, not a moving ``-latest`` tag).
     anthropic_api_key: str = ""
     agent_default_model: str = Field(default="anthropic:claude-sonnet-4-6", min_length=1)
+    # #3997 -- output-token limit for each Anthropic agent request. Since
+    # pydantic-ai 2.52 an unset ``max_tokens`` means the model's maximum
+    # (128,000 for claude-sonnet-4-6), sent as a stream, so the builders
+    # always send this value. 4096 keeps requests as they were before.
+    agent_max_output_tokens: int = Field(default=4096, ge=1, le=128_000)
     # G11.5-T2 #1076 — AWS Bedrock backend configuration. The Bedrock
     # builder (``meho_backplane.agent.models.bedrock_backend_builder``)
     # uses pydantic_ai's :class:`BedrockConverseModel` + ``boto3`` via
@@ -1795,13 +2022,14 @@ class Settings(BaseModel):
     # shared ingress and, unauthenticated, leak operational metrics and the
     # effective four-eyes / feature-gate posture to anyone who can reach it.
     # Empty ("", the default) leaves both endpoints **open** — behaviour is
-    # unchanged, so the in-cluster scraper and the kubelet readiness probe
-    # keep working with no config change. Set it to a shared secret to
-    # require ``Authorization: Bearer <token>`` on both endpoints
-    # (constant-time compared in :mod:`meho_backplane.metrics_access`); a
-    # deployment that turns it on must then hand the same token to the
-    # scraper (Prometheus ``bearer_token`` / ServiceMonitor
-    # ``bearerTokenSecret``) and to the readiness probe (``httpHeaders``).
+    # unchanged. Set it to a shared secret to require
+    # ``Authorization: Bearer <token>`` on ``/metrics`` (constant-time
+    # compared in :mod:`meho_backplane.metrics_access`); a deployment that
+    # turns it on must then hand the same token to the scraper (Prometheus
+    # ``bearer_token`` / ServiceMonitor ``bearerTokenSecret``). ``/ready``
+    # never answers 401 (#3594): without the bearer it still returns the
+    # readiness verdict but leaves out the ``features`` block, so the
+    # kubelet readiness probe needs no header.
     # ``/healthz`` (pure liveness, no posture) is deliberately never guarded,
     # so a bearer-less liveness path always exists. A **source-CIDR** allow
     # was considered and rejected: behind the shared ingress the app sees the
@@ -1897,11 +2125,28 @@ class Settings(BaseModel):
     #: seconds. A slow corpus raises ``CorpusUnavailable`` rather than
     #: blocking the event loop.
     corpus_timeout_seconds: float = Field(default=10.0, gt=0)
+    #: Bound on the corpus **answer** request (connect / read / write), in
+    #: seconds (#3911). Separate from ``corpus_timeout_seconds`` because a
+    #: grounded answer runs retrieval plus one or more model calls on the
+    #: backend: a collection that opts in to the backend's answer endpoint
+    #: (``backend.ref["answer"] == "upstream"``) would time out at the 10 s
+    #: search bound. Keep it below any proxy read timeout in front of the
+    #: corpus, so the backplane gives up first and maps it to a typed 503.
+    corpus_answer_timeout_seconds: float = Field(default=60.0, gt=0)
     #: Whether the ``search_docs`` route (T3, #1521) must reject a query
     #: that carries no product/version filter (REQUIRE_FILTERS). Default
     #: ``True`` — fail-closed scope discipline. Consumed by T3, not by the
     #: transport in this Task.
     corpus_require_filters: bool = True
+    #: Opt-in debug logging of docs query text (#3915). Off by default: the
+    #: docs surfaces log chunk ids and counts, never the question (the audit
+    #: row stores its SHA-256). When true, the query strings a docs call ran
+    #: (the ``ask_docs`` expansion variants, the operator's question first)
+    #: are written as one debug-severity ``docs_query_text`` record, even
+    #: under the INFO log floor
+    #: (:func:`~meho_backplane.docs_search.call_log.log_query_text`). Set via
+    #: ``DOCS_DEBUG_LOG_QUERY_TEXT``.
+    docs_debug_log_query_text: bool = False
     #: Application-layer tenant-scope guard for the agent-supplied
     #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
     #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
@@ -1924,6 +2169,14 @@ class Settings(BaseModel):
     #: secrets are relocated. Pre-#1725 this defaulted empty (guard off).
     #: Set via ``VAULT_KV_TENANT_SCOPE_PREFIX``.
     vault_kv_tenant_scope_prefix: str = "secret/tenants/{tenant_id}/"
+
+    @property
+    def keycloak_discovery_base(self) -> str:
+        """Realm base URL for discovery and token calls, without a trailing slash.
+
+        ``KEYCLOAK_DISCOVERY_URL`` when set, else the issuer URL.
+        """
+        return str(self.keycloak_discovery_url or self.keycloak_issuer_url).rstrip("/")
 
     @field_validator("vault_kv_tenant_scope_prefix")
     @classmethod
@@ -1973,6 +2226,18 @@ class Settings(BaseModel):
                 f"template whose only placeholder is '{{tenant_id}}'; got: "
                 f"{value!r}"
             ) from exc
+        return value
+
+    @field_validator("result_cache_redis_url")
+    @classmethod
+    def _result_cache_url_must_use_supported_scheme(cls, value: str) -> str:
+        """Reject schemes redis-py would refuse, same rule as the broadcast URL."""
+        if not value.startswith(_SUPPORTED_BROADCAST_URL_SCHEMES):
+            supported = ", ".join(_SUPPORTED_BROADCAST_URL_SCHEMES)
+            raise ValueError(
+                f"RESULT_CACHE_REDIS_URL must use a redis-py-supported scheme; "
+                f"supported: {supported}. Got: {value!r}",
+            )
         return value
 
     @field_validator("broadcast_redis_url")
@@ -2129,6 +2394,24 @@ class Settings(BaseModel):
                 ) from exc
         return value
 
+    @field_validator("result_complete_response_wire_max_bytes")
+    @classmethod
+    def _complete_response_ceiling_must_hold_the_receipt(cls, value: int) -> int:
+        """Reject a ``call_operation`` wire ceiling the receipt cannot fit (#3641).
+
+        A completed operation always delivers its receipt, so a ceiling
+        below :data:`RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES` could never
+        be honoured. Failing at startup keeps the ceiling a real bound
+        instead of one the receipt silently bypasses.
+        """
+        if value < RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES:
+            raise ValueError(
+                "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES must be at least "
+                f"{RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES} bytes so the receipt of a "
+                f"completed operation always fits. Got: {value}"
+            )
+        return value
+
     @field_validator("vault_oidc_role_by_tenant")
     @classmethod
     def _vault_oidc_role_by_tenant_must_be_uuid_role_csv(cls, value: str) -> str:
@@ -2166,6 +2449,25 @@ class Settings(BaseModel):
                 ) from exc
         return value
 
+    @field_validator("audit_wrapper_rows_retired")
+    @classmethod
+    def _wrapper_cutover_needs_request_usage(cls, value: bool, info: ValidationInfo) -> bool:
+        """Refuse to start when the wrapper rows are retired without usage events (#3757).
+
+        After the cutover, routine REST and MCP activity is recorded only
+        as request usage events. Those are written only when
+        ``REQUEST_USAGE_RETENTION_DAYS`` is set. Retiring the rows without
+        it would make that activity leave no trace, so this fails closed.
+        """
+        if value and info.data.get("request_usage_retention_days") is None:
+            raise ValueError(
+                "AUDIT_WRAPPER_ROWS_RETIRED=true needs REQUEST_USAGE_RETENTION_DAYS. "
+                "Without request usage events, routine REST and MCP activity would "
+                "leave no record. Set REQUEST_USAGE_RETENTION_DAYS, or set "
+                "AUDIT_WRAPPER_ROWS_RETIRED=false."
+            )
+        return value
+
 
 # Flat env-var -> Settings constructor, one kwarg per field: the length is
 # the field count, not branching complexity (McCabe is trivial). Extracting
@@ -2188,10 +2490,31 @@ def get_settings() -> Settings:
     ``BaseSettings`` is a one-commit refactor.
     """
     vault_namespace_env = os.environ.get("VAULT_NAMESPACE")
+    broadcast_redis_url = os.environ.get("BROADCAST_REDIS_URL", "redis://localhost:6379")
+    # ``or None`` collapses an empty-string env to no-auth, so an
+    # accidentally-blank BROADCAST_REDIS_PASSWORD does not send a
+    # zero-length password on the AUTH command.
+    broadcast_redis_password = os.environ.get("BROADCAST_REDIS_PASSWORD") or None
+    # An unset RESULT_CACHE_REDIS_URL falls back to the broadcast store (URL
+    # and password), so the reader-first result cache is a no-op until the
+    # dedicated pod ships.
+    result_cache_redis_url = os.environ.get("RESULT_CACHE_REDIS_URL") or None
+    if result_cache_redis_url is None:
+        result_cache_redis_url = broadcast_redis_url
+        result_cache_redis_password = broadcast_redis_password
+    else:
+        result_cache_redis_password = os.environ.get("RESULT_CACHE_REDIS_PASSWORD") or None
+    # An unset or blank REQUEST_USAGE_RETENTION_DAYS keeps request usage
+    # collection off (#3734).
+    request_usage_retention_raw = os.environ.get("REQUEST_USAGE_RETENTION_DAYS", "").strip()
+    request_usage_retention_days = (
+        int(request_usage_retention_raw) if request_usage_retention_raw else None
+    )
     return Settings(
         keycloak_issuer_url=os.environ["KEYCLOAK_ISSUER_URL"],  # type: ignore[arg-type]
         keycloak_audience=os.environ["KEYCLOAK_AUDIENCE"],
         keycloak_cli_client_id=os.environ.get("KEYCLOAK_CLI_CLIENT_ID", ""),
+        keycloak_discovery_url=os.environ.get("KEYCLOAK_DISCOVERY_URL") or None,  # type: ignore[arg-type]
         keycloak_jwks_cache_ttl_seconds=int(
             os.environ.get("KEYCLOAK_JWKS_CACHE_TTL_SECONDS", "300"),
         ),
@@ -2203,6 +2526,7 @@ def get_settings() -> Settings:
             "JWT_TENANT_ROLE_CLAIM_NAME",
             "tenant_role",
         ),
+        jwt_role_groups=_parse_jwt_role_groups(os.environ.get("JWT_ROLE_GROUPS", "")),
         jwt_principal_kind_claim_name=os.environ.get(
             "JWT_PRINCIPAL_KIND_CLAIM_NAME",
             "principal_kind",
@@ -2317,14 +2641,8 @@ def get_settings() -> Settings:
             "KB_INGEST_ROOT",
             "/opt/meho/kb-ingest",
         ).strip(),
-        broadcast_redis_url=os.environ.get(
-            "BROADCAST_REDIS_URL",
-            "redis://localhost:6379",
-        ),
-        # ``or None`` collapses an empty-string env to no-auth, so an
-        # accidentally-blank BROADCAST_REDIS_PASSWORD does not send a
-        # zero-length password on the AUTH command.
-        broadcast_redis_password=os.environ.get("BROADCAST_REDIS_PASSWORD") or None,
+        broadcast_redis_url=broadcast_redis_url,
+        broadcast_redis_password=broadcast_redis_password,
         broadcast_retention_hours=int(
             os.environ.get("BROADCAST_RETENTION_HOURS", "24"),
         ),
@@ -2388,8 +2706,17 @@ def get_settings() -> Settings:
         checks_evidence_prune_enabled=parse_bool_env(
             os.environ.get("CHECKS_EVIDENCE_PRUNE_ENABLED", "true"),
         ),
+        request_usage_retention_days=request_usage_retention_days,
+        audit_wrapper_rows_retired=parse_bool_env(
+            os.environ.get("AUDIT_WRAPPER_ROWS_RETIRED", "false"),
+        ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
+        ),
+        result_cache_redis_url=result_cache_redis_url,
+        result_cache_redis_password=result_cache_redis_password,
+        result_cache_writer_enabled=parse_bool_env(
+            os.environ.get("RESULT_CACHE_WRITER_ENABLED", "false"),
         ),
         result_handle_max_record_bytes=int(
             os.environ.get("RESULT_HANDLE_MAX_RECORD_BYTES", "16777216"),
@@ -2409,8 +2736,23 @@ def get_settings() -> Settings:
         result_query_max_output_bytes=int(
             os.environ.get("RESULT_QUERY_MAX_OUTPUT_BYTES", "262144"),
         ),
+        result_complete_response_wire_max_bytes=int(
+            os.environ.get("RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES", "262144"),
+        ),
+        result_query_response_wire_max_bytes=int(
+            os.environ.get("RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES", "2097152"),
+        ),
         result_query_timeout_seconds=int(
-            os.environ.get("RESULT_QUERY_TIMEOUT_SECONDS", "5"),
+            os.environ.get("RESULT_QUERY_TIMEOUT_SECONDS", "10"),
+        ),
+        result_query_executor_workers=int(
+            os.environ.get("RESULT_QUERY_EXECUTOR_WORKERS", "4"),
+        ),
+        result_query_tenant_concurrency=int(
+            os.environ.get("RESULT_QUERY_TENANT_CONCURRENCY", "4"),
+        ),
+        result_query_rate_per_minute=int(
+            os.environ.get("RESULT_QUERY_RATE_PER_MINUTE", "0"),
         ),
         jsonflux_sample_byte_budget=int(
             os.environ.get("JSONFLUX_SAMPLE_BYTE_BUDGET", "4096"),
@@ -2444,6 +2786,17 @@ def get_settings() -> Settings:
         approval_allow_self_approval=parse_bool_env(
             os.environ.get("APPROVAL_ALLOW_SELF_APPROVAL", "false"),
         ),
+        # #3693 — fail-closed default: delegated decisions refused unless
+        # this lab-class switch is explicitly enabled.
+        approval_allow_delegated_decision=parse_bool_env(
+            os.environ.get("APPROVAL_ALLOW_DELEGATED_DECISION", "false"),
+        ),
+        # #4622 -- sandbox mode is off unless both settings are set; the
+        # boot guards in ``meho_backplane.sandbox_mode`` check them.
+        sandbox_mode=parse_bool_env(
+            os.environ.get("MEHO_SANDBOX_MODE", "false"),
+        ),
+        sandbox_mode_confirm=os.environ.get("MEHO_SANDBOX_MODE_CONFIRM", "").strip(),
         # #2322 — approval-TTL default + sweeper knobs.
         approval_default_ttl_seconds=int(
             os.environ.get("APPROVAL_DEFAULT_TTL_SECONDS", str(14 * 24 * 3600)),
@@ -2556,6 +2909,9 @@ def get_settings() -> Settings:
             "AGENT_DEFAULT_MODEL",
             "anthropic:claude-sonnet-4-6",
         ),
+        agent_max_output_tokens=int(
+            os.environ.get("AGENT_MAX_OUTPUT_TOKENS", "4096"),
+        ),
         bedrock_region=os.environ.get("BEDROCK_REGION", "").strip(),
         bedrock_default_model=os.environ.get(
             "BEDROCK_DEFAULT_MODEL",
@@ -2654,8 +3010,14 @@ def get_settings() -> Settings:
         corpus_timeout_seconds=float(
             os.environ.get("CORPUS_TIMEOUT_SECONDS", "10.0"),
         ),
+        corpus_answer_timeout_seconds=float(
+            os.environ.get("CORPUS_ANSWER_TIMEOUT_SECONDS", "60.0"),
+        ),
         corpus_require_filters=parse_bool_env(
             os.environ.get("CORPUS_REQUIRE_FILTERS", "true"),
+        ),
+        docs_debug_log_query_text=parse_bool_env(
+            os.environ.get("DOCS_DEBUG_LOG_QUERY_TEXT"),
         ),
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"

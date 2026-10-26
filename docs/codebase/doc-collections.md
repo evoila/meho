@@ -255,7 +255,15 @@ adapters whose `is_configured()` is true (for `corpus-http`,
 `settings.corpus_url` set) and reports `ok=True` unconditionally — the
 docs add-on is optional, and a deploy with no docs backend configured
 must still become Ready. `detail` carries the configured count (the
-observability value of the check). It deliberately does **not** issue a
+observability value of the check). When `CORPUS_URL` is set but the
+corpus destination screen would reject it, `detail` also says so and
+names `MEHO_TARGET_SSRF_ALLOWLIST` (#3573) — `ok` stays `True`. That
+check is offline: it parses the URL, checks the scheme against the
+allowlist, and screens the host only when it is an IP literal. It never
+does a DNS lookup and never contacts the corpus, so a slow DNS server
+cannot slow down `/ready`. A hostname under `https` is not checked
+there; the dial and `meho docs collections probe` still catch a name
+that resolves to a blocked address. It deliberately does **not** issue a
 live round-trip — a corpus outage must not flap the backplane out of
 rotation; an unconfigured or unreachable backend instead fails closed at
 call time (`CorpusUnavailable` → 503) and at the explicit per-collection
@@ -372,7 +380,11 @@ The service primitive
   `https` scheme + a public, allowlist-aware host, via the shared target
   SSRF guard (`assert_public_destination_async` — the same
   `MEHO_TARGET_SSRF_ALLOWLIST`-aware guard the connector target dial uses).
-  A non-`https` or private/link-local/metadata endpoint raises
+  Plain `http` is accepted only when the host is an exact entry on
+  `MEHO_TARGET_SSRF_ALLOWLIST`: a hostname listed verbatim, or a single
+  IP (bare IP, `/32`, or `/128`). An IP that only falls inside a listed
+  range still needs `https` (#3573, the trusted in-cluster corpus).
+  Any other non-`https` or private/link-local/metadata endpoint raises
   `DocCollectionEndpointError` → `422` (`kind="endpoint_not_allowed"`) and
   is never persisted, closing a credential-capture + SSRF path a
   `tenant_admin` could otherwise open. Absent endpoint (the legacy global
@@ -550,7 +562,14 @@ Two behaviours the service owns (one policy across all fronts):
    probe machine enforces) returns `status` to `provisioning`. The operator
    then re-runs `probe` to promote it back to `ready` — the same
    `create → probe → ready` flow. A metadata-only change leaves `status` +
-   liveness untouched.
+   liveness untouched, and so does a backend change that touches **only**
+   the `answer` / `answer_endpoint` ref keys (#3911) or the `read` /
+   `read_endpoint` ref keys (#3948): those choose where `ask_docs` answers
+   come from (the backend's own answer endpoint) and whether `read_docs` may
+   read around a hit (see [docs-search.md](docs-search.md)), not which corpus
+   the probe validated. A type, endpoint, audience or other ref change still
+   resets readiness. An explicit `answer_endpoint` or `read_endpoint` is a
+   dialed URL and is screened like `endpoint` on create and update.
 
 This is the governed repair for the migration-seeded global `vmware` row
 ([Global-row manifest seed](#global-row-manifest-seed-1920) below): a

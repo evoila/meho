@@ -199,7 +199,7 @@ reason.
 | `bind9.record.add` | `Bind9Connector.bind9_record_add` | `caution` | Atomic A/AAAA record write with snapshot rollback; resolves owning zone via longest-suffix match when `zone` omitted; optional `view` disambiguates split-horizon zones (#2897); verify predicate = `dig` returns the new IP, or `rndc zonestatus` serial-match when a `view` is given |
 | `bind9.record.remove` | `Bind9Connector.bind9_record_remove` | `destructive` | Governed whole-name clear (#3247): atomic remove of **every** A + AAAA at the given FQDN with snapshot rollback; same `view` disambiguation as `record.add`; verify predicate = `dig` no longer resolves the FQDN, or `rndc zonestatus` serial-match when a `view` is given. Promoted from `caution` by the #3247 operator ruling — as the broadest DNS removal it rides the same governed gate as `record.delete`: mandatory human approval + preview-hash binding + whole-name blast-radius (the name + every A/AAAA value that dies) |
 | `bind9.record.delete` | `Bind9Connector.bind9_record_delete` | `destructive` | Governed-delete tier (#3231): deletes exactly ONE record scoped by `(zone, name, type, rdata?)` — never zone-wide, never a whole-rrset sweep. Mandatory human approval + preview-hash binding + blast-radius (the exact record + its siblings). Fail-closed structured refusals `not_found` / `ambiguous` (candidates named) / `unmanaged_zone`; verify predicate confirms the single deleted value is gone (view → `rndc zonestatus`) |
-| `bind9.config.show` | `Bind9Connector.bind9_config_show` | `safe` | Read named.conf or an included fragment under the bind config root; path-safety filter refuses traversal with no content leaked |
+| `bind9.config.show` | `Bind9Connector.bind9_config_show` | `caution` | Read named.conf or an included fragment under the bind config root; path-safety filter refuses traversal with no content leaked. Waits for approval and is on `_CREDENTIAL_READ_OPS`, because a config file can hold TSIG / rndc key secrets; the value of every `secret "..."` line comes back as `[REDACTED:bind_key_secret]` (#4617) |
 | `bind9.config.apply_file` | `Bind9Connector.bind9_config_apply_file` | `dangerous` | Atomic single-fragment write via T3's primitive; validate = `named-checkconf -p`; verify = config still parses after live reload |
 | `bind9.config.apply_views` | `Bind9Connector.bind9_config_apply_views` | `dangerous` | Atomic multi-file tree write (tar mode of T3's primitive); validate = `named-checkconf -p`; verify = caller-supplied `dig` or fallback parse check |
 | `bind9.config.backup` | `Bind9Connector.bind9_config_backup` | `caution` | `tar -czf` of `/etc/bind/` under `/var/backups/meho-bind9/`; returns backup ID + listing of existing backups |
@@ -399,11 +399,30 @@ whether the caller passed `view`:
   so it confirms named loaded our revision into *that* view;
   `named-checkzone` (validate step) already proved the record is in the
   file.
-* **`view` omitted** (`_dig_add_verify` / `_dig_remove_verify`) -- the
-  record-level `dig @localhost` check, unchanged for no-views /
-  single-view targets.
+* **`view` omitted** (`_dig_add_verify` / `_dig_remove_verify` /
+  `_dig_value_absent_verify`) -- the record-level `dig @localhost`
+  check for no-views / single-view targets.
 
-Both predicates **echo their observed state on failure** so the
+All predicates **poll before they fail** (`_poll_verify`, #4205). The
+commit-path `rndc reload` is asynchronous -- the ISC rndc manual says
+"if no zone is specified, the reloading happens asynchronously" -- so
+`named` can still serve the old zone when the first `dig` runs. A
+single check then rolled back a correct write with exit code 12. Every
+predicate now retries up to `_VERIFY_POLL_ATTEMPTS` (10) times,
+`_VERIFY_POLL_INTERVAL_SECONDS` (0.3 s) apart, about 3 s in total. Each
+`dig` call is bounded with `+timeout=1 +tries=1` so a resolver that stops
+answering cannot push the poll past the 90 s SSH budget of the apply. A
+record that never appears still fails, rolls back, and exits 12.
+
+The two absence checks (`_dig_remove_verify`, `_dig_value_absent_verify`)
+only accept "the record is gone" when `dig` exited 0 (`_dig_observe`
+stores the exit status next to the answer). `dig` exits 0 for every real
+DNS answer, including NXDOMAIN, and non-zero when no server replied. A
+lookup that got no reply prints error text without the value, which must
+not pass as absence: the poll retries it and, if the server never
+answers, fails and rolls back.
+
+All predicates **echo their last observed state on failure** so the
 `AtomicApplyError` detail is diagnosable -- the pre-#2897 silent
 `grep -q` / `[ -z … ]` predicates surfaced an empty `exception_message`.
 
@@ -586,6 +605,6 @@ removed by G0.6-T11 (#412) and bind9 has never shipped behind it.
 - Registration substrate: [#395 G0.6-T4 register_typed_operation()](https://github.com/evoila/meho/issues/395)
 - Sibling skeleton precedent: [#321 G3.2-T1 KubernetesConnector skeleton](https://github.com/evoila/meho/issues/321) + `backend/src/meho_backplane/connectors/kubernetes/connector.py`
 - Two-phase registration precedent: `backend/src/meho_backplane/connectors/vault/__init__.py`
-- Consumer wrapper replaced: [scripts/bind9-dns.sh](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/bind9-dns.sh)
+- Consumer wrapper replaced: scripts/bind9-dns.sh
 - ISC bind9 9.18 docs: <https://bind9.readthedocs.io/en/v9.18/>
 - asyncssh: <https://asyncssh.readthedocs.io/>

@@ -44,6 +44,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vm_info import (
     build_vm_info_retrieve_params,
     vm_info_impl,
 )
+from meho_backplane.connectors.vmware_rest.vim_body import vim_moref
 from meho_backplane.operations import dispatcher as dispatcher_module
 from meho_backplane.operations._errors import result_connector_not_found, status_code_for_result
 from meho_backplane.operations._validate import validate_params
@@ -305,11 +306,25 @@ async def test_vm_info_by_name_tolerates_legacy_value_envelope() -> None:
 
 
 @pytest.mark.asyncio
-async def test_vm_info_by_name_unknown_raises() -> None:
+async def test_vm_info_by_name_unknown_is_not_found() -> None:
+    """An empty name listing is a clean "absent" answer, not a connector error."""
     conn = _FakeConnector(listing=[])
 
-    with pytest.raises(RuntimeError, match="no VM named 'ghost'"):
-        await vm_info_impl(conn, _make_operator(), _Target(), {"name": "ghost"})
+    with pytest.raises(ConnectorResourceNotFoundError, match="no VM named 'missing-vm'") as raised:
+        await vm_info_impl(conn, _make_operator(), _Target(), {"name": "missing-vm"})
+
+    assert raised.value.resource_ids == ["missing-vm"]
+    assert conn.post_calls == []
+    result = result_connector_not_found("vmware.vm.info", raised.value, duration_ms=1.0)
+    assert result.status == "not_found"
+    assert result.extras == {
+        "error_code": "not_found",
+        "resource_ids": ["missing-vm"],
+        "resource_id": "missing-vm",
+    }
+    # The synthetic code for the audit row only. The REST route still
+    # answers HTTP 200 with this envelope (see test_api_v1_operations).
+    assert status_code_for_result(result.status) == 404
 
 
 @pytest.mark.asyncio
@@ -355,7 +370,74 @@ def test_retrieve_properties_managed_object_not_found_maps_to_structured_result(
     assert result.extras["error_code"] == "not_found"
     assert result.extras["resource_id"] == "vm-42"
     assert result.extras["resource_ids"] == ["vm-42"]
+    # The synthetic code for the audit row only. The REST route still
+    # answers HTTP 200 with this envelope (see test_api_v1_operations).
     assert status_code_for_result(result.status) == 404
+
+
+def _json_fault_error(fault: dict[str, Any]) -> httpx.HTTPStatusError:
+    """An HTTP 500 whose body is a VI-JSON fault, as vCenter 9.1 answers (#4776)."""
+    response = httpx.Response(
+        500,
+        json=fault,
+        request=httpx.Request("POST", "https://vc.test.invalid/sdk/vim25/9.0"),
+    )
+    return httpx.HTTPStatusError("upstream fault", request=response.request, response=response)
+
+
+def test_retrieve_properties_json_managed_object_not_found_maps_to_structured_result() -> None:
+    """The JSON fault form names the requested VM in ``obj``: same not_found as the XML form."""
+    error = _json_fault_error(
+        {
+            "_typeName": "ManagedObjectNotFound",
+            "faultstring": "The object 'vim.VirtualMachine:vm-42' has already been deleted.",
+            "obj": vim_moref("VirtualMachine", "vm-42"),
+        }
+    )
+
+    with pytest.raises(ConnectorResourceNotFoundError) as raised:
+        VmwareRestConnector._raise_managed_object_not_found(
+            error,
+            "/PropertyCollector/propertyCollector/RetrievePropertiesEx",
+            build_vm_info_retrieve_params("vm-42"),
+        )
+
+    result = result_connector_not_found("vmware.vm.info", raised.value, duration_ms=1.0)
+    assert result.status == "not_found"
+    assert result.extras["error_code"] == "not_found"
+    assert result.extras["resource_id"] == "vm-42"
+    assert result.extras["resource_ids"] == ["vm-42"]
+
+
+def test_retrieve_properties_json_fault_without_obj_reports_requested_moid() -> None:
+    """A JSON fault that names no missing object keeps the rule of the XML form."""
+    error = _json_fault_error({"_typeName": "ManagedObjectNotFound", "faultstring": "gone"})
+
+    with pytest.raises(ConnectorResourceNotFoundError) as raised:
+        VmwareRestConnector._raise_managed_object_not_found(
+            error,
+            "/PropertyCollector/propertyCollector/RetrievePropertiesEx",
+            build_vm_info_retrieve_params("vm-42"),
+        )
+
+    assert raised.value.resource_ids == ["vm-42"]
+
+
+def test_retrieve_properties_json_fault_for_another_object_stays_http_error() -> None:
+    """A missing property collector is not a missing VM."""
+    error = _json_fault_error(
+        {
+            "_typeName": "ManagedObjectNotFound",
+            "faultstring": "gone",
+            "obj": vim_moref("PropertyCollector", "propertyCollector"),
+        }
+    )
+
+    VmwareRestConnector._raise_managed_object_not_found(
+        error,
+        "/PropertyCollector/propertyCollector/RetrievePropertiesEx",
+        build_vm_info_retrieve_params("vm-42"),
+    )
 
 
 def test_retrieve_properties_non_fault_500_stays_http_error() -> None:
@@ -411,11 +493,12 @@ async def test_dispatcher_maps_connector_missing_resource_to_not_found(
 ) -> None:
     """The dispatcher emits the structured result instead of connector_error."""
     audit = AsyncMock()
-    monkeypatch.setattr(dispatcher_module, "audit_and_broadcast_safe", audit)
+    monkeypatch.setattr(dispatcher_module, "audit_safe", audit)
     descriptor = SimpleNamespace(
         source_kind="typed",
         handler_ref=f"{__name__}._raise_missing_resource",
         op_id="vmware.vm.info",
+        tags=[],
     )
 
     result = await dispatcher_module._run_branch_with_error_handling(

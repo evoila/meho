@@ -40,6 +40,7 @@ from typing import Any, Final
 import structlog
 
 from meho_backplane.agent.invocation import (
+    RUN_INPUT_MAX_CHARS,
     AgentDisabledError,
     AgentNotFoundError,
     AgentRunNotFoundError,
@@ -220,7 +221,11 @@ register_mcp_tool(
                 "input": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "The user prompt to run the agent on.",
+                    "maxLength": RUN_INPUT_MAX_CHARS,
+                    "description": (
+                        "The user prompt to run the agent on. "
+                        f"At most {RUN_INPUT_MAX_CHARS} characters."
+                    ),
                 },
                 "async": {
                     "type": "boolean",
@@ -277,6 +282,8 @@ async def _run_status_handler(
             str(view.agent_definition_id) if view.agent_definition_id is not None else None
         ),
         "agent_name": view.agent_name,
+        "identity_sub": view.identity_sub,
+        "identity_act": view.identity_act,
     }
 
 
@@ -289,7 +296,10 @@ register_mcp_tool(
             "Poll an agent run's durable status by run_id (Initiative "
             "#802). Operator-level. Returns {run_id, status, turns, "
             "provider, model, output, error, agent_definition_id, "
-            "agent_name}; output/error are set once the run reaches a "
+            "agent_name, identity_sub, identity_act}; identity_sub is who "
+            "the run acts for and identity_act is the agent acting for "
+            "them on a direct run (null when the agent is the subject). "
+            "output/error are set once the run reaches a "
             "terminal state. `turns` is the number of model-request turns "
             "the loop made; it is recorded only on success, so a succeeded "
             "run always reports `turns >= 1` while any non-succeeded run "
@@ -378,6 +388,8 @@ async def _list_runs_handler(
                     str(s.agent_definition_id) if s.agent_definition_id is not None else None
                 ),
                 "agent_name": s.agent_name,
+                "identity_sub": s.identity_sub,
+                "identity_act": s.identity_act,
                 "created_at": s.created_at.isoformat(),
                 "started_at": s.started_at.isoformat() if s.started_at is not None else None,
                 "ended_at": s.ended_at.isoformat() if s.ended_at is not None else None,
@@ -397,7 +409,8 @@ register_mcp_tool(
             "(Initiative #802; work_ref I3-T2 #1662). Operator-level. "
             "Returns {runs: [{run_id, status, trigger, model_tier, "
             "provider, model, turns, work_ref, agent_definition_id, "
-            "agent_name, created_at, started_at, ended_at}]}; "
+            "agent_name, identity_sub, identity_act, created_at, "
+            "started_at, ended_at}]}; "
             "agent_definition_id / agent_name are null for an ad-hoc run "
             "or a definition deleted after the run (#2472). Filter by "
             "work_ref (exact-match external change-ticket reference, e.g. "

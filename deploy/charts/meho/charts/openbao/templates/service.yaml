@@ -1,0 +1,40 @@
+# Both Services also reach a pod that is not ready (locked or not started
+# yet), so the setup Job can start it and the backplane can report
+# `sealed` instead of "unreachable".
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "coreVault.fullname" . }}
+  labels:
+    {{- include "coreVault.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  publishNotReadyAddresses: true
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "coreVault.selectorLabels" . | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "coreVault.internalName" . }}
+  labels:
+    {{- include "coreVault.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: http
+      port: 8200
+      targetPort: http
+      protocol: TCP
+    - name: cluster
+      port: 8201
+      targetPort: cluster
+      protocol: TCP
+  selector:
+    {{- include "coreVault.selectorLabels" . | nindent 4 }}

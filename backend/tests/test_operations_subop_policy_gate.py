@@ -42,12 +42,18 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
+    ResumeRequester,
     SelfApprovalForbiddenError,
     approve_request,
+    composite_resume_binding,
+    resume_requester_var,
 )
 from meho_backplane.operations.composite import (
+    CompositeResumeState,
     composite_dispatch_var,
     composite_resume_scope_var,
+    composite_resume_state,
+    composite_resume_state_var,
     composite_resume_var,
     enforce_subop_policy,
 )
@@ -433,6 +439,245 @@ async def test_subop_resume_scope_guard_fails_closed_on_second_gate(
 
 
 # ===========================================================================
+# #4217 — a step after the main change continues where it stopped. The
+# relaxed multi-gate guard and the two checks that keep it safe.
+# ===========================================================================
+
+_PARENT_OP_ID = "vmware.composite.vm.deploy_from_library"
+_PARENT_PARAMS = {"library_item": "li-1", "name": "web-01", "resource_pool": "rp-1"}
+_RENAME_OP_ID = "POST:/VirtualMachine/{moId}/Rename_Task"
+_RENAME_PARAMS = {"moId": "vm-1", "body": {"newName": "web-01"}}
+_SAVED_STATE = {"deploy_name": "web-01-meho-x", "deployed": {"vm_id": "vm-1", "step": "rename"}}
+
+
+async def _approval_count(session: AsyncSession) -> int:
+    return int(await session.scalar(select(func.count()).select_from(ApprovalRequest)) or 0)
+
+
+@pytest.mark.asyncio
+async def test_after_main_effect_park_saves_its_state_on_the_row(session: AsyncSession) -> None:
+    """The park stores the saved state and the ``after_main_effect`` mark (#4217)."""
+    token = composite_dispatch_var.set((_PARENT_OP_ID, _PARENT_PARAMS))
+    try:
+        result = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_RENAME_OP_ID,
+            safety_level="dangerous",
+            requires_approval=True,
+            target=None,
+            params=_RENAME_PARAMS,
+            resume_state=_SAVED_STATE,
+            after_main_effect=True,
+        )
+    finally:
+        composite_dispatch_var.reset(token)
+
+    assert result is not None
+    assert result.status == "awaiting_approval"
+    row = await session.get(ApprovalRequest, uuid.UUID(result.extras["approval_request_id"]))
+    assert row is not None
+    assert row.resume_parent == {
+        "op_id": _PARENT_OP_ID,
+        "params": _PARENT_PARAMS,
+        "state": _SAVED_STATE,
+        "after_main_effect": True,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("during_resume", [False, True])
+async def test_after_main_effect_without_saved_state_is_refused(
+    session: AsyncSession, during_resume: bool
+) -> None:
+    """A step marked ``after_main_effect`` that saved no state never runs or waits (#4217).
+
+    Its approval could only re-run the composite from the start and repeat
+    the earlier writes. So the seam refuses it, before the policy check,
+    in an ordinary run and during a resume: no write, no approval row.
+    """
+    before = await _approval_count(session)
+    dispatch_token = composite_dispatch_var.set((_PARENT_OP_ID, _PARENT_PARAMS))
+    scope_token = composite_resume_scope_var.set(
+        ("POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy", "h")
+        if during_resume
+        else None
+    )
+    try:
+        result = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_RENAME_OP_ID,
+            safety_level="dangerous",
+            requires_approval=True,
+            target=None,
+            params=_RENAME_PARAMS,
+            after_main_effect=True,
+        )
+    finally:
+        composite_resume_scope_var.reset(scope_token)
+        composite_dispatch_var.reset(dispatch_token)
+
+    assert result is not None
+    assert result.status == "error"
+    assert result.extras["error_code"] == "composite_resume_state_missing"
+    assert result.extras["blocked_op_id"] == _RENAME_OP_ID
+    assert await _approval_count(session) == before
+
+
+@pytest.mark.asyncio
+async def test_after_main_effect_step_may_wait_during_a_resume(session: AsyncSession) -> None:
+    """The relaxed guard: an ``after_main_effect`` step parks during a resume (#4217).
+
+    The same situation as
+    ``test_subop_resume_scope_guard_fails_closed_on_second_gate``, but the
+    second step runs after the main change and saved its state. Its own
+    resume continues at this step, so it may wait for approval: a second
+    row is written, carrying the state. The re-run runs as the reviewer,
+    but the new row names the requester of the request being re-run.
+    """
+    approved = ("POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy", "approved")
+    before = await _approval_count(session)
+    dispatch_token = composite_dispatch_var.set((_PARENT_OP_ID, _PARENT_PARAMS))
+    scope_token = composite_resume_scope_var.set(approved)
+    resume_token = composite_resume_var.set(None)  # the approved deploy already cleared
+    requester_token = resume_requester_var.set(
+        ResumeRequester(sub="svc-blueprint", act="agent-x", name="Blueprint")
+    )
+    try:
+        result = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_RENAME_OP_ID,
+            safety_level="dangerous",
+            requires_approval=True,
+            target=None,
+            params=_RENAME_PARAMS,
+            resume_state=_SAVED_STATE,
+            after_main_effect=True,
+        )
+    finally:
+        resume_requester_var.reset(requester_token)
+        composite_resume_var.reset(resume_token)
+        composite_resume_scope_var.reset(scope_token)
+        composite_dispatch_var.reset(dispatch_token)
+
+    assert result is not None
+    assert result.status == "awaiting_approval"
+    assert await _approval_count(session) == before + 1
+    row = await session.get(ApprovalRequest, uuid.UUID(result.extras["approval_request_id"]))
+    assert row is not None
+    assert row.resume_parent is not None
+    assert row.resume_parent["state"] == _SAVED_STATE
+    assert (row.principal_sub, row.principal_act, row.principal_name) == (
+        "svc-blueprint",
+        "agent-x",
+        "Blueprint",
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_refuses_an_earlier_write_before_the_approved_step(
+    session: AsyncSession,
+) -> None:
+    """During the resume of an ``after_main_effect`` park, an earlier write is refused (#4217).
+
+    The approved rename has not run yet (``composite_resume_var`` is still
+    set). A composite that wrongly starts from the beginning reaches the
+    deploy first. The seam refuses it before it runs — even for a user
+    whose policy would auto-execute it — and writes no row. Once the
+    approved step has run, later writes are checked as usual.
+    """
+    before = await _approval_count(session)
+    dispatch_token = composite_dispatch_var.set((_PARENT_OP_ID, _PARENT_PARAMS))
+    approved = (_RENAME_OP_ID, compute_params_hash(_RENAME_PARAMS))
+    scope_token = composite_resume_scope_var.set(approved)
+    resume_token = composite_resume_var.set(approved)
+    state_token = composite_resume_state_var.set(
+        CompositeResumeState(op_id=_PARENT_OP_ID, state=_SAVED_STATE, after_main_effect=True)
+    )
+    try:
+        deploy = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id="POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy",
+            safety_level="dangerous",
+            requires_approval=False,
+            target=None,
+            params={"ovfLibraryItemId": "li-1"},
+        )
+        rename = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_RENAME_OP_ID,
+            safety_level="dangerous",
+            requires_approval=True,
+            target=None,
+            params=_RENAME_PARAMS,
+            resume_state=_SAVED_STATE,
+            after_main_effect=True,
+        )
+        later = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id="POST:/vcenter/vm/{vm}/power?action=start",
+            safety_level="dangerous",
+            requires_approval=False,
+            target=None,
+            params={"vm": "vm-1"},
+        )
+    finally:
+        composite_resume_state_var.reset(state_token)
+        composite_resume_var.reset(resume_token)
+        composite_resume_scope_var.reset(scope_token)
+        composite_dispatch_var.reset(dispatch_token)
+
+    assert deploy is not None
+    assert deploy.status == "error"
+    assert deploy.extras["error_code"] == "composite_resume_repeats_write"
+    assert deploy.extras["approved_op_id"] == _RENAME_OP_ID
+    assert deploy.extras["composite_op_id"] == _PARENT_OP_ID
+    assert rename is None, "the approved step clears"
+    assert later is None, "after the approved step, a user's dangerous write auto-executes"
+    assert await _approval_count(session) == before
+
+
+@pytest.mark.asyncio
+async def test_resume_binding_hands_the_saved_state_to_the_parent_only() -> None:
+    """``composite_resume_binding`` binds the saved state for the parent composite (#4217)."""
+    resume_parent = {
+        "op_id": _PARENT_OP_ID,
+        "params": _PARENT_PARAMS,
+        "state": _SAVED_STATE,
+        "after_main_effect": True,
+    }
+    requester = ResumeRequester(sub="svc-blueprint", act=None, name=None)
+    with composite_resume_binding(
+        subop_op_id=_RENAME_OP_ID,
+        subop_params_hash="h",
+        resume_parent=resume_parent,
+        requester=requester,
+    ) as parent_call:
+        assert parent_call == (_PARENT_OP_ID, _PARENT_PARAMS)
+        assert resume_requester_var.get() == requester
+        assert composite_resume_state(_PARENT_OP_ID) == _SAVED_STATE
+        assert composite_resume_state("vmware.composite.vm.create") is None
+        bound = composite_resume_state_var.get()
+        assert bound is not None
+        assert bound.after_main_effect is True
+    assert composite_resume_state(_PARENT_OP_ID) is None
+    assert resume_requester_var.get() is None
+
+    # A park that saved no state binds none, so the composite runs as before.
+    with composite_resume_binding(
+        subop_op_id=_RENAME_OP_ID,
+        subop_params_hash="h",
+        resume_parent={"op_id": _PARENT_OP_ID, "params": _PARENT_PARAMS},
+    ):
+        assert composite_resume_state_var.get() is None
+
+
+# ===========================================================================
 # #294 (security review S06) -- proposed_effect stamping restores the
 # tier-keyed self-approval carve-out + the destructive-binding refusal on
 # composite sub-op parks
@@ -495,7 +740,7 @@ async def test_destructive_subop_refused_without_preview_binding(
     The dispatcher refuses to park a ``destructive`` op that carries no
     ``preview_hash`` + blast-radius binding (#3197, ``_destructive_binding_refusal``).
     The composite seam presents no ``preview_hash``, so a destructive sub-op is
-    routed through the same refusal here -- fail-closed, no durable row -- rather
+    routed through the same refusal here -- fail-closed, no approval row -- rather
     than writing an identifier-only row the tier guards would misread. No shipped
     composite passes ``destructive`` today; this is the defense-in-depth floor.
     """
@@ -515,3 +760,102 @@ async def test_destructive_subop_refused_without_preview_binding(
     # Fail-closed: no identifier-only pending row was written for the park.
     count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
     assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_destructive_subop_refusal_writes_one_denied_audit_row(
+    session: AsyncSession,
+) -> None:
+    """A refused destructive step is recorded as one ``denied`` audit row (#4647).
+
+    The refusal is the step's own decision, so the gate records it on the
+    step's path, through the same writer the dispatcher park uses. The parent
+    composite returns the step's result as is and gets its own ``denied``
+    execution row from the dispatcher (#4275).
+    """
+    from meho_backplane.db.models import AuditLog
+    from meho_backplane.operations._audit import parent_audit_id_var
+
+    op_id = "DELETE:/vcenter/datacenter/{datacenter}"
+    parent_audit_id = uuid.uuid4()
+    token = parent_audit_id_var.set(parent_audit_id)
+    try:
+        result = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=op_id,
+            safety_level="destructive",
+            requires_approval=True,
+            target=None,
+            params={"datacenter": "datacenter-42"},
+        )
+    finally:
+        parent_audit_id_var.reset(token)
+    assert result is not None
+    assert result.extras["error_code"] == "preview_binding_required"
+
+    rows = (await session.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].event_class == "policy_decision"
+    assert rows[0].status_code == 403
+    assert rows[0].payload["result_status"] == "denied"
+    assert rows[0].payload["error"]["error_code"] == "preview_binding_required"
+    assert rows[0].parent_audit_id == parent_audit_id
+
+
+@pytest.mark.asyncio
+async def test_subop_park_refused_when_preflight_says_write_will_be_denied(
+    session: AsyncSession,
+) -> None:
+    """A sub-op whose permission preflight says the write will be denied does not park (#3542).
+
+    The composite seam reuses the dispatcher's ``_preflight_denied_refusal``,
+    so a governed sub-op gets the same ``write_capability_denied`` refusal as
+    a top-level dispatch, and no approval row is written. The refusal is
+    still recorded: one ``denied`` audit row on the sub-op's path, through
+    the same writer the dispatcher park uses.
+    """
+    from typing import Any
+
+    from meho_backplane.db.models import AuditLog
+    from meho_backplane.operations._preview import (
+        _PERMISSION_PREFLIGHTS,
+        PreviewContext,
+        register_permission_preflight,
+    )
+
+    op_id = "PUT:/vcenter/preflight-denied"
+
+    async def _preflight(ctx: PreviewContext) -> dict[str, Any]:
+        return {
+            "check": "vault.capabilities-self",
+            "path": "secret/data/example",
+            "required": ["create", "update"],
+            "granted": ["read"],
+            "will_be_denied": True,
+        }
+
+    register_permission_preflight(op_id, _preflight)
+    try:
+        result = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=op_id,
+            safety_level="caution",
+            requires_approval=True,
+            target=None,
+            params={"value": "x"},
+        )
+    finally:
+        _PERMISSION_PREFLIGHTS.pop(op_id, None)
+    assert result is not None
+    assert result.status == "denied"
+    assert result.extras["error_code"] == "write_capability_denied"
+    assert result.extras["granted"] == ["read"]
+    count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
+    assert count == 0
+    rows = (await session.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].status_code == 403
+    assert rows[0].payload["result_status"] == "denied"
+    assert rows[0].payload["error"]["error_code"] == "write_capability_denied"

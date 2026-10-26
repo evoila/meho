@@ -170,6 +170,9 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # here or every PG-backed acceptance test errors at setup with
     # ``cannot truncate a table referenced in a foreign key constraint``.
     "agent_announcement",
+    # ``agent_announcement_sequence.tenant_id`` is a real FK from migration
+    # ``0114`` (#3748, the per-tenant archive sequence counter).
+    "agent_announcement_sequence",
     # ``agent_definition`` carries a real FK ``tenant(id)`` per migration
     # ``0016`` (#809 G11.1-T2). Listed here so the per-test TRUNCATE stays
     # non-cascading once that table exists.
@@ -216,6 +219,10 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     "dispatch_trace",
     "dispatch_trace_span",
     "documents",
+    # ``kb_revision.tenant_id`` is a real ``REFERENCES tenant(id)`` FK and
+    # ``kb_revision.entry_id`` references ``documents(id)`` (migration
+    # ``0110``, #3753), so it must be truncated in the same statement.
+    "kb_revision",
     "endpoint_descriptor",
     # ``event_outbox.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
     # migration ``0027`` (G11.3-T3 #824). PG rejects truncating ``tenant``
@@ -333,6 +340,10 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # test errors at setup with ``cannot truncate a table referenced in a
     # foreign key constraint``.
     "service_principal_grant",
+    # ``sandbox_delete_grant.tenant_id`` is a real ``REFERENCES tenant(id)``
+    # FK from migration ``0115`` (#4622 sandbox mode delete grants), the
+    # same shape as ``service_principal_grant`` above.
+    "sandbox_delete_grant",
     # ``addon_pairing.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
     # migration ``0079`` (#3025 add-on pairing handshake). PG rejects
     # truncating ``tenant`` unless every referencing table is listed in the

@@ -13,6 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
 )
 
@@ -55,19 +58,23 @@ func TestBuildGrantCreateBodyTargetNameSelector(t *testing.T) {
 }
 
 func TestBuildGrantCreateBodyRejectsUnsafeInput(t *testing.T) {
-	cases := []struct{ name, op, connector, target, product, pattern string }{
-		{"glob operation", "vmware.*", "vmware-rest-9.0", "", "", ""},
-		{"glob connector", "vmware.vm.power", "vmware-*", "", "", ""},
-		{"delete operation", "DELETE:/vcenter/vm", "vmware-rest-9.0", "", "", ""},
-		{"typed delete operation", "vmware.vm.delete", "vmware-rest-9.0", "", "", ""},
-		{"composite operation", "vmware.composite.vm.power", "vmware-rest-9.0", "", "", ""},
-		{"selector plus target", "vmware.vm.power", "vmware-rest-9.0", testGrantID, "vmware", "dc-*"},
-		{"invalid target", "vmware.vm.power", "vmware-rest-9.0", "not-a-uuid", "", ""},
+	cases := []struct{ name, op, connector, target, product, pattern, wantMsg string }{
+		{"glob operation", "vmware.*", "vmware-rest-9.0", "", "", "", "globs are not allowed"},
+		{"glob connector", "vmware.vm.power", "vmware-*", "", "", "", "globs are not allowed"},
+		{"delete operation", "DELETE:/vcenter/vm", "vmware-rest-9.0", "", "", "", "delete grant is made in the web console"},
+		{"typed delete operation", "vmware.vm.delete", "vmware-rest-9.0", "", "", "", "only on an instance in sandbox mode"},
+		{"composite operation", "vmware.composite.vm.power", "vmware-rest-9.0", "", "", "", "is a composite"},
+		{"selector plus target", "vmware.vm.power", "vmware-rest-9.0", testGrantID, "vmware", "dc-*", "mutually exclusive"},
+		{"invalid target", "vmware.vm.power", "vmware-rest-9.0", "not-a-uuid", "", "", "not a valid UUID"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := buildGrantCreateBody("svc:automation", tc.op, tc.connector, tc.target, tc.product, tc.pattern, "reason", ""); err == nil {
+			_, err := buildGrantCreateBody("svc:automation", tc.op, tc.connector, tc.target, tc.product, tc.pattern, "reason", "")
+			if err == nil {
 				t.Fatal("expected validation error")
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Fatalf("error %q does not say %q", err.Error(), tc.wantMsg)
 			}
 		})
 	}
@@ -92,6 +99,31 @@ func TestPrintGrantListEmpty(t *testing.T) {
 	printGrantList(&output, nil)
 	if !strings.Contains(output.String(), "no service-principal grants") {
 		t.Errorf("output: %q", output.String())
+	}
+}
+
+func TestPrintGrantListAndDetailShowOrphaned(t *testing.T) {
+	orphaned, live := true, false
+	remediation := "Target x no longer exists. Then revoke this grant."
+	orphan := api.ServiceGrantRead{Id: uuid.MustParse(testGrantID), PrincipalSub: "svc", OpId: "op", ConnectorId: "c", Orphaned: &orphaned, OrphanRemediation: &remediation}
+	healthy := api.ServiceGrantRead{Id: uuid.New(), PrincipalSub: "svc", OpId: "op", ConnectorId: "c", Orphaned: &live}
+
+	var list bytes.Buffer
+	printGrantList(&list, []api.ServiceGrantRead{orphan, healthy})
+	if !strings.Contains(list.String(), "ORPHANED") || !strings.Contains(list.String(), "1 grant(s) are orphaned") {
+		t.Errorf("list output: %q", list.String())
+	}
+
+	var detail bytes.Buffer
+	printGrantDetail(&detail, &orphan)
+	if !strings.Contains(detail.String(), "orphaned:            yes") || !strings.Contains(detail.String(), remediation) {
+		t.Errorf("detail output: %q", detail.String())
+	}
+
+	var healthyDetail bytes.Buffer
+	printGrantDetail(&healthyDetail, &healthy)
+	if strings.Contains(healthyDetail.String(), "orphaned") {
+		t.Errorf("healthy grant must not show orphaned: %q", healthyDetail.String())
 	}
 }
 
@@ -190,5 +222,40 @@ func TestCreateWiresTargetSelector(t *testing.T) {
 	cmd.SetOut(&stdout)
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRevokeWiresOptionalReason(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		args      []string
+		wantQuery string
+	}{
+		{name: "with reason", args: []string{"--reason", "bot retired"}, wantQuery: "reason=bot+retired"},
+		{name: "without reason", args: nil, wantQuery: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodDelete || r.URL.Path != "/api/v1/service-principals/grants/"+testGrantID {
+					t.Fatalf("route: %s %s", r.Method, r.URL.Path)
+				}
+				if r.URL.RawQuery != tc.wantQuery {
+					t.Fatalf("query: got %q want %q", r.URL.RawQuery, tc.wantQuery)
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer srv.Close()
+			seedCredentials(t, srv.URL)
+			cmd := NewGrantsCmd()
+			cmd.SetArgs(append([]string{"revoke", testGrantID, "--confirm", "--json"}, tc.args...))
+			var stdout bytes.Buffer
+			cmd.SetOut(&stdout)
+			if err := cmd.Execute(); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(stdout.String(), `"status": "revoked"`) {
+				t.Errorf("output: %s", stdout.String())
+			}
+		})
 	}
 }

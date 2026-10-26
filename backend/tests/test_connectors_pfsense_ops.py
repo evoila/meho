@@ -1062,10 +1062,12 @@ async def test_pfsense_dhcp_leases_response_schema_matches_handler_rows() -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_pfsense_ops_has_seventeen_entries() -> None:
+def test_pfsense_ops_has_twenty_three_entries() -> None:
     """canary + 7 reads + dhcp.leases (#2849) + 2 writes (#3090) + 2 deletes (#3232)
-    + 3 teardown-inverse deletes (#3313) + mgmt_flow.summary (meho-internal#252) = 17."""
-    assert len(PFSENSE_OPS) == 17
+    + 3 teardown-inverse deletes (#3313) + mgmt_flow.summary
+    + user.list / route.static.list (#3954) + filter.rule.add / .delete (#3850)
+    + user.disable / user.enable (#3937) = 23."""
+    assert len(PFSENSE_OPS) == 23
 
 
 def test_pfsense_ops_about_is_first() -> None:
@@ -1090,18 +1092,31 @@ _DELETE_OP_IDS = {
     "pfsense.route.static.delete",
     "pfsense.gateway.delete",
     "pfsense.alias.member.remove",
+    "pfsense.filter.rule.delete",
 }
+
+#: The governed user writes (#3937) -- ``dangerous`` + requires approval.
+_USER_WRITE_OP_IDS = {"pfsense.user.disable", "pfsense.user.enable"}
+
+#: The approval-gated firewall rule add (#3850) -- ``dangerous``.
+_DANGEROUS_OP_IDS = {"pfsense.filter.rule.add"}
 
 
 def test_pfsense_read_ops_safe_write_ops_caution_delete_ops_destructive() -> None:
     for op in PFSENSE_OPS:
-        if op.op_id in _DELETE_OP_IDS:
+        if op.op_id in _DANGEROUS_OP_IDS:
+            assert op.safety_level == "dangerous", op.op_id
+        elif op.op_id in _DELETE_OP_IDS:
             assert op.safety_level == "destructive", (
                 f"{op.op_id!r} delete op should be safety_level='destructive'"
             )
         elif op.op_id in _WRITE_OP_IDS:
             assert op.safety_level == "caution", (
                 f"{op.op_id!r} write op should be safety_level='caution'"
+            )
+        elif op.op_id in _USER_WRITE_OP_IDS:
+            assert op.safety_level == "dangerous", (
+                f"{op.op_id!r} user write should be safety_level='dangerous'"
             )
         else:
             assert op.safety_level == "safe", f"{op.op_id!r} has safety_level != 'safe'"
@@ -1134,6 +1149,8 @@ def test_pfsense_ops_covers_expected_op_ids() -> None:
         "pfsense.gateway.list",
         "pfsense.config.show",
         "pfsense.dhcp.leases",
+        "pfsense.user.list",
+        "pfsense.route.static.list",
         "pfsense.gateway.add",
         "pfsense.route.static.add",
         "pfsense.nat.delete",
@@ -1141,7 +1158,11 @@ def test_pfsense_ops_covers_expected_op_ids() -> None:
         "pfsense.route.static.delete",
         "pfsense.gateway.delete",
         "pfsense.alias.member.remove",
+        "pfsense.filter.rule.add",
+        "pfsense.filter.rule.delete",
         "pfsense.mgmt_flow.summary",
+        "pfsense.user.disable",
+        "pfsense.user.enable",
     }
     assert op_ids == expected
 
@@ -1156,6 +1177,7 @@ def test_pfsense_ops_group_keys_include_new_groups() -> None:
     assert "dhcp" in group_keys
     assert "routing" in group_keys
     assert "alias" in group_keys
+    assert "users" in group_keys
 
 
 def test_pfsense_ops_handler_attrs_exist_on_connector() -> None:
@@ -1166,10 +1188,13 @@ def test_pfsense_ops_handler_attrs_exist_on_connector() -> None:
         )
 
 
-def test_pfsense_ops_requires_approval_only_for_destructive_deletes() -> None:
-    """Only the #3232 governed destructive deletes require approval; all else don't."""
+def test_pfsense_ops_requires_approval_only_for_governed_ops() -> None:
+    """Only the governed deletes, the filter rule add (#3850) and the user
+    writes (#3937) require approval."""
     for op in PFSENSE_OPS:
-        if op.op_id in _DELETE_OP_IDS:
+        if op.op_id in _DANGEROUS_OP_IDS | _USER_WRITE_OP_IDS:
+            assert op.requires_approval, f"{op.op_id!r} must require approval"
+        elif op.op_id in _DELETE_OP_IDS:
             assert op.requires_approval, f"{op.op_id!r} destructive delete must require approval"
         else:
             assert not op.requires_approval, f"{op.op_id!r} has requires_approval=True"

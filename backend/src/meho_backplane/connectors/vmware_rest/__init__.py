@@ -37,9 +37,16 @@ themselves).
 
 from meho_backplane.connectors.registry import register_connector_v2
 
-# Register the generic-ingest safety advertisement through the same package
-# import lifecycle as this connector's v2 and typed-operation registrations.
+# Register the generic-ingest spec correction and safety advertisement through
+# the same package import lifecycle as this connector's v2 and typed-operation
+# registrations.
+from meho_backplane.connectors.vmware_rest import (  # noqa: F401
+    ingest_corrections as _ingest_corrections,
+)
 from meho_backplane.connectors.vmware_rest import ingest_safety as _ingest_safety  # noqa: F401
+from meho_backplane.connectors.vmware_rest import (  # noqa: F401
+    tagging_delete_preview as _tagging_delete_preview,
+)
 from meho_backplane.connectors.vmware_rest.connector import (
     VmwareRest80Connector,
     VmwareRestConnector,
@@ -100,9 +107,23 @@ register_connector_v2(
 # during ``run_typed_op_registrars`` -- same lifecycle phase the typed
 # Vault ops use.
 from meho_backplane.connectors.vmware_rest import composites  # noqa: E402
+
+# The ingested content-library item delete is destructive (#4058); its preview
+# reuses the composite planner, so it is imported after the composites.
+from meho_backplane.connectors.vmware_rest import (  # noqa: E402, F401
+    library_item_delete_preview as _library_item_delete_preview,
+)
+
+# The VM moves that copy disks wait for approval (#4749); their copy-size
+# preview reads VM and datastore properties with a composite read helper, so
+# it is imported after the composites too.
+from meho_backplane.connectors.vmware_rest import (  # noqa: E402, F401
+    vm_relocate_preview as _vm_relocate_preview,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops import (  # noqa: E402
     VMWARE_TYPED_OPS,
     register_vmware_typed_operations,
+    register_vmware_typed_operations_8_0,
 )
 from meho_backplane.operations.typed_register import (  # noqa: E402
     register_typed_op_registrar,
@@ -114,6 +135,8 @@ from meho_backplane.operations.typed_register import (  # noqa: E402
 # composite/ingested path, so it registers via its own registrar the same
 # way argocd's typed reads do.
 register_typed_op_registrar(register_vmware_typed_operations)
+# The same typed reads on the ``vmware-rest-8.0`` catalog (#3789).
+register_typed_op_registrar(register_vmware_typed_operations_8_0)
 
 __all__ = [
     "VMWARE_TYPED_OPS",
@@ -126,4 +149,5 @@ __all__ = [
     "load_session_credentials_from_vault",
     "product_from_line_id",
     "register_vmware_typed_operations",
+    "register_vmware_typed_operations_8_0",
 ]

@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -48,15 +49,15 @@ import pytest
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations._audit as audit_module
+from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.composites import register_vmware_composite_operations
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
+    AgentPermission,
     ApprovalRequest,
     ApprovalRequestStatus,
     AuditLog,
@@ -71,6 +72,7 @@ from meho_backplane.operations.approval_queue import (
     resume_dispatch_after_approval,
 )
 from meho_backplane.settings import get_settings
+from tests._vmware_cluster_config_fake import cluster_config_ex, reject_config_ex_member_paths
 
 _CONNECTOR_ID = "vmware-rest-9.0"
 _TENANT_ID = UUID("00000000-0000-0000-0000-00000000a0a3")
@@ -110,18 +112,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with a recording stub."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -200,6 +190,52 @@ def _vmomi_task_moref(value: str) -> dict[str, str]:
     return {"type": "Task", "value": value}
 
 
+def _vmomi_host_parent(host_moid: str, cluster_moid: str) -> dict[str, Any]:
+    """``HostSystem.parent`` read: the host is in *cluster_moid* (#4895)."""
+    return _vmomi_retrieve_result(
+        "HostSystem",
+        host_moid,
+        "parent",
+        {"type": "ClusterComputeResource", "value": cluster_moid},
+    )
+
+
+def _vmomi_cluster_drs(
+    cluster_moid: str, behavior: str, recommendations: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """``ClusterComputeResource`` read serving ``configurationEx`` (DRS on, *behavior*).
+
+    The recorders key ``RetrievePropertiesEx`` by object type, so the one
+    canned result also carries ``drsRecommendation`` for the vm.migrate
+    recursion's DRS read (#4895).
+    """
+    return {
+        "objects": [
+            {
+                "obj": {"type": "ClusterComputeResource", "value": cluster_moid},
+                "propSet": [
+                    {
+                        "name": "configurationEx",
+                        "val": {"drsConfig": {"enabled": True, "defaultVmBehavior": behavior}},
+                    },
+                    {"name": "drsRecommendation", "val": recommendations or []},
+                ],
+            }
+        ]
+    }
+
+
+def _vm_listing_row(vm: str, power_state: str = "POWERED_ON") -> dict[str, Any]:
+    """One ``GET:/vcenter/vm`` row in the real ``Vcenter.VM.Summary`` shape (no cluster field)."""
+    return {
+        "vm": vm,
+        "name": f"name-{vm}",
+        "power_state": power_state,
+        "cpu_count": 1,
+        "memory_size_mib": 1024,
+    }
+
+
 def _http_error(status: int, url: str) -> httpx.HTTPStatusError:
     request = httpx.Request("POST", url)
     response = httpx.Response(status, request=request)
@@ -252,7 +288,9 @@ class _RecordingVmwareConnector:
     ) -> Any:
         spec = self._spec(path)
         self.calls.append(("GET", spec))
-        return self.responses.get(spec, {"value": {}})
+        response = self.responses.get(spec, {"value": {}})
+        # An iterator answers one GET after the other (a listing that changes).
+        return next(response) if isinstance(response, Iterator) else response
 
     async def _post_json(
         self,
@@ -430,13 +468,21 @@ def _benign_responses_for(composite_op_id: str) -> dict[str, Any]:
     """
     empty: dict[str, Any] = {"value": []}
     per_composite: dict[str, dict[str, Any]] = {
-        "vmware.composite.vm.create": {"/vcenter/folder": empty},
+        # vm.create: the folder resolves and the create returns the new VM id.
+        # An empty folder listing would roll back, which is an error (#3813).
+        "vmware.composite.vm.create": {
+            "/vcenter/folder": {"value": [{"folder": "group-v1"}]},
+            "/vcenter/vm": {"value": "vm-benign"},
+        },
         "vmware.composite.vm.clone": {
             "/vcenter/vm-template/library-items/lib-1?action=deploy": {"value": "vm-benign"},
         },
         # deploy_from_library: id passthrough → no finds; the synchronous OVF
         # deploy returns a DeploymentResult that succeeds → status='deployed'.
         "vmware.composite.vm.deploy_from_library": {
+            # No ``name`` in the benign params: the OVF summary supplies the
+            # default VM name the deploy name is built from (#3697).
+            "/vcenter/ovf/library-item/li-1?action=filter": {"name": "ovf-default"},
             "/vcenter/ovf/library-item/li-1?action=deploy": {
                 "succeeded": True,
                 "resource_id": {"type": "VirtualMachine", "id": "vm-benign"},
@@ -514,8 +560,16 @@ def _benign_vmomi_for(composite_op_id: str) -> dict[str, Any]:
                 "ClusterComputeResource", "domain-c1", "drsRecommendation", []
             ),
         },
+        # host.evacuate (#4895): the host's cluster + its DRS config are vim
+        # reads; with DRS fully automated vCenter moves the VMs itself.
         "vmware.composite.host.evacuate": {
+            "HostSystem": _vmomi_host_parent("host-1", "domain-c1"),
+            "ClusterComputeResource": _vmomi_cluster_drs("domain-c1", "fullyAutomated"),
             "/HostSystem/host-1/EnterMaintenanceMode_Task": _vmomi_task_moref("t-enter-benign"),
+        },
+        # #3697: the deployed VM is renamed from its unique deploy name.
+        "vmware.composite.vm.deploy_from_library": {
+            "/VirtualMachine/vm-benign/Rename_Task": _vmomi_task_moref("t-rename-benign"),
         },
         "vmware.composite.host.detach_from_vds": {
             "DistributedVirtualSwitch": _vmomi_retrieve_result(
@@ -563,7 +617,6 @@ async def test_write_composite_executes_through_dispatch_without_ingest(
     composite_op_id: str,
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Each composite runs to a benign business status on the direct session.
 
@@ -601,7 +654,6 @@ async def test_write_composite_executes_through_dispatch_without_ingest(
 async def test_vm_create_happy_path_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.create: folder GET -> create POST -> NIC PATCH -> power POST."""
     recorder = _RecordingVmwareConnector()
@@ -643,7 +695,6 @@ async def test_vm_create_happy_path_sub_op_sequence(
 async def test_vm_create_rollback_on_nic_failure(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.create: a NIC-attach transport error rolls back via DELETE:/vcenter/vm/{vm}."""
     recorder = _RecordingVmwareConnector()
@@ -670,10 +721,20 @@ async def test_vm_create_rollback_on_nic_failure(
         },
     )
 
-    assert result.status == "ok", result.error
+    # #3813: a rolled-back create is a failed call, not ok.
+    assert result.status == "error", result.result
+    assert result.extras["error_code"] == "rolled_back"
     assert result.result["status"] == "rolled_back"
     assert result.result["failed_step"] == "nic_attach"
     assert result.result["vm_id"] is None
+    # #4057: the result says which step failed, why, and that the VM is gone.
+    assert result.result["rollback"] == {"vm_id": "vm-123", "outcome": "removed"}
+    assert result.error is not None
+    assert result.error.startswith(
+        "rolled_back: vm.create failed at step 'nic_attach'; "
+        "the rollback removed the VM it created (vm-123). Cause: nic attach"
+    )
+    assert "HTTP 500" in result.error
     assert recorder.calls == [
         ("GET", "/vcenter/folder"),
         ("POST", "/vcenter/vm"),
@@ -686,7 +747,6 @@ async def test_vm_create_rollback_on_nic_failure(
 async def test_vm_clone_synchronous_deploy_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.clone: source read -> synchronous per-item deploy -> completed (#2970)."""
     recorder = _RecordingVmwareConnector()
@@ -725,7 +785,6 @@ async def test_vm_clone_synchronous_deploy_sub_op_sequence(
 async def test_vm_snapshot_revert_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.snapshot.revert: vim tree read -> match-by-name -> vim revert (#2970)."""
     recorder = _RecordingVmwareConnector()
@@ -775,7 +834,6 @@ async def test_vm_snapshot_revert_sub_op_sequence(
 async def test_vm_migrate_drs_path_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.migrate: vim drsRecommendation read -> relocate (#2970)."""
     recorder = _RecordingVmwareConnector()
@@ -819,7 +877,6 @@ async def test_vm_migrate_drs_path_sub_op_sequence(
 async def test_vm_power_bulk_fan_out_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.power.bulk: list -> per-VM power action fan-out."""
     recorder = _RecordingVmwareConnector()
@@ -848,7 +905,6 @@ async def test_vm_power_bulk_fan_out_sub_op_sequence(
 async def test_host_evacuate_recursive_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """host.evacuate: list VMs -> recursive vm.migrate per VM -> maintenance enter.
 
@@ -861,15 +917,18 @@ async def test_host_evacuate_recursive_sub_op_sequence(
     recorder = _RecordingVmwareConnector()
     recorder.responses.update(
         {
-            "/vcenter/vm": {"value": [{"vm": "vm-a", "cluster": "domain-c1"}]},
+            # Before the maintenance task the host runs vm-a; after it, nothing.
+            "/vcenter/vm": iter([{"value": [_vm_listing_row("vm-a")]}, {"value": []}]),
         }
     )
     recorder.vmomi_responses.update(
         {
-            "ClusterComputeResource": _vmomi_retrieve_result(
-                "ClusterComputeResource",
+            # The cluster comes from the host's ``parent`` (#4895); DRS is on
+            # but manual, so MEHO moves the VM where DRS recommends.
+            "HostSystem": _vmomi_host_parent("host-1", "domain-c1"),
+            "ClusterComputeResource": _vmomi_cluster_drs(
                 "domain-c1",
-                "drsRecommendation",
+                "manual",
                 [
                     {
                         "migrationList": [
@@ -901,11 +960,14 @@ async def test_host_evacuate_recursive_sub_op_sequence(
     assert result.result["status"] == "evacuated"
     assert result.result["maintenance_entered"] is True
     assert result.result["migrated_vms"] == ["vm-a"]
-    # The DRS read + maintenance-enter are vim (#2970); the REST calls are
-    # the listing + the recursion's relocate.
+    assert result.result["moved_by"] == "meho"
+    # The host / cluster / DRS reads + maintenance-enter are vim (#2970,
+    # #4895); the REST calls are the listing, the recursion's relocate and
+    # the listing after the maintenance task.
     assert recorder.calls == [
         ("GET", "/vcenter/vm"),
         ("POST", "/vcenter/vm/vm-a?action=relocate"),
+        ("GET", "/vcenter/vm"),
     ]
     assert [p for p, _ in recorder.vmomi_calls if p.endswith("/EnterMaintenanceMode_Task")] == [
         "/HostSystem/host-1/EnterMaintenanceMode_Task"
@@ -916,7 +978,6 @@ async def test_host_evacuate_recursive_sub_op_sequence(
 async def test_host_detach_from_vds_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """host.detach_from_vds: portgroups -> VMs -> per-NIC migrate -> vim DVS detach."""
     recorder = _RecordingVmwareConnector()
@@ -959,7 +1020,6 @@ async def test_host_detach_from_vds_sub_op_sequence(
 async def test_cluster_patch_sequential_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """cluster.patch: list hosts -> per-host vim enter -> vLCM apply -> vim exit (#2970)."""
     recorder = _RecordingVmwareConnector()
@@ -1016,7 +1076,6 @@ async def test_write_composite_human_dispatch_parks_for_approval(
     composite_op_id: str,
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A USER principal dispatching a write composite is parked at the top level.
 
@@ -1056,7 +1115,6 @@ async def test_write_composite_human_dispatch_parks_for_approval(
 async def test_vm_create_full_queue_approve_resume_execute(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.create: full queued -> approve -> resume -> execute cycle.
 
@@ -1230,7 +1288,6 @@ class _DiskGrowVmwareConnector:
 async def test_disk_grow_queue_approve_resume_with_2681_envelope(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.disk.grow: park (with the #2681 op-identity envelope) → approve → resume → grow.
 
@@ -1329,7 +1386,6 @@ async def test_disk_grow_queue_approve_resume_with_2681_envelope(
 async def test_disk_grow_fresh_boot_dispatchable_without_ingest(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.disk.grow runs to ``grown`` on the direct session with ZERO ingested rows."""
     recorder = _DiskGrowVmwareConnector()
@@ -1446,7 +1502,6 @@ _CLONE_PARAMS: dict[str, Any] = {
 async def test_clone_from_template_queue_approve_resume_with_2681_envelope(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.clone_from_template: park (with #2681 op-identity envelope) → approve → resume → clone.
 
@@ -1547,7 +1602,6 @@ async def test_clone_from_template_queue_approve_resume_with_2681_envelope(
 async def test_clone_from_template_fresh_boot_dispatchable_without_ingest(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.clone_from_template runs to ``cloned`` on the direct session with ZERO ingested rows."""
     recorder = _CloneFromTemplateVmwareConnector()
@@ -1583,7 +1637,6 @@ _DEPLOY_FROM_LIBRARY_PARAMS: dict[str, Any] = {
 async def test_deploy_from_library_queue_approve_resume_with_2681_envelope(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.deploy_from_library: park (with #2681 op-identity envelope) → approve → resume → deploy.
 
@@ -1599,10 +1652,14 @@ async def test_deploy_from_library_queue_approve_resume_with_2681_envelope(
        ``status='deployed'``.
     """
     recorder = _RecordingVmwareConnector()
+    recorder.responses["/vcenter/ovf/library-item/li-1?action=filter"] = {"name": "ovf-default"}
     recorder.responses["/vcenter/ovf/library-item/li-1?action=deploy"] = {
         "succeeded": True,
         "resource_id": {"type": "VirtualMachine", "id": "vm-ovf-9"},
     }
+    recorder.vmomi_responses["/VirtualMachine/vm-ovf-9/Rename_Task"] = _vmomi_task_moref(
+        "t-rename-9"
+    )
     await _bootstrap(recorder, stub_embedding_service)
 
     target_id = uuid.uuid4()
@@ -1659,6 +1716,7 @@ async def test_deploy_from_library_queue_approve_resume_with_2681_envelope(
         "network_mappings": {"nat": "dvportgroup-9"},
         "storage_provisioning": None,
         "ovf_property_keys": [],
+        "deployment_option": None,
         "power_on": False,
     }
 
@@ -1683,8 +1741,813 @@ async def test_deploy_from_library_queue_approve_resume_with_2681_envelope(
     assert result2.status == "ok", result2.error
     assert result2.result["status"] == "deployed"
     assert result2.result["vm_id"] == "vm-ovf-9"
-    # The synchronous OVF deploy fired exactly once, on the approved resume.
-    assert recorder.calls == [("POST", "/vcenter/ovf/library-item/li-1?action=deploy")]
+    # The synchronous OVF deploy fired exactly once, on the approved resume,
+    # after the un-gated OVF summary read (#3697: no ``name`` in the params).
+    assert recorder.calls == [
+        ("POST", "/vcenter/ovf/library-item/li-1?action=filter"),
+        ("POST", "/vcenter/ovf/library-item/li-1?action=deploy"),
+    ]
+    assert recorder.vmomi_calls[0] == (
+        "/VirtualMachine/vm-ovf-9/Rename_Task",
+        {"newName": "ovf-default"},
+    )
+
+
+# ===========================================================================
+# vm.deploy_from_library — an approval after the VM exists never deploys twice
+# ===========================================================================
+#
+# The rename, the power-on and the cleanup removals run after the deploy's
+# main change exists. Their parks save where to continue (#4217), so approving
+# one continues the composite at that step: no second VM. A cleanup removal
+# saves the object it removes, so its approval removes exactly that object.
+# The deploy's own park saves its resolved deploy parameters, so the approved
+# deploy still matches even when a name lookup would now answer differently.
+
+_DEPLOY_OP_ID = "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy"
+_RENAME_VM_OP_ID = "POST:/VirtualMachine/{moId}/Rename_Task"
+_DEPLOY_NAMED_PARAMS: dict[str, Any] = {
+    "library_item": "li-1",
+    "name": "web-01",
+    "resource_pool": "resgroup-8",
+}
+
+
+class _DeployRecordingVmwareConnector(_RecordingVmwareConnector):
+    """A recorder that also keeps the OVF deploy bodies, to read the deploy name."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.deploy_bodies: list[dict[str, Any]] = []
+
+    async def _post_json(
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        verb: str = "POST",
+        json: Any = None,
+        data: Any = None,
+        extra_headers: Any = None,
+        timeout: Any = None,
+    ) -> Any:
+        if self._spec(path).endswith("?action=deploy"):
+            self.deploy_bodies.append(json)
+        return await super()._post_json(
+            target, path, operator=operator, verb=verb, json=json, timeout=timeout
+        )
+
+
+def _deploy_recorder(*, succeeded: bool) -> _DeployRecordingVmwareConnector:
+    """A recorder serving one OVF deploy of ``vm-ovf-9``, its rename and its cleanup reads."""
+    recorder = _DeployRecordingVmwareConnector()
+    recorder.responses["/vcenter/ovf/library-item/li-1?action=deploy"] = {
+        "succeeded": succeeded,
+        "resource_id": {"type": "VirtualMachine", "id": "vm-ovf-9"},
+    }
+    recorder.vmomi_responses["/VirtualMachine/vm-ovf-9/Rename_Task"] = _vmomi_task_moref(
+        "t-rename-9"
+    )
+    # The cleanup's two lookups by deploy name: the VM listing (the recorder
+    # serves it whatever the name filter says) and the pool's child vApps.
+    recorder.responses["/vcenter/vm"] = {"value": [{"vm": "vm-ovf-9", "name": "web-01-meho-x"}]}
+    recorder.vmomi_responses["ResourcePool"] = _vmomi_retrieve_result(
+        "ResourcePool", "resgroup-8", "resourcePool", []
+    )
+    return recorder
+
+
+async def _seed_service_grant(*, op_id: str, target_id: UUID) -> None:
+    """Grant the ``svc-blueprint`` service principal a standing grant on one op."""
+    async with get_sessionmaker()() as s:
+        s.add(
+            ServicePrincipalGrant(
+                id=uuid.uuid4(),
+                tenant_id=_TENANT_ID,
+                principal_sub="svc-blueprint",
+                op_id=op_id,
+                connector_id=_CONNECTOR_ID,
+                target_id=target_id,
+                reason="unattended build",
+                created_by_sub="ops-admin",
+            )
+        )
+        await s.commit()
+
+
+async def _service_deploys_until_a_follow_on_parks(
+    recorder: _DeployRecordingVmwareConnector, *, parked_op_id: str
+) -> tuple[Operator, UUID, ApprovalRequest]:
+    """Run the deploy as a service principal with grants on the composite and the deploy only.
+
+    The deploy runs; the first follow-on write (*parked_op_id*) has no grant
+    and parks. Returns the reviewer, the parked request id and its row.
+    """
+    target_id = await _persist_vmware_target()
+    for op_id in ("vmware.composite.vm.deploy_from_library", _DEPLOY_OP_ID):
+        await _seed_service_grant(op_id=op_id, target_id=target_id)
+    svc = _make_operator(sub="svc-blueprint", principal_kind=PrincipalKind.SERVICE)
+    result = await dispatch(
+        operator=svc,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.deploy_from_library",
+        target=_FakeVmwareTarget(target_id=target_id),
+        params=_DEPLOY_NAMED_PARAMS,
+    )
+    assert result.status == "ok", result.error
+    message = result.result["issues"][-1]["message"]
+    request_id = UUID(message.split("waits for approval request ", 1)[1].split(";", 1)[0])
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, request_id)
+    assert pending is not None
+    assert pending.op_id == parked_op_id
+    assert pending.status == ApprovalRequestStatus.PENDING.value
+    reviewer = await _approve_as_reviewer(request_id)
+    return reviewer, request_id, pending
+
+
+async def _approve_as(request_id: UUID, sub: str) -> Operator:
+    """Approve *request_id* as the user *sub*; returns that reviewer."""
+    reviewer = _make_operator(sub=sub, principal_kind=PrincipalKind.USER)
+    async with get_sessionmaker()() as s:
+        await approve_request(s, request_id, operator=reviewer, params=None)
+        await s.commit()
+    return reviewer
+
+
+async def _resume(request_id: UUID, reviewer: Operator) -> Any:
+    """Run the operator-surface resume of an approved request through the dispatcher."""
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+    assert row is not None
+    return await resume_dispatch_after_approval(operator=reviewer, request=row, params=None)
+
+
+def _request_id_in(issue: dict[str, Any]) -> UUID:
+    """The approval request id an issue message names."""
+    return UUID(issue["message"].split("waits for approval request ", 1)[1].split(";", 1)[0])
+
+
+_DEPLOY_CALL = ("POST", "/vcenter/ovf/library-item/li-1?action=deploy")
+
+
+@pytest.mark.asyncio
+async def test_deploy_rename_park_approve_resume_renames_and_deploys_nothing(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """Approving a waiting rename renames the deployed VM; nothing is deployed again (#4217).
+
+    The park saves the deployed VM and marks the step ``after_main_effect``.
+    The approval re-runs the composite through the real dispatcher, with
+    nothing ingested; the composite continues at the rename: the OVF
+    deploy fired exactly once, and the rename reaches the wire with the
+    parameters the person approved.
+    """
+    recorder = _deploy_recorder(succeeded=True)
+    await _bootstrap(recorder, stub_embedding_service)
+    reviewer, request_id, pending = await _service_deploys_until_a_follow_on_parks(
+        recorder, parked_op_id=_RENAME_VM_OP_ID
+    )
+    assert recorder.calls == [_DEPLOY_CALL]
+    assert recorder.vmomi_calls == [], "the rename waits for approval"
+    deploy_name = recorder.deploy_bodies[0]["deployment_spec"]["name"]
+    assert deploy_name.startswith("web-01-meho-")
+    assert pending.params == {"moId": "vm-ovf-9", "body": {"newName": "web-01"}}
+    assert pending.resume_parent == {
+        "op_id": "vmware.composite.vm.deploy_from_library",
+        "params": _DEPLOY_NAMED_PARAMS,
+        "state": {
+            "deploy_name": deploy_name,
+            "deployed": {
+                "vm_id": "vm-ovf-9",
+                "resource_type": "VirtualMachine",
+                "library_item_id": "li-1",
+                "name": "web-01",
+                "step": "rename",
+                "issues": [],
+            },
+        },
+        "after_main_effect": True,
+    }
+
+    resume = await _resume(request_id, reviewer)
+
+    assert resume.status == "ok", resume.error
+    assert resume.result["status"] == "deployed"
+    assert resume.result["vm_id"] == "vm-ovf-9"
+    assert resume.result["issues"] == []
+    assert recorder.calls == [_DEPLOY_CALL], "no second deploy"
+    assert recorder.vmomi_calls[0] == (
+        "/VirtualMachine/vm-ovf-9/Rename_Task",
+        {"newName": "web-01"},
+    )
+    assert await _approval_row_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_deploy_cleanup_park_approve_resume_deletes_and_deploys_nothing(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """Approving a waiting cleanup DELETE deletes the partial VM and deploys nothing (#4217).
+
+    The deploy reports ``succeeded=false`` and names the VM it left. The
+    service principal has no grant on the delete, so the cleanup waits and
+    saves the VM it removes. The approval runs only the approved DELETE on
+    that VM: no new listing by the deploy name, no second deploy.
+    """
+    recorder = _deploy_recorder(succeeded=False)
+    await _bootstrap(recorder, stub_embedding_service)
+    reviewer, request_id, pending = await _service_deploys_until_a_follow_on_parks(
+        recorder, parked_op_id="DELETE:/vcenter/vm/{vm}"
+    )
+    assert recorder.calls == [_DEPLOY_CALL, ("GET", "/vcenter/vm")]
+    assert pending.params == {"vm": "vm-ovf-9"}
+    assert pending.resume_parent is not None
+    assert pending.resume_parent["after_main_effect"] is True
+    saved = pending.resume_parent["state"]
+    assert saved["deploy_name"] == recorder.deploy_bodies[0]["deployment_spec"]["name"]
+    assert saved["failed"]["status"] == "deploy_failed"
+    assert saved["failed"]["reported"] == ["vm-ovf-9", "VirtualMachine"]
+    assert saved["failed"]["removal"] == ["vm-ovf-9", "VirtualMachine"]
+
+    resume = await _resume(request_id, reviewer)
+
+    assert resume.status == "ok", resume.error
+    assert resume.result["status"] == "deploy_failed"
+    assert resume.result["issues"][-1] == {
+        "category": "cleanup",
+        "severity": "info",
+        "message": "removed VM vm-ovf-9 left by the failed deploy",
+    }
+    assert recorder.calls == [
+        _DEPLOY_CALL,
+        ("GET", "/vcenter/vm"),
+        ("DELETE", "/vcenter/vm/vm-ovf-9"),
+    ]
+    assert len(recorder.deploy_bodies) == 1
+    assert await _approval_row_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_deploy_cleanup_resume_deletes_the_saved_vm_not_the_vm_that_took_its_name(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """An approved cleanup delete removes the saved VM, whatever the name finds now (#4217).
+
+    After the park, the partial VM is renamed by hand and another VM takes
+    the deploy name. The re-run does not list VMs by the deploy name again
+    and reads no vApps: it deletes exactly the VM the person approved. The
+    other VM is never touched.
+    """
+    recorder = _deploy_recorder(succeeded=False)
+    await _bootstrap(recorder, stub_embedding_service)
+    reviewer, request_id, pending = await _service_deploys_until_a_follow_on_parks(
+        recorder, parked_op_id="DELETE:/vcenter/vm/{vm}"
+    )
+    assert pending.params == {"vm": "vm-ovf-9"}
+    assert pending.resume_parent is not None
+    assert pending.resume_parent["state"]["failed"]["removal"] == ["vm-ovf-9", "VirtualMachine"]
+    deploy_name = recorder.deploy_bodies[0]["deployment_spec"]["name"]
+    # Meanwhile: the partial VM was renamed, and another VM carries the deploy name.
+    recorder.responses["/vcenter/vm"] = {"value": [{"vm": "vm-other", "name": deploy_name}]}
+    calls_before = list(recorder.calls)
+    vmomi_calls_before = list(recorder.vmomi_calls)
+
+    resume = await _resume(request_id, reviewer)
+
+    assert resume.status == "ok", resume.error
+    assert resume.result["status"] == "deploy_failed"
+    assert resume.result["issues"][-1] == {
+        "category": "cleanup",
+        "severity": "info",
+        "message": "removed VM vm-ovf-9 left by the failed deploy",
+    }
+    assert recorder.calls == [*calls_before, ("DELETE", "/vcenter/vm/vm-ovf-9")]
+    assert recorder.vmomi_calls == vmomi_calls_before, "no new vApp lookup"
+    assert len(recorder.deploy_bodies) == 1
+    assert await _approval_row_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_deploy_vapp_destroy_park_approve_resume_destroys_once_and_deploys_nothing(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """Approving a waiting vApp destroy destroys the vApp once and deploys nothing (#4217).
+
+    The failed deploy names the vApp it left. The service principal has no
+    grant on ``Destroy_Task``, so the cleanup waits. The row saves the
+    deploy name, the failed deploy and the vApp to remove, marked
+    ``after_main_effect``. The approval runs only that destroy:
+    ``Destroy_Task`` runs once on that vApp, with no new pool lookup, and
+    there is no second OVF deploy.
+    """
+    recorder = _deploy_recorder(succeeded=False)
+    recorder.responses["/vcenter/ovf/library-item/li-1?action=deploy"] = {
+        "succeeded": False,
+        "resource_id": {"type": "VirtualApp", "id": "vapp-7"},
+    }
+    recorder.responses["/vcenter/vm"] = {"value": []}
+    recorder.vmomi_responses["/VirtualApp/vapp-7/Destroy_Task"] = _vmomi_task_moref("t-destroy-7")
+    await _bootstrap(recorder, stub_embedding_service)
+    reviewer, request_id, pending = await _service_deploys_until_a_follow_on_parks(
+        recorder, parked_op_id="POST:/VirtualApp/{moId}/Destroy_Task"
+    )
+    destroy_path = "/VirtualApp/vapp-7/Destroy_Task"
+    assert [path for path, _ in recorder.vmomi_calls if path == destroy_path] == []
+    assert pending.params == {"moId": "vapp-7", "body": {}}
+    assert pending.resume_parent is not None
+    assert pending.resume_parent["after_main_effect"] is True
+    saved = pending.resume_parent["state"]
+    assert saved["deploy_name"] == recorder.deploy_bodies[0]["deployment_spec"]["name"]
+    assert saved["failed"]["status"] == "deploy_failed"
+    assert saved["failed"]["reported"] == ["vapp-7", "VirtualApp"]
+    assert saved["failed"]["removal"] == ["vapp-7", "VirtualApp"]
+    pool_reads_before = _pool_reads(recorder)
+
+    resume = await _resume(request_id, reviewer)
+
+    assert resume.status == "ok", resume.error
+    assert resume.result["status"] == "deploy_failed"
+    assert resume.result["issues"][-1] == {
+        "category": "cleanup",
+        "severity": "info",
+        "message": "removed vApp vapp-7 and its VMs left by the failed deploy",
+    }
+    assert [path for path, _ in recorder.vmomi_calls if path == destroy_path] == [destroy_path]
+    assert _pool_reads(recorder) == pool_reads_before, "no new pool lookup"
+    assert recorder.calls.count(_DEPLOY_CALL) == 1, "no second deploy"
+    assert len(recorder.deploy_bodies) == 1
+    assert await _approval_row_count() == 1
+
+
+def _pool_reads(recorder: _RecordingVmwareConnector) -> int:
+    """How many times the cleanup read the target pool's children (the vApp lookup)."""
+    return sum(
+        1
+        for path, body in recorder.vmomi_calls
+        if path.endswith("/RetrievePropertiesEx")
+        and body["specSet"][0]["propSet"][0]["type"] == "ResourcePool"
+    )
+
+
+@pytest.mark.asyncio
+async def test_deploy_vapp_destroy_resume_destroys_the_saved_vapp_not_the_one_that_took_its_name(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """An approved vApp destroy removes the saved vApp, whatever the pool shows now (#4217).
+
+    After the park, another vApp under the same pool takes the deploy name.
+    The re-run reads neither the pool nor the VM listing: it destroys
+    exactly the vApp the person approved, and the other vApp is never
+    touched.
+    """
+    recorder = _deploy_recorder(succeeded=False)
+    recorder.responses["/vcenter/ovf/library-item/li-1?action=deploy"] = {
+        "succeeded": False,
+        "resource_id": {"type": "VirtualApp", "id": "vapp-7"},
+    }
+    recorder.responses["/vcenter/vm"] = {"value": []}
+    recorder.vmomi_responses["/VirtualApp/vapp-7/Destroy_Task"] = _vmomi_task_moref("t-destroy-7")
+    await _bootstrap(recorder, stub_embedding_service)
+    reviewer, request_id, pending = await _service_deploys_until_a_follow_on_parks(
+        recorder, parked_op_id="POST:/VirtualApp/{moId}/Destroy_Task"
+    )
+    assert pending.params == {"moId": "vapp-7", "body": {}}
+    assert pending.resume_parent is not None
+    assert pending.resume_parent["state"]["failed"]["removal"] == ["vapp-7", "VirtualApp"]
+    deploy_name = recorder.deploy_bodies[0]["deployment_spec"]["name"]
+    # Meanwhile: another vApp under the pool carries the deploy name.
+    other_vapp = {"type": "VirtualApp", "value": "vapp-other"}
+    recorder.vmomi_responses["ResourcePool"] = _vmomi_retrieve_result(
+        "ResourcePool", "resgroup-8", "resourcePool", [other_vapp]
+    )
+    recorder.vmomi_responses["VirtualApp"] = _vmomi_retrieve_result(
+        "VirtualApp", "vapp-other", "name", deploy_name
+    )
+    recorder.vmomi_responses["/VirtualApp/vapp-other/Destroy_Task"] = _vmomi_task_moref("t-other")
+    calls_before = list(recorder.calls)
+    vmomi_count_before = len(recorder.vmomi_calls)
+
+    resume = await _resume(request_id, reviewer)
+
+    assert resume.status == "ok", resume.error
+    assert resume.result["status"] == "deploy_failed"
+    assert resume.result["issues"][-1] == {
+        "category": "cleanup",
+        "severity": "info",
+        "message": "removed vApp vapp-7 and its VMs left by the failed deploy",
+    }
+    assert recorder.calls == calls_before, "no VM listing, no second deploy"
+    new_vmomi_calls = recorder.vmomi_calls[vmomi_count_before:]
+    assert [path for path, _ in new_vmomi_calls if not path.endswith("/RetrievePropertiesEx")] == [
+        "/VirtualApp/vapp-7/Destroy_Task"
+    ]
+    assert all(
+        body["specSet"][0]["propSet"][0]["type"] == "Task"
+        for path, body in new_vmomi_calls
+        if path.endswith("/RetrievePropertiesEx")
+    ), "the only reads are the destroy task poll; no pool or vApp lookup"
+    assert len(recorder.deploy_bodies) == 1
+    assert await _approval_row_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_deploy_each_approval_continues_and_no_write_runs_twice(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three approvals in a row: deploy, then rename, then power-on, each run once (#4217).
+
+    Every write sub-op is forced to ``requires_approval=True``, so even the
+    reviewer's resume waits at each step (the multi-gate shape of
+    ``test_vm_create_multi_gate_resume_fails_closed_no_double_execute``).
+    The rename and the power-on run after the deploy and saved their
+    state, so they may wait again during a resume (the relaxed guard). Each
+    approval continues at its own step: the deploy fires once in total,
+    the rename once, the power-on once. Every request names the service
+    principal that started the deploy as its requester, not the reviewer
+    who ran the re-run, so the same reviewer can approve all three.
+    """
+    monkeypatch.setattr(
+        "meho_backplane.connectors.vmware_rest.composites._write._WRITE_REQUIRES_APPROVAL",
+        True,
+    )
+    recorder = _deploy_recorder(succeeded=True)
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    await _seed_composite_service_grant(
+        composite_op_id="vmware.composite.vm.deploy_from_library", target_id=target_id
+    )
+    svc = _make_operator(sub="svc-blueprint", principal_kind=PrincipalKind.SERVICE)
+    params = {**_DEPLOY_NAMED_PARAMS, "power_on": True}
+    power_call = ("POST", "/vcenter/vm/vm-ovf-9/power?action=start")
+
+    # Run 1: the deploy waits. Nothing reached vCenter.
+    first = await dispatch(
+        operator=svc,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.deploy_from_library",
+        target=_FakeVmwareTarget(target_id=target_id),
+        params=params,
+    )
+    assert first.status == "awaiting_approval", first.error
+    assert recorder.calls == []
+    deploy_request = UUID(first.extras["approval_request_id"])
+
+    # Approval 1: the deploy runs once, under the name the person approved.
+    # The rename then waits again, during the resume; the power-on is held.
+    second = await _resume(deploy_request, await _approve_as(deploy_request, "ops-reviewer"))
+    assert second.status == "ok", second.error
+    assert recorder.calls == [_DEPLOY_CALL]
+    assert recorder.vmomi_calls == []
+    rename_issue, power_issue = second.result["issues"]
+    assert rename_issue["category"] == "rename"
+    assert power_issue["category"] == "power_on"
+    assert second.result["powered_on"] is False
+    rename_request = _request_id_in(rename_issue)
+
+    async with get_sessionmaker()() as s:
+        rename_row = await s.get(ApprovalRequest, rename_request)
+    assert rename_row is not None
+    assert rename_row.principal_sub == "svc-blueprint"
+
+    # Approval 2: only the rename runs. The power-on waits again.
+    third = await _resume(rename_request, await _approve_as(rename_request, "ops-reviewer"))
+    assert third.status == "ok", third.error
+    assert recorder.calls == [_DEPLOY_CALL], "the deploy did not run again"
+    assert [path for path, _ in recorder.vmomi_calls if path.endswith("/Rename_Task")] == [
+        "/VirtualMachine/vm-ovf-9/Rename_Task"
+    ]
+    (power_waits,) = third.result["issues"]
+    assert power_waits["category"] == "power_on"
+    power_request = _request_id_in(power_waits)
+    async with get_sessionmaker()() as s:
+        power_row = await s.get(ApprovalRequest, power_request)
+    assert power_row is not None
+    assert power_row.principal_sub == "svc-blueprint"
+
+    # Approval 3: only the power-on runs.
+    fourth = await _resume(power_request, await _approve_as(power_request, "ops-reviewer"))
+    assert fourth.status == "ok", fourth.error
+    assert fourth.result["powered_on"] is True
+    assert fourth.result["issues"] == []
+    assert recorder.calls == [_DEPLOY_CALL, power_call]
+    assert len(recorder.deploy_bodies) == 1
+    assert [path for path, _ in recorder.vmomi_calls if path.endswith("/Rename_Task")] == [
+        "/VirtualMachine/vm-ovf-9/Rename_Task"
+    ]
+    assert await _approval_row_count() == 3
+
+
+_DEPLOY_BY_NAME_PARAMS: dict[str, Any] = {
+    "library_item_name": "web-ova",
+    "name": "web-01",
+    "resource_pool": "resgroup-8",
+}
+_FIND_ITEM_CALL = ("POST", "/content/library/item?action=find")
+
+
+@pytest.mark.asyncio
+async def test_deploy_resume_deploys_the_saved_item_when_the_name_lookup_changed(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approved deploy deploys the item its first run resolved, not what the name finds (#4217).
+
+    The deploy is asked for by library item name and waits for approval
+    (every write is forced to need one, as in
+    ``test_deploy_each_approval_continues_and_no_write_runs_twice``). Before
+    the approval, the name lookup starts to answer with another item. The
+    reviewer's re-run does not look the name up again: it sends the saved
+    deploy parameters, so the approved deploy matches its stored hash and
+    deploys the item the person approved. Nothing deploys the other item.
+    """
+    monkeypatch.setattr(
+        "meho_backplane.connectors.vmware_rest.composites._write._WRITE_REQUIRES_APPROVAL",
+        True,
+    )
+    recorder = _deploy_recorder(succeeded=True)
+    recorder.responses["/content/library/item?action=find"] = ["li-1"]
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    await _seed_composite_service_grant(
+        composite_op_id="vmware.composite.vm.deploy_from_library", target_id=target_id
+    )
+    svc = _make_operator(sub="svc-blueprint", principal_kind=PrincipalKind.SERVICE)
+
+    first = await dispatch(
+        operator=svc,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.deploy_from_library",
+        target=_FakeVmwareTarget(target_id=target_id),
+        params=_DEPLOY_BY_NAME_PARAMS,
+    )
+    assert first.status == "awaiting_approval", first.error
+    assert recorder.calls == [_FIND_ITEM_CALL], "the lookup ran; the deploy waits"
+    deploy_request = UUID(first.extras["approval_request_id"])
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, deploy_request)
+    assert pending is not None
+    assert pending.op_id == _DEPLOY_OP_ID
+    assert pending.params["ovfLibraryItemId"] == "li-1"
+    deploy_name = pending.params["deployment_spec"]["name"]
+    assert deploy_name.startswith("web-01-meho-")
+    assert pending.resume_parent == {
+        "op_id": "vmware.composite.vm.deploy_from_library",
+        "params": _DEPLOY_BY_NAME_PARAMS,
+        "state": {
+            "deploy_name": deploy_name,
+            "deploy": {"params": pending.params, "name": "web-01"},
+        },
+    }
+
+    # Meanwhile: the same item name now finds another item.
+    recorder.responses["/content/library/item?action=find"] = ["li-2"]
+    recorder.responses["/vcenter/ovf/library-item/li-2?action=deploy"] = {
+        "succeeded": True,
+        "resource_id": {"type": "VirtualMachine", "id": "vm-wrong"},
+    }
+
+    resume = await _resume(deploy_request, await _approve_as(deploy_request, "ops-reviewer"))
+
+    assert resume.status == "ok", resume.error
+    assert resume.result["status"] == "deployed"
+    assert resume.result["vm_id"] == "vm-ovf-9"
+    assert resume.result["library_item_id"] == "li-1"
+    assert recorder.calls == [_FIND_ITEM_CALL, _DEPLOY_CALL], "no new lookup; li-2 never deploys"
+    assert recorder.deploy_bodies == [
+        {key: value for key, value in pending.params.items() if key != "ovfLibraryItemId"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_waiter_resume_of_a_parked_deploy_deploys_once_under_the_same_name(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """An approved deploy runs once, under the name the person approved (#4217).
+
+    With the real token generator the first run draws a random deploy name
+    into the deploy body and saves the whole deploy body with the park. The
+    agent waiter's resume sends it again, so the approved deploy matches
+    its stored parameter hash and runs. The agent's rename then waits during that resume (an
+    agent's ``dangerous`` write always needs approval); approving it renames
+    the VM and deploys nothing more.
+    """
+    recorder = _deploy_recorder(succeeded=True)
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    await _seed_agent_needs_approval_grant("POST:/vcenter/ovf/*")
+    await _seed_agent_needs_approval_grant("POST:/VirtualMachine/*")
+    agent = _make_operator(sub=_AGENT_SUB, principal_kind=PrincipalKind.AGENT)
+
+    request_id, envelope = await _agent_parks_subop(
+        agent=agent,
+        composite_op_id="vmware.composite.vm.deploy_from_library",
+        target_id=target_id,
+        params=_DEPLOY_NAMED_PARAMS,
+    )
+    assert recorder.calls == [], "the deploy must not fire before approval"
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, request_id)
+    assert pending is not None
+    assert pending.op_id == _DEPLOY_OP_ID
+    deploy_name = pending.params["deployment_spec"]["name"]
+    assert deploy_name.startswith("web-01-meho-")
+    assert pending.resume_parent == {
+        "op_id": "vmware.composite.vm.deploy_from_library",
+        "params": _DEPLOY_NAMED_PARAMS,
+        "state": {
+            "deploy_name": deploy_name,
+            "deploy": {"params": pending.params, "name": "web-01"},
+        },
+    }
+
+    await _approve_as_reviewer(request_id)
+    resumed = await _resume_approved_or_already_resumed(
+        operator=agent,
+        call_arguments=_agent_call_arguments(
+            "vmware.composite.vm.deploy_from_library", _DEPLOY_NAMED_PARAMS
+        ),
+        awaiting_envelope=envelope,
+        approval_request_id=request_id,
+    )
+
+    assert resumed["status"] == "ok", resumed
+    assert resumed["result"]["status"] == "deployed"
+    assert recorder.calls == [_DEPLOY_CALL]
+    assert [body["deployment_spec"]["name"] for body in recorder.deploy_bodies] == [deploy_name]
+    assert recorder.vmomi_calls == [], "the rename waits for its own approval"
+    (rename_issue,) = resumed["result"]["issues"]
+    rename_request = _request_id_in(rename_issue)
+    assert await _approval_row_count() == 2
+    # Both resume paths save the step that waits again for the requester of
+    # the request being re-run: here the agent, on the reviewer's path the
+    # service principal (test_deploy_each_approval_continues_and_no_write_runs_twice).
+    async with get_sessionmaker()() as s:
+        rename_row = await s.get(ApprovalRequest, rename_request)
+    assert rename_row is not None
+    assert rename_row.principal_sub == pending.principal_sub == _AGENT_SUB
+
+    resume = await _resume(rename_request, await _approve_as(rename_request, "ops-reviewer-2"))
+
+    assert resume.status == "ok", resume.error
+    assert resume.result["issues"] == []
+    assert recorder.calls == [_DEPLOY_CALL], "no second deploy"
+    assert recorder.vmomi_calls[0] == (
+        "/VirtualMachine/vm-ovf-9/Rename_Task",
+        {"newName": "web-01"},
+    )
+    assert await _approval_row_count() == 2
+
+
+@pytest.mark.asyncio
+async def test_vm_create_rollback_park_approve_resume_deletes_and_creates_nothing(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """Approving a waiting ``vm.create`` rollback DELETE deletes the VM; no second create (#4217).
+
+    The NIC attach fails after the create, so the composite rolls back. The
+    service principal has no grant on the delete, so the DELETE waits. The
+    approval re-runs ``vm.create`` through the real dispatcher; it only
+    runs the rollback on the VM the first run created.
+    """
+    recorder = _RecordingVmwareConnector()
+    recorder.responses["/vcenter/vm"] = {"value": "vm-rb-1"}
+    recorder.failures["/vcenter/vm/vm-rb-1/hardware/ethernet"] = "nic"
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    for op_id in (
+        "vmware.composite.vm.create",
+        "POST:/vcenter/vm",
+        "POST:/vcenter/vm/{vm}/hardware/ethernet",
+    ):
+        await _seed_service_grant(op_id=op_id, target_id=target_id)
+    svc = _make_operator(sub="svc-blueprint", principal_kind=PrincipalKind.SERVICE)
+    params = {
+        "name": "vm-rb",
+        "guest_os": "UBUNTU_64",
+        "folder": "group-v55",
+        "nics": [{"network": "net-x"}],
+    }
+    result = await dispatch(
+        operator=svc,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.create",
+        target=_FakeVmwareTarget(target_id=target_id),
+        params=params,
+    )
+    # #3813: a rolled-back create is a failed call, not ok.
+    assert result.status == "error", result.result
+    assert result.extras["error_code"] == "rolled_back"
+    assert result.result["status"] == "rolled_back"
+    first_calls = list(recorder.calls)
+    assert first_calls == [
+        ("POST", "/vcenter/vm"),
+        ("POST", "/vcenter/vm/vm-rb-1/hardware/ethernet"),
+    ]
+    async with get_sessionmaker()() as s:
+        pending = (await s.scalars(select(ApprovalRequest))).one()
+    assert pending.op_id == "DELETE:/vcenter/vm/{vm}"
+    assert pending.params == {"vm": "vm-rb-1"}
+    assert pending.resume_parent is not None
+    assert pending.resume_parent["after_main_effect"] is True
+    assert pending.resume_parent["state"]["rollback"]["vm_id"] == "vm-rb-1"
+    # #4057: the first result says the VM still exists until the DELETE is approved.
+    assert result.result["rollback"] == {"vm_id": "vm-rb-1", "outcome": "awaiting_approval"}
+
+    resume = await _resume(pending.id, await _approve_as(pending.id, "ops-reviewer"))
+
+    assert resume.status == "error", resume.result
+    assert resume.extras["error_code"] == "rolled_back"
+    assert resume.result["rollback"] == {"vm_id": "vm-rb-1", "outcome": "removed"}
+    unchanged = ("status", "vm_id", "steps_succeeded", "failed_step", "rollback_reason")
+    assert {key: resume.result[key] for key in unchanged} == {
+        key: result.result[key] for key in unchanged
+    }
+    assert recorder.calls == [*first_calls, ("DELETE", "/vcenter/vm/vm-rb-1")]
+    assert await _approval_row_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_import_power_on_park_approve_resume_only_powers_on(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Approving a waiting power-on of an imported VM only powers it on (#4217).
+
+    The import engine is replaced by a counter (its own transfer is covered
+    in ``test_connectors_vmware_rest_ovf_import``). The service principal
+    has no grant on the power-on, so it waits. The approval re-runs the
+    composite through the real dispatcher: the power-on runs, the import
+    does not run again.
+    """
+    from meho_backplane.connectors.vmware_rest.composites import _write
+    from meho_backplane.connectors.vmware_rest.ovf_import import LeaseImportResult
+
+    imports: list[str] = []
+
+    class _Source:
+        def __init__(self, **_kw: Any) -> None:
+            pass
+
+        async def aclose(self) -> None:
+            return None
+
+    async def _resolve(**_kw: Any) -> tuple[str, None]:
+        return "li-1", None
+
+    async def _import(**_kw: Any) -> LeaseImportResult:
+        imports.append("import")
+        return LeaseImportResult(
+            status="imported", vm_id="vm-imp-1", resource_type="VirtualMachine"
+        )
+
+    monkeypatch.setattr(_write.library_download, "LibraryDownloadSource", _Source)
+    monkeypatch.setattr(_write, "_resolve_deploy_library_item", _resolve)
+    monkeypatch.setattr(_write, "import_ovf_from_source", _import)
+
+    recorder = _RecordingVmwareConnector()
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    await _seed_service_grant(op_id="vmware.composite.vm.import_from_library", target_id=target_id)
+    svc = _make_operator(sub="svc-blueprint", principal_kind=PrincipalKind.SERVICE)
+    result = await dispatch(
+        operator=svc,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.import_from_library",
+        target=_FakeVmwareTarget(target_id=target_id),
+        params={
+            "library_item": "li-1",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-1",
+            "power_on": True,
+        },
+    )
+    assert result.status == "ok", result.error
+    assert result.result["powered_on"] is False
+    request_id = _request_id_in(result.result["issues"][-1])
+    assert imports == ["import"]
+    assert recorder.calls == []
+
+    resume = await _resume(request_id, await _approve_as(request_id, "ops-reviewer"))
+
+    assert resume.status == "ok", resume.error
+    assert resume.result["vm_id"] == "vm-imp-1"
+    assert resume.result["powered_on"] is True
+    assert imports == ["import"], "the import did not run again"
+    assert recorder.calls == [("POST", "/vcenter/vm/vm-imp-1/power?action=start")]
+    assert await _approval_row_count() == 1
 
 
 # ===========================================================================
@@ -1701,6 +2564,8 @@ class _DrsRuleVmwareConnector:
     ``Task.info`` poll — the two ``RetrievePropertiesEx`` reads keyed apart by
     the request body's ``specSet`` object type). Records both surfaces so the
     test can prove the mutating vmomi write fires only on the approved resume.
+    The cluster read answers like vCenter 8.0.x: a path into
+    ``configurationEx`` fails.
     """
 
     _MOUNT = "/api"
@@ -1744,13 +2609,15 @@ class _DrsRuleVmwareConnector:
         self.vmomi_calls.append(path)
         if path.endswith("/ReconfigureComputeResource_Task"):
             return {"type": "Task", "value": "task-rule-e2e"}
+        reject_config_ex_member_paths(json)
         spec_type = json["specSet"][0]["propSet"][0]["type"]
         if spec_type == "ClusterComputeResource":
+            config_ex = cluster_config_ex(rules=self.existing_rules)
             return {
                 "objects": [
                     {
                         "obj": {"type": "ClusterComputeResource", "value": "domain-c1"},
-                        "propSet": [{"name": "configurationEx.rule", "val": self.existing_rules}],
+                        "propSet": [{"name": "configurationEx", "val": config_ex}],
                     }
                 ]
             }
@@ -1772,7 +2639,6 @@ class _DrsRuleVmwareConnector:
 async def test_drs_rule_create_queue_approve_resume_with_2681_envelope(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """drs_rule.create: park (#2681 envelope + fan-out preview) → approve → resume → created.
 
@@ -1873,7 +2739,6 @@ async def test_drs_rule_create_queue_approve_resume_with_2681_envelope(
 async def test_drs_rule_create_fresh_boot_dispatchable_without_ingest(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """drs_rule.create runs to ``created`` on the direct session with ZERO ingested rows."""
     recorder = _DrsRuleVmwareConnector()
@@ -1955,7 +2820,6 @@ class _FolderCreateVmwareConnector:
 async def test_folder_create_queue_approve_resume_with_2681_envelope(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """folder.create: park (#2681 + param-echo preview) → approve → resume → created.
 
@@ -2031,7 +2895,6 @@ async def test_folder_create_queue_approve_resume_with_2681_envelope(
 async def test_folder_create_fresh_boot_dispatchable_without_ingest(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """folder.create runs to ``created`` on the direct session with ZERO ingested rows."""
     recorder = _FolderCreateVmwareConnector()
@@ -2060,7 +2923,6 @@ async def test_folder_create_fresh_boot_dispatchable_without_ingest(
 async def test_vm_resize_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.resize: read VM info -> PATCH cpu -> PATCH memory."""
     recorder = _RecordingVmwareConnector()
@@ -2097,7 +2959,6 @@ async def test_vm_resize_sub_op_sequence(
 async def test_vm_nic_repoint_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.nic.repoint: read NIC -> resolve portgroup via /vcenter/network -> PATCH backing."""
     recorder = _RecordingVmwareConnector()
@@ -2145,7 +3006,6 @@ async def test_vm_nic_repoint_sub_op_sequence(
 async def test_vm_device_cdrom_remove_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.device.cdrom (remove): read backing -> DELETE the device."""
     recorder = _RecordingVmwareConnector()
@@ -2199,7 +3059,6 @@ async def test_hardware_write_park_carries_uniform_identity_envelope(
     composite_op_id: str,
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A parked hardware-write composite carries the #2681 uniform op-identity envelope.
 
@@ -2277,7 +3136,6 @@ def _assert_no_secret(blob: str, *, surface: str) -> None:
 async def test_gosc_create_secret_hygiene_across_all_surfaces(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """GOSC create with inline secrets never leaks them to reviewer surfaces (#1503).
 
@@ -2288,8 +3146,6 @@ async def test_gosc_create_secret_hygiene_across_all_surfaces(
     reviewer-facing surface is scanned for the planted secret literals:
 
     * ``proposed_effect`` — the bespoke preview echoes IDENTITY fields only.
-    * broadcast frame — the op is pinned ``credential_write`` so the params
-      collapse to aggregate-only (no ``params`` key at all).
     * audit payload — the durable row stores only a params hash.
 
     Also asserts the #2681 uniform op-identity envelope on the parked row.
@@ -2379,27 +3235,17 @@ async def test_gosc_create_secret_hygiene_across_all_surfaces(
     assert result2.result["status"] == "created"
     assert recorder.calls == [("POST", "/vcenter/guest/customization-specs")]
 
-    # --- Surface 2: broadcast frame (params collapsed to aggregate-only) ---
-    gosc_events = [e for e in captured_events if e.op_id == op_id]
-    assert gosc_events, "no broadcast event captured for the GOSC create"
-    for event in gosc_events:
-        assert event.op_class == "credential_write"
-        # The credential-class collapse drops the params dict entirely.
-        assert "params" not in event.payload, event.payload
-        _assert_no_secret(json.dumps(event.payload, default=str), surface="broadcast")
-
 
 @pytest.mark.asyncio
-async def test_vm_customize_preview_and_broadcast_carry_no_secret(
+async def test_vm_customize_preview_carries_no_secret(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.customize (the apply half) echoes only a spec-name reference -- no secret.
 
     The second half of "redaction covered for both ops": ``vm.customize``
     references a saved spec by name and never carries credential material, so
-    its ``proposed_effect`` and broadcast frame are safe by construction. This
+    its ``proposed_effect`` is safe by construction. This
     pins that: the preview surfaces the VM + spec name + resolved power state,
     and no secret literal can appear (there is none in its params).
     """
@@ -2501,7 +3347,6 @@ async def _seed_composite_service_grant(*, composite_op_id: str, target_id: UUID
 async def test_vm_power_subop_park_approve_resume_executes(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """REST ``?action=`` power sub-op: park → approve → resume fires the power op.
 
@@ -2586,7 +3431,6 @@ class _Pre9RecordingVmwareConnector(_RecordingVmwareConnector):
 async def test_vm_create_vim_subop_park_approve_resume_creates_vm(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """VI-JSON ``CreateVM_Task`` sub-op: park → approve → resume → the VM exists.
 
@@ -2715,7 +3559,6 @@ async def test_vm_create_vim_subop_park_approve_resume_creates_vm(
 async def test_vm_create_multi_gate_resume_fails_closed_no_double_execute(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A later governed leg that re-gates on resume aborts, not re-parks (#3351 B1).
@@ -2838,7 +3681,6 @@ def _library_create_params() -> dict[str, Any]:
 async def test_content_library_subscribed_create_500_audits_error(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A 500 on the create sub-op dispatches as an error and audits as error (#3809).
 
@@ -2888,7 +3730,6 @@ async def test_content_library_subscribed_create_500_audits_error(
 async def test_content_library_subscribed_create_500_on_resume_reaches_approver(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A parked-then-approved create whose sub-op 500s returns an error on resume (#3809).
 
@@ -2951,3 +3792,472 @@ async def test_content_library_subscribed_create_500_on_resume_reaches_approver(
     assert result2.status == "error", result2.error
     assert result2.extras["error_code"] == "create_error"
     assert ("POST", "/content/subscribed-library") in recorder.calls
+
+
+# ===========================================================================
+# #3421 — the in-process agent waiter resumes a composite sub-op park the same
+# way the operator surface does (#3351)
+# ===========================================================================
+#
+# An AGENT principal's governed sub-op parks on the direct seam with
+# ``resume_parent`` set. Before #3421 the agent waiter re-dispatched the
+# agent's original composite call without clearing the approved sub-op, so the
+# sub-op hit its gate again and parked a fresh request: nothing executed and
+# the exactly-one-resumer claim was spent. The waiter now re-enters the parent
+# composite through the same ``composite_resume_binding`` helper the operator
+# surface uses.
+
+_AGENT_SUB = "agent-runner"
+
+
+async def _seed_agent_grant(op_pattern: str, *, verdict: str) -> None:
+    """Give the agent an :class:`AgentPermission` row for *op_pattern*."""
+    async with get_sessionmaker()() as s:
+        s.add(
+            AgentPermission(
+                tenant_id=_TENANT_ID,
+                principal_sub=_AGENT_SUB,
+                op_pattern=op_pattern,
+                verdict=verdict,
+                created_by_sub="ops-admin",
+            )
+        )
+        await s.commit()
+
+
+async def _seed_agent_needs_approval_grant(op_pattern: str) -> None:
+    """Give the agent a ``needs-approval`` grant so its governed sub-op parks.
+
+    Without a grant a ``dangerous`` sub-op is denied for an agent; with one it
+    parks (the ``dangerous`` ceiling), which is the shape under test.
+    """
+    await _seed_agent_grant(op_pattern, verdict="needs-approval")
+
+
+async def _agent_parks_subop(
+    *, agent: Operator, composite_op_id: str, target_id: UUID, params: dict[str, Any]
+) -> tuple[UUID, dict[str, Any]]:
+    """Run the composite as the agent past its top-level gate; its sub-op parks.
+
+    ``_approved=True`` stands in for the already-approved top-level park (every
+    governed composite is ``requires_approval=True``). Returns the parked
+    sub-op's request id and the envelope the agent's tool received.
+    """
+    result = await dispatch(
+        operator=agent,
+        connector_id=_CONNECTOR_ID,
+        op_id=composite_op_id,
+        target=_FakeVmwareTarget(target_id=target_id),
+        params=params,
+        _approved=True,
+    )
+    assert result.status == "awaiting_approval", result.error
+    return UUID(result.extras["approval_request_id"]), result.model_dump(mode="json")
+
+
+async def _approve_as_reviewer(request_id: UUID) -> Operator:
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    async with get_sessionmaker()() as s:
+        await approve_request(s, request_id, operator=reviewer, params=None)
+        await s.commit()
+    return reviewer
+
+
+def _agent_call_arguments(composite_op_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    """The agent's original ``call_operation`` arguments for the composite."""
+    return {
+        "connector_id": _CONNECTOR_ID,
+        "op_id": composite_op_id,
+        "target": {"name": "prod-vcenter"},
+        "params": params,
+    }
+
+
+async def _approval_row_count() -> int:
+    async with get_sessionmaker()() as s:
+        count = await s.scalar(select(func.count()).select_from(ApprovalRequest))
+    return int(count or 0)
+
+
+@pytest.mark.asyncio
+async def test_agent_waiter_resumes_rest_action_subop_park(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """REST ``?action=`` power sub-op: agent park → approve → agent waiter → power fires."""
+    recorder = _RecordingVmwareConnector()
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    await _seed_agent_needs_approval_grant("POST:/vcenter/vm/*")
+    agent = _make_operator(sub=_AGENT_SUB, principal_kind=PrincipalKind.AGENT)
+    params = {"vm": "vm-1", "verb": "on"}
+
+    request_id, envelope = await _agent_parks_subop(
+        agent=agent,
+        composite_op_id="vmware.composite.vm.power",
+        target_id=target_id,
+        params=params,
+    )
+    assert recorder.calls == [], "the power op must not fire before approval"
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, request_id)
+    assert pending is not None
+    assert pending.op_id == "POST:/vcenter/vm/{vm}/power?action=start"
+    assert pending.resume_parent == {"op_id": "vmware.composite.vm.power", "params": params}
+
+    await _approve_as_reviewer(request_id)
+    resumed = await _resume_approved_or_already_resumed(
+        operator=agent,
+        call_arguments=_agent_call_arguments("vmware.composite.vm.power", params),
+        awaiting_envelope=envelope,
+        approval_request_id=request_id,
+    )
+
+    assert resumed["status"] == "ok", resumed
+    assert resumed["result"]["verb"] == "on"
+    # The power write fired exactly once, and no second request was parked.
+    assert recorder.calls == [("POST", "/vcenter/vm/vm-1/power?action=start")]
+    assert await _approval_row_count() == 1
+    async with get_sessionmaker()() as s:
+        final = await s.get(ApprovalRequest, request_id)
+    assert final is not None
+    assert final.resumed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_agent_waiter_resumes_vim_create_subop_park(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """VI-JSON ``CreateVM_Task`` sub-op: agent park → approve → agent waiter → VM exists."""
+    recorder = _Pre9RecordingVmwareConnector()
+    recorder.responses.update({"/vcenter/datastore/datastore-11": {"name": "datastore1"}})
+    recorder.vmomi_responses.update(
+        {
+            "/Folder/group-v55/CreateVM_Task": {
+                "_typeName": "ManagedObjectReference",
+                "type": "Task",
+                "value": "task-3421",
+            },
+            "Task": {
+                "_typeName": "RetrieveResult",
+                "objects": [
+                    {
+                        "_typeName": "ObjectContent",
+                        "obj": {
+                            "_typeName": "ManagedObjectReference",
+                            "type": "Task",
+                            "value": "task-3421",
+                        },
+                        "propSet": [
+                            {
+                                "_typeName": "DynamicProperty",
+                                "name": "info",
+                                "val": {
+                                    "_typeName": "TaskInfo",
+                                    "state": "success",
+                                    "result": {
+                                        "_typeName": "ManagedObjectReference",
+                                        "type": "VirtualMachine",
+                                        "value": "vm-3421",
+                                    },
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
+    )
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    await _seed_agent_needs_approval_grant("POST:/Folder/*")
+    agent = _make_operator(sub=_AGENT_SUB, principal_kind=PrincipalKind.AGENT)
+    params = {
+        "name": "vm-agent-approved",
+        "guest_os": "UBUNTU_64",
+        "folder": "group-v55",
+        "resource_pool": "resgroup-8",
+        "datastore": "datastore-11",
+    }
+
+    request_id, envelope = await _agent_parks_subop(
+        agent=agent,
+        composite_op_id="vmware.composite.vm.create",
+        target_id=target_id,
+        params=params,
+    )
+    assert recorder.vmomi_calls == [], "CreateVM_Task must not fire before approval"
+
+    await _approve_as_reviewer(request_id)
+    resumed = await _resume_approved_or_already_resumed(
+        operator=agent,
+        call_arguments=_agent_call_arguments("vmware.composite.vm.create", params),
+        awaiting_envelope=envelope,
+        approval_request_id=request_id,
+    )
+
+    assert resumed["status"] == "ok", resumed
+    assert resumed["result"]["status"] == "created"
+    assert resumed["result"]["vm_id"] == "vm-3421"
+    vmomi_paths = [call[0] for call in recorder.vmomi_calls]
+    assert vmomi_paths.count("/Folder/group-v55/CreateVM_Task") == 1
+    assert await _approval_row_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_waiter_multi_gate_resume_fails_closed(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """The multi-gate guard fires on the agent path too (#3351 B1, #3421).
+
+    The agent re-enters the composite as itself. ``vm.create`` with
+    ``power_on_after_create`` clears the approved create leg, then the power
+    leg would need a second approval for the agent. The guard refuses instead
+    of parking, so the create ran once and no second request exists.
+    """
+    recorder = _RecordingVmwareConnector()
+    recorder.responses.update({"/vcenter/vm": {"value": "vm-agent-multigate"}})
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    await _seed_agent_needs_approval_grant("POST:/vcenter/vm*")
+    agent = _make_operator(sub=_AGENT_SUB, principal_kind=PrincipalKind.AGENT)
+    params = {
+        "name": "vm-agent-multigate",
+        "guest_os": "UBUNTU_64",
+        "folder": "group-v55",
+        "power_on_after_create": True,
+    }
+
+    request_id, envelope = await _agent_parks_subop(
+        agent=agent,
+        composite_op_id="vmware.composite.vm.create",
+        target_id=target_id,
+        params=params,
+    )
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, request_id)
+    assert pending is not None
+    assert pending.op_id == "POST:/vcenter/vm"
+
+    await _approve_as_reviewer(request_id)
+    resumed = await _resume_approved_or_already_resumed(
+        operator=agent,
+        call_arguments=_agent_call_arguments("vmware.composite.vm.create", params),
+        awaiting_envelope=envelope,
+        approval_request_id=request_id,
+    )
+
+    assert resumed["status"] == "error", resumed
+    assert resumed["extras"]["error_code"] == "composite_resume_multi_gate_unsupported"
+    assert resumed["extras"]["approved_op_id"] == "POST:/vcenter/vm"
+    assert resumed["extras"]["blocked_op_id"] == "POST:/vcenter/vm/{vm}/power?action=start"
+    assert recorder.calls == [("POST", "/vcenter/vm")]
+    assert await _approval_row_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_operator_and_agent_surfaces_resume_the_same_row_identically(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both resume surfaces re-enter the same parked row the same way (#3421).
+
+    Spies the dispatcher on both surfaces and resumes one parked composite
+    sub-op row through each. Both must dispatch the same parent composite with
+    the same params, ``_approved=True``, and the same approved sub-op bound on
+    the two composite resume vars.
+    """
+    import meho_backplane.operations.dispatcher as dispatcher_module
+    import meho_backplane.operations.meta_tools as meta_tools_module
+    from meho_backplane.connectors import OperationResult
+    from meho_backplane.operations.composite import (
+        composite_resume_scope_var,
+        composite_resume_var,
+    )
+
+    recorder = _RecordingVmwareConnector()
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    await _seed_agent_needs_approval_grant("POST:/vcenter/vm/*")
+    agent = _make_operator(sub=_AGENT_SUB, principal_kind=PrincipalKind.AGENT)
+    params = {"vm": "vm-1", "verb": "on"}
+    request_id, envelope = await _agent_parks_subop(
+        agent=agent,
+        composite_op_id="vmware.composite.vm.power",
+        target_id=target_id,
+        params=params,
+    )
+    reviewer = await _approve_as_reviewer(request_id)
+
+    seen: list[dict[str, Any]] = []
+
+    async def _spy_dispatch(**kwargs: Any) -> OperationResult:
+        seen.append(
+            {
+                "connector_id": kwargs["connector_id"],
+                "op_id": kwargs["op_id"],
+                "params": kwargs["params"],
+                "approved": kwargs.get("_approved"),
+                "target_id": getattr(kwargs["target"], "id", None),
+                "resume": composite_resume_var.get(),
+                "scope": composite_resume_scope_var.get(),
+            }
+        )
+        return OperationResult(status="ok", op_id=kwargs["op_id"], duration_ms=0.0)
+
+    monkeypatch.setattr(dispatcher_module, "dispatch", _spy_dispatch)
+    monkeypatch.setattr(meta_tools_module, "dispatch", _spy_dispatch)
+
+    # Operator surface.
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+    assert row is not None
+    await resume_dispatch_after_approval(operator=reviewer, request=row, params=None)
+
+    # Free the one-resumer claim so the agent surface can resume the same row.
+    async with get_sessionmaker()() as s:
+        await s.execute(
+            update(ApprovalRequest)
+            .where(ApprovalRequest.id == request_id)
+            .values(resumed_at=None, resume_result=None)
+        )
+        await s.commit()
+
+    # Agent surface.
+    await _resume_approved_or_already_resumed(
+        operator=agent,
+        call_arguments=_agent_call_arguments("vmware.composite.vm.power", params),
+        awaiting_envelope=envelope,
+        approval_request_id=request_id,
+    )
+
+    assert len(seen) == 2
+    operator_call, agent_call = seen
+    assert operator_call == agent_call
+    assert operator_call["op_id"] == "vmware.composite.vm.power"
+    assert operator_call["params"] == params
+    assert operator_call["approved"] is True
+    assert operator_call["target_id"] == target_id
+    approved_subop = ("POST:/vcenter/vm/{vm}/power?action=start", row.params_hash)
+    assert operator_call["resume"] == approved_subop
+    assert operator_call["scope"] == approved_subop
+    # Both surfaces reset the vars after the re-entry.
+    assert composite_resume_var.get() is None
+    assert composite_resume_scope_var.get() is None
+
+
+async def _reassign_target_name(original_id: UUID, *, soft_delete: bool) -> UUID:
+    """Move the name ``prod-vcenter`` to a new target while the request waits.
+
+    The original target is renamed (or soft-deleted when *soft_delete* is
+    set), then a fresh target takes the name the agent used when it parked.
+    Returns the new target's id.
+    """
+    async with get_sessionmaker()() as s:
+        original = await s.get(TargetORM, original_id)
+        assert original is not None
+        if soft_delete:
+            original.deleted_at = datetime.now(UTC)
+        else:
+            original.name = "old-vcenter"
+        await s.commit()
+    return await _persist_vmware_target()
+
+
+@pytest.mark.asyncio
+async def test_agent_waiter_composite_resume_runs_against_saved_target_after_rename(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The name the agent parked with now points elsewhere; the saved target wins.
+
+    Same check as the operator surface: the composite re-entry loads the
+    target the approval row saved by id. The power write still fires once,
+    against the original (renamed) target, never against the new one that
+    took over the name.
+    """
+    import meho_backplane.operations.meta_tools as meta_tools_module
+
+    recorder = _RecordingVmwareConnector()
+    await _bootstrap(recorder, stub_embedding_service)
+    original_id = await _persist_vmware_target()
+    await _seed_agent_needs_approval_grant("POST:/vcenter/vm/*")
+    agent = _make_operator(sub=_AGENT_SUB, principal_kind=PrincipalKind.AGENT)
+    params = {"vm": "vm-1", "verb": "on"}
+    request_id, envelope = await _agent_parks_subop(
+        agent=agent,
+        composite_op_id="vmware.composite.vm.power",
+        target_id=original_id,
+        params=params,
+    )
+    impostor_id = await _reassign_target_name(original_id, soft_delete=False)
+    await _approve_as_reviewer(request_id)
+
+    real_dispatch = meta_tools_module.dispatch
+    dispatched_targets: list[tuple[UUID | None, str | None]] = []
+
+    async def _recording_dispatch(**kwargs: Any) -> Any:
+        target = kwargs["target"]
+        dispatched_targets.append((getattr(target, "id", None), getattr(target, "name", None)))
+        return await real_dispatch(**kwargs)
+
+    monkeypatch.setattr(meta_tools_module, "dispatch", _recording_dispatch)
+    resumed = await _resume_approved_or_already_resumed(
+        operator=agent,
+        call_arguments=_agent_call_arguments("vmware.composite.vm.power", params),
+        awaiting_envelope=envelope,
+        approval_request_id=request_id,
+    )
+
+    assert resumed["status"] == "ok", resumed
+    assert dispatched_targets == [(original_id, "old-vcenter")]
+    assert impostor_id not in {tid for tid, _ in dispatched_targets}
+    assert recorder.calls == [("POST", "/vcenter/vm/vm-1/power?action=start")]
+    assert await _approval_row_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_waiter_composite_resume_refuses_deleted_target_with_reused_name(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """The saved target was deleted and its name reused: refuse, run nothing.
+
+    The waiter returns a ``denied`` envelope, fires no write against the new
+    target, parks no second request, and leaves the one-resumer claim free.
+    """
+    recorder = _RecordingVmwareConnector()
+    await _bootstrap(recorder, stub_embedding_service)
+    original_id = await _persist_vmware_target()
+    await _seed_agent_needs_approval_grant("POST:/vcenter/vm/*")
+    agent = _make_operator(sub=_AGENT_SUB, principal_kind=PrincipalKind.AGENT)
+    params = {"vm": "vm-1", "verb": "on"}
+    request_id, envelope = await _agent_parks_subop(
+        agent=agent,
+        composite_op_id="vmware.composite.vm.power",
+        target_id=original_id,
+        params=params,
+    )
+    await _reassign_target_name(original_id, soft_delete=True)
+    await _approve_as_reviewer(request_id)
+
+    resumed = await _resume_approved_or_already_resumed(
+        operator=agent,
+        call_arguments=_agent_call_arguments("vmware.composite.vm.power", params),
+        awaiting_envelope=envelope,
+        approval_request_id=request_id,
+    )
+
+    assert resumed["status"] == "denied", resumed
+    assert resumed["extras"]["error_code"] == "denied"
+    assert str(original_id) in resumed["error"]
+    assert recorder.calls == [], "nothing may run against the target that reused the name"
+    assert await _approval_row_count() == 1
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+    assert row is not None
+    assert row.resumed_at is None

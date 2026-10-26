@@ -278,6 +278,7 @@ def test_ready_with_empty_registry_returns_503(client: TestClient) -> None:
         "ui_surface",
         "audit_replay",
         "approval_queue",
+        "approval_custody",
         "mcp",
     }
 
@@ -304,6 +305,7 @@ def test_ready_with_all_passing_probes_returns_200(client: TestClient) -> None:
         "ui_surface",
         "audit_replay",
         "approval_queue",
+        "approval_custody",
         "mcp",
     }
 

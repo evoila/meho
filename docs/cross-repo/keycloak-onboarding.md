@@ -43,10 +43,15 @@ scripts. The read ops:
 | `client_scope` | `keycloak.client_scope.list` | `GET .../client-scopes` | read-only |
 | `user` | `keycloak.user.list` | `GET .../users` (`?username=`/`?max=`) | read-only |
 | `user` | `keycloak.role_mapping.get` | `GET .../users/{id}/role-mappings` | read-only |
+| `role` | `keycloak.role.list` | `GET .../roles` | read-only |
+| `role` | `keycloak.role.users` | `GET .../roles/{role-name}/users` | read-only |
+| `group` | `keycloak.group.list` | `GET .../groups` (or `.../groups/{group-id}/children`) | read-only |
+| `group` | `keycloak.group.member.list` | `GET .../groups/{group-id}/members` | read-only |
 
-Six read ops. All are `safety_level="safe"` and
-`requires_approval=False`; the write ops (below) are `caution` /
-`dangerous` and all `requires_approval=True`. Every op dispatches through the same
+Ten read ops. All are `safety_level="safe"` and
+`requires_approval=False`. The write ops (below) are `caution`,
+`dangerous` or `destructive`, and all are `requires_approval=True`.
+Every op dispatches through the same
 `POST /api/v1/operations/call` route the agent surface uses — auth,
 policy, audit, broadcast, and JSONFlux all run as documented in
 [CLAUDE.md](../../CLAUDE.md) §6. The CLI verb tree is operator ergonomics
@@ -57,7 +62,14 @@ every Keycloak op via the narrow-waist meta-tools, see the
 
 `client.get` and `role_mapping.get` take the client / user **internal
 UUID** (`id`), not the human `clientId` / `username` — discover it via
-the matching `.list` op first.
+the matching `.list` op first. `group.member.list` also takes the
+group's internal UUID, from `group.list`. `role.users` is different: it
+takes the role **name**, from `role.list`.
+
+`group.list` lists the top-level groups, or the direct children of one
+group when you pass `parent_id`. By default Keycloak leaves out the group
+attributes. Pass `brief=false` to see them (for example the `tenant_id`
+and `tenant_role` of a role group).
 
 ### The write surface (G3.13-T4 #1406)
 
@@ -69,15 +81,43 @@ approves it through the queue.
 
 | Group | Op ID | Admin REST API | Safety |
 | --- | --- | --- | --- |
-| `realm` | `keycloak.realm.create` | `POST /admin/realms` | dangerous |
-| `realm` | `keycloak.realm.update` | `PUT .../realms/{realm}` | caution |
-| `client` | `keycloak.client.create` | `POST .../realms/{realm}/clients` | caution |
-| `client` | `keycloak.client.update` | `PUT .../clients/{id}` | caution |
-| `client_scope` | `keycloak.client_scope.create` | `POST .../client-scopes` | caution |
-| `protocol_mapper` | `keycloak.protocol_mapper.create` | `POST .../clients/{id}/protocol-mappers/models` | caution |
-| `user` | `keycloak.user.create` | `POST .../realms/{realm}/users` | caution |
-| `user` | `keycloak.user.reset_password` | `PUT .../users/{id}/reset-password` | caution |
-| `role_mapping` | `keycloak.role_mapping.assign` | `POST .../users/{id}/role-mappings/realm` | dangerous |
+| `realm_write` | `keycloak.realm.create` | `POST /admin/realms` | dangerous |
+| `realm_write` | `keycloak.realm.update` | `PUT .../realms/{realm}` | caution |
+| `client_write` | `keycloak.client.create` | `POST .../realms/{realm}/clients` | caution |
+| `client_write` | `keycloak.client.update` | `PUT .../clients/{id}` | caution |
+| `client_write` | `keycloak.client.delete` | `DELETE .../clients/{id}` | destructive |
+| `client_scope_write` | `keycloak.client_scope.create` | `POST .../client-scopes` | caution |
+| `protocol_mapper_write` | `keycloak.protocol_mapper.create` | `POST .../clients/{id}/protocol-mappers/models` | caution |
+| `user_write` | `keycloak.user.create` | `POST .../realms/{realm}/users` | caution |
+| `user_write` | `keycloak.user.reset_password` | `PUT .../users/{id}/reset-password` | caution |
+| `user_write` | `keycloak.user.delete` | `DELETE .../users/{id}` | destructive |
+| `role_mapping_write` | `keycloak.role_mapping.assign` | `POST .../users/{id}/role-mappings/realm` | dangerous |
+| `group_write` | `keycloak.group.create` | `POST .../groups` (or `.../groups/{group-id}/children`) | dangerous |
+| `group_write` | `keycloak.group.update_attributes` | `PUT .../groups/{group-id}` | dangerous |
+| `group_write` | `keycloak.group.member.add` | `PUT .../users/{user-id}/groups/{groupId}` | dangerous |
+| `group_write` | `keycloak.group.member.remove` | `DELETE .../users/{user-id}/groups/{groupId}` | dangerous |
+| `group_write` | `keycloak.group.delete` | `DELETE .../groups/{group-id}` | destructive |
+
+Sixteen write ops. The group column is the registered group key: use it
+as the `group` argument of `search_operations` (for example
+`group="realm_write"` finds `keycloak.realm.create`).
+
+The group ops are `dangerous` because MEHO reads a user's tenant and
+role from Keycloak group membership. A role group carries `tenant_id` and
+`tenant_role` as group attributes. So creating such a group, or adding a
+user to it, gives that user access to a tenant. This is the same risk as
+`role_mapping.assign`.
+
+- `group.create` takes a name, an optional `parent_id` (to make a
+  sub-group) and an optional `attributes` map. It is safe to run twice:
+  if the group already exists, it returns `already_exists=true` and the
+  existing id.
+- `group.update_attributes` merges the given attributes into the group
+  (default), or replaces them all with `replace=true`.
+- `group.member.add` / `group.member.remove` find the group by
+  `group_id` or `group_name`, and the user by `user_id` or `username`.
+  They are safe to run twice: adding a user who is already a member, or
+  removing a user who is not a member, returns `unchanged=true`.
 
 Three properties are load-bearing for correctness and safety:
 
@@ -103,6 +143,37 @@ Three properties are load-bearing for correctness and safety:
   aggregate-only broadcast). The CLI exposes only `--password-secret-ref`,
   never an inline `--password`, so the secret never lands in shell
   history or `ps` output.
+
+#### Deletes need a preview and a second person's approval
+
+`keycloak.user.delete`, `keycloak.group.delete` and
+`keycloak.client.delete` remove one object each. They are on the
+`destructive` risk level, so they run differently from the other writes.
+MEHO always denies a delete to an agent. No grant can change that.
+Any other caller, for example a person or a service account, can ask
+for a delete. The request always waits until a second person approves it.
+
+1. **Preview first.** Call `preview_operation` with the same params. It
+   shows what will be deleted and returns a `preview_hash`. Nothing is
+   deleted yet.
+2. **Ask for approval.** Call `call_operation` with the same params and
+   the `preview_hash`. The request then waits until a **second person**
+   approves it. You cannot approve your own delete.
+3. **The delete runs** after the approval. MEHO reports `deleted: true`
+   only after a read of the object answers 404.
+
+Other rules:
+
+- Pass the internal `id`, or a name: `username` for a user, `name` for a
+  group, `client_id` for a client. A name that matches more than one
+  object is refused. Pass the `id` instead.
+- MEHO refuses to delete Keycloak's built-in clients (such as
+  `admin-cli` or `realm-management`), and the client or user that this
+  MEHO target logs in with.
+- A group that has sub-groups is refused unless you pass
+  `delete_subgroups=true`. Keycloak deletes the sub-groups with it.
+- It is safe to run twice: if the object is already gone, nothing is
+  deleted and the result says `already_absent: true`.
 
 `keycloak.idp.create` (identity-provider federation) is **deferred** —
 it is not exercised by the current bootstrap scripts (#1406), so it is
@@ -232,7 +303,7 @@ direct-access-grant client).
   at the target's `secret_ref` path. For the RDC fleet the consumer path
   is `secret/rdc-hetzner-dc/keycloak/admin`. The service-account client
   needs the `realm-management` roles to read the managed realm (at
-  minimum `view-realm`, `view-clients`, `view-users` for the six read
+  minimum `view-realm`, `view-clients`, `view-users` for the read
   ops). See [credential split](#the-admin-vs-operator-credential-split-load-bearing).
 - **A registered `keycloak` target** in the MEHO `targets` table (see
   below).
@@ -331,6 +402,10 @@ $ meho keycloak user list --target rdc-keycloak --username operator-a
 # Read a user's realm + client role mappings by internal UUID
 $ meho keycloak role-mapping get --target rdc-keycloak --id 22222222-2222-2222-2222-222222222222
 
+# List groups with their attributes, then the members of one group
+$ meho keycloak group list --target kc --attributes
+$ meho keycloak group member list --target kc --id 33333333-3333-3333-3333-333333333333
+
 # JSON output for piping to jq
 $ meho keycloak client list --target rdc-keycloak --json | jq '.result.rows[].id'
 $ meho keycloak realm get --target rdc-keycloak --json | jq '.result.realm.sslRequired'
@@ -403,6 +478,45 @@ names and the per-client role names.
 Flags:
 - `--id <uuid>` — **required**; the user's internal UUID.
 
+### `meho keycloak group list`
+
+Maps to `keycloak.group.list`. Lists the realm's top-level groups, with
+their internal `id`.
+
+Flags:
+- `--search <text>` — show only groups whose name contains this text
+  (Keycloak `?search=`).
+- `--parent-id <uuid>` — list the direct children of this group instead
+  of the top-level groups.
+- `--attributes` — include the group attributes (for example `tenant_id`
+  and `tenant_role`). Keycloak leaves them out by default.
+- `--max <n>` — cap the result count.
+
+### `meho keycloak group member list`
+
+Maps to `keycloak.group.member.list`. Lists the users in one group.
+User credential material is never shown.
+
+Flags:
+- `--id <uuid>` — **required**; the group's internal UUID (from
+  `group list`).
+- `--max <n>` — cap the result count.
+
+### Role reads (no own verb)
+
+`keycloak.role.list` (all realm roles) and `keycloak.role.users` (the
+users who hold one realm role) have no `meho keycloak` verb. Run them
+with `meho operation call`:
+
+```console
+$ meho operation call keycloak-admin-26.x keycloak.role.list --target kc
+$ meho operation call keycloak-admin-26.x keycloak.role.users --target kc \
+    --params '{"name": "tenant_admin"}'
+```
+
+`role.users` takes the role **name**, not a UUID. Keycloak returns the
+first 100 members, sorted by username.
+
 ## The agent meta-tool path
 
 Per [CLAUDE.md](../../CLAUDE.md) postulate 5, the agent surface is the
@@ -416,8 +530,8 @@ call_operation(connector_id="keycloak-admin-26.x", op_id="keycloak.client.list",
                target="rdc-keycloak", params={"client_id": "meho-backplane"})
 ```
 
-`search_operations(connector_id="keycloak", …)` surfaces all six ops and
-`call_operation` dispatches them — verified by
+`search_operations(connector_id="keycloak", …)` surfaces the Keycloak
+ops and `call_operation` dispatches them — verified by
 `test_keycloak_e2e_ops_visible_to_search_operations` and the per-op
 dispatch tests in
 [`backend/tests/test_connectors_keycloak_e2e.py`](../../backend/tests/test_connectors_keycloak_e2e.py).
@@ -461,12 +575,53 @@ $ meho keycloak user reset-password --target rdc-keycloak \
 # Grant a realm role to a user (privilege grant; --role is repeatable)
 $ meho keycloak role-mapping assign --target rdc-keycloak \
     --username operator-a --role tenant_admin
+
+# Create a role group with attributes (--attribute is repeatable;
+# --parent-id makes it a sub-group)
+$ meho keycloak group create --target kc --name role-tenant-2 \
+    --attribute tenant_id=t-2 --attribute tenant_role=admin
+
+# Change a group's attributes (merged by default; --replace sets them all)
+$ meho keycloak group update-attributes --target kc \
+    --name role-tenant-2 --attribute tenant_role=member
+
+# Add a user to a group, or remove the user from it
+$ meho keycloak group member add --target kc \
+    --group-name role-tenant-2 --username operator-a
+$ meho keycloak group member remove --target kc \
+    --group-name role-tenant-2 --username operator-a
 ```
+
+`group update-attributes` finds the group by `--id` or `--name`.
+`group member add` / `remove` find the group by `--group-id` or
+`--group-name`, and the user by `--user-id` or `--username`. Use
+`--parent-id` with a name to pick a sub-group.
 
 Because every write is `requires_approval=True`, the first dispatch
 returns `status=awaiting_approval` and parks the call in the approval
 queue. A human approves it through the queue; the approved write then
 runs against Keycloak.
+
+The three delete verbs work in two steps (see
+[Deletes need a preview and a second person's approval](#deletes-need-a-preview-and-a-second-persons-approval)):
+
+```console
+# Step 1: preview only. Nothing is deleted. It prints a preview_hash.
+$ meho keycloak user delete --target kc --username event-guest
+
+# Step 2: the same command with the hash. It waits until a second
+# person approves it; the approval runs the delete.
+$ meho keycloak user delete --target kc --username event-guest \
+    --preview-hash <hash>
+
+# The same two steps for a group (--name) and a client (--client-id)
+$ meho keycloak group delete --target kc --name event-team
+$ meho keycloak client delete --target kc --client-id event-app
+```
+
+Each delete verb also takes `--id <uuid>` instead of the name.
+`group delete` takes `--delete-subgroups` to delete a group that has
+sub-groups. Do not run the command again after the approval.
 
 ## Audit and broadcast
 
@@ -476,15 +631,16 @@ Every `meho keycloak …` dispatch writes an audit row to the
 - `connector_id = "keycloak-admin-26.x"`
 - `op_id` = the dispatched op (e.g. `keycloak.client.list`)
 - `target_id` = the resolved target row ID
-- `params_hash` = SHA-256 of the input params (for replay detection)
+- `params_hash` = keyed hash of the input params, with secret-named values left out (for replay detection)
 - `status` = `ok` / `error` / `denied`
 - `duration_ms` = connector wall-clock time
 
-Broadcast events follow the standard envelope (CLAUDE.md §6 §7). The six
+Broadcast events follow the standard envelope (CLAUDE.md §6 §7). The ten
 read ops are `safety_level="safe"` and broadcast with `risk_level=LOW`
 unless the agent's policy engine overrides. The write ops broadcast under
-their mutation class — `keycloak.role_mapping.assign` and the create /
-update verbs as `write`, and the two password ops
+their mutation class — `keycloak.role_mapping.assign`, the create /
+update verbs, the group ops and the deletes as `write`, and the two
+password ops
 (`keycloak.user.create` / `keycloak.user.reset_password`) as
 `credential_write`, which collapses the broadcast to aggregate-only so no
 credential material reaches the feed.

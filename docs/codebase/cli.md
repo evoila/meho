@@ -40,7 +40,7 @@ names.
   (`groups`, `search`, `call`).
 - `meho connector ...` (G0.7-T5 #405) — spec-ingestion + review
   workflow (`ingest`, `list`, `review`, `edit-group`, `edit-op`,
-  `enable`, `disable`).
+  `enable`, `disable`, `delete`).
 - `meho audit ...` (G8.1-T3 #467) — audit-log query surface
   (`query`, `recent`, `show`, `who-touched`, `my-recent`) wrapping
   the four `/api/v1/audit/*` routes shipped by G8.1-T2 (#466). G8.2-T5
@@ -48,6 +48,11 @@ names.
   tree over `GET /api/v1/audit/sessions/{id}/replay` (`--json`,
   `--max-depth`; a 413 `session_too_large` redirects to
   `query --session-id`) — plus a `--session-id` filter on `query`.
+  #4855 adds `trace list` (the operation runs that still have a stored
+  flight-recorder trace, via `query` with `has_trace=true`, audit id
+  first) and `trace show <audit-id>` (one trace over
+  `GET /api/v1/audit/{audit_id}/trace`; headers and bodies only in
+  `--json`).
 - `meho kb ...` (G4.1-T4 #418) — knowledge-base operator surface
   (`ingest`, `search`, `list`, `show`, `add`, `delete`) wrapping
   the five `/api/v1/kb*` routes shipped by G4.1-T2 (#416) plus the
@@ -70,8 +75,9 @@ names.
   parent — per consumer-needs.md §G5's ergonomic shape:
   `meho remember "note"` rather than `meho memory remember "note"`).
   Wraps the four `/api/v1/memory*` routes shipped by G5.1-T2 (#422)
-  plus the `/api/v1/retrieve` route (G0.4-T5 #262, `source="memory"`
-  scoped) for `meho recall --query`. Five scopes: `user` /
+  plus `POST /api/v1/memory/search` (#3741, the same
+  `MemoryService.search_memories` call MCP `search_memory` makes) for
+  `meho recall --query`. Five scopes: `user` /
   `user-tenant` / `user-target` / `tenant` / `target`. The two
   target-scoped values require `--target NAME`; the CLI rejects a
   missing `--target` client-side before the round-trip.
@@ -147,7 +153,7 @@ names.
 
 ```text
 cli/
-├── go.mod                  # github.com/evoila/meho/cli; Go 1.25.8.
+├── go.mod                  # github.com/evoila/meho/cli; Go 1.26.10.
 ├── Makefile                # build / test / lint / install / generate / snapshot / release.
 ├── .golangci.yml           # linter config (rationale below).
 ├── .goreleaser.yaml        # GoReleaser v2 release config (rationale: § Release pipeline).
@@ -164,6 +170,7 @@ cli/
     ├── api/
     │   ├── client.gen.go      # generated typed client (oapi-codegen v2.5).
     │   ├── client.go          # auth-aware wrapper; NewAuthedClient + GetHealth.
+    │   ├── workref.go         # Meho-Work-Ref header + MEHO_WORK_REF env names, work-ref shape check, context helpers (#3804).
     │   └── refresh.go         # lazy 401-retry refresh via x/oauth2.
     ├── auth/
     │   ├── devicecode.go      # OAuth 2.0 device-code flow + OIDC discovery.
@@ -175,14 +182,18 @@ cli/
     │   ├── config.go          # backplane-URL config file ($XDG/meho/config.json).
     │   └── config_test.go     # roundtrip + 0600/0700 mode test.
     ├── cmd/
-    │   ├── root.go            # cobra root + dynamic-discovery hook.
+    │   ├── root.go            # cobra root + dynamic-discovery hook + global --work-ref pre-run (#3804).
     │   ├── root_test.go       # built-in command surface + dynamic-graft test.
     │   ├── version.go         # `meho version` subcommand.
     │   ├── version_test.go    # output-contract test.
     │   ├── login.go           # `meho login` subcommand + auth-config discovery + --resolve split-DNS pin (#2107) + config persistence + post-login memory-migration nudge (T5 #612).
     │   ├── login_test.go      # override-resolution + help-flag + --resolve help/hint (#2107) + post-login nudge tests.
-    │   ├── status.go          # `meho status` subcommand + --json + URL resolver.
+    │   ├── status.go          # `meho status` subcommand + --json + URL resolver + printVersionSkew (shared with login, #3871).
     │   ├── status_test.go     # happy/JSON/no-creds/unreachable/401/redaction tests.
+    │   ├── doctor.go          # `meho doctor` (#3666) — command, report model, redaction, exit codes.
+    │   ├── doctor_offline.go  # offline layer: binary, config, credential store, plugin shim/lock/cache, plugin settings, CA bundle.
+    │   ├── doctor_online.go   # authenticated layer: DNS, token + refresh, MCP handshake, working-surface compare.
+    │   ├── doctor_test.go     # offline, credential-store, redaction, and httptest MCP-stub tests.
     │   ├── audit/            # G8.1-T3 #467 — `meho audit …` verb tree.
     │   │   ├── audit.go          # NewRootCmd + shared typed-client helpers (G0.12-T5 #1263).
     │   │   ├── query.go          # `meho audit query` (POST /api/v1/audit/query).
@@ -191,10 +202,14 @@ cli/
     │   │   ├── who_touched.go    # `meho audit who-touched <target>` (GET /api/v1/audit/who-touched/{target}).
     │   │   ├── my_recent.go      # `meho audit my-recent` (GET /api/v1/audit/my-recent).
     │   │   ├── replay.go         # `meho audit replay <session-id>` (GET /api/v1/audit/sessions/{id}/replay) — ASCII tree + 413 redirect.
+    │   │   ├── trace.go          # `meho audit trace` group + `trace list` (#4855; POST /api/v1/audit/query with has_trace=true, audit id first).
+    │   │   ├── trace_show.go     # `meho audit trace show <audit-id>` (GET /api/v1/audit/{id}/trace) — header + one line per span; no header/body values.
     │   │   ├── audit_test.go     # helper + URL-normalisation + register-all-verbs tests.
     │   │   ├── query_test.go     # body-marshal + render + 400-passthrough + --session-id tests.
     │   │   ├── show_test.go      # path-escape + 404 / 422 surface + summary render tests.
     │   │   ├── replay_test.go    # tree render + --json + --max-depth fold + 413 redirect tests.
+    │   │   ├── trace_test.go     # has_trace body + audit-id-first table + --json + 403 tests.
+    │   │   ├── trace_show_test.go # span lines without header/body values + --json unchanged + no-trace exit 0 + 404 / 403 tests.
     │   │   ├── who_touched_test.go # query-param emit + table render tests.
     │   │   ├── my_recent_test.go # JWT-only-principal contract tests.
     │   │   └── recent_test.go    # since=24h binding + --json passthrough tests.
@@ -207,7 +222,7 @@ cli/
     │   │   ├── add.go            # `meho kb add <slug> --body @file|@-|text` (POST /api/v1/kb).
     │   │   ├── delete.go         # `meho kb delete <slug> [--confirm]` (DELETE /api/v1/kb/{slug}).
     │   │   ├── kb_test.go        # helpers + register-all-verbs + body/metadata/confirm contract tests.
-    │   │   ├── ingest_test.go    # POST body + four-bucket render + 400 directory_not_found tests.
+    │   │   ├── ingest_test.go    # POST body + counter/conflict render + 400 directory_not_found tests.
     │   │   ├── search_test.go    # POST body (source pinned) + table render + nil-score safety tests.
     │   │   ├── list_test.go      # query-param emit + table render + limit-range gate tests.
     │   │   ├── show_test.go      # path-escape + Markdown body to stdout + 404 slug_not_found tests.
@@ -226,7 +241,7 @@ cli/
     │   ├── memory/           # G5.1-T4 #424 — top-level `meho remember/recall/forget/list/promote` (no parent).
     │   │   ├── memory.go         # Scope alias for api.MemoryScope + newAuthedClient/retryOn401/renderHTTPStatus typed-client helpers (G0.12-T10 #1268) + parseScope/parseTTL/parseTags/parseScopeSlugArg/loadBody/confirmPrompt.
     │   │   ├── remember.go       # `meho remember <body> [--scope --slug --target --tag --ttl --persist --json]` (POST /api/v1/memory). `--persist` (G5.2-T2 #624) sends explicit `expires_at: null` to opt out of the backend's default-7-day TTL on `memory-user` writes.
-    │   │   ├── recall.go         # `meho recall <scope>/<slug>` or `meho recall --query` (GET /api/v1/memory/{scope}/{slug} or POST /api/v1/retrieve, source="memory").
+    │   │   ├── recall.go         # `meho recall <scope>/<slug>` or `meho recall --query` (GET /api/v1/memory/{scope}/{slug} or POST /api/v1/memory/search).
     │   │   ├── forget.go         # `meho forget <scope>/<slug> [--confirm --target --json]` (DELETE /api/v1/memory/{scope}/{slug}).
     │   │   ├── list.go           # `meho list [--scope --tag --slug-pattern --include-expired --limit --json]` (GET /api/v1/memory).
     │   │   └── memory_test.go    # parseScope/parseTTL/parseScopeSlugArg + verb-happy-path + 403/404/422 + decline + JSON envelope tests.
@@ -235,17 +250,20 @@ cli/
     │   │   ├── ingest.go         # `meho connector ingest` (POST /api/v1/connectors/ingest). 202-aware since G0.22-T4 #1609: polls GET /ingest/jobs/{job_id} to a terminal status by default, `--no-wait` exits 0 with the job handle; 200 stays the legacy sync render. Owns the shared pollIngestJob loop + renderIngestTerminal lifecycle switch (succeeded/failed/degraded/undocumented) that ingest_status.go reuses. `--tenant-id` (#2209) selects the write scope: omitted leaves the body's tenant_id unset (built-in/global, the #2085 omit-equals-global contract); the operator's own tenant UUID makes the ingest tenant-curated.
     │   │   ├── ingest_status.go  # `meho connector ingest-status <job-id> [--wait] [--json]` (#1621) — post-`--no-wait` poll/inspect verb. Snapshot by default (running → identity+lifecycle echo, exit 0), `--wait` polls to terminal; terminal render + poll loop reuse ingest.go's renderIngestTerminal / pollIngestJob (no duplicated switch). Closes the PR #1618 loop the `--no-wait` hint now names.
     │   │   ├── list.go           # `meho connector list` (GET  /api/v1/connectors). List endpoint returns dict[str, list[dict]] (no response_model on the backend; per-row UUID serialisation), so a package-private listEntry decode lives here.
-    │   │   ├── review.go         # `meho connector review <id>` (GET  /api/v1/connectors/{id}/review).
+    │   │   ├── review.go         # `meho connector review <id>` (GET  /api/v1/connectors/{id}/review). `--prefer tenant|builtin|legacy` (#3799, #4889) is sent as `?prefer=` to pick a row when the id matches both a built-in and a tenant connector (`legacy` picks the tenant's old copy under a former product name); omitted, the 409 stays the default.
     │   │   ├── edit_group.go     # `meho connector edit-group <id> <key>` (PATCH groups/{key}).
     │   │   ├── edit_op.go        # `meho connector edit-op <id> <op>` (PATCH operations/{op}).
-    │   │   ├── enable.go         # `meho connector enable <id>`  + shared transition factory + `disable`.
-    │   │   ├── enable_reads.go   # `meho connector enable-reads <id>` (POST /enable-reads, G0.25-T7 #1749) — bulk-enable GET/HEAD ingested ops; writes stay default-deny. Renders the ops_enabled count; idempotent.
+    │   │   ├── enable.go         # `meho connector enable <id>`  + shared transition factory + `disable` + `delete`.
+    │   │   ├── enable_reads.go   # `meho connector enable-reads <id>` (POST /enable-reads, G0.25-T7 #1749) — bulk-enable GET/HEAD ingested ops; writes stay default-deny. Renders the ops_enabled count; idempotent. Takes the same `--prefer tenant|builtin|legacy` flag as `review` (#3799, #4889).
     │   │   ├── disable.go        # `meho connector disable <id>` (constructor only; logic in enable.go).
-    │   │   └── connector_test.go # pure-function + typed-client mocked HTTP contract tests.
+    │   │   ├── delete.go         # `meho connector delete <id>` (DELETE /api/v1/connectors/{id}, #4889) — removes the connector's operations and groups from the operator's own tenant; the built-in copy stays. Constructor only; logic in enable.go. The verb the list `next_step` and the `connector_legacy_tenant_copy` message name.
+    │   │   ├── delete_test.go    # `delete` wiring, 204 --json envelope, 404 render.
+    │   │   ├── connector_test.go # pure-function + typed-client mocked HTTP contract tests.
+    │   │   └── prefer_test.go    # `--prefer` on review / enable-reads + the 409 connector_scope_ambiguous CLI error (#3799).
     │   ├── operation/         # G0.6-T13 #481 — `meho operation …` meta-tool surface.
     │   │   ├── operation.go      # NewRootCmd + operationsAPI seam + apiResponseError sentinel + loadParamsFlag (G0.12-T2 #1260).
     │   │   ├── groups.go         # `meho operation groups` (GET /api/v1/operations/groups) — typed via api.GetGroupsApiV1OperationsGroupsGetParams.
-    │   │   ├── search.go         # `meho operation search` (GET /api/v1/operations/search) — typed via api.GetSearchApiV1OperationsSearchGetParams.
+    │   │   ├── search.go         # `meho operation search` (GET /api/v1/operations/search) — typed via api.GetSearchApiV1OperationsSearchGetParams. A 200 with the backplane's `status: "rate_limited"` envelope is rendered as unexpected_response (exit 4) with the wait, in both ranked and `--op-id` mode.
     │   │   ├── call.go           # `meho operation call`   (POST /api/v1/operations/call) — typed via api.CallOperationBody + FromCallOperationBodyTarget0.
     │   │   ├── operation_test.go # render + helper + sentinel tests.
     │   │   └── client_test.go    # G0.12-T2 #1260 — fakeOperationsClient mocks the operationsAPI seam; asserts typed request params + 401 refresh dance + error classification.
@@ -316,11 +334,15 @@ cli/
     ├── discovery/
     │   ├── discovery.go       # /api/v1/commands manifest fetch + cobra graft + maturity help labels (#2676).
     │   └── discovery_test.go  # 200/404/transport/decode + collision + maturity-label tests.
+    ├── netdiag/
+    │   ├── netdiag.go         # shared DNS / TLS / unreachable classifier for client diagnostics (#3666).
+    │   └── netdiag_test.go    # table tests + a real TLS failure.
     ├── output/
     │   ├── format.go          # human + JSON formatters + structured exit codes.
     │   └── format_test.go     # human/JSON/exit-code pinning.
     └── version/
-        └── version.go         # build-time identity (Version/Commit/Date).
+        ├── version.go         # build-time identity (Version/Commit/Date).
+        └── skew.go            # GET /version fetch + CLI/backplane version-gap warning (#3871).
 ```
 
 `internal/` enforces the Go-visibility seal: only packages under
@@ -491,14 +513,66 @@ Authorization Grant (RFC 8628). End-to-end shape:
    deferred to a future Task per the v0.1 scope.) Under `--print-token`
    this prompt is written to stderr instead, so stdout stays reserved
    for the token — see step 7.
-5. **Polling.** `Config.DeviceAccessToken` polls the token endpoint
-   at the IdP-supplied `interval`, honouring RFC 8628's
-   `authorization_pending` and `slow_down` semantics. The polling
-   loop returns when the IdP issues a token, the device code
-   expires (`expires_in`, enforced inside the oauth2 package), the
-   operator denies the grant (`access_denied`), or the polling
-   context is cancelled. The outer timeout is 10 minutes
+5. **Polling.** `auth.pollDeviceToken` (our own loop, not the oauth2
+   package's `DeviceAccessToken`) asks the token endpoint again and
+   again whether the person has approved. Each check is **one** form
+   POST with `grant_type`, `device_code` and `client_id` in the body
+   and no `Authorization` header (RFC 8628 §3.4; the CLI is a public
+   client). The loop returns when the IdP issues a token, the code's
+   lifetime ends, the operator denies the grant (`access_denied`), or
+   the polling context is cancelled. The outer timeout is 10 minutes
    (`auth.PollTimeout`).
+
+   The wait between checks follows RFC 8628 §3.5 and starts when an
+   answer has arrived, so two checks never reach the server closer
+   together than the wait:
+
+   * The first wait is the IdP's `interval` (5 seconds when it sends
+     none, §3.2). `authorization_pending` → check again after the wait.
+   * `slow_down` → the wait grows by 5 seconds, for this check and all
+     later ones. It never grows past 30 seconds (or past the IdP's own
+     `interval`, if that is longer). The cap only stops an IdP that
+     keeps answering `slow_down` from stretching the wait without end.
+   * **Last check before the end.** The final check is meant to run
+     2 seconds before the code's life (`expires_in`) ends. The regular
+     cadence goes on only while another full wait still fits between
+     the next check and that moment; otherwise the next check is the
+     final one. The final check keeps the full wait to the check before
+     it, even if that puts it inside the last 2 seconds: Keycloak
+     answers `slow_down` to a check that comes sooner than `interval`
+     after the previous one, and that answer would hide an approval.
+     (The very first check has no such limit; the IdP has seen no
+     request yet.) If the final check is still pending, or no check
+     fits before the end any more, the login stops with "device code
+     expired before authorisation", not with the 10-minute timeout
+     message. Without `expires_in` the regular cadence continues until
+     `PollTimeout`.
+   * **The code's end is a deadline.** The sleeps and the token
+     requests run on a context that ends with the code (as in the
+     oauth2 package's own loop). An answer that stalls past the end
+     stops the login with the "device code expired" message, not with
+     the 10-minute one.
+   * The "Waiting for authorisation…" line in step 4 also says how long
+     the code is valid and until when (local time), when the IdP sent
+     `expires_in`.
+
+   Why our own loop (#4892), in two parts:
+
+   1. Our `oauth2.Config` left `Endpoint.AuthStyle` at zero
+      ("auto-detect"). The package then sent every token request twice —
+      first with the client id in an `Authorization` header, then in the
+      form body — and only remembered the working style after a success.
+      Before the approval every answer is an error, so each check was two
+      requests, the second one landed inside the IdP's `interval` and
+      drew `slow_down`, the wait grew by 5 seconds at every check, and
+      the code's last ~75 seconds were never checked. Pinning
+      `oauth2.AuthStyleInParams` alone fixes this part; the refresh path
+      (`api/refresh.go`) had the same cause and does exactly that.
+   2. The package's `DeviceAccessToken` loop cannot make a last check
+      just before the code's end, and it has no upper limit for the wait.
+      Those two need our own loop. Do not go back to `DeviceAccessToken`
+      with a pinned auth style: the double request would be gone, but
+      the last check would be lost again.
 
    **Detached from ambient deadlines.** The interactive approval
    wait runs on a context built by `auth.NewDeviceFlowContext`,
@@ -705,6 +779,42 @@ via JWT/OIDC federation, reads a sentinel secret, probes the DB
 migration state, and returns a structured response. The CLI
 renders that response in one of two formats.
 
+### What the human format prints (#4830)
+
+One line per subsystem, in this order. The first three lines are the
+v0.1 contract; the rest appear only when the backplane sends the
+field, so a response from an older backplane prints as it always did.
+
+| Line | Source field | Example |
+|---|---|---|
+| `Logged in as …` | `operator` | `Logged in as alice@example.com (sub: …)` |
+| `Vault: …` | `vault` | `Vault: reachable, read OK (version=42)` |
+| `DB: …` | `db` | `DB: migrated, revision 0115` |
+| `Readiness: …` | `readiness` | `Readiness: ready (keycloak, vault, db, broadcast, docs_backends ok)` |
+| `Approvals: …` | `approvals` | `Approvals: a second person must approve; decisions on someone else's instruction are refused; approval key configured` |
+| `Features: …` | `features` | `Features: all configured` or `Features: not configured: agent_runtime (needs KEYCLOAK_ADMIN_CLIENT_ID)` |
+| `Sandbox mode: on …` | `sandbox_mode` | printed only when the mode is on (#4622) |
+
+The DB line (`formatDB` in `internal/output/format.go`) uses the
+database revision and the revision this version expects, which the
+backplane sends as values since #4830 (`db.revision`, `db.head`):
+
+- `DB: migrated, revision 0115` — the database is at the expected revision.
+- `DB: not migrated (database at 0114, this version expects 0115)` — the
+  migration did not run.
+- `DB: migrated, revision 0116 (newer than this version, which expects
+  0115; normal after a rollback)` — the database is ahead; see
+  `docs/codebase/migrations.md`, "Rollback contract".
+- `DB: not migrated (check_failed: OperationalError)` — the probe could
+  not read the database; the detail is the text `/ready` shows.
+
+When readiness fails, the line becomes a header followed by one indented
+line per failing check with its detail, and one `ok: …` line naming the
+checks that passed. This is how an operator confirms an upgrade through
+MEHO instead of a shell into the pod: the database revision, the
+readiness checks and the approval key state all come from one
+`meho status` call, and `--json` carries the same fields.
+
 ### Pipeline
 
 1. **Resolve the backplane URL.** Override (`--backplane <url>`)
@@ -726,7 +836,12 @@ renders that response in one of two formats.
      at login time. If refresh succeeds, retries the request once.
    * If refresh fails (no refresh_token, IdP rejected), surfaces
      `auth_expired`.
-4. **Render output.** Default human format on stdout; `--json`
+4. **Check the version gap.** `printVersionSkew` reads the
+   backplane's `GET /version` (3-second cap) and compares its
+   `chart_version` with the CLI's build version
+   (`internal/version/skew.go`). See
+   [Version check](#version-check-login-and-status) below.
+5. **Render output.** Default human format on stdout; `--json`
    emits the typed body as a single JSON document. Both formats
    write success output to stdout and errors to stderr.
 
@@ -764,7 +879,7 @@ that branch on them:
 | Code | Meaning                                                         |
 | ---- | --------------------------------------------------------------- |
 | 0    | Success                                                         |
-| 1    | Generic failure (cobra usage error, panic recovery, etc.)       |
+| 1    | Generic failure; also `usage_error` (unknown flag, wrong number of arguments) |
 | 2    | `auth_expired`                                                  |
 | 3    | `unreachable`                                                   |
 | 4    | `unexpected_response`                                           |
@@ -774,6 +889,26 @@ The propagation path is `output.RenderError` → `silentError` →
 default error printer is bypassed via `SilenceErrors=true` on the
 status subcommand so the JSON envelope doesn't double-render
 alongside the text rendering of `.Error()`.
+
+Most subcommands set `SilenceErrors=true`. cobra checks flags and the
+argument count before `RunE` runs, so without help those errors would
+print nothing. `internal/cmd/usage_errors.go` covers this for the whole
+tree in one place: the root's flag error function (every child inherits
+it) and a wrapper around every command's `Args` check both print a
+`usage_error` through `output.RenderError`, exit code 1:
+
+```text
+meho: usage_error: unknown flag: --bogus (run 'meho targets list --help' for usage)
+```
+
+With `--json` on a command that has that flag, the same error uses the
+JSON envelope. cobra stops parsing at an unknown flag, so the usage
+error reads the raw command line up to `--` and the last `--json`
+setting wins, as it does for a parsed flag. A word that is the value of
+another flag of the command (`--query --json`) is skipped, so it does
+not count as a setting. `usage_errors_test.go` walks every command and
+checks that an unknown flag prints a message that names the flag. Missing
+required flags (`MarkFlagRequired`) are not covered by this path yet.
 
 ### Sensitive-data discipline
 
@@ -803,6 +938,195 @@ The same `eyJ` prefix matches access tokens, refresh tokens, and
 id tokens alike, so the single redaction rule covers every
 credential the CLI persists.
 
+### Version check (`login` and `status`)
+
+An old CLI against a newer backplane can misread new responses. For
+example, a CLI from before the approval flow called a write that was
+waiting for approval an "invalid" response. So `meho login` (after the
+token is stored) and `meho status` (after the health call) compare
+versions:
+
+- The CLI reads `GET /version` on the backplane. The route needs no
+  login. Only `chart_version` is used; `git_sha` cannot be compared
+  with a CLI release.
+- Supported: the same major version, and the CLI minor version is the
+  same as the backplane's or one lower (N-1).
+- Outside that range the CLI prints one line on **stderr**, for
+  example `warning: CLI v0.12.0 vs backplane 0.35.12 — this CLI is too
+  old for this backplane. Upgrade: <release page for v0.35.12>`.
+  The CLI and the backplane share release tags, so the backplane's
+  version names the CLI release to install.
+- No warning when the comparison makes no sense: a `dev` CLI build, a
+  backplane without `chart_version`, or a main-branch backplane build
+  (date-based `0.1.<YYYYMMDD>-<sha>` chart version).
+- The check is best effort. A missing route, a timeout, or a bad body
+  prints nothing and never changes the exit code. stdout is not
+  touched, so `meho status --json` stays one JSON document.
+
+A status the CLI does not know in an `OperationResult` gets the same
+treatment: `dispatch.UnknownStatusError` (used by `dispatch.Render`,
+`meho operation call`, and `meho secret read`) says the backplane is
+probably newer than the CLI, that the operation may have run or be
+waiting for approval, and points at `meho status`. The exit code stays
+`4` (`unexpected_response`) because the CLI cannot tell whether the
+operation worked.
+
+## Global work-ref (`--work-ref`, `MEHO_WORK_REF`, #3804)
+
+A change-ticket reference (`gh:<owner>/<repo>#<n>`) links an audit row
+to the change that allowed it. The backplane audit middleware reads it
+from the `Meho-Work-Ref` request header and writes it to
+`audit_log.work_ref` on the row for that request (#1657). The CLI sets
+that header from one place, so every verb gets it without its own flag.
+
+- The root command has a persistent `--work-ref` flag. When the flag is
+  not set, the CLI reads `MEHO_WORK_REF`. The flag wins.
+- The root `PersistentPreRunE` (`applyWorkRef` in `root.go`) checks the
+  shape once. A bad value stops the command before any request leaves
+  the CLI. A good value goes on the command context
+  (`api.WithWorkRef`).
+- Commands that send no backplane request skip the check:
+  `help`, `completion` and its children, `__complete` /
+  `__completeNoDesc` (shell completion), `version` and
+  `doctor --no-network`. A bad `MEHO_WORK_REF` in the shell does not
+  break them. An online `doctor` run sends an authenticated request to
+  `/api/v1/health/live`, which the backplane audits, so it keeps the
+  check and sends the header (also on its MCP handshake posts).
+  `TestWorkRefHeaderOnOnlineDoctor` proves this through the real root
+  command.
+- The `AuthedClient` request editor calls `api.SetWorkRefHeader`, so
+  every generated-client call made with `cmd.Context()` sends the
+  header. The hand-rolled backplane requests (`targets add` / `import`,
+  `event-source`, the broadcast feed, and the `status --watch` feed
+  stream on every connect and reconnect) call the same helper next to
+  their `Authorization` header. Keycloak admin calls, login, discovery
+  and the version check do not send it.
+- The backplane binds the header for the whole request, not only for
+  the HTTP request row. So the rows the connector service writes
+  inside the request (`meho_connector_edit_op`,
+  `meho_connector_llm_grouping` for an ingest, enable / disable, ...)
+  carry the same work-ref, and `meho audit query --work-ref` finds
+  them together with the request row. `backend/tests/
+  test_audit_work_ref_control_plane.py` proves this round trip for
+  `targets add`, `agent grant create`, `connector ingest` (sync and
+  background job) and `connector edit-op`.
+- The header works the same way on MCP (`POST /mcp`, #4256). The audit
+  middleware writes no row of its own for `/mcp`, but it still reads the
+  header first. So the MCP row and the dispatch row of each tool call
+  carry it. A `work_ref` argument on `call_operation` still wins over the
+  header. `backend/tests/test_mcp_work_ref_header.py` proves this.
+- Some commands have their own local `--work-ref` (`operation call`,
+  `scheduler create`, `runbook start`, `agent run`, and the filters on
+  `audit query`, `approvals list`, `broadcast recent`, ...). Cobra lets a local
+  flag hide the parent's persistent flag, so on those commands the flag
+  keeps its own meaning. Only `MEHO_WORK_REF` reaches the header there.
+- No PersistentPreRun hooks exist below the root. If one is added, it
+  must call `applyWorkRef` too (cobra runs only the nearest hook).
+
+## Doctor flow (`meho doctor`, #3666)
+
+`meho doctor` checks the client setup on this machine and says which
+layer fails. It only reports: it never logs in again, re-installs, or
+edits a file.
+
+### Offline layer (no network)
+
+`runOfflineChecks` in `doctor_offline.go`. One check per line:
+
+- **binary** — `os.Executable()` and the build version.
+- **config** — parses the saved backplane URL (`config.json`) or
+  `--backplane` with `normalizeBackplaneURL`. No call.
+- **credential store** — mirrors `auth.NewTokenStore`. Four states:
+  `keyring`, `file-forced` (`MEHO_KEYRING_DISABLE`), `file-fallback`
+  (the keyring answers but the login sits in the 0600 file, usually
+  because it was too big), and `keyring-unavailable` (any keyring error
+  other than go-keyring's `ErrNotFound`). `ErrNotFound` means "the
+  keyring works, nothing is stored", never "backend unavailable". When
+  both stores hold a login, the doctor applies `auth.SecondaryWins`,
+  the same rule the CLI's store applies on read (the entry with a
+  refresh token wins, then the newer one), so it names the store the
+  CLI really uses. The keyring value is parsed only for that rule and
+  never reported; an entry that is not valid JSON is a failure. A
+  credentials file that exists but cannot be read or parsed is a
+  failure too, because the CLI's store returns that error from every
+  read, so `meho login` would fail on it as well. The one exception
+  mirrors the store: a usable keyring entry still counts, and the
+  broken file is only a warning.
+- **plugin shim** — finds the Claude Code plugin: `--plugin-root`, then
+  `CLAUDE_PLUGIN_ROOT`, then a bounded search under `~/.claude/plugins`
+  for `bin/meho-mcp-remote` next to a `package-lock.json`.
+- **plugin settings** — where the shim reads its settings. It reads
+  `plugin.env` (`MEHO_PLUGIN_CONFIG` or `$XDG_CONFIG_HOME/meho/plugin.env`)
+  the same way the shim does: a value in the file wins over the
+  environment. Reports the MCP URL, the scopes the shim will request
+  (the default is read from the shim file itself, so it cannot drift),
+  and warns when the plugin and the CLI point at different hosts.
+- **vendored lock** — mirrors the shim's `cmp -s` test: the cached
+  `package-lock.json` must match the plugin's committed one byte for
+  byte, and the installed `mcp-remote` must match the version pinned in
+  the lock. A matching lock makes the shim skip the install, so a
+  missing or unreadable `node_modules/mcp-remote/package.json` is a
+  failure with a hint to delete the cache directory.
+- **cache** — `node_modules/mcp-remote` present in the cache dir.
+- **CA bundle** — `MEHO_CA_CERT`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`
+  must be readable PEM files with at least one certificate.
+
+### Authenticated layer
+
+`runAuthenticatedChecks` in `doctor_online.go`. It stops at the first
+failed step. Every request has a 15 second timeout and the whole layer
+a 60 second deadline, so a server that accepts the connection and then
+stays silent ends as an `unreachable` failure in the report instead of
+a hang. The root command also skips the dynamic command discovery
+fetch for `meho doctor` (`invokesDoctor` in `root.go`): the doctor
+makes exactly the calls it reports, and none with `--no-network`.
+
+1. **dns** — resolves the backplane host (skipped for an IP).
+2. **token** — `GET /api/v1/health/live` (no role gate, no Vault). On a
+   401 it refreshes the token the normal way and tries once more. The
+   request carries the global work-ref header when one is set, because
+   the backplane audits this authenticated route.
+3. **MCP handshake** — `initialize` → `notifications/initialized` →
+   `resources/list` → `tools/list` → `tools/call meho_status` on
+   `<backplane>/mcp`, with the same bearer. Answers may be JSON or SSE.
+   The `Mcp-Session-Id` from `initialize` is echoed and shown as a
+   correlation id.
+4. **working surface** — compares `surface_summary.listed_working_tools`
+   from `meho_status` with the names the handshake listed. A tool the
+   server lists for this session but the client did not see is a
+   `surface_gap`.
+
+Failure classes: `dns`, `tls`, `unreachable` (from `internal/netdiag`),
+`not_logged_in`, `refresh_rejected`, `no_refresh_token`, `unauthorized`,
+`surface_gap`, `unexpected`. Exit codes follow the `meho status`
+taxonomy: 2 login problem, 3 network problem, 4 unexpected answer or
+surface gap, 1 an offline check failed, 0 no failure.
+
+The scopes shown are the CLI login's scopes. A Claude client logs in on
+its own through `mcp-remote` and can hold other scopes (for example
+`mcp:admin`); `meho_status` called from that client shows those.
+
+### Shared network classifier (`internal/netdiag`)
+
+`netdiag.Classify(err)` walks the error chain and returns `dns`
+(`*net.DNSError`), `tls` (x509 / `crypto/tls` errors), `unreachable`
+(`*net.OpError`, timeouts), or `other`. `netdiag.Hint` gives a plain
+next step. The first-start checks of `meho status` (#4042) are meant to
+reuse this package so both commands name failures the same way.
+
+### Redaction
+
+`renderDoctor` passes every free-text field through `redactSensitive`
+before printing, in human and JSON mode alike. It extends
+`redactJWTLike`: it also removes `Authorization` / `Cookie` /
+`Set-Cookie` header values, bearer values, OAuth parameters (`code=`,
+`state=`, `redirect_uri=`, token parameters, and the same names as
+JSON members such as `"access_token":"..."`, because a failed token
+exchange echoes the response body), `Location` values, and the query
+part of any URL. `TestDoctor_RedactsSecrets` plants each marker and
+checks that none reaches the output; `TestDoctor_RefreshErrorBodyRedacted`
+does the same through the real refresh path.
+
 ## Watch flow (`meho status --watch`, G6.1-T5)
 
 `--watch` flips `meho status` from a one-shot health probe to a
@@ -827,8 +1151,12 @@ in `meho login`" stays consistent.
 ### Broadcast working-surface verbs (#3470)
 
 `meho broadcast recent` reads a bounded, filterable history page through
-`GET /api/v1/broadcast/recent`; the route delegates to the same strict
-history helper as `meho_broadcast_recent`. `meho broadcast announce
+`GET /api/v1/broadcast/recent`; the route uses the same archive reader
+as `meho_broadcast_recent` and returns stored agent announcements only
+(#3748). Without `--json`, `recent` prints one warning line first when
+the answer carries a `gap` (archive retention removed announcements
+the page would have shown), also when the page is empty; with `--json`
+the `gap` object is part of the output. `meho broadcast announce
 <activity>` posts to `/api/v1/broadcast/announce`, which rate-limits and
 then uses the same durable-before-stream publisher as
 `meho_broadcast_announce`. `meho broadcast watch` consumes the existing
@@ -934,9 +1262,11 @@ end-to-end reconnect / 401 / 403 / Ctrl-C tests need the
 `internal/api/client.gen.go` is produced by
 [oapi-codegen v2.5](https://github.com/oapi-codegen/oapi-codegen)
 from `cli/api/openapi.json` — a committed snapshot of the
-backplane's OpenAPI document. v2.5 is the last v2.x release with
-Go 1.25.8 minimum (raised from 1.22 by charm.land/huh/v2 v2.0.3's
-transitive deps in PR #640). The generator itself runs
+backplane's OpenAPI document. v2.5 is the last v2.x release that
+supports Go 1.22. The CLI module itself requires Go 1.26.10: Go 1.25
+gets no more security fixes, 1.26.9 is the first 1.26 release
+that fixes nine standard-library CVEs, and 1.26.10 also fixes
+GO-2026-6809 in `crypto/x509`. The generator itself runs
 on a newer Go toolchain (downloaded automatically by `go install`
 when the host has Go 1.21+) so this is a build-time vs.
 runtime split.
@@ -1031,11 +1361,15 @@ narrow-waist contract.
   per group + a `when_to_use` blurb the agent consults to pick a group
   to search within. Unknown `connector_id` returns an empty `groups`
   list (operationally meaningful, never 404).
-- `meho operation search <connector_id> <query> [--group K] [--limit N]`
+- `meho operation search <connector_id> <query> [--group K] [--limit N] [--scores]`
   — calls `GET /api/v1/operations/search`. Runs hybrid BM25 + cosine
   RRF over `endpoint_descriptor` rows scoped to the connector
   (optionally narrowed to one `group_key`) and renders the top hits
-  with `fused_score`. `--limit` is clamped by the API at 50.
+  with their `safety_level`. `--limit` is clamped by the API at 50.
+  `--scores` shows the ranking score; the backplane sends it only to a
+  `tenant_admin` (#3668). With `--op-id <op_id>` (no query needed) it
+  prints that one operation's call contract instead: parameter
+  schema, examples, target rule, result shape and retry rules.
 - `meho operation call <connector_id> <op_id> --target <slug> [--params ...] [--work-ref gh:<owner>/<repo>#<n>] [--preview-hash <hash>]`
   — calls `POST /api/v1/operations/call`. Invokes the G0.6 dispatcher
   end-to-end (parameter validation, policy gate, audit, JSONFlux,
@@ -1052,16 +1386,41 @@ narrow-waist contract.
   real call would and returns the literal would-be request
   (`method` / `resolved_path` / `query` / redacted `body`) plus a
   `preview_hash` **instead of dispatching** — nothing is sent, no audit
-  row is written. The `preview_hash` is the binding a
+  row is written. The summary also prints the plan (`proposed_effect`)
+  when the preview has one, or the `plan_note` when it does not (#4028). The `preview_hash` is the binding a
   `safety_level='destructive'` op requires (#3197): the dispatcher
   fail-closes a destructive `call` with `status=denied` /
   `error_code=preview_binding_required` unless it carries a
   `--preview-hash` from a prior preview of the identical
   `(connector_id, op_id, target, params)`. Without this verb the CLI
   had no way to obtain the hash, so the destructive tier was
-  MCP-only. The verb exits 1 on a non-ok envelope (`status="error"`
-  for input faults, `status="unavailable"` for a typed/composite op
-  with no literal HTTP request to preview).
+  MCP-only. Whenever the op resolved, the human output also prints one
+  plain line with the risk level and what MEHO would do with this call
+  for this caller and target (#3973 / #4923) — for example "Risk level:
+  dangerous. This call waits for approval." — and `--json` carries
+  `safety_level`, `requires_approval`, `policy_verdict` and
+  `policy_reason`. The verb exits 1 on a non-ok
+  envelope (`status="error"` for input faults, `status="unavailable"` for
+  a typed/composite op with no literal HTTP request to preview).
+- `meho operation result-query <handle_id> [--offset N] [--limit N] | [--where ...] [--select ...] [--group-by ...] [--aggregate ...] [--order-by ...] [--query-limit N] | [--path <pointer>]`
+  — calls `POST /api/v1/operations/result-query`, the REST twin of the
+  MCP `result_query` tool. It reads a stored result back by its handle
+  id, in one of three modes (`cli/internal/cmd/operation/resultquery.go`):
+  paging a rows handle (`--offset` / `--limit`), one relational query
+  over a rows handle (`--where`, `--select`, `--group-by`, `--aggregate`,
+  `--order-by`, `--query-limit`; #3366), or a path read (`--path`,
+  #4888). `--path` takes an RFC 6901 JSON Pointer and sets `query.path`:
+  `""` is the whole document, `/a/0/b` goes one step per `/`. It reads
+  one value of a document handle, or a top-level field a rows handle
+  left out of its inline summary (`omitted_scalar_count`). An array
+  value pages with `--offset` / `--limit`. The CLI refuses `--path`
+  together with any query flag before the call. The reply carries
+  `path`, `value_type` and `value` (raw JSON) next to the paging fields;
+  the human render is one header line (handle, path, type) and the
+  pretty-printed value, or the item lines with the window for an array.
+  Paging a document handle without `--path` is a server 422; the CLI
+  shows the server's message and adds the `--path` form that works
+  (`resultquery_path.go`).
 
 ### Reserved flags (same shape across all three verbs)
 
@@ -1142,14 +1501,25 @@ scenarios.
 ### Exit codes
 
 - `0` — verb ran cleanly; for `call`, `status == "ok"`.
-- `1` — `call` only: dispatcher returned `status == "error"` or
-  `status == "denied"` (connector raised, schema validation rejected,
-  or policy denied — the three structured-failure envelopes the
-  backend `Connector.execute` contract defines). Surfaced via the
-  `errOpError` sentinel.
+- `1` — `call` only: dispatcher returned `status == "error"`,
+  `status == "denied"` or `status == "rate_limited"` (connector raised,
+  schema validation rejected, policy denied, or the caller is over its
+  rate or concurrency limit). The envelope is printed first; a
+  `rate_limited` one shows `extras.retry_after_seconds`. When the
+  backplane committed an audit row, the text output ends with
+  `audit receipt: <id>` on every status, not only on `ok` (#4833) —
+  a failed call's row is the one that says why it failed; read it
+  with `meho audit show <id>`. A null `audit_id` prints no line. A
+  parked call (`awaiting_approval`, exit 0) shows the receipt too, after
+  the parked hint: a multi-step operation that stops for approval
+  already has its own audit row.
+  Surfaced via the `errOpError` sentinel.
 - `2` — `auth_expired` (no stored credentials, or refresh failed).
 - `3` — `unreachable` (network / transport failure).
-- `4` — `unexpected_response` (parse error, malformed JSON, etc.).
+- `4` — `unexpected_response` (parse error, malformed JSON, or an
+  `OperationResult.status` this CLI does not know — the message names
+  a likely CLI/backplane version gap, see
+  [Version check](#version-check-login-and-status)).
 
 ### MCP parity
 
@@ -1162,6 +1532,25 @@ verbs; both hit the same backend functions in
 The CLI `operation preview` verb + `call --preview-hash` flag (#3293)
 give operators the same destructive-tier preview/dispatch pair the MCP
 `preview_operation` + `call_operation(preview_hash)` tools give agents.
+
+A vendor verb can run the same two steps itself. The shared
+`cli/internal/dispatch` core has `Connector.Preview` (posts to
+`/api/v1/operations/preview`) and `Connector.CallWithPreviewHash` (a
+`Call` that also sends `preview_hash`). The Keycloak delete verbs (#3944,
+`meho keycloak user|group|client delete`; #3886, `meho keycloak realm
+delete`) use them: without
+`--preview-hash` the verb only previews and prints the hash (nothing is
+deleted, nothing waits for approval); run again with `--preview-hash <hash>`
+and the request waits until a second person approves it.
+
+`Connector.PreviewAndCall` does both steps in one run: it previews, then
+sends the call with the hash. If the preview is not `status=ok` with a
+hash, it sends no call and returns the preview, and
+`Connector.RenderPreviewFailure` prints why (exit 1).
+`meho harbor robot delete` and `meho bind9 record remove` use it (#4014),
+so each run ends in `awaiting_approval`. The escape-hatch verbs
+`meho harbor operation call` and `meho vmware operation call` take a
+`--preview-hash` flag with the same meaning as on `meho operation call`.
 The fourth route `GET /api/v1/operations/{descriptor_id}` (tenant-
 admin diagnostic for `llm_instructions` inspection) is deferred — the
 G0.6-T13 DoD was "three CLI verbs", not four.
@@ -1179,9 +1568,11 @@ updates flow through `meho targets import` (POST for new rows, PATCH
 under `--update`) for bulk reconciliation, or through `meho targets
 add` (Task #2862) for a single target without authoring a YAML file —
 the earlier blanket deferral of a standalone `create` verb (#1574 /
-#1559) is lifted for the single-target create case only. No standalone
-`update` / `delete` verb is surfaced yet, though the API supports
-`PATCH` / `DELETE /api/v1/targets/{name}` (`tenant_admin`).
+#1559) is lifted for the single-target create case only. `meho targets
+update` (Task #3854) changes one target through `PATCH
+/api/v1/targets/{name}`. No standalone `delete` verb is surfaced yet,
+though the API supports `DELETE /api/v1/targets/{name}`
+(`tenant_admin`).
 
 ### Subcommands
 
@@ -1195,7 +1586,13 @@ the earlier blanket deferral of a standalone `create` verb (#1574 /
   `--tls-server-name`, `--preferred-impl`, `--note`) and are sent only
   when set, so the server's defaults apply to the rest — notably an
   omitted `--secret-ref` derives the per-tenant default credential path
-  (#1723) rather than persisting "no credential". `tenant_id` is never
+  (#1723) rather than persisting "no credential". `--no-secret-ref`
+  (Task #3854; cannot be combined with `--secret-ref`) sends an
+  explicit `"secret_ref": null`, so the target is stored with no
+  credential and dispatch takes the auth-optional path — the way to
+  register a product that needs no login. `--extra key=value`
+  (repeatable) seeds the `extras` map with string values, for example
+  `--extra scheme=http` for a plain-HTTP Prometheus. `tenant_id` is never
   sent; the backplane binds it from the operator's JWT. All validation
   stays server-side: an unknown product, an out-of-tenant `secret_ref`,
   or an SSRF-guarded host come back as a 422 whose body the CLI prints
@@ -1204,6 +1601,23 @@ the earlier blanket deferral of a standalone `create` verb (#1574 /
   `import.go`'s `doAuthedRequest` POST plumbing, so a static-bearer
   escape hatch is deliberately **not** offered — auth stays interactive
   `meho login` only.
+- `meho targets update <name-or-alias> [field flags] [--clear F]`
+  (Task #3854) — calls `PATCH /api/v1/targets/{name}` (`TargetUpdate`)
+  for one target. The field flags have the same names as `add`'s and
+  are sent only when set, so every other column keeps its value.
+  `--alias` replaces the whole alias list and `--extra key=value`
+  replaces the whole `extras` map, matching the server's PATCH
+  semantics. `--clear <field>` (repeatable) sends an explicit JSON null
+  for a nullable column: `secret-ref`, `version`, `port`, `fqdn`,
+  `tls-ca-pin`, `tls-server-name`, `preferred-impl`, `note`. The two
+  collection columns are NOT NULL, so `--clear alias` sends
+  `"aliases": []` and `--clear extra` sends `"extras": {}` instead of
+  null; that is how an operator removes every alias or every extra.
+  Three checks run before any request: at least one field must be
+  given, `--clear` must name a field from that list, and one field
+  cannot be both set and cleared (all exit 4). Server errors use the shared
+  `renderHTTPStatus` ladder (404 near-misses, 409 ambiguous alias, 422
+  body verbatim). Same `doAuthedRequest` plumbing as `add`.
 - `meho targets list [--product P] [--limit N] [--cursor C]` — calls
   `GET /api/v1/targets`. Renders the operator's tenant-scoped targets
   as a `NAME / ALIASES / PRODUCT / HOST` table. Results are keyset-
@@ -1297,11 +1711,12 @@ verbatim.
 
 ### Out of scope (v0.2)
 
-- Standalone `update` / `delete` verbs. The API supports `PATCH` /
-  `DELETE /api/v1/targets/{name}` (`tenant_admin`); the CLI surfaces
-  them in a follow-up task when operators ask. Single-target **create**
-  now ships as `meho targets add` (Task #2862); bulk reconciliation of
-  updates stays with `meho targets import --update`.
+- A standalone `delete` verb. The API supports
+  `DELETE /api/v1/targets/{name}` (`tenant_admin`); the CLI surfaces it
+  in a follow-up task when operators ask. Single-target **create** ships
+  as `meho targets add` (Task #2862) and single-target **update** as
+  `meho targets update` (Task #3854); bulk reconciliation of updates
+  stays with `meho targets import --update`.
 - Auto-completion of target names. Operators type names; tab-completion
   would need a separate `cobra-complete`-style design pass.
 - Client-side caching. Every CLI invocation hits the API fresh — the
@@ -1383,10 +1798,19 @@ unqualified names. After G0.12-T16 #1274 the 15 vendor dirs (`vault`,
 `gcloud`, `bind9`, `k8s`, `sddc-manager`, `vcf-automation`, `vcf-fleet`,
 `vcf-logs`, `vcf-operations`) share **one** transport implementation
 instead of byte-near-identical `doAuthedRequest` / `sendRequest` /
-`httpError` trios. Exit codes: `0` status=ok, `1` status=error/denied
-(via the `errOpError` sentinel re-exported from
+`httpError` trios. Exit codes: `0` status=ok, `1`
+status=error/denied/rate_limited (via the `errOpError` sentinel re-exported from
 `dispatch.ErrOpError`), `2` auth_expired, `3` unreachable,
 `4` unexpected_response.
+
+The failure render is shared too: every vendor package's
+`printErrorTrailer` delegates to `dispatch.WriteErrorTrailer`, which
+prints the connector error, the `extras` blob, then
+`audit receipt: <id>` when the envelope carried an `audit_id` (#4833).
+`dispatch.CallResult` keeps `audit_id` for that, so a vendor verb's
+`--json` output carries the key as well (null when the backplane
+committed no row). The vendor `CallResult` still drops `handle` and
+`delivery`; restoring those is #4659.
 
 ### Typed op_id repoint contract (typed connectors, #2942)
 
@@ -1959,16 +2383,17 @@ Direct:
 * `github.com/zalando/go-keyring` — cross-platform OS keyring,
   chosen over `99designs/keyring` (which ADR 0004 rejected on
   maintenance-cadence grounds — last release December 2022).
-* `golang.org/x/oauth2` — supplies `Config.DeviceAuth` and
-  `Config.DeviceAccessToken` for the RFC 8628 device-code flow,
-  plus `Config.TokenSource` for the T3 refresh path. Pinned at
+* `golang.org/x/oauth2` — supplies `Config.DeviceAuth` to start the
+  RFC 8628 device-code flow (the token polling is our own loop, see
+  "Login flow" step 5), plus `Config.TokenSource` for the T3 refresh
+  path. Pinned at
   `v0.27.0`; the Go 1.22 minimum constraint that previously blocked
-  upgrades is lifted now that the module requires Go 1.25.8.
+  upgrades is lifted now that the module requires Go 1.26.10.
 * `github.com/oapi-codegen/runtime` — runtime helpers the generated
   client uses (JSON merging for `oneOf` unions, parameter styling
   per RFC 6570). Pinned at `v1.1.1`; the Go 1.22 compatibility
   constraint that blocked upgrades is lifted now that the module
-  requires Go 1.25.8 — upgrade tracked as a follow-up.
+  requires Go 1.26.10 — upgrade tracked as a follow-up.
 
 Build-time tool (not in `go.mod`; installed under `bin/` via
 `make tools`):
@@ -1976,7 +2401,7 @@ Build-time tool (not in `go.mod`; installed under `bin/` via
 * `github.com/oapi-codegen/oapi-codegen/v2` — the OpenAPI → Go
   client generator itself. Pinned at `v2.5.0`, the last v2.x
   release whose module go directive was compatible with Go 1.22;
-  now that the module requires Go 1.25.8, a newer v2.x may be
+  now that the module requires Go 1.26.10, a newer v2.x may be
   used — upgrade tracked as a follow-up. `make tools` runs
   `go install …@v2.5.0` with
   `GOBIN=$PWD/bin`; the generator itself executes on a Go 1.24+
@@ -1993,8 +2418,8 @@ have to trust to run `meho login` against their secrets.
 `cli/internal/cmd/admin/keycloak/` registers the install-time
 realm-provisioning verb that closes the v0.3.1 dogfood's deepest
 deployer friction: a working `meho-cli` device-code client + the
-public MCP browser-flow client + the **5 protocol mappers + 4 default
-client scopes + meho-admins group + admin user** that together let
+public MCP browser-flow client + the **6 protocol mappers + 4 default
+client scopes + five MEHO role groups + admin user** that together let
 `meho login` and the MCP onramp authenticate without 4 sequential
 walls of opaque `invalid_token` / `unauthorized_client` errors. The
 verb encodes the 5-step recipe documented in
@@ -2022,10 +2447,24 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      loopback callbacks `http://localhost:*` + `http://127.0.0.1:*`
      that `mcp-remote` and Claude Code listen on — Keycloak matches
      redirect hosts literally, so both loopback forms are listed).
-  3. 5 protocol mappers cloned from the reference shape on
-     `meho-backplane`, installed on **both** public clients:
-     `audience-meho-backplane`, `meho-mcp-audience`, `tenant-id`,
-     `tenant-role`, `groups-claim`.
+  3. 6 protocol mappers, installed on **both** public clients:
+     `audience-meho-backplane`, `meho-mcp-audience`, `groups-claim`,
+     and three stock User Attribute mappers
+     (`oidc-usermodel-attribute-mapper`) — `tenant-id`, `tenant-role`
+     and `approver` — that read the `tenant_id`, `tenant_role` and
+     `approver` attributes of the person's group
+     (`aggregate.attrs=false`, `multivalued=false`; `approver` is a
+     `boolean` claim). No mapper carries a fixed value
+     ([`docs/decisions/login-role-groups.md`](../decisions/login-role-groups.md),
+     #4590). The names `tenant-id` / `tenant-role` are the names the
+     older fixed-value mappers had, so a run on an older realm updates
+     them in place (Keycloak's mapper PUT replaces the type and config)
+     and prints `[updated] mapper tenant-id (replaced
+     oidc-hardcoded-claim-mapper with oidc-usermodel-attribute-mapper)`.
+     Every mapper spells out all four token toggles (ID token, access
+     token, userinfo, introspection), because Keycloak's GET fills an
+     unset toggle with its default and the mapper would otherwise never
+     match on a re-run.
   4. 4 default client scopes (`basic`, `roles`, `web-origins`,
      `acr`) explicitly assigned to **both** public clients. The
      `basic` scope is load-bearing — Keycloak 25+ moved the `sub`
@@ -2033,8 +2472,18 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      **not** auto-inherit the realm's default-default scopes, so an
      explicit assignment is the only way to guarantee `sub` lands in
      the access token (RFC 9068 §2.2.1 requires it).
-  5. The `meho-admins` top-level group + an admin user joined to
-     it, with a password set via `/users/{id}/reset-password`.
+  5. The five MEHO role groups (`roleGroups` in `bootstrap.go`):
+     `MEHO-Readers` (`read_only`), `MEHO-Operators` (`operator`),
+     `MEHO-SA-Operators` (`operator`), `MEHO-Admins` (`tenant_admin`),
+     `MEHO-Approvers` (`read_only` + `approver=true`). Each carries
+     `tenant_id` from `--tenant-id` (default the all-zero UUID). The
+     groups are created even with `--skip-user-provisioning`, because
+     they carry the tenant and the role. Then an admin user joined to
+     `MEHO-Admins`, with a password set via
+     `/users/{id}/reset-password` (skipped with
+     `--skip-user-provisioning`). `--tenant-role` and
+     `--admin-group-name` were removed in #4590; passing either fails
+     with cobra's `unknown flag` error before any Keycloak call.
   6. Optional client scope `offline_access`. Attached to the MCP
      client (`meho-mcp`) as **optional** (not default — only flows
      that ask for a refresh token mint one); this closes the W7 wall
@@ -2045,6 +2494,25 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      per-client `client.offline.session.idle.timeout` attribute
      (default 48h = 172800s) so an idle offline token expires fast.
      Operators then request it per-login with `meho login --offline`.
+     The MCP client always gets `client.offline.session.idle.timeout`
+     (default 48h = 172800s, change it with
+     `--mcp-offline-session-idle=<seconds>`, #4001). Without it an MCP
+     login would last up to the realm's Offline Session Idle (30 days
+     by default). The attribute is part of the desired client shape,
+     so a re-run sets it on an existing `meho-mcp` client too.
+  7. The MEHO MCP client scopes `mcp:read`, `mcp:execute` and
+     `mcp:admin` (#4002). Keycloak does not ship them, so the verb
+     creates each as a realm client scope (`POST /client-scopes`,
+     `include.in.token.scope=true`, no mappers) when it is missing,
+     then attaches all three to `meho-mcp` as **optional**. The Claude
+     Code plugin and the Claude Desktop bundle ask for
+     `mcp:read mcp:execute` by default and add `mcp:admin` for the
+     operator tools; Keycloak refuses a login that asks for a scope the
+     client does not offer (`invalid_scope`). An existing scope with the
+     same name is left as it is. `meho-cli` does not get them.
+     `backend/tests/integration/test_keycloak_bootstrap_mcp_login.py`
+     proves the login against a real Keycloak (empty realm → this verb
+     → browser login with and without `mcp:admin`).
 
 ### Idempotency
 
@@ -2057,19 +2525,31 @@ Every step does a "does this exist?" check before mutating:
   skip.
 - Default scopes: `GET /clients/{uuid}/default-client-scopes`;
   missing scope → PUT; already present → skip.
+- Realm client scopes (`mcp:*`): `GET /client-scopes`; missing by
+  name → POST; present → skip (never updated).
 - Optional scopes: `GET /clients/{uuid}/optional-client-scopes`;
   missing scope → PUT; already present → skip. Only applied to the
   MCP client (the CLI client's optional-scope set is left untouched
   for the RFC 8628 rationale above).
-- Group: `GET /groups?search=<name>` (filtered client-side to exact
-  match); missing → POST.
+- Role groups: `GET /groups?search=<name>` (filtered client-side to
+  exact match; the search answer has no attributes); missing → POST
+  with the attributes; present → `GET /groups/{id}` and compare the
+  three owned attributes (`tenant_id`, `tenant_role`, `approver`).
+  Different → `PUT /groups/{id}` with the full attribute map (Keycloak
+  replaces the whole map, so other attributes are carried over, and so
+  is the group description); equal → skip. `approver` is removed from
+  every group except `MEHO-Approvers`. Old groups such as
+  `meho-admins` are never touched.
 - User: `GET /users?exact=true&username=<name>`; missing → POST then
   `PUT /users/{id}/reset-password`; existing → skip the password
   reset (silent password rotation on a re-run is strictly worse than
   a "set it once at create time" rule — see the per-finding rationale
-  in `reconcileUser`).
+  in `reconcileUser`). Not yet in `MEHO-Admins` → join it (printed as
+  `[updated] user …`).
 
-A clean re-run prints `[skip]` for every resource and exits 0.
+A clean re-run prints `[skip]` for every mapper, scope, group and the
+user, and exits 0. The two clients always print `[updated] client`:
+the client is PUT with the same settings on every run.
 
 ### Refusals
 
@@ -2133,31 +2613,47 @@ the CA cert is available.
 ### Tests
 
 `bootstrap_test.go` drives a fake Keycloak (`httptest.Server` +
-in-memory state maps) through eight scenarios:
+in-memory state maps) through these scenarios, among others:
 
 - Fresh realm: every resource created, mapper + scope counts match
-  the recipe (5 mappers, 4 default scopes, 2 clients, 1 group, 1
-  user).
-- Idempotent re-run: zero new POSTs against the same realm; password
-  reset called exactly once across two runs.
+  the recipe (6 mappers, 4 default scopes, 2 clients, 5 groups with
+  their attributes, 1 user in `MEHO-Admins` only).
+- Idempotent re-run: zero new POSTs and zero mapper / group /
+  membership PUTs against the same realm; password reset called
+  exactly once across two runs.
+- Upgrade: a realm with the older fixed-value `tenant-id` /
+  `tenant-role` mappers and a `meho-admins` group ends with only User
+  Attribute mappers, the five groups, the admin user also in
+  `MEHO-Admins`, the old group left in place; a second run changes
+  nothing.
+- Changed group attributes are set back; other attributes stay;
+  `approver` is removed from a non-approver group.
+- `--tenant-role` / `--admin-group-name` stop with `unknown flag`.
 - Confidential-client refusal: `--cli-client-id meho-backplane`
   errors at the validation boundary.
 - Trailing-slash refusal: `--mcp-resource-uri .../mcp/` errors with
   a "trailing slash" message naming the recipe rule.
 - Dry-run: zero Keycloak calls, banner present in stdout.
-- Skip-user-provisioning: 2 clients land, 0 groups, 0 users.
+- Skip-user-provisioning: 2 clients land, 5 groups, 0 users.
 - Mandatory-flag validation: missing `--keycloak-base-url`,
   `--realm`, etc. each surface a flag-specific error.
 - Mapper-shape parity with the reference shell script:
   `audience-meho-backplane` carries `included.client.audience=
   meho-backplane`; `meho-mcp-audience` carries `included.custom.
-  audience=<uri>`; `tenant-id` / `tenant-role` are
-  `oidc-hardcoded-claim-mapper`; `groups-claim` is
-  `oidc-group-membership-mapper` with `claim.name=groups`.
+  audience=<uri>`; `tenant-id` / `tenant-role` / `approver` are
+  `oidc-usermodel-attribute-mapper` with no `claim.value`;
+  `groups-claim` is `oidc-group-membership-mapper` with
+  `claim.name=groups`.
 
-Real-realm verification belongs in a future `testcontainers` Keycloak
-integration test; the unit suite proves the orchestrator's
-interaction shape, not the realm semantics.
+The unit suite proves the orchestrator's interaction shape.
+`backend/tests/integration/test_keycloak_bootstrap_mcp_login.py`
+proves the realm semantics against a real Keycloak 26.0 in CI: a
+person in each of the five groups gets the right `tenant_id` /
+`tenant_role` (and only the `MEHO-Approvers` person gets `approver`),
+both in the token Keycloak builds for `meho-cli` and through a real
+`meho-mcp` login checked by the backplane's JWT code; a person in no
+group gets `401 missing_tenant_claim`; and an older realm with
+fixed-value mappers is upgraded, with a second run changing nothing.
 
 ## Known issues / forward-compat scaffolding
 
@@ -2309,7 +2805,7 @@ helper should be extracted to a shared `cmd/_authed` package.
   CREATE / PATCH semantics the CLI relies on. The
   real-`targets.yaml` round-trip test replays every conformant
   entry from a pinned snapshot of
-  [`evoila-bosnia/claude-rdc-hetzner-dc/rdc-hetzner-dc/targets.yaml`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/rdc-hetzner-dc/targets.yaml)
+  `evoila-bosnia/claude-rdc-hetzner-dc/rdc-hetzner-dc/targets.yaml`
   (24 entries; SHA pinned in the test module).
 
 ### Out-of-scope
@@ -2325,10 +2821,10 @@ helper should be extracted to a shared `cmd/_authed` package.
 
 ## References
 
-* Parent Goal: [#11](https://github.com/evoila-bosnia/meho-internal/issues/11)
-* Parent Initiative: [G2.6 #42](https://github.com/evoila-bosnia/meho-internal/issues/42)
-* Stack ADR (locked): [#13](https://github.com/evoila-bosnia/meho-internal/issues/13)
-* Cosign keyless ADR (locked): [#15](https://github.com/evoila-bosnia/meho-internal/issues/15) — same identity-claim format used by image (`image.yml`) and chart (`chart.yml`) signing.
+* Parent Goal: #11
+* Parent Initiative: G2.6 #42
+* Stack ADR (locked): #13
+* Cosign keyless ADR (locked): #15 — same identity-claim format used by image (`image.yml`) and chart (`chart.yml`) signing.
 * cobra docs: https://github.com/spf13/cobra
 * zalando/go-keyring: https://github.com/zalando/go-keyring
 * golang.org/x/oauth2 device flow: https://pkg.go.dev/golang.org/x/oauth2#Config.DeviceAuth

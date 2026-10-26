@@ -13,12 +13,19 @@ resolver consumes them).
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from pydantic_ai import ToolFailed
 
-__all__ = ["MetaToolSpec"]
+from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.operations.meta_tools import (
+    ConnectorNotIngestedError,
+    UnknownConnectorError,
+)
+
+__all__ = ["MetaToolSpec", "connector_errors_reach_model"]
 
 
 #: The shape of a handler the agent meta-tools adapt: the existing
@@ -68,3 +75,22 @@ class MetaToolSpec:
         self.description = description
         self.parameter_schema = parameter_schema
         self.required_role = required_role
+
+
+@contextmanager
+def connector_errors_reach_model() -> Iterator[None]:
+    """Send a bad ``connector_id`` back to the model instead of ending the run.
+
+    The discovery handlers raise :class:`UnknownConnectorError` or
+    :class:`ConnectorNotIngestedError` when the model names a connector that
+    does not exist or has no operations yet (#4232). Any other exception from
+    a tool ends the whole run, so this turns those two into
+    :class:`pydantic_ai.ToolFailed`. The model sees a failed tool result with
+    the same text the MCP surface returns, and can try another id. A
+    ``ToolFailed`` does not use the tool's retry budget; the run's
+    ``request_limit`` still bounds the loop.
+    """
+    try:
+        yield
+    except (UnknownConnectorError, ConnectorNotIngestedError) as exc:
+        raise ToolFailed(str(exc)) from exc

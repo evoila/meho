@@ -93,11 +93,11 @@ func printSearchTable(w io.Writer, query string, r *searchResponse) {
 	if len(r.Hits) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "%-50s %6s  %s\n", "op_id", "score", "summary")
+	fmt.Fprintf(w, "%-50s %-11s  %s\n", "op_id", "safety", "summary")
 	for _, h := range r.Hits {
-		fmt.Fprintf(w, "%-50s %6.3f  %s\n",
+		fmt.Fprintf(w, "%-50s %-11s  %s\n",
 			truncate(h.OpID, 50),
-			h.FusedScore,
+			h.SafetyLevel,
 			truncate(strDeref(h.Summary), 80),
 		)
 	}
@@ -107,6 +107,7 @@ func newOperationCallCmd() *cobra.Command {
 	var (
 		targetName        string
 		paramsFlag        string
+		previewHash       string
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -116,6 +117,10 @@ func newOperationCallCmd() *cobra.Command {
 		Long: "call wraps POST /api/v1/operations/call with connector_id=\n" +
 			"\"harbor-rest-2.x\" pre-baked. Use when an op doesn't have a\n" +
 			"dedicated alias yet.\n\n" +
+			"A destructive op needs --preview-hash: run `meho operation preview\n" +
+			"harbor-rest-2.x <op_id>` with the same --target and --params first, then\n" +
+			"pass its preview_hash here. The call then waits until a second\n" +
+			"person approves it.\n\n" +
 			"Exit codes mirror meho operation call.",
 		Example: "  meho harbor operation call harbor.about --target prod-harbor\n" +
 			"  meho harbor operation call harbor.project.list --target prod-harbor --json",
@@ -123,18 +128,20 @@ func newOperationCallCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runOperationCall(cmd, args[0], targetName, paramsFlag, jsonOut, backplaneOverride)
+			return runOperationCall(cmd, args[0], targetName, paramsFlag, previewHash, jsonOut, backplaneOverride)
 		},
 	}
 	cmd.Flags().StringVar(&targetName, "target", "", "Harbor target slug")
 	cmd.Flags().StringVar(&paramsFlag, "params", "", "params as inline JSON or @<file>")
+	cmd.Flags().StringVar(&previewHash, "preview-hash", "",
+		"preview_hash from a prior `meho operation preview` of the same op, target and params; required for a destructive op")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit the full OperationResult envelope as JSON")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
 }
 
-func runOperationCall(cmd *cobra.Command, opID, targetName, paramsFlag string, jsonOut bool, backplaneOverride string) error {
+func runOperationCall(cmd *cobra.Command, opID, targetName, paramsFlag, previewHash string, jsonOut bool, backplaneOverride string) error {
 	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
@@ -143,7 +150,7 @@ func runOperationCall(cmd *cobra.Command, opID, targetName, paramsFlag string, j
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), jsonOut)
 	}
-	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.CallWithPreviewHash(cmd.Context(), backplaneURL, opID, targetName, params, previewHash)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}

@@ -63,9 +63,9 @@
     locations (mobile top bar + desktop sidebar account row); ``id_prefix``
     keeps the badge swap targets unique across the two instances. The badge
     span ``hx-get``s ``/ui/approvals/badge`` on ``load`` (authoritative
-    first paint) and again on the ``meho:approval-bump`` event the
-    ``approvals-bell.js`` controller dispatches on <body> when an
-    ``approval.*`` SSE frame arrives or a decision completes -- so the
+    first paint), on the ``meho:approval-badge-poll`` event the
+    ``approvals-bell.js`` timer dispatches on <body> every 5 seconds while
+    the page is visible, and on ``meho:approval-bump`` after a decision -- so the
     count is always the server's tenant-scoped truth. Clicking the bell
     loads the pending-requests panel into the shared
     ``#meho-approvals-modal`` container. -#}
@@ -82,7 +82,7 @@
   <span
     id="{{ id_prefix }}-approvals-badge"
     hx-get="/ui/approvals/badge"
-    hx-trigger="load, meho:approval-bump from:body"
+    hx-trigger="load, meho:approval-badge-poll from:body, meho:approval-bump from:body"
     hx-target="this"
     hx-swap="innerHTML"
   ></span>
@@ -214,6 +214,18 @@
             {{ approvals_bell("mobile") }}
           </div>
         </header>
+
+        {# ---------- Sandbox mode banner (#4622) ---------- #}
+        {% if sandbox_mode_active() %}
+        <div class="alert alert-warning rounded-none" role="status" data-sandbox-banner>
+          <span>
+            <strong>Sandbox mode:</strong> agents may delete systems here without a person's approval.
+            {% if sandbox_expiring_delete_grants is defined and sandbox_expiring_delete_grants %}
+            <a href="/ui/grants" class="link">{{ sandbox_expiring_delete_grants }} delete grant{% if sandbox_expiring_delete_grants != 1 %}s{% endif %} expire{% if sandbox_expiring_delete_grants == 1 %}s{% endif %} within 7 days.</a>
+            {% endif %}
+          </span>
+        </div>
+        {% endif %}
 
         {# ---------- Content slot ---------- #}
         <main class="mx-auto w-full max-w-[1500px] flex-1 px-5 py-6 lg:px-10 lg:py-9">
@@ -384,30 +396,19 @@
       </aside>
     </div>
 
-    {# ---------- Approvals notifications wiring (app-shell, #1778) ----------
-       One ``approvalsBell`` Alpine root for the whole shell: it hosts the
-       hidden SSE sink subscribed to the session-gated bridge filtered to
-       ``op_class=approval`` and routes each ``approval.*`` frame into a
-       badge re-fetch (``onSseMessage`` -> ``meho:approval-bump`` on <body>),
-       and listens for the ``meho:approval-decided`` HX-Trigger the decision
-       POSTs fire to close the modal + re-fetch the count. The shared
+    {# ---------- Approvals notifications wiring (app-shell, #1778, #3758) ----------
+       One ``approvalsBell`` Alpine root for the whole shell. Its single
+       timer (``approvals-bell.js``) dispatches ``meho:approval-badge-poll`` on
+       <body> every 5 seconds while the page is visible, and both bell
+       badges re-fetch ``/ui/approvals/badge`` on that event. It also
+       listens for the ``meho:approval-decided`` HX-Trigger the decision
+       POSTs fire to close the modal and re-fetch the count. The shared
        ``#meho-approvals-modal`` container is the swap target both bells'
-       ``hx-get /ui/approvals`` and the panel's "Review" buttons render into.
-       Frames are consumed through the hidden-sink + ``x-on:htmx:sse-*``
-       pattern (same as ``dashboard-feed.js``) so event fields never reach
-       the DOM as live markup -- the bell only ever reads ``op_id``. #}
+       ``hx-get /ui/approvals`` and the panel's "Review" buttons render into. #}
     <div
       x-data="approvalsBell()"
-      x-on:htmx:sse-before-message="onSseMessage($event)"
       x-on:meho:approval-decided.window="onDecided()"
     >
-      <div
-        hx-ext="sse"
-        sse-connect="/ui/broadcast/stream?op_class=approval"
-        sse-swap="broadcast"
-        class="hidden"
-        aria-hidden="true"
-      ></div>
       {# Stable modal container -- never replaced. The bell / panel / detail
          fragments swap their own ``<dialog id="meho-approvals-modal"
          class="modal">`` into this via ``hx-swap="innerHTML"``, the same

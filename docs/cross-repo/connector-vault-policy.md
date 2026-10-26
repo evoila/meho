@@ -25,7 +25,7 @@ session loader. The *shape* of "what Vault must grant" — which secret
 subtree, which templated path, which identity claim — is a property of
 that chassis code, so it is documented here and changes in lock-step
 with it. The actual Vault configuration lives on the consumer side
-([`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)
+(`evoila-bosnia/claude-rdc-hetzner-dc`
 in the dogfood case); this page is the spec that side reads.
 
 This runbook is the **per-target-secret** companion to
@@ -313,6 +313,8 @@ KV-v2 **write** surface — `vault.kv.put` (new version, wholesale
 replace), `vault.kv.patch` (merge fields onto the current version), and
 `vault.kv.delete` (soft-delete versions)
 ([`connectors/vault/ops.py`](../../backend/src/meho_backplane/connectors/vault/ops.py)).
+`vault.kv.metadata.delete` (evoila/meho#3424) adds the permanent removal of
+a whole secret: every version and its metadata.
 These ops register `requires_approval=True`, so a human/operator write
 parks for a four-eyes review before it executes. **The review is wasted
 if the write then hits Vault `permission denied`** — the templated §2
@@ -325,10 +327,23 @@ path **before** an operator approves the parked write.
 
 ### 6.1 Write-capability policy stanza
 
+> **Check the target's `vault_role` first.** A write runs under the
+> operator's token, logged in with the `extras.vault_role` of the vault
+> target it is dispatched on. When the target sets none, the role comes
+> from the deployment's fallback chain: for a check run, the check-runner
+> role or, when that is unset, the global default; for every other
+> operator, the per-tenant role, then the global default (see §6.3 for
+> the exact order). So before
+> you add the stanza below, check which target the write ran on. Another
+> registered vault target may already have a role that can write this
+> path. If so, run the same write on that target. No policy change is
+> needed.
+
 Like the §2 reads, KV-v2 writes are scoped per operator through ACL
 policy templating. KV-v2 authorizes each write against a **different**
 path prefix: `vault.kv.put` / `vault.kv.patch` write the value under
-`<mount>/data/<path>` (`create`/`update` there), while `vault.kv.delete`'s
+`<mount>/data/<path>` (`create`/`update` there for `put`; `read`/`update`
+for `patch`, which reads the secret before it writes), while `vault.kv.delete`'s
 version soft-delete (`POST <mount>/delete/<path>`) is authorized by
 `update` on the **`/delete/`** path — *not* the data path (evoila/meho#3274,
 lab-verified in claude-rdc-hetzner-dc#2814). Add **both** stanzas below
@@ -339,7 +354,9 @@ alongside the §2 read grants (they are *additive* — keep all):
 # identity. <ACCESSOR> is the JWT mount accessor (resolve it as in §2).
 # `create` covers a first write to a path; `update` covers a subsequent
 # write (new version). Vault requires BOTH for an unconditional
-# `vault.kv.put` / `vault.kv.patch` on the /data/ path.
+# `vault.kv.put` on the /data/ path. `vault.kv.patch` reads the current
+# version first and then writes to the existing secret, so it needs
+# `read` + `update` here (never `create`, evoila/meho#4831).
 path "secret/data/targets/{{identity.entity.aliases.<ACCESSOR>.name}}/*" {
   capabilities = ["create", "read", "update"]
 }
@@ -351,19 +368,34 @@ path "secret/data/targets/{{identity.entity.aliases.<ACCESSOR>.name}}/*" {
 path "secret/delete/targets/{{identity.entity.aliases.<ACCESSOR>.name}}/*" {
   capabilities = ["update"]
 }
+
+# Only if this identity may PERMANENTLY remove secrets
+# (`vault.kv.metadata.delete`, evoila/meho#3424). The op sends
+# DELETE <mount>/metadata/<path> and reads the same path before and after,
+# so it needs `read` and `delete` on the /metadata/ path. Leave this out to
+# keep permanent removal impossible for this identity.
+path "secret/metadata/targets/{{identity.entity.aliases.<ACCESSOR>.name}}/*" {
+  capabilities = ["read", "delete"]
+}
 ```
 
 Notes:
 
-- **`create` *and* `update` are both required** for `vault.kv.put` /
-  `vault.kv.patch`. Vault treats a first write to a non-existent path as
-  `create` and a write to an existing path as `update`; an unconditional
-  write (no CAS guard) can be either, so the policy must grant both or
-  the write fails the first time the path's existence flips. `read` is
-  carried here too so the §2 read grant and this write grant can collapse
-  into one stanza if you prefer (the connector's write path does not
-  itself read the value, but keeping `read` here is harmless and avoids
-  two near-identical path blocks).
+- **`create` *and* `update` are both required** for `vault.kv.put`.
+  Vault treats a first write to a non-existent path as `create` and a
+  write to an existing path as `update`; an unconditional write (no CAS
+  guard) can be either, so the policy must grant both or the write fails
+  the first time the path's existence flips.
+- **`read` *and* `update` are required** for `vault.kv.patch`
+  (evoila/meho#4831, evoila/meho#3897). The connector calls hvac's
+  `secrets.kv.v2.patch`, which reads the current version (`GET`, needs
+  `read`), merges the fields, and writes the result back to the existing
+  secret with a version check (`POST`, needs `update`). A patch never
+  writes a missing secret, so it never needs `create`. A role with
+  `create` + `update` but no `read` fails at the read step. The
+  park-time check (§6.2) asks for exactly `read` + `update` for a patch.
+  Keeping `read` in the stanza above also lets the §2 read grant and this
+  write grant collapse into one path block.
 - **`vault.kv.delete` needs `update` on the `/delete/` path** — the
   version soft-delete POSTs to `<mount>/delete/<path>`, which Vault
   authorizes with `update` on *that* path, **not** `/data/`
@@ -371,11 +403,18 @@ Notes:
   `/data/` grant alone does **not** authorize a soft-delete, so a policy
   that ships only `/data/` denies every delete post-approval. It is not a
   `delete` capability and not a `/metadata/` grant.
-- **No `/metadata/` write grant is needed** for these three ops. `put` /
-  `patch` operate on `/data/`; the version soft-delete operates on
-  `/delete/`. Destroying versions or deleting all metadata
-  (`vault kv metadata delete`) is **not** a wired op and deliberately
-  needs no grant.
+- **No `/metadata/` write grant is needed** for `put`, `patch` and the
+  soft `delete`. `put` / `patch` operate on `/data/`; the version
+  soft-delete operates on `/delete/`.
+- **`vault.kv.metadata.delete` needs `read` and `delete` on the
+  `/metadata/` path** (the third stanza above). `delete` there is what lets
+  Vault remove every version and the metadata. `read` lets the op check the
+  path before the delete (nothing there → nothing is changed) and after it
+  (the op reports `deleted` only when the read finds nothing). Grant it only
+  to an identity that should be able to purge secrets, for example a
+  dedicated teardown role ([vault-provisioning.md](vault-provisioning.md)
+  §8). Destroying single versions (`PUT <mount>/destroy/<path>`) is still
+  **not** a wired op and needs no grant.
 - The **same per-operator templating constraints** from §2 apply: no
   glob inside the rendered `{{identity...}}` segment; the trailing `/*`
   is a literal glob in the static path portion.
@@ -383,13 +422,16 @@ Notes:
 ### 6.2 Verify a token can write a path (`sys/capabilities-self`)
 
 The backplane runs this exact check at **park time** — when a
-`vault.kv.put`/`patch`/`delete` parks for approval, the dispatcher
-probes `POST sys/capabilities-self` on the path the op authorizes
-against (`secret/data/<path>` for `put`/`patch`, `secret/delete/<path>`
-for `delete` — evoila/meho#3274) and surfaces a `permission_preflight`
-banner on the approval row (`will_be_denied: true` when the token lacks
-the required capability), so an operator is **not** asked to approve a
-write that Vault will then reject
+`vault.kv.put`/`patch`/`delete`/`metadata.delete` parks for approval, the
+dispatcher probes `POST sys/capabilities-self` on the path the op
+authorizes against (`secret/data/<path>` for `put`/`patch`,
+`secret/delete/<path>` for `delete` — evoila/meho#3274,
+`secret/metadata/<path>` for `metadata.delete` — evoila/meho#3424) and
+stores the result as `permission_preflight` on the approval row. When the
+token lacks the required capability (`will_be_denied: true`), MEHO does not
+park the op at all: the caller gets `denied` / `write_capability_denied`
+(evoila/meho#3542), so an operator is **not** asked to approve a write
+that Vault will then reject
 ([`operations/dispatcher.py`](../../backend/src/meho_backplane/operations/dispatcher.py)
 `_handle_needs_approval` →
 [`connectors/vault/ops.py`](../../backend/src/meho_backplane/connectors/vault/ops.py)
@@ -410,6 +452,8 @@ vault token capabilities "secret/data/targets/<op-sub>/<target>"
 # Expect for a writable put/patch path: create read update
 vault token capabilities "secret/delete/targets/<op-sub>/<target>"
 # Expect for a soft-delete-capable path: update
+vault token capabilities "secret/metadata/targets/<op-sub>/<target>"
+# Expect for a path this identity may permanently remove: delete read
 ```
 
 Or, equivalently, against the raw API (what the backplane preflight
@@ -425,13 +469,13 @@ vault write -format=json sys/capabilities-self \
 
 Expected outcomes:
 
-- **`create` + `update` present** → the parked write will execute on
-  approval; the approval row's `permission_preflight.will_be_denied` is
-  `false`.
-- **Only `read` (or `deny`)** → the write will be denied. The approval
-  row shows `will_be_denied: true` with the lacking capabilities. Fix
-  §6.1 (add the write stanza) or §3 (identity-alias mismatch), not the
-  connector.
+- **`create` + `update` present** (for `put`), or **`read` + `update`
+  present** (for `patch`) → the parked write will execute on approval;
+  the approval row's `permission_preflight.will_be_denied` is `false`.
+- **Only `read` (or `deny`)** → the write will be denied. MEHO refuses to
+  park it and returns `write_capability_denied` with `granted` and
+  `required`. Fix §6.1 (add the write stanza) or §3 (identity-alias
+  mismatch), not the connector, then call the operation again.
 
 > **Reviewer-token caveat.** An *approved* re-dispatch executes under the
 > **reviewing** operator's token, not the original dispatcher's
@@ -448,8 +492,27 @@ Expected outcomes:
 
 The read path (§2–§5) and the write path use the **same** federated
 identity model: every KV op runs under the acting **operator's**
-OIDC-federated Vault token (the `meho-mcp` role), never a shared god-mode
-backplane token. There is no separate service-account identity for agent
+OIDC-federated Vault token, never a shared god-mode backplane token. The
+role the token logs in under is picked in this order (first match wins):
+
+1. the dispatch target's `extras.vault_role`, when the target sets one
+   (evoila/meho#3274);
+2. for the synthetic background-dispatch operator (a check run) only: the
+   dedicated check-runner role (`VAULT_CHECK_RUNNER_ROLE`,
+   evoila/meho#2757). When that variable is unset, a check run uses the
+   deployment-global `VAULT_OIDC_ROLE` directly and **skips step 3**;
+3. a per-tenant role from `VAULT_OIDC_ROLE_BY_TENANT` matching the
+   operator's tenant (evoila/meho#3852). A check run never reaches this
+   step;
+4. the deployment-global `VAULT_OIDC_ROLE` (usually `meho-mcp`).
+
+So the write identity is the operator's JWT together with the role this
+chain selects. When you diagnose a denied write on a target without a
+`vault_role`, check steps 2–4 for the acting operator before you edit a
+policy: the role was not necessarily `meho-mcp`. For a check run, the
+per-tenant map does not matter; only the check-runner role or the global
+default can apply. There is no separate
+service-account identity for agent
 writes in this model — an *agent-initiated* `vault.kv.put` still parks and
 executes under a human operator's token (the dispatcher's at park time,
 the reviewer's on approved re-dispatch; see the §6.2 reviewer-token
@@ -458,32 +521,37 @@ caveat). The contract a deploy must satisfy is therefore:
 | Path | Acting identity | Required Vault capabilities on the templated path |
 |------|-----------------|---------------------------------------------------|
 | Read (`vault.kv.read`, credential resolution) | Operator's OIDC-federated token | `read` on `secret/data/…/{{identity…}}/*` (§2) |
-| Write (`vault.kv.put` / `patch`) | Operator's OIDC-federated token (dispatcher at park; **reviewer** on approved re-dispatch) | `create` + `update` on `secret/data/…/{{identity…}}/*` (§6.1) |
+| Write (`vault.kv.put`) | Operator's OIDC-federated token (dispatcher at park; **reviewer** on approved re-dispatch) | `create` + `update` on `secret/data/…/{{identity…}}/*` (§6.1) |
+| Write (`vault.kv.patch`) | same | `read` + `update` on `secret/data/…/{{identity…}}/*` (§6.1); it reads before it writes and never needs `create` |
 | Write (`vault.kv.delete` version soft-delete) | same | `update` on the data path (§6.1) |
+| Write (`vault.kv.metadata.delete` permanent removal) | same | `read` + `delete` on `secret/metadata/…/{{identity…}}/*` (§6.1) |
 
 A deploy that follows only the §2 read grant provisions **read-only** and
 discovers the missing write grant *after* an operator approves a parked
 write. Two product signals make that gap visible without reading Vault's
 logs:
 
-- **Park-time warning (before Approve).** The dispatcher runs the §6.2
-  `sys/capabilities-self` probe under the dispatching operator's token and,
-  when the token lacks `create`/`update`, stamps
-  `proposed_effect.write_capability_warning =
-  "connector_identity_may_lack_write"` on the approval row alongside the
-  `permission_preflight` banner (`will_be_denied: true` with the lacking
-  capabilities). This is a **warning, not a gate** — the park still
-  proceeds and the operator may approve anyway (e.g. the write policy is
-  landing in the same change). It surfaces the gap while a human is still
-  in the loop.
+- **Park-time refusal (before Approve).** The dispatcher runs the §6.2
+  `sys/capabilities-self` probe under the dispatching operator's token.
+  When the token lacks a right the write needs, MEHO does **not** park the op
+  (evoila/meho#3542). The caller gets `status: denied` with
+  `error_code: "write_capability_denied"`, `path`, `granted`, `required`
+  and a `doc_ref` pointing back at this §6. No approval row is created, so
+  no person spends an approval on a write that cannot land. If the write
+  policy is landing in the same change, apply it first, then call the
+  operation again. (Before #3542 this was only a warning,
+  `write_capability_warning`, and the op parked anyway.)
 - **Post-approval structured error (after Approve).** If the write is
   approved and Vault still denies it, the op result is **not** a bare
   `permission denied` or the read-oriented `connector_vault_forbidden`; it
   is the write-specific `error_code: "vault_write_identity_forbidden"` with
   `path` (the denied `secret/data/<path>`), `identity_hint` (the acting
   operator's `sub`), and `doc_ref` pointing back at this §6. It names the
-  §6.1 write stanza as the fix and repeats the do-NOT-widen-the-shared-policy
-  warning (the grant is per-operator templated, not role-wide).
+  acting target and its `vault_role` when known, and lists two fixes in
+  order: first, run the same write on a vault target whose `vault_role`
+  can already write the path (no policy change); second, add the §6.1
+  write stanza. It repeats the do-NOT-widen-the-shared-policy warning
+  (the grant is per-operator templated, not role-wide).
 
 To verify the contract for a given operator + target before wiring an
 approval flow, run the §6.2 `sys/capabilities-self` probe under **that

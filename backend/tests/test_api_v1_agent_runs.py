@@ -41,7 +41,11 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from sqlalchemy import select
 
-from meho_backplane.agent.invocation import AgentInvoker, reset_agent_invoker_for_testing
+from meho_backplane.agent.invocation import (
+    RUN_INPUT_MAX_CHARS,
+    AgentInvoker,
+    reset_agent_invoker_for_testing,
+)
 from meho_backplane.agent.run import PydanticAgentRun
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
@@ -215,26 +219,56 @@ async def test_async_run_returns_handle_then_poll(monkeypatch: pytest.MonkeyPatc
     assert body["agent_definition_id"] is not None
 
 
+@respx.mock
 @pytest.mark.asyncio
-async def test_sync_run_converts_to_async_on_timeout(
-    client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A sync run past the server-side timeout returns a 202 handle."""
+async def test_sync_run_converts_to_async_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sync run past the server-side timeout returns a 202 handle.
+
+    Driven over an httpx ``ASGITransport`` like
+    :func:`test_async_run_returns_handle_then_poll`, and for the same reason:
+    the converted run keeps going in the background after the 202. The sync
+    :class:`TestClient` closes its per-request event loop the moment the
+    POST returns, which cancels that run in the middle of a database call
+    (since #4221 a configured run reads the tenant conventions before its
+    first model turn). The cancelled aiosqlite worker thread then dies when
+    it reports back to the closed loop, and the next test that garbage-
+    collects that connection waits forever for a close that nobody runs
+    (#4270). Polling the run to its terminal state keeps the loop open
+    until nothing is left running.
+    """
+    install_fake_vault(monkeypatch)
     await _seed_definition()
     _install_invoker("eventually")
     monkeypatch.setenv("AGENT_SYNC_TIMEOUT_SECONDS", "0.0000001")
     get_settings.cache_clear()
     key = make_rsa_keypair("kid-timeout")
-    with respx.mock as r:
-        mock_discovery_and_jwks(r, public_jwks(key))
-        resp = client.post(
+    mock_discovery_and_jwks(respx.mock, public_jwks(key))
+    headers = {"Authorization": f"Bearer {_token(key)}"}
+
+    async with httpx.AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="https://testserver",
+    ) as ac:
+        resp = await ac.post(
             "/api/v1/agents/triage/run",
             json={"input": "go"},
-            headers={"Authorization": f"Bearer {_token(key)}"},
+            headers=headers,
         )
-    assert resp.status_code == 202, resp.text
-    assert resp.json()["converted_to_async"] is True
+        assert resp.status_code == 202, resp.text
+        body = resp.json()
+        assert body["converted_to_async"] is True
+        handle = body["run_id"]
+
+        status = ""
+        for _ in range(100):
+            poll = await ac.get(f"/api/v1/agents/runs/{handle}", headers=headers)
+            assert poll.status_code == 200, poll.text
+            status = poll.json()["status"]
+            if status == "succeeded":
+                break
+            await asyncio.sleep(0.02)
+
+    assert status == "succeeded"
 
 
 @pytest.mark.asyncio
@@ -694,3 +728,99 @@ async def test_cancel_run_read_only_rejected(client: TestClient) -> None:
             headers={"Authorization": f"Bearer {_token(key, role=TenantRole.READ_ONLY)}"},
         )
     assert resp.status_code == 403, resp.text
+
+
+# ---------------------------------------------------------------------------
+# #4908 -- the run input has a size limit
+# ---------------------------------------------------------------------------
+#
+# Both run routes share ``AgentRunRequest``, whose ``input`` carries
+# ``max_length=RUN_INPUT_MAX_CHARS``. A longer input is a 422 from the body
+# model, before the route handler runs: no run row, no model call. An input
+# exactly at the limit runs normally.
+
+_RUN_ROUTES = ("/api/v1/agents/triage/run", "/api/v1/agents/triage/run/events")
+
+
+class _RefusingInvoker(AgentInvoker):
+    """An invoker that counts, and fails on, every attempt to start a run.
+
+    Both run routes go through one of these two methods first: ``/run``
+    calls ``run``; ``/run/events`` calls ``ensure_runnable`` before it opens
+    the stream. A body the model rejects must reach neither.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(runtime=PydanticAgentRun(model_factory=lambda: _final_text("never")))
+        self.calls = 0
+
+    async def run(self, *args: object, **kwargs: object) -> Any:
+        self.calls += 1
+        raise AssertionError("a rejected input must not start a run")
+
+    async def ensure_runnable(self, *args: object, **kwargs: object) -> None:
+        self.calls += 1
+        raise AssertionError("a rejected input must not resolve a definition")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", _RUN_ROUTES)
+async def test_run_input_over_limit_is_422_and_starts_no_run(
+    client: TestClient, route: str
+) -> None:
+    """One character over the limit: 422 naming the field and the limit, no run."""
+    await _seed_definition()
+    invoker = _RefusingInvoker()
+    reset_agent_invoker_for_testing(invoker)
+    key = make_rsa_keypair("kid-too-long")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            route,
+            json={"input": "x" * (RUN_INPUT_MAX_CHARS + 1)},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+    assert resp.status_code == 422, resp.text[:200]
+    errors = resp.json()["detail"]
+    assert len(errors) == 1, errors
+    assert errors[0]["type"] == "string_too_long"
+    assert errors[0]["loc"] == ["body", "input"]
+    assert errors[0]["ctx"]["max_length"] == RUN_INPUT_MAX_CHARS
+    assert invoker.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_run_input_at_limit_runs(client: TestClient) -> None:
+    """Exactly RUN_INPUT_MAX_CHARS characters runs on ``/run``."""
+    await _seed_definition()
+    _install_invoker("fits")
+    key = make_rsa_keypair("kid-at-limit")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            _RUN_ROUTES[0],
+            json={"input": "x" * RUN_INPUT_MAX_CHARS},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+    assert resp.status_code == 200, resp.text[:200]
+    assert resp.json()["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_run_input_at_limit_streams(client: TestClient) -> None:
+    """Exactly RUN_INPUT_MAX_CHARS characters streams on ``/run/events``."""
+    await _seed_definition()
+    _install_invoker("fits")
+    key = make_rsa_keypair("kid-at-limit-sse")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        with client.stream(
+            "POST",
+            _RUN_ROUTES[1],
+            json={"input": "x" * RUN_INPUT_MAX_CHARS},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        ) as resp:
+            assert resp.status_code == 200, resp.read()[:200]
+            body = "".join(chunk for chunk in resp.iter_text())
+    assert "event: final" in body
+    assert "fits" in body

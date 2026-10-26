@@ -66,7 +66,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections.abc import Awaitable, Callable
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import httpx
 import structlog
@@ -469,6 +469,8 @@ class ConnectorAuthError(SessionLoginError):
         target_name: str | None = None,
         host: str | None = None,
         secret_ref: str | None = None,
+        remediation: str | None = None,
+        stage: Literal["establish", "call", "after_relogin"] = "establish",
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -476,6 +478,18 @@ class ConnectorAuthError(SessionLoginError):
         self.target_name = target_name
         self.host = host
         self.secret_ref = secret_ref
+        # Optional connector-specific fix, used by the dispatcher's
+        # ``connector_auth_failed`` builder in place of the generic
+        # "restage the stale credential" clause when the right fix is
+        # something else (e.g. VCFA 9.1's API-token field, #3865).
+        self.remediation = remediation
+        # Which step was rejected, so the dispatcher's summary says what
+        # really happened (#3566). ``establish`` (the default): the login
+        # POST itself. ``call``: a normal call on a live session was
+        # rejected with an auth/permission fault. ``after_relogin``: the
+        # connector already logged in again and retried the call once, and
+        # the fresh session was still rejected.
+        self.stage = stage
 
 
 def session_establish_auth_error(

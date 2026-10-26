@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 
 	"github.com/evoila/meho/cli/internal/api"
+	"github.com/evoila/meho/cli/internal/output"
 )
 
 // fakeOperationsClient is a per-package test double satisfying the
@@ -111,16 +113,29 @@ func (f *fakeOperationsClient) GetSearchApiV1OperationsSearchGetWithResponse(
 	return popSearchResp(&f.searchResponses), popErr(&f.searchErrors)
 }
 
-func (f *fakeOperationsClient) PostResultQueryApiV1OperationsResultQueryPostWithResponse(
+// PostResultQueryApiV1OperationsResultQueryPost turns the canned typed
+// response into the raw *http.Response the verb reads itself.
+func (f *fakeOperationsClient) PostResultQueryApiV1OperationsResultQueryPost(
 	_ context.Context,
 	params *api.PostResultQueryApiV1OperationsResultQueryPostParams,
 	body api.PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody,
 	_ ...api.RequestEditorFn,
-) (*api.PostResultQueryApiV1OperationsResultQueryPostResponse, error) {
+) (*http.Response, error) {
 	f.lastResultQueryParams = params
 	bodyCopy := body
 	f.lastResultQueryBody = &bodyCopy
-	return popResultQueryResp(&f.resultQueryResponses), popErr(&f.resultQueryErrors)
+	canned := popResultQueryResp(&f.resultQueryResponses)
+	if err := popErr(&f.resultQueryErrors); err != nil {
+		return nil, err
+	}
+	if canned == nil {
+		return nil, errors.New("fakeOperationsClient: no canned result-query response")
+	}
+	return &http.Response{
+		StatusCode: canned.HTTPResponse.StatusCode,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(bytes.NewReader(canned.Body)),
+	}, nil
 }
 
 func (f *fakeOperationsClient) Refresh(_ context.Context) error {
@@ -310,6 +325,158 @@ func TestGetSearchPassesTypedParams(t *testing.T) {
 	}
 	if p.Limit == nil || *p.Limit != 7 {
 		t.Fatalf("getSearch should pass typed Limit=%d; got %+v", 7, p.Limit)
+	}
+}
+
+// TestGetSearchSendsIncludeScores — --scores maps to include_scores=true.
+func TestGetSearchSendsIncludeScores(t *testing.T) {
+	body, _ := json.Marshal(SearchResponse{Hits: nil})
+	f := &fakeOperationsClient{
+		searchResponses: []*api.GetSearchApiV1OperationsSearchGetResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: body},
+		},
+	}
+	opts := searchOptions{ConnectorID: "vault-1.x", Query: "secret", Scores: true}
+	if _, err := getSearch(context.Background(), f, opts); err != nil {
+		t.Fatalf("getSearch: %v", err)
+	}
+	p := f.lastSearchParams
+	if p.IncludeScores == nil || !*p.IncludeScores {
+		t.Fatalf("--scores should send include_scores=true; got %+v", p.IncludeScores)
+	}
+}
+
+// TestGetExactOpSendsOpIDAndDecodesContract — --op-id sends only
+// connector_id + op_id and decodes the single contract (#3668).
+func TestGetExactOpSendsOpIDAndDecodesContract(t *testing.T) {
+	body := []byte(`{"operation": {"connector_id": "vault-1.x", "op_id": "vault.kv.read",
+		"summary": "Read a secret.", "description": null, "group_key": "kv",
+		"safety_level": "safe", "requires_approval": false,
+		"parameter_schema": {"type": "object", "properties": {"path": {"type": "string"}}},
+		"examples": [{"source": "parameter_schema", "param": "path", "value": "secret/app"}],
+		"target": {"required": true, "resolves_by": "name", "guidance": "Pass the target name."},
+		"result_shape": {"envelope_fields": ["status", "handle"], "guidance": "Use result_query."},
+		"pagination_hint": null, "recovery": ["Fix params and call again."]}}`)
+	f := &fakeOperationsClient{
+		searchResponses: []*api.GetSearchApiV1OperationsSearchGetResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: body},
+		},
+	}
+	opts := searchOptions{ConnectorID: "vault-1.x", OpID: "vault.kv.read", Limit: 10, GroupKey: "kv"}
+	got, err := getExactOp(context.Background(), f, opts)
+	if err != nil {
+		t.Fatalf("getExactOp: %v", err)
+	}
+	p := f.lastSearchParams
+	if p.OpId == nil || *p.OpId != "vault.kv.read" {
+		t.Fatalf("getExactOp should send op_id; got %+v", p.OpId)
+	}
+	if p.Q != nil || p.Group != nil || p.Limit != nil {
+		t.Fatalf("getExactOp should not send q/group/limit; got %+v", p)
+	}
+	if got.Operation.OpID != "vault.kv.read" || !got.Operation.Target.Required {
+		t.Fatalf("contract not decoded; got %+v", got.Operation)
+	}
+	var buf bytes.Buffer
+	printContract(&buf, &got.Operation)
+	for _, want := range []string{"vault.kv.read", "Pass the target name.", `"path"`, "secret/app", "Use result_query.", "Fix params"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("printContract missing %q in output:\n%s", want, buf.String())
+		}
+	}
+}
+
+// TestGetExactOpRateLimitedIsAnError — a 200 that carries the
+// backplane's rate_limited envelope must not decode into an empty
+// contract; the CLI reports the wait and exits non-zero (#3668).
+func TestGetExactOpRateLimitedIsAnError(t *testing.T) {
+	body := []byte(`{"status": "rate_limited", "error_code": "rate_limited", "kind": "rate",
+		"limit": 10, "retry_after_seconds": 7,
+		"error": "rate_limited: 10 dispatches per minute for this principal; retry after 7s"}`)
+	f := &fakeOperationsClient{
+		searchResponses: []*api.GetSearchApiV1OperationsSearchGetResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: body},
+		},
+	}
+	got, err := getExactOp(context.Background(), f, searchOptions{ConnectorID: "vault-1.x", OpID: "vault.kv.read"})
+	if err == nil {
+		t.Fatalf("expected an error for a rate_limited envelope; got contract %+v", got)
+	}
+	var limited *rateLimitedError
+	if !errors.As(err, &limited) {
+		t.Fatalf("expected *rateLimitedError; got %T: %v", err, err)
+	}
+	if limited.RetryAfterSeconds != 7 || limited.Limit != 10 {
+		t.Fatalf("retry guidance not decoded; got %+v", limited)
+	}
+	if !strings.Contains(err.Error(), "wait 7 seconds") {
+		t.Errorf("error should name the wait; got %q", err.Error())
+	}
+}
+
+// TestRunExactOpRateLimitedRendersWaitAndNoContract — end to end
+// through the verb: nothing on stdout, the wait on stderr, non-zero exit.
+func TestRunExactOpRateLimitedRendersWaitAndNoContract(t *testing.T) {
+	body := []byte(`{"status": "rate_limited", "limit": 10, "retry_after_seconds": 7,
+		"error": "rate_limited: 10 dispatches per minute for this principal; retry after 7s"}`)
+	f := &fakeOperationsClient{
+		searchResponses: []*api.GetSearchApiV1OperationsSearchGetResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: body},
+		},
+	}
+	cmd := newSearchCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	err := runExactOp(cmd, f, "https://backplane.example", searchOptions{
+		ConnectorID: "vault-1.x", OpID: "vault.kv.read",
+	})
+	if err == nil {
+		t.Fatal("expected a non-nil error so the process exits non-zero")
+	}
+	var coder output.ExitCoder
+	if !errors.As(err, &coder) || coder.ExitCode() != output.ExitUnexpected {
+		t.Fatalf("expected exit %d; got %v", output.ExitUnexpected, err)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout should stay empty; got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "wait 7 seconds") {
+		t.Errorf("stderr should carry the retry guidance; got %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "needs approval") {
+		t.Errorf("stderr must not render a blank contract; got %q", stderr.String())
+	}
+}
+
+// TestGetSearchRateLimitedIsAnError — ranked mode shares fetchSearch,
+// so the same envelope is an error there too instead of "0 hit(s)".
+func TestGetSearchRateLimitedIsAnError(t *testing.T) {
+	body := []byte(`{"status": "rate_limited", "limit": 10, "retry_after_seconds": 3, "error": "x"}`)
+	f := &fakeOperationsClient{
+		searchResponses: []*api.GetSearchApiV1OperationsSearchGetResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: body},
+		},
+	}
+	_, err := getSearch(context.Background(), f, searchOptions{ConnectorID: "vault-1.x", Query: "read", Limit: 10})
+	var limited *rateLimitedError
+	if !errors.As(err, &limited) || limited.RetryAfterSeconds != 3 {
+		t.Fatalf("expected *rateLimitedError with retry 3; got %T: %v", err, err)
+	}
+}
+
+// TestRateLimitedEnvelopeIgnoresRealResults — a normal contract or
+// hits body is never mistaken for a rate-limit refusal.
+func TestRateLimitedEnvelopeIgnoresRealResults(t *testing.T) {
+	for _, body := range []string{
+		`{"operation": {"op_id": "vault.kv.read"}}`,
+		`{"hits": [], "query_duration_ms": 1}`,
+		`{"status": "ok"}`,
+		`not json`,
+	} {
+		if got := rateLimitedEnvelope([]byte(body)); got != nil {
+			t.Errorf("body %q wrongly read as rate limited: %+v", body, got)
+		}
 	}
 }
 
@@ -704,6 +871,88 @@ func TestRunCallAwaitingApprovalRealPath(t *testing.T) {
 	}
 }
 
+// TestRunCallUnknownStatusNamesVersionSkew — a status the CLI does not
+// know (old CLI, newer backplane) exits 4 on the real runCall path with
+// a message that names the likely version gap instead of "invalid", and
+// prints no result envelope.
+func TestRunCallUnknownStatusNamesVersionSkew(t *testing.T) {
+	cr, _ := json.Marshal(CallResult{Status: "queued_for_window", OpID: "argocd.app.sync"})
+	f := &fakeOperationsClient{
+		callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: cr},
+		},
+	}
+	withFakeClient(t, f)
+
+	cmd := newCallCmd()
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs([]string{"argocd-api-3.x", "argocd.app.sync", "--backplane", "https://x"})
+	err := cmd.Execute()
+	var ec output.ExitCoder
+	if !errors.As(err, &ec) || ec.ExitCode() != output.ExitUnexpected {
+		t.Fatalf("unknown status must exit %d; got %v", output.ExitUnexpected, err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("no envelope on stdout for an unknown status; got %q", out.String())
+	}
+	for _, want := range []string{"queued_for_window", "probably newer than this CLI", "meho status"} {
+		if !strings.Contains(errBuf.String(), want) {
+			t.Errorf("stderr missing %q; got %q", want, errBuf.String())
+		}
+	}
+	if strings.Contains(errBuf.String(), "invalid") {
+		t.Errorf("unknown status must not be called invalid; got %q", errBuf.String())
+	}
+}
+
+// TestRunCallRateLimitedExitsOne — status=rate_limited is a known
+// dispatcher refusal (#3500), not a version gap. `operation call` prints
+// the envelope, including extras.retry_after_seconds, and exits 1 via
+// errOpError (not exit 4), in both human and --json mode.
+func TestRunCallRateLimitedExitsOne(t *testing.T) {
+	for _, jsonOut := range []bool{false, true} {
+		errText := "rate_limited: over the dispatch rate limit; retry after 30s"
+		cr, _ := json.Marshal(CallResult{
+			Status: "rate_limited", OpID: "vault.kv.read", Error: &errText,
+			Extras: json.RawMessage(`{"error_code":"rate_limited","kind":"rate","limit":5,"retry_after_seconds":30}`),
+		})
+		f := &fakeOperationsClient{
+			callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+				{HTTPResponse: makeHTTPResp(200), Body: cr},
+			},
+		}
+		withFakeClient(t, f)
+
+		cmd := newCallCmd()
+		var out, errBuf bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errBuf)
+		args := []string{"vault-1.x", "vault.kv.read", "--backplane", "https://x"}
+		if jsonOut {
+			args = append(args, "--json")
+		}
+		cmd.SetArgs(args)
+		err := cmd.Execute()
+		if !errors.Is(err, errOpError) {
+			t.Fatalf("json=%t: rate_limited must exit 1 via errOpError; got %v", jsonOut, err)
+		}
+		var ec output.ExitCoder
+		if errors.As(err, &ec) {
+			t.Fatalf("json=%t: rate_limited must not carry exit code %d", jsonOut, ec.ExitCode())
+		}
+		for _, want := range []string{"rate_limited", "retry_after_seconds"} {
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("json=%t: stdout missing %q; got %q", jsonOut, want, out.String())
+			}
+		}
+		if strings.Contains(errBuf.String(), "does not know") {
+			t.Errorf("json=%t: rate_limited was treated as an unknown status: %s", jsonOut, errBuf.String())
+		}
+	}
+}
+
 // TestRunCallAwaitingApprovalJSON — with --json the parked envelope
 // round-trips as the full OperationResult JSON (incl.
 // extras.approval_request_id) and the command exits 0.
@@ -737,6 +986,51 @@ func TestRunCallAwaitingApprovalJSON(t *testing.T) {
 	extras, ok := decoded["extras"].(map[string]any)
 	if !ok || extras["approval_request_id"] != "ar-op-1" {
 		t.Errorf("json envelope must carry extras.approval_request_id; got %v", decoded["extras"])
+	}
+}
+
+// TestRunCallAwaitingApprovalRendersAuditReceipt — a multi-step operation
+// that stops for approval already has an audit row. On the real runCall
+// path the parked text output shows its id and exits 0 (#4833). A null
+// audit_id prints no line.
+func TestRunCallAwaitingApprovalRendersAuditReceipt(t *testing.T) {
+	const auditID = "55555555-5555-5555-5555-555555555555"
+	id := auditID
+	for name, got := range map[string]*string{"present": &id, "null": nil} {
+		t.Run(name, func(t *testing.T) {
+			cr, _ := json.Marshal(CallResult{
+				Status: "awaiting_approval", OpID: "argocd.app.sync", DurationMs: 7,
+				Extras:  json.RawMessage(`{"approval_request_id":"ar-op-2"}`),
+				AuditID: got,
+			})
+			f := &fakeOperationsClient{
+				callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+					{HTTPResponse: makeHTTPResp(200), Body: cr},
+				},
+			}
+			withFakeClient(t, f)
+
+			cmd := newCallCmd()
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetArgs([]string{"argocd-api-3.x", "argocd.app.sync", "--target", "test-target", "--backplane", "https://x"})
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("awaiting_approval must not be an error (parked, exit 0); got %v", err)
+			}
+			if !strings.Contains(out.String(), "meho approvals show ar-op-2") {
+				t.Errorf("parked hint must still be present:\n%s", out.String())
+			}
+			if got == nil {
+				if strings.Contains(out.String(), "audit receipt:") {
+					t.Errorf("null audit_id must not render a receipt:\n%s", out.String())
+				}
+				return
+			}
+			if !strings.HasSuffix(out.String(), "audit receipt: "+auditID+"\n") {
+				t.Errorf("parked render must end with the audit receipt:\n%s", out.String())
+			}
+		})
 	}
 }
 

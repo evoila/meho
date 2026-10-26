@@ -10,7 +10,12 @@ guard, resume-target fix, write-op secret redaction) + #1503 (G0.20-T3
 
 ## Overview
 
-The approval substrate parks `requires_approval` / `caution` / `dangerous`
+Which calls wait for approval depends on the op's safety level and on who
+calls it (an agent, a person, or a service account). The table in
+[agent-permission-model.md](agent-permission-model.md#safety-levels-at-a-glance)
+shows each case.
+
+The approval substrate parks `requires_approval` / `caution` / `dangerous` / `destructive`
 dispatches durably and lets an operator approve or reject them
 across **REST, MCP, and CLI** transports. Two layers, one source of
 truth:
@@ -22,12 +27,11 @@ truth:
   "decision" row on approve/reject/expire).
 - **T5 wires the operator surfaces on top:** `GET /api/v1/approvals/{id}`
   (inspect), `meho_approvals_{list,get,approve,reject}` MCP tools, and
-  `meho approvals {list,show,approve,reject}` CLI verbs. T5 also adds
-  the broadcast notifications: each `create_pending_request` /
-  `approve_request` / `reject_request` publishes an
-  `approval.{pending,approved,rejected}` event via
-  `broadcast.publisher.publish_event` so a `broadcast_watch` operator
-  session learns of pending requests without polling.
+  `meho approvals {list,show,approve,reject}` CLI verbs. Since #3758 no
+  approval step is published to Broadcast. `record_approval_step_event`
+  records `approval.{pending,approved,rejected,expired}` only for the
+  paired add-on that asked (#3027); the audit log records every step; the
+  agent waiter, the bell badge and the console read the stored row.
 
 The durable state is one `approval_request` row (table created by
 `backend/alembic/versions/0023_create_approval_request.py`, T4 #817).
@@ -89,6 +93,62 @@ terminal, so it cannot be approved (the pending guard raises
 `ApprovalRequestAlreadyDecidedError`) — an expired run-bound request can
 never be claimed or re-dispatched (#2293).
 
+## The params hash on requests and audit rows
+
+Two kinds of rows carry a keyed hash of a call's params:
+
+- **The approval request** (`approval_request.params_hash`) binds the exact
+  call. It is HMAC-SHA256 with a server key over every value
+  (`compute_params_hash` in `operations/_validate.py`). Before an approved
+  call runs, MEHO checks the params against it (`params_hash_matches`), so a
+  call that changed any value, a password too, does not match.
+  The request also keeps the params themselves, because MEHO runs the
+  approved call with them:
+  - For most operations they are stored in plain form in
+    `approval_request.params`.
+  - For a `credential_write` operation they are not on the request row.
+    They are encrypted in `approval_execution_payload` instead (see
+    "Credential-write execution custody" below).
+- **Audit rows** (`payload.params_hash` on dispatch, MCP and hosted-agent
+  tool rows, and `operation_run.params_hash`) store the hash, not the params.
+  They use the same keyed hash, but each secret-named value (`password`,
+  `client_secret`, `api_key` and similar, the names the broadcast scrub
+  uses) is replaced by a fixed marker first (`compute_audit_params_hash`).
+  Two calls with the same other values get the same hash. For a call without
+  secret-named values, both hashes are equal.
+
+The server key is derived from `DATABASE_URL` (HMAC-SHA256 under a fixed
+label). Every install has that value, the key is never stored, and there is
+no new setting. What follows:
+
+- Hashes can be compared inside one install. Rows written before the keyed
+  hash hold a plain SHA-256: they stay readable, but they do not match new
+  hashes. The column format (64 hex characters) is unchanged, so there is no
+  migration.
+- A request that was already waiting for approval when MEHO was upgraded
+  holds the plain hash. The approval check accepts it for the request's own
+  params, so the request can still be approved.
+- When `DATABASE_URL` changes (for example a new database password), the key
+  changes: new hashes no longer match older ones, and a request that waits
+  for approval at that moment must be asked for again.
+- A client cannot compute these hashes itself, because they need the server
+  key. To match a request to a call, use the `approval_request_id` the call
+  returns, or the `preview_hash` of a destructive call.
+
+The satellite work item is the exception: `gateway_command.params_hash` is a
+plain SHA-256 (`params_digest`), because the runner checks it again and holds
+no server key. That row stores the params themselves anyway.
+
+The effect rows a satellite forwards (`gateway.command.effect`) are audit rows
+like the others:
+
+- `params_hash` is the same audit hash, computed from the command's stored
+  params. When no command matches the record's digest, it is the keyed hash
+  of the runner's digest (`compute_audit_digest_hash`).
+- `record_hash` and `signature` hold keyed hashes too.
+- The plain values stay where they are checked: with the runner, in the chain
+  head (`runner_effect_chain`) and on the `gateway_command` row.
+
 ## Credential-write execution custody (#3537)
 
 For every operation classified as `credential_write`, the parked
@@ -103,14 +163,62 @@ CLI, UI, audit, and broadcast views.
 Parking fails closed before its transaction commits if the key is missing or
 not a valid Fernet key. The key is deliberately independent of
 `UI_SESSION_ENCRYPTION_KEY`: console enablement must never decide credential
-custody. Configure Helm with an existing Kubernetes Secret:
+custody.
 
-```yaml
-approvalHandoff:
-  enabled: true
-  secretName: meho-approval-handoff
-  secretKey: approval_handoff_encryption_key
-```
+### Required: set the custody key (#3712)
+
+**`APPROVAL_HANDOFF_ENCRYPTION_KEY` is REQUIRED** on every deployment where a
+credential-write operation (for example a Vault KV write) may wait for
+approval. This holds for human and service callers alike. Without a valid key,
+MEHO denies the operation instead of letting it wait, with the message
+`credential-write approval custody is unavailable; configure a valid
+APPROVAL_HANDOFF_ENCRYPTION_KEY before parking this operation`. The Helm chart
+keeps `approvalHandoff` off by default, so an install with unchanged values has
+no key. Since v0.35.2 such an install denies these operations.
+
+Not affected: a credential-write that runs at once under a standing grant (it
+never waits, so it needs no key), and approvals that were already waiting
+before the v0.35.2 upgrade.
+
+Check the state before the first denial: `GET /ready` shows
+`features.approval_custody` with `custody` set to `configured`, `missing` or
+`malformed`. The key value never appears there. `helm install` and
+`helm upgrade` also print a warning while `approvalHandoff.enabled` is false.
+
+Set it up in three steps:
+
+1. Create a Fernet key:
+
+   ```bash
+   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+   ```
+
+2. Store it in a Kubernetes Secret. Pipe it in, so the key stays out of shell
+   history and the process list:
+
+   ```bash
+   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode(), end='')" \
+     | kubectl -n <namespace> create secret generic meho-approval-handoff \
+         --from-file=approval_handoff_encryption_key=/dev/stdin
+   ```
+
+   Or sync the Secret through your usual secret manager (for example an
+   ExternalSecret).
+
+3. Point the chart at the Secret and run `helm upgrade`:
+
+   ```yaml
+   approvalHandoff:
+     enabled: true
+     secretName: meho-approval-handoff
+     secretKey: approval_handoff_encryption_key
+   ```
+
+With a built-in part of the core on (`corePostgres.enabled` or
+`coreKeycloak.enabled`), the install makes this key itself, in the Secret
+`<release>-core-approval-handoff` (key `approval_handoff_encryption_key`).
+Skip steps 1 and 2 and set `approvalHandoff.secretName` to that name. See
+[core-secrets.md](core-secrets.md).
 
 The chart uses `secretKeyRef`; never place the key in `values.yaml`. Rotate by
 creating a new Fernet key in the referenced Secret and restarting all
@@ -427,6 +535,128 @@ routed to `NEEDS_APPROVAL`, re-running the gate on resume would re-queue
 the call instead of executing it, so the bypass is what lets the
 approved op run.
 
+## Delegated decisions: the reason-line convention (#3692)
+
+Sometimes an approver decides because **another person told them to, in
+writing**. The approver still decides under their own identity
+(`reviewed_by`). The decision reason records the other person, their
+words, and where the work is tracked. It uses three `Key: value` lines
+at the end of the reason, in the style of git trailers
+(`Signed-off-by:`):
+
+```text
+Ran the delete after sign-off in the change window.
+
+Instructed-by: lead@example.com
+Instruction: "please run the cleanup tonight"
+Refs: #12, CHG-9
+```
+
+Rules (`parse_delegation` in `operations/approval_queue.py`, pure and
+deterministic):
+
+- A reason is **delegated** when any line starts with `Instructed-by:`.
+  Keys are case-insensitive.
+- The trailer lines must be the **last paragraph** of the reason (after
+  a blank line), and every line in that paragraph must be `Key: value`.
+  Other keys in the block are ignored.
+- `Instructed-by:`, `Instruction:` and `Refs:` must all be present and
+  non-empty. `Refs:` is comma-separated. Surrounding double quotes on
+  the instruction are removed; the words inside are kept as written.
+- A key may appear only once.
+
+If a delegated reason breaks a rule, `DelegatedReasonInvalidError` is
+raised **before** any state change, so the row stays `pending` and no
+decision audit row is written. Both `approve_request` and
+`reject_request` call the parser, so every decide surface gets the same
+check:
+
+| Surface | Refusal |
+|---|---|
+| REST `/approve`, `/reject`, `/decide` | 422, `detail` starts with `delegated_reason_invalid:` |
+| Console approve / deny | the modal re-renders with a 422 banner naming what is missing |
+| CLI `meho approvals approve` / `reject --reason` | posts to `/decide`; prints the 422 body |
+
+**On the ledger.** There is no new column and no migration (the same
+choice as the #2087 break-glass audit). A valid delegated decision adds
+a `delegation` object to the `approval.decision` audit row's payload,
+next to the verbatim `reason`:
+
+```json
+{"decision": "approved", "reviewed_by": "<approver sub>",
+ "reason": "Ran the delete ...\n\nInstructed-by: ...",
+ "delegation": {"instructed_by": "lead@example.com",
+                "instruction": "please run the cleanup tonight",
+                "refs": ["#12", "CHG-9"]}}
+```
+
+It also emits the WARNING log event `approval_delegated_decision`
+(`approval_request_id`, `op_id`, `decision`, `reviewed_by`,
+`instructed_by`, `tenant_id`). Find delegated decisions on the ledger by
+filtering `approval.decision` rows whose payload has a `delegation` key.
+
+**On the read surfaces.** `get_decision_delegation` reads the block back
+from the decision audit row. `GET /api/v1/approvals/{id}` carries it as
+the optional `delegation` field of `ApprovalRequestView` (the list view
+leaves it `null`). `meho approvals show` and the `approve` / `reject`
+summary print `Instructed by` / `Instruction` / `Refs`. The console shows
+the same three lines on the decided modal and on the outcome card right
+after a decision (`project_request_to_view(row, delegation)`).
+
+**Reason length.** All three REST bodies (`ApproveRequestBody`,
+`RejectRequestBody`, `DecideRequestBody`) and the console form cap
+`reason` at `MAX_REASON_LENGTH` (2000 characters). A longer reason is a
+422.
+
+`work_ref` is unchanged: it stays the requester-side change ref. The
+`Refs:` values may match it, but they do not have to.
+
+### Delegated decisions are allowed only on lab-class deployments (#3693)
+
+On production, an approve or reject must be the approver's own call.
+A decision made on someone else's instruction is allowed only on a
+lab-class deployment. MEHO has no environment object, so the deployment
+says which class it is with one boot switch, like the self-approval
+switch:
+
+| Setting | Env var | Helm value | Default |
+|---|---|---|---|
+| `Settings.approval_allow_delegated_decision` | `APPROVAL_ALLOW_DELEGATED_DECISION` | `config.approvalAllowDelegatedDecision` | `false` (production) |
+
+The switch is read from the environment at boot. No request field,
+header, or parameter can change it.
+
+How the check runs (`_check_delegated_allowed` in
+`operations/approval_queue.py`):
+
+- Both `approve_request` and `reject_request` call it right after
+  `parse_delegation`, before any state change. So it covers REST, CLI,
+  and console at once. There is no MCP decision path.
+- An ordinary decision (no `Instructed-by:` line) always passes, on
+  every deployment.
+- An incomplete delegation block is still a 422 (`delegated_reason_invalid`),
+  checked first.
+- A valid delegation block with the switch off raises
+  `DelegatedDecisionForbiddenError`. The row stays `pending` and no
+  decision audit row is written. MEHO logs the WARNING event
+  `approval_delegated_decision_refused` (`approval_request_id`, `op_id`,
+  `decision`, `operator_sub`, `instructed_by`, `tenant_id`).
+- With the switch on, the decision goes through and is recorded as
+  described above.
+
+How a refusal reads:
+
+| Surface | Refusal |
+|---|---|
+| REST `/approve`, `/reject`, `/decide` | 403, `detail` starts with `delegated_decision_forbidden:` |
+| Console approve / deny | the modal re-renders with a 403 banner |
+| CLI `meho approvals approve` / `reject --reason` | posts to `/decide`; prints the 403 body |
+
+`GET /ready` shows the stance in
+`features.approval_queue.delegated_decision_posture`:
+`"production_own_hand_only"` (switch off) or
+`"lab_class_delegation_allowed"` (switch on).
+
 ## Single-operator tenants: use an agent-requester, not break-glass (#1738)
 
 The self-approval guard enforces requester != approver on the stable
@@ -583,8 +813,8 @@ Two changes close that gap, scoped to the **direct**-op path:
 **The `run_id` gate (no double-execution / agent-run regression
 guard).** `/decide` re-dispatches **only when
 `run_id IS NULL`** — i.e. a direct operator op. An **agent-run** request
-(`run_id` set) is still resumed in-process by the agent runtime off the
-`approval.approved` broadcast (the must-not-regress path); re-dispatching
+(`run_id` set) is still resumed in-process by the agent runtime once it
+reads the approved row (the must-not-regress path); re-dispatching
 it from `/decide` too would execute the op twice. So the agent-run
 resume path is untouched: it keeps its in-memory params, ignores the new
 column, and remains the sole re-dispatcher for `run_id`-bearing requests.
@@ -624,7 +854,7 @@ the existing exactly-one-resumer substrate rather than duplicating it:
    (#3079) — persists the re-dispatch's reduced result envelope onto
    `approval_request.resume_result` (nullable JSON, migration `0096`) right
    after the dispatch returns. Only the resumer that **won**
-   `claim_resume` (#2293) reaches the capture (`_persist_resume_result`), so
+   `claim_resume` (#2293) reaches the capture (`persist_resume_result`), so
    it runs at most once per approved request; a loser that no-ops
    `already_resumed` leaves the winner's result untouched. The stored value
    is `OperationResult.model_dump(mode="json")` — the **same** reduced /
@@ -659,9 +889,47 @@ The response (`ApprovalResultView`) carries `status`, `resumed`
 (`resumed_at is not None`), `reviewed_by` / `decided_at`, and `result` (the
 captured envelope, or `null` while unready). A consumer polls until
 `status == "approved"` and `result` is populated, then resumes by poll on the
-returned task id. `resume_result` is **internal to this surface** — like
-`params` it is never projected onto the default read view (`_view`) or a
-broadcast frame.
+returned task id. When the approved run failed on an upstream vim fault,
+`result.extras.upstream_fault` carries the fault type and full faultstring
+(#3567), so the owner can see why without the approver-owned
+flight-recorder handle. The `resume_result` **payload** is internal to this
+surface — like `params` it is never projected onto the default read view
+(`_view`) or a broadcast frame. Only a short summary of it (status, error
+code, audit id) appears on the list and show views; see "Approved, but the
+run failed" below (#3543).
+
+### Who owns a result handle from an approved run (#3548)
+
+The approved op runs under the **approver's** `Operator`. Before #3548 a
+large result spilled into a handle owned by the approver's `sub`. But
+`/result` serves only the **parker**, so the parker got an envelope with a
+handle it could not open (`handle_not_found`).
+
+Now the parker owns it:
+
+- `_dispatch_resume_with_bound_context` binds
+  `operations.reducer.handle_owner_sub_var` to `request.principal_sub` for
+  the run (token reset in `finally`).
+- `dispatcher._reduce_or_error` uses that value as
+  `reducer_context["operator_sub"]` when it is set. Otherwise it uses the
+  dispatching operator's `sub`, as before.
+- The tenant does not change. The approver can only load rows from its own
+  tenant, so the parker's tenant is the same.
+- Every spill in the run follows the binding, including the child ops of a
+  resumed multi-step (composite) op.
+
+What this means:
+
+- One owner per handle. The parker can page and query it with
+  `result_query`. Any other principal still misses, **including the
+  approver**. The approver still sees the summary and sample rows inline. The
+  approver did not ask for the data.
+- The audit model is unchanged. The run's audit row still names the
+  approver as the actor. The parker's `result_query` reads run under the
+  parker, so they match the parker's `approval.result` row.
+- Only the operator-surface resume does this. A normal dispatch, and the
+  in-process agent-run resume (it already runs as the parking agent), keep
+  handles owned by the caller.
 
 **Relation to the #3027 add-on step event.** `publish_approval_event`
 already durably records the *decision* (`approval.approved` / `.rejected`)
@@ -669,6 +937,239 @@ for the paired add-on that requested the approval
 (`AddonStepEventService.record_if_owned_committed`). That answers "was it
 approved?"; the `/result` surface answers "what did the approved re-dispatch
 produce?" — complementary, not a duplicate.
+
+## The audit row of an approved run (#3864)
+
+When a person approves a request, MEHO runs the operation. The run writes its
+own audit row, separate from the `approval.decision` row. The decision row
+only says "approved". The run row says whether the change landed.
+
+What the run row holds:
+
+- `method='DISPATCH'`, `path` and `payload.op_id` set to the real op (for
+  example `keycloak.user.create`).
+- `payload.result_status` is `ok` or `error`. A failed run also has
+  `payload.error` with the `error_code` and the safe details (#2680).
+- `payload.approval_request_id` names the request it ran for.
+- `parent_audit_id` points at the request's `approval.request` row, next to
+  the decision row (#2086). The agent-run resume sets `parent_audit_id` the
+  same way, but its run row has no `payload.approval_request_id` (follow
+  `parent_audit_id` to the request), and its `operator_sub` is the agent
+  that made the call, not the approver.
+- `operator_sub` is the approver, who ran it.
+
+The approve response (`dispatch_status`, `dispatch_error`) and the stored
+`resume_result` carry the same outcome. `resume_result.audit_id` is the id of
+the run row, for a failed run too.
+
+Before #3864 the REST `/approve` and `/decide` routes left their own log
+labels (`audit_op_id="approval.decide"` and siblings) in place during the run.
+The dispatcher copies every `audit_*` label into the run row, so the run row
+was labelled `approval.decide`. A search for the real op found the request
+and the decision, but no run. `_dispatch_resume_with_bound_context` now clears
+those labels for the run (`_run_audit_context`) and puts them back after. The
+route's own row keeps `approval.decide`.
+
+Two failures that must never read as success, both covered by
+`tests/test_approval_failed_run_record.py`:
+
+- **The password ref cannot be read.** `keycloak.user.create` and
+  `keycloak.user.reset_password` read the password from `password_secret_ref`.
+  When Vault refuses, cannot find, or cannot be reached for it (a connection
+  failure or timeout during the read), the run fails with
+  `vault_credentials_read_error`. The error shows only the ref prefix (for
+  example `tenants/…`) and the error class. No user is created.
+- **The Keycloak account may not write.** A 403 from Keycloak fails the run
+  with `connector_http_403`.
+
+## Retry-safe approval requests, binding identity, and run phase (#3486)
+
+A durable client, such as an add-on that drives a two-person governed
+delete, retries after a crash or restart. Three things make that safe.
+
+### 1. Send an `idempotency_key` so a retry gets the same request
+
+`call_operation` (REST `POST /api/v1/operations/call`, MCP `call_operation`)
+takes an optional `idempotency_key` (1 to 200 characters,
+`CallOperationBody.idempotency_key`). It only matters when the call waits
+for approval.
+
+- **First call.** The new `approval_request` row stores the key
+  (`idempotency_key` column, migration `0105`).
+- **Retry of the identical call.** If the same principal in the same tenant
+  has a `pending` or `approved` request with this key,
+  `create_pending_request` returns that request. The reply is the normal
+  `awaiting_approval` envelope (HTTP 200) with the **same**
+  `extras.approval_request_id` and `extras.approval_request_reused: true`.
+  No new row, no new `approval.request` audit row, no second
+  `approval.pending` event. The first row's audit record stands.
+- **Same key, different call.** "Identical" means the same `op_id`,
+  `connector_id`, target, `params_hash`, `preview_hash`, and `work_ref`. If
+  any of them differs, the call is refused with `status="denied"` and
+  `extras.error_code="idempotency_key_conflict"`, and
+  `extras.approval_request_id` names the request that holds the key. Nothing
+  is parked. The refusal writes a `denied` audit row.
+- **When the key is free again.** A `rejected` or `expired` request no
+  longer holds its key, so the same key parks a new request. An `approved`
+  request keeps its key even after it ran: a retry then returns the request
+  that already ran, so the op is never run twice.
+- **A late retry.** A request can pass its deadline (`expires_at`) while
+  it is still `pending`, because the expiry sweeper runs only every few
+  minutes, or not at all when it is off. Such a request can no longer be
+  approved, so a retry does not get it back. Instead, `create_pending_request`
+  locks it and expires it in the same transaction (`_lock_and_expire_pending`,
+  the same steps and the same `approval.decision` audit row as
+  `expire_stale_requests`). Like the sweeper, it records the expiry under
+  the system identity `system:approval-expiry` (`expiry_operator` in
+  `approval_queue.py`), not under the requester. Then it parks a new
+  request with the same key.
+  The reply carries the new `approval_request_id` and no
+  `approval_request_reused`. After commit the dispatcher publishes
+  `approval.expired` for the old request and `approval.pending` for the
+  new one.
+- **Who can match.** The key is scoped to `(tenant_id, principal_sub)`. Two
+  requesters, or two runs with different `work_ref` values, never share one
+  request. Without a key, nothing changes: every call that waits for
+  approval makes a new request.
+
+**Races.** A partial unique index,
+`approval_request_idempotency_key_idx` on `(tenant_id, principal_sub,
+idempotency_key) WHERE idempotency_key IS NOT NULL AND status IN
+('pending', 'approved')`, makes sure two racing calls cannot both insert.
+The losing insert runs in a savepoint (`_insert_idempotent_request`). When
+the index refuses it, the savepoint rolls back and the winner's row is
+returned the same way as a normal retry.
+
+Two late retries can also race to expire the same overdue request. Only one
+gets the row lock. When the other's locked re-read finds no `pending` row,
+the row changed under it: another retry expired it and parked a replacement,
+or a sweep, reject or approve got there first. `_resolve_idempotent_request`
+then looks the key up again and returns what holds it now, for example the
+replacement as a reused request. It never returns the expired row it read
+first. That second lookup refreshes the row the session already holds
+(`populate_existing`). This matters when an approve commits while the late
+retry waits for the lock: the row is now `approved`, and the retry returns
+it. With the cached `pending` state it would try to expire the row again,
+miss again, and never return.
+`tests/integration/test_approval_idempotent_retry_pg.py` runs both races
+(two late retries; a late retry against an approve) on a real Postgres.
+
+**What does not change.** The lookup runs inside `create_pending_request`,
+after every park gate in `_handle_needs_approval`. So a retry still goes
+through the policy gate, the destructive-tier `preview_hash` check (#3197),
+and the permission preflight. A retry with a stale `preview_hash` is refused
+with `preview_hash_mismatch`, as before. The key is not used for the
+sub-op requests a composite (multi-step) op makes, and not on the resume
+path. Tenant isolation and the one-resumer latch (`resumed_at`) are
+unchanged.
+
+### 2. `preview_hash` on list and show
+
+`ApprovalRequestView` (`GET /api/v1/approvals` and `GET
+/api/v1/approvals/{id}`) now carries `preview_hash`, the destructive-tier
+binding stored at park time. With `op_id`, `target_id`, and `params_hash`, a
+client can match a request to the row it previewed. It is `null` for a
+non-destructive request. The field is additive.
+
+### 3. `result_state`: has the approved op run yet?
+
+`status` keeps its four values (`pending` / `approved` / `rejected` /
+`expired`), so the migration `0023` `CHECK` constraint and every existing
+client are unchanged. Next to it, the list and show views carry
+`result_state`, worked out from the row by `approval_result_state` (it is
+not stored):
+
+| `result_state` | Meaning |
+|---|---|
+| `null` | `status` is not `approved`. |
+| `not_started` | Approved. No resumer has claimed the run yet (`resumed_at IS NULL`). |
+| `started` | A resumer claimed the run (`resumed_at` is set), but no result is stored yet. The op may still be running. |
+| `executed` | The stored result (`resume_result`) has `status == "ok"`. |
+| `failed` | A result is stored and its `status` is not `ok`. |
+
+So a client that lists or shows requests can tell "approved, not run yet"
+from "approved and run" without polling the owner-only `/result` read. The
+result body itself stays on `/result` only; the views show the phase, not
+the payload.
+
+Both resume paths store the result (`persist_resume_result`): the operator
+surface (`resume_dispatch_after_approval`) and the in-process agent waiter
+(`_resume_approved_or_already_resumed` in `agent/approval_wait.py`). So a
+request the agent resumed also reaches `executed` or `failed`. Limits of
+`started`: the result write is best-effort, and a re-dispatch that raised
+instead of returning an envelope stores nothing. In those cases the row
+stays `started`.
+
+### 4. Approved, but the run failed: `resume_outcome` (#3543)
+
+`status` stays `approved` even when the run after the approval failed (for
+example a Vault write that Vault refused). `result_state` already tells
+`executed` from `failed`. Next to it, the list and show views carry
+`resume_outcome`, a short summary read off the stored result by
+`operations/approval_outcome.py` (`resume_outcome`):
+
+| Field | Meaning |
+|---|---|
+| `resumed_at` | When MEHO started the run (the `resumed_at` claim). |
+| `result_status` | `status` of the stored result: `ok`, `error`, `denied`, ... `null` while no result is stored. |
+| `error_code` | `extras.error_code` of a failed run, for example `connector_error`. |
+| `audit_id` | The audit row the dispatcher wrote for the run. |
+
+`resume_outcome` is `null` for a request that is not approved, and before
+the run starts. The result body and the free-text `error` stay on the
+owner-only `/result` read: an odd or missing field reads as `null`, never
+raises.
+
+Where it shows:
+
+- **REST** `GET /api/v1/approvals` and `GET /api/v1/approvals/{id}`: the
+  `resume_outcome` field.
+- **MCP** `meho_approvals_list` / `meho_approvals_get`: `result_state` and
+  `resume_outcome`, same shape.
+- **CLI** `meho approvals list`: a `RUN` column (`not-run`, `started`,
+  `ok`, `FAILED`, or `-` when the request is not approved). `meho approvals
+  show` and `approve`: `Run:`, `Run started:`, `Run result:`, `Error code:`
+  and `Run audit:` lines, with the `meho audit show <id>` command for the
+  audit row.
+- **Console** `/ui/approvals`: a run badge next to the `approved` pill in
+  the history list (`ran OK`, `run failed`, ...). The detail modal of a
+  failed run shows a red banner with the error code and a link to the audit
+  row (`/ui/audit?audit_id=<id>`). The card after an approve says "Approved,
+  but the run failed" when the run returned an error. When another resumer
+  (usually the waiting requester) already ran the operation
+  (`already_resumed`), it shows the normal "Request approved" card.
+
+**Decision: reads of an approval request stay as they are here.** A client
+that polls `GET /api/v1/approvals/{id}` until the run ends makes one
+routine REST read per poll. Routine reads moving off the audit log and into
+request usage records is the job of #3757 (it retires the per-request
+wrapper rows), not of this change. The owner-only `/result` read keeps its
+`approval.result` audit row on purpose: it hands out the result payload,
+which is a data release worth a record. With `result_state` and
+`resume_outcome` on the list and show views, a client no longer needs to
+poll `/result` to learn whether the run ended.
+
+**Pinned by tests:** `tests/test_approval_resume_outcome.py` (summary
+shape, odd envelopes, a resume that errors shows on REST show, list and
+MCP), `tests/test_ui_approvals.py` (run badge, failed-run modal, failed
+approve card) and `cli/internal/cmd/approvals/approvals_test.go`.
+
+### The add-on governed-destroy round trip (#3478)
+
+For the add-on that proposes a destructive op: send an `idempotency_key`
+with the `call_operation` that carries the `preview_hash`. Derive the key
+from something stable on your side, for example your run id plus the row
+you want to delete. If you crash before you store the
+`approval_request_id`, send the identical call again with the same key. You
+get the same request back. Then watch `result_state` on `GET
+/api/v1/approvals/{id}`, and read the result body from `/result` once it is
+`executed` or `failed`.
+
+**Pinned by tests:** `tests/test_approval_idempotent_park.py` (retry,
+scoping, conflict, race, `result_state` on the REST list and show after both
+resume paths), `tests/integration/test_approval_idempotent_retry_pg.py` (two
+late retries, and a late retry against an approve, on a real Postgres) and
+`tests/migrations/test_migration_0105_add_approval_request_idempotency_key.py`.
 
 ## `proposed_effect` builder hook (#1437)
 
@@ -739,8 +1240,13 @@ Three invariants make the hook safe to wire on the park path:
    dispatcher merges that marker onto the identifier fields, so the
    parked row reads "blast-radius unknown: <reason>" instead of a bare
    identifier default a reviewer can't tell from a small action. The
-   reason string is the exception's type + message, truncated at 500
-   chars. A builder that *declines* (returns `None` — op not
+   reason string is the exception's type + message. The message is
+   redacted with the packaged default credential policy (the same one
+   the `connector_error` envelope uses) and then truncated at 500 chars,
+   because a builder fault can echo an upstream error body — for example
+   a Kubernetes admission webhook denial that quotes a password (#3876).
+   Redaction runs before the cut so a secret cannot survive as a
+   fragment. A builder that *declines* (returns `None` — op not
    previewable from these params) still collapses to the identifier-only
    default with no marker, as do connector-resolution faults outside
    the hook.
@@ -760,10 +1266,20 @@ Three invariants make the hook safe to wire on the park path:
    expected to return identity-only / scrubbed summaries. The generic
    params-echo default (#1856) scrubs the echoed params with **two**
    passes that reuse the existing redaction discipline:
-   `_scrub_secret_param_keys` masks values keyed by a well-known
-   credential name (`password` / `client_secret` / `token` / … —
-   recursively, since the connector-boundary engine walks Mappings
-   key-by-key without inspecting the *key*), then
+   `_scrub_secret_param_keys` masks values keyed by a secret-shaped
+   name (`password` / `admin_password` / `rootPassword` /
+   `client_secret` / `api_key` / … — recursively, since the
+   connector-boundary engine walks Mappings key-by-key without inspecting
+   the *key*). It uses `broadcast.events.is_secret_param_name`, the same
+   name check as the broadcast params scrub, so any param the broadcast
+   path flags as secret is also masked in the echo (#3808). It walks the
+   same containers too: every mapping and every sequence other than a
+   string (a list or a tuple). It also uses the same value rule: only a
+   string, mapping or sequence value is masked.
+   A bare boolean, number or `null` under a secret-shaped name (for
+   example `bind_secret_id: false` or `secret_id_ttl: 600`) stays
+   visible, because it is a setting, not a secret, and the approver
+   needs to see it. Then
    `apply_connector_boundary_redaction` (the same per-`(connector_id,
    tenant, op)` pipeline the response path and the dispatch-request
    preview run) catches secret *value* shapes (JWTs, bearer tokens,
@@ -773,7 +1289,11 @@ The only builder wired in #1437 is **`k8s.apply`**: it re-invokes the
 `k8s_apply` handler with `dry_run="server"` forced on (the API's
 `?dryRun=All`), so nothing persists and the per-document summary
 (resource identity + `resourceVersion` + `uid`) is the diff-preview the
-reviewer reads. The ArgoCD write ops register their own builders the same
+reviewer reads. When the API server rejects the dry-run (for example an
+admission webhook denial), the handler raises `ApplyRejectedError` and the
+row gets the `preview_unavailable` marker with the server's message in
+`preview_error`, so the reviewer sees that the apply will be rejected
+(#3876). The ArgoCD write ops register their own builders the same
 way (#1452): `argocd.app.set` / `argocd.appproject.update` populate
 `{before_spec, after_spec}` and `argocd.app.delete` populates
 `{cascade_resources}` from read-only GETs against the live
@@ -805,6 +1325,53 @@ in an `additionalProperties` representation) never reaches the durable
 row. `keycloak.role_mapping.assign` populates
 `{resource, username, id, realm, granted_roles}` (the granted realm role
 names). Further connectors register their own builders as needed.
+
+## Credential writes: what the approver sees (#4850)
+
+A credential write is an op pinned `credential_write` in
+`broadcast/events.py` (`_CREDENTIAL_WRITE_OPS`). When it waits for
+approval, the generic echo of params is turned off (invariant 3). So the
+approver sees only what a bespoke preview builder shows. Without one,
+the approver sees the op id, the target and the reason
+`credential_write_redacted`, and does not know which account, secret or
+host changes.
+
+Every credential write that can wait for approval now has a builder.
+Each builder shows what changes and never a secret value. These nine
+got one in #4850:
+
+| Op | Who waits for approval | The approver sees | Never shown |
+|---|---|---|---|
+| `keycloak.user.reset_password` | every call | user (`username` / `id`), realm, Vault path of the new password (`password_secret_ref`, mount, field), `temporary` | the password |
+| `vault.auth.userpass.update_password` | every call | mount, username, `sets_password` | the password |
+| `vault.auth.userpass.write` | every call | mount, username, `sets_password`, `token_policies` and whether they are replaced or kept | the password |
+| `k8s.secret.create` | every call | name, namespace, type, all key names, inline key names, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts | any value |
+| `k8s.job.create` | every call | name, namespace, service account, per container: name, image, env var names, `envFrom` Secret / ConfigMap names, command size in bytes | env values, the command and args text |
+| `sddc.host.validate` | an agent's call | host count; per host: `fqdn`, `username`, `storageType`, `networkPoolId` | the ESXi password and any other spec field |
+| `sddc.host.commission` | every call | the same as `sddc.host.validate` | the same |
+| `holodeck.router.patch` | every call | HoloRouter version, whether the call only checks (`verify_only`, a 9.1 router), the patch ids and the module file each one edits | nothing secret exists; the op takes no params |
+| `vmware.composite.vm.guest.file.read` | an agent's call | VM, guest path, whether MEHO downloads the bytes (`fetch_content`, `max_inline_bytes`), the guest login's store path (`guest_secret_ref`) | the guest login |
+
+Each builder copies the fields it shows by name. It never walks the
+whole params, so a new or extra field (a password in an open
+`HostCommissionSpec`, say) does not reach the stored request. All nine
+read only the params (and the target's version for Holodeck) and make
+no network calls. The builders live next to their connectors:
+`keycloak/ops_write_preview.py`, `vault/userpass_write_preview.py`,
+`kubernetes/ops_write_preview.py`, `sddc_manager/host_commission_preview.py`,
+`holodeck/router_patch_preview.py` and
+`vmware_rest/composites/_guest_file_read_preview.py`.
+
+**CI keeps it that way.** `tests/test_credential_write_preview_conformance.py`
+runs every typed-op registrar. It takes each registered op that is in
+`_CREDENTIAL_WRITE_OPS` and can wait for approval (`requires_approval`,
+or a `safety_level` above `safe`), and fails when the op has no builder.
+An op that must stay without a preview goes into
+`_NO_PREVIEW_CREDENTIAL_WRITES` in that test, with the reason. The list
+is empty today. Two credential writes have no builder and are not in the
+sweep: `vmware.composite.vm.guest.env.read` and
+`vmware.composite.vm.guest.process.list`. They are `safe`, so no call of
+theirs waits for approval by default.
 
 ## Catalog `safety_level` on every envelope (#1855)
 
@@ -864,6 +1431,32 @@ When such an op reaches `needs-approval`, `_handle_needs_approval` calls
   mismatch (params swapped between preview and call, or a forged/stale
   hash) → `preview_hash_mismatch`.
 
+**Every refusal is recorded (#4647).** A `destructive` call that is
+refused before it can wait for approval, with `preview_binding_required`,
+`preview_hash_mismatch` or `blast_radius_required`, writes one `denied`
+audit row on the op's own path through `dispatcher._audit_denied_and_return`,
+the same writer a policy denial and the #3542 preflight refusal use:
+`event_class=policy_decision`, synthetic status 403,
+`payload.result_status=denied`, and the refusal code under
+`payload.error.error_code`. No approval row is written and nothing reaches
+the vendor. A refused `destructive` step inside a multi-step operation
+(`composite.enforce_subop_policy`) writes the same row on the step's path,
+linked to the parent operation's audit id in `parent_audit_id`. The parent
+operation gets its own `denied` execution row from the dispatcher when the
+handler returns the refusal (#4275).
+
+Two system faults in `_handle_needs_approval` write no audit row on
+purpose. Neither is a decision about the call; both are a MEHO-side fault
+with no fitting audit event class. They leave different traces:
+
+- A missing or malformed approval encryption key
+  (`ApprovalHandoffKeyError`) returns a `denied` result whose message names
+  the key setting. Nothing is logged. The returned result is the only
+  record.
+- A failure while saving the approval request is logged as
+  `approval_queue_create_failed` (with the op id and the operator) and
+  returns a `denied` result.
+
 The verified hash is persisted on `ApprovalRequest.preview_hash` (nullable
 `Text`, migration `0086`) — **distinct** from `params_hash` (that hashes
 the request *params*; this hashes the *preview result* the approver was
@@ -888,7 +1481,13 @@ gate and the console modal read it without reaching into `preview`.
 `blast_radius_missing_reason` (`operations/_preview.py`) validates it; a
 missing/malformed block → `_handle_needs_approval` refuses the park with
 `denied` / `blast_radius_required` (naming the missing field) rather than
-falling back to the identifier-only default. So a `destructive` op that
+falling back to the identifier-only default. When the block is missing
+because the op's preview builder raised, the reason also carries the
+builder's error. A builder raises on purpose to refuse a delete before it
+waits for approval (the Keycloak delete guards, #3944), so the caller reads
+why it was refused. `result_blast_radius_required` runs the reason through
+`_sanitize_free_text` (secret-pattern redaction, then a 256-character cap),
+like every other exception text a result builder emits. So a `destructive` op that
 registers no blast-radius preview builder is un-parkable by construction —
 fail-closed. That refusal is **runtime-only**, though: a posture sweep that
 promotes an op to `destructive` without adding its builder ships an
@@ -1063,8 +1662,34 @@ hooks and merges them: the preview (or the identifier-only default when
 there is no preview) is the base, the preflight result is attached
 under `proposed_effect["permission_preflight"]` when it fired, and the
 catalog `safety_level` (#1855, above) is stamped on top. Both hooks are
-opt-in and fail-soft — a preflight that raises degrades to no banner;
-the park always proceeds.
+opt-in and fail-soft — a preflight that raises degrades to no banner and
+the park proceeds.
+
+**A will-be-denied verdict refuses the park (#3542).** When the preflight
+returns `will_be_denied: true`, MEHO does not write an approval row.
+`dispatcher._preflight_denied_refusal` runs after `_build_proposed_effect`
+and the destructive-tier checks, at both park points (`_handle_needs_approval`
+and the composite sub-op seam `composite.enforce_subop_policy`). It
+returns `status="denied"` with `error_code="write_capability_denied"` and
+`extras` `path` / `granted` / `required` / `reason` / `doc_ref` (the write
+policy, `connector-vault-policy.md#6-kv-v2-write-surface`). So no person
+spends an approval on a write the identity cannot perform. The caller adds
+the write grant and calls again. Both park points still write one `denied`
+audit row for the attempt on the refused op's own path (the refusal details
+ride under `payload["error"]`) and publish one `denied` broadcast event, the
+same as an ordinary policy denial. They share one writer,
+`dispatcher._audit_denied_and_return`. For a refused step inside a
+multi-step operation the row is written by the sub-op gate and carries the
+parent operation's audit id in `parent_audit_id`. The parent returns the
+step's result as is and gets its own `denied` execution row from the
+dispatcher (#4275); the step's row records the step's decision. A plain
+policy "no" for a step writes the same step row. Every row the step gate writes (this
+`denied` row and the `approval.request` row of a step that waits) carries
+the step's own policy result in `policy_decision`, `needs-approval`, not
+the parent's (#4646). The gate binds the step's result for its own call
+only, so the parent operation's own audit row keeps the parent's result. Before #3542 the verdict was only a
+warning and the op parked anyway; rows parked then still carry
+`write_capability_warning`, which the console modal shows as a banner.
 
 The KV-v2 write ops (`vault.kv.put` / `vault.kv.patch` /
 `vault.kv.delete`) register a preflight that probes
@@ -1080,6 +1705,15 @@ runs under the **reviewing** operator's token
 (`resume_dispatch_after_approval`); both share the `meho-mcp` role policy,
 so the preflight is the right early signal while the reviewer must carry
 the same grant.
+
+`k8s.secret.read_to_ref` (#3844) also registers a preflight. The op reads
+a Kubernetes Secret and writes the value to Vault through the
+`vault.kv.put` handler, so it gets the same `vault.kv.put` check on the
+path it writes to: `secret/data/tenants/<tenant_id>/<register_as>`. Its
+preview stays hidden (it is a credential op), but the check still runs,
+so a write Vault would refuse is refused at park time instead of after
+approval. See
+[`docs/codebase/connectors-kubernetes.md`](connectors-kubernetes.md).
 
 ## Transports
 
@@ -1168,7 +1802,9 @@ dispatcher re-checks `required_role` at `tools/call`.
 ### CLI (`cli/internal/cmd/approvals/`)
 
 `meho approvals list / show <id> / approve <id> / reject <id> [--reason]`
-verbs that hit the REST surface via the generated typed client.
+verbs that hit the REST surface via the generated typed client. `list`
+has a `RUN` column and `show` / `approve` print how the run of an approved
+request ended (#3543, see "Approved, but the run failed" above).
 
 ### Operator console (`backend/src/meho_backplane/ui/routes/approvals/`)
 
@@ -1209,7 +1845,7 @@ no new gate, service call, route, or migration.
 | `GET` | `/ui/approvals/badge` | Live **pending** count for the app-shell bell. Always `status='pending'` — it counts actionable work, not history. |
 | `GET` | `/ui/approvals` | Content-negotiated. A normal navigation (no `HX-Request`) → the **full-page console**: status tabs (Pending / Approved / Rejected / Expired / All), a `work_ref` filter, and the decision-history list. The bell's `hx-get` (`HX-Request: true`) → the existing pending **panel** modal fragment (unchanged). (G10.8-T #1827) |
 | `GET` | `/ui/approvals/list` | Decision-history partial — the HTMX swap target for the status tabs / `work_ref` filter / "Load more" offset pager. Reuses `list_pending(status=…, work_ref=…, offset=…)`; `tab=all` passes `status=None`. Pages with a real offset, not the badge's 50-row glance cap. (G10.8-T #1827) |
-| `GET` | `/ui/approvals/{id}` | Request-detail modal. A pending row offers Approve/Deny; a **decided** row renders read-only with a decision banner ("Approved/Rejected by X at T"). The `proposed_effect` envelope renders **structurally** (#2447), not as raw JSON (below). |
+| `GET` | `/ui/approvals/{id}` | Request-detail modal. A pending row offers Approve/Deny; a **decided** row renders read-only with a decision banner ("Approved/Rejected by X at T"). An approved row also shows how its run ended; a failed run turns the banner red (#3543). The `proposed_effect` envelope renders **structurally** (#2447), not as raw JSON (below). |
 | `POST` | `/ui/approvals/{id}/approve` | Approve in-process + re-dispatch the parked op + fail-open broadcast. |
 | `POST` | `/ui/approvals/{id}/reject` | Reject in-process + broadcast; the op never runs. |
 
@@ -1240,7 +1876,8 @@ free-text reason (an `audit_log` read deferred to a follow-up).
 badge (mirroring the ops-launcher `safety_badge` mold — error for
 `dangerous`, warning for `caution`) + an `op_class` chip in the header;
 a `role="alert"` warning banner when `write_capability_warning` is set
-(#2331); an error banner when `preview_unavailable` is true, carrying
+(#2331; new parks with that verdict are refused since #3542, so only older
+rows carry it); an error banner when `preview_unavailable` is true, carrying
 `preview_error` (#1628); a reason-keyed notice when `preview_populated`
 is false (`credential_write_redacted` → elevated-risk redaction copy,
 `connector_did_not_populate` → a neutral "no preview" note, #2332); and a
@@ -1268,7 +1905,7 @@ a phantom event cannot outlive a failed transaction:
 | Create | `approval.pending` | `create_pending_request` (dispatcher parks a `needs-approval` verdict). | `operations/dispatcher.py::_handle_needs_approval` |
 | Approve | `approval.approved` | `approve_request` succeeds. | `api/v1/approvals.py` (REST), `mcp/tools/approvals.py` (MCP) |
 | Reject | `approval.rejected` | `reject_request` succeeds. | `api/v1/approvals.py` (REST), `mcp/tools/approvals.py` (MCP) |
-| Expire | `approval.expired` | `expire_stale_requests` (periodic sweeper) per expired row. | `operations/approval_expiry.py::_sweep_one_tenant` (commits then publishes per returned row's `_audit_id`) |
+| Expire | `approval.expired` | `expire_stale_requests` (periodic sweeper) per expired row, or a late retry with the same idempotency key that finds its request still `pending` past the deadline. Both use the `system:approval-expiry` identity. | `operations/approval_expiry.py::_sweep_one_tenant` (commits then publishes per returned row's `_audit_id`); `operations/dispatcher.py::_handle_needs_approval` (publishes the `_expired_request` before the new `approval.pending`) |
 
 Payload: `approval_request_id`, `decision`, `connector_id`,
 `approval_op_id`. The event's `audit_id` field is the decision row's
@@ -1372,14 +2009,17 @@ service principal whose composite parked a child on the direct seam wrote
 `parent_audit_id = NULL` — an orphan approval the replay walk could not
 tie back to its composite.
 
-Note that a composite which returns the child's `awaiting_approval`
-result **verbatim** (the usual write-composite shape) writes no composite
-DISPATCH row of its own — the dispatcher passes a handler-returned
-`OperationResult` straight through. The child's row still records the
-composite's `audit_id` as its parent; whether that parent row is later
-persisted (a composite that continues past the park) is orthogonal to the
-lineage stamp. Reproducing the whole composite step on approve is a
-separate concern (#3351, below).
+A composite which returns the child's `awaiting_approval` result
+**verbatim** (the usual write-composite shape) gets its own DISPATCH row
+from the dispatcher since #4275: an `operation_execution` row with
+`result_status="awaiting_approval"` under the composite's `audit_id`,
+saved last, after the handler returns. The child's `approval.request` row
+records that id as its parent, so the parent row exists once the call
+returns. The composite's row keeps `awaiting_approval` forever; the
+approved work gets the second run's row, whose parent is the
+`approval.request` row. See "Results a handler returns" in
+[`audit_query.md`](audit_query.md). Reproducing the whole composite step
+on approve is a separate concern (#3351, below).
 
 ### Composite-child resume: re-enter the parent, not the child key (#3351)
 
@@ -1456,8 +2096,143 @@ composite's own dispatch audit row. This is enforced in
 `enforce_subop_policy` (the `NEEDS_APPROVAL` branch, keyed off the unconsumed
 `composite_resume_scope_var`) and is unreachable for shipped composites.
 
+#### Continuing where it stopped (#4217)
+
+Some steps run after the composite's main change already exists: the
+rename or power-on of a VM that was just deployed, the delete that cleans
+up a failed deploy, or `vm.create`'s rollback delete. Running the whole
+composite again for such a step repeats the main change (it deploys a
+second VM). So these steps tell the seam two things:
+
+- `resume_state`: JSON the composite saves on the approval row, under
+  `resume_parent["state"]`. During the re-run, `composite_resume_binding`
+  binds it on `composite_resume_state_var`, and the composite reads it with
+  `composite_resume_state(op_id)` (only the parent composite gets it). The
+  composite uses it to continue at the step that waited, with the same
+  parameters, so the approved sub-op still matches its stored parameter
+  hash. The state must pin what the step acts on: the object id, or the
+  resolved parameters. It must not hold a name the re-run would look up
+  again, because by then the name may point at something else, and the
+  step would no longer be the one the person approved.
+- `after_main_effect=True`: this step runs after the main change. The row
+  stores `resume_parent["after_main_effect"] = true`.
+
+**The safety-check change (the relaxed guard).** The multi-gate guard above
+does not apply to an `after_main_effect` step. Such a step may wait for
+approval even during a re-run, because its own re-run continues at that
+step and repeats no earlier write. `enforce_subop_policy` checks
+`if resume_scope is not None and not after_main_effect`. Steps without the
+mark still fail closed (`test_vm_create_multi_gate_resume_fails_closed_no_double_execute`).
+
+**Who the new request belongs to.** A step that waits again during a
+re-run gets a new approval request. That request names the requester of
+the request being re-run (`principal_sub`, `principal_act`,
+`principal_name`), not the reviewer who runs the re-run. Both resume paths
+pass that requester to `composite_resume_binding`, which binds
+`resume_requester_var`; `enforce_subop_policy` hands it to
+`create_pending_request(requester=...)`. So the reviewer path and the agent
+path save the same requester.
+
+**The risk, and the two checks that limit it.** With the guard relaxed, safety
+depends on the composite: its re-run must really skip every earlier write.
+Two checks in `enforce_subop_policy` stop a composite that gets this wrong:
+
+- `after_main_effect=True` without `resume_state` is refused
+  (`composite_resume_state_missing`), in every run, before the policy
+  check. Without state the re-run could only start from the beginning.
+- During the re-run of an `after_main_effect` park, until the approved
+  sub-op has cleared, any other governed write that is not itself
+  `after_main_effect` is refused before it runs, whatever the policy
+  verdict (`composite_resume_repeats_write`). That is a write the first run
+  already did.
+
+What is left: a composite can still repeat an earlier step that is itself
+marked `after_main_effect` (for example a second removal in the same
+cleanup), so only mark steps that are safe to run again. Ungoverned reads
+are not checked.
+
+Steps that use the switch today: in `vm.deploy_from_library` the rename,
+the power-on, the cleanup VM delete and the vApp destroy; in `vm.create`
+the rollback delete; in `vm.import_from_library` the power-on. Tests:
+`test_operations_subop_policy_gate.py` (the seam checks, on their own) and
+the `#4217` tests in `test_connectors_vmware_rest_composites_write_e2e.py`
+(through the real dispatcher, including three approvals in a row where
+each write runs once).
+
 A direct (non-composite) park is unchanged — `resume_parent` is NULL, so
 the resume keeps the generic re-dispatch of the stored `op_id`.
+
+#### Both resume surfaces read `resume_parent` (#3421)
+
+Two code paths can resume a request that waits for approval, and both
+handle a composite (multi-step operation) sub-op the same way:
+
+- the operator surface, `resume_dispatch_after_approval`
+  (`operations/approval_queue.py`);
+- the in-process agent waiter, `_resume_approved_or_already_resumed`
+  (`agent/approval_wait.py`).
+
+Both call one helper, `composite_resume_binding` in
+`operations/approval_queue.py`. When the row has a `resume_parent`, the
+helper returns the parent composite's `(op_id, params)` and sets
+`composite_resume_var` and `composite_resume_scope_var` to the approved
+sub-op while the parent runs again. When `resume_parent` is NULL it returns
+`None` and sets nothing. Because both paths share it, they cannot drift
+apart. `test_operator_and_agent_surfaces_resume_the_same_row_identically`
+checks that both paths run the same row the same way.
+
+What the agent waiter does:
+
+- **Composite sub-op waiting for approval.** It runs the parent composite
+  again (`_approved=True`) with the row's `connector_id`, the parent `op_id`
+  and the parent params. It keeps the rest of the agent's original call
+  (`work_ref`, …). The approved sub-op clears its gate and runs once. Before
+  #3421 the waiter re-sent the agent's call without clearing the sub-op, so
+  the sub-op created a second request and nothing ran.
+- **Target check.** The re-run uses the target the row saved by id
+  (`rehydrate_resume_target`, the same check the operator surface runs), not
+  the target name from the agent's original call. While the request waited,
+  that name may have moved to another target: the target was renamed, or
+  deleted and a new one created with the same name. Loading by id means the
+  approved write can only run against the original target. If the saved
+  target no longer resolves (soft-deleted or revoked), the waiter returns a
+  `denied` envelope and runs nothing. This check runs before the
+  one-resumer claim, so a refused resume leaves the claim free.
+  Covered by `test_composite_resume_uses_saved_target_when_name_was_reassigned`
+  and `test_composite_resume_fails_closed_when_saved_target_deleted_and_name_reused`
+  (unit) and the two `test_agent_waiter_composite_resume_*` tests (end to
+  end).
+- **Direct request (no `resume_parent`).** It runs the agent's original
+  `call_arguments` again, including the target name, with one change: the
+  `connector_id` is the catalog the request row stored. The park may have
+  run on a sibling catalog of the one the agent named (for example the agent
+  named `vmware-rest-9.0` for an 8.0.3 vCenter, so the park stored
+  `vmware-rest-8.0`). That stored catalog is the one policy checked and the
+  approver saw. An approved call never switches catalogs, so the resume runs
+  on the stored catalog or is refused with `unqualified_target_version` when
+  the target's detected version no longer fits it. Covered by
+  `test_agent_resume_runs_on_the_stored_sibling_catalog` and
+  `test_agent_resume_is_refused_when_the_target_version_moved`.
+- **Credential-write sub-op.** The row stores only the parent `op_id`; the
+  parent params live in the encrypted custody copy. For a composite sub-op
+  the claim winner consumes that copy to get the parent params. For a direct
+  request it still discards the copy.
+
+One difference stays on purpose: the agent waiter re-enters the composite
+as the **agent**, not as the reviewer. So every other governed sub-op is
+checked against the agent's own grants. If one would need its own approval,
+the multi-gate guard above fails closed
+(`composite_resume_multi_gate_unsupported`) on the agent path too, unless
+that step is marked `after_main_effect` (#4217): then it waits for its own
+approval. If the agent has no grant for it, that sub-op is denied.
+
+Note: every shipped governed composite is `requires_approval=True` at the
+top level, so an agent's first call makes the composite itself wait for
+approval (`resume_parent` NULL). A sub-op request with `resume_parent` set
+happens later, inside the resumed composite. Today the agent waiter does not
+wait on that second request; an operator surface resumes it. The waiter's
+composite branch makes the agent path correct whenever it does resume such
+a row.
 
 ## MCP elicitation URL-mode (forward-looking)
 
@@ -1488,6 +2263,84 @@ for the agent-run substrate's full shape, including the wait timeout
 (`Settings.agent_approval_wait_timeout_seconds`, default 30 min) and the
 fail-open semantics on broadcast outage.
 
+## An add-on proposes a governed destroy (#3478)
+
+A paired add-on signs in as a **service principal** (client credentials,
+`principal_kind=service`). It **can** drive a destructive op. It cannot run
+the op alone: a human must approve it. It needs no standing grant. This is
+the supported way for an add-on to do two-person deletes without a person
+typing each delete on the CLI.
+
+The rule that confuses people: the destructive tier is DENY **only for
+agent principals**. For service and user principals it waits for approval.
+The rule is recorded in
+[`governed-delete-operations.md`](../decisions/governed-delete-operations.md)
+("Who may propose").
+
+| Principal kind | Destructive op | Code |
+|---|---|---|
+| `agent` | Refused (DENY). Nothing is parked. | `auth/permissions.py:131` `_SAFETY_DEFAULT` + `:154` `_SAFETY_CEILING`; agent branch of `operations/_validate.py:450` `policy_gate` |
+| `service` | Waits for approval. No grant can approve it in advance. | `operations/_validate.py:362` `_non_agent_verdict` (the `destructive` branch); `operations/service_grants.py:758` `consult_and_record_grant` refuses the tier before any grant lookup |
+| `user` | Waits for approval. | `operations/_validate.py:362` `_non_agent_verdict` |
+
+### The round trip
+
+The add-on needs the `operator` role to call `POST /api/v1/operations/call`
+and `/preview`. Paths are under `backend/src/meho_backplane/`.
+
+1. **Preview.** The add-on calls `preview_operation` (REST
+   `POST /api/v1/operations/preview`) with the exact
+   `(connector_id, op_id, target, params)`. The reply carries a
+   `preview_hash`. The reply does **not** carry the blast-radius statement.
+2. **Call with the hash.** The add-on calls `call_operation` with the same
+   values plus `preview_hash` (`operations/meta_tools.py:427`
+   `CallOperationBody.preview_hash`, passed on to `dispatch` at `:1131`).
+3. **Park.** The policy gate returns `NEEDS_APPROVAL`, so the dispatcher
+   reaches `_handle_needs_approval` (`operations/dispatcher.py:2487`). For a
+   destructive op it runs `_destructive_binding_refusal` (`:2364`, called at
+   `:2567`) before it writes any row. That check recomputes the preview hash
+   on the server and needs a valid blast-radius block on `proposed_effect`.
+   A missing or wrong hash, or a missing block, is refused, and no row is
+   written. On success the row stores `preview_hash`, and the blast radius
+   lives on the row's `proposed_effect`. The add-on gets
+   `status="awaiting_approval"` and `extras.approval_request_id`. It should
+   store that id.
+4. **A human approves.** The approver must be a different person: there is
+   no self-approval for this tier, not even with break-glass
+   (`operations/approval_queue.py:1835` `_check_self_approval`). The approve
+   step checks the preview hash again (`:1926`
+   `_check_destructive_preview_binding`). The decision verbs are human-only
+   on every surface, so the add-on cannot approve its own request.
+5. **The op runs under the approver.**
+   `resume_dispatch_after_approval` (`operations/approval_queue.py:1221`)
+   re-runs the dispatch with the **approver's** `Operator`. So the approver's
+   role is what counts when the op runs, and the audit row for the delete
+   names the approver. The result is saved on the row
+   (`_persist_resume_result`, `:1359`). A large result goes into a result
+   handle that the add-on owns (see "Who owns a result handle" above).
+6. **The add-on reads the result.** The add-on polls
+   `GET /api/v1/approvals/{id}/result` (`api/v1/approvals.py:614`,
+   `read_approval_result` at `operations/approval_queue.py:2062`). Only the
+   principal that parked the op may read it; anyone else gets 403
+   `not_request_owner`, even the approver. The reply has `result: null`
+   until the op has run.
+
+A paired add-on can also read the approval outcome from its durable
+step-event stream ([`addon-step-events.md`](addon-step-events.md), #3027).
+That says *whether* the op was approved; `/result` says *what the run
+returned*.
+
+**Pinned by tests:**
+
+- `tests/test_connectors_harbor_robot_delete.py::test_service_principal_proposes_destroy_and_adopts_result`
+  — the full round trip for a service principal, including the `/result`
+  read by the parker and the 403 for the approver.
+- `tests/test_service_principal_grant_gate.py::test_service_principal_destructive_parks_and_grant_never_satisfies`
+  — a destructive op parks for a service principal even with a live
+  matching grant.
+- `tests/test_connectors_harbor_robot_delete.py::test_agent_principal_is_denied`
+  — the same op is refused for an agent principal.
+
 ## Service-principal standing grants + safety_level gate (#3151 / #3152)
 
 The non-agent gate (`_non_agent_verdict`, `operations/_validate.py`) gained
@@ -1506,11 +2359,67 @@ service`), leaving the human `USER` path unchanged:
   during an unattended run auto-approve instead. Each use writes an
   `approval.decision` / `auto-approved` audit row (this section's shape),
   carrying `grant_id` — same ledger visibility as a human decision.
+- **Lineage ids on the auto-approval row** (#3695): the grant-use row is
+  written at decision time with the same ids the parked path keeps, so an
+  auto-approval links to the call it cleared:
+  - `request_id` — the request's correlation id. The call's `DISPATCH` row
+    now carries the same `request_id` (it was always NULL before), so you
+    can find the call an auto-approval cleared, and its flight-recorder
+    trace, by matching `request_id`. In a multi-step operation all child
+    rows share the request id; use `parent_audit_id` to tell them apart.
+  - `agent_session_id` — the agent-run or MCP session
+    (`resolve_agent_session_id()`). NULL for a plain REST call, which has
+    no session.
+  - `parent_audit_id` — the multi-step parent's audit id
+    (`parent_audit_id_var`) when the cleared call is a child step. NULL for
+    a top-level call.
+
+  There is still no row while a call runs; a call only gets its `DISPATCH`
+  row when it ends. For long calls use async mode (`async: true` on REST
+  `/call` or on MCP `call_operation`): the `operation_run` row shows the
+  call as `running` with `started_at` for its whole run. See
+  [`async-governed-dispatch.md`](async-governed-dispatch.md).
 
 Grants are operator-role REST at `/api/v1/service-principals/grants`;
 delete-shaped ops are refused at creation (the grant list is the *floor*
 of what runs unattended, never a bypass of a modeled destructive gate).
 Full design: [`service-principal-grants.md`](service-principal-grants.md).
+
+## Sandbox mode (#4622)
+
+On an instance in **sandbox mode** (decision record
+[`docs/decisions/sandbox-mode.md`](../decisions/sandbox-mode.md)) the
+destructive-tier rule above has one exception: a standing grant made in
+the web console by a tenant admin, a **delete grant**, may cover a delete
+by a service principal. The instance holds only disposable test systems,
+so nothing waits for a person there. Everything else in this document
+stays as it is: people and agents keep their rules, a run approval never
+covers a delete, satellites get no delete, and self-approval stays
+forbidden.
+
+- The mode is one instance-wide switch, set at install time and fixed for
+  the life of the database (`meho_backplane/sandbox_mode.py`). Every other
+  instance shows `"sandbox_mode": "off"` on `/ready` and
+  `GET /api/v1/health`, and every audit row carries
+  `audit_log.sandbox_mode = false`.
+- A `destructive` call under a delete grant still needs its preview hash
+  and a valid blast radius. The gate runs the same checks the park path
+  runs (`_destructive_binding_refusal`) before it records the grant use,
+  so a refused call leaves no `approval.decision` row. The grant-use row
+  stores the hash and the blast radius in `payload`.
+- A delete below `destructive` (the verb `DELETE`, the `destructive` tag,
+  a delete name, a delete step) runs under a delete grant with no hash;
+  its grant-use row stores the proposed effect.
+- A `destructive` step gate or child call stays refused: it cannot carry a
+  preview hash (`preview_binding_required`, as today).
+- Delete grants live in `sandbox_delete_grant`, which an older build and an
+  instance with the mode off never read: after a rollback every delete
+  waits for a person again.
+- With the mode on, the park reasons add that a delete grant made in the
+  web console may cover the delete; with it off every reason text is
+  unchanged.
+
+Details: [`service-principal-grants.md`](service-principal-grants.md#sandbox-mode-4622).
 
 ## References
 

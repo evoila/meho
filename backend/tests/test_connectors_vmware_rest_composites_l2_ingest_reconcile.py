@@ -134,12 +134,13 @@ def _required_raw_sub_op_ids() -> set[str]:
 def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
     """Guard: the introspection finds every write composite's sub-op tuple.
 
-    Seventeen ``_SUB_OPS_*`` module constants today (the T6/#509 + vm.power
+    Eighteen ``_SUB_OPS_*`` module constants today (the T6/#509 + vm.power
     writes, the #2891 hardware trio, the two GOSC composites / #2892, the
     OVF/OVA content-library deploy / #2909, the typed HttpNfcLease import
     / #3229 — whose REST sub-ops ride the content-library find + download-session
-    actions — and the #3505 governed-allocation resource-pool create + delete,
-    all served by the pinned vcenter.yaml).
+    actions — the #3505 governed-allocation resource-pool create + delete,
+    and the 9.0+ REST arm of the #3198 vm.destroy, all served by the pinned
+    vcenter.yaml).
     ``vm.snapshot.revert`` no longer appears: both of its sub-ops moved to
     the vim surface in #2970 (the pinned vcenter.yaml serves no snapshot
     REST resource), so its manifest lives in
@@ -160,6 +161,7 @@ def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
         "_SUB_OPS_VM_CREATE",
         "_SUB_OPS_VM_CUSTOMIZE",
         "_SUB_OPS_VM_DEPLOY_FROM_LIBRARY",
+        "_SUB_OPS_VM_DESTROY",
         "_SUB_OPS_VM_DEVICE_CDROM",
         "_SUB_OPS_VM_IMPORT_FROM_LIBRARY",
         "_SUB_OPS_VM_MIGRATE",
@@ -173,16 +175,22 @@ def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
 def test_vm_deploy_from_library_sub_op_manifest_is_expected() -> None:
     """Pin the deploy_from_library manifest so a drift can't shrink the reconcile.
 
-    All four sub-ops are ``vcenter.yaml``-served REST paths (the OVF deploy,
-    both content-library find actions used for name resolution, and the
-    power-on), so — unlike the vim-shaped writes — they reconcile through the
-    generic ``_SUB_OPS_*`` sweep above rather than a ``_VIM_SUB_OPS_*`` lane.
+    All seven REST sub-ops are ``vcenter.yaml``-served paths (the OVF deploy,
+    both content-library find actions used for name resolution, the
+    power-on, and the #3697 failed-deploy cleanup: the OVF summary that
+    supplies the default VM name, the listing by the unique deploy name, and
+    the VM delete), so they reconcile through the generic ``_SUB_OPS_*``
+    sweep above. The #3697 rename is vim and lives in the separate
+    ``_VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY`` lane below.
     """
     assert set(_write._SUB_OPS_VM_DEPLOY_FROM_LIBRARY) == {
         "POST:/content/library?action=find",
         "POST:/content/library/item?action=find",
+        "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=filter",
         "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy",
         "POST:/vcenter/vm/{vm}/power?action=start",
+        "GET:/vcenter/vm",
+        "DELETE:/vcenter/vm/{vm}",
     }
 
 
@@ -440,6 +448,16 @@ def test_every_write_composite_sub_op_resolves_against_pinned_vcenter_spec() -> 
 # ``vi-json.yaml`` when the spec-shelf is configured.
 
 
+def test_vm_resource_allocation_set_reuses_the_disk_grow_vim_pair() -> None:
+    """#3880: allocation set rides the same reconciled RetrievePropertiesEx +
+    ReconfigVM_Task pair as vm.disk.grow -- no new vim op_id to reconcile."""
+    from meho_backplane.connectors.vmware_rest.composites import _vm_allocation
+
+    assert set(_vm_allocation._VIM_SUB_OPS_VM_RESOURCE_ALLOCATION_SET) == set(
+        _write._VIM_SUB_OPS_VM_DISK_GROW
+    )
+
+
 def test_vm_disk_grow_vi_json_sub_op_manifest_is_the_expected_pair() -> None:
     """Pin the disk-grow vi-json manifest so a drift can't shrink the reconcile."""
     assert set(_write._VIM_SUB_OPS_VM_DISK_GROW) == {
@@ -545,7 +563,17 @@ def test_vm_disk_grow_vi_json_paths_exist_in_the_pinned_spec() -> None:
 # the blast-radius preview reads. These are declared in
 # ``_write._VIM_SUB_OPS_VM_DESTROY`` (deliberately NOT in the ``_SUB_OPS_*``
 # namespace, so the vcenter.yaml sweep skips them). The 9.0+ arm is the
-# synchronous REST ``DELETE:/vcenter/vm/{vm}`` — a plain vcenter.yaml path.
+# synchronous REST ``DELETE:/vcenter/vm/{vm}`` — a plain vcenter.yaml path,
+# declared with its ``GET:/vcenter/vm/{vm}`` power-state read in
+# ``_write._SUB_OPS_VM_DESTROY`` and reconciled by the generic sweep above.
+
+
+def test_vm_destroy_rest_sub_op_manifest_is_the_expected_pair() -> None:
+    """Pin the destroy REST manifest so a drift can't shrink the reconcile."""
+    assert set(_write._SUB_OPS_VM_DESTROY) == {
+        "GET:/vcenter/vm/{vm}",
+        "DELETE:/vcenter/vm/{vm}",
+    }
 
 
 def test_vm_destroy_vi_json_sub_op_manifest_is_the_expected_pair() -> None:
@@ -661,6 +689,69 @@ def test_vm_import_from_library_vi_json_paths_exist_in_the_pinned_spec() -> None
         assert _vi_json_path_item_has_post(spec_text, path), (
             f"{path!r} is not a POST path item in the pinned vi-json.yaml — the "
             "import vi-json sub-op targets a path the spec does not serve"
+        )
+
+
+# ---------------------------------------------------------------------------
+# vm.deploy_from_library VI-JSON sub-op reconciliation (#3697)
+# ---------------------------------------------------------------------------
+#
+# The deploy runs under a unique name and renames the finished VM (or vApp)
+# to the requested name through the core vim ``ManagedEntity.Rename_Task``
+# (the pinned vcenter.yaml serves no REST rename), task-polled via
+# ``PropertyCollector.RetrievePropertiesEx``. Declared in
+# ``_write._VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY`` (deliberately NOT in the
+# ``_SUB_OPS_*`` namespace, so the vcenter.yaml sweep above skips them).
+
+
+def test_vm_deploy_from_library_vi_json_sub_op_manifest_is_expected() -> None:
+    """Pin the deploy rename vim manifest so a drift can't shrink the reconcile."""
+    assert set(_write._VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY) == {
+        "POST:/VirtualMachine/{moId}/Rename_Task",
+        "POST:/VirtualApp/{moId}/Rename_Task",
+        "POST:/VirtualApp/{moId}/Destroy_Task",
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+    }
+
+
+def test_vm_deploy_from_library_vi_json_sub_ops_round_trip_through_ingest() -> None:
+    """The deploy rename vim op_ids are byte-for-byte what the parser emits."""
+    required = set(_write._VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY)
+    spec = _build_vcenter_fixture(required)
+    spec_bytes = json.dumps(spec).encode()
+    spec_url = "https://specs.example.test/vi-json.yaml"
+
+    with _GETADDRINFO_PATCH, respx.mock(assert_all_called=False) as router:
+        router.get(spec_url).mock(
+            return_value=httpx.Response(
+                200, content=spec_bytes, headers={"content-type": "application/json"}
+            )
+        )
+        rows = parse_openapi(spec_url, spec_source="spec:vi-json.yaml")
+    ingested_op_ids = {row.op_id for row in rows}
+    assert required <= ingested_op_ids
+
+
+def test_vm_deploy_from_library_vi_json_paths_exist_in_the_pinned_spec() -> None:
+    """Each deploy vim sub-op path is a real POST path in the pinned vi-json.yaml.
+
+    ``ManagedEntity.Rename_Task`` and ``Destroy_Task`` are core vim25 methods
+    every managed entity inherits, so the pinned spec must serve the rename
+    for ``VirtualMachine`` and ``VirtualApp`` and the destroy for
+    ``VirtualApp`` (the cleanup of a failed vApp deploy, #3697). Skips when
+    the spec-shelf is not configured, so CI — where the env vars are wired —
+    is the operator-visible signal.
+    """
+    spec_path = resolve_vi_json_yaml()
+    if spec_path is None:
+        pytest.skip(VCENTER_SPEC_REASON)
+    spec_text = spec_path.read_text(encoding="utf-8")
+    for op_id in _write._VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY:
+        _, _, path = op_id.partition(":")
+        assert _vi_json_path_item_has_post(spec_text, path), (
+            f"{path!r} is not a POST path item in the pinned vi-json.yaml — the "
+            "deploy rename vi-json sub-op targets a path the spec does not serve"
         )
 
 
@@ -1016,8 +1107,8 @@ def test_3091_vim_paths_exist_in_the_pinned_spec(manifest_name: str) -> None:
 #
 # vm.create's optional ``nested_hv`` leg is vi-json, not vcenter REST:
 # ``VirtualMachineConfigSpec.nestedHVEnabled`` has no REST expression (the
-# #3087 recipe lanes pin that gap) and raw VI-JSON dispatch mounts on
-# ``/api`` — a 9.x-fleet shape that 404s on vCenter 8.0.x (#2466) — so the
+# #3087 recipe lanes pin that gap) and raw VI-JSON dispatch has no ``/api``
+# fallback and no Task polling (#2466, #3534) — so the
 # leg rides the same governed vmomi substrate as disk-grow:
 # ``POST:/VirtualMachine/{moId}/ReconfigVM_Task`` (the flag write) plus the
 # shared Task-poll read ``RetrievePropertiesEx``. The #3099 pre-9.0 create
@@ -1145,6 +1236,7 @@ def test_host_vi_json_sub_op_manifests_are_the_expected_sets() -> None:
     """Pin the host-domain vi-json manifests so a drift can't shrink the reconcile."""
     assert set(_host._VIM_SUB_OPS_HOST_DATASTORE_MOUNT_NFS) == {
         "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
         "POST:/HostDatastoreSystem/{moId}/CreateNasDatastore",
     }
     assert set(_host._VIM_SUB_OPS_HOST_DISK_MARK_FLASH) == {
@@ -1214,4 +1306,140 @@ def test_host_vi_json_paths_exist_in_the_pinned_spec() -> None:
         assert _vi_json_path_item_has_post(spec_text, path), (
             f"{path!r} is not a POST path item in the pinned vi-json.yaml — a "
             "host-domain vi-json sub-op targets a path the spec does not serve"
+        )
+
+
+# ---------------------------------------------------------------------------
+# #3339 teardown deletes -- distributed / host standard port group, folder,
+# datastore file delete + directory create. No REST surface exists for any of
+# them, so every sub-op is a vi-json method reconciled against the pinned
+# vi-json.yaml like the #3091 portgroup writes above.
+# ---------------------------------------------------------------------------
+
+from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
+    _datastore_files,
+    _drs_rule_delete,
+    _library_delete,
+    _snapshot,
+    _teardown,
+    _teardown_network,
+)
+
+_EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
+    "_VIM_SUB_OPS_NETWORK_PORTGROUP_DELETE": (
+        _teardown_network,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+            "POST:/DistributedVirtualSwitch/{moId}/FetchDVPorts",
+            "POST:/DistributedVirtualPortgroup/{moId}/Destroy_Task",
+        },
+    ),
+    "_VIM_SUB_OPS_HOST_STANDARD_PORTGROUP_DELETE": (
+        _teardown_network,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+            "POST:/HostNetworkSystem/{moId}/RemovePortGroup",
+        },
+    ),
+    "_VIM_SUB_OPS_FOLDER_DELETE": (
+        _teardown,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+            "POST:/Folder/{moId}/Destroy_Task",
+        },
+    ),
+    "_VIM_SUB_OPS_DATASTORE_FILE_DELETE": (
+        _datastore_files,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/HostDatastoreBrowser/{moId}/SearchDatastore_Task",
+            "POST:/HostDatastoreBrowser/{moId}/SearchDatastoreSubFolders_Task",
+            "POST:/FileManager/{moId}/DeleteDatastoreFile_Task",
+        },
+    ),
+    "_VIM_SUB_OPS_DATASTORE_DIR_CREATE": (
+        _datastore_files,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/HostDatastoreBrowser/{moId}/SearchDatastore_Task",
+            "POST:/FileManager/{moId}/MakeDirectory",
+        },
+    ),
+    # The content-library deletes read Datastore.vm + the VMs' devices (vim)
+    # for the "a VM mounts this item" check.
+    "_VIM_SUB_OPS_CONTENT_LIBRARY_MEDIA_CHECK": (
+        _library_delete,
+        {"POST:/PropertyCollector/{moId}/RetrievePropertiesEx"},
+    ),
+    # The DRS rule delete rides the same lanes: the cluster rule read, then
+    # the same ReconfigureComputeResource_Task as cluster.drs_rule.create.
+    "_VIM_SUB_OPS_CLUSTER_DRS_RULE_DELETE": (
+        _drs_rule_delete,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+            "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task",
+        },
+    ),
+    # The VM snapshot create and delete: the snapshot-tree read, then one task.
+    "_VIM_SUB_OPS_VM_SNAPSHOT_CREATE": (
+        _snapshot,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualMachine/{moId}/CreateSnapshotEx_Task",
+        },
+    ),
+    "_VIM_SUB_OPS_VM_SNAPSHOT_DELETE": (
+        _snapshot,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualMachineSnapshot/{moId}/RemoveSnapshot_Task",
+        },
+    ),
+}
+
+
+@pytest.mark.parametrize("manifest_name", sorted(_EXPECTED_3339_VIM_MANIFESTS))
+def test_3339_vim_sub_op_manifests_are_pinned(manifest_name: str) -> None:
+    """Pin each #3339 teardown vim manifest so a drift can't shrink the reconcile."""
+    module, expected = _EXPECTED_3339_VIM_MANIFESTS[manifest_name]
+    assert set(getattr(module, manifest_name)) == expected
+
+
+@pytest.mark.parametrize("manifest_name", sorted(_EXPECTED_3339_VIM_MANIFESTS))
+def test_3339_vim_sub_ops_round_trip_through_ingest(manifest_name: str) -> None:
+    """The #3339 vim op_ids are byte-for-byte what ``parse_openapi`` emits."""
+    module, _ = _EXPECTED_3339_VIM_MANIFESTS[manifest_name]
+    required = set(getattr(module, manifest_name))
+    spec_bytes = json.dumps(_build_vcenter_fixture(required)).encode()
+    spec_url = "https://specs.example.test/vi-json.yaml"
+    with _GETADDRINFO_PATCH, respx.mock(assert_all_called=False) as router:
+        router.get(spec_url).mock(
+            return_value=httpx.Response(
+                200, content=spec_bytes, headers={"content-type": "application/json"}
+            )
+        )
+        rows = parse_openapi(spec_url, spec_source="spec:vi-json.yaml")
+    assert required <= {row.op_id for row in rows}
+
+
+@pytest.mark.parametrize("manifest_name", sorted(_EXPECTED_3339_VIM_MANIFESTS))
+def test_3339_vim_paths_exist_in_the_pinned_spec(manifest_name: str) -> None:
+    """Each #3339 teardown vim path is a real POST path in the pinned vi-json.yaml.
+
+    Skips when the spec-shelf is not configured; CI is the operator-visible signal.
+    """
+    spec_path = resolve_vi_json_yaml()
+    if spec_path is None:
+        pytest.skip(VCENTER_SPEC_REASON)
+    spec_text = spec_path.read_text(encoding="utf-8")
+    module, _ = _EXPECTED_3339_VIM_MANIFESTS[manifest_name]
+    for op_id in getattr(module, manifest_name):
+        _, _, path = op_id.partition(":")
+        assert _vi_json_path_item_has_post(spec_text, path), (
+            f"{path!r} is not a POST path item in the pinned vi-json.yaml -- the "
+            f"{manifest_name} vim sub-op targets a path the spec does not serve"
         )

@@ -12,20 +12,24 @@ filtering (active-only vs full history).
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
+from fnmatch import fnmatchcase
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor, ServicePrincipalGrant
+from meho_backplane.db.models import AuditLog, EndpointDescriptor, ServicePrincipalGrant, Target
 from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate
 from meho_backplane.operations.service_grants import (
     GrantValidationError,
     ServicePrincipalGrantService,
+    consult_and_record_grant,
     find_live_grant,
     null_target_only_park_hint,
 )
@@ -197,6 +201,203 @@ async def test_create_refuses_delete_shaped_by_pattern(op_id: str) -> None:
     assert "delete-shaped" in str(exc.value)
 
 
+_VIM_DELETE_OP_IDS = (
+    "POST:/VirtualMachine/{moId}/Destroy_Task",
+    "POST:/VirtualApp/{moId}/Destroy_Task",
+    "POST:/HostNetworkSystem/{moId}/RemovePortGroup",
+    "POST:/FileManager/{moId}/DeleteDatastoreFile_Task",
+    "POST:/VirtualMachine/{moId}/UnregisterVM",
+)
+
+
+async def _grant_rows_for(op_id: str) -> int:
+    async with get_sessionmaker()() as s:
+        count = await s.execute(
+            select(func.count())
+            .select_from(ServicePrincipalGrant)
+            .where(ServicePrincipalGrant.op_id == op_id)
+        )
+        return int(count.scalar_one())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", _VIM_DELETE_OP_IDS)
+async def test_create_refuses_vendor_delete_action_name(op_id: str) -> None:
+    """A VI-JSON delete is a POST, so only its action name says it is a delete (#4632)."""
+    svc = ServicePrincipalGrantService()
+    with pytest.raises(GrantValidationError) as exc:
+        await svc.create(_TENANT_ID, _CREATOR, _payload(op_id=op_id))
+    action_name = op_id.rsplit("/", 1)[-1]
+    assert f"is a delete (vendor action name {action_name!r})" in str(exc.value)
+    assert await _grant_rows_for(op_id) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "op_id",
+    ["POST:/VirtualMachine/{moId}/Destroyer_Task", "POST:/VirtualMachine/{moId}/Reset_Task"],
+)
+async def test_create_allows_names_that_only_look_like_a_delete(op_id: str) -> None:
+    """The same lookalike pair the parser test uses stays grantable."""
+    svc = ServicePrincipalGrantService()
+    row = await svc.create(_TENANT_ID, _CREATOR, _payload(op_id=op_id))
+    assert row.op_id == op_id
+
+
+@pytest.mark.asyncio
+async def test_create_refuses_vendor_delete_action_name_without_pattern_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The action-name sign does not depend on SERVICE_GRANT_DELETE_SHAPED_PATTERNS."""
+    monkeypatch.setenv("SERVICE_GRANT_DELETE_SHAPED_PATTERNS", "acme.custom.nuke")
+    get_settings.cache_clear()
+    assert get_settings().service_grant_delete_shaped_patterns == ("acme.custom.nuke",)
+    svc = ServicePrincipalGrantService()
+    with pytest.raises(GrantValidationError) as exc:
+        await svc.create(
+            _TENANT_ID, _CREATOR, _payload(op_id="POST:/VirtualMachine/{moId}/Destroy_Task")
+        )
+    assert "vendor action name 'Destroy_Task'" in str(exc.value)
+
+
+def _service_operator() -> Operator:
+    return Operator(
+        sub=_PRINCIPAL,
+        raw_jwt="svc-jwt",
+        tenant_id=_TENANT_ID,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.SERVICE,
+    )
+
+
+async def _seed_grant_row(op_id: str) -> None:
+    """Write a grant row straight into the database, bypassing create's review."""
+    async with get_sessionmaker()() as s:
+        s.add(
+            ServicePrincipalGrant(
+                tenant_id=_TENANT_ID,
+                principal_sub=_PRINCIPAL,
+                op_id=op_id,
+                connector_id=_CONNECTOR,
+                reason="written before the rule existed",
+                created_by_sub=_CREATOR,
+            )
+        )
+        await s.commit()
+
+
+async def _grant_use_audit_rows() -> int:
+    async with get_sessionmaker()() as s:
+        count = await s.execute(
+            select(func.count()).select_from(AuditLog).where(AuditLog.path == "approval.decision")
+        )
+        return int(count.scalar_one())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "descriptor_kwargs",
+    [
+        pytest.param(
+            {"source_kind": "ingested", "method": "POST", "tags": ["write"]},
+            id="ingested-style-record",
+        ),
+        pytest.param({"source_kind": "composite"}, id="inner-step-record"),
+    ],
+)
+async def test_existing_grant_row_never_lets_a_vendor_delete_run(
+    descriptor_kwargs: dict[str, object],
+) -> None:
+    """A stored grant on a VI-JSON delete is inert at dispatch (#4632).
+
+    The inner step of a multi-step operation arrives as an in-memory record
+    with only its declared level: no method, no tags. The op id is the only
+    sign, and it is enough.
+    """
+    op_id = "POST:/VirtualMachine/{moId}/Destroy_Task"
+    await _seed_grant_row(op_id)
+    descriptor = EndpointDescriptor(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        op_id=op_id,
+        safety_level="dangerous",
+        requires_approval=True,
+        parameter_schema={},
+        **descriptor_kwargs,
+    )
+
+    grant_id = await consult_and_record_grant(
+        operator=_service_operator(),
+        descriptor=descriptor,
+        target=None,
+        connector_id=_CONNECTOR,
+    )
+
+    assert grant_id is None
+    assert await _grant_use_audit_rows() == 0
+
+
+@pytest.mark.asyncio
+async def test_existing_grant_row_still_clears_an_ordinary_write() -> None:
+    """Control: the same seeded-row path auto-approves a non-delete inner step."""
+    op_id = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+    await _seed_grant_row(op_id)
+    descriptor = EndpointDescriptor(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        op_id=op_id,
+        source_kind="composite",
+        safety_level="caution",
+        requires_approval=False,
+        parameter_schema={},
+    )
+
+    grant_id = await consult_and_record_grant(
+        operator=_service_operator(),
+        descriptor=descriptor,
+        target=None,
+        connector_id=_CONNECTOR,
+    )
+
+    assert grant_id is not None
+    assert await _grant_use_audit_rows() == 1
+
+
+@pytest.mark.asyncio
+async def test_decide_only_consult_reports_the_grant_but_records_no_use() -> None:
+    """``record=False`` answers "would a grant clear this?" and writes nothing (#4923).
+
+    The preview asks the policy gate what the dispatcher would do; a grant
+    that would clear the call is reported, but its use is not recorded, so
+    a preview never shows up as an auto-approval on the audit ledger.
+    """
+    op_id = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+    await _seed_grant_row(op_id)
+    descriptor = EndpointDescriptor(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        op_id=op_id,
+        source_kind="composite",
+        safety_level="caution",
+        requires_approval=False,
+        parameter_schema={},
+    )
+
+    grant_id = await consult_and_record_grant(
+        operator=_service_operator(),
+        descriptor=descriptor,
+        target=None,
+        connector_id=_CONNECTOR,
+        record=False,
+    )
+
+    assert grant_id is not None
+    assert await _grant_use_audit_rows() == 0
+
+
 @pytest.mark.asyncio
 async def test_create_refuses_destructive_tagged_descriptor() -> None:
     """A non-delete-named op whose descriptor carries 'destructive' is refused.
@@ -296,6 +497,8 @@ async def test_revoke_is_soft_delete_and_allows_regrant() -> None:
     assert revoked is not None
     assert revoked.revoked_at is not None
     assert revoked.revoked_by_sub == "op-revoker"
+    # No reason given → no reason stored (a reason is optional on revoke).
+    assert revoked.revoked_reason is None
 
     # Re-revoking an already-revoked grant is a no-op → False (404 at the boundary).
     assert await svc.revoke(_TENANT_ID, entry.id, "op-revoker") is False
@@ -303,6 +506,18 @@ async def test_revoke_is_soft_delete_and_allows_regrant() -> None:
     # The scope is free again: a fresh grant for the same key is accepted.
     again = await svc.create(_TENANT_ID, _CREATOR, _payload(op_id=op))
     assert again.id != entry.id
+
+
+@pytest.mark.asyncio
+async def test_revoke_stores_optional_reason() -> None:
+    """A reason passed to revoke is stored as ``revoked_reason`` on the row (#3489)."""
+    svc = ServicePrincipalGrantService()
+    entry = await svc.create(_TENANT_ID, _CREATOR, _payload(op_id="vmware.composite.vm.update"))
+
+    assert await svc.revoke(_TENANT_ID, entry.id, "op-revoker", reason="bot retired") is True
+    revoked = await svc.get(_TENANT_ID, entry.id)
+    assert revoked is not None
+    assert revoked.revoked_reason == "bot retired"
 
 
 @pytest.mark.asyncio
@@ -603,3 +818,135 @@ async def test_null_target_only_park_hint_fires_for_target_scoped_dispatch(
             target_id=None,
         )
     ) is None
+
+
+# ---------------------------------------------------------------------------
+# Orphaned grants (#3430)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_target(name: str, *, deleted: bool = False) -> uuid.UUID:
+    target_id = uuid.uuid4()
+    async with get_sessionmaker()() as s, s.begin():
+        s.add(
+            Target(
+                id=target_id,
+                tenant_id=_TENANT_ID,
+                name=name,
+                aliases=[],
+                product="vmware",
+                host=f"{name}.test",
+                port=443,
+                deleted_at=datetime.now(UTC) if deleted else None,
+            )
+        )
+    return target_id
+
+
+async def _soft_delete_target(target_id: uuid.UUID) -> None:
+    async with get_sessionmaker()() as s, s.begin():
+        await s.execute(
+            update(Target).where(Target.id == target_id).values(deleted_at=datetime.now(UTC))
+        )
+
+
+@pytest.mark.asyncio
+async def test_grant_on_re_registered_target_is_orphaned_with_remediation() -> None:
+    """Delete + register again under a new id: the old grant reads as orphaned.
+
+    The live-target grant and a selector grant on the same op are not flagged.
+    The orphaned grant is not revoked (read-time classification only).
+    """
+    svc = ServicePrincipalGrantService()
+    old_id = await _seed_target("sddc-mgr")
+    orphan = await svc.create(_TENANT_ID, _CREATOR, _payload(target_id=old_id))
+    assert orphan.orphaned is False
+
+    # Tear down and rebuild: the old row is soft-deleted, the new row gets a new id.
+    await _soft_delete_target(old_id)
+    new_id = await _seed_target("sddc-mgr")
+    live = await svc.create(_TENANT_ID, _CREATOR, _payload(target_id=new_id))
+    selector = await svc.create(
+        _TENANT_ID,
+        _CREATOR,
+        ServiceGrantCreate(
+            principal_sub=_PRINCIPAL,
+            op_id="vmware.composite.vm.create",
+            connector_id=_CONNECTOR,
+            target_name_pattern="sddc-mgr",
+            reason="survives a new registration",
+        ),
+    )
+    targetless = await svc.create(_TENANT_ID, _CREATOR, _payload(op_id="vmware.composite.vm.power"))
+
+    listed = {g.id: g for g in await svc.list_(_TENANT_ID)}
+    assert listed[orphan.id].orphaned is True
+    remediation = listed[orphan.id].orphan_remediation
+    assert remediation is not None
+    assert str(old_id) in remediation
+    assert "target_name_pattern='sddc-mgr'" in remediation
+    assert "revoke" in remediation
+    for ok in (live, selector, targetless):
+        assert listed[ok.id].orphaned is False
+        assert listed[ok.id].orphan_remediation is None
+
+    shown = await svc.get(_TENANT_ID, orphan.id)
+    assert shown is not None
+    assert shown.orphaned is True
+    # Never auto-revoked: cleanup stays an operator decision.
+    assert shown.revoked_at is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("old_name", "lookalike", "expected_pattern"),
+    [
+        ("example[1]", "example1", "example[[]1]"),
+        ("ex*ample", "example", "ex[*]ample"),
+        ("ex?ample", "exXample", "ex[?]ample"),
+    ],
+)
+async def test_orphan_remediation_escapes_glob_characters_in_old_name(
+    old_name: str, lookalike: str, expected_pattern: str
+) -> None:
+    """The suggested selector matches the old name literally, not a look-alike.
+
+    ``target_name_pattern`` is an fnmatch glob. A raw ``example[1]`` would
+    match ``example1`` and miss ``example[1]`` itself.
+    """
+    svc = ServicePrincipalGrantService()
+    old_id = await _seed_target(old_name, deleted=True)
+    entry = await svc.create(_TENANT_ID, _CREATOR, _payload(target_id=old_id))
+    assert entry.orphaned is True
+    remediation = entry.orphan_remediation
+    assert remediation is not None
+    assert f"target_name_pattern={expected_pattern!r}" in remediation
+
+    pattern = re.search(r"target_name_pattern='([^']*)'", remediation)
+    assert pattern is not None
+    assert fnmatchcase(old_name, pattern.group(1))
+    assert not fnmatchcase(lookalike, pattern.group(1))
+
+
+@pytest.mark.asyncio
+async def test_grant_on_unknown_target_id_is_orphaned_without_old_name() -> None:
+    """A target id with no row at all (or in another tenant) is orphaned too."""
+    svc = ServicePrincipalGrantService()
+    entry = await svc.create(_TENANT_ID, _CREATOR, _payload(target_id=uuid.uuid4()))
+    assert entry.orphaned is True
+    assert entry.orphan_remediation is not None
+    assert "target_name_pattern or target_product" in entry.orphan_remediation
+
+
+@pytest.mark.asyncio
+async def test_revoked_grant_on_deleted_target_is_not_flagged() -> None:
+    """A revoked grant is already cleaned up, so it is not called orphaned."""
+    svc = ServicePrincipalGrantService()
+    target_id = await _seed_target("gone", deleted=True)
+    entry = await svc.create(_TENANT_ID, _CREATOR, _payload(target_id=target_id))
+    assert entry.orphaned is True
+    assert await svc.revoke(_TENANT_ID, entry.id, _CREATOR)
+
+    history = {g.id: g for g in await svc.list_(_TENANT_ID, include_revoked=True)}
+    assert history[entry.id].orphaned is False
+    assert history[entry.id].orphan_remediation is None

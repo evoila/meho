@@ -6,9 +6,10 @@
 G4.3-T6 (#445) of Initiative #373. The route is the HTTP face of the
 :func:`meho_backplane.retrieval.retire.compute_retire_checklist`
 service — combines T2's eval results (precision@5 + MEHO-vs-baseline)
-with T5's audit-log-backed usage telemetry (daily-use date + operator
-breadth) and a caller-supplied count of open
-``retrieval-migration-blocker`` issues to produce the five-criterion
+with T5's usage telemetry (daily-use date + operator breadth, read from
+request usage events since #3747; empty unless
+``REQUEST_USAGE_RETENTION_DAYS`` is set) and a caller-supplied count of
+open ``retrieval-migration-blocker`` issues to produce the five-criterion
 per-surface green/yellow/red checklist Goal #215 decision #2 locked.
 
 The CLI verb ``meho retrieval retire-checklist`` (also T6) runs the
@@ -155,7 +156,7 @@ def _bind_request_audit_context(
     payload. The two override keys (``audit_op_id`` /
     ``audit_op_class``) are honoured by the chassis broadcast
     publisher per
-    :func:`meho_backplane.audit._publish_broadcast_event`;
+    :func:`meho_backplane.audit._resolve_op_id_and_class_override`;
     ``audit_tenant_scope`` distinguishes own-tenant inspection from
     genuine cross-tenant audit-trail queries.
     """
@@ -179,6 +180,11 @@ async def retire_checklist_endpoint(
     operator: Operator = _require_operator,
 ) -> RetireChecklistReport:
     """Return the five-criterion retire-decision checklist per surface.
+
+    The usage criteria read request usage events (``request_usage``),
+    not ``audit_log``. MEHO collects them only when
+    ``REQUEST_USAGE_RETENTION_DAYS`` is set, so they stay unmet when that
+    setting is off, and they cover only the time since collection started.
 
     Tenant scoping mirrors the sibling usage route:
     Callers are scoped to ``operator.tenant_id``; a ``tenant_filter``
@@ -242,6 +248,7 @@ async def retire_checklist_endpoint(
             tenant_id=target_tenant,
             blocker_counts=blocker_counts,
             baseline_overrides=body.baseline_overrides,
+            source="request_usage",
         )
 
     structlog.contextvars.bind_contextvars(audit_row_count=len(report.surfaces))

@@ -9,10 +9,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
 )
@@ -104,6 +107,139 @@ func TestRunRequiresInput(t *testing.T) {
 	}
 }
 
+// noRequestServer fails the test if the CLI sends any request to it.
+func noRequestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		t.Errorf("no request must be sent for a too-long --input; got %s %s", r.Method, r.URL.Path)
+	}))
+}
+
+// assertShortLimitError checks the one stderr line a too-long --input
+// produces: it names the limit and does not repeat the input.
+func assertShortLimitError(t *testing.T, stderr, input string) {
+	t.Helper()
+	if n := strings.Count(stderr, "\n"); n != 1 {
+		t.Errorf("expected exactly one stderr line, got %d: %q", n, stderr)
+	}
+	if !strings.Contains(stderr, fmt.Sprint(runInputMaxChars)) {
+		t.Errorf("stderr should name the limit %d; got %q", runInputMaxChars, stderr)
+	}
+	if strings.Contains(stderr, input[:64]) {
+		t.Errorf("stderr must not repeat the input; got %d bytes", len(stderr))
+	}
+}
+
+func TestRunRejectsTooLongInputBeforeSending(t *testing.T) {
+	srv := noRequestServer(t)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	tooLong := strings.Repeat("x", runInputMaxChars+1)
+	cmd, stdout, stderr := newTestCmd(t)
+	err := runRun(cmd, runOptions{Name: "triage", Input: tooLong, BackplaneOverride: srv.URL})
+	if err == nil {
+		t.Fatalf("expected error for a too-long --input")
+	}
+	assertShortLimitError(t, stderr.String(), tooLong)
+	if stdout.Len() != 0 {
+		t.Errorf("stdout should stay empty; got %q", stdout.String())
+	}
+}
+
+func TestRunSendsInputAtLimitCountedInCharacters(t *testing.T) {
+	// 65536 two-byte characters: well over the limit in bytes, exactly at
+	// it in characters — the way the server counts.
+	atLimit := strings.Repeat("é", runInputMaxChars)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agents/triage/run", func(w http.ResponseWriter, r *http.Request) {
+		var body api.AgentRunRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body.Input != atLimit {
+			t.Errorf("input at the limit must reach the server unchanged")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(runResponse{
+			RunID:  "33333333-3333-3333-3333-333333333333",
+			Status: "succeeded",
+			Output: map[string]any{"text": "ok"},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newTestCmd(t)
+	err := runRun(cmd, runOptions{Name: "triage", Input: atLimit, BackplaneOverride: srv.URL})
+	if err != nil {
+		t.Fatalf("runRun: %v; stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "succeeded") {
+		t.Errorf("stdout missing succeeded; got %q", stdout.String())
+	}
+}
+
+func TestRunEventsRejectsTooLongInputBeforeSending(t *testing.T) {
+	srv := noRequestServer(t)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	tooLong := strings.Repeat("x", runInputMaxChars+1)
+	cmd, stdout, stderr := newTestCmd(t)
+	err := runRunEvents(cmd, runEventsOptions{Name: "triage", Input: tooLong, BackplaneOverride: srv.URL})
+	if err == nil {
+		t.Fatalf("expected error for a too-long --input")
+	}
+	assertShortLimitError(t, stderr.String(), tooLong)
+	if stdout.Len() != 0 {
+		t.Errorf("stdout should stay empty; got %q", stdout.String())
+	}
+}
+
+// TestRunInputMaxCharsMatchesOpenAPI ties the CLI's copy of the limit to
+// the server's. CI keeps cli/api/openapi.json equal to the backend, so a
+// change to the backend constant without a matching change here fails
+// this test instead of letting the two fronts drift apart.
+func TestRunInputMaxCharsMatchesOpenAPI(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "api", "openapi.json"))
+	if err != nil {
+		t.Fatalf("read openapi.json: %v", err)
+	}
+	var doc struct {
+		Components struct {
+			Schemas map[string]struct {
+				Properties map[string]struct {
+					MaxLength *int `json:"maxLength"`
+				} `json:"properties"`
+			} `json:"schemas"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("decode openapi.json: %v", err)
+	}
+	got := doc.Components.Schemas["AgentRunRequest"].Properties["input"].MaxLength
+	if got == nil {
+		t.Fatalf("AgentRunRequest.input has no maxLength in openapi.json")
+	}
+	if *got != runInputMaxChars {
+		t.Fatalf("AgentRunRequest.input maxLength = %d; CLI runInputMaxChars = %d", *got, runInputMaxChars)
+	}
+}
+
+func TestRunHelpNamesInputLimit(t *testing.T) {
+	for _, c := range []*cobra.Command{newRunCmd(), newRunEventsCmd()} {
+		f := c.Flags().Lookup("input")
+		if f == nil {
+			t.Fatalf("%s: --input flag missing", c.Name())
+		}
+		if !strings.Contains(f.Usage, fmt.Sprint(runInputMaxChars)) {
+			t.Errorf("%s: --input help should name the limit %d; got %q", c.Name(), runInputMaxChars, f.Usage)
+		}
+	}
+}
+
 // --- run-status ---
 
 func TestRunStatusRejectsInvalidUUID(t *testing.T) {
@@ -122,16 +258,20 @@ func TestRunStatusHappyPath(t *testing.T) {
 	provider := "anthropic"
 	model := "claude-sonnet-4-6"
 	output := map[string]any{"text": "done"}
+	sub := "alice"
+	act := "agent:triage-bot"
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/agents/runs/"+handle, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(api.AgentRunStatusResponse{
-			RunId:    uuid.MustParse(handle),
-			Status:   api.AgentRunStatusSucceeded,
-			Turns:    2,
-			Provider: &provider,
-			Model:    &model,
-			Output:   &output,
+			RunId:       uuid.MustParse(handle),
+			Status:      api.AgentRunStatusSucceeded,
+			Turns:       2,
+			Provider:    &provider,
+			Model:       &model,
+			Output:      &output,
+			IdentitySub: &sub,
+			IdentityAct: &act,
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -142,7 +282,7 @@ func TestRunStatusHappyPath(t *testing.T) {
 	if err := runRunStatus(cmd, runStatusOptions{Handle: handle, BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("runRunStatus: %v; stderr=%s", err, stderr.String())
 	}
-	for _, want := range []string{"succeeded", "anthropic", "done"} {
+	for _, want := range []string{"succeeded", "anthropic", "done", "agent:triage-bot for alice"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("stdout missing %q in %q", want, stdout.String())
 		}
@@ -460,5 +600,57 @@ func TestListRunsParamsOmitsEmptyFilters(t *testing.T) {
 	if params.WorkRef != nil || params.Status != nil || params.AgentName != nil ||
 		params.Limit != nil || params.Offset != nil {
 		t.Errorf("empty options must leave filters nil; got %+v", params)
+	}
+}
+
+func TestRunListShowsRunIdentity(t *testing.T) {
+	sub := "alice"
+	act := "agent:triage-bot"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agents/runs", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]api.AgentRunSummaryResponse{
+			{
+				RunId:       uuid.MustParse("33333333-3333-3333-3333-333333333333"),
+				Status:      api.AgentRunStatusSucceeded,
+				Trigger:     "direct",
+				ModelTier:   "standard",
+				IdentitySub: &sub,
+				IdentityAct: &act,
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newTestCmd(t)
+	if err := runRunList(cmd, runListOptions{BackplaneOverride: srv.URL}); err != nil {
+		t.Fatalf("runRunList: %v; stderr=%s", err, stderr.String())
+	}
+	for _, want := range []string{"IDENTITY", "agent:triage-bot for alice"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout missing %q in %q", want, stdout.String())
+		}
+	}
+}
+
+func TestRunIdentity(t *testing.T) {
+	sub := "agent:nightly"
+	act := "agent:triage-bot"
+	person := "alice"
+	cases := []struct {
+		name     string
+		sub, act *string
+		want     string
+	}{
+		{"direct run", &person, &act, "agent:triage-bot for alice"},
+		{"scheduled run", &sub, nil, "agent:nightly"},
+		{"nothing sent", nil, nil, "-"},
+	}
+	for _, c := range cases {
+		if got := runIdentity(c.sub, c.act); got != c.want {
+			t.Errorf("%s: runIdentity = %q, want %q", c.name, got, c.want)
+		}
 	}
 }

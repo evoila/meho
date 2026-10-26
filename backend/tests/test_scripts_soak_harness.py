@@ -127,7 +127,7 @@ class TestStage3StateDiff:
 
 
 # ---------------------------------------------------------------------------
-# Stage 4 — audit + broadcast + approval completeness
+# Stage 4 — audit + approval completeness
 # ---------------------------------------------------------------------------
 
 
@@ -150,11 +150,6 @@ class TestStage4ApprovalCompleteness:
         res = assert_approval_completeness(
             "k8s.scale",
             audit_rows=[_request_row(), _decision_row(), _write_row()],
-            broadcast_events=[
-                {"op_id": "approval.request"},
-                {"op_id": "approval.decision"},
-                {"op_id": "k8s.scale", "payload": {"op_class": "write", "result_status": "ok"}},
-            ],
             returned_after_decision=True,
         )
         assert res.passed, res.findings
@@ -163,7 +158,6 @@ class TestStage4ApprovalCompleteness:
         res = assert_approval_completeness(
             "k8s.scale",
             audit_rows=[_request_row(), _write_row()],
-            broadcast_events=[{"op_id": "k8s.scale", "payload": {}}],
             returned_after_decision=True,
         )
         assert not res.passed
@@ -177,9 +171,6 @@ class TestStage4ApprovalCompleteness:
         res = assert_approval_completeness(
             "k8s.scale",
             audit_rows=[_request_row(), _decision_row()],
-            broadcast_events=[
-                {"op_id": "k8s.scale", "payload": {"op_class": "write", "result_status": "ok"}},
-            ],
             returned_after_decision=True,
         )
         assert not res.passed
@@ -190,9 +181,6 @@ class TestStage4ApprovalCompleteness:
         res = assert_approval_completeness(
             "k8s.scale",
             audit_rows=[_request_row(), _decision_row(), _write_row(), _write_row()],
-            broadcast_events=[
-                {"op_id": "k8s.scale", "payload": {"op_class": "write", "result_status": "ok"}},
-            ],
             returned_after_decision=True,
         )
         assert not res.passed
@@ -202,7 +190,6 @@ class TestStage4ApprovalCompleteness:
         res = assert_approval_completeness(
             "k8s.scale",
             audit_rows=[_request_row(), _request_row(), _decision_row(), _write_row()],
-            broadcast_events=[{"op_id": "k8s.scale", "payload": {}}],
             returned_after_decision=True,
         )
         assert not res.passed
@@ -212,32 +199,17 @@ class TestStage4ApprovalCompleteness:
         res = assert_approval_completeness(
             "k8s.scale",
             audit_rows=[_request_row(), _decision_row(), _write_row()],
-            broadcast_events=[{"op_id": "k8s.scale", "payload": {}}],
             returned_after_decision=False,
         )
         assert not res.passed
         assert any(f["kind"] == "premature_return" for f in res.blockers)
 
-    def test_two_broadcast_events_for_op_blocks(self) -> None:
-        res = assert_approval_completeness(
-            "k8s.scale",
-            audit_rows=[_request_row(), _decision_row(), _write_row()],
-            broadcast_events=[
-                {"op_id": "k8s.scale", "payload": {}},
-                {"op_id": "k8s.scale", "payload": {}},
-            ],
-            returned_after_decision=True,
-        )
-        assert not res.passed
-        assert any(f["kind"] == "broadcast_event_count" for f in res.blockers)
-
-    def test_rejected_op_requires_zero_op_broadcasts(self) -> None:
-        # A rejected op never executes → zero write-effect broadcasts AND
-        # zero path==op_id dispatch rows is correct.
+    def test_rejected_op_requires_zero_write_rows(self) -> None:
+        # A rejected op never executes → zero path==op_id dispatch rows
+        # is correct.
         res = assert_approval_completeness(
             "k8s.scale",
             audit_rows=[_request_row(), _decision_row()],
-            broadcast_events=[{"op_id": "approval.decision"}],
             returned_after_decision=True,
             decision="rejected",
         )
@@ -249,40 +221,16 @@ class TestStage4ApprovalCompleteness:
         res = assert_approval_completeness(
             "k8s.scale",
             audit_rows=[_request_row(), _decision_row(), _write_row()],
-            broadcast_events=[{"op_id": "approval.decision"}],
             returned_after_decision=True,
             decision="rejected",
         )
         assert not res.passed
         assert any(f["kind"] == "write_audit_row_count" for f in res.blockers)
 
-    def test_credential_write_leak_in_broadcast_blocks(self) -> None:
-        # k8s.secret.create classifies credential_write (#1401) — a params
-        # key on its broadcast event means the secret reached the feed.
+    def test_credential_write_passes_on_audit_rows_alone(self) -> None:
         res = assert_approval_completeness(
             "k8s.secret.create",
             audit_rows=[_request_row(), _decision_row(), _write_row("k8s.secret.create")],
-            broadcast_events=[
-                {
-                    "op_id": "k8s.secret.create",
-                    "payload": {"op_class": "credential_write", "params": {"data": "s3cret"}},
-                },
-            ],
-            returned_after_decision=True,
-        )
-        assert not res.passed
-        assert any(f["kind"] == "credential_leak" for f in res.blockers)
-
-    def test_credential_write_aggregate_only_passes(self) -> None:
-        res = assert_approval_completeness(
-            "k8s.secret.create",
-            audit_rows=[_request_row(), _decision_row(), _write_row("k8s.secret.create")],
-            broadcast_events=[
-                {
-                    "op_id": "k8s.secret.create",
-                    "payload": {"op_class": "credential_write", "result_status": "ok"},
-                },
-            ],
             returned_after_decision=True,
         )
         assert res.passed, res.findings

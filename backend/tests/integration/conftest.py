@@ -89,6 +89,7 @@ from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
 from tests._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from tests._oidc_jwt_helpers import ISSUER as _ISSUER
+from tests._pgvector_image import pgvector_test_image
 
 # ---------------------------------------------------------------------------
 # Docker-availability skip — same shape as test_migration_rollback /
@@ -172,8 +173,8 @@ def async_pg_url() -> Iterator[str]:
     from docker.errors import APIError as _DockerAPIError
     from testcontainers.postgres import PostgresContainer
 
-    # pgvector/pgvector:pg16 — Postgres 16 with the pgvector extension
-    # pre-installed. After G0.4-T1 (#258) migration 0003 runs
+    # The chart's own PostgreSQL 17 image with the pgvector extension
+    # pre-installed (``tests/_pgvector_image.py``, #4039). After G0.4-T1 (#258) migration 0003 runs
     # ``CREATE EXTENSION IF NOT EXISTS vector`` as part of
     # ``alembic upgrade head``, so the testcontainers image must ship
     # the extension. Stock ``postgres:16-alpine`` (the v0.1-chassis
@@ -185,7 +186,7 @@ def async_pg_url() -> Iterator[str]:
     # cache, internal Harbor) does not require a code change — same
     # env-knob shape ``test_db_engine`` / ``test_migration_rollback``
     # honour.
-    image = os.environ.get("MEHO_TEST_PGVECTOR_IMAGE", "pgvector/pgvector:pg16")
+    image = pgvector_test_image()
     pg = PostgresContainer(image)
     try:
         pg.start()
@@ -437,6 +438,8 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   ``EventOutbox`` discipline, not ``Target``'s soft FK); must be listed
         #   here or PG rejects the per-test TRUNCATE with ``cannot truncate a
         #   table referenced in a foreign key constraint``.
+        # * ``sandbox_delete_grant`` — migration 0115 (#4622 sandbox mode delete
+        #   grants) carries the same real ``REFERENCES tenant(id)`` FK.
         # * ``service_principal_grant`` — migration 0078 (#3151/#3152 standing
         #   grants) carries a real ``REFERENCES tenant(id)`` FK; must be listed
         #   here or PG rejects the per-test TRUNCATE of ``tenant`` with ``cannot
@@ -477,18 +480,19 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   a table referenced in a foreign key constraint``.
         await conn.execute(
             text(
-                "TRUNCATE TABLE agent_announcement, approval_execution_payload, "
+                "TRUNCATE TABLE agent_announcement, agent_announcement_sequence, "
+                "approval_execution_payload, "
                 "approval_request, agent_permission, "
                 "agent_principal, runner_principal, runner_write_allowlist, "
                 "runner_assignments, runner_check_results, "
                 "scheduled_trigger, sensor_results, sensor, "
                 "check_dashboard_sensors, check_dashboards, "
                 "event_outbox, event_source, gateway_command, runner_effect_chain, "
-                "service_principal_grant, addon_pairing, operation_run, "
+                "service_principal_grant, sandbox_delete_grant, addon_pairing, operation_run, "
                 "addon_capability, addon_orchestration_run, "
-                "service_principal_grant, addon_pairing, addon_step_event, "
+                "service_principal_grant, sandbox_delete_grant, addon_pairing, addon_step_event, "
                 "agent_run, audit_log, identity_budget, "
-                "documents, graph_edge, "
+                "documents, kb_revision, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
                 "broadcast_override, agent_definition, "
                 "dispatch_trace_span, dispatch_trace, tenant",
@@ -552,18 +556,19 @@ async def pg_engine_empty_tenant(
         # ``tenant`` stays empty, reproducing the clean-room deploy.
         await conn.execute(
             text(
-                "TRUNCATE TABLE agent_announcement, approval_execution_payload, "
+                "TRUNCATE TABLE agent_announcement, agent_announcement_sequence, "
+                "approval_execution_payload, "
                 "approval_request, agent_permission, "
                 "agent_principal, runner_principal, runner_write_allowlist, "
                 "runner_assignments, runner_check_results, "
                 "scheduled_trigger, sensor_results, sensor, "
                 "check_dashboard_sensors, check_dashboards, "
                 "event_outbox, event_source, gateway_command, runner_effect_chain, "
-                "service_principal_grant, addon_pairing, operation_run, "
+                "service_principal_grant, sandbox_delete_grant, addon_pairing, operation_run, "
                 "addon_capability, addon_orchestration_run, "
-                "service_principal_grant, addon_pairing, addon_step_event, "
+                "service_principal_grant, sandbox_delete_grant, addon_pairing, addon_step_event, "
                 "agent_run, audit_log, identity_budget, "
-                "documents, graph_edge, "
+                "documents, kb_revision, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
                 "broadcast_override, agent_definition, "
                 "dispatch_trace_span, dispatch_trace, tenant",

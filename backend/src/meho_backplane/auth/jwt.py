@@ -218,14 +218,14 @@ async def _resolve_jwks_uri(settings: Settings) -> str:
     """Fetch the OIDC discovery doc and return the ``jwks_uri`` field.
 
     Keycloak guarantees the well-known endpoint at
-    ``{issuer}/.well-known/openid-configuration``. We deliberately
+    ``{realm}/.well-known/openid-configuration``; ``{realm}`` is
+    ``KEYCLOAK_DISCOVERY_URL`` when set, else the issuer. We deliberately
     re-resolve discovery on every cache miss rather than caching the
     URI long-term; the cost is one extra round trip per cache miss
     (rare), and it lets operators rotate Keycloak realms (and the
     associated ``jwks_uri``) without restarting the backplane.
     """
-    issuer = str(settings.keycloak_issuer_url).rstrip("/")
-    discovery_url = f"{issuer}/.well-known/openid-configuration"
+    discovery_url = f"{settings.keycloak_discovery_base}/.well-known/openid-configuration"
     discovery = await _http_get_json(discovery_url)
     jwks_uri = discovery.get("jwks_uri")
     if not isinstance(jwks_uri, str) or not jwks_uri:
@@ -279,6 +279,23 @@ async def _fetch_jwks(*, force_refresh: bool = False) -> dict[str, Any]:
         return jwks
 
 
+def _accepted_issuers(settings: Settings) -> list[str]:
+    """Return the ``iss`` values a token may carry, with and without ``/``.
+
+    Keycloak publishes its issuer without a trailing slash
+    (``https://<host>/realms/<realm>``). Other OIDC providers always
+    end theirs with one — authentik publishes
+    ``https://<host>/application/o/<slug>/``. OIDC Discovery 1.0 §4.3
+    says ``iss`` is identical to the published issuer, slash included,
+    so a single exact value can only ever match one of the two
+    families. Accepting both forms of the *configured* issuer keeps
+    the check strict against a different issuer while letting the
+    operator type the value with or without the slash.
+    """
+    base = str(settings.keycloak_issuer_url).rstrip("/")
+    return [base, f"{base}/"]
+
+
 def _decode_with_jwks(
     token: str,
     jwks: dict[str, Any],
@@ -307,7 +324,7 @@ def _decode_with_jwks(
             claims_options={
                 "iss": {
                     "essential": True,
-                    "value": str(settings.keycloak_issuer_url).rstrip("/"),
+                    "values": _accepted_issuers(settings),
                 },
                 "aud": {
                     "essential": True,
@@ -499,7 +516,7 @@ def _classify_decode_error(
         return _classify_invalid_claim(
             exc,
             expected_audience=expected_audience,
-            expected_issuer=str(settings.keycloak_issuer_url).rstrip("/"),
+            expected_issuer=str(settings.keycloak_issuer_url),
         )
     if isinstance(exc, MissingClaimError):
         return _classify_missing_claim(exc)
@@ -799,6 +816,58 @@ def _extract_tenant_role(claims: Any, settings: Settings) -> TenantRole:
         raise _http_401("unknown_tenant_role") from exc
 
 
+#: Claim the Keycloak group-membership mapper writes (the ``groups-claim``
+#: mapper of the shipped realm). Fixed here rather than in Settings: the
+#: five-group login recipe fixes the claim name.
+_GROUPS_CLAIM_NAME: str = "groups"
+
+
+def _role_groups_in_token(claims: Any, settings: Settings) -> list[str]:
+    """Return the configured role groups the token's ``groups`` claim names.
+
+    The group-membership mapper can send plain names or full paths
+    (``/MEHO-Operators``), so a leading ``/`` is dropped on both sides
+    before comparing. Each group is listed once, in the order
+    :attr:`Settings.jwt_role_groups` lists them, so the 401 message and
+    the log event are stable.
+    """
+    raw = claims.get(_GROUPS_CLAIM_NAME)
+    if not isinstance(raw, list):
+        return []
+    names = {item.lstrip("/") for item in raw if isinstance(item, str)}
+    found: list[str] = []
+    for group in settings.jwt_role_groups:
+        name = group.lstrip("/")
+        if name in names and name not in found:
+            found.append(name)
+    return found
+
+
+def _reject_multiple_role_groups(claims: Any, settings: Settings) -> None:
+    """Refuse a token whose ``groups`` claim names more than one role group.
+
+    A person must be in exactly one of the MEHO login groups
+    (``docs/decisions/login-role-groups.md``, #4594). In two, Keycloak
+    copies ``tenant_role`` from whichever group it finds first, so the
+    person would get an unpredictable role. The 401 names the groups
+    it found, because the company admin who put the person there will
+    not know the rule. Tokens without a ``groups`` claim (service
+    accounts, agents, check runners) pass through untouched. The group
+    names come from the trusted issuer's signed token, so they are safe
+    to log and to echo back to the caller.
+    """
+    groups = _role_groups_in_token(claims, settings)
+    if len(groups) < 2:
+        return
+    log = structlog.get_logger(__name__)
+    log.warning("multiple_role_groups", claim_name=_GROUPS_CLAIM_NAME, groups=groups)
+    raise _http_401(
+        f"multiple_role_groups: this login is in {len(groups)} MEHO role groups "
+        f"({', '.join(groups)}). A person must be in exactly one of these groups. "
+        "Ask your admin to keep you in one group only."
+    )
+
+
 def _is_service_account_token(claims: Any, settings: Settings) -> bool:
     """Positively identify an IdP service-account (client-credentials) token.
 
@@ -904,22 +973,32 @@ def _extract_client_id(
        against. This path is unchanged, so ``service`` principals keep their
        exact prior value.
 
-    2. **Standard client-identity claim for agents (#3795).** A registered
-       agent client authenticates via ``client_credentials`` and carries **no**
-       ``preferred_username`` marker (it has no ``profile`` scope), so path 1
-       yields nothing and its ``clientId`` (``agent:<name>``) would otherwise be
-       lost. For ``principal_kind == agent`` only, fall back to the standard
-       ``azp`` (authorized party) / RFC 9068 ``client_id`` claim, which
-       Keycloak populates with the very ``clientId`` an ``agent_permission``
-       grant is keyed on (``AgentPrincipal.keycloak_client_id``). Surfacing it
-       is what lets :func:`~meho_backplane.auth.permissions.resolve_verdict`
-       match a grant to the token whose ``sub`` is the service-account UUID.
+    2. **Standard client-identity claim for agents and services (#3795,
+       #3446).** A registered agent client authenticates via
+       ``client_credentials`` and carries **no** ``preferred_username`` marker
+       (it has no ``profile`` scope), so path 1 yields nothing and its
+       ``clientId`` (``agent:<name>``) would otherwise be lost. For
+       ``principal_kind == agent``, fall back to the standard ``azp``
+       (authorized party) / RFC 9068 ``client_id`` claim, which Keycloak
+       populates with the very ``clientId`` an ``agent_permission`` grant is
+       keyed on (``AgentPrincipal.keycloak_client_id``). Surfacing it is what
+       lets :func:`~meho_backplane.auth.permissions.resolve_verdict` match a
+       grant to the token whose ``sub`` is the service-account UUID. The same
+       fallback applies to ``principal_kind == service`` (#3446): a
+       client-credentials token the marker-independent shape test
+       (:func:`_is_client_credentials_token`) classified as ``service`` has,
+       by construction, an ``azp`` / ``client_id`` claim but no marker, and
+       without its ``clientId`` the #3028 / #3446 audit parent-linkage could
+       not open an orchestration run for it. The claim is verified (it is
+       part of the signed token), so it is as trustworthy as the marker.
 
-    Returns ``None`` for an interactive user, a ``service`` / ``runner`` client
-    whose username lacks the #3178 marker, an agent token carrying neither
-    ``azp`` nor ``client_id``, or a realm with the marker disabled by an empty
-    prefix. The agent fallback is gated on ``principal_kind`` so no ``user`` /
-    ``service`` / ``runner`` token changes its ``client_id`` value.
+    Returns ``None`` for an interactive user, a ``runner`` client whose
+    username lacks the #3178 marker (or whose realm disabled the marker with
+    an empty prefix), and an agent or service token carrying neither the
+    marker nor ``azp`` / ``client_id``. The claim fallback is gated on
+    ``principal_kind`` so no ``user`` / ``runner`` token changes its
+    ``client_id`` value: a human's ``azp`` is the public login client, never
+    a service identity.
     """
     prefix = settings.jwt_service_account_username_prefix
     if prefix:
@@ -928,9 +1007,10 @@ def _extract_client_id(
             return username[len(prefix) :] or None
     # Agent clients (client_credentials, no profile scope) carry the clientId
     # only in the standard authorized-party / client_id claim, never in the
-    # #3178 username marker (#3795). Gate on the agent kind so service / user /
+    # #3178 username marker (#3795). A service token classified by shape alone
+    # is in the same position (#3446). Gate on those two kinds so user /
     # runner tokens keep their prior ``client_id`` (None or the marker value).
-    if principal_kind is PrincipalKind.AGENT:
+    if principal_kind in (PrincipalKind.AGENT, PrincipalKind.SERVICE):
         for claim_name in ("azp", "client_id"):
             value = claims.get(claim_name)
             if isinstance(value, str) and value:
@@ -1319,6 +1399,9 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     / ``missing_tenant_role_claim`` / ``unknown_tenant_role``) so the
     bare ``invalid_token`` fallback is reserved for unexpected
     pydantic validation failures (the malformed-email regression case).
+    The one-group check (``multiple_role_groups``, #4594) runs first:
+    a person in two login groups carries a ``tenant_role`` Keycloak
+    picked at random, so the tenant extractors would accept it.
 
     ``principal_kind`` extraction is graceful only for the **absent**
     claim (→ ``user`` default, the pre-G11.2 legacy contract); a
@@ -1346,6 +1429,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
         raise _http_401("missing_sub")
     name = claims.get("name")
     email = claims.get("email")
+    _reject_multiple_role_groups(claims, settings)
     tenant_id = _extract_tenant_id(claims, settings)
     tenant_role = _extract_tenant_role(claims, settings)
     principal_kind = _extract_principal_kind(claims, settings)
@@ -1509,8 +1593,7 @@ async def keycloak_readiness_probe() -> ProbeResult:
             detail=f"settings_unavailable: {type(exc).__name__}",
         )
 
-    issuer = str(settings.keycloak_issuer_url).rstrip("/")
-    discovery_url = f"{issuer}/.well-known/openid-configuration"
+    discovery_url = f"{settings.keycloak_discovery_base}/.well-known/openid-configuration"
 
     try:
         discovery = await _http_get_json(discovery_url)

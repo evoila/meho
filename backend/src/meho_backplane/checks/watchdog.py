@@ -11,8 +11,7 @@ because an operator happened to read a dashboard. This module gives the
 loop a liveness signal of its own: the runner stamps every completed
 tick, an independent watchdog task detects "no tick completed for
 ``SENSOR_RUNNER_STALL_AFTER_TICKS`` x the tick interval" and emits a
-structured log plus a ``checks.scheduler_stalled`` broadcast event, and
-the health surface exposes the staleness for an external prober — the
+structured log, and the health surface exposes the staleness for an external prober — the
 Prometheus ``Watchdog``/dead-man's-switch division: MEHO surfaces the
 signal, the external prober consumes it.
 
@@ -43,9 +42,8 @@ catches (its symptom: the facet goes stale or unreachable).
 Re-emission policy: once per continuous stall
 =============================================
 
-A stall emits exactly one ``checks_scheduler_stalled`` log + one
-``checks.scheduler_stalled`` event per affected tenant, however long the
-stall lasts. The watchdog keeps returning ``True`` while stalled but
+A stall emits exactly one ``checks_scheduler_stalled`` log, however long
+the stall lasts. The watchdog keeps returning ``True`` while stalled but
 does not re-emit; the next completed tick emits the paired
 ``checks_scheduler_recovered`` carrying the stall duration and re-arms
 the detector. One stall, one stalled/recovered pair — an external
@@ -62,24 +60,13 @@ tick before the stall (the reference the detector tripped on), matching
 the "gap between batches" number an operator reconstructs from the
 audit ledger.
 
-Tenant fan-out
-==============
-
-Broadcast feeds are per-tenant (``meho:feed:{tenant_id}``); a stall is
-platform-wide. The stalled event fans out to every tenant with at least
-one active Sensor — each of them is blind while the loop is quiet — and
-the recovered event goes to exactly the tenants the stalled event went
-to (the set is captured at detection), so the pair always matches even
-when sensors are created or deleted mid-stall. The structured log lines
-are process-level and emitted regardless of tenant fan-out.
-
 Failure posture
 ===============
 
-Fail-open, the ``checks_transition_broadcast_failed`` posture (#2720):
-state updates commit first, then emission; a failing tenant query or
-publish warn-logs ``checks_watchdog_emit_failed`` and never reaches the
-runner's tick path or kills the watchdog loop. The health facet derives
+State updates happen first, then the log line. A failed check is
+warn-logged (``checks_watchdog_check_failed``) and never kills the
+watchdog loop. No Broadcast event is published (#3758): the feed carries
+deliberate agent announcements only. The health facet derives
 staleness live from the stamp on every read — it keeps working even if
 the watchdog task itself has died.
 
@@ -93,21 +80,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast
 
 import structlog
-from sqlalchemy import select
 
-from meho_backplane.checks.broadcast import (
-    SCHEDULER_RECOVERED_OP_ID,
-    SCHEDULER_STALLED_OP_ID,
-    publish_scheduler_liveness_event,
-)
-from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import Sensor, SensorStatus
 from meho_backplane.metrics import note_loop_tick
 from meho_backplane.settings import get_settings
 
@@ -147,10 +125,6 @@ _BASELINE: datetime | None = None
 #: flagged; ``None`` when the loop is healthy. Doubles as the
 #: once-per-stall latch and the recovery event's duration origin.
 _STALLED_SINCE: datetime | None = None
-
-#: Tenants the stalled event was addressed to, captured at detection so
-#: the recovered event goes to exactly the same feeds.
-_STALL_TENANTS: tuple[uuid.UUID, ...] = ()
 
 
 def _log() -> structlog.typing.FilteringBoundLogger:
@@ -199,12 +173,11 @@ def reset_watchdog_state() -> None:
     Called from :func:`meho_backplane.checks.runner.reset_sensor_runner_state`
     so the runner test fixtures reset both modules in one place.
     """
-    global _LAST_TICK_COMPLETED_AT, _LAST_CLAIM_AT, _BASELINE, _STALLED_SINCE, _STALL_TENANTS
+    global _LAST_TICK_COMPLETED_AT, _LAST_CLAIM_AT, _BASELINE, _STALLED_SINCE
     _LAST_TICK_COMPLETED_AT = None
     _LAST_CLAIM_AT = None
     _BASELINE = None
     _STALLED_SINCE = None
-    _STALL_TENANTS = ()
 
 
 def _stall_threshold_seconds() -> float:
@@ -259,16 +232,6 @@ def sensor_runner_liveness(now: datetime | None = None) -> SensorRunnerLiveness:
     )
 
 
-async def _active_sensor_tenant_ids() -> list[uuid.UUID]:
-    """Distinct tenants holding at least one active Sensor (own session)."""
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        rows = await session.scalars(
-            select(Sensor.tenant_id).where(Sensor.status == SensorStatus.ACTIVE.value).distinct()
-        )
-        return list(rows)
-
-
 async def note_tick_completed(now: datetime | None = None, *, lock_acquired: bool = True) -> None:
     """Stamp a completed runner tick; emit recovery if a stall was flagged.
 
@@ -280,56 +243,36 @@ async def note_tick_completed(now: datetime | None = None, *, lock_acquired: boo
     contention) shows a growing ``seconds_since_last_claim`` instead of
     reading fully healthy. The tick stamp itself is unconditional — a
     lock-miss tick still proves the loop coroutine alive, which is the
-    stall class the tick facet exists for. **Never raises**: the stamp and
-    the stall-latch clear commit before any emission, and the emission
-    block is guarded, so a broadcast or logging failure cannot fail the
-    tick that proved the loop alive. *now* is injectable for
+    stall class the tick facet exists for. The stamp and the stall-latch
+    clear happen before the recovery log line. *now* is injectable for
     deterministic tests.
     """
-    global _LAST_TICK_COMPLETED_AT, _LAST_CLAIM_AT, _STALLED_SINCE, _STALL_TENANTS
+    global _LAST_TICK_COMPLETED_AT, _LAST_CLAIM_AT, _STALLED_SINCE
     stamp = now if now is not None else datetime.now(UTC)
     stalled_since = _STALLED_SINCE
-    notified = _STALL_TENANTS
     _LAST_TICK_COMPLETED_AT = stamp
     if lock_acquired:
         _LAST_CLAIM_AT = stamp
     if stalled_since is None:
         return
     _STALLED_SINCE = None
-    _STALL_TENANTS = ()
     stalled_for = (stamp - stalled_since).total_seconds()
-    try:
-        _log().warning(
-            "checks_scheduler_recovered",
-            stalled_for_seconds=stalled_for,
-        )
-        for tenant_id in notified:
-            await publish_scheduler_liveness_event(
-                tenant_id=tenant_id,
-                op_id=SCHEDULER_RECOVERED_OP_ID,
-                detail={"stalled_for_seconds": stalled_for},
-            )
-    except Exception:
-        _log().warning(
-            "checks_watchdog_emit_failed",
-            op_id=SCHEDULER_RECOVERED_OP_ID,
-            exc_info=True,
-        )
+    _log().warning(
+        "checks_scheduler_recovered",
+        stalled_for_seconds=stalled_for,
+    )
 
 
 async def evaluate_stall_watchdog(now: datetime | None = None) -> bool:
     """One watchdog check. Returns ``True`` while the loop reads as stalled.
 
     Detection edge (quiet time first exceeds the threshold): set the
-    once-per-stall latch, emit the ``checks_scheduler_stalled`` log, and
-    fan the ``checks.scheduler_stalled`` event out to every tenant with
-    an active Sensor. Subsequent checks during the same stall return
-    ``True`` without re-emitting. The latch is set *before* the emission
-    block so a failing tenant query or publish (warn-logged, fail-open)
-    still arms the recovery pair. *now* is injectable for deterministic
+    once-per-stall latch and emit the ``checks_scheduler_stalled`` log.
+    Subsequent checks during the same stall return ``True`` without
+    re-emitting. *now* is injectable for deterministic
     tests.
     """
-    global _STALLED_SINCE, _STALL_TENANTS
+    global _STALLED_SINCE
     check_at = now if now is not None else datetime.now(UTC)
     reference = _staleness_reference()
     if reference is None:
@@ -348,25 +291,6 @@ async def evaluate_stall_watchdog(now: datetime | None = None) -> bool:
         stall_threshold_seconds=threshold,
         tick_interval_seconds=tick_interval,
     )
-    try:
-        tenants = tuple(await _active_sensor_tenant_ids())
-        _STALL_TENANTS = tenants
-        for tenant_id in tenants:
-            await publish_scheduler_liveness_event(
-                tenant_id=tenant_id,
-                op_id=SCHEDULER_STALLED_OP_ID,
-                detail={
-                    "seconds_since_last_tick": quiet_seconds,
-                    "stall_threshold_seconds": threshold,
-                    "tick_interval_seconds": tick_interval,
-                },
-            )
-    except Exception:
-        _log().warning(
-            "checks_watchdog_emit_failed",
-            op_id=SCHEDULER_STALLED_OP_ID,
-            exc_info=True,
-        )
     return True
 
 
@@ -395,7 +319,7 @@ async def _watchdog_loop() -> None:
         except Exception:
             _log().warning("checks_watchdog_check_failed", exc_info=True)
         # Liveness gauge for the watchdog loop itself — complements, does not
-        # replace, its broadcast-plane stall detection for the runner.
+        # replace, its stall detection for the runner.
         note_loop_tick("sensor_watchdog", get_settings().sensor_runner_tick_interval_seconds)
 
 

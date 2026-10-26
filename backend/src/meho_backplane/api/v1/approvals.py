@@ -90,19 +90,27 @@ from meho_backplane.operations.approval_context import (
     ReviewerContext,
     resolve_reviewer_context,
 )
+from meho_backplane.operations.approval_outcome import resume_outcome
 from meho_backplane.operations.approval_queue import (
+    MAX_REASON_LENGTH,
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
     ApprovalRequestExpiredError,
+    ApprovalResultState,
+    DelegatedDecisionForbiddenError,
+    DelegatedReasonInvalidError,
+    Delegation,
     ParamsMismatchError,
     PreviewBindingMissingError,
     ResultAccessForbiddenError,
     SelfApprovalForbiddenError,
     UnauthorizedApprovalError,
+    approval_result_state,
     approve_request,
+    get_decision_delegation,
     get_request,
-    publish_approval_event,
     read_approval_result,
+    record_approval_step_event,
     reject_request,
     resume_dispatch_after_approval,
 )
@@ -133,6 +141,9 @@ _require_approvals_access = Depends(require_approvals_access)
 #: (list / show / result) keep ``require_approvals_access`` alone so a
 #: service principal's approval bridge can still list the queue.
 _require_human = Depends(require_human_principal)
+
+#: Decision ``reason`` length bound, the same value the console form uses.
+_MAX_REASON_LENGTH = MAX_REASON_LENGTH
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +183,42 @@ class ReviewerContextView(BaseModel):
     summary: str | None = None
 
 
+class DelegationView(BaseModel):
+    """Who told the approver to decide, read off the decision audit row (#3692).
+
+    Present only when the decision ``reason`` ended with the
+    ``Instructed-by:`` / ``Instruction:`` / ``Refs:`` trailer block. The
+    approver is still ``reviewed_by``; ``instructed_by`` is the other human
+    whose written instruction they acted on.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    instructed_by: str
+    instruction: str
+    refs: list[str]
+
+
+class ApprovalResumeOutcomeView(BaseModel):
+    """What happened when an approved request ran (#3543).
+
+    A summary read off the stored result envelope. The result body and the
+    free-text error stay on the owner-only ``/result`` read.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: When MEHO started the run of the approved operation.
+    resumed_at: str | None
+    #: ``status`` of the run's result: ``ok``, ``error``, ``denied``, ...
+    #: ``None`` while the run has no stored result.
+    result_status: str | None
+    #: Error code of a failed run (for example ``connector_error``).
+    error_code: str | None
+    #: Id of the audit row the run wrote. Open it with ``meho audit show``.
+    audit_id: uuid.UUID | None
+
+
 class ApprovalRequestView(BaseModel):
     """Read-only view of an :class:`~meho_backplane.db.models.ApprovalRequest`."""
 
@@ -191,8 +238,21 @@ class ApprovalRequestView(BaseModel):
     connector_id: str
     target_id: uuid.UUID | None
     params_hash: str
+    #: Preview-result-hash binding (#3197) stored at park time (#3486). Lets a
+    #: client match a request to the destructive row it previewed. ``None``
+    #: for a non-destructive request. Additive.
+    preview_hash: str | None = None
     proposed_effect: dict[str, Any]
     status: ApprovalRequestStatus
+    #: Run phase of an approved request (#3486): ``not_started`` /
+    #: ``started`` / ``executed`` / ``failed``. ``None`` unless ``status`` is
+    #: ``approved``. Read off the row; ``status`` keeps its four values.
+    #: Additive; a client that ignores it is unaffected.
+    result_state: ApprovalResultState | None = None
+    #: Run summary of an approved request (#3543): start time, result
+    #: status, error code and the run's audit id. ``None`` until the run
+    #: starts, and for a request that is not ``approved``. Additive.
+    resume_outcome: ApprovalResumeOutcomeView | None = None
     reviewed_by: str | None
     #: Reviewer display name, resolved alongside ``reviewed_by`` (#3300).
     #: ``None`` before a decision or when the deciding token carried no
@@ -209,6 +269,10 @@ class ApprovalRequestView(BaseModel):
     #: (resolution is single-request only) and on any surface that predates
     #: this field. Additive; a client that ignores it is unaffected.
     reviewer_context: ReviewerContextView | None = None
+    #: Delegated-decision block (#3692) from the decision audit row:
+    #: who instructed the approver, their words, and the refs. ``None`` on
+    #: the list view, before a decision, and for an ordinary decision.
+    delegation: DelegationView | None = None
 
 
 class ApprovalResultView(BaseModel):
@@ -250,7 +314,12 @@ class ApproveRequestBody(BaseModel):
     )
     reason: str = Field(
         default="",
-        description="Optional human-readable approval reason (recorded in the audit row).",
+        max_length=_MAX_REASON_LENGTH,
+        description=(
+            "Optional human-readable approval reason (recorded in the audit row). "
+            "End it with Instructed-by: / Instruction: / Refs: lines when "
+            "another human instructed this decision."
+        ),
     )
     async_: bool = Field(
         default=False,
@@ -274,7 +343,12 @@ class RejectRequestBody(BaseModel):
 
     reason: str = Field(
         default="",
-        description="Optional human-readable rejection reason (recorded in the audit row).",
+        max_length=_MAX_REASON_LENGTH,
+        description=(
+            "Optional human-readable rejection reason (recorded in the audit row). "
+            "End it with Instructed-by: / Instruction: / Refs: lines when "
+            "another human instructed this decision."
+        ),
     )
 
 
@@ -326,15 +400,31 @@ def _reviewer_context_view(ctx: ReviewerContext) -> ReviewerContextView:
     )
 
 
+def _resume_outcome_view(row: ApprovalRequest) -> ApprovalResumeOutcomeView | None:
+    """Project the run summary of *row* (#3543), or ``None`` before a run."""
+    outcome = resume_outcome(row)
+    if outcome is None:
+        return None
+    return ApprovalResumeOutcomeView(
+        resumed_at=outcome.resumed_at,
+        result_status=outcome.result_status,
+        error_code=outcome.error_code,
+        audit_id=outcome.audit_id,
+    )
+
+
 def _view(
-    row: ApprovalRequest, reviewer_context: ReviewerContextView | None = None
+    row: ApprovalRequest,
+    reviewer_context: ReviewerContextView | None = None,
+    delegation: Delegation | None = None,
 ) -> ApprovalRequestView:
     """Convert an ORM row to a response view.
 
     *reviewer_context* is the redacted, resolved judging context (#3353),
     supplied only on the single-request path (its resolution runs a few
     tenant-scoped reads); the list view passes ``None`` and the field is
-    simply absent there.
+    simply absent there. *delegation* (#3692) is likewise single-request
+    only -- it is read off the decision audit row.
     """
     return ApprovalRequestView(
         id=row.id,
@@ -347,8 +437,11 @@ def _view(
         connector_id=row.connector_id,
         target_id=row.target_id,
         params_hash=row.params_hash,
+        preview_hash=row.preview_hash,
         proposed_effect=row.proposed_effect,
         status=ApprovalRequestStatus(row.status),
+        result_state=approval_result_state(row),
+        resume_outcome=_resume_outcome_view(row),
         reviewed_by=row.reviewed_by,
         reviewed_by_name=row.reviewed_by_name,
         decided_at=row.decided_at.isoformat() if row.decided_at else None,
@@ -356,6 +449,31 @@ def _view(
         expires_at=row.expires_at.isoformat() if row.expires_at else None,
         work_ref=row.work_ref,
         reviewer_context=reviewer_context,
+        delegation=(
+            DelegationView(
+                instructed_by=delegation.instructed_by,
+                instruction=delegation.instruction,
+                refs=list(delegation.refs),
+            )
+            if delegation is not None
+            else None
+        ),
+    )
+
+
+def _delegated_reason_http_error(exc: DelegatedReasonInvalidError) -> HTTPException:
+    """Map an incomplete delegated-decision reason to 422 (#3692)."""
+    return HTTPException(
+        status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=f"delegated_reason_invalid: {exc}",
+    )
+
+
+def _delegated_forbidden_http_error(exc: DelegatedDecisionForbiddenError) -> HTTPException:
+    """Map a delegated decision on a non-lab deployment to 403 (#3693)."""
+    return HTTPException(
+        status_code=http_status.HTTP_403_FORBIDDEN,
+        detail=f"delegated_decision_forbidden: {exc}",
     )
 
 
@@ -389,8 +507,8 @@ async def _capture_operator_decision(
 ) -> ApprovalRequest:
     """Commit a ``/decide`` operator decision + publish, mapping errors to HTTP.
 
-    Runs the approve/reject inside one transaction, publishes the
-    fail-open broadcast after commit, and projects the approval-queue
+    Runs the approve/reject inside one transaction, records the
+    fail-open add-on step event after commit, and projects the approval-queue
     exceptions onto the same HTTP status codes the ``/approve`` route
     uses. Returns the decided :class:`ApprovalRequest` (the caller decides
     whether to re-dispatch). Extracted so :func:`decide_approval_request`
@@ -410,11 +528,10 @@ async def _capture_operator_decision(
                 )
             await session.commit()
         # Publish AFTER commit (fail-open).
-        await publish_approval_event(
+        await record_approval_step_event(
             tenant_id=operator.tenant_id,
             request=request,
             decision=decision,
-            principal_sub=operator.sub,
             audit_id=request._audit_id,  # type: ignore[attr-defined]
         )
     except ApprovalNotFoundError as exc:
@@ -454,6 +571,10 @@ async def _capture_operator_decision(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="preview_binding_missing",
         ) from exc
+    except DelegatedReasonInvalidError as exc:
+        raise _delegated_reason_http_error(exc) from exc
+    except DelegatedDecisionForbiddenError as exc:
+        raise _delegated_forbidden_http_error(exc) from exc
     return request
 
 
@@ -548,7 +669,8 @@ async def get_approval_request(
         # subject / lineage for ``meho approvals show``. Fail-open: the
         # resolver never raises, so a resolution miss just omits the block.
         reviewer_context = _reviewer_context_view(await resolve_reviewer_context(session, row))
-    return _view(row, reviewer_context)
+        delegation = await get_decision_delegation(session, row)
+    return _view(row, reviewer_context, delegation)
 
 
 @router.get("/{request_id}/result", response_model=ApprovalResultView)
@@ -640,11 +762,10 @@ async def _record_approval_decision(
             await session.commit()
         # Publish AFTER commit (G11.2-T5): a phantom event cannot
         # outlive a failed transaction; helper is fail-open.
-        await publish_approval_event(
+        await record_approval_step_event(
             tenant_id=operator.tenant_id,
             request=request,
             decision="approved",
-            principal_sub=operator.sub,
             audit_id=request._audit_id,  # type: ignore[attr-defined]
         )
     except ApprovalNotFoundError as exc:
@@ -690,6 +811,10 @@ async def _record_approval_decision(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="preview_binding_missing",
         ) from exc
+    except DelegatedReasonInvalidError as exc:
+        raise _delegated_reason_http_error(exc) from exc
+    except DelegatedDecisionForbiddenError as exc:
+        raise _delegated_forbidden_http_error(exc) from exc
     return request
 
 
@@ -727,7 +852,9 @@ async def approve_approval_request(
       requester and self-approval break-glass is disabled (G11.7-T1 #1401).
     * 404 — request not found (or belongs to another tenant).
     * 409 — request is already decided.
-    * 422 — params hash mismatch.
+    * 422 — params hash mismatch, a reason over 2000 characters, or a
+      delegated reason (``Instructed-by:``) missing ``Instruction:`` /
+      ``Refs:`` (#3692).
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id="approval.approve",
@@ -798,6 +925,8 @@ async def reject_approval_request(
       nor the ``approver`` capability, #3243).
     * 404 — request not found (or belongs to another tenant).
     * 409 — request is already decided.
+    * 422 — a reason over 2000 characters, or a delegated reason
+      (``Instructed-by:``) missing ``Instruction:`` / ``Refs:`` (#3692).
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id="approval.reject",
@@ -814,11 +943,10 @@ async def reject_approval_request(
                 reason=body.reason,
             )
             await session.commit()
-        await publish_approval_event(
+        await record_approval_step_event(
             tenant_id=operator.tenant_id,
             request=request,
             decision="rejected",
-            principal_sub=operator.sub,
             audit_id=request._audit_id,  # type: ignore[attr-defined]
         )
     except ApprovalNotFoundError as exc:
@@ -836,6 +964,10 @@ async def reject_approval_request(
             status_code=http_status.HTTP_409_CONFLICT,
             detail=f"approval_request_already_{exc.status}",
         ) from exc
+    except DelegatedReasonInvalidError as exc:
+        raise _delegated_reason_http_error(exc) from exc
+    except DelegatedDecisionForbiddenError as exc:
+        raise _delegated_forbidden_http_error(exc) from exc
 
     return RejectResponseBody(
         approval_request_id=request_id,
@@ -865,7 +997,12 @@ class DecideRequestBody(BaseModel):
     )
     reason: str = Field(
         default="",
-        description="Optional rationale recorded on the decision audit row.",
+        max_length=_MAX_REASON_LENGTH,
+        description=(
+            "Optional rationale recorded on the decision audit row. End it "
+            "with Instructed-by: / Instruction: / Refs: lines when another "
+            "human instructed this decision."
+        ),
     )
 
 
@@ -920,8 +1057,8 @@ async def decide_approval_request(
     """Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).
 
     Flips the request to ``approved`` or ``rejected``, writes the
-    decision audit row, and publishes the ``approval.{approved,rejected}``
-    broadcast event. Backs the CLI/MCP operator-decision flow where the
+    decision audit row, and records the ``approval.{approved,rejected}``
+    add-on step event. Backs the CLI/MCP operator-decision flow where the
     operator approves by id alone.
 
     On **every approval** the decision then drives a re-dispatch using the

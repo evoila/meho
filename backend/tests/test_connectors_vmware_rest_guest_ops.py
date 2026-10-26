@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,8 +34,14 @@ import httpx
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.broadcast.events import classify_op, scrub_broadcast_params
 from meho_backplane.connectors import OperationResult
-from meho_backplane.connectors.vmware_rest.composites import _guest, _register
+from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
+from meho_backplane.connectors.vmware_rest.composites import (
+    _guest,
+    _guest_secret_ref,
+    _register,
+)
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.settings import get_settings
 
@@ -80,6 +86,7 @@ class _Target:
     host: str = "vc.example.test"
     secret_ref: str = "targets/vc"
     verify_tls: bool = False
+    extras: dict[str, Any] = field(default_factory=dict)
 
 
 class _FakeStreamResponse:
@@ -106,6 +113,7 @@ class _FakeStreamResponse:
         state: dict[str, int],
         content_encoding: str | None = None,
         content_type: str | None = None,
+        content_length: str | None = None,
     ) -> None:
         self.status_code = status
         self._body = body
@@ -115,6 +123,8 @@ class _FakeStreamResponse:
         headers: dict[str, str] = {}
         if declare_content_length:
             headers["content-length"] = str(len(body))
+        if content_length is not None:
+            headers["content-length"] = content_length
         if content_encoding is not None:
             headers["content-encoding"] = content_encoding
         if content_type is not None:
@@ -168,6 +178,7 @@ class _FakeTransferClient:
         chunk_size: int = 65536,
         get_content_encoding: str | None = None,
         get_content_type: str | None = None,
+        get_content_length: str | None = None,
     ) -> None:
         self._put_calls = put_calls
         self._get_calls = get_calls
@@ -179,6 +190,7 @@ class _FakeTransferClient:
         self._chunk_size = chunk_size
         self._get_content_encoding = get_content_encoding
         self._get_content_type = get_content_type
+        self._get_content_length = get_content_length
 
     async def put(self, url: str, *, content: bytes | None = None) -> httpx.Response:
         self._put_calls.append({"url": url, "content": content})
@@ -200,6 +212,7 @@ class _FakeTransferClient:
                 state=self._stream_state,
                 content_encoding=self._get_content_encoding,
                 content_type=self._get_content_type,
+                content_length=self._get_content_length,
             )
         )
 
@@ -215,7 +228,8 @@ class _GuestRecordingConnector:
     ``declare_content_length`` toggles whether the response advertises a
     ``Content-Length`` (off = a chunked / lying host, exercising the streamed
     running-total abort); ``stream_state["yielded"]`` records how many body
-    bytes were actually drained.
+    bytes were actually drained. ``get_content_length`` sets a raw
+    ``Content-Length`` header value, replacing the real body length.
     """
 
     vmomi: dict[str, Any] = field(default_factory=dict)
@@ -226,6 +240,7 @@ class _GuestRecordingConnector:
     stream_chunk_size: int = 65536
     get_content_encoding: str | None = None
     get_content_type: str | None = None
+    get_content_length: str | None = None
     vmomi_calls: list[dict[str, Any]] = field(default_factory=list)
     put_calls: list[dict[str, Any]] = field(default_factory=list)
     get_calls: list[dict[str, Any]] = field(default_factory=list)
@@ -255,6 +270,7 @@ class _GuestRecordingConnector:
             chunk_size=self.stream_chunk_size,
             get_content_encoding=self.get_content_encoding,
             get_content_type=self.get_content_type,
+            get_content_length=self.get_content_length,
         )
 
 
@@ -921,6 +937,67 @@ async def test_file_read_fetch_error_message_omits_the_entire_body(creds: _CredR
 
 
 @pytest.mark.asyncio
+async def test_file_read_fetch_error_clips_long_header_values(creds: _CredRecorder) -> None:
+    """A 16 KB media type and a 16 KB declared length are cut before they are echoed.
+
+    Both values come from the transfer host's response headers and land in the
+    error message, which is also what the audit row stores. The media type is
+    cut to under 128 characters and the length to under 20 digits.
+    """
+    long_type = "application/" + "x" * (16 * 1024)
+    long_length = "9" * (16 * 1024)
+    conn = _read_conn(
+        _read_info(size=10),
+        get_status=500,
+        get_body=b"err",
+        get_content_type=long_type,
+        get_content_length=long_length,
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        await _guest.guest_file_read_composite(
+            operator=_operator(),
+            target=_Target(),
+            params={"vm": "vm-42", "guest_path": "/etc/hostname", "fetch_content": True},
+            connector=conn,  # type: ignore[arg-type]
+        )
+    message = str(excinfo.value)
+    echoed_type = message.split("Content-Type: ", 1)[1].split(",", 1)[0]
+    echoed_length = message.split("Content-Length: ", 1)[1].split(")", 1)[0]
+    assert len(echoed_type) < 128
+    assert echoed_type.startswith("application/xxx") and echoed_type.endswith("...")
+    assert len(echoed_length.rstrip(".")) < 20
+    assert echoed_length.startswith("999") and echoed_length.endswith("...")
+    assert len(message) < 400
+    assert conn.stream_state["yielded"] == 0
+
+
+def test_transfer_metadata_helpers_clip_to_ceilings() -> None:
+    """The header helpers cut long values and keep short ones as they are."""
+    media = _guest._media_type_token("text/" + "a" * (16 * 1024))
+    assert len(media) == _guest._MAX_ECHOED_MEDIA_TYPE_CHARS < 128
+    assert media.endswith("...")
+    length = _guest._declared_length("1" * (16 * 1024))
+    assert len(length) == _guest._MAX_ECHOED_LENGTH_DIGITS < 20
+    assert length.endswith("...")
+    # Normal values pass through unchanged.
+    assert _guest._media_type_token("Application/JSON; charset=utf-8") == "application/json"
+    assert _guest._declared_length("1048576") == "1048576"
+    assert _guest._declared_length("0") == "0"
+    assert _guest._declared_length("007") == "7"
+    # Anything that is not plain ASCII digits is not echoed.
+    for bad in ("-1", "+5", "1_000", "12a", "", "\u0661\u0662"):
+        assert _guest._declared_length(bad) == "unknown"
+
+
+def test_file_too_large_clips_a_long_declared_size() -> None:
+    """The over-cap refusal also cuts a very long declared size."""
+    message = str(_guest._file_too_large(int("9" * 4000), 1024))
+    assert "9" * 20 not in message
+    assert "file is 9999999999999999... bytes" in message
+    assert "file is 2048 bytes" in str(_guest._file_too_large(2048, 1024))
+
+
+@pytest.mark.asyncio
 async def test_file_read_fetch_sends_accept_encoding_identity(creds: _CredRecorder) -> None:
     """The transfer GET requests identity encoding (decompression-bomb guard)."""
     info = _read_info(size=5)
@@ -1430,3 +1507,273 @@ async def test_program_run_no_pid_raises(creds: _CredRecorder, auto_gate: _GateR
             params={"vm": "vm-42", "program_path": "/bin/true"},
             connector=conn,  # type: ignore[arg-type]
         )
+
+
+# ---------------------------------------------------------------------------
+# guest_secret_ref -- per-call guest credential override (#3364)
+# ---------------------------------------------------------------------------
+
+
+_OVERRIDE_USER = "vm-guest"
+_OVERRIDE_PASSWORD = "vm-only-pw-9f2a"
+_OVERRIDE_REF = "targets/app-vm-01"
+
+
+class _OverrideStore:
+    """Stub for the override read -- records the ref handed to the store seam."""
+
+    def __init__(self, *, raises: Exception | None = None) -> None:
+        self.calls: list[tuple[str | None, str]] = []
+        self._raises = raises
+
+    async def __call__(self, target: Any, operator: Operator, *, param: str) -> dict[str, Any]:
+        self.calls.append((target.secret_ref, param))
+        if self._raises is not None:
+            raise self._raises
+        return {"guest_username": _OVERRIDE_USER, "guest_password": _OVERRIDE_PASSWORD}
+
+
+@pytest.fixture
+def override_store(monkeypatch: pytest.MonkeyPatch) -> _OverrideStore:
+    store = _OverrideStore()
+    monkeypatch.setattr(_guest_secret_ref, "load_param_secret_data", store)
+    return store
+
+
+_Handler = Callable[..., Awaitable[Any]]
+
+
+def _override_cases() -> list[tuple[str, _Handler, Callable[[], Any], dict[str, Any], str]]:
+    """(op_id, handler, connector factory, params, vim method suffix) for the five ops."""
+    return [
+        (
+            "vmware.composite.vm.guest.process.list",
+            _guest.guest_process_list_composite,
+            lambda: _GuestRecordingConnector(
+                vmomi={
+                    "GuestOperationsManager": _process_mgr(),
+                    "/GuestProcessManager/pm-1/ListProcessesInGuest": [{"name": "x", "pid": 1}],
+                }
+            ),
+            {"vm": "vm-42"},
+            "/ListProcessesInGuest",
+        ),
+        (
+            "vmware.composite.vm.guest.env.read",
+            _guest.guest_env_read_composite,
+            lambda: _GuestRecordingConnector(
+                vmomi={
+                    "GuestOperationsManager": _process_mgr(),
+                    "/GuestProcessManager/pm-1/ReadEnvironmentVariableInGuest": ["A=1"],
+                }
+            ),
+            {"vm": "vm-42"},
+            "/ReadEnvironmentVariableInGuest",
+        ),
+        (
+            "vmware.composite.vm.guest.file.read",
+            _guest.guest_file_read_composite,
+            lambda: _read_conn(_read_info()),
+            {"vm": "vm-42", "guest_path": "/etc/os-release"},
+            "/InitiateFileTransferFromGuest",
+        ),
+        (
+            "vmware.composite.vm.guest.file.write",
+            _guest.guest_file_write_composite,
+            lambda: _GuestRecordingConnector(
+                vmomi={
+                    "GuestOperationsManager": _file_mgr(),
+                    "/GuestFileManager/fm-1/InitiateFileTransferToGuest": "https://vc.example.test/guestFile?id=9&token=xyz",
+                }
+            ),
+            {"vm": "vm-42", "guest_path": "/etc/mtu.conf", "content": "MTU=1400\n"},
+            "/InitiateFileTransferToGuest",
+        ),
+        (
+            "vmware.composite.vm.guest.program.run",
+            _guest.guest_program_run_composite,
+            lambda: _ProgramRunConnector(start_pid=77),
+            {"vm": "vm-42", "program_path": "/usr/bin/true"},
+            "/StartProgramInGuest",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("op_id", "handler", "make_conn", "params", "method_suffix"),
+    _override_cases(),
+    ids=[
+        case[0].rsplit(".", 2)[-2] + "." + case[0].rsplit(".", 1)[-1] for case in _override_cases()
+    ],
+)
+async def test_guest_secret_ref_overrides_the_target_secret(
+    creds: _CredRecorder,
+    auto_gate: _GateRecorder,
+    override_store: _OverrideStore,
+    op_id: str,
+    handler: _Handler,
+    make_conn: Callable[[], Any],
+    params: dict[str, Any],
+    method_suffix: str,
+) -> None:
+    conn = make_conn()
+    out = await handler(
+        operator=_operator(),
+        target=_Target(),
+        params={**params, "guest_secret_ref": _OVERRIDE_REF},
+        connector=conn,
+    )
+    # The guest login came from the override ref, read under the param name.
+    assert override_store.calls == [(_OVERRIDE_REF, "guest_secret_ref")]
+    assert creds.calls == []
+    call = next(c for c in conn.vmomi_calls if c["path"].endswith(method_suffix))
+    assert call["json"]["auth"]["username"] == _OVERRIDE_USER
+    assert call["json"]["auth"]["password"] == _OVERRIDE_PASSWORD
+    assert _OVERRIDE_PASSWORD not in json.dumps(out)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("op_id", "handler", "make_conn", "params", "method_suffix"),
+    _override_cases(),
+    ids=[
+        case[0].rsplit(".", 2)[-2] + "." + case[0].rsplit(".", 1)[-1] for case in _override_cases()
+    ],
+)
+async def test_without_guest_secret_ref_the_target_secret_is_used(
+    creds: _CredRecorder,
+    auto_gate: _GateRecorder,
+    override_store: _OverrideStore,
+    op_id: str,
+    handler: _Handler,
+    make_conn: Callable[[], Any],
+    params: dict[str, Any],
+    method_suffix: str,
+) -> None:
+    conn = make_conn()
+    await handler(operator=_operator(), target=_Target(), params=params, connector=conn)
+    assert creds.calls == [("guest_username", "guest_password")]
+    assert override_store.calls == []
+    call = next(c for c in conn.vmomi_calls if c["path"].endswith(method_suffix))
+    assert call["json"]["auth"]["username"] == "svc-guest"
+
+
+@pytest.mark.asyncio
+async def test_guest_secret_ref_value_never_reaches_a_governed_surface(
+    creds: _CredRecorder, auto_gate: _GateRecorder, override_store: _OverrideStore
+) -> None:
+    """The override credential stays off params, result, gate, audit, broadcast."""
+    params = {
+        "vm": "vm-42",
+        "guest_path": "/etc/mtu.conf",
+        "content": "MTU=1400\n",
+        "guest_secret_ref": _OVERRIDE_REF,
+    }
+    conn = _GuestRecordingConnector(
+        vmomi={
+            "GuestOperationsManager": _file_mgr(),
+            "/GuestFileManager/fm-1/InitiateFileTransferToGuest": "https://vc.example.test/guestFile?id=9&token=xyz",
+        }
+    )
+    out = await _guest.guest_file_write_composite(
+        operator=_operator(),
+        target=_Target(),
+        params=params,
+        connector=conn,  # type: ignore[arg-type]
+    )
+    # The params dict (what the audit row hashes / the approval carries)
+    # holds only the reference string.
+    assert params["guest_secret_ref"] == _OVERRIDE_REF
+    for surface in (json.dumps(params), json.dumps(out), json.dumps(auto_gate.calls)):
+        assert _OVERRIDE_PASSWORD not in surface
+        assert _OVERRIDE_USER not in surface
+    # Broadcast: the op is pinned aggregate-only, and even the scrubbed
+    # params shape carries no credential value.
+    assert classify_op("vmware.composite.vm.guest.file.write") == "credential_write"
+    scrubbed, _found = scrub_broadcast_params(params)
+    assert _OVERRIDE_PASSWORD not in json.dumps(scrubbed)
+
+
+@pytest.mark.asyncio
+async def test_guest_secret_ref_store_denial_fails_closed(
+    creds: _CredRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ref the operator may not read: the param-ref error, no target fallback, no login."""
+    denied = SecretRefReadError(
+        param="guest_secret_ref",
+        secret_ref=_OVERRIDE_REF,
+        cause=httpx.HTTPStatusError("403", request=None, response=None),  # type: ignore[arg-type]
+    )
+    store = _OverrideStore(raises=denied)
+    monkeypatch.setattr(_guest_secret_ref, "load_param_secret_data", store)
+    conn = _GuestRecordingConnector(vmomi={"GuestOperationsManager": _process_mgr()})
+    with pytest.raises(SecretRefReadError) as excinfo:
+        await _guest.guest_process_list_composite(
+            operator=_operator(),
+            target=_Target(),
+            params={"vm": "vm-42", "guest_secret_ref": _OVERRIDE_REF},
+            connector=conn,  # type: ignore[arg-type]
+        )
+    assert excinfo.value is denied
+    assert creds.calls == []
+    assert conn.vmomi_calls == []
+    assert "app-vm-01" not in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_guest_secret_ref_outside_prefix_fails_closed(
+    creds: _CredRecorder, override_store: _OverrideStore
+) -> None:
+    """A readable ref outside the target's prefix: rejected, no read, no fallback, no login."""
+    conn = _GuestRecordingConnector(vmomi={"GuestOperationsManager": _process_mgr()})
+    with pytest.raises(_guest_secret_ref.GuestSecretRefScopeError):
+        await _guest.guest_env_read_composite(
+            operator=_operator(),
+            target=_Target(),
+            params={"vm": "vm-42", "guest_secret_ref": "other/app-vm-01"},
+            connector=conn,  # type: ignore[arg-type]
+        )
+    assert override_store.calls == []
+    assert creds.calls == []
+    assert conn.vmomi_calls == []
+
+
+@pytest.mark.asyncio
+async def test_guest_secret_ref_write_gate_runs_before_the_override_read(
+    creds: _CredRecorder, override_store: _OverrideStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parked = OperationResult(status="parked", op_id="x", error="parked", duration_ms=0.0)
+    gate = _GateRecorder({"POST:/GuestProcessManager/{moId}/StartProgramInGuest": parked})
+    monkeypatch.setattr(_guest, "enforce_subop_policy", gate)
+    conn = _ProgramRunConnector(start_pid=1)
+    out = await _guest.guest_program_run_composite(
+        operator=_operator(),
+        target=_Target(),
+        params={"vm": "vm-42", "program_path": "/usr/bin/true", "guest_secret_ref": "other/x"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out is parked
+    assert override_store.calls == []
+    assert creds.calls == []
+    assert conn.vmomi_calls == []
+
+
+def test_guest_secret_ref_is_declared_on_the_five_login_ops_only() -> None:
+    from meho_backplane.connectors.vmware_rest.composites import schemas
+
+    with_login = {
+        "vmware.composite.vm.guest.process.list": schemas.GUEST_PROCESS_LIST_PARAMETER_SCHEMA,
+        "vmware.composite.vm.guest.env.read": schemas.GUEST_ENV_READ_PARAMETER_SCHEMA,
+        "vmware.composite.vm.guest.file.read": schemas.GUEST_FILE_READ_PARAMETER_SCHEMA,
+        "vmware.composite.vm.guest.file.write": schemas.GUEST_FILE_WRITE_PARAMETER_SCHEMA,
+        "vmware.composite.vm.guest.program.run": schemas.GUEST_PROGRAM_RUN_PARAMETER_SCHEMA,
+    }
+    for op_id, schema in with_login.items():
+        prop = schema["properties"]["guest_secret_ref"]
+        assert prop["type"] == "string", op_id
+        assert "guest_secret_ref" not in schema["required"], op_id
+        assert schema["additionalProperties"] is False, op_id
+    net_show = schemas.GUEST_NET_SHOW_PARAMETER_SCHEMA
+    assert "guest_secret_ref" not in net_show["properties"]
+    assert net_show["additionalProperties"] is False

@@ -36,15 +36,53 @@ plumbing to break.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from meho_backplane.connectors.schemas import ResultHandle
 
 __all__ = [
+    "FullResultCapture",
     "PassThroughReducer",
     "Reducer",
     "ResultHandle",
+    "full_result_capture_var",
+    "handle_owner_sub_var",
 ]
+
+#: The principal that owns a spilled result handle, when it is not the
+#: operator running the dispatch (#3548). ``None`` (the default) keeps the
+#: normal rule: the dispatching operator owns its handle. The approval resume
+#: binds the parking principal's ``sub`` here while it re-runs the approved op
+#: under the approver, so the handle inside the stored result belongs to the
+#: principal that ``GET /api/v1/approvals/{id}/result`` serves.
+handle_owner_sub_var: ContextVar[str | None] = ContextVar("handle_owner_sub", default=None)
+
+
+@dataclass
+class FullResultCapture:
+    """Receives the full result of one dispatch before it is shortened (#4117).
+
+    The dispatcher fills ``payload`` with the redacted payload it hands to the
+    reducer, so the caller that set the capture sees the same data every other
+    caller gets, only not shortened. ``captured`` tells a short payload that
+    passed through (``None`` is a valid payload) apart from a dispatch that
+    never reached the reducer. The caller still receives the normal shortened
+    result and handle; the capture adds a second view, it changes nothing on
+    the wire.
+    """
+
+    payload: Any = None
+    captured: bool = False
+
+
+#: The sensor runner sets this around its own dispatch so it can check its
+#: rule against the full result instead of the shortened summary (#4117).
+#: ``None`` (the default) for every other caller: nothing is captured.
+full_result_capture_var: ContextVar[FullResultCapture | None] = ContextVar(
+    "full_result_capture", default=None
+)
 
 
 @runtime_checkable

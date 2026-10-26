@@ -53,6 +53,23 @@ const (
 	ApprovalRequestStatusRejected ApprovalRequestStatus = "rejected"
 )
 
+// Defines values for ApprovalResultState.
+const (
+	ApprovalResultStateExecuted   ApprovalResultState = "executed"
+	ApprovalResultStateFailed     ApprovalResultState = "failed"
+	ApprovalResultStateNotStarted ApprovalResultState = "not_started"
+	ApprovalResultStateStarted    ApprovalResultState = "started"
+)
+
+// Defines values for AuditEventClass.
+const (
+	AuditEventClassApprovalDecision   AuditEventClass = "approval_decision"
+	AuditEventClassLegacyRequest      AuditEventClass = "legacy_request"
+	AuditEventClassOperationExecution AuditEventClass = "operation_execution"
+	AuditEventClassPolicyDecision     AuditEventClass = "policy_decision"
+	AuditEventClassSecurityEvent      AuditEventClass = "security_event"
+)
+
 // Defines values for AuthModel.
 const (
 	AuthModelImpersonation        AuthModel = "impersonation"
@@ -249,6 +266,32 @@ const (
 	DashboardReadStateUnknown  DashboardReadState = "unknown"
 )
 
+// Defines values for DocsChunkScoreKind.
+const (
+	DocsChunkScoreKindDistance   DocsChunkScoreKind = "distance"
+	DocsChunkScoreKindSimilarity DocsChunkScoreKind = "similarity"
+)
+
+// Defines values for DocsReadResultDisclosure.
+const (
+	DocsReadResultDisclosureFull DocsReadResultDisclosure = "full"
+	DocsReadResultDisclosureLink DocsReadResultDisclosure = "link"
+)
+
+// Defines values for DocsReadResultMode.
+const (
+	DocsReadResultModeAround  DocsReadResultMode = "around"
+	DocsReadResultModePage    DocsReadResultMode = "page"
+	DocsReadResultModeSection DocsReadResultMode = "section"
+)
+
+// Defines values for DocsReadResultReason.
+const (
+	DocsReadResultReasonLinkOnly         DocsReadResultReason = "link_only"
+	DocsReadResultReasonPdfNotSupported  DocsReadResultReason = "pdf_not_supported"
+	DocsReadResultReasonTypeNotSupported DocsReadResultReason = "type_not_supported"
+)
+
 // Defines values for EditOpBodySafetyLevel.
 const (
 	EditOpBodySafetyLevelCaution     EditOpBodySafetyLevel = "caution"
@@ -363,11 +406,29 @@ const (
 	IngestRequestAuthSchemeStaticHeader      IngestRequestAuthScheme = "static_header"
 )
 
+// Defines values for KbProvenanceSourceKind.
+const (
+	KbProvenanceSourceKindDirect    KbProvenanceSourceKind = "direct"
+	KbProvenanceSourceKindDirectory KbProvenanceSourceKind = "directory"
+)
+
+// Defines values for KbProvenanceState.
+const (
+	KbProvenanceStateLegacy   KbProvenanceState = "legacy"
+	KbProvenanceStateRecorded KbProvenanceState = "recorded"
+)
+
 // Defines values for KindFilterValue.
 const (
 	KindFilterValueCron   KindFilterValue = "cron"
 	KindFilterValueEvent  KindFilterValue = "event"
 	KindFilterValueOneOff KindFilterValue = "one_off"
+)
+
+// Defines values for MemoryEntrySearchHitExpiryState.
+const (
+	MemoryEntrySearchHitExpiryStateNever     MemoryEntrySearchHitExpiryState = "never"
+	MemoryEntrySearchHitExpiryStateScheduled MemoryEntrySearchHitExpiryState = "scheduled"
 )
 
 // Defines values for MemoryScope.
@@ -401,12 +462,27 @@ const (
 	PermissionVerdictNeedsApproval PermissionVerdict = "needs-approval"
 )
 
+// Defines values for PreviewOperationResponseStatus.
+const (
+	PreviewOperationResponseStatusError       PreviewOperationResponseStatus = "error"
+	PreviewOperationResponseStatusOk          PreviewOperationResponseStatus = "ok"
+	PreviewOperationResponseStatusRateLimited PreviewOperationResponseStatus = "rate_limited"
+	PreviewOperationResponseStatusUnavailable PreviewOperationResponseStatus = "unavailable"
+)
+
 // Defines values for PrincipalKind.
 const (
 	PrincipalKindAgent   PrincipalKind = "agent"
 	PrincipalKindRunner  PrincipalKind = "runner"
 	PrincipalKindService PrincipalKind = "service"
 	PrincipalKindUser    PrincipalKind = "user"
+)
+
+// Defines values for ReadDocsRequestMode.
+const (
+	ReadDocsRequestModeAround  ReadDocsRequestMode = "around"
+	ReadDocsRequestModePage    ReadDocsRequestMode = "page"
+	ReadDocsRequestModeSection ReadDocsRequestMode = "section"
 )
 
 // Defines values for RetireChecklistReportOverallVerdict.
@@ -435,6 +511,14 @@ const (
 	RunSummaryStateAbandoned  RunSummaryState = "abandoned"
 	RunSummaryStateCompleted  RunSummaryState = "completed"
 	RunSummaryStateInProgress RunSummaryState = "in_progress"
+)
+
+// Defines values for SafetyOverlayEntrySafetyLevel.
+const (
+	SafetyOverlayEntrySafetyLevelCaution     SafetyOverlayEntrySafetyLevel = "caution"
+	SafetyOverlayEntrySafetyLevelDangerous   SafetyOverlayEntrySafetyLevel = "dangerous"
+	SafetyOverlayEntrySafetyLevelDestructive SafetyOverlayEntrySafetyLevel = "destructive"
+	SafetyOverlayEntrySafetyLevelSafe        SafetyOverlayEntrySafetyLevel = "safe"
 )
 
 // Defines values for ScheduledTriggerInFlightPolicy.
@@ -588,6 +672,7 @@ const (
 	TargetCreateProductGcloud     TargetCreateProduct = "gcloud"
 	TargetCreateProductGh         TargetCreateProduct = "gh"
 	TargetCreateProductHarbor     TargetCreateProduct = "harbor"
+	TargetCreateProductHcx        TargetCreateProduct = "hcx"
 	TargetCreateProductHetzner    TargetCreateProduct = "hetzner"
 	TargetCreateProductHolodeck   TargetCreateProduct = "holodeck"
 	TargetCreateProductHyperv     TargetCreateProduct = "hyperv"
@@ -606,13 +691,17 @@ const (
 	TargetCreateProductProxmox    TargetCreateProduct = "proxmox"
 	TargetCreateProductRabbitmq   TargetCreateProduct = "rabbitmq"
 	TargetCreateProductRke2       TargetCreateProduct = "rke2"
+	TargetCreateProductSalt       TargetCreateProduct = "salt"
 	TargetCreateProductSddc       TargetCreateProduct = "sddc"
+	TargetCreateProductSrm        TargetCreateProduct = "srm"
 	TargetCreateProductTempo      TargetCreateProduct = "tempo"
 	TargetCreateProductVault      TargetCreateProduct = "vault"
 	TargetCreateProductVcd        TargetCreateProduct = "vcd"
 	TargetCreateProductVcfa       TargetCreateProduct = "vcfa"
 	TargetCreateProductVmware     TargetCreateProduct = "vmware"
+	TargetCreateProductVr         TargetCreateProduct = "vr"
 	TargetCreateProductVrli       TargetCreateProduct = "vrli"
+	TargetCreateProductVro        TargetCreateProduct = "vro"
 	TargetCreateProductVrops      TargetCreateProduct = "vrops"
 	TargetCreateProductWindns     TargetCreateProduct = "windns"
 	TargetCreateProductWinsrv     TargetCreateProduct = "winsrv"
@@ -652,6 +741,37 @@ const (
 const (
 	TopologyDiffEntrySourceEdge TopologyDiffEntrySource = "edge"
 	TopologyDiffEntrySourceNode TopologyDiffEntrySource = "node"
+)
+
+// Defines values for TopologyEdgeRelationClass.
+const (
+	TopologyEdgeRelationClassContainment TopologyEdgeRelationClass = "containment"
+	TopologyEdgeRelationClassDependency  TopologyEdgeRelationClass = "dependency"
+	TopologyEdgeRelationClassPlacement   TopologyEdgeRelationClass = "placement"
+	TopologyEdgeRelationClassUnknown     TopologyEdgeRelationClass = "unknown"
+)
+
+// Defines values for TopologyNodeScopeStatus.
+const (
+	TopologyNodeScopeStatusGlobal     TopologyNodeScopeStatus = "global"
+	TopologyNodeScopeStatusLegacy     TopologyNodeScopeStatus = "legacy"
+	TopologyNodeScopeStatusTarget     TopologyNodeScopeStatus = "target"
+	TopologyNodeScopeStatusUnresolved TopologyNodeScopeStatus = "unresolved"
+)
+
+// Defines values for TopologyNodeViaRelationClass.
+const (
+	TopologyNodeViaRelationClassContainment TopologyNodeViaRelationClass = "containment"
+	TopologyNodeViaRelationClassDependency  TopologyNodeViaRelationClass = "dependency"
+	TopologyNodeViaRelationClassPlacement   TopologyNodeViaRelationClass = "placement"
+	TopologyNodeViaRelationClassUnknown     TopologyNodeViaRelationClass = "unknown"
+)
+
+// Defines values for TopologyPathDirection.
+const (
+	TopologyPathDirectionForward    TopologyPathDirection = "forward"
+	TopologyPathDirectionReverse    TopologyPathDirection = "reverse"
+	TopologyPathDirectionUndirected TopologyPathDirection = "undirected"
 )
 
 // Defines values for UnderscoreKindFilter.
@@ -711,12 +831,14 @@ const (
 // Defines values for EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer.
 const (
 	EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPreferBuiltin EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer = "builtin"
+	EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPreferLegacy  EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer = "legacy"
 	EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPreferTenant  EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer = "tenant"
 )
 
 // Defines values for GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer.
 const (
 	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPreferBuiltin GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "builtin"
+	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPreferLegacy  GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "legacy"
 	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPreferTenant  GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "tenant"
 )
 
@@ -901,18 +1023,18 @@ type AgentDefinitionRead struct {
 //
 // “extra="forbid"“ for the same reason as
 // :class:`AgentDefinitionCreate`. A field left “None“ (its default)
-// is *not* applied -- the service distinguishes "field omitted" from
-// "field set to a value" via :meth:`pydantic.BaseModel.model_dump`
-// with “exclude_unset=True“, so a PATCH can change a single field
-// without clobbering the rest.
+// is *not* applied, and neither is a field sent as “null“ -- the
+// service drops both via :meth:`pydantic.BaseModel.model_dump` with
+// “exclude_unset=True, exclude_none=True“, so a PATCH can change a
+// single field without clobbering the rest.
 //
 // “name“ is *not* updatable here: it is the per-tenant natural key
 // (the URL path segment + unique index). Renaming an agent is a
 // delete + recreate, which keeps the natural-key invariant simple and
 // avoids a name-collision race inside the update path.
 //
-// “output_schema“ cannot be cleared through this shape (“None“ is
-// indistinguishable from "omitted" under “exclude_unset“); clearing
+// “output_schema“ cannot be cleared through this shape (“null“ is
+// treated the same as "omitted"); clearing
 // a structured-output schema is a delete + recreate in v0.2. This is
 // an accepted v0.2 limitation, not a silent bug -- documented so a
 // future shape (a sentinel / “JsonValue“ discriminator) can lift it.
@@ -1142,7 +1264,7 @@ type AgentRunRequest struct {
 	// Async Return a run handle immediately instead of blocking for the result.
 	Async *bool `json:"async,omitempty"`
 
-	// Input The user prompt to run the agent on.
+	// Input The user prompt to run the agent on. At most 65536 characters.
 	Input string `json:"input"`
 }
 
@@ -1184,13 +1306,19 @@ type AgentRunStatus string
 
 // AgentRunStatusResponse Poll response for “GET /agents/runs/{handle}“.
 type AgentRunStatusResponse struct {
-	AgentDefinitionId *openapi_types.UUID     `json:"agent_definition_id"`
-	AgentName         *string                 `json:"agent_name"`
-	Error             *string                 `json:"error"`
-	Model             *string                 `json:"model"`
-	Output            *map[string]interface{} `json:"output"`
-	Provider          *string                 `json:"provider"`
-	RunId             openapi_types.UUID      `json:"run_id"`
+	AgentDefinitionId *openapi_types.UUID `json:"agent_definition_id"`
+	AgentName         *string             `json:"agent_name"`
+	Error             *string             `json:"error"`
+
+	// IdentityAct The agent that acts for identity_sub on a direct run. Null when the agent is itself the subject.
+	IdentityAct *string `json:"identity_act"`
+
+	// IdentitySub Who the run acts for: the person who started a direct run, or the agent itself on a scheduled run.
+	IdentitySub *string                 `json:"identity_sub"`
+	Model       *string                 `json:"model"`
+	Output      *map[string]interface{} `json:"output"`
+	Provider    *string                 `json:"provider"`
+	RunId       openapi_types.UUID      `json:"run_id"`
 
 	// Status Closed lifecycle status of an :class:`AgentRun`.
 	//
@@ -1242,11 +1370,17 @@ type AgentRunSummaryResponse struct {
 	AgentName         *string             `json:"agent_name"`
 	CreatedAt         time.Time           `json:"created_at"`
 	EndedAt           *time.Time          `json:"ended_at"`
-	Model             *string             `json:"model"`
-	ModelTier         string              `json:"model_tier"`
-	Provider          *string             `json:"provider"`
-	RunId             openapi_types.UUID  `json:"run_id"`
-	StartedAt         *time.Time          `json:"started_at"`
+
+	// IdentityAct The agent that acts for identity_sub on a direct run. Null when the agent is itself the subject.
+	IdentityAct *string `json:"identity_act"`
+
+	// IdentitySub Who the run acts for: the person who started a direct run, or the agent itself on a scheduled run.
+	IdentitySub *string            `json:"identity_sub"`
+	Model       *string            `json:"model"`
+	ModelTier   string             `json:"model_tier"`
+	Provider    *string            `json:"provider"`
+	RunId       openapi_types.UUID `json:"run_id"`
+	StartedAt   *time.Time         `json:"started_at"`
 
 	// Status Closed lifecycle status of an :class:`AgentRun`.
 	//
@@ -1333,19 +1467,53 @@ type ApprovalRequestStatus string
 
 // ApprovalRequestView Read-only view of an :class:`~meho_backplane.db.models.ApprovalRequest`.
 type ApprovalRequestView struct {
-	ConnectorId    string                 `json:"connector_id"`
-	CreatedAt      string                 `json:"created_at"`
-	DecidedAt      *string                `json:"decided_at"`
+	ConnectorId string  `json:"connector_id"`
+	CreatedAt   string  `json:"created_at"`
+	DecidedAt   *string `json:"decided_at"`
+
+	// Delegation Who told the approver to decide, read off the decision audit row (#3692).
+	//
+	// Present only when the decision ``reason`` ended with the
+	// ``Instructed-by:`` / ``Instruction:`` / ``Refs:`` trailer block. The
+	// approver is still ``reviewed_by``; ``instructed_by`` is the other human
+	// whose written instruction they acted on.
+	Delegation     *DelegationView        `json:"delegation,omitempty"`
 	ExpiresAt      *string                `json:"expires_at"`
 	Id             openapi_types.UUID     `json:"id"`
 	OpId           string                 `json:"op_id"`
 	ParamsHash     string                 `json:"params_hash"`
+	PreviewHash    *string                `json:"preview_hash"`
 	PrincipalAct   *string                `json:"principal_act"`
 	PrincipalName  *string                `json:"principal_name"`
 	PrincipalSub   string                 `json:"principal_sub"`
 	ProposedEffect map[string]interface{} `json:"proposed_effect"`
-	ReviewedBy     *string                `json:"reviewed_by"`
-	ReviewedByName *string                `json:"reviewed_by_name"`
+
+	// ResultState Whether an approved request has run yet (#3486).
+	//
+	// Read off the row, never stored. ``status`` keeps its closed four-state
+	// contract; this field adds the run phase next to it, so a client that
+	// lists or shows requests can tell "approved, not run yet" from
+	// "approved and run" without polling the owner-only ``/result`` read.
+	//
+	// * :attr:`NOT_STARTED` -- approved, and no resumer has claimed the run
+	//   yet (``resumed_at IS NULL``).
+	// * :attr:`STARTED` -- a resumer claimed the run (``resumed_at`` is set),
+	//   but no result is stored. Either the op is still running, or the run
+	//   ended without a stored result: the result write is best-effort, and a
+	//   re-dispatch that raised instead of returning an envelope stores
+	//   nothing. Both resume paths (operator surfaces and the in-process
+	//   agent waiter) store the envelope they get back.
+	// * :attr:`EXECUTED` -- the stored result has ``status == "ok"``.
+	// * :attr:`FAILED` -- a result is stored and its ``status`` is not ``ok``.
+	ResultState *ApprovalResultState `json:"result_state,omitempty"`
+
+	// ResumeOutcome What happened when an approved request ran (#3543).
+	//
+	// A summary read off the stored result envelope. The result body and the
+	// free-text error stay on the owner-only ``/result`` read.
+	ResumeOutcome  *ApprovalResumeOutcomeView `json:"resume_outcome,omitempty"`
+	ReviewedBy     *string                    `json:"reviewed_by"`
+	ReviewedByName *string                    `json:"reviewed_by_name"`
 
 	// ReviewerContext Redacted, human-legible context for judging a parked request (#3353).
 	//
@@ -1390,6 +1558,25 @@ type ApprovalRequestView struct {
 	TenantId openapi_types.UUID    `json:"tenant_id"`
 	WorkRef  *string               `json:"work_ref"`
 }
+
+// ApprovalResultState Whether an approved request has run yet (#3486).
+//
+// Read off the row, never stored. “status“ keeps its closed four-state
+// contract; this field adds the run phase next to it, so a client that
+// lists or shows requests can tell "approved, not run yet" from
+// "approved and run" without polling the owner-only “/result“ read.
+//
+//   - :attr:`NOT_STARTED` -- approved, and no resumer has claimed the run
+//     yet (“resumed_at IS NULL“).
+//   - :attr:`STARTED` -- a resumer claimed the run (“resumed_at“ is set),
+//     but no result is stored. Either the op is still running, or the run
+//     ended without a stored result: the result write is best-effort, and a
+//     re-dispatch that raised instead of returning an envelope stores
+//     nothing. Both resume paths (operator surfaces and the in-process
+//     agent waiter) store the envelope they get back.
+//   - :attr:`EXECUTED` -- the stored result has “status == "ok"“.
+//   - :attr:`FAILED` -- a result is stored and its “status“ is not “ok“.
+type ApprovalResultState string
 
 // ApprovalResultView Principal-scoped view of an approved dispatch's result (#3209).
 //
@@ -1437,6 +1624,33 @@ type ApprovalResultView struct {
 	Status ApprovalRequestStatus `json:"status"`
 }
 
+// ApprovalResumeOutcomeView What happened when an approved request ran (#3543).
+//
+// A summary read off the stored result envelope. The result body and the
+// free-text error stay on the owner-only “/result“ read.
+type ApprovalResumeOutcomeView struct {
+	AuditId      *openapi_types.UUID `json:"audit_id"`
+	ErrorCode    *string             `json:"error_code"`
+	ResultStatus *string             `json:"result_status"`
+	ResumedAt    *string             `json:"resumed_at"`
+}
+
+// ApprovalsStatus The approval settings in force (#4830).
+//
+// “custody“ is the state of the approval key: “configured“,
+// “missing“ or “malformed“. “effective_posture“ says whether a
+// second person must approve (“four_eyes_enforced“) or one operator
+// may approve their own request (“single_operator_break_glass“).
+// “delegated_decision_posture“ says whether a decision made on
+// someone else's instruction is allowed. The three values come from
+// :func:`meho_backplane.features.build_features_block`; they are state
+// words only, never a key value.
+type ApprovalsStatus struct {
+	Custody                  string `json:"custody"`
+	DelegatedDecisionPosture string `json:"delegated_decision_posture"`
+	EffectivePosture         string `json:"effective_posture"`
+}
+
 // ApproveRequestBody POST body for “…/approve“.
 type ApproveRequestBody struct {
 	// Async Async governed dispatch (#3079). When true, the decision is still recorded synchronously, but the resumed op is dispatched on a background task and the route returns HTTP 202 + a durable run handle immediately instead of blocking for the resumed op's full duration. Poll / cancel via ``/api/v1/operations/runs/{handle}``. Default false — the response is byte-identical to the pre-#3079 inline resume.
@@ -1445,7 +1659,7 @@ type ApproveRequestBody struct {
 	// Params The original dispatch params, unchanged. The hash must match the stored params_hash on the approval request.
 	Params *map[string]interface{} `json:"params,omitempty"`
 
-	// Reason Optional human-readable approval reason (recorded in the audit row).
+	// Reason Optional human-readable approval reason (recorded in the audit row). End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.
 	Reason *string `json:"reason,omitempty"`
 }
 
@@ -1477,6 +1691,9 @@ type ApproveResponseBody_DispatchResult struct {
 // naming the absent key (carrying *why* the collection is mandatory)
 // rather than Pydantic's generic “field_required“. “product“ /
 // “version“ are optional refinements within the chosen collection.
+// “target“ (#3920) names a target; when “product“ and “version“ are
+// both absent, its fingerprint product and version become the default
+// soft scope (a ranking hint, never a filter).
 //
 // There is **no** “collections“ fan-out field: “ask_docs“ is
 // single-collection only (#1548 decision 2), matching the MCP tool.
@@ -1489,6 +1706,7 @@ type AskDocsRequest struct {
 	Limit      *int    `json:"limit,omitempty"`
 	Product    *string `json:"product"`
 	Query      string  `json:"query"`
+	Target     *string `json:"target"`
 	Version    *string `json:"version"`
 }
 
@@ -1548,6 +1766,39 @@ type AssignmentDocumentResponse struct {
 	Runner string              `json:"runner"`
 }
 
+// AuditClassCounts 200 body for “POST /api/v1/audit/class-counts“ (#3747).
+//
+// “counts“ has one key per event class (“operation_execution“,
+// “policy_decision“, “approval_decision“, “security_event“,
+// “legacy_request“), “0“ when a class has no rows. Old rows count
+// as “legacy_request“; they are never reclassified. “total“ is the
+// sum. “since“ is the start of the counted window: the request's
+// “since“, or 24 hours ago when the request set none.
+type AuditClassCounts struct {
+	Counts map[string]int `json:"counts"`
+	Since  time.Time      `json:"since"`
+	Total  int            `json:"total"`
+}
+
+// AuditClassCountsRequest POST body for “/api/v1/audit/class-counts“ (#3747).
+//
+// The same filters as :class:`AuditQueryRequest`, without
+// “event_class“, “limit“ and “cursor“: the answer counts every
+// class for the whole matching set, not one page.
+type AuditClassCountsRequest struct {
+	AgentSessionId *openapi_types.UUID `json:"agent_session_id"`
+	AuditId        *openapi_types.UUID `json:"audit_id"`
+	OpClass        *string             `json:"op_class"`
+	OpId           *string             `json:"op_id"`
+	ParentAuditId  *openapi_types.UUID `json:"parent_audit_id"`
+	Principal      *string             `json:"principal"`
+	ResultStatus   *string             `json:"result_status"`
+	Since          *string             `json:"since"`
+	Target         *string             `json:"target"`
+	Until          *string             `json:"until"`
+	WorkRef        *string             `json:"work_ref"`
+}
+
 // AuditEntry One row of the audit query result.
 //
 // Field-to-column mapping (see module docstring for the substrate
@@ -1578,6 +1829,7 @@ type AuditEntry struct {
 	AgentSessionId   *openapi_types.UUID    `json:"agent_session_id"`
 	BroadcastEventId *openapi_types.UUID    `json:"broadcast_event_id"`
 	DurationMs       *string                `json:"duration_ms"`
+	EventClass       string                 `json:"event_class"`
 	Id               openapi_types.UUID     `json:"id"`
 	Method           string                 `json:"method"`
 	OpClass          string                 `json:"op_class"`
@@ -1598,6 +1850,29 @@ type AuditEntry struct {
 	WorkRef          *string                `json:"work_ref"`
 }
 
+// AuditEventClass What kind of accountable event one “audit_log“ row records (#3733).
+//
+// The set is closed. The database CHECK “ck_audit_log_event_class“
+// rejects any other value, so a new class needs a code change and a
+// migration together.
+//
+//   - :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation
+//     (success or failure), or a MEHO-internal action such as a topology
+//     edit, a retention sweep or a reaper.
+//   - :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:
+//     a policy deny, a rate-limit refusal, or a park for approval.
+//   - :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,
+//     rejected, or let an approval request expire.
+//   - :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
+//     refresh-token replay or a broken satellite effect chain.
+//   - :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
+//     row written before migration “0106“ reads as this class; it is never
+//     guessed from “method“ / “path“. The REST and MCP request wrapper
+//     rows also keep this class while “AUDIT_WRAPPER_ROWS_RETIRED“ is off;
+//     with it on they write a decision or execution class, or no row
+//     (#3757, :mod:`meho_backplane.audit_cutover`).
+type AuditEventClass string
+
 // AuditQueryRequest POST body for “/api/v1/audit/query“.
 //
 // Mirrors :class:`~meho_backplane.audit_query.AuditQueryFilters`
@@ -1606,25 +1881,44 @@ type AuditEntry struct {
 // layer. All other fields pass through to the substrate filter
 // object unchanged. The empty body shape “{}“ is the no-filter
 // case — every field defaults to None or the substrate-side default.
-//
-// “extra="forbid"“ rejects unknown fields with 422
-// “extra_forbidden“ so a typo or a client passing “tenant_id“
-// in the body fails loud at the framework boundary — the route
-// always uses “operator.tenant_id“ from the JWT, never the body.
 type AuditQueryRequest struct {
 	AgentSessionId *openapi_types.UUID `json:"agent_session_id"`
 	AuditId        *openapi_types.UUID `json:"audit_id"`
 	Cursor         *string             `json:"cursor"`
-	Limit          *int                `json:"limit,omitempty"`
-	OpClass        *string             `json:"op_class"`
-	OpId           *string             `json:"op_id"`
-	ParentAuditId  *openapi_types.UUID `json:"parent_audit_id"`
-	Principal      *string             `json:"principal"`
-	ResultStatus   *string             `json:"result_status"`
-	Since          *string             `json:"since"`
-	Target         *string             `json:"target"`
-	Until          *string             `json:"until"`
-	WorkRef        *string             `json:"work_ref"`
+
+	// EventClass What kind of accountable event one ``audit_log`` row records (#3733).
+	//
+	// The set is closed. The database CHECK ``ck_audit_log_event_class``
+	// rejects any other value, so a new class needs a code change and a
+	// migration together.
+	//
+	// * :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation
+	//   (success or failure), or a MEHO-internal action such as a topology
+	//   edit, a retention sweep or a reaper.
+	// * :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:
+	//   a policy deny, a rate-limit refusal, or a park for approval.
+	// * :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,
+	//   rejected, or let an approval request expire.
+	// * :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
+	//   refresh-token replay or a broken satellite effect chain.
+	// * :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
+	//   row written before migration ``0106`` reads as this class; it is never
+	//   guessed from ``method`` / ``path``. The REST and MCP request wrapper
+	//   rows also keep this class while ``AUDIT_WRAPPER_ROWS_RETIRED`` is off;
+	//   with it on they write a decision or execution class, or no row
+	//   (#3757, :mod:`meho_backplane.audit_cutover`).
+	EventClass    *AuditEventClass    `json:"event_class,omitempty"`
+	HasTrace      *bool               `json:"has_trace"`
+	Limit         *int                `json:"limit,omitempty"`
+	OpClass       *string             `json:"op_class"`
+	OpId          *string             `json:"op_id"`
+	ParentAuditId *openapi_types.UUID `json:"parent_audit_id"`
+	Principal     *string             `json:"principal"`
+	ResultStatus  *string             `json:"result_status"`
+	Since         *string             `json:"since"`
+	Target        *string             `json:"target"`
+	Until         *string             `json:"until"`
+	WorkRef       *string             `json:"work_ref"`
 }
 
 // AuditQueryResult Page of audit rows plus the forward-only continuation cursor.
@@ -1676,9 +1970,19 @@ type AuditQueryResult struct {
 // rows belong to no session), and mirrors the honest
 // “when_negotiated“ capture label the deploy's “/status“ reports.
 //
+// “loose_row_count“ (#4670) is the number of nodes in “root“ whose
+// “parent_audit_id“ names a row that does not exist in the tenant. A
+// multi-step operation saves its own row last, so such a node belongs
+// to an operation that is still running, or to one that stopped before
+// that save (“docs/decisions/composite-audit-when-a-step-waits.md“).
+// Such rows render as roots; this count tells them apart from real
+// chain starts. A root whose parent lives in another session is not
+// counted.
+//
 // Frozen like the substrate models it carries.
 type AuditReplayResult struct {
 	ExcludedNullSessionCount int                `json:"excluded_null_session_count"`
+	LooseRowCount            int                `json:"loose_row_count"`
 	Root                     []ReplayNode       `json:"root"`
 	RowCount                 int                `json:"row_count"`
 	SessionId                openapi_types.UUID `json:"session_id"`
@@ -1705,6 +2009,11 @@ type AuditReplayResult struct {
 //     normal state an operator must be able to observe, not an error. The
 //     console pane renders a "no trace captured" empty state for this case.
 //
+// Only an “operation_execution“ row resolves to the flight recorder
+// (#3747). A decision, security or legacy row is not an execution, so it
+// answers “trace_present=False“ and the route never reads a trace for
+// it. “event_class“ echoes the row's class so the reason is visible.
+//
 // “trace.redaction_uncertain“ surfaces the F5 degrade flag so an operator
 // (and a paired add-on reading over this route with its operator principal)
 // can see when a trace was withheld from the agent handle. The operator plane
@@ -1712,7 +2021,8 @@ type AuditReplayResult struct {
 //
 // Frozen like the models it carries.
 type AuditTraceResult struct {
-	AuditId openapi_types.UUID `json:"audit_id"`
+	AuditId    openapi_types.UUID `json:"audit_id"`
+	EventClass *string            `json:"event_class"`
 
 	// Trace A dispatch trace header plus its ordered spans, tenant-scoped.
 	//
@@ -1885,6 +2195,13 @@ type BodyEditUiEventSourcesSlugEditPost struct {
 	Status       string  `json:"status"`
 }
 
+// BodyRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost defines model for Body__renew_delete_grants_ui_grants_service_renew_delete_grants_post.
+type BodyRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost struct {
+	ExpiresAt    *string `json:"expires_at"`
+	PrincipalSub *string `json:"principal_sub,omitempty"`
+	Reason       *string `json:"reason"`
+}
+
 // BodyAnnotateUiTopologyEdgesPost defines model for Body_annotate_ui_topology_edges_post.
 type BodyAnnotateUiTopologyEdgesPost struct {
 	EvidenceUrl *string `json:"evidence_url,omitempty"`
@@ -1918,6 +2235,7 @@ type BodyCorpusSearchUiCorpusSearchPost struct {
 	Collection *string `json:"collection,omitempty"`
 	Mode       *string `json:"mode,omitempty"`
 	Q          *string `json:"q,omitempty"`
+	Target     *string `json:"target,omitempty"`
 }
 
 // BodyKbEditorPreviewUiKbEditorPreviewPost defines model for Body_kb_editor_preview_ui_kb_editor_preview_post.
@@ -2630,6 +2948,13 @@ type BodyUiConventionsPreviewUiConventionsPreviewPost struct {
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+	Title      *string           `json:"title,omitempty"`
+}
+
+// BodyUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPost defines model for Body_ui_corpus_chunk_read_ui_corpus_chunks__collection_key___chunk_id__post.
+type BodyUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPost struct {
+	Cursor     *string `json:"cursor,omitempty"`
+	ReadHandle *string `json:"read_handle,omitempty"`
 }
 
 // BodyUiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPost defines model for Body_ui_corpus_collections_register_submit_ui_corpus_collections_register_post.
@@ -2907,6 +3232,8 @@ type BoolCompare struct {
 // BroadcastAnnounceRequest The REST representation of a governed agent announcement.
 type BroadcastAnnounceRequest struct {
 	Activity       string                                  `json:"activity"`
+	ClaimId        *openapi_types.UUID                     `json:"claim_id"`
+	IdempotencyKey *string                                 `json:"idempotency_key"`
 	Phase          *BroadcastAnnounceRequestPhase          `json:"phase,omitempty"`
 	PlannedOpClass *BroadcastAnnounceRequestPlannedOpClass `json:"planned_op_class"`
 	RunId          *openapi_types.UUID                     `json:"run_id"`
@@ -2923,15 +3250,28 @@ type BroadcastAnnounceRequestPhase string
 // BroadcastAnnounceRequestPlannedOpClass defines model for BroadcastAnnounceRequest.PlannedOpClass.
 type BroadcastAnnounceRequestPlannedOpClass string
 
-// BroadcastAnnounceResponse Acknowledgement with distinct durable event id and stream cursor.
+// BroadcastAnnounceResponse Acknowledgement of a stored announcement.
+//
+// “replayed=true“ means the step was already stored and no new row was
+// written. “watch_checkpoint“ is a watch cursor just after this
+// announcement in the archive order. “delivery_pending=true“ means
+// the announcement is stored and readable, but the live wake-up for
+// watchers failed; a retry with the same “idempotency_key“ finishes it.
 type BroadcastAnnounceResponse struct {
-	Cursor         string              `json:"cursor"`
-	EventId        openapi_types.UUID  `json:"event_id"`
-	PlannedOpClass *string             `json:"planned_op_class"`
-	RunId          *openapi_types.UUID `json:"run_id"`
-	Targets        *[]string           `json:"targets"`
-	TtlMinutes     *int                `json:"ttl_minutes"`
-	WorkRef        *string             `json:"work_ref"`
+	ActorSub        *string             `json:"actor_sub"`
+	Admission       string              `json:"admission"`
+	ClaimId         openapi_types.UUID  `json:"claim_id"`
+	DeliveryPending bool                `json:"delivery_pending"`
+	EventId         openapi_types.UUID  `json:"event_id"`
+	OwnerSub        string              `json:"owner_sub"`
+	Phase           string              `json:"phase"`
+	PlannedOpClass  *string             `json:"planned_op_class"`
+	Replayed        bool                `json:"replayed"`
+	RunId           *openapi_types.UUID `json:"run_id"`
+	Targets         *[]string           `json:"targets"`
+	TtlMinutes      *int                `json:"ttl_minutes"`
+	WatchCheckpoint *string             `json:"watch_checkpoint"`
+	WorkRef         *string             `json:"work_ref"`
 }
 
 // BroadcastOverrideCreate Incoming POST body. Pydantic v2 strict.
@@ -3000,8 +3340,8 @@ type BroadcastOverridesListResponse struct {
 // criterion is unsatisfiable from a single list call -- the
 // deferred AC the issue body folds back in.
 //
-// All four fields are populated by a single call to
-// :func:`~meho_backplane.conventions.preamble.assemble_preamble`
+// All fields are populated by a single call to
+// :func:`~meho_backplane.conventions.preamble.assemble_preamble_detailed`
 // against the operator's tenant, so the budget arithmetic is
 // end-to-end consistent with T4's preamble assembler (the same
 // helper that produces the MCP “initialize“ “instructions“
@@ -3018,12 +3358,10 @@ type BroadcastOverridesListResponse struct {
 //     parameter in tests). Exposed on the list response so
 //     operators can do the budget math without grepping the source.
 //   - “estimated_tokens“ -- :func:`estimate_tokens` over the
-//     assembled preamble text (header + guard + delimited kept
-//     blocks). Empty tenant: 0. Fitting tenant: positive integer
-//     below “max_tokens“. Over-budget tenant: positive integer
-//     below “max_tokens“ (the packer dropped slugs whole until it
-//     fit), but “over_budget=True“ and “dropped_slugs“ is
-//     non-empty.
+//     rendered conventions band (header + guard + delimited kept
+//     blocks). Empty tenant: 0. Otherwise at most “max_tokens“
+//     when any entry was kept (the packer drops entries whole until
+//     the band fits).
 //   - “over_budget“ -- convenience flag derived from
 //     “len(dropped_slugs) > 0“. Cheap derived value but worth
 //     surfacing as a boolean so CLI / dashboard consumers branch on
@@ -3034,11 +3372,26 @@ type BroadcastOverridesListResponse struct {
 //     "insufficient_budget" exit-code-5 warning so the operator
 //     knows exactly which conventions never reach an agent
 //     session.
+//   - “included_slugs“ -- slugs in the band, in pack order. Each
+//     operational slug is in exactly one of “included_slugs“ or
+//     “dropped_slugs“. "Included" means MEHO sends it in the MCP
+//     “initialize“ instructions; a client may ignore instructions,
+//     so it is not proof that an agent applied the rule.
+//   - “oversize_slugs“ -- the dropped slugs that do not fit even as
+//     the only entry (rows written before the rendered write check,
+//     or by another path). The rest of “dropped_slugs“ fit alone
+//     but lost the room to higher-priority entries.
 type BudgetStatus struct {
 	DroppedSlugs    []string `json:"dropped_slugs"`
 	EstimatedTokens int      `json:"estimated_tokens"`
-	MaxTokens       int      `json:"max_tokens"`
-	OverBudget      bool     `json:"over_budget"`
+
+	// IncludedSlugs Operational slugs MEHO puts in the MCP initialize instructions, in pack order. An MCP client may ignore instructions, so this does not prove an agent saw them.
+	IncludedSlugs []string `json:"included_slugs"`
+	MaxTokens     int      `json:"max_tokens"`
+	OverBudget    bool     `json:"over_budget"`
+
+	// OversizeSlugs Dropped slugs that do not fit the budget even as the only entry. The other dropped slugs fit alone but lost the room to higher-priority entries.
+	OversizeSlugs []string `json:"oversize_slugs"`
 }
 
 // CallOperationBody Request body for the “POST /api/v1/operations/call“ route.
@@ -3105,10 +3458,13 @@ type BudgetStatus struct {
 // tracker API call (Goal #1651 ships the field only).
 type CallOperationBody struct {
 	// Async Async governed dispatch (#3079). When true, ``/call`` returns a durable run handle (HTTP 202) immediately instead of holding the connection for the op's full duration; execution proceeds server-side and the caller polls / cancels via ``/api/v1/operations/runs/{handle}``. The completed ``OperationResult`` envelope is persisted on the run, so a dropped response never loses the outcome. Default false — sync mode is byte-identical to the pre-#3079 behaviour.
-	Async       *bool                   `json:"async,omitempty"`
-	ConnectorId string                  `json:"connector_id"`
-	OpId        string                  `json:"op_id"`
-	Params      *map[string]interface{} `json:"params,omitempty"`
+	Async       *bool  `json:"async,omitempty"`
+	ConnectorId string `json:"connector_id"`
+
+	// IdempotencyKey Optional retry key for a call that waits for approval (#3486). If you send the same key again with the identical call, MEHO returns the approval request it already made (same approval_request_id, extras.approval_request_reused=true) instead of a second one. The key belongs to you: another principal's key never matches. It is free again once that request is rejected or expires. The same key with a different call is refused with idempotency_key_conflict. Ignored when the call does not wait for approval.
+	IdempotencyKey *string                 `json:"idempotency_key"`
+	OpId           string                  `json:"op_id"`
+	Params         *map[string]interface{} `json:"params,omitempty"`
 
 	// PreviewHash Preview-result-hash binding for the destructive tier (#3197). The hash a prior preview_operation of the identical (connector_id, op_id, target, params) returned. REQUIRED for a safety_level='destructive' op — the dispatcher refuses to park the approval fail-closed unless it matches the server-recomputed preview hash. Ignored for every non-destructive op. None default keeps a bare call_operation byte-identical to pre-#3197.
 	PreviewHash *string                   `json:"preview_hash"`
@@ -3303,7 +3659,11 @@ type ConfirmVerifyResponseAnswer string
 // about what verb closes the workflow). It is a :class:`NextStep`
 // object on “state="registered"“ rows and “None“ on
 // “state="ingested"“ rows (no operator action remains for an
-// ingested connector). The hint is computed against the curated
+// ingested connector) — with one exception: a tenant row stored under
+// a former product name (“vcf-logs“ rows for “vrli-rest-9.0“,
+// #4889) can never be called, so it ships “dispatchable=False“ plus
+// a “next_step“ naming “meho connector delete <id>“ as the
+// clean-up. For registered rows the hint is computed against the curated
 // connector-spec catalog (#743): when the catalog carries an entry
 // for the registry's “(product, version)“ the verb points at
 // “meho connector ingest --catalog ...“; otherwise it points at
@@ -3332,7 +3692,9 @@ type ConfirmVerifyResponseAnswer string
 // “tenant_id“, but surfacing it directly lets a consumer key on it
 // without re-deriving. “shadowed_by_tenant_scope“ is the precedence
 // marker: within a single response, a “"builtin"“ row carries
-// “True“ when a “"tenant"“ row shares its “connector_id“ — i.e.
+// “True“ when a “"tenant"“ row shares its “connector_id“ **and**
+// “product“ (the rule dispatch uses; a tenant row under a former
+// product name, #4889, shares the id but shadows nothing) — i.e.
 // the built-in copy is *shadowed* by a tenant-scoped twin that
 // :func:`~meho_backplane.operations._lookup.lookup_descriptor` resolves
 // first (tenant-wins dispatch precedence). The two fields exist because
@@ -3345,7 +3707,10 @@ type ConfirmVerifyResponseAnswer string
 // keep working; the listing sets “scope“ explicitly per row and
 // stamps “shadowed_by_tenant_scope“ in a post-pass over the full
 // response. Invariant: within one response no two rows share
-// “(connector_id, scope)“. See :data:`ConnectorScope`.
+// “(connector_id, scope)“, with one exception: a tenant row stored
+// under a former product name (#4889) sits next to the tenant's
+// current copy of the same id; “product“ tells the two apart. See
+// :data:`ConnectorScope`.
 type ConnectorListItem struct {
 	ConnectorId           string                 `json:"connector_id"`
 	DisabledGroupCount    int                    `json:"disabled_group_count"`
@@ -3412,6 +3777,28 @@ type ConnectorListResponse struct {
 	NextCursor *string             `json:"next_cursor"`
 }
 
+// ConnectorReviewDeleteOp One stored ingested delete that sits below the “destructive“ risk level (#3827).
+//
+// The review report for stored deletes. Rows persisted by an earlier
+// ingest keep their old “safety_level“ / “requires_approval“ until the
+// connector is ingested again, so a guard test on the spec cannot show an
+// operator which stored rows still run without approval. Each row carries
+// what is stored next to what a fresh ingest of the same “(method, path)“
+// would assign today (parser default, then the connector floor, then the
+// catalog overlay). “needs_correction“ is “True“ when the stored row is
+// weaker than that; “reason“ says why in plain words.
+type ConnectorReviewDeleteOp struct {
+	ExpectedRequiresApproval bool   `json:"expected_requires_approval"`
+	ExpectedSafetyLevel      string `json:"expected_safety_level"`
+	IsEnabled                bool   `json:"is_enabled"`
+	Method                   string `json:"method"`
+	NeedsCorrection          bool   `json:"needs_correction"`
+	OpId                     string `json:"op_id"`
+	Reason                   string `json:"reason"`
+	RequiresApproval         bool   `json:"requires_approval"`
+	SafetyLevel              string `json:"safety_level"`
+}
+
 // ConnectorReviewGroup One group within the review payload.
 //
 // Carries the LLM-generated group metadata
@@ -3421,12 +3808,47 @@ type ConnectorListResponse struct {
 // review queue; “op_count“ is the cheap precomputed length for
 // the CLI's “meho connector review“ summary view (T5).
 type ConnectorReviewGroup struct {
-	GroupKey     string              `json:"group_key"`
-	Name         string              `json:"name"`
-	OpCount      int                 `json:"op_count"`
-	Ops          []ConnectorReviewOp `json:"ops"`
-	ReviewStatus string              `json:"review_status"`
-	WhenToUse    string              `json:"when_to_use"`
+	// Advisory Advice for the operator who reviews one group (#3671).
+	//
+	// ``distribution`` is what the group's enabled ops really do.
+	// ``flags`` lists short, plain notes where the group's ``when_to_use``
+	// text does not match those ops (for example the text says
+	// "read-only" but some ops need approval). Empty when nothing looks
+	// wrong.
+	//
+	// This is advice only. It never blocks a dispatch, an ingest, or the
+	// move from ``staged`` to ``enabled``. Dispatch keeps using each op's
+	// own ``safety_level``, ``requires_approval``, and policy; the group
+	// label and its text are never part of that decision.
+	Advisory     *ConnectorReviewGroupAdvisory `json:"advisory,omitempty"`
+	GroupKey     string                        `json:"group_key"`
+	Name         string                        `json:"name"`
+	OpCount      int                           `json:"op_count"`
+	Ops          []ConnectorReviewOp           `json:"ops"`
+	ReviewStatus string                        `json:"review_status"`
+	WhenToUse    string                        `json:"when_to_use"`
+}
+
+// ConnectorReviewGroupAdvisory Advice for the operator who reviews one group (#3671).
+//
+// “distribution“ is what the group's enabled ops really do.
+// “flags“ lists short, plain notes where the group's “when_to_use“
+// text does not match those ops (for example the text says
+// "read-only" but some ops need approval). Empty when nothing looks
+// wrong.
+//
+// This is advice only. It never blocks a dispatch, an ingest, or the
+// move from “staged“ to “enabled“. Dispatch keeps using each op's
+// own “safety_level“, “requires_approval“, and policy; the group
+// label and its text are never part of that decision.
+type ConnectorReviewGroupAdvisory struct {
+	// Distribution Risk levels of the enabled ops in one group (#3671).
+	//
+	// Counts only ops with ``is_enabled=True``. One count per value of the
+	// closed ``safety_level`` set, plus how many of those ops need approval
+	// and how many ops are enabled in total. Disabled ops are not counted.
+	Distribution *GroupSafetyDistribution `json:"distribution,omitempty"`
+	Flags        *[]string                `json:"flags,omitempty"`
 }
 
 // ConnectorReviewOp One operation within a group, as rendered in the review payload.
@@ -3483,18 +3905,21 @@ type ConnectorReviewOp struct {
 // (the Goal flags secret-handling sensitivity). See
 // :data:`~meho_backplane.operations.ingest.api_schemas.ConnectorAuthoringKind`.
 type ConnectorReviewPayload struct {
-	ConnectorId          string                       `json:"connector_id"`
-	Dispatchable         *bool                        `json:"dispatchable,omitempty"`
-	Groups               []ConnectorReviewGroup       `json:"groups"`
-	ImplId               string                       `json:"impl_id"`
-	Kind                 *ConnectorReviewPayloadKind  `json:"kind,omitempty"`
-	NeedsReingestOpCount *int                         `json:"needs_reingest_op_count,omitempty"`
-	Product              string                       `json:"product"`
-	Provenance           *[]ConnectorReviewProvenance `json:"provenance,omitempty"`
-	TenantId             *openapi_types.UUID          `json:"tenant_id"`
-	TotalOpCount         int                          `json:"total_op_count"`
-	UngroupedOpCount     *int                         `json:"ungrouped_op_count,omitempty"`
-	Version              string                       `json:"version"`
+	ConnectorId                     string                       `json:"connector_id"`
+	DeleteOpsBelowDestructive       *[]ConnectorReviewDeleteOp   `json:"delete_ops_below_destructive,omitempty"`
+	DeleteOpsNeedingCorrectionCount *int                         `json:"delete_ops_needing_correction_count,omitempty"`
+	Dispatchable                    *bool                        `json:"dispatchable,omitempty"`
+	Groups                          []ConnectorReviewGroup       `json:"groups"`
+	ImplId                          string                       `json:"impl_id"`
+	Kind                            *ConnectorReviewPayloadKind  `json:"kind,omitempty"`
+	NeedsReingestOpCount            *int                         `json:"needs_reingest_op_count,omitempty"`
+	Product                         string                       `json:"product"`
+	Provenance                      *[]ConnectorReviewProvenance `json:"provenance,omitempty"`
+	TenantId                        *openapi_types.UUID          `json:"tenant_id"`
+	TotalOpCount                    int                          `json:"total_op_count"`
+	UngroupedOpCount                *int                         `json:"ungrouped_op_count,omitempty"`
+	UngroupedOps                    *[]ConnectorReviewOp         `json:"ungrouped_ops,omitempty"`
+	Version                         string                       `json:"version"`
 }
 
 // ConnectorReviewPayloadKind defines model for ConnectorReviewPayload.Kind.
@@ -3543,6 +3968,7 @@ type ConnectorSpecEntry struct {
 	Product                    string                           `json:"product"`
 	ProfileResource            *string                          `json:"profile_resource"`
 	RequiresConnectorClass     string                           `json:"requires_connector_class"`
+	SafetyOverlay              *[]SafetyOverlayEntry            `json:"safety_overlay"`
 	Sha256                     *string                          `json:"sha256"`
 	SpecInfoVersion            *string                          `json:"spec_info_version"`
 	SpecInfoVersionsCompatible *[]string                        `json:"spec_info_versions_compatible"`
@@ -3597,10 +4023,13 @@ type Convention struct {
 	//   preamble's packed order (the packer iterates ``priority DESC,
 	//   created_at ASC``; ``position=1`` means highest-priority slot in
 	//   the operator's tenant). ``None`` when ``included=False``.
-	// * ``token_count`` -- the convention body's own estimated token
-	//   cost via :func:`estimate_tokens`. Useful for the operator to
-	//   see why a near-budget body got dropped (it weighed more than
-	//   the remaining headroom).
+	// * ``token_count`` -- the convention's own rendered block cost
+	//   (heading + body) via :func:`estimate_tokens`. Useful for the
+	//   operator to see why a near-budget entry got dropped (it weighed
+	//   more than the remaining headroom).
+	// * ``fits_alone`` -- ``True`` when the band with only this entry
+	//   fits the budget. ``fits_alone=True`` with ``included=False``
+	//   means higher-priority entries used up the room.
 	// * ``would_drop_slugs`` -- the full ``dropped_slugs`` list the
 	//   packer produced on this assembly. When ``included=True`` this
 	//   names *other* slugs that fell out of the preamble (the just-
@@ -3636,10 +4065,10 @@ type Convention struct {
 // (lowercase ASCII, digits, hyphen) so audit log paths stay
 // grep-friendly and no operator can sneak a slash through. The
 // title and body are bounded only by a generous upper limit; the
-// real budget gate is the over-budget 422 in the route handler,
-// which runs :func:`estimate_tokens` against “body“ before
-// insert and rejects any single “operational“ entry exceeding
-// :data:`DEFAULT_MAX_PREAMBLE_TOKENS`.
+// real budget gate is the over-budget 422 in the service, which
+// renders the entry alone (heading, guard prefix, band delimiters,
+// title, and body) and rejects any “operational“ entry whose
+// rendered estimate exceeds :data:`DEFAULT_MAX_PREAMBLE_TOKENS`.
 //
 // “priority“ is optional with a default of 0; the SmallInteger
 // column on :class:`TenantConvention` bounds the range to
@@ -3673,25 +4102,31 @@ type ConventionCreate struct {
 //
 // Per the issue's acceptance criterion, history returns newest
 // first ("pick newest first for v0.2; documented"); the route's
-// ORDER BY “ts DESC“ enforces this. “audit_id“ is the soft-FK
-// that G8's audit-query path joins on; it is nullable because
-// T5's seed migration inserts history rows with no audit_log row
-// (seeded rows pre-date any HTTP request).
+// ORDER BY “ts DESC“ enforces this.
+//
+// Provenance (#3747): the history row is the record of the edit.
+// “change_kind“ says what it was (“created“ / “updated“ /
+// “deleted“) and “request_id“ is the request correlation id of the
+// call, which links to the request usage event. Both are “None“ on
+// rows written before #3747. “audit_id“ is the legacy link to the
+// REST request wrapper row: old rows carry it, new rows and seeded
+// rows have “None“.
 //
 // “body_before“ is nullable -- the first history row (the
 // CREATE event) has no prior state. DELETE history rows get
 // “body_after=<final body>“ (a legible last-known state for
 // audit forensics) rather than an empty-string sentinel; the
-// lifecycle distinction (create / update / delete) lives in the
-// audit log row's “method“ / “path“ columns, not on the
-// history row itself.
+// lifecycle distinction (create / update / delete) is
+// “change_kind“ on rows since #3747.
 type ConventionHistoryEntry struct {
 	ActorSub     string              `json:"actor_sub"`
 	AuditId      *openapi_types.UUID `json:"audit_id"`
 	BodyAfter    string              `json:"body_after"`
 	BodyBefore   *string             `json:"body_before"`
+	ChangeKind   *string             `json:"change_kind"`
 	ConventionId openapi_types.UUID  `json:"convention_id"`
 	Id           openapi_types.UUID  `json:"id"`
+	RequestId    *openapi_types.UUID `json:"request_id"`
 	Ts           time.Time           `json:"ts"`
 }
 
@@ -3738,8 +4173,8 @@ type ConventionListResponse struct {
 	// criterion is unsatisfiable from a single list call -- the
 	// deferred AC the issue body folds back in.
 	//
-	// All four fields are populated by a single call to
-	// :func:`~meho_backplane.conventions.preamble.assemble_preamble`
+	// All fields are populated by a single call to
+	// :func:`~meho_backplane.conventions.preamble.assemble_preamble_detailed`
 	// against the operator's tenant, so the budget arithmetic is
 	// end-to-end consistent with T4's preamble assembler (the same
 	// helper that produces the MCP ``initialize`` ``instructions``
@@ -3756,12 +4191,10 @@ type ConventionListResponse struct {
 	//   parameter in tests). Exposed on the list response so
 	//   operators can do the budget math without grepping the source.
 	// * ``estimated_tokens`` -- :func:`estimate_tokens` over the
-	//   assembled preamble text (header + guard + delimited kept
-	//   blocks). Empty tenant: 0. Fitting tenant: positive integer
-	//   below ``max_tokens``. Over-budget tenant: positive integer
-	//   below ``max_tokens`` (the packer dropped slugs whole until it
-	//   fit), but ``over_budget=True`` and ``dropped_slugs`` is
-	//   non-empty.
+	//   rendered conventions band (header + guard + delimited kept
+	//   blocks). Empty tenant: 0. Otherwise at most ``max_tokens``
+	//   when any entry was kept (the packer drops entries whole until
+	//   the band fits).
 	// * ``over_budget`` -- convenience flag derived from
 	//   ``len(dropped_slugs) > 0``. Cheap derived value but worth
 	//   surfacing as a boolean so CLI / dashboard consumers branch on
@@ -3772,6 +4205,15 @@ type ConventionListResponse struct {
 	//   "insufficient_budget" exit-code-5 warning so the operator
 	//   knows exactly which conventions never reach an agent
 	//   session.
+	// * ``included_slugs`` -- slugs in the band, in pack order. Each
+	//   operational slug is in exactly one of ``included_slugs`` or
+	//   ``dropped_slugs``. "Included" means MEHO sends it in the MCP
+	//   ``initialize`` instructions; a client may ignore instructions,
+	//   so it is not proof that an agent applied the rule.
+	// * ``oversize_slugs`` -- the dropped slugs that do not fit even as
+	//   the only entry (rows written before the rendered write check,
+	//   or by another path). The rest of ``dropped_slugs`` fit alone
+	//   but lost the room to higher-priority entries.
 	BudgetStatus BudgetStatus        `json:"budget_status"`
 	Items        []ConventionSummary `json:"items"`
 	NextCursor   *string             `json:"next_cursor"`
@@ -4109,8 +4551,23 @@ type DashboardReadState string
 // “bool | None“ for forward compatibility with response decoders
 // that were generated against the chassis-stage shape, but the
 // handler now always populates it from the probe.
+//
+// “revision“, “head“ and “detail“ (#4830) carry the probe's
+// values, so an operator can confirm an upgrade from “meho status“
+// without a shell into the pod: “revision“ is the revision stamped
+// in the database, “head“ the revision this build expects, and
+// “detail“ the same text “/ready“ shows for the “db“ check.
+// “revision“ is “None“ when the database has no revision or could
+// not be read; “head“ is “None“ when the migration scripts could
+// not be loaded. After a rollback “revision“ is newer than “head“
+// while “migrated“ stays “True“ (“docs/codebase/migrations.md“,
+// "Rollback contract"). The defaults keep older response decoders
+// working.
 type DbStatus struct {
-	Migrated *bool `json:"migrated"`
+	Detail   *string `json:"detail"`
+	Head     *string `json:"head"`
+	Migrated *bool   `json:"migrated"`
+	Revision *string `json:"revision"`
 }
 
 // DecideRequestBody POST body for “/decide“ — the operator-decision path.
@@ -4123,7 +4580,7 @@ type DecideRequestBody struct {
 	// Decision One of 'approved' / 'rejected'.
 	Decision string `json:"decision"`
 
-	// Reason Optional rationale recorded on the decision audit row.
+	// Reason Optional rationale recorded on the decision audit row. End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.
 	Reason *string `json:"reason,omitempty"`
 }
 
@@ -4181,6 +4638,18 @@ type DecideResponseBody_DispatchResult struct {
 // than silently de-duplicated.
 type DeclareCapabilitiesRequest struct {
 	Capabilities []CapabilityDeclaration `json:"capabilities"`
+}
+
+// DelegationView Who told the approver to decide, read off the decision audit row (#3692).
+//
+// Present only when the decision “reason“ ended with the
+// “Instructed-by:“ / “Instruction:“ / “Refs:“ trailer block. The
+// approver is still “reviewed_by“; “instructed_by“ is the other human
+// whose written instruction they acted on.
+type DelegationView struct {
+	InstructedBy string   `json:"instructed_by"`
+	Instruction  string   `json:"instruction"`
+	Refs         []string `json:"refs"`
 }
 
 // DeprecateTemplateResponse Response for “meho_runbook_deprecate_template“ -- the now-deprecated coordinates.
@@ -4402,12 +4871,16 @@ type DocCollectionUpdate struct {
 // optional owning-document id (“None“ when the corpus has no document
 // concept for a chunk) and is only read as a citation-label fallback.
 //
-// “title“ is the **optional** human-legible chunk title (#2475), passed
-// through from the corpus (“CorpusChunk.title“). It is the *preferred*
-// citation label — every citation face (“ask_docs“, “/ui/corpus“)
-// feeds it to the “title -> document_id -> filename -> URL“ label chain
-// — and is “None“ until the upstream corpus supplies one, so today's
-// corpus (which sends no title) sees no behaviour change.
+// “title“ is the **optional** human-legible chunk title (#2475). It is
+// the corpus's own “title“ when it sends one, else a title derived from
+// the hit's page identity (#3913): its section (last heading or breadcrumb
+// tail) joined with its page name (the humanised filename), by
+// :func:`~meho_backplane.docs_search.citation_links.derive_chunk_title`.
+// It is the *preferred* citation label — every citation face
+// (“ask_docs“, “/ui/corpus“) feeds it to the “title -> document_id ->
+// filename -> URL“ label chain — and the local synthesis prompt shows it
+// on each evidence line. “None“ when the corpus sends neither a title
+// nor any page identity.
 //
 // “source_url“ is the **backend-agnostic** citation reference (#132): a
 // canonical public URL where one is derivable, else an opaque
@@ -4416,15 +4889,86 @@ type DocCollectionUpdate struct {
 // normalizes it via
 // :func:`~meho_backplane.docs_search.citation_links.normalize_source_ref`
 // so no storage-backend scheme or internal bucket/layout reaches the wire.
+// When the hit's own source is not an “https“ link and the backend sent
+// an “upstream_url“, that public link is the “source_url“ (#3913).
+//
+// “score_kind“ names the direction of “score“ when the backend sends
+// it: “distance“ means lower is better, “similarity“ higher is better.
+// “None“ when the backend does not say; it is never defaulted.
+//
+// “upstream_url“ / “upstream_page“ are the backend's optional public
+// link to the hit's source (for a PDF with a known page, ending in
+// “#page=N“) and that page, counted in the whole source document
+// (#3913). “None“ when the backend does not send them. “chunk_id“ is
+// kept either way, so the “meho://docs“ chunk resource still finds the
+// hit.
+//
+// “read_handle“ (#3948) is the backend's opaque, signed handle for reading
+// more around the hit with “read_docs“. It is set only when the backend
+// sent one **and** the collection offers read
+// (:meth:`~meho_backplane.docs_search.backends.base.SearchBackend.supports_read`),
+// so a hit that carries it can always be read; otherwise it is “None“ (a
+// PDF hit gets none from the backend). It is passed through unchanged and
+// never logged: it carries a few words of the hit, so the logs name the
+// “chunk_id“ instead.
 type DocsChunk struct {
-	ChunkId    string   `json:"chunk_id"`
-	Collection *string  `json:"collection"`
-	Content    string   `json:"content"`
-	DocumentId *string  `json:"document_id"`
-	Score      *float32 `json:"score"`
-	SourceUrl  *string  `json:"source_url"`
-	Title      *string  `json:"title"`
+	ChunkId      string              `json:"chunk_id"`
+	Collection   *string             `json:"collection"`
+	Content      string              `json:"content"`
+	DocumentId   *string             `json:"document_id"`
+	ReadHandle   *string             `json:"read_handle"`
+	Score        *float32            `json:"score"`
+	ScoreKind    *DocsChunkScoreKind `json:"score_kind"`
+	SourceUrl    *string             `json:"source_url"`
+	Title        *string             `json:"title"`
+	UpstreamPage *int                `json:"upstream_page"`
+	UpstreamUrl  *string             `json:"upstream_url"`
 }
+
+// DocsChunkScoreKind defines model for DocsChunk.ScoreKind.
+type DocsChunkScoreKind string
+
+// DocsReadResult The result of one “read_docs“ call, the same on every face.
+//
+//   - “mode“ -- what was read: “around“, “page“ or “section“.
+//   - “text“ -- the text, or “None“ when there is none to return: the
+//     file's owner allows only its link (“disclosure“ is “link“), or the
+//     backend cannot read the file's type (“reason“ says which).
+//   - “title“ -- the source's title, when known.
+//   - “source_url“ -- the public “http(s)“ link to the source, when there
+//     is one. Never a storage path.
+//   - “disclosure“ -- “full“ (text may be returned) or “link“ (only the
+//     link).
+//   - “reason“ -- why “text“ is “None“: “link_only“,
+//     “pdf_not_supported“ or “type_not_supported“.
+//   - “located“ -- whether the backend found the hit in the file (“None“
+//     when it does not say).
+//   - “truncated“ -- whether the backend cut the reply at its size cap.
+//   - “next“ / “up“ -- opaque cursors: pass one back as “cursor“ (with
+//     the same “read_handle“) to read on, or “None“.
+//
+// Frozen so a face cannot change it after the read.
+type DocsReadResult struct {
+	Disclosure DocsReadResultDisclosure `json:"disclosure"`
+	Located    *bool                    `json:"located"`
+	Mode       DocsReadResultMode       `json:"mode"`
+	Next       *string                  `json:"next"`
+	Reason     *DocsReadResultReason    `json:"reason"`
+	SourceUrl  *string                  `json:"source_url"`
+	Text       *string                  `json:"text"`
+	Title      *string                  `json:"title"`
+	Truncated  *bool                    `json:"truncated,omitempty"`
+	Up         *string                  `json:"up"`
+}
+
+// DocsReadResultDisclosure defines model for DocsReadResult.Disclosure.
+type DocsReadResultDisclosure string
+
+// DocsReadResultMode defines model for DocsReadResult.Mode.
+type DocsReadResultMode string
+
+// DocsReadResultReason defines model for DocsReadResult.Reason.
+type DocsReadResultReason string
 
 // DraftTemplateRequest Request body for “meho_runbook_draft_template“ -- create a new draft.
 //
@@ -4968,6 +5512,16 @@ type EventSourceUpdate struct {
 	Status *EventSourceStatus `json:"status,omitempty"`
 }
 
+// FeatureStatus One gated feature from “/ready“'s “features“ block (#4830).
+//
+// “configured“ is the feature's state; “missing_env“ lists the
+// names of the settings it still needs. Names only, never values.
+type FeatureStatus struct {
+	Configured bool      `json:"configured"`
+	MissingEnv *[]string `json:"missing_env,omitempty"`
+	Name       string    `json:"name"`
+}
+
 // FilterPredicate One “WHERE“ clause term: “field op value“.
 //
 // “value“ is omitted for “IS NULL“, a list for “IN“ (each element
@@ -5113,18 +5667,50 @@ type GovernedSubopsResponse struct {
 // :attr:`AGENT`, so every existing caller is unaffected.
 type GrantPrincipalKind string
 
+// GroupSafetyDistribution Risk levels of the enabled ops in one group (#3671).
+//
+// Counts only ops with “is_enabled=True“. One count per value of the
+// closed “safety_level“ set, plus how many of those ops need approval
+// and how many ops are enabled in total. Disabled ops are not counted.
+type GroupSafetyDistribution struct {
+	Caution               *int `json:"caution,omitempty"`
+	Dangerous             *int `json:"dangerous,omitempty"`
+	Destructive           *int `json:"destructive,omitempty"`
+	EnabledOpCount        *int `json:"enabled_op_count,omitempty"`
+	RequiresApprovalCount *int `json:"requires_approval_count,omitempty"`
+	Safe                  *int `json:"safe,omitempty"`
+}
+
+// GroupSummaryModel Pydantic projection of
+// :class:`~meho_backplane.operations.ingest.llm_groups.GroupSummary`.
+//
+// One row per group: how many ops this run added to it, and how many
+// typed, composite, and ingested ops it holds now.
+// “typed_operation_count > 0“ means a typed registrar owns the
+// group; grouping never files ingested ops into such a group.
+// Composite ops do not make a group typed.
+type GroupSummaryModel struct {
+	CompositeOperationCount int    `json:"composite_operation_count"`
+	Created                 bool   `json:"created"`
+	GroupKey                string `json:"group_key"`
+	IngestedOperationCount  int    `json:"ingested_operation_count"`
+	OperationsAdded         int    `json:"operations_added"`
+	TypedOperationCount     int    `json:"typed_operation_count"`
+}
+
 // GroupingResultModel Pydantic projection of
 // :class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.
 //
 // Mirrors the dataclass; rendered alongside :class:`IngestionResultModel`
 // in the ingest response so the operator sees both counts.
 type GroupingResultModel struct {
-	ConnectorId          string  `json:"connector_id"`
-	GroupsCreated        int     `json:"groups_created"`
-	LlmCallCount         int     `json:"llm_call_count"`
-	LlmDurationMs        float32 `json:"llm_duration_ms"`
-	OperationsAssigned   int     `json:"operations_assigned"`
-	OperationsUnassigned int     `json:"operations_unassigned"`
+	ConnectorId          string               `json:"connector_id"`
+	Groups               *[]GroupSummaryModel `json:"groups,omitempty"`
+	GroupsCreated        int                  `json:"groups_created"`
+	LlmCallCount         int                  `json:"llm_call_count"`
+	LlmDurationMs        float32              `json:"llm_duration_ms"`
+	OperationsAssigned   int                  `json:"operations_assigned"`
+	OperationsUnassigned int                  `json:"operations_unassigned"`
 }
 
 // HTTPValidationError defines model for HTTPValidationError.
@@ -5183,7 +5769,40 @@ type HTTPValidationError struct {
 // contract-compatible with this backplane build, and its last liveness
 // heartbeat. The list is empty when nothing is paired; the empty-default
 // keeps response decoders generated against the pre-#3025 shape working.
+//
+// “granted_scopes“ (#3666) lists the OAuth scope names on the caller's
+// token, sorted. It carries scope names only, never token material.
+// “surface_summary“ (#3666) compares the working-surface tools the
+// server registers with the ones this session lists
+// (:class:`SurfaceSummary`). Both have empty defaults so older response
+// decoders keep working; the handler always fills them.
+//
+// “sandbox_mode“ (#4622) is “"on"“ or “"off"“: whether this
+// instance lets a standing grant made in the web console cover a delete
+// by a service principal. “meho status“ prints one line when it is on.
+// The default “"off"“ keeps older response decoders working.
+//
+// “readiness“, “approvals“ and “features“ (#4830) let an operator
+// confirm an upgrade through MEHO: the same checks “/ready“ returns
+// (:class:`ReadinessStatus`), the approval settings in force
+// (:class:`ApprovalsStatus`) and the gated features with the names of
+// the settings they still need (:class:`FeatureStatus`). The route is
+// OPERATOR-gated, so unlike “/ready“ no metrics token is needed.
+// “None“ / empty defaults keep older response decoders working; the
+// handler always fills them.
 type HealthResponse struct {
+	// Approvals The approval settings in force (#4830).
+	//
+	// ``custody`` is the state of the approval key: ``configured``,
+	// ``missing`` or ``malformed``. ``effective_posture`` says whether a
+	// second person must approve (``four_eyes_enforced``) or one operator
+	// may approve their own request (``single_operator_break_glass``).
+	// ``delegated_decision_posture`` says whether a decision made on
+	// someone else's instruction is allowed. The three values come from
+	// :func:`meho_backplane.features.build_features_block`; they are state
+	// words only, never a key value.
+	Approvals *ApprovalsStatus `json:"approvals,omitempty"`
+
 	// Db Database migration status.
 	//
 	// ``migrated`` is ``True`` when the DB-migration-state probe reports
@@ -5196,9 +5815,23 @@ type HealthResponse struct {
 	// ``bool | None`` for forward compatibility with response decoders
 	// that were generated against the chassis-stage shape, but the
 	// handler now always populates it from the probe.
-	Db                  DbStatus `json:"db"`
-	McpProtocolVersion  *string  `json:"mcp_protocol_version,omitempty"`
-	McpSessionIdCapture string   `json:"mcp_session_id_capture"`
+	//
+	// ``revision``, ``head`` and ``detail`` (#4830) carry the probe's
+	// values, so an operator can confirm an upgrade from ``meho status``
+	// without a shell into the pod: ``revision`` is the revision stamped
+	// in the database, ``head`` the revision this build expects, and
+	// ``detail`` the same text ``/ready`` shows for the ``db`` check.
+	// ``revision`` is ``None`` when the database has no revision or could
+	// not be read; ``head`` is ``None`` when the migration scripts could
+	// not be loaded. After a rollback ``revision`` is newer than ``head``
+	// while ``migrated`` stays ``True`` (``docs/codebase/migrations.md``,
+	// "Rollback contract"). The defaults keep older response decoders
+	// working.
+	Db                  DbStatus         `json:"db"`
+	Features            *[]FeatureStatus `json:"features,omitempty"`
+	GrantedScopes       *[]string        `json:"granted_scopes,omitempty"`
+	McpProtocolVersion  *string          `json:"mcp_protocol_version,omitempty"`
+	McpSessionIdCapture string           `json:"mcp_session_id_capture"`
 
 	// Operator Operator identity surface exposed to the CLI and MCP ``meho_status``.
 	//
@@ -5218,6 +5851,16 @@ type HealthResponse struct {
 	// ``meho://tenant/<id>/info`` resource returns.
 	Operator OperatorIdentity `json:"operator"`
 	Pairings *[]PairingHealth `json:"pairings,omitempty"`
+
+	// Readiness The ``/ready`` verdict and its checks (#4830).
+	//
+	// Built from :func:`meho_backplane.health.readiness_snapshot`, the
+	// helper the web console's dashboard already uses, so ``meho status``
+	// and ``meho_status`` show the same checks as ``/ready`` — which a
+	// deployment may block at its ingress, and which hides its
+	// ``features`` block from callers without the metrics token.
+	Readiness   *ReadinessStatus `json:"readiness,omitempty"`
+	SandboxMode *string          `json:"sandbox_mode,omitempty"`
 
 	// SensorRunner Liveness of this process's sensor evaluation loop (#2763).
 	//
@@ -5244,6 +5887,21 @@ type HealthResponse struct {
 	// replica's claim stamp advances, so alert on the minimum across
 	// replicas, not per pod.
 	SensorRunner *SensorRunnerStatus `json:"sensor_runner,omitempty"`
+
+	// SurfaceSummary Which working-surface MCP tools this session should see, and which it does.
+	//
+	// ``expected_working_tools`` is every tool the server registers on the
+	// working surface, sorted. ``listed_working_tools`` is the part of that
+	// set this session's ``tools/list`` returns. ``missing_working_tools`` is
+	// the difference: tools hidden from this session by its tenant role, a
+	// tenant capability it lacks, or an add-on that is not paired.
+	// ``operator_surface_listed`` is ``True`` when the session also sees the
+	// operator planes (its token carries the ``mcp:admin`` scope).
+	//
+	// A client compares its own ``tools/list`` result against
+	// ``listed_working_tools``. A tool the server lists but the client does not
+	// see is a gap on the client side (``meho doctor`` reports it).
+	SurfaceSummary *SurfaceSummary `json:"surface_summary,omitempty"`
 
 	// Vault Federation-chain status for the deployment's credential backend.
 	//
@@ -5450,7 +6108,8 @@ type IngestKbRequest struct {
 // omit-equals-global semantics the MCP sibling
 // “meho_connector_ingest“ documents. The operator's own tenant
 // UUID targets their tenant-curated namespace; any other UUID is
-// rejected with a synchronous 403 on both the sync and async
+// rejected (unless the operator holds “platform_admin“, #3800)
+// with a synchronous 403 on both the sync and async
 // branches by :meth:`IngestionPipelineService.authorize_scope`
 // (checked eagerly at the route before the async job row is
 // created, #2208, and again inside the service as defence-in-depth).
@@ -5481,7 +6140,7 @@ type IngestRequest struct {
 	SpecInfoVersionsCompatible *[]string     `json:"spec_info_versions_compatible"`
 	Specs                      *[]SpecSource `json:"specs,omitempty"`
 
-	// TenantId Write scope for the ingested connector rows. Omit or pass null to ingest under the built-in / global scope (tenant_id IS NULL) — the same omit-equals-global semantics as the MCP tool meho_connector_ingest (tenant_admin only). Pass your own tenant UUID for a tenant-scoped ingest; another tenant's UUID is rejected with 403.
+	// TenantId Write scope for the ingested connector rows. Omit or pass null to ingest under the built-in / global scope (tenant_id IS NULL) — the same omit-equals-global semantics as the MCP tool meho_connector_ingest (tenant_admin only). Pass your own tenant UUID for a tenant-scoped ingest; another tenant's UUID is rejected with 403 unless the caller holds platform_admin, which may ingest into another tenant when it names that tenant here (the write is audited).
 	TenantId *openapi_types.UUID `json:"tenant_id"`
 	Version  *string             `json:"version"`
 }
@@ -5555,15 +6214,31 @@ type IngestionResultModel struct {
 // operator-facing identifier (“documents.source_id“ on the SQL
 // side); the underlying “Document.id“ UUID is also surfaced for
 // cross-correlation with audit-log rows and future MCP resource
-// URIs.
+// URIs. “id“ is the entry UUID.
+//
+// “revision_id“ is the retained revision that holds this body. Pass
+// it with “id“ to “meho://kb/id/{entry}/revision/{revision}“ to
+// read this exact body later, even after the entry changes. It is
+// “None“ only for a row that has no stored revision.
 type KbEntry struct {
 	Body      string                 `json:"body"`
 	CreatedAt time.Time              `json:"created_at"`
 	Id        openapi_types.UUID     `json:"id"`
 	Metadata  map[string]interface{} `json:"metadata"`
-	Slug      string                 `json:"slug"`
-	TenantId  openapi_types.UUID     `json:"tenant_id"`
-	UpdatedAt time.Time              `json:"updated_at"`
+
+	// Provenance Where a kb entry came from, as read back from its metadata.
+	//
+	// ``state="recorded"`` means the service stored provenance when it
+	// wrote the entry; the other fields are then set (``relative_path``
+	// stays ``None`` for direct writes). ``state="legacy"`` means the
+	// entry was written before provenance was stored, or the stored value
+	// is not in the expected shape; every other field is ``None``. Legacy
+	// rows are not rewritten -- the next write records real provenance.
+	Provenance KbProvenance        `json:"provenance"`
+	RevisionId *openapi_types.UUID `json:"revision_id"`
+	Slug       string              `json:"slug"`
+	TenantId   openapi_types.UUID  `json:"tenant_id"`
+	UpdatedAt  time.Time           `json:"updated_at"`
 }
 
 // KbEntryCreate POST body for “/api/v1/kb“ -- create / re-index one entry.
@@ -5601,10 +6276,22 @@ type KbEntryPreview struct {
 	UpdatedAt string                 `json:"updated_at"`
 }
 
+// KbIngestConflict Two or more files in one directory ingest claim the same slug.
+//
+// “relative_paths“ lists every file that claims “slug“, sorted,
+// relative to the ingest directory. None of these files is written,
+// and an existing entry with this slug stays unchanged. The operator
+// fixes the conflict (rename a file or change its “slug:“
+// front-matter) and runs the ingest again.
+type KbIngestConflict struct {
+	RelativePaths []string `json:"relative_paths"`
+	Slug          string   `json:"slug"`
+}
+
 // KbIngestionResult Summary of one :meth:`KbService.ingest_directory` run.
 //
-// The four counters partition every discovered “.md“ file into
-// exactly one of four buckets:
+// The five counters partition every discovered “.md“ file into
+// exactly one of five buckets:
 //
 //   - “inserted_count“ -- file's slug had no prior row in the tenant;
 //     a new document row was created and embedded.
@@ -5620,9 +6307,17 @@ type KbEntryPreview struct {
 //     front-matter). The matching error message is appended to
 //     :attr:`errors`; the ingestion run continues with the remaining
 //     files.
+//   - “conflict_count“ -- the file shares its slug with at least one
+//     other file in the same run. No file in that group is written;
+//     :attr:`conflicts` lists each group once.
 //
 // Sum invariant: “inserted_count + updated_count + skipped_count
-// + error_count == <total discovered .md files>“.
+// + error_count + conflict_count == <total discovered .md files>“.
+//
+// The run walks files in sorted relative-path order, so the same
+// directory gives the same counters, “errors“ order and
+// “conflicts“ order on every run, whatever order the filesystem
+// lists the files in.
 //
 // The “errors“ list is bounded in practice by the corpus size --
 // no per-file error string exceeds ~200 chars (the file path plus a
@@ -5630,11 +6325,13 @@ type KbEntryPreview struct {
 // corpus stays under ~200 KB of allocated memory. Truncation /
 // sampling can land in v0.2.next if real corpora drive that.
 type KbIngestionResult struct {
-	ErrorCount    int      `json:"error_count"`
-	Errors        []string `json:"errors"`
-	InsertedCount int      `json:"inserted_count"`
-	SkippedCount  int      `json:"skipped_count"`
-	UpdatedCount  int      `json:"updated_count"`
+	ConflictCount int                `json:"conflict_count"`
+	Conflicts     []KbIngestConflict `json:"conflicts"`
+	ErrorCount    int                `json:"error_count"`
+	Errors        []string           `json:"errors"`
+	InsertedCount int                `json:"inserted_count"`
+	SkippedCount  int                `json:"skipped_count"`
+	UpdatedCount  int                `json:"updated_count"`
 }
 
 // KbListResponse Response envelope for “GET /api/v1/kb“.
@@ -5648,6 +6345,27 @@ type KbIngestionResult struct {
 type KbListResponse struct {
 	Entries []KbEntryPreview `json:"entries"`
 }
+
+// KbProvenance Where a kb entry came from, as read back from its metadata.
+//
+// “state="recorded"“ means the service stored provenance when it
+// wrote the entry; the other fields are then set (“relative_path“
+// stays “None“ for direct writes). “state="legacy"“ means the
+// entry was written before provenance was stored, or the stored value
+// is not in the expected shape; every other field is “None“. Legacy
+// rows are not rewritten -- the next write records real provenance.
+type KbProvenance struct {
+	IngestedAt   *time.Time              `json:"ingested_at"`
+	RelativePath *string                 `json:"relative_path"`
+	SourceKind   *KbProvenanceSourceKind `json:"source_kind"`
+	State        KbProvenanceState       `json:"state"`
+}
+
+// KbProvenanceSourceKind defines model for KbProvenance.SourceKind.
+type KbProvenanceSourceKind string
+
+// KbProvenanceState defines model for KbProvenance.State.
+type KbProvenanceState string
 
 // KindFilterValue Closed enum of the trigger “kind“ values exposed in the filter URL.
 //
@@ -5677,6 +6395,9 @@ type KindFilterValue string
 // and write an audit row per poll. The facet honours this handler's
 // constraints — an in-memory clock read; no connector, no credential,
 // no secret.
+//
+// “db“ shares :class:`DbStatus` with the deep check, so it carries
+// the migration revision too (#4830). It still never touches Vault.
 type LivenessResponse struct {
 	// Db Database migration status.
 	//
@@ -5690,6 +6411,18 @@ type LivenessResponse struct {
 	// ``bool | None`` for forward compatibility with response decoders
 	// that were generated against the chassis-stage shape, but the
 	// handler now always populates it from the probe.
+	//
+	// ``revision``, ``head`` and ``detail`` (#4830) carry the probe's
+	// values, so an operator can confirm an upgrade from ``meho status``
+	// without a shell into the pod: ``revision`` is the revision stamped
+	// in the database, ``head`` the revision this build expects, and
+	// ``detail`` the same text ``/ready`` shows for the ``db`` check.
+	// ``revision`` is ``None`` when the database has no revision or could
+	// not be read; ``head`` is ``None`` when the migration scripts could
+	// not be loaded. After a rollback ``revision`` is newer than ``head``
+	// while ``migrated`` stays ``True`` (``docs/codebase/migrations.md``,
+	// "Rollback contract"). The defaults keep older response decoders
+	// working.
 	Db DbStatus `json:"db"`
 
 	// Operator Operator identity surface exposed to the CLI and MCP ``meho_status``.
@@ -5793,6 +6526,68 @@ type MemoryEntry struct {
 	UserSub    *string            `json:"user_sub"`
 }
 
+// MemoryEntrySearchHit One bounded hit from :meth:`MemoryService.search_memories` (#3751).
+//
+// A hit is evidence for picking a result, not the entry itself. It holds
+// a short, query-relevant “snippet“ of the body (at most
+// :data:`~meho_backplane.memory.snippet.SNIPPET_MAX_CHARS` characters of
+// body text), never the whole body and never the free-form “metadata“.
+// The full entry is read through “locator“.
+//
+// “rank“ is the 1-based position in the result list. It is an order,
+// not a confidence: the fused (RRF) ranking score is not calibrated, so
+// it is not exposed.
+//
+// Provenance fields say where the evidence comes from and who can see
+// it: “scope“, “user_sub“ (the owner of a user-scoped entry, “None“
+// for shared scopes), “target_name“, and the “created_at“ /
+// “updated_at“ / “expires_at“ timestamps. Frozen for the same reason
+// as :class:`MemoryEntry`.
+type MemoryEntrySearchHit struct {
+	BodyChars int        `json:"body_chars"`
+	CreatedAt time.Time  `json:"created_at"`
+	ExpiresAt *time.Time `json:"expires_at"`
+
+	// ExpiryState ``never`` when the entry has no expiry, else ``scheduled``.
+	//
+	// Search leaves out expired entries, so there is no expired state.
+	ExpiryState *MemoryEntrySearchHitExpiryState `json:"expiry_state,omitempty"`
+	Id          openapi_types.UUID               `json:"id"`
+
+	// Locator Canonical selected-read URI (``meho://memory/id/{document_uuid}``).
+	//
+	// Built from the row id only, so it never carries a target name
+	// or owner. Read it with ``resources/read`` to get the full entry.
+	Locator *string `json:"locator,omitempty"`
+	Rank    int     `json:"rank"`
+
+	// Scope One of the five memory scopes from consumer-needs.md §G5 L137-141.
+	//
+	// The string value is the wire-level identifier (route path segment,
+	// CLI flag value, MCP tool arg). Each value maps to a single
+	// ``documents.kind`` row prefixed with ``memory-`` --
+	// :func:`kind_for_scope` is the canonical translation. The mapping is
+	// one-to-one and bijective with :func:`scope_for_kind`, so callers
+	// never round-trip through ad-hoc string-prefixing.
+	//
+	// ``StrEnum`` (PEP 663, stdlib in 3.11+) gives the members ``str``
+	// semantics for free: ``f"scope={MemoryScope.USER}"`` renders as
+	// ``"scope=user"`` rather than ``"scope=MemoryScope.USER"``, matching
+	// the :class:`~meho_backplane.auth.operator.TenantRole` convention.
+	Scope            MemoryScope `json:"scope"`
+	Slug             string      `json:"slug"`
+	Snippet          string      `json:"snippet"`
+	SnippetTruncated bool        `json:"snippet_truncated"`
+	TargetName       *string     `json:"target_name"`
+	UpdatedAt        time.Time   `json:"updated_at"`
+	UserSub          *string     `json:"user_sub"`
+}
+
+// MemoryEntrySearchHitExpiryState “never“ when the entry has no expiry, else “scheduled“.
+//
+// Search leaves out expired entries, so there is no expired state.
+type MemoryEntrySearchHitExpiryState string
+
 // MemoryListResponse Response envelope for “GET /api/v1/memory“.
 //
 // Wrapped in “{"entries": [...]}“ so a future cursor field can
@@ -5821,6 +6616,44 @@ type MemoryListResponse struct {
 // “"scope=user"“ rather than “"scope=MemoryScope.USER"“, matching
 // the :class:`~meho_backplane.auth.operator.TenantRole` convention.
 type MemoryScope string
+
+// MemorySearchBody POST body for “/api/v1/memory/search“.
+//
+// Same limits as the MCP “search_memory“ tool so the CLI and an agent
+// can send the same input: “query“ 1..256 chars, “limit“ 1..50
+// (default 10). Omit “scope“ to search all five scopes.
+type MemorySearchBody struct {
+	Limit *int   `json:"limit,omitempty"`
+	Query string `json:"query"`
+
+	// Scope One of the five memory scopes from consumer-needs.md §G5 L137-141.
+	//
+	// The string value is the wire-level identifier (route path segment,
+	// CLI flag value, MCP tool arg). Each value maps to a single
+	// ``documents.kind`` row prefixed with ``memory-`` --
+	// :func:`kind_for_scope` is the canonical translation. The mapping is
+	// one-to-one and bijective with :func:`scope_for_kind`, so callers
+	// never round-trip through ad-hoc string-prefixing.
+	//
+	// ``StrEnum`` (PEP 663, stdlib in 3.11+) gives the members ``str``
+	// semantics for free: ``f"scope={MemoryScope.USER}"`` renders as
+	// ``"scope=user"`` rather than ``"scope=MemoryScope.USER"``, matching
+	// the :class:`~meho_backplane.auth.operator.TenantRole` convention.
+	Scope *MemoryScope `json:"scope,omitempty"`
+}
+
+// MemorySearchResponse Response for “/api/v1/memory/search“ -- the same hits “search_memory“ returns.
+//
+// “hits“ is the only field. Each hit is bounded evidence (#3751): a
+// short snippet, provenance, and the selected-read “locator“, never the
+// full body. The MCP tool also wraps each snippet in the untrusted-text
+// envelope and adds its “delivery“ fields; this REST face serves the
+// plain snippet for the CLI table. There is deliberately no total or
+// count: "no match" and "only rows you may not see" both return
+// “{"hits": []}“.
+type MemorySearchResponse struct {
+	Hits []MemoryEntrySearchHit `json:"hits"`
+}
 
 // MyRecentPage Unified list envelope for “GET /api/v1/audit/my-recent“.
 //
@@ -6299,10 +7132,13 @@ type PermissionVerdict string
 //     preamble's packed order (the packer iterates “priority DESC,
 //     created_at ASC“; “position=1“ means highest-priority slot in
 //     the operator's tenant). “None“ when “included=False“.
-//   - “token_count“ -- the convention body's own estimated token
-//     cost via :func:`estimate_tokens`. Useful for the operator to
-//     see why a near-budget body got dropped (it weighed more than
-//     the remaining headroom).
+//   - “token_count“ -- the convention's own rendered block cost
+//     (heading + body) via :func:`estimate_tokens`. Useful for the
+//     operator to see why a near-budget entry got dropped (it weighed
+//     more than the remaining headroom).
+//   - “fits_alone“ -- “True“ when the band with only this entry
+//     fits the budget. “fits_alone=True“ with “included=False“
+//     means higher-priority entries used up the room.
 //   - “would_drop_slugs“ -- the full “dropped_slugs“ list the
 //     packer produced on this assembly. When “included=True“ this
 //     names *other* slugs that fell out of the preamble (the just-
@@ -6322,6 +7158,8 @@ type PermissionVerdict string
 // sub-model means GET-single can drop the field cleanly while
 // POST/PATCH attach it.
 type PreambleInclusion struct {
+	// FitsAlone True when the rendered conventions band with only this entry fits the budget. Fitting alone does not promise inclusion.
+	FitsAlone      bool     `json:"fits_alone"`
 	Included       bool     `json:"included"`
 	Position       *int     `json:"position"`
 	TokenCount     int      `json:"token_count"`
@@ -6362,6 +7200,85 @@ type PreviewOperationBodyTarget1 map[string]interface{}
 type PreviewOperationBody_Target struct {
 	union json.RawMessage
 }
+
+// PreviewOperationResponse Response envelope of “POST /api/v1/operations/preview“ (#4923).
+//
+// Types the envelope :func:`preview_operation` returns so the OpenAPI
+// document and the generated clients know its fields. The route serialises
+// only the keys the envelope carries (“response_model_exclude_unset“):
+// an “error“ envelope has no “method“, an ingested “ok“ preview has no
+// “plan_shown“, and so on. “extra="allow"“ keeps the keys a
+// target-resolution or rate-limit envelope adds (“duration_ms“,
+// “retry_after_seconds“, ...) on the wire unchanged.
+type PreviewOperationResponse struct {
+	// ConnectorId The connector the preview resolved against. May differ from the requested id when a sibling catalog serves the target.
+	ConnectorId *string `json:"connector_id"`
+
+	// Error Human-readable fault (status=error / unavailable / rate_limited).
+	Error *string `json:"error"`
+
+	// Extras Structured fault details, for example `error_code` or `validation_errors`.
+	Extras *map[string]interface{} `json:"extras"`
+
+	// Method Resolved HTTP verb (status=ok); `COMPOSITE` for a synthetic preview.
+	Method *string `json:"method"`
+
+	// OpId Echo of the requested op id.
+	OpId *string `json:"op_id"`
+
+	// PlanNote Plain reason the plan is not shown (when `plan_shown` is false).
+	PlanNote *string `json:"plan_note"`
+
+	// PlanShown Synthetic preview only: true when `proposed_effect` is present. False means the plan needs the target and is shown on the approval request.
+	PlanShown *bool `json:"plan_shown"`
+
+	// PolicyReason The policy gate's reason for the verdict; null when it gives none (a person's call that runs at once).
+	PolicyReason *string `json:"policy_reason"`
+
+	// PolicyVerdict Three-state verdict returned by the permission resolver.
+	//
+	// :attr:`AUTO_EXECUTE` — the op proceeds without human review.
+	// :attr:`NEEDS_APPROVAL` — the op is parked pending an operator
+	// decision; the approval queue (G11.2-T4) handles the resume path.
+	// :attr:`DENY` — the op is refused immediately with a structured,
+	// agent-reasonable error.
+	//
+	// The vocabulary is intentionally closed: a fourth verdict would
+	// require a code + migration change, which is the cheapest way to
+	// prevent drift between the DB layer and the policy engine.
+	PolicyVerdict *PermissionVerdict `json:"policy_verdict,omitempty"`
+
+	// PreviewHash Stable SHA-256 over the resolved request (status=ok). Present it as `preview_hash` on the governed call of a destructive-tier op.
+	PreviewHash *string `json:"preview_hash"`
+
+	// ProposedEffect The plan of what the op will change, the same block the approval request shows. Present only on a synthetic preview whose plan can be built without contacting the target.
+	ProposedEffect *map[string]interface{} `json:"proposed_effect"`
+
+	// Query Query-string params, or null when there are none (status=ok).
+	Query *map[string]interface{} `json:"query"`
+
+	// RedactedBody The would-be request body after the connector-boundary redaction pipeline; null when the op declares no body (status=ok).
+	RedactedBody interface{} `json:"redacted_body,omitempty"`
+
+	// RequiresApproval True when the op is marked as needing a human approval before it runs. Present whenever `safety_level` is.
+	RequiresApproval *bool `json:"requires_approval"`
+
+	// ResolvedPath Fully resolved request path, placeholders substituted and mount prefix applied (status=ok); the op id for a synthetic preview.
+	ResolvedPath *string `json:"resolved_path"`
+
+	// SafetyLevel The op's risk level: safe, caution, dangerous or destructive. Present on every preview whose op resolved (every status except unknown_op / unknown_connector).
+	SafetyLevel *string `json:"safety_level"`
+
+	// SourceKind `ingested`, `typed` or `composite`; absent when the op is unknown.
+	SourceKind *string `json:"source_kind"`
+
+	// Status ok: the would-be request (or the synthetic preview) resolved. error: a structured fault, see `error` and `extras.error_code`. unavailable: a typed/composite op outside the approval tiers has no request to preview. rate_limited: over the per-minute dispatch cap for this principal.
+	Status               PreviewOperationResponseStatus `json:"status"`
+	AdditionalProperties map[string]interface{}         `json:"-"`
+}
+
+// PreviewOperationResponseStatus ok: the would-be request (or the synthetic preview) resolved. error: a structured fault, see `error` and `extras.error_code`. unavailable: a typed/composite op outside the approval tiers has no request to preview. rate_limited: over the per-minute dispatch cap for this principal.
+type PreviewOperationResponseStatus string
 
 // PrincipalKind Discriminator that distinguishes what authenticated this request.
 //
@@ -6468,6 +7385,52 @@ type QueryResult struct {
 	ReciprocalRank         float32   `json:"reciprocal_rank"`
 }
 
+// ReadDocsRequest POST body for “/api/v1/read_docs“, the same fields as the MCP tool.
+//
+// “collection“ is typed optional so a missing value gets the docs
+// surfaces' own 422 naming the mandatory scope. “product“ / “version“
+// are needed only on a collection whose scope gates send hard filters: the
+// handle is bound to the filters of the hit's search. So a caller passes
+// them only for a hit from a single-collection search that used them, and
+// leaves them out for a hit from a cross-collection search, which ignores
+// them. “extra="forbid"“ rejects unknown fields.
+type ReadDocsRequest struct {
+	After      *int                 `json:"after,omitempty"`
+	Before     *int                 `json:"before,omitempty"`
+	Collection *string              `json:"collection"`
+	Cursor     *string              `json:"cursor"`
+	Mode       *ReadDocsRequestMode `json:"mode,omitempty"`
+
+	// Product The `product` you searched with. Needed only on a collection that applies scope filters; otherwise ignored. Pass it only when the hit came from a single-collection search that used it. Leave it out for a hit from a cross-collection search (`collections` or `collection='all'`; such a hit carries its own `collection`): that search ignores `product`, so its handle has none.
+	Product    *string `json:"product"`
+	ReadHandle string  `json:"read_handle"`
+
+	// Version The `version` you searched with. Needed only on a collection that applies scope filters; otherwise ignored. Pass it only when the hit came from a single-collection search that used it. Leave it out for a hit from a cross-collection search (`collections` or `collection='all'`; such a hit carries its own `collection`): that search ignores `version`, so its handle has none.
+	Version *string `json:"version"`
+}
+
+// ReadDocsRequestMode defines model for ReadDocsRequest.Mode.
+type ReadDocsRequestMode string
+
+// ReadinessCheck One readiness check, as “/ready“ reports it (#4830).
+type ReadinessCheck struct {
+	Detail *string `json:"detail,omitempty"`
+	Name   string  `json:"name"`
+	Ok     bool    `json:"ok"`
+}
+
+// ReadinessStatus The “/ready“ verdict and its checks (#4830).
+//
+// Built from :func:`meho_backplane.health.readiness_snapshot`, the
+// helper the web console's dashboard already uses, so “meho status“
+// and “meho_status“ show the same checks as “/ready“ — which a
+// deployment may block at its ingress, and which hides its
+// “features“ block from callers without the metrics token.
+type ReadinessStatus struct {
+	Checks *[]ReadinessCheck `json:"checks,omitempty"`
+	Ready  bool              `json:"ready"`
+}
+
 // ReassignRunRequest Request body for “meho_runbook_reassign“ -- transfer ownership of a run.
 //
 // :attr:`new_assignee` is the operator subject identifier of the
@@ -6535,7 +7498,7 @@ type RefreshResult struct {
 
 // RejectRequestBody POST body for “…/reject“.
 type RejectRequestBody struct {
-	// Reason Optional human-readable rejection reason (recorded in the audit row).
+	// Reason Optional human-readable rejection reason (recorded in the audit row). End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.
 	Reason *string `json:"reason,omitempty"`
 }
 
@@ -6617,6 +7580,7 @@ type ReplayNode struct {
 	Children         *[]ReplayNode          `json:"children,omitempty"`
 	Depth            int                    `json:"depth"`
 	DurationMs       *string                `json:"duration_ms"`
+	EventClass       string                 `json:"event_class"`
 	Id               openapi_types.UUID     `json:"id"`
 	Method           string                 `json:"method"`
 	OpClass          string                 `json:"op_class"`
@@ -6727,6 +7691,11 @@ type ResultQueryBody struct {
 	// and the operator/aggregate allow-lists are enforced here, at construction;
 	// field-vs-schema validation needs the handle's columns and happens in
 	// :func:`compile_query`.
+	//
+	// ``path`` is the other read: an RFC 6901 pointer into a document handle,
+	// or into the top-level fields a rows handle left out of its inline
+	// summary. It is never compiled to SQL, so it cannot be combined with any
+	// relational field (checked here, at construction).
 	Query *ResultQuerySpec `json:"query,omitempty"`
 }
 
@@ -6739,6 +7708,11 @@ type ResultQueryBody struct {
 // and the operator/aggregate allow-lists are enforced here, at construction;
 // field-vs-schema validation needs the handle's columns and happens in
 // :func:`compile_query`.
+//
+// “path“ is the other read: an RFC 6901 pointer into a document handle,
+// or into the top-level fields a rows handle left out of its inline
+// summary. It is never compiled to SQL, so it cannot be combined with any
+// relational field (checked here, at construction).
 type ResultQuerySpec struct {
 	// Aggregate Aggregate output columns (COUNT/SUM/MIN/MAX/AVG).
 	Aggregate *[]Aggregate `json:"aggregate,omitempty"`
@@ -6754,6 +7728,9 @@ type ResultQuerySpec struct {
 
 	// OrderBy Sort terms (max 4).
 	OrderBy *[]OrderBy `json:"order_by,omitempty"`
+
+	// Path RFC 6901 JSON Pointer into a document handle (for example `/status/conditions/0`; `""` is the whole document), or into the top-level fields a rows handle left out of its inline summary (`omitted_scalar_count`). Reads one value; an array value pages with the call's `offset` / `limit`. Cannot be combined with `filter`, `select`, `group_by`, `aggregate`, `order_by`, or `limit`.
+	Path *string `json:"path"`
 
 	// Select Projection: columns to return (max 64). Omit for all columns. Not allowed together with `aggregate` (the output is then the group keys plus the aggregates).
 	Select *[]string `json:"select,omitempty"`
@@ -7277,6 +8254,27 @@ type SafetyChangeModel struct {
 	OpId            string                 `json:"op_id"`
 }
 
+// SafetyOverlayEntry One catalog rule that raises the safety of matching ingested ops.
+//
+// A catalog row that declares :attr:`ConnectorSpecEntry.safety_overlay`
+// lets an operator raise the safety level and turn on approval for
+// chosen operations of that spec, without changing the ingest code.
+// “method“ is matched exactly (upper-cased). “path“ is a
+// shell-style glob matched case-sensitively against the spec path
+// template with any query string removed; “*“ also matches “/“.
+// The rule only ever raises: it never lowers a stricter level and never
+// clears an approval requirement (see
+// :func:`meho_backplane.operations.ingest.safety_floors.apply_safety_floor`).
+type SafetyOverlayEntry struct {
+	Method           string                        `json:"method"`
+	Path             string                        `json:"path"`
+	RequiresApproval *bool                         `json:"requires_approval,omitempty"`
+	SafetyLevel      SafetyOverlayEntrySafetyLevel `json:"safety_level"`
+}
+
+// SafetyOverlayEntrySafetyLevel defines model for SafetyOverlayEntry.SafetyLevel.
+type SafetyOverlayEntrySafetyLevel string
+
 // ScheduledTriggerCreate Request body for “POST /api/v1/scheduler/triggers“.
 //
 // Discriminated by *kind*: exactly one of “cron_expr“ / “fire_at“
@@ -7611,7 +8609,10 @@ type ScheduledTriggerStatus string
 // with a route-shaped 422 naming the absent key (carrying *why* the
 // collection is mandatory), rather than Pydantic's generic
 // “field_required“. “product“ / “version“ are **optional
-// refinements** within the chosen collection.
+// refinements** within the chosen collection. “target“ (#3920) names a
+// target; when “product“ and “version“ are both absent, its
+// fingerprint product and version become the default soft scope (a
+// ranking hint, never a filter). It is ignored on a fan-out.
 //
 // “collections“ is the opt-in **cross-collection fan-out** scope (G4.6-T5
 // #1554): an explicit list of collection keys to query and RRF-merge.
@@ -7630,6 +8631,7 @@ type SearchDocsRequest struct {
 	Limit       *int      `json:"limit,omitempty"`
 	Product     *string   `json:"product"`
 	Query       string    `json:"query"`
+	Target      *string   `json:"target"`
 	Version     *string   `json:"version"`
 }
 
@@ -8006,19 +9008,30 @@ type ServiceGrantListResponse struct {
 // ServiceGrantRead Row shape every accessor returns.
 //
 // “from_attributes=True“ allows direct construction from an ORM row.
-// Exposes “revoked_at“ / “revoked_by_sub“ so callers can tell a live
-// grant from a revoked one in the history.
+// Exposes “revoked_at“ / “revoked_by_sub“ / “revoked_reason“ so
+// callers can tell a live grant from a revoked one in the history, and why
+// it was revoked.
+//
+// “orphaned“ / “orphan_remediation“ are filled in by the service when
+// it reads the grant (see
+// :func:`~meho_backplane.operations.service_grants.classify_orphaned_grants`);
+// building the shape straight from an ORM row leaves them at the
+// not-orphaned default.
 type ServiceGrantRead struct {
 	ConnectorId       string              `json:"connector_id"`
 	CreatedAt         time.Time           `json:"created_at"`
 	CreatedBySub      string              `json:"created_by_sub"`
+	DeleteGrant       *bool               `json:"delete_grant,omitempty"`
 	ExpiresAt         *time.Time          `json:"expires_at"`
 	Id                openapi_types.UUID  `json:"id"`
 	OpId              string              `json:"op_id"`
+	OrphanRemediation *string             `json:"orphan_remediation"`
+	Orphaned          *bool               `json:"orphaned,omitempty"`
 	PrincipalSub      string              `json:"principal_sub"`
 	Reason            string              `json:"reason"`
 	RevokedAt         *time.Time          `json:"revoked_at"`
 	RevokedBySub      *string             `json:"revoked_by_sub"`
+	RevokedReason     *string             `json:"revoked_reason"`
 	TargetId          *openapi_types.UUID `json:"target_id"`
 	TargetNamePattern *string             `json:"target_name_pattern"`
 	TargetProduct     *string             `json:"target_product"`
@@ -8331,6 +9344,26 @@ type SurfaceResultSurface string
 
 // SurfaceResultVerdict defines model for SurfaceResult.Verdict.
 type SurfaceResultVerdict string
+
+// SurfaceSummary Which working-surface MCP tools this session should see, and which it does.
+//
+// “expected_working_tools“ is every tool the server registers on the
+// working surface, sorted. “listed_working_tools“ is the part of that
+// set this session's “tools/list“ returns. “missing_working_tools“ is
+// the difference: tools hidden from this session by its tenant role, a
+// tenant capability it lacks, or an add-on that is not paired.
+// “operator_surface_listed“ is “True“ when the session also sees the
+// operator planes (its token carries the “mcp:admin“ scope).
+//
+// A client compares its own “tools/list“ result against
+// “listed_working_tools“. A tool the server lists but the client does not
+// see is a gap on the client side (“meho doctor“ reports it).
+type SurfaceSummary struct {
+	ExpectedWorkingTools  *[]string `json:"expected_working_tools,omitempty"`
+	ListedWorkingTools    *[]string `json:"listed_working_tools,omitempty"`
+	MissingWorkingTools   *[]string `json:"missing_working_tools,omitempty"`
+	OperatorSurfaceListed *bool     `json:"operator_surface_listed,omitempty"`
+}
 
 // Target Full read shape — returned by GET /targets/{name} and the resolver.
 //
@@ -8851,12 +9884,18 @@ type TopologyEdge struct {
 	// listing is a survey of relationships, not a node dump; callers that
 	// need the bag look the node up separately via
 	// :func:`meho_backplane.topology.resolvers.resolve_node`.
+	//
+	// ``source_scope`` (#3760) is the node's stored source scope, so an
+	// edge answer says which source each end came from.
 	From       TopologyEdgeEndpoint    `json:"from"`
 	Id         openapi_types.UUID      `json:"id"`
 	Kind       string                  `json:"kind"`
 	LastSeen   *time.Time              `json:"last_seen"`
 	Properties *map[string]interface{} `json:"properties,omitempty"`
-	Source     string                  `json:"source"`
+
+	// RelationClass What this edge means (#3760); unmapped kinds are ``unknown``.
+	RelationClass *TopologyEdgeRelationClass `json:"relation_class,omitempty"`
+	Source        string                     `json:"source"`
 
 	// To One endpoint of a :class:`TopologyEdge` — the ``from`` or ``to`` node.
 	//
@@ -8869,8 +9908,14 @@ type TopologyEdge struct {
 	// listing is a survey of relationships, not a node dump; callers that
 	// need the bag look the node up separately via
 	// :func:`meho_backplane.topology.resolvers.resolve_node`.
+	//
+	// ``source_scope`` (#3760) is the node's stored source scope, so an
+	// edge answer says which source each end came from.
 	To TopologyEdgeEndpoint `json:"to"`
 }
+
+// TopologyEdgeRelationClass What this edge means (#3760); unmapped kinds are “unknown“.
+type TopologyEdgeRelationClass string
 
 // TopologyEdgeEndpoint One endpoint of a :class:`TopologyEdge` — the “from“ or “to“ node.
 //
@@ -8883,10 +9928,14 @@ type TopologyEdge struct {
 // listing is a survey of relationships, not a node dump; callers that
 // need the bag look the node up separately via
 // :func:`meho_backplane.topology.resolvers.resolve_node`.
+//
+// “source_scope“ (#3760) is the node's stored source scope, so an
+// edge answer says which source each end came from.
 type TopologyEdgeEndpoint struct {
-	Id   openapi_types.UUID `json:"id"`
-	Kind string             `json:"kind"`
-	Name string             `json:"name"`
+	Id          openapi_types.UUID `json:"id"`
+	Kind        string             `json:"kind"`
+	Name        string             `json:"name"`
+	SourceScope *string            `json:"source_scope"`
 }
 
 // TopologyHistoryEntry One row of the per-resource history walk (G9.3-T3).
@@ -8964,28 +10013,66 @@ type TopologyHistoryResult struct {
 // every “parent_node_id“ in a closure result is itself a row of
 // that result. Additive with “None“ defaults so pre-#2538
 // constructors and payloads stay valid.
+//
+// “source_scope“ (#3739) is the stored “graph_node.source_scope“:
+// “global“, “target:<uuid>“, “legacy:<uuid>“ or “None“.
+// “scope_status“ is derived from it. “unresolved“ means the row
+// has no scope yet and the reader does not know which source the
+// name belongs to; it never falls back to the last target that saw
+// the row.
+//
+// “last_seen“ (#3760) is MEHO's own time, not the vendor's: the last
+// refresh that reported an “auto“ node, or when an operator entered
+// a “curated“ node (a later refresh that also observes it moves it
+// forward). “None“ means the latest refresh no longer reported the
+// row. “via_edge_source“ / “via_edge_last_seen“
+// are the same facts for the edge walked to reach the node, and
+// “via_relation_class“ is that edge's relation class (see
+// :mod:`meho_backplane.topology.evidence`). All are “None“ on the
+// root row.
 type TopologyNode struct {
 	Depth        int                     `json:"depth"`
 	Id           openapi_types.UUID      `json:"id"`
 	Kind         string                  `json:"kind"`
+	LastSeen     *time.Time              `json:"last_seen"`
 	Name         string                  `json:"name"`
 	ParentNodeId *openapi_types.UUID     `json:"parent_node_id"`
 	Properties   *map[string]interface{} `json:"properties,omitempty"`
-	Source       string                  `json:"source"`
-	ViaEdgeId    *openapi_types.UUID     `json:"via_edge_id"`
-	ViaEdgeKind  *string                 `json:"via_edge_kind"`
+
+	// ScopeStatus Where the name is unique, or ``unresolved`` when not recorded.
+	ScopeStatus     *TopologyNodeScopeStatus `json:"scope_status,omitempty"`
+	Source          string                   `json:"source"`
+	SourceScope     *string                  `json:"source_scope"`
+	ViaEdgeId       *openapi_types.UUID      `json:"via_edge_id"`
+	ViaEdgeKind     *string                  `json:"via_edge_kind"`
+	ViaEdgeLastSeen *time.Time               `json:"via_edge_last_seen"`
+	ViaEdgeSource   *string                  `json:"via_edge_source"`
+
+	// ViaRelationClass Relation class of the edge walked to reach this node.
+	ViaRelationClass *TopologyNodeViaRelationClass `json:"via_relation_class"`
 }
+
+// TopologyNodeScopeStatus Where the name is unique, or “unresolved“ when not recorded.
+type TopologyNodeScopeStatus string
+
+// TopologyNodeViaRelationClass Relation class of the edge walked to reach this node.
+type TopologyNodeViaRelationClass string
 
 // TopologyPath An ordered shortest path between two nodes.
 //
 // “nodes“ runs from the “from“ node (“depth == 0“) to the
 // “to“ node (“depth == total_hops“) inclusive. “total_hops“ is
 // the number of edges traversed, i.e. “len(nodes) - 1“. v0.2 is
-// unweighted: every edge costs one hop.
+// unweighted: every edge costs one hop. “direction“ (#3760) is the
+// edge direction the search applied.
 type TopologyPath struct {
-	Nodes     []TopologyNode `json:"nodes"`
-	TotalHops int            `json:"total_hops"`
+	Direction *TopologyPathDirection `json:"direction,omitempty"`
+	Nodes     []TopologyNode         `json:"nodes"`
+	TotalHops int                    `json:"total_hops"`
 }
+
+// TopologyPathDirection defines model for TopologyPath.Direction.
+type TopologyPathDirection string
 
 // TopologyTimelineEntry One row of the topology timeline (G9.3-T5).
 //
@@ -9605,6 +10692,11 @@ type ByWorkRefApiV1AuditByWorkRefRefGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ClassCountsApiV1AuditClassCountsPostParams defines parameters for ClassCountsApiV1AuditClassCountsPost.
+type ClassCountsApiV1AuditClassCountsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // MyRecentApiV1AuditMyRecentGetParams defines parameters for MyRecentApiV1AuditMyRecentGet.
 type MyRecentApiV1AuditMyRecentGetParams struct {
 	Since         *string `form:"since,omitempty" json:"since,omitempty"`
@@ -9770,7 +10862,7 @@ type EnableEndpointApiV1ConnectorsConnectorIdEnablePostParams struct {
 
 // EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParams defines parameters for EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPost.
 type EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParams struct {
-	// Prefer Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only). Omit for the default fail-loud 409 connector_scope_ambiguous response.
+	// Prefer Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only); 'legacy' the tenant's old copy stored under a former product name (the copy a delete removes first). Omit for the default fail-loud 409 connector_scope_ambiguous response.
 	Prefer        *EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer `form:"prefer,omitempty" json:"prefer,omitempty"`
 	Authorization *string                                                                   `json:"authorization,omitempty"`
 }
@@ -9790,7 +10882,7 @@ type EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams struct {
 
 // GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams defines parameters for GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet.
 type GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams struct {
-	// Prefer Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only). Omit for the default fail-loud 409 connector_scope_ambiguous response.
+	// Prefer Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only); 'legacy' the tenant's old copy stored under a former product name (the copy a delete removes first). Omit for the default fail-loud 409 connector_scope_ambiguous response.
 	Prefer        *GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer `form:"prefer,omitempty" json:"prefer,omitempty"`
 	Authorization *string                                                           `json:"authorization,omitempty"`
 }
@@ -9986,6 +11078,11 @@ type RememberApiV1MemoryPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// SearchMemoriesApiV1MemorySearchPostParams defines parameters for SearchMemoriesApiV1MemorySearchPost.
+type SearchMemoriesApiV1MemorySearchPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ForgetApiV1MemoryScopeSlugDeleteParams defines parameters for ForgetApiV1MemoryScopeSlugDelete.
 type ForgetApiV1MemoryScopeSlugDeleteParams struct {
 	TargetName    *string `form:"target_name,omitempty" json:"target_name,omitempty"`
@@ -10073,14 +11170,25 @@ type GetSearchApiV1OperationsSearchGetParams struct {
 	Q *string `form:"q,omitempty" json:"q,omitempty"`
 
 	// Query Deprecated alias for `q`; still honoured.
-	Query         *string `form:"query,omitempty" json:"query,omitempty"`
-	Group         *string `form:"group,omitempty" json:"group,omitempty"`
-	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Query *string `form:"query,omitempty" json:"query,omitempty"`
+	Group *string `form:"group,omitempty" json:"group,omitempty"`
+	Limit *int    `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// OpId Exact-op mode. Look up this one operation and return its call contract (`{operation: {...}}`: the parameter schema, examples, target rule, result shape and retry guidance) instead of ranked hits. `q`, `group` and `limit` are ignored when it is set. An unknown op_id is a 404 with `detail.reason=unknown_op`.
+	OpId *string `form:"op_id,omitempty" json:"op_id,omitempty"`
+
+	// IncludeScores Add the ranking scores (`fused_score`, `bm25_score`, `cosine_score`) to each ranked hit. Only honoured for a tenant_admin caller; ignored for everyone else.
+	IncludeScores *bool   `form:"include_scores,omitempty" json:"include_scores,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
 // GetDescriptorApiV1OperationsDescriptorIdGetParams defines parameters for GetDescriptorApiV1OperationsDescriptorIdGet.
 type GetDescriptorApiV1OperationsDescriptorIdGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ReadDocsEndpointApiV1ReadDocsPostParams defines parameters for ReadDocsEndpointApiV1ReadDocsPost.
+type ReadDocsEndpointApiV1ReadDocsPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -10309,6 +11417,8 @@ type CreateGrantApiV1ServicePrincipalsGrantsPostParams struct {
 
 // RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteParams defines parameters for RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDelete.
 type RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteParams struct {
+	// Reason Optional reason for the revoke. Stored on the grant and the audit row.
+	Reason        *string `form:"reason,omitempty" json:"reason,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -10537,6 +11647,7 @@ type UiAuditPageUiAuditGetParams struct {
 	WorkRef        *string             `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	AuditId        *openapi_types.UUID `form:"audit_id,omitempty" json:"audit_id,omitempty"`
 	AgentSessionId *openapi_types.UUID `form:"agent_session_id,omitempty" json:"agent_session_id,omitempty"`
+	EventClass     *string             `form:"event_class,omitempty" json:"event_class,omitempty"`
 }
 
 // UiAuditResultsUiAuditResultsGetParams defines parameters for UiAuditResultsUiAuditResultsGet.
@@ -10551,6 +11662,7 @@ type UiAuditResultsUiAuditResultsGetParams struct {
 	WorkRef        *string             `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	Cursor         *string             `form:"cursor,omitempty" json:"cursor,omitempty"`
 	AgentSessionId *openapi_types.UUID `form:"agent_session_id,omitempty" json:"agent_session_id,omitempty"`
+	EventClass     *string             `form:"event_class,omitempty" json:"event_class,omitempty"`
 	Partial        *string             `form:"partial,omitempty" json:"partial,omitempty"`
 }
 
@@ -10635,6 +11747,11 @@ type UiConnectorsDeleteSubmitUiConnectorsNameDeletePostParams struct {
 // UiConventionsListUiConventionsGetParams defines parameters for UiConventionsListUiConventionsGet.
 type UiConventionsListUiConventionsGetParams struct {
 	Kind *string `form:"kind,omitempty" json:"kind,omitempty"`
+}
+
+// CorpusIndexUiCorpusGetParams defines parameters for CorpusIndexUiCorpusGet.
+type CorpusIndexUiCorpusGetParams struct {
+	Target *string `form:"target,omitempty" json:"target,omitempty"`
 }
 
 // IndexUiGrantsGetParams defines parameters for IndexUiGrantsGet.
@@ -10879,6 +11996,9 @@ type RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostJSONRequestBody = Rej
 // AskDocsEndpointApiV1AskDocsPostJSONRequestBody defines body for AskDocsEndpointApiV1AskDocsPost for application/json ContentType.
 type AskDocsEndpointApiV1AskDocsPostJSONRequestBody = AskDocsRequest
 
+// ClassCountsApiV1AuditClassCountsPostJSONRequestBody defines body for ClassCountsApiV1AuditClassCountsPost for application/json ContentType.
+type ClassCountsApiV1AuditClassCountsPostJSONRequestBody = AuditClassCountsRequest
+
 // QueryApiV1AuditQueryPostJSONRequestBody defines body for QueryApiV1AuditQueryPost for application/json ContentType.
 type QueryApiV1AuditQueryPostJSONRequestBody = AuditQueryRequest
 
@@ -10936,6 +12056,9 @@ type IngestKbApiV1KbIngestPostJSONRequestBody = IngestKbRequest
 // RememberApiV1MemoryPostJSONRequestBody defines body for RememberApiV1MemoryPost for application/json ContentType.
 type RememberApiV1MemoryPostJSONRequestBody = RememberBody
 
+// SearchMemoriesApiV1MemorySearchPostJSONRequestBody defines body for SearchMemoriesApiV1MemorySearchPost for application/json ContentType.
+type SearchMemoriesApiV1MemorySearchPostJSONRequestBody = MemorySearchBody
+
 // PromoteApiV1MemoryScopeSlugPromotePostJSONRequestBody defines body for PromoteApiV1MemoryScopeSlugPromotePost for application/json ContentType.
 type PromoteApiV1MemoryScopeSlugPromotePostJSONRequestBody = PromoteBody
 
@@ -10947,6 +12070,9 @@ type PostPreviewApiV1OperationsPreviewPostJSONRequestBody = PreviewOperationBody
 
 // PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody defines body for PostResultQueryApiV1OperationsResultQueryPost for application/json ContentType.
 type PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody = ResultQueryBody
+
+// ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody defines body for ReadDocsEndpointApiV1ReadDocsPost for application/json ContentType.
+type ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody = ReadDocsRequest
 
 // RetrieveEndpointApiV1RetrievePostJSONRequestBody defines body for RetrieveEndpointApiV1RetrievePost for application/json ContentType.
 type RetrieveEndpointApiV1RetrievePostJSONRequestBody = RetrieveRequest
@@ -11170,9 +12296,6 @@ type UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetJSONReque
 // UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody defines body for UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGet for application/json ContentType.
 type UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody = UISessionContext
 
-// UiConnectorsDetailUiConnectorsNameGetJSONRequestBody defines body for UiConnectorsDetailUiConnectorsNameGet for application/json ContentType.
-type UiConnectorsDetailUiConnectorsNameGetJSONRequestBody = UISessionContext
-
 // UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody defines body for UiConnectorsEditSubmitUiConnectorsNamePatch for application/x-www-form-urlencoded ContentType.
 type UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody = BodyUiConnectorsEditSubmitUiConnectorsNamePatch
 
@@ -11218,6 +12341,9 @@ type UiConventionsEditModalUiConventionsSlugEditGetJSONRequestBody = UISessionCo
 // UiConventionsHistoryUiConventionsSlugHistoryGetJSONRequestBody defines body for UiConventionsHistoryUiConventionsSlugHistoryGet for application/json ContentType.
 type UiConventionsHistoryUiConventionsSlugHistoryGetJSONRequestBody = UISessionContext
 
+// UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostFormdataRequestBody defines body for UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPost for application/x-www-form-urlencoded ContentType.
+type UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostFormdataRequestBody = BodyUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPost
+
 // UiCorpusCollectionsTableUiCorpusCollectionsGetJSONRequestBody defines body for UiCorpusCollectionsTableUiCorpusCollectionsGet for application/json ContentType.
 type UiCorpusCollectionsTableUiCorpusCollectionsGetJSONRequestBody = UISessionContext
 
@@ -11253,6 +12379,9 @@ type EditUiEventSourcesSlugEditPostFormdataRequestBody = BodyEditUiEventSourcesS
 
 // CreateUiGrantsCreatePostFormdataRequestBody defines body for CreateUiGrantsCreatePost for application/x-www-form-urlencoded ContentType.
 type CreateUiGrantsCreatePostFormdataRequestBody = BodyCreateUiGrantsCreatePost
+
+// RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody defines body for RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost for application/x-www-form-urlencoded ContentType.
+type RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody = BodyRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost
 
 // KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody defines body for KbEditorPreviewUiKbEditorPreviewPost for application/x-www-form-urlencoded ContentType.
 type KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody = BodyKbEditorPreviewUiKbEditorPreviewPost
@@ -11412,6 +12541,325 @@ type VaultMoveUiVaultMovePostFormdataRequestBody = BodyVaultMoveUiVaultMovePost
 
 // VaultPutUiVaultPutPostFormdataRequestBody defines body for VaultPutUiVaultPutPost for application/x-www-form-urlencoded ContentType.
 type VaultPutUiVaultPutPostFormdataRequestBody = BodyVaultPutUiVaultPutPost
+
+// Getter for additional properties for PreviewOperationResponse. Returns the specified
+// element and whether it was found
+func (a PreviewOperationResponse) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for PreviewOperationResponse
+func (a *PreviewOperationResponse) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for PreviewOperationResponse to handle AdditionalProperties
+func (a *PreviewOperationResponse) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["connector_id"]; found {
+		err = json.Unmarshal(raw, &a.ConnectorId)
+		if err != nil {
+			return fmt.Errorf("error reading 'connector_id': %w", err)
+		}
+		delete(object, "connector_id")
+	}
+
+	if raw, found := object["error"]; found {
+		err = json.Unmarshal(raw, &a.Error)
+		if err != nil {
+			return fmt.Errorf("error reading 'error': %w", err)
+		}
+		delete(object, "error")
+	}
+
+	if raw, found := object["extras"]; found {
+		err = json.Unmarshal(raw, &a.Extras)
+		if err != nil {
+			return fmt.Errorf("error reading 'extras': %w", err)
+		}
+		delete(object, "extras")
+	}
+
+	if raw, found := object["method"]; found {
+		err = json.Unmarshal(raw, &a.Method)
+		if err != nil {
+			return fmt.Errorf("error reading 'method': %w", err)
+		}
+		delete(object, "method")
+	}
+
+	if raw, found := object["op_id"]; found {
+		err = json.Unmarshal(raw, &a.OpId)
+		if err != nil {
+			return fmt.Errorf("error reading 'op_id': %w", err)
+		}
+		delete(object, "op_id")
+	}
+
+	if raw, found := object["plan_note"]; found {
+		err = json.Unmarshal(raw, &a.PlanNote)
+		if err != nil {
+			return fmt.Errorf("error reading 'plan_note': %w", err)
+		}
+		delete(object, "plan_note")
+	}
+
+	if raw, found := object["plan_shown"]; found {
+		err = json.Unmarshal(raw, &a.PlanShown)
+		if err != nil {
+			return fmt.Errorf("error reading 'plan_shown': %w", err)
+		}
+		delete(object, "plan_shown")
+	}
+
+	if raw, found := object["policy_reason"]; found {
+		err = json.Unmarshal(raw, &a.PolicyReason)
+		if err != nil {
+			return fmt.Errorf("error reading 'policy_reason': %w", err)
+		}
+		delete(object, "policy_reason")
+	}
+
+	if raw, found := object["policy_verdict"]; found {
+		err = json.Unmarshal(raw, &a.PolicyVerdict)
+		if err != nil {
+			return fmt.Errorf("error reading 'policy_verdict': %w", err)
+		}
+		delete(object, "policy_verdict")
+	}
+
+	if raw, found := object["preview_hash"]; found {
+		err = json.Unmarshal(raw, &a.PreviewHash)
+		if err != nil {
+			return fmt.Errorf("error reading 'preview_hash': %w", err)
+		}
+		delete(object, "preview_hash")
+	}
+
+	if raw, found := object["proposed_effect"]; found {
+		err = json.Unmarshal(raw, &a.ProposedEffect)
+		if err != nil {
+			return fmt.Errorf("error reading 'proposed_effect': %w", err)
+		}
+		delete(object, "proposed_effect")
+	}
+
+	if raw, found := object["query"]; found {
+		err = json.Unmarshal(raw, &a.Query)
+		if err != nil {
+			return fmt.Errorf("error reading 'query': %w", err)
+		}
+		delete(object, "query")
+	}
+
+	if raw, found := object["redacted_body"]; found {
+		err = json.Unmarshal(raw, &a.RedactedBody)
+		if err != nil {
+			return fmt.Errorf("error reading 'redacted_body': %w", err)
+		}
+		delete(object, "redacted_body")
+	}
+
+	if raw, found := object["requires_approval"]; found {
+		err = json.Unmarshal(raw, &a.RequiresApproval)
+		if err != nil {
+			return fmt.Errorf("error reading 'requires_approval': %w", err)
+		}
+		delete(object, "requires_approval")
+	}
+
+	if raw, found := object["resolved_path"]; found {
+		err = json.Unmarshal(raw, &a.ResolvedPath)
+		if err != nil {
+			return fmt.Errorf("error reading 'resolved_path': %w", err)
+		}
+		delete(object, "resolved_path")
+	}
+
+	if raw, found := object["safety_level"]; found {
+		err = json.Unmarshal(raw, &a.SafetyLevel)
+		if err != nil {
+			return fmt.Errorf("error reading 'safety_level': %w", err)
+		}
+		delete(object, "safety_level")
+	}
+
+	if raw, found := object["source_kind"]; found {
+		err = json.Unmarshal(raw, &a.SourceKind)
+		if err != nil {
+			return fmt.Errorf("error reading 'source_kind': %w", err)
+		}
+		delete(object, "source_kind")
+	}
+
+	if raw, found := object["status"]; found {
+		err = json.Unmarshal(raw, &a.Status)
+		if err != nil {
+			return fmt.Errorf("error reading 'status': %w", err)
+		}
+		delete(object, "status")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for PreviewOperationResponse to handle AdditionalProperties
+func (a PreviewOperationResponse) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.ConnectorId != nil {
+		object["connector_id"], err = json.Marshal(a.ConnectorId)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'connector_id': %w", err)
+		}
+	}
+
+	if a.Error != nil {
+		object["error"], err = json.Marshal(a.Error)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'error': %w", err)
+		}
+	}
+
+	if a.Extras != nil {
+		object["extras"], err = json.Marshal(a.Extras)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'extras': %w", err)
+		}
+	}
+
+	if a.Method != nil {
+		object["method"], err = json.Marshal(a.Method)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'method': %w", err)
+		}
+	}
+
+	if a.OpId != nil {
+		object["op_id"], err = json.Marshal(a.OpId)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'op_id': %w", err)
+		}
+	}
+
+	if a.PlanNote != nil {
+		object["plan_note"], err = json.Marshal(a.PlanNote)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'plan_note': %w", err)
+		}
+	}
+
+	if a.PlanShown != nil {
+		object["plan_shown"], err = json.Marshal(a.PlanShown)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'plan_shown': %w", err)
+		}
+	}
+
+	if a.PolicyReason != nil {
+		object["policy_reason"], err = json.Marshal(a.PolicyReason)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'policy_reason': %w", err)
+		}
+	}
+
+	if a.PolicyVerdict != nil {
+		object["policy_verdict"], err = json.Marshal(a.PolicyVerdict)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'policy_verdict': %w", err)
+		}
+	}
+
+	if a.PreviewHash != nil {
+		object["preview_hash"], err = json.Marshal(a.PreviewHash)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'preview_hash': %w", err)
+		}
+	}
+
+	if a.ProposedEffect != nil {
+		object["proposed_effect"], err = json.Marshal(a.ProposedEffect)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'proposed_effect': %w", err)
+		}
+	}
+
+	if a.Query != nil {
+		object["query"], err = json.Marshal(a.Query)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'query': %w", err)
+		}
+	}
+
+	object["redacted_body"], err = json.Marshal(a.RedactedBody)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'redacted_body': %w", err)
+	}
+
+	if a.RequiresApproval != nil {
+		object["requires_approval"], err = json.Marshal(a.RequiresApproval)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'requires_approval': %w", err)
+		}
+	}
+
+	if a.ResolvedPath != nil {
+		object["resolved_path"], err = json.Marshal(a.ResolvedPath)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'resolved_path': %w", err)
+		}
+	}
+
+	if a.SafetyLevel != nil {
+		object["safety_level"], err = json.Marshal(a.SafetyLevel)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'safety_level': %w", err)
+		}
+	}
+
+	if a.SourceKind != nil {
+		object["source_kind"], err = json.Marshal(a.SourceKind)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'source_kind': %w", err)
+		}
+	}
+
+	object["status"], err = json.Marshal(a.Status)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'status': %w", err)
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
 
 // AsApproveResponseBodyDispatchResult0 returns the union data inside the ApproveResponseBody_DispatchResult as a ApproveResponseBodyDispatchResult0
 func (t ApproveResponseBody_DispatchResult) AsApproveResponseBodyDispatchResult0() (ApproveResponseBodyDispatchResult0, error) {
@@ -12785,6 +14233,11 @@ type ClientInterface interface {
 	// ByWorkRefApiV1AuditByWorkRefRefGet request
 	ByWorkRefApiV1AuditByWorkRefRefGet(ctx context.Context, ref string, params *ByWorkRefApiV1AuditByWorkRefRefGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ClassCountsApiV1AuditClassCountsPostWithBody request with any body
+	ClassCountsApiV1AuditClassCountsPostWithBody(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ClassCountsApiV1AuditClassCountsPost(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, body ClassCountsApiV1AuditClassCountsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// MyRecentApiV1AuditMyRecentGet request
 	MyRecentApiV1AuditMyRecentGet(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -13012,6 +14465,11 @@ type ClientInterface interface {
 
 	RememberApiV1MemoryPost(ctx context.Context, params *RememberApiV1MemoryPostParams, body RememberApiV1MemoryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// SearchMemoriesApiV1MemorySearchPostWithBody request with any body
+	SearchMemoriesApiV1MemorySearchPostWithBody(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	SearchMemoriesApiV1MemorySearchPost(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, body SearchMemoriesApiV1MemorySearchPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ForgetApiV1MemoryScopeSlugDelete request
 	ForgetApiV1MemoryScopeSlugDelete(ctx context.Context, scope MemoryScope, slug string, params *ForgetApiV1MemoryScopeSlugDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -13058,6 +14516,11 @@ type ClientInterface interface {
 
 	// GetDescriptorApiV1OperationsDescriptorIdGet request
 	GetDescriptorApiV1OperationsDescriptorIdGet(ctx context.Context, descriptorId openapi_types.UUID, params *GetDescriptorApiV1OperationsDescriptorIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ReadDocsEndpointApiV1ReadDocsPostWithBody request with any body
+	ReadDocsEndpointApiV1ReadDocsPostWithBody(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ReadDocsEndpointApiV1ReadDocsPost(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, body ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RetrieveEndpointApiV1RetrievePostWithBody request with any body
 	RetrieveEndpointApiV1RetrievePostWithBody(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -13617,10 +15080,8 @@ type ClientInterface interface {
 
 	UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGet(ctx context.Context, connectorId string, groupKey string, body UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UiConnectorsDetailUiConnectorsNameGetWithBody request with any body
-	UiConnectorsDetailUiConnectorsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	UiConnectorsDetailUiConnectorsNameGet(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// UiConnectorsDetailUiConnectorsNameGet request
+	UiConnectorsDetailUiConnectorsNameGet(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiConnectorsEditSubmitUiConnectorsNamePatchWithBody request with any body
 	UiConnectorsEditSubmitUiConnectorsNamePatchWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -13646,6 +15107,9 @@ type ClientInterface interface {
 	UiConnectorsReprobeUiConnectorsNameProbePostWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UiConnectorsReprobeUiConnectorsNameProbePost(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGet request
+	UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGet(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiConventionsListUiConventionsGetWithBody request with any body
 	UiConventionsListUiConventionsGetWithBody(ctx context.Context, params *UiConventionsListUiConventionsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -13698,10 +15162,15 @@ type ClientInterface interface {
 	UiConventionsHistoryUiConventionsSlugHistoryGet(ctx context.Context, slug string, body UiConventionsHistoryUiConventionsSlugHistoryGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CorpusIndexUiCorpusGet request
-	CorpusIndexUiCorpusGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CorpusIndexUiCorpusGet(ctx context.Context, params *CorpusIndexUiCorpusGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGet request
 	UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGet(ctx context.Context, collectionKey string, chunkId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithBody request with any body
+	UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithBody(ctx context.Context, collectionKey string, chunkId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithFormdataBody(ctx context.Context, collectionKey string, chunkId string, body UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiCorpusCollectionsTableUiCorpusCollectionsGetWithBody request with any body
 	UiCorpusCollectionsTableUiCorpusCollectionsGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -13748,6 +15217,9 @@ type ClientInterface interface {
 
 	CorpusSearchUiCorpusSearchPostWithFormdataBody(ctx context.Context, body CorpusSearchUiCorpusSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// UiDashboardRecentOperationsUiDashboardRecentOperationsGet request
+	UiDashboardRecentOperationsUiDashboardRecentOperationsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListUiEventSourcesGet request
 	ListUiEventSourcesGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -13780,6 +15252,11 @@ type ClientInterface interface {
 	CreateUiGrantsCreatePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	CreateUiGrantsCreatePostWithFormdataBody(ctx context.Context, body CreateUiGrantsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBody request with any body
+	RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithFormdataBody(ctx context.Context, body RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RevokeUiGrantsKindGrantIdRevokePost request
 	RevokeUiGrantsKindGrantIdRevokePost(ctx context.Context, kind string, grantId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -14776,6 +16253,30 @@ func (c *Client) ByWorkRefApiV1AuditByWorkRefRefGet(ctx context.Context, ref str
 	return c.Client.Do(req)
 }
 
+func (c *Client) ClassCountsApiV1AuditClassCountsPostWithBody(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClassCountsApiV1AuditClassCountsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ClassCountsApiV1AuditClassCountsPost(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, body ClassCountsApiV1AuditClassCountsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClassCountsApiV1AuditClassCountsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) MyRecentApiV1AuditMyRecentGet(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewMyRecentApiV1AuditMyRecentGetRequest(c.Server, params)
 	if err != nil {
@@ -15760,6 +17261,30 @@ func (c *Client) RememberApiV1MemoryPost(ctx context.Context, params *RememberAp
 	return c.Client.Do(req)
 }
 
+func (c *Client) SearchMemoriesApiV1MemorySearchPostWithBody(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSearchMemoriesApiV1MemorySearchPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SearchMemoriesApiV1MemorySearchPost(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, body SearchMemoriesApiV1MemorySearchPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSearchMemoriesApiV1MemorySearchPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) ForgetApiV1MemoryScopeSlugDelete(ctx context.Context, scope MemoryScope, slug string, params *ForgetApiV1MemoryScopeSlugDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewForgetApiV1MemoryScopeSlugDeleteRequest(c.Server, scope, slug, params)
 	if err != nil {
@@ -15954,6 +17479,30 @@ func (c *Client) GetSearchApiV1OperationsSearchGet(ctx context.Context, params *
 
 func (c *Client) GetDescriptorApiV1OperationsDescriptorIdGet(ctx context.Context, descriptorId openapi_types.UUID, params *GetDescriptorApiV1OperationsDescriptorIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetDescriptorApiV1OperationsDescriptorIdGetRequest(c.Server, descriptorId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReadDocsEndpointApiV1ReadDocsPostWithBody(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReadDocsEndpointApiV1ReadDocsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReadDocsEndpointApiV1ReadDocsPost(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, body ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReadDocsEndpointApiV1ReadDocsPostRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -18484,20 +20033,8 @@ func (c *Client) UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdR
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiConnectorsDetailUiConnectorsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(c.Server, name, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) UiConnectorsDetailUiConnectorsNameGet(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiConnectorsDetailUiConnectorsNameGetRequest(c.Server, name, body)
+func (c *Client) UiConnectorsDetailUiConnectorsNameGet(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsDetailUiConnectorsNameGetRequest(c.Server, name)
 	if err != nil {
 		return nil, err
 	}
@@ -18618,6 +20155,18 @@ func (c *Client) UiConnectorsReprobeUiConnectorsNameProbePostWithBody(ctx contex
 
 func (c *Client) UiConnectorsReprobeUiConnectorsNameProbePost(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiConnectorsReprobeUiConnectorsNameProbePostRequest(c.Server, name, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGet(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetRequest(c.Server, name)
 	if err != nil {
 		return nil, err
 	}
@@ -18868,8 +20417,8 @@ func (c *Client) UiConventionsHistoryUiConventionsSlugHistoryGet(ctx context.Con
 	return c.Client.Do(req)
 }
 
-func (c *Client) CorpusIndexUiCorpusGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCorpusIndexUiCorpusGetRequest(c.Server)
+func (c *Client) CorpusIndexUiCorpusGet(ctx context.Context, params *CorpusIndexUiCorpusGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCorpusIndexUiCorpusGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -18882,6 +20431,30 @@ func (c *Client) CorpusIndexUiCorpusGet(ctx context.Context, reqEditors ...Reque
 
 func (c *Client) UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGet(ctx context.Context, collectionKey string, chunkId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetRequest(c.Server, collectionKey, chunkId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithBody(ctx context.Context, collectionKey string, chunkId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostRequestWithBody(c.Server, collectionKey, chunkId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithFormdataBody(ctx context.Context, collectionKey string, chunkId string, body UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostRequestWithFormdataBody(c.Server, collectionKey, chunkId, body)
 	if err != nil {
 		return nil, err
 	}
@@ -19108,6 +20681,18 @@ func (c *Client) CorpusSearchUiCorpusSearchPostWithFormdataBody(ctx context.Cont
 	return c.Client.Do(req)
 }
 
+func (c *Client) UiDashboardRecentOperationsUiDashboardRecentOperationsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiDashboardRecentOperationsUiDashboardRecentOperationsGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) ListUiEventSourcesGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListUiEventSourcesGetRequest(c.Server)
 	if err != nil {
@@ -19242,6 +20827,30 @@ func (c *Client) CreateUiGrantsCreatePostWithBody(ctx context.Context, contentTy
 
 func (c *Client) CreateUiGrantsCreatePostWithFormdataBody(ctx context.Context, body CreateUiGrantsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCreateUiGrantsCreatePostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithFormdataBody(ctx context.Context, body RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithFormdataBody(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -23266,6 +24875,61 @@ func NewByWorkRefApiV1AuditByWorkRefRefGetRequest(server string, ref string, par
 	return req, nil
 }
 
+// NewClassCountsApiV1AuditClassCountsPostRequest calls the generic ClassCountsApiV1AuditClassCountsPost builder with application/json body
+func NewClassCountsApiV1AuditClassCountsPostRequest(server string, params *ClassCountsApiV1AuditClassCountsPostParams, body ClassCountsApiV1AuditClassCountsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewClassCountsApiV1AuditClassCountsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewClassCountsApiV1AuditClassCountsPostRequestWithBody generates requests for ClassCountsApiV1AuditClassCountsPost with any type of body
+func NewClassCountsApiV1AuditClassCountsPostRequestWithBody(server string, params *ClassCountsApiV1AuditClassCountsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/audit/class-counts")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewMyRecentApiV1AuditMyRecentGetRequest generates requests for MyRecentApiV1AuditMyRecentGet
 func NewMyRecentApiV1AuditMyRecentGetRequest(server string, params *MyRecentApiV1AuditMyRecentGetParams) (*http.Request, error) {
 	var err error
@@ -27252,6 +28916,61 @@ func NewRememberApiV1MemoryPostRequestWithBody(server string, params *RememberAp
 	return req, nil
 }
 
+// NewSearchMemoriesApiV1MemorySearchPostRequest calls the generic SearchMemoriesApiV1MemorySearchPost builder with application/json body
+func NewSearchMemoriesApiV1MemorySearchPostRequest(server string, params *SearchMemoriesApiV1MemorySearchPostParams, body SearchMemoriesApiV1MemorySearchPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSearchMemoriesApiV1MemorySearchPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewSearchMemoriesApiV1MemorySearchPostRequestWithBody generates requests for SearchMemoriesApiV1MemorySearchPost with any type of body
+func NewSearchMemoriesApiV1MemorySearchPostRequestWithBody(server string, params *SearchMemoriesApiV1MemorySearchPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/memory/search")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewForgetApiV1MemoryScopeSlugDeleteRequest generates requests for ForgetApiV1MemoryScopeSlugDelete
 func NewForgetApiV1MemoryScopeSlugDeleteRequest(server string, scope MemoryScope, slug string, params *ForgetApiV1MemoryScopeSlugDeleteParams) (*http.Request, error) {
 	var err error
@@ -28102,6 +29821,38 @@ func NewGetSearchApiV1OperationsSearchGetRequest(server string, params *GetSearc
 
 		}
 
+		if params.OpId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "op_id", runtime.ParamLocationQuery, *params.OpId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeScores != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_scores", runtime.ParamLocationQuery, *params.IncludeScores); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -28158,6 +29909,61 @@ func NewGetDescriptorApiV1OperationsDescriptorIdGetRequest(server string, descri
 	if err != nil {
 		return nil, err
 	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewReadDocsEndpointApiV1ReadDocsPostRequest calls the generic ReadDocsEndpointApiV1ReadDocsPost builder with application/json body
+func NewReadDocsEndpointApiV1ReadDocsPostRequest(server string, params *ReadDocsEndpointApiV1ReadDocsPostParams, body ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewReadDocsEndpointApiV1ReadDocsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewReadDocsEndpointApiV1ReadDocsPostRequestWithBody generates requests for ReadDocsEndpointApiV1ReadDocsPost with any type of body
+func NewReadDocsEndpointApiV1ReadDocsPostRequestWithBody(server string, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/read_docs")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -30580,6 +32386,28 @@ func NewRevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteRequest(server strin
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Reason != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "reason", runtime.ParamLocationQuery, *params.Reason); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
@@ -34540,6 +36368,22 @@ func NewUiAuditPageUiAuditGetRequest(server string, params *UiAuditPageUiAuditGe
 
 		}
 
+		if params.EventClass != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "event_class", runtime.ParamLocationQuery, *params.EventClass); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -34747,6 +36591,22 @@ func NewUiAuditResultsUiAuditResultsGetRequest(server string, params *UiAuditRes
 		if params.AgentSessionId != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "agent_session_id", runtime.ParamLocationQuery, *params.AgentSessionId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.EventClass != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "event_class", runtime.ParamLocationQuery, *params.EventClass); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -36675,19 +38535,8 @@ func NewUiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGrou
 	return req, nil
 }
 
-// NewUiConnectorsDetailUiConnectorsNameGetRequest calls the generic UiConnectorsDetailUiConnectorsNameGet builder with application/json body
-func NewUiConnectorsDetailUiConnectorsNameGetRequest(server string, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(server, name, "application/json", bodyReader)
-}
-
-// NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody generates requests for UiConnectorsDetailUiConnectorsNameGet with any type of body
-func NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(server string, name string, contentType string, body io.Reader) (*http.Request, error) {
+// NewUiConnectorsDetailUiConnectorsNameGetRequest generates requests for UiConnectorsDetailUiConnectorsNameGet
+func NewUiConnectorsDetailUiConnectorsNameGetRequest(server string, name string) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -36712,12 +38561,10 @@ func NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(server string, name
 		return nil, err
 	}
 
-	req, err := http.NewRequest("GET", queryURL.String(), body)
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
-
-	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -36975,6 +38822,40 @@ func NewUiConnectorsReprobeUiConnectorsNameProbePostRequestWithBody(server strin
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetRequest generates requests for UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGet
+func NewUiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetRequest(server string, name string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/%s/recent-operations", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	return req, nil
 }
@@ -37444,7 +39325,7 @@ func NewUiConventionsHistoryUiConventionsSlugHistoryGetRequestWithBody(server st
 }
 
 // NewCorpusIndexUiCorpusGetRequest generates requests for CorpusIndexUiCorpusGet
-func NewCorpusIndexUiCorpusGetRequest(server string) (*http.Request, error) {
+func NewCorpusIndexUiCorpusGetRequest(server string, params *CorpusIndexUiCorpusGetParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -37460,6 +39341,28 @@ func NewCorpusIndexUiCorpusGetRequest(server string) (*http.Request, error) {
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -37507,6 +39410,60 @@ func NewUiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetRequest(server s
 	if err != nil {
 		return nil, err
 	}
+
+	return req, nil
+}
+
+// NewUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostRequestWithFormdataBody calls the generic UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPost builder with application/x-www-form-urlencoded body
+func NewUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostRequestWithFormdataBody(server string, collectionKey string, chunkId string, body UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostRequestWithBody(server, collectionKey, chunkId, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostRequestWithBody generates requests for UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPost with any type of body
+func NewUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostRequestWithBody(server string, collectionKey string, chunkId string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "collection_key", runtime.ParamLocationPath, collectionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "chunk_id", runtime.ParamLocationPath, chunkId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/corpus/chunks/%s/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -37906,6 +39863,33 @@ func NewCorpusSearchUiCorpusSearchPostRequestWithBody(server string, contentType
 	return req, nil
 }
 
+// NewUiDashboardRecentOperationsUiDashboardRecentOperationsGetRequest generates requests for UiDashboardRecentOperationsUiDashboardRecentOperationsGet
+func NewUiDashboardRecentOperationsUiDashboardRecentOperationsGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/dashboard/recent-operations")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewListUiEventSourcesGetRequest generates requests for ListUiEventSourcesGet
 func NewListUiEventSourcesGetRequest(server string) (*http.Request, error) {
 	var err error
@@ -38292,6 +40276,46 @@ func NewCreateUiGrantsCreatePostRequestWithBody(server string, contentType strin
 	}
 
 	operationPath := fmt.Sprintf("/ui/grants/create")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithFormdataBody calls the generic RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost builder with application/x-www-form-urlencoded body
+func NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithFormdataBody(server string, body RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithBody generates requests for RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost with any type of body
+func NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/grants/service/renew-delete-grants")
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -43319,6 +45343,11 @@ type ClientWithResponsesInterface interface {
 	// ByWorkRefApiV1AuditByWorkRefRefGetWithResponse request
 	ByWorkRefApiV1AuditByWorkRefRefGetWithResponse(ctx context.Context, ref string, params *ByWorkRefApiV1AuditByWorkRefRefGetParams, reqEditors ...RequestEditorFn) (*ByWorkRefApiV1AuditByWorkRefRefGetResponse, error)
 
+	// ClassCountsApiV1AuditClassCountsPostWithBodyWithResponse request with any body
+	ClassCountsApiV1AuditClassCountsPostWithBodyWithResponse(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ClassCountsApiV1AuditClassCountsPostResponse, error)
+
+	ClassCountsApiV1AuditClassCountsPostWithResponse(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, body ClassCountsApiV1AuditClassCountsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ClassCountsApiV1AuditClassCountsPostResponse, error)
+
 	// MyRecentApiV1AuditMyRecentGetWithResponse request
 	MyRecentApiV1AuditMyRecentGetWithResponse(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*MyRecentApiV1AuditMyRecentGetResponse, error)
 
@@ -43546,6 +45575,11 @@ type ClientWithResponsesInterface interface {
 
 	RememberApiV1MemoryPostWithResponse(ctx context.Context, params *RememberApiV1MemoryPostParams, body RememberApiV1MemoryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RememberApiV1MemoryPostResponse, error)
 
+	// SearchMemoriesApiV1MemorySearchPostWithBodyWithResponse request with any body
+	SearchMemoriesApiV1MemorySearchPostWithBodyWithResponse(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SearchMemoriesApiV1MemorySearchPostResponse, error)
+
+	SearchMemoriesApiV1MemorySearchPostWithResponse(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, body SearchMemoriesApiV1MemorySearchPostJSONRequestBody, reqEditors ...RequestEditorFn) (*SearchMemoriesApiV1MemorySearchPostResponse, error)
+
 	// ForgetApiV1MemoryScopeSlugDeleteWithResponse request
 	ForgetApiV1MemoryScopeSlugDeleteWithResponse(ctx context.Context, scope MemoryScope, slug string, params *ForgetApiV1MemoryScopeSlugDeleteParams, reqEditors ...RequestEditorFn) (*ForgetApiV1MemoryScopeSlugDeleteResponse, error)
 
@@ -43592,6 +45626,11 @@ type ClientWithResponsesInterface interface {
 
 	// GetDescriptorApiV1OperationsDescriptorIdGetWithResponse request
 	GetDescriptorApiV1OperationsDescriptorIdGetWithResponse(ctx context.Context, descriptorId openapi_types.UUID, params *GetDescriptorApiV1OperationsDescriptorIdGetParams, reqEditors ...RequestEditorFn) (*GetDescriptorApiV1OperationsDescriptorIdGetResponse, error)
+
+	// ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse request with any body
+	ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReadDocsEndpointApiV1ReadDocsPostResponse, error)
+
+	ReadDocsEndpointApiV1ReadDocsPostWithResponse(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, body ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ReadDocsEndpointApiV1ReadDocsPostResponse, error)
 
 	// RetrieveEndpointApiV1RetrievePostWithBodyWithResponse request with any body
 	RetrieveEndpointApiV1RetrievePostWithBodyWithResponse(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetrieveEndpointApiV1RetrievePostResponse, error)
@@ -44151,10 +46190,8 @@ type ClientWithResponsesInterface interface {
 
 	UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetWithResponse(ctx context.Context, connectorId string, groupKey string, body UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse, error)
 
-	// UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse request with any body
-	UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error)
-
-	UiConnectorsDetailUiConnectorsNameGetWithResponse(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error)
+	// UiConnectorsDetailUiConnectorsNameGetWithResponse request
+	UiConnectorsDetailUiConnectorsNameGetWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error)
 
 	// UiConnectorsEditSubmitUiConnectorsNamePatchWithBodyWithResponse request with any body
 	UiConnectorsEditSubmitUiConnectorsNamePatchWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsEditSubmitUiConnectorsNamePatchResponse, error)
@@ -44180,6 +46217,9 @@ type ClientWithResponsesInterface interface {
 	UiConnectorsReprobeUiConnectorsNameProbePostWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error)
 
 	UiConnectorsReprobeUiConnectorsNameProbePostWithResponse(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error)
+
+	// UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetWithResponse request
+	UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse, error)
 
 	// UiConventionsListUiConventionsGetWithBodyWithResponse request with any body
 	UiConventionsListUiConventionsGetWithBodyWithResponse(ctx context.Context, params *UiConventionsListUiConventionsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConventionsListUiConventionsGetResponse, error)
@@ -44232,10 +46272,15 @@ type ClientWithResponsesInterface interface {
 	UiConventionsHistoryUiConventionsSlugHistoryGetWithResponse(ctx context.Context, slug string, body UiConventionsHistoryUiConventionsSlugHistoryGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConventionsHistoryUiConventionsSlugHistoryGetResponse, error)
 
 	// CorpusIndexUiCorpusGetWithResponse request
-	CorpusIndexUiCorpusGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*CorpusIndexUiCorpusGetResponse, error)
+	CorpusIndexUiCorpusGetWithResponse(ctx context.Context, params *CorpusIndexUiCorpusGetParams, reqEditors ...RequestEditorFn) (*CorpusIndexUiCorpusGetResponse, error)
 
 	// UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetWithResponse request
 	UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetWithResponse(ctx context.Context, collectionKey string, chunkId string, reqEditors ...RequestEditorFn) (*UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse, error)
+
+	// UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithBodyWithResponse request with any body
+	UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithBodyWithResponse(ctx context.Context, collectionKey string, chunkId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse, error)
+
+	UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithFormdataBodyWithResponse(ctx context.Context, collectionKey string, chunkId string, body UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse, error)
 
 	// UiCorpusCollectionsTableUiCorpusCollectionsGetWithBodyWithResponse request with any body
 	UiCorpusCollectionsTableUiCorpusCollectionsGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiCorpusCollectionsTableUiCorpusCollectionsGetResponse, error)
@@ -44282,6 +46327,9 @@ type ClientWithResponsesInterface interface {
 
 	CorpusSearchUiCorpusSearchPostWithFormdataBodyWithResponse(ctx context.Context, body CorpusSearchUiCorpusSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*CorpusSearchUiCorpusSearchPostResponse, error)
 
+	// UiDashboardRecentOperationsUiDashboardRecentOperationsGetWithResponse request
+	UiDashboardRecentOperationsUiDashboardRecentOperationsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse, error)
+
 	// ListUiEventSourcesGetWithResponse request
 	ListUiEventSourcesGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListUiEventSourcesGetResponse, error)
 
@@ -44314,6 +46362,11 @@ type ClientWithResponsesInterface interface {
 	CreateUiGrantsCreatePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateUiGrantsCreatePostResponse, error)
 
 	CreateUiGrantsCreatePostWithFormdataBodyWithResponse(ctx context.Context, body CreateUiGrantsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*CreateUiGrantsCreatePostResponse, error)
+
+	// RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBodyWithResponse request with any body
+	RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse, error)
+
+	RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithFormdataBodyWithResponse(ctx context.Context, body RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse, error)
 
 	// RevokeUiGrantsKindGrantIdRevokePostWithResponse request
 	RevokeUiGrantsKindGrantIdRevokePostWithResponse(ctx context.Context, kind string, grantId openapi_types.UUID, reqEditors ...RequestEditorFn) (*RevokeUiGrantsKindGrantIdRevokePostResponse, error)
@@ -45549,6 +47602,29 @@ func (r ByWorkRefApiV1AuditByWorkRefRefGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ByWorkRefApiV1AuditByWorkRefRefGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ClassCountsApiV1AuditClassCountsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AuditClassCounts
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ClassCountsApiV1AuditClassCountsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ClassCountsApiV1AuditClassCountsPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -46994,6 +49070,29 @@ func (r RememberApiV1MemoryPostResponse) StatusCode() int {
 	return 0
 }
 
+type SearchMemoriesApiV1MemorySearchPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *MemorySearchResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r SearchMemoriesApiV1MemorySearchPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SearchMemoriesApiV1MemorySearchPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type ForgetApiV1MemoryScopeSlugDeleteResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -47134,7 +49233,7 @@ func (r GetGroupsApiV1OperationsGroupsGetResponse) StatusCode() int {
 type PostPreviewApiV1OperationsPreviewPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *map[string]interface{}
+	JSON200      *PreviewOperationResponse
 	JSON422      *HTTPValidationError
 }
 
@@ -47286,6 +49385,28 @@ func (r GetDescriptorApiV1OperationsDescriptorIdGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetDescriptorApiV1OperationsDescriptorIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ReadDocsEndpointApiV1ReadDocsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *DocsReadResult
+}
+
+// Status returns HTTPResponse.Status
+func (r ReadDocsEndpointApiV1ReadDocsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ReadDocsEndpointApiV1ReadDocsPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -50611,6 +52732,28 @@ func (r UiConnectorsReprobeUiConnectorsNameProbePostResponse) StatusCode() int {
 	return 0
 }
 
+type UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiConventionsListUiConventionsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -50834,6 +52977,7 @@ func (r UiConventionsHistoryUiConventionsSlugHistoryGetResponse) StatusCode() in
 type CorpusIndexUiCorpusGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
@@ -50868,6 +53012,28 @@ func (r UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse) Status
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -51072,6 +53238,27 @@ func (r CorpusSearchUiCorpusSearchPostResponse) StatusCode() int {
 	return 0
 }
 
+type UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type ListUiEventSourcesGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -51264,6 +53451,28 @@ func (r CreateUiGrantsCreatePostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r CreateUiGrantsCreatePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -53849,6 +56058,23 @@ func (c *ClientWithResponses) ByWorkRefApiV1AuditByWorkRefRefGetWithResponse(ctx
 	return ParseByWorkRefApiV1AuditByWorkRefRefGetResponse(rsp)
 }
 
+// ClassCountsApiV1AuditClassCountsPostWithBodyWithResponse request with arbitrary body returning *ClassCountsApiV1AuditClassCountsPostResponse
+func (c *ClientWithResponses) ClassCountsApiV1AuditClassCountsPostWithBodyWithResponse(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ClassCountsApiV1AuditClassCountsPostResponse, error) {
+	rsp, err := c.ClassCountsApiV1AuditClassCountsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClassCountsApiV1AuditClassCountsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ClassCountsApiV1AuditClassCountsPostWithResponse(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, body ClassCountsApiV1AuditClassCountsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ClassCountsApiV1AuditClassCountsPostResponse, error) {
+	rsp, err := c.ClassCountsApiV1AuditClassCountsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClassCountsApiV1AuditClassCountsPostResponse(rsp)
+}
+
 // MyRecentApiV1AuditMyRecentGetWithResponse request returning *MyRecentApiV1AuditMyRecentGetResponse
 func (c *ClientWithResponses) MyRecentApiV1AuditMyRecentGetWithResponse(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*MyRecentApiV1AuditMyRecentGetResponse, error) {
 	rsp, err := c.MyRecentApiV1AuditMyRecentGet(ctx, params, reqEditors...)
@@ -54568,6 +56794,23 @@ func (c *ClientWithResponses) RememberApiV1MemoryPostWithResponse(ctx context.Co
 	return ParseRememberApiV1MemoryPostResponse(rsp)
 }
 
+// SearchMemoriesApiV1MemorySearchPostWithBodyWithResponse request with arbitrary body returning *SearchMemoriesApiV1MemorySearchPostResponse
+func (c *ClientWithResponses) SearchMemoriesApiV1MemorySearchPostWithBodyWithResponse(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SearchMemoriesApiV1MemorySearchPostResponse, error) {
+	rsp, err := c.SearchMemoriesApiV1MemorySearchPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSearchMemoriesApiV1MemorySearchPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) SearchMemoriesApiV1MemorySearchPostWithResponse(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, body SearchMemoriesApiV1MemorySearchPostJSONRequestBody, reqEditors ...RequestEditorFn) (*SearchMemoriesApiV1MemorySearchPostResponse, error) {
+	rsp, err := c.SearchMemoriesApiV1MemorySearchPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSearchMemoriesApiV1MemorySearchPostResponse(rsp)
+}
+
 // ForgetApiV1MemoryScopeSlugDeleteWithResponse request returning *ForgetApiV1MemoryScopeSlugDeleteResponse
 func (c *ClientWithResponses) ForgetApiV1MemoryScopeSlugDeleteWithResponse(ctx context.Context, scope MemoryScope, slug string, params *ForgetApiV1MemoryScopeSlugDeleteParams, reqEditors ...RequestEditorFn) (*ForgetApiV1MemoryScopeSlugDeleteResponse, error) {
 	rsp, err := c.ForgetApiV1MemoryScopeSlugDelete(ctx, scope, slug, params, reqEditors...)
@@ -54715,6 +56958,23 @@ func (c *ClientWithResponses) GetDescriptorApiV1OperationsDescriptorIdGetWithRes
 		return nil, err
 	}
 	return ParseGetDescriptorApiV1OperationsDescriptorIdGetResponse(rsp)
+}
+
+// ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse request with arbitrary body returning *ReadDocsEndpointApiV1ReadDocsPostResponse
+func (c *ClientWithResponses) ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReadDocsEndpointApiV1ReadDocsPostResponse, error) {
+	rsp, err := c.ReadDocsEndpointApiV1ReadDocsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReadDocsEndpointApiV1ReadDocsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ReadDocsEndpointApiV1ReadDocsPostWithResponse(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, body ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ReadDocsEndpointApiV1ReadDocsPostResponse, error) {
+	rsp, err := c.ReadDocsEndpointApiV1ReadDocsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReadDocsEndpointApiV1ReadDocsPostResponse(rsp)
 }
 
 // RetrieveEndpointApiV1RetrievePostWithBodyWithResponse request with arbitrary body returning *RetrieveEndpointApiV1RetrievePostResponse
@@ -56535,17 +58795,9 @@ func (c *ClientWithResponses) UiConnectorsRegistryReviewGroupUiConnectorsRegistr
 	return ParseUiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse(rsp)
 }
 
-// UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsDetailUiConnectorsNameGetResponse
-func (c *ClientWithResponses) UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error) {
-	rsp, err := c.UiConnectorsDetailUiConnectorsNameGetWithBody(ctx, name, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseUiConnectorsDetailUiConnectorsNameGetResponse(rsp)
-}
-
-func (c *ClientWithResponses) UiConnectorsDetailUiConnectorsNameGetWithResponse(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error) {
-	rsp, err := c.UiConnectorsDetailUiConnectorsNameGet(ctx, name, body, reqEditors...)
+// UiConnectorsDetailUiConnectorsNameGetWithResponse request returning *UiConnectorsDetailUiConnectorsNameGetResponse
+func (c *ClientWithResponses) UiConnectorsDetailUiConnectorsNameGetWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error) {
+	rsp, err := c.UiConnectorsDetailUiConnectorsNameGet(ctx, name, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -56635,6 +58887,15 @@ func (c *ClientWithResponses) UiConnectorsReprobeUiConnectorsNameProbePostWithRe
 		return nil, err
 	}
 	return ParseUiConnectorsReprobeUiConnectorsNameProbePostResponse(rsp)
+}
+
+// UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetWithResponse request returning *UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse
+func (c *ClientWithResponses) UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse, error) {
+	rsp, err := c.UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGet(ctx, name, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse(rsp)
 }
 
 // UiConventionsListUiConventionsGetWithBodyWithResponse request with arbitrary body returning *UiConventionsListUiConventionsGetResponse
@@ -56808,8 +59069,8 @@ func (c *ClientWithResponses) UiConventionsHistoryUiConventionsSlugHistoryGetWit
 }
 
 // CorpusIndexUiCorpusGetWithResponse request returning *CorpusIndexUiCorpusGetResponse
-func (c *ClientWithResponses) CorpusIndexUiCorpusGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*CorpusIndexUiCorpusGetResponse, error) {
-	rsp, err := c.CorpusIndexUiCorpusGet(ctx, reqEditors...)
+func (c *ClientWithResponses) CorpusIndexUiCorpusGetWithResponse(ctx context.Context, params *CorpusIndexUiCorpusGetParams, reqEditors ...RequestEditorFn) (*CorpusIndexUiCorpusGetResponse, error) {
+	rsp, err := c.CorpusIndexUiCorpusGet(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -56823,6 +59084,23 @@ func (c *ClientWithResponses) UiCorpusChunkDetailUiCorpusChunksCollectionKeyChun
 		return nil, err
 	}
 	return ParseUiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse(rsp)
+}
+
+// UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithBodyWithResponse request with arbitrary body returning *UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse
+func (c *ClientWithResponses) UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithBodyWithResponse(ctx context.Context, collectionKey string, chunkId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse, error) {
+	rsp, err := c.UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithBody(ctx, collectionKey, chunkId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithFormdataBodyWithResponse(ctx context.Context, collectionKey string, chunkId string, body UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse, error) {
+	rsp, err := c.UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithFormdataBody(ctx, collectionKey, chunkId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse(rsp)
 }
 
 // UiCorpusCollectionsTableUiCorpusCollectionsGetWithBodyWithResponse request with arbitrary body returning *UiCorpusCollectionsTableUiCorpusCollectionsGetResponse
@@ -56978,6 +59256,15 @@ func (c *ClientWithResponses) CorpusSearchUiCorpusSearchPostWithFormdataBodyWith
 	return ParseCorpusSearchUiCorpusSearchPostResponse(rsp)
 }
 
+// UiDashboardRecentOperationsUiDashboardRecentOperationsGetWithResponse request returning *UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse
+func (c *ClientWithResponses) UiDashboardRecentOperationsUiDashboardRecentOperationsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse, error) {
+	rsp, err := c.UiDashboardRecentOperationsUiDashboardRecentOperationsGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse(rsp)
+}
+
 // ListUiEventSourcesGetWithResponse request returning *ListUiEventSourcesGetResponse
 func (c *ClientWithResponses) ListUiEventSourcesGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListUiEventSourcesGetResponse, error) {
 	rsp, err := c.ListUiEventSourcesGet(ctx, reqEditors...)
@@ -57081,6 +59368,23 @@ func (c *ClientWithResponses) CreateUiGrantsCreatePostWithFormdataBodyWithRespon
 		return nil, err
 	}
 	return ParseCreateUiGrantsCreatePostResponse(rsp)
+}
+
+// RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBodyWithResponse request with arbitrary body returning *RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse
+func (c *ClientWithResponses) RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse, error) {
+	rsp, err := c.RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithFormdataBodyWithResponse(ctx context.Context, body RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse, error) {
+	rsp, err := c.RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse(rsp)
 }
 
 // RevokeUiGrantsKindGrantIdRevokePostWithResponse request returning *RevokeUiGrantsKindGrantIdRevokePostResponse
@@ -59544,6 +61848,39 @@ func ParseByWorkRefApiV1AuditByWorkRefRefGetResponse(rsp *http.Response) (*ByWor
 	return response, nil
 }
 
+// ParseClassCountsApiV1AuditClassCountsPostResponse parses an HTTP response from a ClassCountsApiV1AuditClassCountsPostWithResponse call
+func ParseClassCountsApiV1AuditClassCountsPostResponse(rsp *http.Response) (*ClassCountsApiV1AuditClassCountsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ClassCountsApiV1AuditClassCountsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AuditClassCounts
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseMyRecentApiV1AuditMyRecentGetResponse parses an HTTP response from a MyRecentApiV1AuditMyRecentGetWithResponse call
 func ParseMyRecentApiV1AuditMyRecentGetResponse(rsp *http.Response) (*MyRecentApiV1AuditMyRecentGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -61541,6 +63878,39 @@ func ParseRememberApiV1MemoryPostResponse(rsp *http.Response) (*RememberApiV1Mem
 	return response, nil
 }
 
+// ParseSearchMemoriesApiV1MemorySearchPostResponse parses an HTTP response from a SearchMemoriesApiV1MemorySearchPostWithResponse call
+func ParseSearchMemoriesApiV1MemorySearchPostResponse(rsp *http.Response) (*SearchMemoriesApiV1MemorySearchPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SearchMemoriesApiV1MemorySearchPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest MemorySearchResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseForgetApiV1MemoryScopeSlugDeleteResponse parses an HTTP response from a ForgetApiV1MemoryScopeSlugDeleteWithResponse call
 func ParseForgetApiV1MemoryScopeSlugDeleteResponse(rsp *http.Response) (*ForgetApiV1MemoryScopeSlugDeleteResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -61747,7 +64117,7 @@ func ParsePostPreviewApiV1OperationsPreviewPostResponse(rsp *http.Response) (*Po
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest map[string]interface{}
+		var dest PreviewOperationResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -61957,6 +64327,32 @@ func ParseGetDescriptorApiV1OperationsDescriptorIdGetResponse(rsp *http.Response
 			return nil, err
 		}
 		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseReadDocsEndpointApiV1ReadDocsPostResponse parses an HTTP response from a ReadDocsEndpointApiV1ReadDocsPostWithResponse call
+func ParseReadDocsEndpointApiV1ReadDocsPostResponse(rsp *http.Response) (*ReadDocsEndpointApiV1ReadDocsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ReadDocsEndpointApiV1ReadDocsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DocsReadResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	}
 
@@ -66137,6 +68533,32 @@ func ParseUiConnectorsReprobeUiConnectorsNameProbePostResponse(rsp *http.Respons
 	return response, nil
 }
 
+// ParseUiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse parses an HTTP response from a UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetWithResponse call
+func ParseUiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse(rsp *http.Response) (*UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseUiConventionsListUiConventionsGetResponse parses an HTTP response from a UiConventionsListUiConventionsGetWithResponse call
 func ParseUiConventionsListUiConventionsGetResponse(rsp *http.Response) (*UiConventionsListUiConventionsGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -66410,6 +68832,16 @@ func ParseCorpusIndexUiCorpusGetResponse(rsp *http.Response) (*CorpusIndexUiCorp
 		HTTPResponse: rsp,
 	}
 
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
 	return response, nil
 }
 
@@ -66422,6 +68854,32 @@ func ParseUiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse(rsp *
 	}
 
 	response := &UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse parses an HTTP response from a UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithResponse call
+func ParseUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse(rsp *http.Response) (*UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}
@@ -66673,6 +69131,22 @@ func ParseCorpusSearchUiCorpusSearchPostResponse(rsp *http.Response) (*CorpusSea
 	return response, nil
 }
 
+// ParseUiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse parses an HTTP response from a UiDashboardRecentOperationsUiDashboardRecentOperationsGetWithResponse call
+func ParseUiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse(rsp *http.Response) (*UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
 // ParseListUiEventSourcesGetResponse parses an HTTP response from a ListUiEventSourcesGetWithResponse call
 func ParseListUiEventSourcesGetResponse(rsp *http.Response) (*ListUiEventSourcesGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -66881,6 +69355,32 @@ func ParseCreateUiGrantsCreatePostResponse(rsp *http.Response) (*CreateUiGrantsC
 	}
 
 	response := &CreateUiGrantsCreatePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse parses an HTTP response from a RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithResponse call
+func ParseRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse(rsp *http.Response) (*RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

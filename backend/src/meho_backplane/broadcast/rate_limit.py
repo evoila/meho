@@ -39,9 +39,8 @@ failure mode.
 
 The limiter raises a domain error (:class:`AnnounceRateLimitError`),
 not an MCP-vocabulary error: the announce handler translates it into the
-wire ``-32000`` rate-limited error (mirrors the ``InvalidSinceError``
-seam, which keeps :mod:`~meho_backplane.broadcast.history` free of the
-MCP error vocabulary).
+wire ``-32000`` rate-limited error, which keeps the broadcast package
+free of the MCP error vocabulary.
 """
 
 from __future__ import annotations

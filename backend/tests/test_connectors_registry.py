@@ -320,6 +320,9 @@ def test_lifespan_calls_eager_import_connectors() -> None:
             patch("meho_backplane.main.run_typed_op_registrars", new=AsyncMock()),
             patch("meho_backplane.main.eager_import_mcp_modules"),
             patch("meho_backplane.main._assert_mcp_resource_uri_configured"),
+            # #4622: the sandbox-mode boot step reads the stored mode from
+            # the database; patched out like the other env/DB boot steps.
+            patch("meho_backplane.main.assert_sandbox_mode_consistent", new=AsyncMock()),
             patch("meho_backplane.main.get_embedding_service"),
             # G5.2-T1 (#623) added a memory-expiry sweeper start to the
             # lifespan body; G9.3-T6 (#858) added a topology-history
@@ -400,6 +403,10 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                     # hits the real get_settings() -> KeyError on
                     # KEYCLOAK_ISSUER_URL (this test pins no env).
                     raw_payload_prune_enabled=False,
+                    # #3734 request usage prune starts when retention is set
+                    # (not None). A bare MagicMock attribute is not None, so
+                    # pin it to None (collection off) for the same reason.
+                    request_usage_retention_days=None,
                 ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),
@@ -477,6 +484,10 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                 load_catalog=MagicMock(),
                 validate_catalog_registry_coverage=MagicMock(),
                 stamp_catalog_profiled_connectors=AsyncMock(),
+                # #3640 result-read pool sizing reads real settings fields;
+                # keep it out of this env-free test.
+                configure_result_read_admission=MagicMock(),
+                shutdown_result_read_admission=MagicMock(),
             ),
         ):
             # Manually step through the lifespan async generator.
@@ -520,6 +531,9 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
             patch("meho_backplane.main.run_typed_op_registrars", new=AsyncMock()),
             patch("meho_backplane.main.eager_import_mcp_modules"),
             patch("meho_backplane.main._assert_mcp_resource_uri_configured"),
+            # #4622: the sandbox-mode boot step reads the stored mode from
+            # the database; patched out like the other env/DB boot steps.
+            patch("meho_backplane.main.assert_sandbox_mode_consistent", new=AsyncMock()),
             patch("meho_backplane.main.get_embedding_service"),
             # G5.2-T1 (#623) + G9.3-T6 (#858) + G11.2-T6 (#819) +
             # G11.3-T4 (#825) — same lifespan-task patches as the
@@ -574,6 +588,10 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                     # hits the real get_settings() -> KeyError on
                     # KEYCLOAK_ISSUER_URL (this test pins no env).
                     raw_payload_prune_enabled=False,
+                    # #3734 request usage prune starts when retention is set
+                    # (not None). A bare MagicMock attribute is not None, so
+                    # pin it to None (collection off) for the same reason.
+                    request_usage_retention_days=None,
                 ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),
@@ -647,6 +665,10 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                 load_catalog=MagicMock(),
                 validate_catalog_registry_coverage=MagicMock(),
                 stamp_catalog_profiled_connectors=AsyncMock(),
+                # #3640 result-read pool sizing reads real settings fields;
+                # keep it out of this env-free test.
+                configure_result_read_admission=MagicMock(),
+                shutdown_result_read_admission=MagicMock(),
             ),
         ):
             gen = lifespan(None)  # type: ignore[arg-type]

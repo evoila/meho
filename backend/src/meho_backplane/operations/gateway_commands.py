@@ -65,6 +65,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.runner_write_allowlist import load_runner_allowlist
 from meho_backplane.db.models import (
+    AuditEventClass,
     AuditLog,
     EndpointDescriptor,
     GatewayCommand,
@@ -81,7 +82,7 @@ from meho_backplane.gateway.queue import (
 from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
-    compute_params_hash,
+    compute_audit_params_hash,
     policy_gate,
     validate_params,
 )
@@ -99,6 +100,7 @@ from meho_backplane.runner.work_item_signing import (
     TARGETLESS_SCOPE,
     SigningKeyUnavailableError,
     load_signing_key,
+    params_digest,
     sign_remote_write_item,
 )
 
@@ -332,6 +334,7 @@ async def _write_gateway_audit_row(
     """
     row = AuditLog(
         id=audit_id,
+        event_class=AuditEventClass.OPERATION_EXECUTION,
         occurred_at=datetime.now(UTC),
         operator_sub=operator.sub,
         tenant_id=operator.tenant_id,
@@ -397,10 +400,14 @@ async def mint_gateway_command(
        → :attr:`MintRefusalCode.NEEDS_APPROVAL`); the defensive
        ``is not AUTO_EXECUTE`` branch denies any unexpected verdict.
 
-    On success it stamps ``params_hash`` on the synchronous mint audit row,
-    then enqueues the command bound to ``(runner_id, op_id, target,
-    params_hash, expires_at)`` with ``mint_audit_id`` set. The session is
-    flushed, **not** committed — the caller owns the mint+audit commit.
+    On success it enqueues the command bound to ``(runner_id, op_id, target,
+    params_hash, expires_at)`` with ``mint_audit_id`` set, then writes the
+    synchronous mint audit row. The command row's ``params_hash`` is
+    :func:`~meho_backplane.runner.work_item_signing.params_digest`, the
+    digest the runner checks again (it holds no server key); the audit row
+    gets :func:`~meho_backplane.operations._validate.compute_audit_params_hash`.
+    The session is flushed, **not** committed — the caller owns the
+    mint+audit commit.
 
     A refusal writes **no** ``gateway_command`` row and **no**
     ``approval_request`` row; the command never reaches a runner.
@@ -426,7 +433,6 @@ async def mint_gateway_command(
         or refused (``refusal_code`` set, no rows written).
     """
     started = time.monotonic()
-    params_hash = compute_params_hash(params)
     product, version, impl_id = parse_connector_id(connector_id)
 
     # --- Step 2: descriptor lookup ---------------------------------------
@@ -514,7 +520,6 @@ async def mint_gateway_command(
             op_id=op_id,
             target=target,
             params=params,
-            params_hash=params_hash,
             runner_id=runner_id,
             target_descriptor=target_descriptor,
             expires_at=expires_at,
@@ -552,7 +557,6 @@ async def mint_gateway_command(
         op_id=op_id,
         target=target,
         params=params,
-        params_hash=params_hash,
         runner_id=runner_id,
         target_descriptor=target_descriptor,
         expires_at=expires_at,
@@ -567,7 +571,7 @@ async def _screen_remote_write(
     operator: Operator,
     op_id: str,
     target: Any,
-    params_hash: str,
+    params: dict[str, Any],
     runner_id: str,
 ) -> tuple[Any, Any, MintResult | None]:
     """Run the three read-only remote-write pre-checks, in fail-closed order.
@@ -578,7 +582,7 @@ async def _screen_remote_write(
     are bound. None of these three checks writes a row or consumes the approval:
 
     1. **Approval binding** (mechanism 1, #3189) — a committed, un-consumed,
-       param-bound ``ApprovalRequest`` for ``(op, target, params_hash)``; none →
+       param-bound ``ApprovalRequest`` for ``(op, target, params)``; none →
        :attr:`MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED`.
     2. **Signing key** (#3189) — the central Ed25519 key must be provisioned to
        sign the capability; unavailable →
@@ -599,7 +603,7 @@ async def _screen_remote_write(
         tenant_id=operator.tenant_id,
         op_id=op_id,
         target_id=target_id,
-        params_hash=params_hash,
+        params=params,
     )
     if approval is None:
         return (
@@ -665,7 +669,6 @@ async def _mint_remote_write(
     op_id: str,
     target: Any,
     params: dict[str, Any],
-    params_hash: str,
     runner_id: str,
     target_descriptor: dict[str, Any] | None,
     expires_at: datetime | None,
@@ -689,7 +692,7 @@ async def _mint_remote_write(
         operator=operator,
         op_id=op_id,
         target=target,
-        params_hash=params_hash,
+        params=params,
         runner_id=runner_id,
     )
     if refusal is not None:
@@ -719,7 +722,6 @@ async def _mint_remote_write(
         op_id=op_id,
         target=target,
         params=params,
-        params_hash=params_hash,
         runner_id=runner_id,
         target_descriptor=target_descriptor,
         expires_at=expires_at,
@@ -738,7 +740,6 @@ async def _finalize_mint(
     op_id: str,
     target: Any,
     params: dict[str, Any],
-    params_hash: str,
     runner_id: str,
     target_descriptor: dict[str, Any] | None,
     expires_at: datetime | None,
@@ -758,8 +759,16 @@ async def _finalize_mint(
     the signature is stamped on the command row (migration 0092). The mint
     audit payload records ``approval_request_id`` / ``signed`` for the
     remote-write lineage; the safe path leaves both unset (unchanged shape).
+
+    Two params hashes: the command row and the signature bind
+    :func:`~meho_backplane.runner.work_item_signing.params_digest`, because
+    the runner checks that digest again and holds no server key. The mint
+    audit row records
+    :func:`~meho_backplane.operations._validate.compute_audit_params_hash`,
+    like every other audit row.
     """
     mint_audit_id = uuid.uuid4()
+    command_digest = params_digest(params)
     command = await enqueue_command(
         session,
         tenant_id=operator.tenant_id,
@@ -768,7 +777,7 @@ async def _finalize_mint(
         params=params,
         enqueued_by_sub=operator.sub,
         target_descriptor=target_descriptor,
-        params_hash=params_hash,
+        params_hash=command_digest,
         expires_at=expires_at,
         mint_audit_id=mint_audit_id,
         safety_level=safety_level,
@@ -778,7 +787,7 @@ async def _finalize_mint(
         command.signature = sign_remote_write_item(
             signing_key,
             op_id=op_id,
-            params_hash=params_hash,
+            params_hash=command_digest,
             target_scope=_target_scope(target),
             expires_at=command.expires_at,
         )
@@ -790,7 +799,7 @@ async def _finalize_mint(
         "op_id": op_id,
         "connector_id": connector_id,
         "runner_id": runner_id,
-        "params_hash": params_hash,
+        "params_hash": compute_audit_params_hash(params),
         "result_status": "minted",
     }
     if approval_request_id is not None:

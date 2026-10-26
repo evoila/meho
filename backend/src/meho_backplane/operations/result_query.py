@@ -35,27 +35,71 @@ its own recoverable-error shape (MCP: a typed ``-32602`` with
 ``data.reason=handle_not_found``; REST: a ``404`` with a structured
 ``detail``). The caller learns the handle is gone (re-run the operation)
 rather than getting an opaque internal error.
+
+Bounded work
+============
+
+Every read (paging, query, and a ``path`` read) goes through
+:func:`_run_admitted_read`. It passes
+:func:`~meho_backplane.operations.result_read_admission.admit_result_read`
+before it touches the store, so a read that is over the rate cap or finds
+every worker slot busy is refused with a recoverable
+:class:`ResultReadRejectedError` and no Valkey ``GET`` is made. The ``GET``
+then runs on the event loop and everything after it — decoding the record,
+the operator check, the CPU-heavy shaping (for a query: catalog, compile,
+register, ``SELECT``, encode), and the wire-size check on the finished
+response — runs as one job on the dedicated worker pool. One deadline
+(``result_query_timeout_seconds``) covers the ``GET`` and the job, so no
+step can hold the event loop or a worker slot past the budget without the
+caller hearing about it.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import threading
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
+import duckdb
 import msgspec
+import pyarrow as pa
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors.result_handle_store import get_result_handle_store
+from meho_backplane.connectors.result_handle_store import (
+    ResultHandleStore,
+    SpilledRowSet,
+    get_result_handle_store,
+)
 from meho_backplane.jsonflux.query.contract import (
     RESULT_TABLE,
+    ROW_ORDINAL,
     CompiledQuery,
     QueryContractError,
     ResultQuerySpec,
     compile_query,
 )
 from meho_backplane.jsonflux.query.engine import QueryEngine
+from meho_backplane.jsonflux.query.json_pointer import (
+    JsonPointerError,
+    json_type,
+    parse_json_pointer,
+    resolve_json_pointer,
+)
+from meho_backplane.jsonflux.query.result_catalog import (
+    ResultFieldCatalog,
+    _build_catalog_from_admitted,
+)
+from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
+from meho_backplane.operations.result_read_admission import (
+    ResultReadCapacityError,
+    ResultReadRateLimitError,
+    ResultReadRejectedError,
+    admit_result_read,
+    run_on_result_read_executor,
+)
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -65,6 +109,9 @@ __all__ = [
     "ResultQueryOutputTooLargeError",
     "ResultQuerySpec",
     "ResultQueryTimeoutError",
+    "ResultReadCapacityError",
+    "ResultReadRateLimitError",
+    "ResultReadRejectedError",
     "read_result_window",
     "run_result_query",
 ]
@@ -120,65 +167,154 @@ async def read_result_window(
     query path applies, so no agent receives an over-budget page — with a
     paging-specific remediation (read a smaller ``limit``, since paging has no
     ``select`` / ``filter``).
+
+    Raises :class:`ResultReadRejectedError` (rate or capacity) before the
+    store is read when the read is not admitted, and
+    :class:`ResultQueryTimeoutError` when the fetch and decode run past the
+    time budget (#3640).
     """
-    if operator.tenant_id is None:
-        raise ResultHandleNotFoundError(handle_id)
-
-    window = await get_result_handle_store().fetch_window(
-        tenant_id=operator.tenant_id,
-        operator_sub=operator.sub,
-        handle_id=handle_id,
-        offset=offset,
-        limit=limit,
-    )
-    if window is None:
-        raise ResultHandleNotFoundError(handle_id)
-
-    # Byte ceiling shared with the query path (#3387): even a window within the
-    # row cap can serialize past the output budget when rows are wide or deeply
-    # nested, and no agent may receive an over-budget page (CLAUDE.md postulate
-    # 6). Encoding is for the size check only — the window rows are returned
-    # verbatim, so an in-budget read is byte-for-byte unchanged.
+    store = get_result_handle_store()
     max_bytes = get_settings().result_query_max_output_bytes
-    encoded_rows = msgspec.json.encode(window.rows)
-    if len(encoded_rows) > max_bytes:
-        raise ResultQueryOutputTooLargeError(
-            handle_id,
-            len(encoded_rows),
-            max_bytes,
-            remediation=ResultQueryOutputTooLargeError.PAGING_REMEDIATION,
-        )
 
-    return {
-        "handle_id": str(handle_id),
-        "rows": window.rows,
-        "offset": offset,
-        "limit": limit,
-        "returned_rows": len(window.rows),
-        "total_rows": window.total_rows,
-        "stored_rows": window.stored_rows,
-        "truncated": window.truncated,
-    }
+    def work(raw: bytes, guard: _WorkerGuard) -> dict[str, Any]:
+        window = store.decode_window(
+            raw, operator_sub=operator.sub, handle_id=handle_id, offset=offset, limit=limit
+        )
+        if window is None:
+            raise ResultHandleNotFoundError(handle_id)
+        guard.check()
+        # Byte ceiling shared with the query path (#3387): even a window
+        # within the row cap can serialize past the output budget when rows
+        # are wide or deeply nested, and no agent may receive an over-budget
+        # page (CLAUDE.md postulate 6). Encoding is for the size check only —
+        # the window rows are returned verbatim, so an in-budget read is
+        # byte-for-byte unchanged.
+        output_bytes = len(msgspec.json.encode(window.rows))
+        if output_bytes > max_bytes:
+            raise ResultQueryOutputTooLargeError(
+                handle_id,
+                output_bytes,
+                max_bytes,
+                remediation=_paging_remediation(window.rows, offset, max_bytes),
+            )
+        payload = {
+            "handle_id": str(handle_id),
+            "rows": window.rows,
+            "offset": offset,
+            "limit": limit,
+            "returned_rows": len(window.rows),
+            "total_rows": window.total_rows,
+            "stored_rows": window.stored_rows,
+            "truncated": window.truncated,
+        }
+        _check_wire_ceiling(payload, handle_id, ResultQueryOutputTooLargeError.PAGING_REMEDIATION)
+        return payload
+
+    return await _run_admitted_read(
+        operator,
+        handle_id,
+        store,
+        work,
+        timeout_remediation=ResultQueryTimeoutError.PAGING_REMEDIATION,
+    )
+
+
+#: How many top-level field names a paging refusal lists as ``select`` hints.
+_SELECT_HINT_FIELDS = 5
+#: Largest JSON-encoded size of one listed field name. Field names come from
+#: the stored rows (vendor data), so a refusal must not copy a huge name into
+#: its own message; names over this budget are left out of the list.
+_SELECT_HINT_NAME_BYTES = 64
+
+
+def _select_hint_names(row: dict[str, Any]) -> list[str]:
+    """The first few top-level field names of *row* that fit the name budget."""
+    names: list[str] = []
+    for name in row:
+        if len(msgspec.json.encode(name)) > _SELECT_HINT_NAME_BYTES:
+            continue
+        names.append(name)
+        if len(names) == _SELECT_HINT_FIELDS:
+            break
+    return names
+
+
+def _paging_remediation(rows: list[Any], offset: int, max_bytes: int) -> str:
+    """Say how to read an over-budget paging window (#3704).
+
+    Rows that are large nested objects (for example one full Kubernetes or
+    ArgoCD object per row) can push even the default page past the byte
+    budget. A bare "lower `limit`" leaves the caller guessing, so this names
+    the row size, the largest ``limit`` that fits from *offset*, and the
+    top-level fields a ``select`` query can return instead of whole rows.
+    Only runs on the refusal path, so encoding each row again is cheap
+    enough.
+    """
+    sizes = [len(msgspec.json.encode(row)) for row in rows]
+    fit = 0
+    used = 2  # the enclosing "[" and "]"
+    for size in sizes:
+        used += size + (1 if fit else 0)  # a "," between rows
+        if used > max_bytes:
+            break
+        fit += 1
+    first = rows[0] if rows else None
+    nested = isinstance(first, dict) and any(
+        isinstance(value, dict | list) for value in first.values()
+    )
+    shape = "large nested objects" if nested else "large"
+    if fit:
+        hint = (
+            f"The rows in this window are {shape} (about {sum(sizes) // len(sizes)} bytes "
+            f"each). The first {fit} rows fit: set `limit` to {fit}, then continue "
+            f"with `offset` {offset + fit}."
+        )
+    else:
+        hint = (
+            f"The rows in this window are {shape}: the row at `offset` {offset} alone "
+            f"is {sizes[0] if sizes else 0} bytes, so no `limit` fits."
+        )
+    if isinstance(first, dict):
+        hint += (
+            " To get fewer fields per row, run a query with `select` set to some top-level fields"
+        )
+        names = _select_hint_names(first)
+        if names:
+            hint += f" (this handle has: {', '.join(names)})"
+        hint += "."
+    return hint
 
 
 class ResultQueryTimeoutError(Exception):
-    """A compiled ``result_query`` ``SELECT`` exceeded its wall-time budget.
+    """A result read exceeded its wall-time budget.
 
-    DuckDB has no native Python query timeout, so the core runs
-    ``conn.execute()`` on a worker thread and calls ``conn.interrupt()`` when
-    the ``result_query_timeout_seconds`` budget elapses. Recoverable: the
-    caller narrows the query (a tighter ``filter``, fewer ``group_by`` keys,
-    a lower ``limit``) and retries. Each transport maps it to its own
-    recoverable-error shape.
+    The ``result_query_timeout_seconds`` budget covers the whole read on
+    every path (paging, query, ``path``): the store fetch, the decode, the
+    shaping steps on the worker thread (for a query: catalog, compile,
+    ``SELECT``, encode), and the wire-size check on the finished response.
+    DuckDB has no native Python query timeout, so on
+    expiry the core calls ``conn.interrupt()``; a worker that is still busy
+    keeps its slot until it finishes, but the caller gets this error at
+    once. Recoverable: the remediation names the way out for the caller's
+    surface. Each transport maps it to its own recoverable-error shape.
     """
 
-    def __init__(self, handle_id: UUID, timeout_seconds: int) -> None:
+    #: Remediation for the query surface (it has ``select`` / ``filter``).
+    QUERY_REMEDIATION = (
+        "Narrow the query (a tighter filter, fewer group_by keys, or a lower limit) and retry."
+    )
+    #: Remediation for the paging surface (no projection/filter — only ``limit``).
+    PAGING_REMEDIATION = "Read a smaller window: lower `limit` and retry."
+
+    def __init__(
+        self, handle_id: UUID, timeout_seconds: int, remediation: str | None = None
+    ) -> None:
         self.handle_id = handle_id
         self.timeout_seconds = timeout_seconds
+        self.remediation = remediation or self.QUERY_REMEDIATION
         super().__init__(
-            f"query over handle {handle_id} exceeded the {timeout_seconds}s time "
-            "budget and was aborted. Narrow the query (a tighter filter, fewer "
-            "group_by keys, or a lower limit) and retry."
+            f"read of handle {handle_id} exceeded the {timeout_seconds}s time "
+            f"budget and was aborted. {self.remediation}"
         )
 
 
@@ -193,7 +329,7 @@ class ResultQueryOutputTooLargeError(Exception):
     over-budget payload. Recoverable, and the remediation is tailored to the
     caller's surface: the query path can project fewer columns or filter
     harder; the paging path has neither and can only read a smaller window.
-    Each transport maps it to its own recoverable shape with
+    Each transport maps this to its own recoverable shape with
     ``reason="output_too_large"``.
     """
 
@@ -210,32 +346,73 @@ class ResultQueryOutputTooLargeError(Exception):
         output_bytes: int,
         max_bytes: int,
         remediation: str | None = None,
+        *,
+        wire: bool = False,
     ) -> None:
         self.handle_id = handle_id
         self.output_bytes = output_bytes
         self.max_bytes = max_bytes
         self.remediation = remediation or self.QUERY_REMEDIATION
-        super().__init__(
-            f"result for handle {handle_id} is {output_bytes} serialized bytes, "
-            f"over the {max_bytes}-byte output budget. {self.remediation}"
+        if wire:
+            detail = (
+                f"the response for handle {handle_id} is {output_bytes} bytes on the "
+                f"wire, over the {max_bytes}-byte delivery limit, so it was not "
+                "delivered (delivery unavailable)."
+            )
+        else:
+            detail = (
+                f"result for handle {handle_id} is {output_bytes} serialized bytes, "
+                f"over the {max_bytes}-byte output budget."
+            )
+        super().__init__(f"{detail} {self.remediation}")
+
+
+def _check_wire_ceiling(payload: dict[str, Any], handle_id: UUID, remediation: str) -> None:
+    """Refuse a read-back response that is too large on the wire (#3641).
+
+    The terminal check, after the pre-encode row-bytes check: it measures
+    the whole response as the MCP ``tools/call`` wire carries it (text block
+    plus ``structuredContent``) against ``result_query_response_wire_max_bytes``.
+    The REST twin shares the bound; it sends the payload once, so it is
+    always smaller than this measurement.
+    """
+    max_bytes = get_settings().result_query_response_wire_max_bytes
+    size = measure_delivered_wire_bytes(payload)
+    if size > max_bytes:
+        raise ResultQueryOutputTooLargeError(
+            handle_id, size, max_bytes, remediation=remediation, wire=True
         )
 
 
-def _known_columns(engine: QueryEngine) -> dict[str, str]:
-    """Return exact registered handle column names mapped to DuckDB types.
+#: Arrow type for each catalog scalar family in the explicit projection.
+_FAMILY_ARROW_TYPES: dict[str, pa.DataType] = {
+    "boolean": pa.bool_(),
+    "integer": pa.int64(),
+    "number": pa.float64(),
+    "string": pa.string(),
+}
 
-    The contract compiler validates every referenced field against this set,
-    so an unknown field is rejected before any SQL runs.
+
+def _project_rows(rows: list[dict[str, Any]], catalog: ResultFieldCatalog) -> pa.Table:
+    """Build the relational table the compiled ``SELECT`` runs over.
+
+    One typed column per queryable catalog field, named by its generated
+    internal identifier, plus the hidden row ordinal. Fields that cannot be
+    queried are left out: they are only ever returned raw, by ordinal.
     """
-    described = engine.conn.execute(f"DESCRIBE {RESULT_TABLE}").fetchall()
-    return {str(row[0]): str(row[1]) for row in described}
+    columns: dict[str, pa.Array] = {ROW_ORDINAL: pa.array(range(len(rows)), type=pa.int64())}
+    for entry in catalog.fields:
+        if entry.queryable and entry.scalar_family is not None:
+            arrow_type = _FAMILY_ARROW_TYPES[entry.scalar_family]
+            columns[entry.column] = pa.array([row.get(entry.name) for row in rows], type=arrow_type)
+    return pa.table(columns)
 
 
 def _execute_sync(engine: QueryEngine, compiled: CompiledQuery) -> tuple[list[str], list[Any]]:
     """Run the compiled SELECT on the engine's connection (worker thread).
 
     Returns the result column names and the raw fetched rows. Runs on a
-    worker thread so :func:`run_result_query` can call
+    worker thread so :func:`_run_admitted_read` can call
     ``engine.conn.interrupt()`` from the event loop on timeout.
     """
     cursor = engine.conn.execute(compiled.sql, compiled.params)
@@ -243,58 +420,137 @@ def _execute_sync(engine: QueryEngine, compiled: CompiledQuery) -> tuple[list[st
     return columns, cursor.fetchall()
 
 
-async def _run_compiled_query(
+class _QueryAbandonedError(Exception):
+    """The caller gave up; the worker stops at its next step."""
+
+
+class _WorkerGuard:
+    """Lets the event loop stop a worker job safely.
+
+    The worker calls :meth:`check` between its steps and opens and closes
+    its engine (query mode only) through the guard; the event loop may call
+    :meth:`abandon` at any time. A lock keeps ``interrupt()`` and
+    ``close()`` from running at the same time, and an abandoned guard stops
+    the worker before its next step.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._engine: QueryEngine | None = None
+        self._abandoned = False
+
+    def check(self) -> None:
+        if self._abandoned:
+            raise _QueryAbandonedError
+
+    def open(self) -> QueryEngine:
+        engine = QueryEngine()
+        with self._lock:
+            if self._abandoned:
+                engine.close()
+                raise _QueryAbandonedError
+            self._engine = engine
+        return engine
+
+    def close(self) -> None:
+        with self._lock:
+            engine, self._engine = self._engine, None
+        if engine is not None:
+            engine.close()
+
+    def abandon(self) -> None:
+        with self._lock:
+            self._abandoned = True
+            if self._engine is not None:
+                with contextlib.suppress(duckdb.Error):
+                    self._engine.conn.interrupt()
+
+
+def _query_pipeline_sync(
+    guard: _WorkerGuard,
     rows: list[dict[str, Any]],
     spec: ResultQuerySpec,
-    handle_id: UUID,
-    *,
     max_output_rows: int,
-    timeout_seconds: int,
-) -> tuple[list[dict[str, Any]], bool, int]:
-    """Compile *spec*, run it under the time budget; return rows + flags.
+) -> tuple[list[dict[str, Any]], bool, int, bytes]:
+    """Catalog, compile, register, SELECT, rehydrate, encode (worker thread).
 
-    The engine is created + the rows registered + the contract compiled
-    inline (bounded work), then only the ``SELECT`` execution runs on a
-    worker thread so the event loop can interrupt it on timeout. The result
-    is capped to ``max_output_rows`` and ``truncated`` is ``True`` when the
-    underlying result had more rows than the cap admits.
+    The field catalog is built from every stored row (the rows passed the
+    reducer's admission guard before they were spilled). The result is
+    capped to ``max_output_rows``; ``truncated`` is ``True`` when the
+    underlying result had more rows. Output rows come from the compiled
+    output plan: flat queries copy the raw stored rows. Returns the rows,
+    the flag, the effective limit, and the rows encoded as JSON bytes.
     """
-    engine = QueryEngine()
+    catalog = _build_catalog_from_admitted(rows)
+    compiled = compile_query(spec, catalog, max_limit=max_output_rows)
+    table = _project_rows(rows, catalog)
+    engine = guard.open()
     try:
-        engine.register(RESULT_TABLE, rows, unwrap="auto")
-        columns = _known_columns(engine)
-        compiled = compile_query(
-            spec,
-            list(columns),
-            max_limit=max_output_rows,
-            column_types=columns,
-        )
-
-        loop = asyncio.get_running_loop()
-        future = loop.run_in_executor(None, _execute_sync, engine, compiled)
-        try:
-            result_columns, fetched = await asyncio.wait_for(
-                asyncio.shield(future), timeout_seconds
-            )
-        except TimeoutError as exc:  # asyncio.TimeoutError aliases this on 3.11+
-            with contextlib.suppress(Exception):
-                engine.conn.interrupt()
-            with contextlib.suppress(BaseException):
-                await future
-            raise ResultQueryTimeoutError(handle_id, timeout_seconds) from exc
+        engine.conn.register(RESULT_TABLE, table)
+        _, fetched = _execute_sync(engine, compiled)
     finally:
-        engine.close()
+        guard.close()
+    guard.check()
 
     truncated = len(fetched) > compiled.effective_limit
     capped = fetched[: compiled.effective_limit]
-    result_rows = [dict(zip(result_columns, row, strict=False)) for row in capped]
-    return result_rows, truncated, compiled.effective_limit
+    result_rows = compiled.output_plan.rehydrate(capped, raw_rows=rows)
+    guard.check()
+    return result_rows, truncated, compiled.effective_limit, msgspec.json.encode(result_rows)
+
+
+async def _run_admitted_read[T](
+    operator: Operator,
+    handle_id: UUID,
+    store: ResultHandleStore,
+    work: Callable[[bytes, _WorkerGuard], T],
+    *,
+    timeout_remediation: str | None = None,
+) -> T:
+    """Admit, fetch the raw record, and run *work* on the pool — one deadline.
+
+    The order is fixed: admission first (no store access on a refusal),
+    then the Valkey ``GET`` on the event loop, then ``work(raw, guard)`` as
+    one job on the dedicated worker pool. *work* decodes the record (the
+    operator check included), shapes the answer, and checks its wire size;
+    it calls
+    ``guard.check()`` between its steps so an abandoned job stops early.
+    ``result_query_timeout_seconds`` covers the ``GET`` and the job
+    together. On expiry — or when the caller is cancelled — the job is
+    abandoned (a running DuckDB query is interrupted), the caller returns
+    at once, and the worker keeps the lease until it finishes.
+
+    Raises :class:`ResultHandleNotFoundError` when the operator has no
+    tenant or the store holds no record, :class:`ResultReadRejectedError`
+    from admission, :class:`ResultQueryTimeoutError` on expiry, and
+    whatever *work* raises.
+    """
+    if operator.tenant_id is None:
+        raise ResultHandleNotFoundError(handle_id)
+    timeout_seconds = get_settings().result_query_timeout_seconds
+    guard = _WorkerGuard()
+    async with admit_result_read(operator) as lease:
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                raw = await store.fetch_record(tenant_id=operator.tenant_id, handle_id=handle_id)
+                if raw is None:
+                    raise ResultHandleNotFoundError(handle_id)
+                return await run_on_result_read_executor(
+                    lease, work, raw, guard, on_abandon=guard.abandon
+                )
+        except TimeoutError as exc:
+            raise ResultQueryTimeoutError(
+                handle_id, timeout_seconds, remediation=timeout_remediation
+            ) from exc
 
 
 async def run_result_query(
     operator: Operator,
     handle_id: UUID,
     spec: ResultQuerySpec,
+    *,
+    offset: int = 0,
+    limit: int = 50,
 ) -> dict[str, Any]:
     """Run a bounded, validated structured query over a spilled handle (#3366).
 
@@ -310,43 +566,58 @@ async def run_result_query(
     never presented as a whole-inventory total.
 
     Raises :class:`ResultHandleNotFoundError` (unknown / expired /
-    cross-operator handle, or no tenant), :class:`QueryContractError` (a
-    field-vs-schema or value-shape violation), :class:`ResultQueryTimeoutError`
-    (time budget exceeded), or :class:`ResultQueryOutputTooLargeError` (byte
-    budget exceeded). Each transport maps these to its own recoverable-error
-    shape.
+    cross-operator handle, or no tenant), :class:`ResultReadRejectedError`
+    (rate or capacity, raised before the store is read),
+    :class:`QueryContractError` (a field-vs-schema or value-shape violation),
+    :class:`ResultQueryTimeoutError` (time budget exceeded), or
+    :class:`ResultQueryOutputTooLargeError` (byte budget exceeded). Each
+    transport maps these to its own recoverable-error shape.
+
+    A spec with ``path`` is a document read, not a query: it branches to
+    :func:`_read_document_path`, which uses *offset* / *limit* to page an
+    array value. *offset* / *limit* are ignored for a relational query.
     """
-    if operator.tenant_id is None:
-        raise ResultHandleNotFoundError(handle_id)
+    if spec.path is not None:
+        return await _read_document_path(operator, handle_id, spec.path, offset, limit)
 
-    row_set = await get_result_handle_store().fetch_rows(
-        tenant_id=operator.tenant_id,
-        operator_sub=operator.sub,
-        handle_id=handle_id,
-    )
-    if row_set is None:
-        raise ResultHandleNotFoundError(handle_id)
-
+    store = get_result_handle_store()
     settings = get_settings()
-    result_rows, truncated, effective_limit = await _run_compiled_query(
-        row_set.rows,
-        spec,
-        handle_id,
-        max_output_rows=settings.result_query_max_output_rows,
-        timeout_seconds=settings.result_query_timeout_seconds,
-    )
+    max_output_rows = settings.result_query_max_output_rows
+    max_bytes = settings.result_query_max_output_bytes
 
-    # Byte cap applied AFTER the row cap: wide/nested rows can overflow the
-    # token budget even under the row ceiling. Encoding also normalizes any
-    # non-JSON-native value (datetime, Decimal) to a JSON-safe form for the
-    # transport layer, in one pass.
-    encoded_rows = msgspec.json.encode(result_rows)
-    if len(encoded_rows) > settings.result_query_max_output_bytes:
-        raise ResultQueryOutputTooLargeError(
-            handle_id, len(encoded_rows), settings.result_query_max_output_bytes
+    def work(raw: bytes, guard: _WorkerGuard) -> dict[str, Any]:
+        row_set = store.decode_rows(raw, operator_sub=operator.sub, handle_id=handle_id)
+        if row_set is None:
+            raise ResultHandleNotFoundError(handle_id)
+        guard.check()
+        _, truncated, effective_limit, encoded_rows = _query_pipeline_sync(
+            guard, row_set.rows, spec, max_output_rows
         )
-    json_safe_rows: list[dict[str, Any]] = msgspec.json.decode(encoded_rows)
+        # Byte cap applied AFTER the row cap: wide/nested rows can overflow
+        # the token budget even under the row ceiling. The encode also
+        # normalizes any non-JSON-native value (datetime, Decimal) to a
+        # JSON-safe form for the transport layer, in one pass.
+        if len(encoded_rows) > max_bytes:
+            raise ResultQueryOutputTooLargeError(handle_id, len(encoded_rows), max_bytes)
+        json_safe_rows: list[dict[str, Any]] = msgspec.json.decode(encoded_rows)
+        guard.check()
+        payload = _query_payload(handle_id, row_set, json_safe_rows, truncated, effective_limit)
+        # The wire check encodes the whole response again, so it is worker
+        # work under the same deadline, like the paging and ``path`` reads.
+        _check_wire_ceiling(payload, handle_id, ResultQueryOutputTooLargeError.QUERY_REMEDIATION)
+        return payload
 
+    return await _run_admitted_read(operator, handle_id, store, work)
+
+
+def _query_payload(
+    handle_id: UUID,
+    row_set: SpilledRowSet,
+    rows: list[dict[str, Any]],
+    truncated: bool,
+    effective_limit: int,
+) -> dict[str, Any]:
+    """Shape the query response with its coverage metadata (worker thread)."""
     partial = row_set.stored_rows < row_set.total_rows
     coverage_note = (
         (
@@ -357,16 +628,92 @@ async def run_result_query(
         if partial
         else None
     )
-
     return {
         "handle_id": str(handle_id),
-        "rows": json_safe_rows,
+        "rows": rows,
         "offset": 0,
         "limit": effective_limit,
-        "returned_rows": len(json_safe_rows),
+        "returned_rows": len(rows),
         "total_rows": row_set.total_rows,
         "stored_rows": row_set.stored_rows,
         "truncated": truncated,
         "coverage": "partial" if partial else "complete",
         "coverage_note": coverage_note,
     }
+
+
+#: Remediation for an over-budget or timed-out ``path`` read.
+_PATH_REMEDIATION = (
+    "Point `path` at a smaller part of the document, or page an array value with a smaller `limit`."
+)
+
+
+async def _read_document_path(
+    operator: Operator,
+    handle_id: UUID,
+    path: str,
+    offset: int,
+    limit: int,
+) -> dict[str, Any]:
+    """Resolve the RFC 6901 *path* against a handle's document (#3633).
+
+    For a document handle that is the whole retained payload. For a rows
+    handle it is the dict of top-level fields the reducer left out of the
+    inline summary (``omitted_scalar_count``), so ``/stderr`` reads a value
+    that was too big to ride inline. An array value pages: ``rows`` holds
+    ``[offset : offset+limit]`` of its items, a non-object item wrapped as
+    ``{"value": item}`` (the same shape the reducer gives a list of scalars).
+    Any other value comes back whole in ``value``. A pointer that does not
+    resolve, or a rows handle with nothing kept beside its rows, is a
+    :class:`QueryContractError`. The output byte budget is the same as for
+    paging and queries, and so are admission and the deadline (#3640).
+    """
+    try:
+        tokens = parse_json_pointer(path)
+    except JsonPointerError as exc:  # already checked by the spec; kept for direct callers
+        raise QueryContractError(str(exc)) from exc
+    store = get_result_handle_store()
+    max_bytes = get_settings().result_query_max_output_bytes
+
+    def work(raw: bytes, guard: _WorkerGuard) -> dict[str, Any]:
+        stored = store.decode_document(raw, operator_sub=operator.sub, handle_id=handle_id)
+        if stored is None:
+            raise ResultHandleNotFoundError(handle_id)
+        try:
+            node = resolve_json_pointer(stored.document, tokens)
+        except JsonPointerError as exc:
+            raise QueryContractError(str(exc)) from exc
+        guard.check()
+
+        result: dict[str, Any] = {
+            "handle_id": str(handle_id),
+            "path": path,
+            "value_type": json_type(node),
+            "offset": offset,
+            "limit": limit,
+            "truncated": False,
+            "coverage": "complete",
+            "coverage_note": None,
+        }
+        if isinstance(node, list):
+            window = node[offset : offset + limit]
+            rows = [item if isinstance(item, dict) else {"value": item} for item in window]
+            result.update(
+                rows=rows, returned_rows=len(rows), total_rows=len(node), stored_rows=len(node)
+            )
+            budgeted: Any = rows
+        else:
+            result.update(rows=[], value=node, returned_rows=1, total_rows=1, stored_rows=1)
+            budgeted = node
+
+        output_bytes = len(msgspec.json.encode(budgeted))
+        if output_bytes > max_bytes:
+            raise ResultQueryOutputTooLargeError(
+                handle_id, output_bytes, max_bytes, remediation=_PATH_REMEDIATION
+            )
+        _check_wire_ceiling(result, handle_id, _PATH_REMEDIATION)
+        return result
+
+    return await _run_admitted_read(
+        operator, handle_id, store, work, timeout_remediation=_PATH_REMEDIATION
+    )

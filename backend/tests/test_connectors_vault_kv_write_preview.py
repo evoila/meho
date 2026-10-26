@@ -211,11 +211,13 @@ def test_provenance_populated_generic_echo() -> None:
 def test_provenance_credential_class_none_is_redacted_reason() -> None:
     """A credential-class op that collapsed to identifier-only ⇒ redacted reason.
 
-    ``vault.auth.userpass.write`` is a credential_write op with no bespoke
-    builder, so its preview is intentionally suppressed. The provenance
-    must name that as a deliberate redaction, not a missing preview.
+    ``vmware.composite.vm.guest.env.read`` is a credential_write op with no
+    bespoke builder, so its preview is intentionally suppressed. The
+    provenance must name that as a deliberate redaction, not a missing preview.
     """
-    populated, reason = describe_preview_provenance(None, op_id="vault.auth.userpass.write")
+    populated, reason = describe_preview_provenance(
+        None, op_id="vmware.composite.vm.guest.env.read"
+    )
     assert populated is False
     assert reason == PREVIEW_REASON_CREDENTIAL_REDACTED
 
@@ -300,19 +302,20 @@ async def test_dispatcher_stamps_redacted_reason_for_builderless_credential_op(
     monkeypatch.setattr(dispatcher, "_resolve_connector_instance", _no_connector)
     monkeypatch.setattr(dispatcher, "build_permission_preflight", _no_preflight)
 
+    # guest.env.read is credential_write and has no builder (the userpass
+    # writes got one in #4850).
+    op_id = "vmware.composite.vm.guest.env.read"
     effect = await dispatcher._build_proposed_effect(
-        op_id="vault.auth.userpass.write",
-        connector_id="vault-1.x",
-        descriptor=_FakeStampDescriptor(
-            op_id="vault.auth.userpass.write", safety_level="dangerous"
-        ),  # type: ignore[arg-type]
+        op_id=op_id,
+        connector_id="vmware-rest-9.0",
+        descriptor=_FakeStampDescriptor(op_id=op_id, safety_level="caution"),  # type: ignore[arg-type]
         operator=_operator(),
         target=None,
-        params={"username": "svc", "password": "sekret"},
+        params={"vm": "vm-42", "password": "sekret"},
     )
     assert effect is not None
     assert effect["preview_populated"] is False
     assert effect["preview_reason"] == PREVIEW_REASON_CREDENTIAL_REDACTED
     # The identifier-only default still names the op for the reviewer.
-    assert effect["op_id"] == "vault.auth.userpass.write"
+    assert effect["op_id"] == op_id
     _no_secret_anywhere(effect, "sekret")

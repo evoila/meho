@@ -20,8 +20,10 @@ import (
 // shapes, so `--plane` is required (no implicit default — the wrong
 // plane would silently dispatch a different op_id).
 //
-// Provider plane → `vcfa.provider.health` (GET:/cloudapi/1.0.0/site) —
-// site identity (name, description, restName, productVersion).
+// Provider plane → `vcfa.provider.health` — structured health: an
+// authenticated GET:/cloudapi/1.0.0/orgs (pageSize=1) plus the
+// unauthenticated GET:/iaas/api/about API versions (evoila/meho#3865;
+// the former GET:/cloudapi/1.0.0/site answers 405 on VCFA 9.1).
 // Tenant plane → `vcfa.tenant.about` (GET:/iaas/api/about) — supported
 // API versions + latestApiVersion.
 func newAboutCmd() *cobra.Command {
@@ -104,31 +106,47 @@ func printAbout(w io.Writer, plane string, r *CallResult) {
 }
 
 func printAboutProvider(w io.Writer, r *CallResult) {
-	var site struct {
-		ID             string `json:"id"`
-		Name           string `json:"name"`
-		Description    string `json:"description"`
-		RestName       string `json:"restName"`
-		ProductVersion string `json:"productVersion"`
+	var health struct {
+		ProviderPlane *struct {
+			Reachable     bool   `json:"reachable"`
+			Authenticated bool   `json:"authenticated"`
+			Check         string `json:"check"`
+			OrgCount      *int   `json:"org_count"`
+		} `json:"provider_plane"`
+		API *struct {
+			Reachable            bool     `json:"reachable"`
+			LatestAPIVersion     string   `json:"latestApiVersion"`
+			SupportedAPIVersions []string `json:"supportedApiVersions"`
+			Error                string   `json:"error"`
+		} `json:"api"`
 	}
-	if err := jsonUnmarshalStrict(r.Result, &site); err != nil || site.Name == "" {
+	if err := jsonUnmarshalStrict(r.Result, &health); err != nil || health.ProviderPlane == nil {
 		fallbackResultRender(w, r)
 		return
 	}
-	if site.ID != "" {
-		fmt.Fprintf(w, "  id:              %s\n", site.ID)
+	pp := health.ProviderPlane
+	fmt.Fprintf(w, "  provider_plane:  reachable=%t authenticated=%t\n", pp.Reachable, pp.Authenticated)
+	if pp.Check != "" {
+		fmt.Fprintf(w, "  check:           %s\n", pp.Check)
 	}
-	if site.Name != "" {
-		fmt.Fprintf(w, "  name:            %s\n", site.Name)
+	if pp.OrgCount != nil {
+		fmt.Fprintf(w, "  org_count:       %d\n", *pp.OrgCount)
 	}
-	if site.RestName != "" {
-		fmt.Fprintf(w, "  rest_name:       %s\n", site.RestName)
+	if health.API == nil {
+		return
 	}
-	if site.ProductVersion != "" {
-		fmt.Fprintf(w, "  product_version: %s\n", site.ProductVersion)
+	if !health.API.Reachable {
+		fmt.Fprintf(w, "  api:             unreachable (%s)\n", health.API.Error)
+		return
 	}
-	if site.Description != "" {
-		fmt.Fprintf(w, "  description:     %s\n", site.Description)
+	if health.API.LatestAPIVersion != "" {
+		fmt.Fprintf(w, "  latest_api_version: %s\n", health.API.LatestAPIVersion)
+	}
+	if len(health.API.SupportedAPIVersions) > 0 {
+		fmt.Fprintf(w, "  supported_apis:\n")
+		for _, v := range health.API.SupportedAPIVersions {
+			fmt.Fprintf(w, "    - %s\n", v)
+		}
 	}
 }
 

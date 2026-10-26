@@ -22,19 +22,22 @@ These tests pin:
 * the starter-alert contract (the alert names, the release-scoped
   ``absent(up)`` scrape alert, the ``broadcast_publish_errors_total``
   rate alert, the #2888 background-loop liveness alert in its own
-  ``meho.loops`` group, the by-concern group split, and the tunable
-  ``for`` / ``severity`` / ``missedTicks`` knobs).
+  ``meho.loops`` group, the #3915 scoped zero-hit docs-search alert in its
+  own ``meho.docs`` group, the by-concern group split, and the tunable
+  ``for`` / ``severity`` / ``missedTicks`` / ``threshold`` / ``window``
+  knobs).
 
 The authoritative chart gate is ``.github/workflows/chart.yml`` (lint +
 ``helm template`` + kubeconform + these render assertions). This test
 mirrors the assertions at the unit layer so the regression is catchable
 from ``pytest`` on any machine with ``helm`` installed; it skips cleanly
-where ``helm`` is absent (the backend unit-test sandbox does not ship it
-— the workflow gate covers that environment).
+where ``helm`` is absent. CI's unit shards install ``helm`` and set
+``MEHO_REQUIRE_HELM=1``, so there a missing ``helm`` fails instead.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -48,7 +51,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CHART_DIR = _REPO_ROOT / "deploy" / "charts" / "meho"
 
 # Minimal chassis-required overrides that satisfy values.schema.json.
+# ``--namespace default`` pins ``.Release.Namespace``. Without it, helm takes
+# the namespace from the current kube context, or from the pod's service
+# account when it runs inside Kubernetes (as the CI runners do). The
+# assertions below expect ``default``.
 _BASE_OVERRIDES = [
+    "--namespace",
+    "default",
     "--set",
     "image.tag=test",
     "--set",
@@ -76,8 +85,8 @@ _BASE_OVERRIDES = [
 ]
 
 pytestmark = pytest.mark.skipif(
-    shutil.which("helm") is None,
-    reason="helm not installed in this sandbox; chart.yml workflow gate covers CI",
+    shutil.which("helm") is None and os.environ.get("MEHO_REQUIRE_HELM") != "1",
+    reason="helm not installed; set MEHO_REQUIRE_HELM=1 to fail instead of skip",
 )
 
 
@@ -256,6 +265,48 @@ def test_loop_liveness_alert_knobs_are_tunable() -> None:
     assert "(3 * background_loop_interval_seconds)" in alert["expr"]
     assert alert["for"] == "1m"
     assert alert["labels"]["severity"] == "critical"
+
+
+def test_prometheus_rule_renders_docs_scoped_zero_hits_alert() -> None:
+    """The #3915 docs alert lands as a NEW ``meho.docs`` group.
+
+    It sums the release's ``docs_search_scoped_zero_hits_total`` increase
+    over the window (release-scoped like the scrape alert, so another
+    release's pods never count) and compares it with the threshold.
+    """
+    pr = _render_show_only("templates/prometheusrule.yaml", "--set", "prometheusRule.enabled=true")
+    group_names = {g["name"] for g in pr["spec"]["groups"]}
+    assert "meho.docs" in group_names
+    assert {"meho.scrape", "meho.broadcast", "meho.loops"} <= group_names
+
+    alert = _alerts(pr)["MehoDocsScopedZeroHits"]
+    assert alert["expr"] == (
+        "sum(increase(docs_search_scoped_zero_hits_total"
+        '{job="test-meho", namespace="default"}[1h])) >= 5'
+    )
+    assert alert["for"] == "15m"
+    assert alert["labels"]["severity"] == "warning"
+
+
+def test_docs_scoped_zero_hits_alert_knobs_are_tunable() -> None:
+    """``threshold`` / ``window`` / ``for`` / ``severity`` flow through."""
+    pr = _render_show_only(
+        "templates/prometheusrule.yaml",
+        "--set",
+        "prometheusRule.enabled=true",
+        "--set",
+        "prometheusRule.docsScopedZeroHits.threshold=20",
+        "--set",
+        "prometheusRule.docsScopedZeroHits.window=6h",
+        "--set",
+        "prometheusRule.docsScopedZeroHits.for=1h",
+        "--set",
+        "prometheusRule.docsScopedZeroHits.severity=info",
+    )
+    alert = _alerts(pr)["MehoDocsScopedZeroHits"]
+    assert alert["expr"].endswith("[6h])) >= 20")
+    assert alert["for"] == "1h"
+    assert alert["labels"]["severity"] == "info"
 
 
 def test_service_monitor_and_prometheus_rule_are_independent() -> None:

@@ -9,7 +9,7 @@ Copyright (c) 2026 evoila Group
 
 ## Why this matters
 
-- The consumer's [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc) repo carries a `kb/` directory — the team's distilled vendor knowledge (vCenter / NSX / Vault / Keycloak / k8s / Argo / Harbor / general; ~44 entries at the time of writing, and growing).
+- The consumer's `evoila-bosnia/claude-rdc-hetzner-dc` repo carries a `kb/` directory — the team's distilled vendor knowledge (vCenter / NSX / Vault / Keycloak / k8s / Argo / Harbor / general; ~44 entries at the time of writing, and growing).
 - Today every operator's Claude session relies on the repo being cloned and `grep kb/`. New knowledge reaches the team only via PR review + clone. **Two operators landing the same kb entry independently is a real failure mode.**
 - Per [decision #2](../decisions/locked-decisions.md): MEHO ingests the corpus once; the repo `kb/` stays live as the fallback for ≥1 month; the in-repo copy retires only when `meho kb search` is in daily use and the team agrees. There is no auto-retirement — the retire decision is an explicit operator call backed by the G4.3 eval.
 
@@ -47,13 +47,15 @@ Expected on a never-ingested corpus: `inserted_count == <file count>`, `updated_
 meho kb ingest ./kb --json
 ```
 
-Expected: a `KbIngestionResult` with `inserted_count == <file count>` on the first real run. Any per-file failure (binary file masquerading as `.md`, malformed front-matter, invalid slug) is counted in `error_count` and described in `errors[]` — the run continues; one bad file does not abort the corpus.
+Expected: a `KbIngestionResult` with `inserted_count == <file count>` on the first real run. Any per-file failure (binary file masquerading as `.md`, malformed front-matter, invalid slug) is counted in `error_count` and described in `errors[]` — the run continues; one bad file does not abort the corpus. If two or more files share a slug, none of them is written, the existing entry stays unchanged, and they are listed in `conflicts[]` (counted in `conflict_count`). Rename a file or fix its `slug:` front-matter, then run the ingest again.
 
 The `tenant` row was already seeded by the **first authenticated request** of this session — including the `--dry-run` in step 2. The seed runs in the `verify_jwt_and_bind` middleware that every authenticated route flows through (G0.8-T1, #628), so any authenticated call (a read, a `--dry-run`, or this real ingest) provisions the row idempotently before the route runs. Before #628 this step failed with an asyncpg `documents_tenant_id_fkey` violation on a fresh deploy because the `tenant` table was empty; that failure mode is gone.
 
 Slug derivation: the slug is the filename stem (`vcenter-9.0-snapshot-revert.md` → slug `vcenter-9.0-snapshot-revert`) unless the file's YAML front-matter carries a `slug:` override. The consumer's kb has no front-matter today; the override is future-compat. Slugs must match `^[a-z](?:[a-z0-9.\-]*[a-z0-9])?$` — lowercase, start with a letter, end with a letter or digit, with hyphens and **dots** allowed (dots carry the version numbers, e.g. `vcenter-9.0-...`). A filename that does not produce a valid slug surfaces as a per-file error rather than aborting the run.
 
 To skip drafts or scratch files, drop a `.kb-ignore` file at the kb root — one glob pattern per line, `#` for comments. A bare directory name (`drafts`) skips everything beneath it.
+
+The ingest reads only regular files inside the folder. It skips links (to files or folders) and special files such as pipes. For each skipped file it writes one `kb_file_skipped` line to the server log. If your kb content arrives as links, copy it into a normal folder first. For example, a Kubernetes ConfigMap volume shows its files as links.
 
 ### 4. Verify ingestion
 

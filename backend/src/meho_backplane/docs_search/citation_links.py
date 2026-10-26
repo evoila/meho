@@ -57,16 +57,20 @@ unknown resolve identically across surfaces:
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Final
 from urllib.parse import urlsplit
 
+from meho_backplane.auth.corpus import web_link_or_none
+
 __all__ = [
     "CitationLink",
     "citation_link_payload",
+    "derive_chunk_title",
     "normalize_source_ref",
+    "public_source_url",
     "resolve_citation_link",
 ]
 
@@ -100,6 +104,10 @@ _BROADCOM_KB_ARTICLE_BASE: Final[str] = "https://knowledge.broadcom.com/external
 #: smuggle a malformed id into the canonical URL -- a non-matching stem falls
 #: through to the degraded arm rather than minting ``.../external/article/index``.
 _KB_ARTICLE_ID_RE: Final[re.Pattern[str]] = re.compile(r"^\d+$")
+
+#: Joins a chunk's section (its last heading, or the breadcrumb tail) to its
+#: page name (the humanised filename) in a derived title (#3913).
+_TITLE_JOINER: Final[str] = " \u2014 "
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +190,58 @@ def _humanise_segment(segment: str) -> str:
     """
     stem = PurePosixPath(segment).stem
     return re.sub(r"[-_]+", " ", stem).strip()
+
+
+def _collapse(text: str) -> str:
+    """Collapse every whitespace run in *text* to one space and strip it."""
+    return " ".join(text.split())
+
+
+def _comparable(text: str) -> str:
+    """Fold *text* for an equality check that ignores case and punctuation."""
+    return _collapse(re.sub(r"[\W_]+", " ", text)).casefold()
+
+
+def derive_chunk_title(
+    *,
+    title: str | None,
+    heading_path: Sequence[str] = (),
+    breadcrumb: str = "",
+    filename: str = "",
+) -> str | None:
+    """Pick a human title for a chunk from the page identity the corpus sends.
+
+    One rule for every hit, on ``search_docs`` and on the upstream answer
+    path (#3913, #3911):
+
+    1. the corpus's own ``title`` when it sends one;
+    2. else the chunk's **section** -- the last non-blank ``heading_path``
+       element, or the last ``>``-separated segment of the ``breadcrumb``
+       when there is no heading -- joined with the **page name**, the
+       humanised ``filename`` stem: ``What's New`` + ``product-2-1-release-notes.html``
+       -> ``What's New — product 2 1 release notes``. A section alone names a
+       part of a page but not which page (or which release) it is on, so the
+       page name rides along. When only one of the two exists, it is the
+       title; when both say the same thing (ignoring case and punctuation),
+       the section is the title;
+    3. else ``None``, so the citation-label chain falls through to its own
+       fallbacks.
+
+    Only the last path segment of ``filename`` is read, so a full object
+    path (``gs://bucket/dir/page.html``) never reaches the title. Whitespace
+    runs in a heading or breadcrumb collapse to one space.
+    """
+    if title and title.strip():
+        return title.strip()
+    section = next(
+        (_collapse(heading) for heading in reversed(heading_path) if heading.strip()),
+        _collapse(breadcrumb.rsplit(">", 1)[-1]),
+    )
+    name = PurePosixPath(filename.strip()).name if filename.strip() else ""
+    page = _humanise_segment(name) if name else ""
+    if section and page and _comparable(section) != _comparable(page):
+        return f"{section}{_TITLE_JOINER}{page}"
+    return section or page or None
 
 
 def _label_for(source: _Source, title: str | None, document_id: str | None) -> str:
@@ -373,6 +433,14 @@ def citation_link_payload(
     }
 
 
+def _scheme_of(value: str | None) -> str:
+    """Return the URL scheme of *value*, or ``""`` when it has none or is broken."""
+    try:
+        return urlsplit((value or "").strip()).scheme
+    except ValueError:
+        return ""
+
+
 def normalize_source_ref(
     source_url: str | None,
     *,
@@ -380,6 +448,7 @@ def normalize_source_ref(
     chunk_id: str,
     title: str | None = None,
     document_id: str | None = None,
+    upstream_url: str | None = None,
 ) -> str:
     """Return a backend-agnostic citation reference for a chunk (#132).
 
@@ -395,7 +464,14 @@ def normalize_source_ref(
     Normalization is **Option A (canonical public URL) with an Option B
     (opaque MEHO ref) fallback**:
 
-    * When :func:`resolve_citation_link` derives a **canonical public URL** --
+    * When the chunk's own ``source_url`` is an ``https`` link, it is the
+      reference, unchanged.
+    * Otherwise, when the backend sent an ``upstream_url`` (#3913) -- the
+      public ``http(s)`` link to the source page or document, for a PDF often
+      ending in ``#page=N`` -- that link is the reference. The backend knows
+      the public source of its own objects, so its link wins over a link
+      derived from the object path here.
+    * Otherwise, when :func:`resolve_citation_link` derives a **canonical public URL** --
       a Broadcom KB article (``https://knowledge.broadcom.com/...``) or an
       already-``https`` source -- that URL *is* the reference. Most
       consumer-useful (a clickable citation), and a vendor/web URL exposes no
@@ -424,14 +500,47 @@ def normalize_source_ref(
             the returned reference).
         document_id: Optional owning-document id (label fallback in the
             resolver; not part of the returned reference).
+        upstream_url: Optional public ``http(s)`` link the backend sent for
+            the chunk's source. Used when *source_url* is not an ``https``
+            link. It is checked by the same rule as the corpus parse
+            (:func:`~meho_backplane.auth.corpus.web_link_or_none`): another
+            scheme, no host, a space, a control or bidi character, more than
+            2048 characters or a broken URL reads as absent, never raises.
 
     Returns:
         A non-empty, backend-agnostic reference string: a canonical
         ``http(s)`` URL, or an opaque ``meho://docs/<collection>/<chunk_id>``.
         Never a ``gs://`` (or other backend-scheme) path.
     """
-    link = resolve_citation_link(source_url, title=title, document_id=document_id)
-    if link.href is not None:
-        return link.href
+    public = public_source_url(
+        source_url, title=title, document_id=document_id, upstream_url=upstream_url
+    )
+    if public is not None:
+        return public
     collection = (collection_key or "").strip() or _UNKNOWN_COLLECTION_SEGMENT
     return f"{_MEHO_DOCS_REF_SCHEME}://docs/{collection}/{chunk_id}"
+
+
+def public_source_url(
+    source_url: str | None,
+    *,
+    title: str | None = None,
+    document_id: str | None = None,
+    upstream_url: str | None = None,
+) -> str | None:
+    """Return the public ``http(s)`` link for a source, or ``None``.
+
+    The public half of :func:`normalize_source_ref`, with the same order: an
+    ``https`` *source_url* as it is; else a usable *upstream_url*; else the
+    canonical URL :func:`resolve_citation_link` derives (a KB article, an
+    ``http(s)`` source). ``None`` when there is no public link. A storage path
+    (``gs://``) is never returned.
+
+    ``read_docs`` (#3948) uses it directly: a read reply has no chunk id to
+    build an opaque ``meho://`` reference from, so a source without a public
+    link is simply ``None`` there.
+    """
+    upstream = web_link_or_none(upstream_url)
+    if upstream is not None and _scheme_of(source_url) != "https":
+        return upstream
+    return resolve_citation_link(source_url, title=title, document_id=document_id).href

@@ -93,12 +93,17 @@ type operationsAPI interface {
 		params *api.GetSearchApiV1OperationsSearchGetParams,
 		reqEditors ...api.RequestEditorFn,
 	) (*api.GetSearchApiV1OperationsSearchGetResponse, error)
-	PostResultQueryApiV1OperationsResultQueryPostWithResponse(
+	// result-query binds to the raw method, not the *WithResponse one:
+	// the generated parser decodes every 422 as HTTPValidationError (a
+	// list `detail`) and fails on the backplane's object `detail`
+	// refusals (output_too_large, invalid_query, query_timeout), which
+	// would hide the reason from the operator.
+	PostResultQueryApiV1OperationsResultQueryPost(
 		ctx context.Context,
 		params *api.PostResultQueryApiV1OperationsResultQueryPostParams,
 		body api.PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody,
 		reqEditors ...api.RequestEditorFn,
-	) (*api.PostResultQueryApiV1OperationsResultQueryPostResponse, error)
+	) (*http.Response, error)
 	Refresh(ctx context.Context) error
 }
 
@@ -166,6 +171,13 @@ func renderRequestError(
 	// the "this is a backend disagreement" hint rather than the "your
 	// network is down" one. Pure transport errors (timeouts, DNS,
 	// connection refused) still fall through to unreachable (exit 3).
+	// A rate-limited search comes back as HTTP 200 with a structured
+	// refusal envelope; it is a backplane answer, so it renders as
+	// unexpected_response (exit 4) with the wait the backplane asked for.
+	var limited *rateLimitedError
+	if errors.As(err, &limited) {
+		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(limited.Error()), jsonOut)
+	}
 	var apiErr *apiResponseError
 	if errors.As(err, &apiErr) {
 		if apiErr.StatusCode == http.StatusUnauthorized {

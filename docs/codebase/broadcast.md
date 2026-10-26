@@ -1,82 +1,95 @@
 # Activity broadcast
 
-Operator-facing real-time view of every audited operation, plus
-agent-authored announcements, scoped per tenant. The substrate is a
-Valkey 9.x Stream (`meho:feed:{tenant_id}`); the SSE surface
-(`/api/v1/feed` and `/ui/broadcast/stream`), the CLI verbs
-(`meho broadcast recent`, `announce`, and `watch`), and the MCP tools
-(`meho_broadcast_recent`, `meho_broadcast_watch`,
-`meho_broadcast_announce`) all read or write to that single substrate.
+Broadcast is the tenant's feed of **deliberate agent announcements**:
+"starting X", "update", "done". Since #3758 nothing else is on it.
+Automatic activity (REST and MCP calls, dispatches, approvals, standing
+grants, checks, topology writes, event ingest) publishes no Broadcast
+event; the audit log (`query_audit`, `/ui/audit`) is the record of that
+activity.
+
+Announcements are stored in the `agent_announcement` table, and that
+table is the record. Every reader reads it in commit order (#3748). The
+Valkey 9.x stream `meho:feed:{tenant_id}` only wakes live readers early.
 MEHO-hosted agent runs reach the same substrate through the agent
 meta-tool bridge (`broadcast_announce` / `broadcast_recent` /
-`broadcast_watch`, #2548), which reuses these MCP handlers — see
-`docs/codebase/agent-runtime.md` § Broadcast coordination tools.
+`broadcast_watch`, #2548) — see `docs/codebase/agent-runtime.md`
+§ Broadcast coordination tools.
+
+There is no Slack or other chat mirror of Broadcast (public issue #333
+was closed as not planned).
 
 ## Overview
 
-Three layers, separated for traceability:
+1. **Writer side.** Only `publish_agent_announcement`
+   (`broadcast/publisher.py`), reached through `meho_broadcast_announce`
+   / `POST /api/v1/broadcast/announce`, and only for a trusted agent
+   identity (#3736). It stores the row first (**fail-loud**), then writes
+   one `XADD meho:feed:{tenant_id}` entry, `MAXLEN ~ 10_000`
+   (**fail-soft**: a failed write returns `delivery_pending=true` and
+   counts on `broadcast_publish_errors_total`).
 
-1. **Writer side.** `AuditMiddleware` (`backend/src/meho_backplane/audit.py`)
-   and the MCP dispatcher (`backend/src/meho_backplane/mcp/handlers.py`)
-   both call `publish_event(BroadcastEvent)` after the audit row
-   commits. The publisher is **fail-open** — a Valkey wobble never
-   converts an OK request into a 5xx. The agent-authored counterpart
-   `publish_agent_announcement(AgentAnnouncementEvent)` is
-   **fail-loud** — the calling agent needs to know whether its
-   announcement landed. Both go through one `XADD meho:feed:{tenant_id}`
-   per call, single `event` field carrying the JSON-serialised model,
-   `MAXLEN ~` trim to `BROADCAST_MAXLEN = 10_000` entries.
+2. **Fanout side.** There is no fanout worker. Readers scan the archive
+   and use `XREAD BLOCK` on the stream only as a wake-up; when Valkey
+   fails they poll the archive every 5 seconds
+   (`archive_reader.WATCH_POLL_SECONDS`).
 
-2. **Fanout side.** **There is no separate fanout worker.** The
-   publisher writes directly to the per-tenant stream; readers
-   subscribe directly. This is a deliberate v0.1+ shape (ADR 0005):
-   Valkey Streams' XREAD BLOCK semantics give us the live-tail
-   subscription primitive without an intermediate broker process. A
-   future Slack mirror / cross-cluster bridge (G6.2 #333) would be
-   the first surface that takes a separate consumer-group reader; v0.8
-   does not have one.
+3. **Reader side.** All readers read the archive:
 
-3. **Reader side.** Three reader shapes for three call patterns:
+   | Reader | Surface | Read | Start |
+   | --- | --- | --- | --- |
+   | MCP / REST recent | `meho_broadcast_recent`, `GET /api/v1/broadcast/recent` | `read_announcement_history` | 30-min window, paged |
+   | MCP watch | `meho_broadcast_watch` | `watch_announcements` | caller's watch checkpoint |
+   | SSE feed | `GET /api/v1/feed` (Bearer JWT, operator role) | `announcement_feed_frames` | newest 50, then live; `Last-Event-Id` / `since` resume |
+   | SSE bridge | `GET /ui/broadcast/stream` (session cookie) | same generator | same |
+   | CLI watch | `meho broadcast watch` / `meho status --watch` → `GET /api/v1/feed` | same generator | same |
+   | MCP resource | `meho://tenant/{id}/feed` | `latest_announcements` | newest 50 |
+   | UI history | `GET /ui/broadcast/history` | `latest_announcements` | retention window, newest `IN_DOM_ROW_CAP` |
+   | Agent bridge | `broadcast_recent` / `broadcast_watch` meta-tools | the MCP handlers | as MCP |
 
-   | Reader | Surface | Read primitive | Cursor default | Backlog |
-   | --- | --- | --- | --- | --- |
-   | SSE feed | `GET /api/v1/feed` (Bearer JWT) | `XREAD BLOCK` | `$` (live tail) | **Last 50 on `$` connections** |
-   | SSE bridge | `GET /ui/broadcast/stream` (session cookie) | `XREAD BLOCK` | `$` (live tail) | **Last 50 on `$` connections** |
-   | MCP recent | `meho_broadcast_recent` | `XRANGE` | 30-min window | All entries in window |
-   | MCP watch | `meho_broadcast_watch` | `XREAD BLOCK` | caller-supplied `since_cursor` (required) | None — caller pins |
-   | CLI recent | `meho broadcast recent` → `GET /api/v1/broadcast/recent` | shared `XRANGE` history helper | 30-min window | All entries in window |
-   | CLI announce | `meho broadcast announce` → `POST /api/v1/broadcast/announce` | shared durable announcement publisher | n/a | n/a |
-   | CLI watch | `meho broadcast watch` → `GET /api/v1/feed` | `XREAD BLOCK` | `$` (live tail) | Last 50 on fresh connections |
-   | MCP resource | `tenant_feed` snapshot | `XREVRANGE + COUNT 50` | n/a | Latest 50 |
-   | UI history | `GET /ui/broadcast/history` | `XRANGE` | 30-min window | All entries in window |
-   | Agent bridge | `broadcast_recent` / `broadcast_watch` meta-tools (#2548) | reuse the MCP recent/watch handlers | as MCP recent/watch | as MCP recent/watch |
+   **SSE frames (#3758).** Each announcement is
+   `event: broadcast` / `data: <AgentAnnouncementEvent JSON>` /
+   `id: <watch checkpoint just after it>`. A reconnect with that id in
+   `Last-Event-Id` resumes right after it. A `Last-Event-Id` that is not
+   a checkpoint of this tenant (for example a Valkey stream id a browser
+   kept from before #3758) starts fresh instead of a 400, so an
+   `EventSource` does not get stuck. `since` takes a checkpoint or an
+   ISO-8601 time; anything else is a 400. A retention gap or a
+   checkpoint ahead of the archive is one `event: gap` frame. A database
+   error after streaming began is one `event: feed_error` frame. A
+   heartbeat comment follows 30 seconds without output.
 
-   The SSE backlog prelude is the v0.8.0 fix for #1305 — see *Known
-   issues* below.
+   **Row identifier semantics.** Every reader returns `event_id` (the
+   announcement's UUID, equal to the `agent_announcement` row's PK).
+   Readers de-duplicate by `event_id`.
 
-   **Row identifier semantics (MCP recent/watch, #2479 / #2547).** Every
-   event row the two MCP read tools return carries the entry's Valkey
-   stream id twice: `cursor` (self-labelled; round-trips as the tools'
-   `cursor` input arg) and `id` (legacy alias of the same value —
-   unlike every other MCP surface, a broadcast row's `id` is NOT the
-   row's domain UUID). The durable identifiers live on the event
-   fields: `event_id` / `audit_id` on operation rows; and, since #2547,
-   `event_id` on announcement rows too — a genuine per-announcement UUID
-   minted at publish (equal to the durable `agent_announcement` row's PK),
-   now distinct from the stream `cursor`. A DB-backfilled announcement
-   (see *Durable announcements* below) carries `event_id` but a **null**
-   `cursor` / `id` (it has no Valkey stream entry of its own).
+   **Read-side `filter`.** `op_class` / `principal` / `target` /
+   `actor_sub` / `work_ref`, plus `active_only` on recent/watch.
+   `op_class` and `actor_sub` are operation filters, so no announcement
+   matches them; the filter vocabulary is retired in #3762.
 
-   **Read-side `filter` object (MCP recent/watch).** Both tools accept a
-   `filter` object narrowing by exact-match `op_class` / `principal` /
-   `target` / `work_ref`, plus the boolean `active_only`. `target`
-   matches a `BroadcastEvent`'s `target_name` or an announcement's single
-   `target` **or any entry in its `targets` list**. `work_ref` matches
-   an announcement's `work_ref` only (an audit-derived event never has
-   one). `active_only` (default `false`) drops TTL'd announcement claims
-   whose `expires_at` has elapsed; non-TTL events (announcements without
-   a TTL, and all audit-derived rows) always pass. All matching runs on
-   the raw model before the untrusted-text wrap (#2544).
+**What moved off Broadcast (#3758).**
+
+- *Approval wait.* The agent waiter reads the stored approval row every
+  2 seconds (`agent/approval_wait.py`); it no longer touches Valkey.
+- *Approvals bell.* One timer in `approvals-bell.js` dispatches
+  `meho:approval-badge-poll` every 5 seconds while the page is visible;
+  both badges re-fetch `GET /ui/approvals/badge`. A decision dispatches
+  `meho:approval-bump` (badges plus the open history list).
+- *Recent operations.* The dashboard tray (`GET /ui/dashboard/recent-operations`,
+  newest 50 via the audit reader) and the connector card
+  (`GET /ui/connectors/{name}/recent-operations`, newest 10) render on
+  the server from `operation_execution` audit rows. `recent-ops-refresh.js`
+  swaps in a fresh copy every 5 seconds while the page is visible; the
+  card shows when it was updated. Both need the `operator` role, the
+  same minimum as the audit API: a `read_only` session (or a role lift
+  that cannot complete) sees a notice instead of rows, and the fragment
+  answers 403 (`ui/roles.py::is_ui_operator`, `connectors/operator.py`
+  `is_operator`).
+- *Checks.* See [`checks-broadcast.md`](checks-broadcast.md).
+
+Plain JS timers are used instead of `hx-trigger="every 5s [filter]"`
+because htmx evaluates trigger filters with `eval`, which the console's
+CSP does not allow.
 
 ## Key types
 
@@ -117,7 +130,9 @@ Three layers, separated for traceability:
   the single `target` for multi-target work), `planned_op_class` (the
   declared op class, spanning the full `classify_op` taxonomy),
   `ttl_minutes` (1..1440), `work_ref` (opaque change-ticket ref, ≤256,
-  same convention as `AgentRun.work_ref`), `run_id` (UUID). A derived
+  same convention as `AgentRun.work_ref`), `run_id` (UUID), and the
+  server-stamped trusted claim fields (#3736): `claim_id`, `owner_sub`,
+  `actor_sub`, `admission` (see *Who can publish*). A derived
   `expires_at` computed field (`ts + ttl_minutes`, or `None`) drives
   the `active_only` read filter. `kind` / `event_kind =
   "agent_announcement"` discriminator so readers can dispatch on the
@@ -135,11 +150,11 @@ Three layers, separated for traceability:
   envelope (`_ANNOUNCEMENT_UNTRUSTED_FIELDS` +
   `_ANNOUNCEMENT_UNTRUSTED_LIST_FIELDS`, wrapped per-element for the
   list) **only on LLM-facing re-serves**. The wrap is applied by the
-  read-side serialiser: `list_recent_events_strict` (the MCP
-  `broadcast.recent` tool) passes `dump_event_wire` (wraps prose);
-  `list_recent_events_fail_soft` (the UI history pane) passes
-  `_dump_event_plain` (no wrap) because the browser sink escapes every
-  field separately (Alpine `x-text` sets `textContent`) and the
+  read-side serialiser: the archive reader `broadcast/archive_reader.py`
+  (MCP `meho_broadcast_recent` / `meho_broadcast_watch` and
+  `GET /api/v1/broadcast/recent`, #3748) uses `dump_event_wire` (wraps prose);
+  the UI history pane and the SSE feeds send the plain `model_dump` (no
+  wrap) because the browser sink escapes every field separately (Alpine `x-text` sets `textContent`) and the
   multi-line guard block would be human-visible noise on a feed row
   (#2549). All filtering (`event_matches`) runs on the raw model **before**
   the wrap, so narrowing is unaffected by the envelope — the same split
@@ -175,6 +190,38 @@ Three layers, separated for traceability:
     prefix branch would relabel their rows — historical ones included.
     See [`docs/codebase/checks-broadcast.md`](checks-broadcast.md).
   - `other` — full detail.
+
+  **One class per call.** The audit row and the broadcast event of one
+  call carry the same `op_id` and `op_class`. Every writer gets the class
+  from `resolve_op_class(op_id, declared)` in `broadcast/events.py`:
+  - The declared class wins when there is one: the MCP tool's
+    `ToolDefinition.op_class`, or a route's `audit_op_class`. Tool names
+    like `list_targets` or `meho_status` have no verb suffix, so
+    `classify_op` alone would call them `other`.
+  - The exception: when `classify_op` says `credential_*` or
+    `audit_query`, that class wins. A declared class can never turn an
+    aggregate-only broadcast into a full one.
+  - With no declared class, the class is `classify_op(op_id)`.
+
+  Where it is used:
+  - **MCP `tools/call`** (`mcp/handlers.py`): the row and the event carry
+    the resolved class, and the event carries the row's `op_id` (the tool
+    name, or the `audit_op_id` the handler bound). `call_operation` keeps
+    `tool_call` on both; only the redaction detail comes from the inner op.
+    `resources/read` rows carry `op_id = mcp.resource.read` and `read`, like
+    their events.
+  - **Dispatch rows** (`operations/_audit.py`): the row's `op_id` is
+    always the op that ran, and the row stores its class. A route label
+    that is still bound while the op runs (for example `agent.run` /
+    `write` from an agent run) no longer replaces them.
+  - **HTTP rows** (`audit.py`): a route-declared class is stored as
+    resolved. Rows with no declared class keep none, and audit query
+    derives it the same way.
+
+  MEHO's own registry writes that run through the dispatcher
+  (`targets.register`, `topology.annotate` / `.unannotate` /
+  `.bulk_import` / `.create_node` / `.delete_node`) are pinned `write` in
+  `_WRITE_OPS`.
 
   `credential_read` and `audit_query` are *upgradeable*: a per-call or
   per-tenant override may surface full detail to an operator who already
@@ -216,43 +263,57 @@ Three layers, separated for traceability:
 
 ## Control flow
 
-### Write path (audit-derived)
-
-```
-HTTP request
-  → AuditMiddleware (audit.py)
-    → handler runs
-    → audit row INSERT commits
-    → publish_event(BroadcastEvent)        ← fail-open
-      → XADD meho:feed:{operator.tenant_id} {event: <json>} MAXLEN ~ 10000
-```
-
 ### Write path (agent-authored)
 
 ```
-MCP tools/call meho_broadcast_announce
+MCP tools/call meho_broadcast_announce   (REST: POST /api/v1/broadcast/announce)
   → _handler_announce (mcp/tools/broadcast.py)
+    → resolve_agent_admission(operator)  (auth/agent_admission.py, #3736)
+      → not a trusted agent → AgentIdentityRequiredError
+           → MCP -32602, error.data.code = "agent_identity_required" (REST 403)
     → enforce_announce_rate_limit(tenant_id, principal_sub)  ← fail-loud
       → (skipped when broadcast_announce_rate_per_minute == 0)
       → MULTI: INCR meho:ratelimit:announce:{tenant}:{sub}:{minute}
                EXPIRE …  60
       → count > limit → AnnounceRateLimitExceeded
            → McpRateLimitedError → JSON-RPC -32000 (retry-after in data)
-    → publish_agent_announcement(AgentAnnouncementEvent)  ← fail-loud
-      → INSERT agent_announcement (id = event.event_id, typed claims)  ← durable, first
-      → XADD meho:feed:{operator.tenant_id} {event: <json>} MAXLEN ~ 10000
-      → returns Valkey entry id verbatim
-    → returns {event_id, cursor} to the agent
-      (`event_id` is the real per-announcement UUID minted at publish —
-       equal to the durable row's id and to the event's `event_id` on
-       recent/watch reads, #2547; `cursor` is the stream entry id, the
-       canonical self-labelled name, #2479. The two are now distinct.)
+    → build_trusted_announcement(admission, …)  (broadcast/announcement_claims.py)
+      → stamps principal, owner, actor, run, work_ref; mints claim_id on
+        'start'; missing ttl_minutes → 30
+    → publish_agent_announcement(event, idempotency_key)
+      → claim rules + INSERT agent_announcement in one transaction  ← the record, fail-loud
+        (update/completion lock the claim's start row until commit and
+         look the retry key up under that lock;
+         known retry key → replay the stored step, no INSERT)
+        → UPDATE agent_announcement_sequence SET last_seq = last_seq + 1
+            RETURNING last_seq  ← row's seq; locks the tenant counter until commit (#3748)
+      → SELECT agent_announcement ... FOR UPDATE  ← one delivery at a time per row
+        (stream_entry_id already set → nothing to deliver)
+      → one Lua script (deliver once):  ← fail-soft (#3748)
+          GET meho:announce:delivered:{tenant}:{event_id}  ← known → return it, no write
+          XADD meho:feed:{operator.tenant_id} {event: <json>} MAXLEN ~ 10000
+          SET meho:announce:delivered:{tenant}:{event_id} <entry id> EX <stream window>
+        (any error → rollback, log broadcast_announcement_delivery_pending,
+         delivery_pending=true)
+      → UPDATE agent_announcement SET stream_entry_id  ← delivery mark, fail-soft
+      → returns AnnouncementPublishResult(event, seq, stream_entry_id,
+         replayed, delivery_pending)
+    → returns {event_id, watch_checkpoint, delivery_pending, claim_id, phase,
+       owner_sub, admission, ttl_minutes, replayed, …} to the agent
+      (`event_id` is the per-announcement UUID minted at publish, equal to
+       the durable row's id and to `event_id` on recent/watch reads;
+       `watch_checkpoint` is a watch cursor just after this announcement.)
 ```
 
+See *Who can publish* below for the admission and claim rules.
+
 The durable INSERT runs **before** the `XADD` so the archive is never
-lost to a stream-side failure; both legs are fail-loud (a persistence or
-publish failure surfaces to the agent as JSON-RPC `-32603`, not a silent
-drop). See *Durable announcements* below.
+lost to a stream-side failure. A persistence failure surfaces to the
+agent as JSON-RPC `-32603` (nothing was stored). A stream failure after
+the commit is not an error: the agent gets `delivery_pending=true`,
+readers already see the announcement, and a retry with the same
+`idempotency_key` finishes the stream write without a second row. See
+*Durable announcements* and *Archive order and cursors* below.
 
 The rate limit (G6.5-T6 #2546) is a per-`(tenant, principal)`
 fixed-window counter (the canonical Redis `INCR` rate-limiter pattern)
@@ -270,85 +331,14 @@ session preamble as a static band (`BROADCAST_DISCIPLINE_BAND` in
 `conventions/preamble.py`, #2546) so agents receive it without relying
 on the optional consumer onboarding template.
 
-### Read path (SSE)
+### Read path (SSE and UI history)
 
-```
-GET /api/v1/feed (Bearer JWT)
-  → require_role(OPERATOR) gate
-  → _validate_cursor_or_400(_resolve_cursor(Last-Event-Id, since))
-  → _feed_generator(operator, cursor, op_class, principal, target)
-    [prelude — only when cursor == "$"]
-      → XREVRANGE meho:feed:{tenant_id} + - COUNT 50
-      → yield each entry as `event: broadcast` frame (chronological)
-      → advance cursor to last entry id
-    [live-tail loop]
-      → XREAD BLOCK 30000 COUNT 20 meho:feed:{tenant_id} {cursor}
-      → yield each surviving entry as `event: broadcast` frame
-      → heartbeat on outbound silence ≥ 30s
-```
-
-**Union validation (#2549).** `_process_entries` peeks the wire `kind`
-discriminator (`select_event_model`, shared with the XRANGE `parse_entry`)
-and validates each entry against `BroadcastEvent` *or*
-`AgentAnnouncementEvent`, so **both** audit-driven operations and
-agent-authored announcements ride the SSE feed as first-class
-`event: broadcast` frames. Before #2549 the generator validated only
-`BroadcastEvent` and dropped announcements on the resulting
-`ValidationError` (`feed_skipped_malformed_event`) — the feed was
-write-only for humans. Genuinely malformed entries (undecodable JSON,
-invalid payload of either kind) still skip with that log. Filtering
-delegates to `event_matches`, so an `op_class` filter narrows to
-operations only (an announcement has no op-class), while `principal` /
-`target` match both kinds (`target` against an announcement's `target`
-or any `targets[]`). The surviving entry's raw wire JSON is emitted
-verbatim (unwrapped); SSE consumers escape/render the agent prose on
-their side. `/ui/broadcast/stream` imports `_process_entries`, so the
-same union validation covers the browser feed.
-
-### Read path (UI SSE bridge)
-
-`GET /ui/broadcast/stream` is the session-cookie-gated mirror of
-`/api/v1/feed`. The browser's `EventSource` can't set
-`Authorization: Bearer ...` headers, so the live broadcast page
-(`/ui/broadcast`) wires its `sse-connect` to this bridge, which
-authenticates via `UISessionMiddleware` and the BFF session cookie.
-Frame shape is byte-compatible with the API edge — the `_process_entries`
-helper, the cursor resolver, and the backlog prelude are imported
-verbatim from `api/v1/feed.py`. Since #2549 that shared helper
-union-validates both kinds, so announcements reach the browser feed too.
-
-**Rendering both kinds (#2549).** The shared row partial
-(`broadcast/_event_row.html`) branches on `ev.kind`: an operation renders
-the audit columns (`op_id` / `op_class` / `result_status` / `payload`); an
-announcement renders its agent-authored variant — a 📣 principal badge, a
-phase chip (`start` / `update` / `completion`), the `activity` as escaped
-quoted prose (bound via `x-text`, never `innerHTML`), the `target`/`targets`
-attribution, and a claim-metadata cell (`planned_op_class` · TTL ·
-`work_ref`, the #2544 structured fields). Rows key on `rowKey(ev)`
-(`event_id` → `cursor`/`id` → composite) because live announcement frames
-carry no durable id. The announcement row is not clickable — announcements
-have no `audit_id`, so `openDrawer` no-ops.
-
-**Adjacent stream consumers.** The dashboard recent-activity tray
-(`dashboard-feed.js`) and the connectors recent-ops card
-(`connectors-feed.js`) also subscribe to `/ui/broadcast/stream`. They are
-operation-activity surfaces (their row shape is the audit `BroadcastEvent`),
-so they **drop** announcement frames in `onSseMessage` — announcements
-render on the broadcast feed / history (their first-class home), not as
-blank operation rows.
-
-### Read path (UI history — Last 24h)
-
-`GET /ui/broadcast/history[?kind=]` renders the finite XRANGE replay pane
-via `list_recent_events_fail_soft` (fail-soft: a Valkey blip degrades to
-the empty state, not a 500). Since #2549 it renders **both** kinds through
-the same row partial; the former hard drop of announcement rows
-(`_is_audit_event`) became the optional `?kind=` filter
-(`operation` / `agent_announcement`, clamped by `_normalise_kind_filter`;
-absent renders both), surfaced as an "All / Operations / Announcements"
-button group that `hx-get`s the fragment back into `#broadcast-history`.
-The fail-soft path serialises via `_dump_event_plain` (unwrapped); the
-pane's HTML sink escapes announcement prose separately.
+See *Reader side* in the overview. `/ui/broadcast/stream` and
+`/api/v1/feed` share `api/v1/feed.announcement_feed_frames`; the UI
+history pane and the MCP resource share
+`archive_reader.latest_announcements`. The shared row partial
+(`broadcast/_event_row.html`) renders an announcement with its
+agent-authored text bound via `x-text`.
 
 ### Read path (dispatch-time target-activity advisory)
 
@@ -420,6 +410,122 @@ path, merged as a clobber-free union of distinct keys
    which *rejects* — rather than nudges — a caution-or-higher write-class
    op dispatched without an active claim in a tenant that opted in.
 
+## Who can publish (#3736)
+
+Only a trusted agent can publish an announcement. People keep read
+access (`meho_broadcast_recent`, `watch`, the UI) under their normal
+tenant role. `auth/agent_admission.py::resolve_agent_admission` decides
+from server-side facts only. There are two ways in:
+
+1. **A MEHO-hosted agent run.** The call runs inside a live hosted run.
+   The run id comes from `current_agent_run_id_var`, which only the agent
+   runtime sets. The `agent_run` row must be in the caller's tenant and
+   not finished (`pending`, `running` or `awaiting_approval`). The acting
+   agent comes from the delegation binding (`resolve_actor_sub`), and the
+   work reference comes from the run row.
+2. **A registered agent principal.** The verified token says
+   `principal_kind=agent`, and its client id names a registered,
+   not-revoked `agent_principal` row in the caller's tenant.
+
+Everything else gets the stable machine error `agent_identity_required`
+(MCP `-32602` with `error.data = {code, reason, remediation}`, REST
+`403` with the same `detail`). MEHO never guesses an agent from the
+transport, a person's login client, a CLI login, a flag, or a `run_id`
+the caller sent.
+
+**How to get a trusted identity.** Pick one:
+
+- Run the work as a MEHO-hosted agent run (`meho agent run …`). The
+  run's announcements are stamped automatically.
+- Register an agent principal: `meho agent-principal register <name>`
+  (a tenant admin does this). Then the agent calls MEHO with that
+  principal's client-credentials token.
+
+**What the server stamps.** The caller cannot set these fields:
+`principal_sub` (token `sub`), `owner_sub` (the acting agent of a hosted
+run, or the agent principal's `agent:<name>` client id), `actor_sub`,
+`run_id`, `admission` (`hosted_run` / `agent_principal`), and, inside a
+hosted run, `work_ref`. A `run_id` the caller sends is refused unless it
+equals the checked run (`server_stamped_field`); inside a hosted run a
+different `work_ref` is refused the same way. A registered agent
+principal may still declare its own `work_ref`.
+
+**Claims.** Each new announcement is one step of a claim:
+
+| Step | Needs | What happens |
+|---|---|---|
+| `start` (default) | no `claim_id`; `idempotency_key` optional | The server mints a new `claim_id`. |
+| `update` | `claim_id` + `idempotency_key` | Continues an open claim. |
+| `completion` | `claim_id` + `idempotency_key` | Closes the claim. No more steps after this. |
+
+- A missing `ttl_minutes` becomes 30 (`TTL_DEFAULT_MINUTES`), inside the
+  existing 1..1440 bound.
+- Only the claim's owner can update or complete it. For a hosted run the
+  claim also stays with that run: another run of the same agent gets
+  `claim_not_owned`.
+- The `idempotency_key` is scoped to (tenant, owner). Sending the same
+  step again returns the first result with `replayed=true`; nothing new
+  is stored. The same key for a different step gets
+  `idempotency_key_reused`.
+- A retry also finishes a delivery that failed half-way. The row is
+  written first, then the stream. If the stream write fails, the caller
+  gets a success with `delivery_pending=true` (#3748) and the row keeps
+  `stream_entry_id = NULL`. The retry with the same key finds that row,
+  writes the stream entry with the stored ids, marks the row, and
+  returns `replayed=true` with `delivery_pending=false` and the same
+  `event_id` and `watch_checkpoint`. A `start` sent without a key cannot
+  be retried this way; its row stays in the archive (readers see it) and
+  only the stream wake-up is missing.
+- Overlapping requests never deliver a step twice. The stored row is
+  locked (`SELECT ... FOR UPDATE`) from the delivery check through the
+  stream write and the delivery mark, so a retry that overlaps the first
+  try waits, then sees the entry id and writes nothing. For `update` /
+  `completion` the retry key is looked up after the claim's start row is
+  locked, so a retry that waits behind the first copy of its step
+  replays it instead of getting `claim_completed`.
+- A retry after a lost delivery mark never writes a second entry either.
+  The stream write is one Lua script: it checks a per-event marker key
+  (`meho:announce:delivered:{tenant}:{event_id}`), runs the `XADD`, and
+  stores the new entry id in the marker, all in one step. If the first
+  try wrote the entry but the row mark failed, or the reply to the write
+  never came back, the row still says "not delivered"; the retry's script
+  then finds the marker, returns the known entry id without writing, and
+  the row is marked with it. The retry gets `replayed=true` and writes
+  nothing. The marker lives as long as the stream read window
+  (`broadcast_retention_hours`).
+- "Same step" means every field matches: `run_id`, `phase`, `activity`,
+  `target`, `targets`, `scope`, `planned_op_class`, `ttl_minutes`,
+  `work_ref`, and `claim_id` for `update` / `completion`. So a second
+  hosted run of the same agent that reuses a key gets
+  `idempotency_key_reused`, not the first run's claim.
+- Error codes (MCP `error.data.code`, REST `422` `detail.code`):
+  `claim_id_not_allowed`, `claim_id_required`, `idempotency_key_required`,
+  `server_stamped_field`, `claim_not_found`, `claim_not_owned`,
+  `claim_completed`, `idempotency_key_reused`.
+- The checks and the INSERT share one transaction. For `update` and
+  `completion` the claim's `start` row is locked (`SELECT ... FOR
+  UPDATE`) until commit, so two steps on one claim run one after the
+  other: an `update` that waits behind a `completion` sees the completion
+  row and gets `claim_completed`. Three partial unique indexes
+  (migration `0112`) back this up and also catch two requests that race
+  on the same retry key: one retry key per owner, one `start` per claim,
+  one `completion` per claim. The lock is a PostgreSQL feature; SQLite
+  (dev/test) drops it and relies on the indexes. The PostgreSQL test is
+  `tests/integration/test_broadcast_claim_steps_pg.py`.
+
+A claim is **advisory**. It tells others what an agent intends. It is
+never a lock, never blocks another claim, and never blocks a write.
+
+**Legacy rows.** Rows written before #3736 have no `claim_id` /
+`owner_sub` (`AgentAnnouncementEvent.is_trusted_claim` is `False`). They
+stay readable as history, but no step can continue them: an `update` or
+`completion` naming such a row gets `claim_not_found`.
+
+**Not changed yet.** The read side still shows legacy entries the same
+way, `active_only` still treats a TTL-less legacy entry as active, and
+the opt-in announce gate still asks the caller for a claim. Retiring the
+human announce gate and making reads use only trusted claims is #3762.
+
 ## Durable announcements (#2547)
 
 The Valkey stream is the hot real-time path but not durable: it is
@@ -434,29 +540,29 @@ had no durable home until T2.
 `db/models.py::AgentAnnouncement`) keyed on the event's minted UUID
 (`event_id`), persisting the typed claim fields (T1 #2544) and lineage.
 The row is written **before** the `XADD` so a stream-side failure never
-costs the durable record; both legs are fail-loud. Columns: `id` (UUID
+costs the durable record; the archive leg is fail-loud, the stream leg
+fail-soft (`delivery_pending`, #3748). The `XADD` runs with
+the row locked (`SELECT ... FOR UPDATE`), so only one request delivers a
+stored step, and inside one Lua script with a per-event marker key, so a
+retry after a lost delivery mark or a lost reply finds the entry instead
+of writing it again. After a successful `XADD` one UPDATE in the same
+transaction sets `stream_entry_id` (the delivery mark, fail-soft: a
+failure there only logs a warning, because the announcement is already
+delivered; the next retry marks the row).
+Columns: `id` (UUID
 PK), `tenant_id` (FK), `principal_sub`, `activity`, `target`, `scope`,
 `targets` (JSONB), `phase`, `planned_op_class`, `ttl_minutes`,
-`work_ref`, `run_id`, `created_at` (the event's `ts`). Indexes:
+`work_ref`, `run_id`, `created_at` (the event's `ts`), plus the trusted
+claim columns from migration `0112` (#3736): `claim_id`, `owner_sub`,
+`actor_sub`, `admission`, `idempotency_key`, `stream_entry_id`, plus
+`seq` from migration `0114` (#3748). Indexes:
 `(tenant_id, created_at DESC)` (recent backfill + prune) and
 `(tenant_id, work_ref)` (filter). This is the split Kubernetes draws
 between its bounded Events TTL and the durable records it expects
 elsewhere.
 
-**Recent DB backfill.** `meho_broadcast_recent` reads the archive when
-the requested window reaches before the stream's oldest surviving entry
-(`_backfill_recent_from_db` in `broadcast/history.py`). The stream
-`XRANGE` from the window start defines the covered range; the gap
-`[window_start, oldest_stream_entry)` (or the whole window when the
-stream is empty — the restart / `FLUSHALL` shape) is filled from the DB,
-deduped against the stream page by `event_id` and bounded by the
-remaining page budget. Backfilled rows carry `event_id` but a **null**
-`cursor` / `id`. Only wall-clock windows (default or ISO `cursor`)
-backfill; a stream-cursor `cursor` is forward pagination and skips it.
-`op_class` / `actor_sub` filters short-circuit (no announcement carries
-either). `watch` does **not** backfill — it is a forward live-tail poll
-for events strictly past a cursor, which has no archive dimension. Deep
-DB-only pagination is out of scope (T5 owns deep-history UX).
+**Stream backfill (removed in #3758).** Every reader now reads the archive
+directly, so no reader backfills a stream window from the archive.
 
 **Retention prune.** `broadcast/announcement_retention.py` is a
 lifespan-owned weekly `asyncio` loop (a deliberate copy of the
@@ -473,6 +579,133 @@ Helm knobs: `broadcastAnnouncement.{retentionDays,pruneIntervalSeconds,pruneEnab
 (env `BROADCAST_ANNOUNCEMENT_*`). This is distinct from
 `broadcast_retention_hours` (the *stream* read-window heuristic, a
 different substrate).
+
+**When it runs.** The interval (`BROADCAST_ANNOUNCEMENT_PRUNE_INTERVAL_SECONDS`, default 7 days) counts
+from the **last recorded run**, not from pod start. So a pod restart (an
+update, a crash, a node drain) does not start the interval again:
+
+- After a pod starts, the prune waits one minute, so it does not run in
+  the middle of startup.
+- Then it reads the time of its newest `broadcast.announcement.prune` audit row within the
+  last interval. A row counts only if it has the system tenant id,
+  `method='INTERNAL'`, `operator_sub='system:broadcast-announcement-retention'` and that path. Every run
+  writes this row, also when it deleted 0 rows.
+- If there is no such row, it runs at once. Otherwise it waits only for
+  the rest of the interval. After that it runs once per interval.
+- A last-run time in the future (a pod with a fast clock wrote it) counts
+  as "due now". If the read fails, it logs `broadcast_announcement_retention_last_run_read_failed`
+  and runs at once. The wait is never longer than one interval.
+- Each start logs `broadcast_announcement_retention_scheduled` with `last_run_at` and
+  `next_run_in_seconds`, so you can check the schedule after a restart.
+- With retention days set to `0` no row is written, so the no-op
+  heartbeat runs about one minute after each start.
+
+The shared steps live in `backend/src/meho_backplane/loop_schedule.py`.
+
+## Archive order and cursors (#3748)
+
+The archive is the record; the stream is only a wake-up for watchers.
+`meho_broadcast_recent`, `meho_broadcast_watch` and
+`GET /api/v1/broadcast/recent` read announcements from
+`agent_announcement` by a per-tenant sequence number, `seq`
+(`broadcast/archive_reader.py`).
+
+**Commit-order sequence.** `broadcast/archive_sequence.py`. Each tenant
+has one `agent_announcement_sequence` row (`tenant_id`, `last_seq`,
+migration `0114`). The publisher runs `UPDATE ... SET last_seq =
+last_seq + 1 RETURNING last_seq` in the same transaction as the
+announcement INSERT, right before it. The UPDATE locks the counter row
+until commit or rollback, so:
+
+- a second writer in the same tenant waits and gets the next number
+  only after the first one is done: numbers follow commit order;
+- a rollback (including a lost retry-key race) gives the number back:
+  committed numbers have no holes;
+- a reader that has seen number N has seen every smaller number,
+  because those committed earlier. "The highest number I have seen" is
+  a safe resume point.
+
+The lock only orders writes. It is held for the INSERT and the commit,
+never across a Valkey call, and it is not a lease, a claim, or a way to
+stop competing work. A unique index `(tenant_id, seq)` backs it up. The
+first announcement of a tenant creates the counter row (`INSERT ... ON
+CONFLICT DO NOTHING`). Existing rows were numbered 1..n per tenant by
+the migration, oldest first. `seq` is nullable only so an older pod
+can still write during a rolling upgrade. Before every scan, the reader
+gives such rows the next numbers, oldest first, under the same counter
+lock (`number_unnumbered_rows`), so they show up as new announcements
+instead of staying invisible. The lock order is the same everywhere:
+announcement rows first, the counter second. A claim step locks the
+claim's start row and then takes the counter; the numbering reader
+locks the rows it will number (`SELECT ... FOR UPDATE`, oldest first)
+and then takes the counter. Nobody holds the counter while waiting for
+a row, so a reader and a claim step on the same start row take turns
+instead of waiting for each other. The PostgreSQL lock tests are in
+`tests/integration/test_broadcast_archive_cursor_pg.py`.
+
+**Two cursor kinds.** `broadcast/archive_cursor.py`. Both are opaque,
+versioned by prefix, and bound to the tenant (a cursor from another
+tenant is refused with `-32602`):
+
+| Cursor | Prefix | Holds | Used by |
+|---|---|---|---|
+| History page cursor | `h1.` | the fixed upper end of one read, the last scanned `seq`, the window start | recent `next_cursor` → recent `cursor` |
+| Watch checkpoint | `w1.` | "seen everything up to `seq`" | recent `watch_checkpoint`, announce ack `watch_checkpoint`, watch `cursor` / `next_cursor` |
+
+An old Valkey stream id (`<ms>-<seq>`) as `cursor` is refused with a
+hint.
+
+**recent.** Takes the tenant's current `last_seq` first (the read's
+upper end), then pages rows `after < seq <= upper` in `seq` order,
+inside the time window (default 30 minutes; an ISO-8601 `cursor` starts
+it earlier). It scans at most `limit` rows, then filters. It returns
+`{events, next_cursor, watch_checkpoint, gap}`: `next_cursor` continues
+the same fixed view (`null` at the end), and `watch_checkpoint` is the
+upper end, so a watcher that starts there misses nothing after the
+read. The checkpoint is set even when the archive is empty or the
+filter hides every row.
+
+**watch.** Scans rows after the checkpoint (up to `WATCH_SCAN_LIMIT` =
+100). It returns at once when a row matches, the scan page is full, or
+there is a gap. Otherwise it waits and scans again after each wake-up
+and at the timeout. Before each scan it notes the stream's newest id
+(`XREVRANGE + - COUNT 1`), then waits with `XREAD BLOCK` from that id, so
+an announcement that commits during the scan still wakes it. Operation
+events on the same stream cause harmless extra scans. If Valkey fails,
+the call scans every `WATCH_POLL_SECONDS` (5 s) instead, until the
+timeout. `next_cursor` always moves past every scanned row, also when
+the filter hides them; event ids are de-duplicated within a call, and a
+reconnect with the returned checkpoint never repeats an event.
+
+**Gaps.** The retention prune deletes rows by `created_at` but never
+the counter, and numbers have no holes. So every scan knows how many
+rows it should have found between its start and its end (the last row
+of a full page, or the upper end), and the difference to the rows it did
+find is the number of announcements that are gone. The count comes from
+the scanned rows themselves, not from a separate "oldest kept row" query.
+That way a prune that lands between the high-water mark read and the row
+scan is still counted, and so is a row pruned from the middle of the
+range: a row's `created_at` is set before it takes its number, so the
+time-based prune can remove number 2 and keep 1 and 3. The read says so
+instead of claiming to be complete:
+
+- `{"reason": "retention_trimmed", "missed_events": N, ...}` — a watch
+  checkpoint, a history page cursor, or a fresh window whose scanned
+  range is missing N rows.
+- `{"reason": "retention_trimmed", "missed_events": null, ...}` — a
+  fresh recent window, or an SSE feed `since=<time>`, that starts before
+  `broadcast_announcement_retention_days` while rows were pruned. The
+  feed sends this frame before the first replayed announcement.
+- `{"reason": "checkpoint_ahead", ...}` — a watch checkpoint above the
+  tenant's current `last_seq` (for example after a database restore);
+  watching restarts at the current end.
+
+`gap` is `null` otherwise.
+
+**Not changed yet.** The SSE feed (`/api/v1/feed`, `meho broadcast
+watch`), the UI pane, and the `meho://tenant/{id}/feed` resource still
+read the stream, and audit-driven operation events are still published
+there. Moving those consumers is #3758.
 
 ## Dependencies
 
@@ -507,6 +740,9 @@ different substrate).
   `broadcast_agent_announcements_total{phase}`.
 
 ## Known issues
+
+The fixed issues below describe the stream-based SSE reader that #3758
+replaced with the archive reader; they stay as history.
 
 ### `claude-rdc-hetzner-dc#789` N1 — fresh SSE connections die at ~5 s with a spurious error frame (FIXED v0.9.0, #1354)
 

@@ -22,13 +22,19 @@ handles upsert, body-hash dedupe, embedding pipeline, and
 Scope
 -----
 
-Five composites ship. ``gh.composite.pr_status_summary`` (T4 #1224) is
-read-only. #2081 adds four more: ``gh.composite.project_view`` (read),
+Ten composites ship. ``gh.composite.pr_status_summary`` (T4 #1224) and
+``gh.composite.repo_view`` (one repository, read) are read-only.
+``gh.composite.repo_create`` (one repository in an organization) is a
+``caution`` write that waits for approval (``requires_approval=True``). #2081
+adds four more: ``gh.composite.project_view`` (read),
 ``gh.composite.project_item_add`` /
 ``gh.composite.project_item_set_field`` (Projects-v2 GraphQL writes),
 and ``gh.composite.sub_issue_add`` (sub-issue linkage REST write) --
 together the "file a board-complete ticket without a gh CLI fallback"
-surface.
+surface. The ``git`` group adds ``gh.composite.git_ref_view`` and
+``gh.composite.git_tree_view`` (reads) and
+``gh.composite.branch_commit_files`` (a ``dangerous`` write that always
+waits for approval; see :mod:`._git`).
 
 The composite-helper's defaults are ``safety_level="dangerous"`` +
 ``requires_approval=True`` (suited to high-blast-radius write
@@ -63,8 +69,17 @@ from meho_backplane.connectors.github.composites._board import (
     project_item_set_field_composite,
     project_view_composite,
 )
+from meho_backplane.connectors.github.composites._git import (
+    branch_commit_files_composite,
+    git_ref_view_composite,
+    git_tree_view_composite,
+)
 from meho_backplane.connectors.github.composites._read import (
     pr_status_summary_composite,
+    repo_view_composite,
+)
+from meho_backplane.connectors.github.composites._repos import (
+    repo_create_composite,
 )
 from meho_backplane.connectors.github.composites._sub_issues import (
     sub_issue_add_composite,
@@ -78,8 +93,23 @@ from meho_backplane.connectors.github.composites.schemas import (
     PROJECT_ITEM_SET_FIELD_RESPONSE_SCHEMA,
     PROJECT_VIEW_PARAMETER_SCHEMA,
     PROJECT_VIEW_RESPONSE_SCHEMA,
+    REPO_CREATE_PARAMETER_SCHEMA,
+    REPO_CREATE_RESPONSE_SCHEMA,
+    REPO_VIEW_PARAMETER_SCHEMA,
+    REPO_VIEW_RESPONSE_SCHEMA,
     SUB_ISSUE_ADD_PARAMETER_SCHEMA,
     SUB_ISSUE_ADD_RESPONSE_SCHEMA,
+)
+from meho_backplane.connectors.github.composites.schemas_git import (
+    BRANCH_COMMIT_FILES_LLM_INSTRUCTIONS,
+    BRANCH_COMMIT_FILES_PARAMETER_SCHEMA,
+    BRANCH_COMMIT_FILES_RESPONSE_SCHEMA,
+    GIT_REF_VIEW_LLM_INSTRUCTIONS,
+    GIT_REF_VIEW_PARAMETER_SCHEMA,
+    GIT_REF_VIEW_RESPONSE_SCHEMA,
+    GIT_TREE_VIEW_LLM_INSTRUCTIONS,
+    GIT_TREE_VIEW_PARAMETER_SCHEMA,
+    GIT_TREE_VIEW_RESPONSE_SCHEMA,
 )
 from meho_backplane.operations.typed_register import register_composite_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
@@ -132,6 +162,23 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "database id. The sub-issue must share the parent's repository "
         "owner."
     ),
+    "repos": (
+        "Use for questions about one repository as a whole: does it "
+        "exist, who owns it, is it public or private, what is its "
+        "default branch, is it archived, how many issues are open, when "
+        "was the last push, and what may the connector's identity do in "
+        "it. Start here before you read branches, files, issues or pull "
+        "requests of a repository you have not seen in this session. "
+        "Use repo_create to make a new repository in an organisation; it "
+        "waits for approval and changes nothing when the name exists."
+    ),
+    "git": (
+        "Use to work with the git objects of a repository: which commit a "
+        "branch or tag points to (git_ref_view), the files and folders of a "
+        "branch, tag or commit (git_tree_view), and writing text files to a "
+        "branch as one new commit (branch_commit_files, waits for approval, "
+        "never forces). Start with git_ref_view, then git_tree_view."
+    ),
 }
 
 
@@ -155,6 +202,7 @@ class _CompositeSpec(NamedTuple):
     tags: list[str]
     safety_level: Literal["safe", "caution", "dangerous", "destructive"]
     requires_approval: bool
+    llm_instructions: dict[str, Any] | None = None
 
 
 _COMPOSITES: tuple[_CompositeSpec, ...] = (
@@ -265,6 +313,146 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="caution",
         requires_approval=False,
     ),
+    _CompositeSpec(
+        op_id="gh.composite.repo_view",
+        handler=repo_view_composite,
+        summary=(
+            "Read one repository: owner, visibility, default branch, topics, "
+            "open issues, permissions."
+        ),
+        description=(
+            "Reads one repository with GET /repos/{owner}/{repo} and returns a "
+            "short summary: name, owner, visibility, default branch, archived "
+            "flag, topics, open issue count, last push time, and what the "
+            "connector's identity may do there (read, write, admin). Read-only."
+        ),
+        parameter_schema=REPO_VIEW_PARAMETER_SCHEMA,
+        response_schema=REPO_VIEW_RESPONSE_SCHEMA,
+        group_key="repos",
+        tags=["composite", "read-only", "repos"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions={
+            "when_to_call": (
+                "Call when you need the basic facts of one repository: whether it "
+                "exists and is reachable, its owner and visibility, its default "
+                "branch, whether it is archived, how many issues are open, when it "
+                "was last pushed to, and whether the connector may read, write or "
+                "administer it."
+            ),
+            "output_shape": (
+                "{name, full_name, owner, owner_type, visibility, default_branch, "
+                "archived, topics: [string], open_issues_count, pushed_at, "
+                "permissions: {read, write, admin} | null}. open_issues_count "
+                "counts open issues and open pull requests together."
+            ),
+            "next_step": (
+                "A 404 means the repository does not exist or the connector's "
+                "identity cannot see it. Use default_branch as the branch for "
+                "later reads of files or commits. If permissions.write is false, "
+                "do not plan a write to this repository."
+            ),
+        },
+    ),
+    _CompositeSpec(
+        op_id="gh.composite.repo_create",
+        handler=repo_create_composite,
+        summary=(
+            "Create a repository in an organisation: name, description, visibility, "
+            "optional README."
+        ),
+        description=(
+            "Creates one repository in an organisation with POST /orgs/{org}/repos. "
+            "Private unless visibility is 'public'. With with_readme, GitHub makes a "
+            "first commit. When a repository with that name already exists, nothing is "
+            "written and status is 'unchanged'. A change that waits for approval."
+        ),
+        parameter_schema=REPO_CREATE_PARAMETER_SCHEMA,
+        response_schema=REPO_CREATE_RESPONSE_SCHEMA,
+        group_key="repos",
+        tags=["composite", "write", "repos"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions={
+            "when_to_call": (
+                "Call when a person asks for a new repository in a GitHub organisation. "
+                "Do not call to change an existing repository; use repo_view first if "
+                "you are not sure the name is free."
+            ),
+            "preconditions": (
+                "The connector's identity must be allowed to create repositories in "
+                "the organisation. Pass visibility 'public' only when the person asked "
+                "for a public repository by name; the default is private. The call "
+                "waits until an approver accepts it."
+            ),
+            "output_shape": (
+                "{status: 'created' | 'unchanged', name, full_name, owner, url, "
+                "visibility, default_branch, guidance}. 'unchanged' means a repository "
+                "with that name already exists and nothing was written."
+            ),
+            "next_step": (
+                "On 'created', tell the person the url and default_branch. On "
+                "'unchanged', say the name is taken and ask whether to use the existing "
+                "repository or pick another name. A 403 means the identity may not "
+                "create repositories there; a 422 means GitHub rejected the name."
+            ),
+        },
+    ),
+    _CompositeSpec(
+        op_id="gh.composite.git_ref_view",
+        handler=git_ref_view_composite,
+        summary="Read the commit a branch or tag points to.",
+        description=(
+            "Reads GET /repos/{owner}/{repo}/git/ref/{ref} for a branch or tag "
+            "name. MEHO builds the ref (heads/<name> or tags/<name>) itself. "
+            "A missing branch or tag answers found=false, not an error. "
+            "Read-only."
+        ),
+        parameter_schema=GIT_REF_VIEW_PARAMETER_SCHEMA,
+        response_schema=GIT_REF_VIEW_RESPONSE_SCHEMA,
+        group_key="git",
+        tags=["composite", "read-only", "git", "ref", "branch", "tag"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=GIT_REF_VIEW_LLM_INSTRUCTIONS,
+    ),
+    _CompositeSpec(
+        op_id="gh.composite.git_tree_view",
+        handler=git_tree_view_composite,
+        summary="List the files and folders of a branch, tag, commit or tree.",
+        description=(
+            "Reads GET /repos/{owner}/{repo}/git/trees/{tree_sha}, with "
+            "recursive=1 when asked, and returns each entry's path, type, mode, "
+            "SHA-1 and size. A long list comes back behind a result handle. "
+            "Read-only."
+        ),
+        parameter_schema=GIT_TREE_VIEW_PARAMETER_SCHEMA,
+        response_schema=GIT_TREE_VIEW_RESPONSE_SCHEMA,
+        group_key="git",
+        tags=["composite", "read-only", "git", "tree", "files"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=GIT_TREE_VIEW_LLM_INSTRUCTIONS,
+    ),
+    _CompositeSpec(
+        op_id="gh.composite.branch_commit_files",
+        handler=branch_commit_files_composite,
+        summary="Write text files to a branch as one new commit (waits for approval).",
+        description=(
+            "Reads the branch, creates a tree with the files on top of its "
+            "commit, creates the commit, and moves the branch in one update that "
+            "GitHub applies only while the branch is still at base_sha, never "
+            "with force. Otherwise the call stops with precondition_failed. "
+            "Every call waits for approval."
+        ),
+        parameter_schema=BRANCH_COMMIT_FILES_PARAMETER_SCHEMA,
+        response_schema=BRANCH_COMMIT_FILES_RESPONSE_SCHEMA,
+        group_key="git",
+        tags=["composite", "write", "git", "commit", "branch", "files"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=BRANCH_COMMIT_FILES_LLM_INSTRUCTIONS,
+    ),
 )
 
 
@@ -309,5 +497,6 @@ async def register_github_composite_operations(
             tags=spec.tags,
             safety_level=spec.safety_level,
             requires_approval=spec.requires_approval,
+            llm_instructions=spec.llm_instructions,
             embedding_service=embedding_service,
         )

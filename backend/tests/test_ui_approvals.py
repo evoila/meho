@@ -66,6 +66,7 @@ from meho_backplane.db.models import (
     Target,
     Tenant,
 )
+from meho_backplane.operations._errors import result_already_resumed
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import (
     SESSION_COOKIE_NAME,
@@ -199,6 +200,8 @@ def _seed_request(
     decided_at: datetime | None = None,
     work_ref: str | None = None,
     expires_at: datetime | None = None,
+    resumed_at: datetime | None = None,
+    resume_result: dict[str, object] | None = None,
 ) -> uuid.UUID:
     """Insert one ``approval_request`` row; return its id."""
     rid = request_id or uuid.uuid4()
@@ -233,6 +236,8 @@ def _seed_request(
                     work_ref=work_ref,
                     created_at=datetime(2026, 6, 15, 12, 0, tzinfo=UTC),
                     expires_at=stored_expires_at,
+                    resumed_at=resumed_at,
+                    resume_result=resume_result,
                 ),
             )
         return rid
@@ -1207,8 +1212,8 @@ def test_reject_rejected_without_csrf_token() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_app_shell_renders_bell_and_sse_filter() -> None:
-    """Every console page carries the approvals bell + the op_class=approval SSE sink."""
+def test_app_shell_renders_bell_with_polled_badges() -> None:
+    """Every console page carries the bell; both badges refresh on one body event (#3758)."""
     _seed_tenant(_TENANT_A, "tenant-a")
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
 
@@ -1225,8 +1230,22 @@ def test_app_shell_renders_bell_and_sse_filter() -> None:
     assert 'data-icon="bell"' in body
     # The badge target seeds itself from the live count endpoint.
     assert 'hx-get="/ui/approvals/badge"' in body
-    # The notifications bell subscribes to the SSE bridge filtered to approvals.
-    assert 'sse-connect="/ui/broadcast/stream?op_class=approval"' in body
+    # No Broadcast SSE subscription: the bell polls the badge endpoint.
+    assert "/ui/broadcast/stream" not in body
+    assert "sse-before-message" not in body
+    # Both badges (mobile + sidebar) re-fetch on the one body event the
+    # shell timer dispatches, with no inline htmx filter expression.
+    for prefix in ("mobile", "sidebar"):
+        assert f'id="{prefix}-approvals-badge"' in body
+    assert (
+        body.count(
+            'hx-trigger="load, meho:approval-badge-poll from:body, meho:approval-bump from:body"'
+        )
+        == 2
+    )
+    assert "[document" not in body
+    # Exactly one bell controller root, so exactly one timer per page.
+    assert body.count('x-data="approvalsBell()"') == 1
     # The app-shell controller script is loaded on every page.
     assert "/ui/static/src/app/approvals-bell.js" in body
 
@@ -2121,3 +2140,279 @@ def test_internal_params_never_reach_the_history_view() -> None:
         assert "flavor" not in body
         assert "params_hash" not in body
         assert "0" * 64 not in body
+
+
+# ---------------------------------------------------------------------------
+# #3692 -- delegated decisions: the approver acted on another human's
+# written instruction. The console shows who instructed, their words, and
+# the refs; an incomplete trailer block is refused and the row stays pending.
+# ---------------------------------------------------------------------------
+
+_DELEGATED_REASON = (
+    "Denied after the change review.\n"
+    "\n"
+    "Instructed-by: lead@example.com\n"
+    'Instruction: "deny this one, wrong cluster"\n'
+    "Refs: #12, CHG-9"
+)
+
+
+def _post_console_decision(rid: uuid.UUID, action: str, reason: str) -> tuple[str, int]:
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, new_callable=AsyncMock, return_value=_dispatch_result()),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/{action}",
+                data={"reason": reason},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+    return response.text, response.status_code
+
+
+def test_delegated_reject_renders_delegation_on_outcome_and_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delegated deny shows the delegation on the outcome card and the decided modal."""
+    monkeypatch.setenv("APPROVAL_ALLOW_DELEGATED_DECISION", "true")
+    get_settings.cache_clear()
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+
+    body, status_code = _post_console_decision(rid, "reject", _DELEGATED_REASON)
+
+    assert status_code == 200, body
+    assert "Request denied" in body
+    assert 'data-testid="approval-delegation"' in body
+    assert "Instructed by" in body
+    assert "lead@example.com" in body
+    assert "deny this one, wrong cluster" in body
+    assert "#12, CHG-9" in body
+
+    # The decided modal reads the block back off the decision audit row.
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub="op-99")
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            detail = client.get(f"/ui/approvals/{rid}")
+
+    assert detail.status_code == 200, detail.text
+    assert 'data-testid="approval-delegation"' in detail.text
+    assert "lead@example.com" in detail.text
+    assert "deny this one, wrong cluster" in detail.text
+    assert "#12, CHG-9" in detail.text
+
+
+def test_ordinary_decided_modal_has_no_delegation_block() -> None:
+    """A decided row with a plain reason renders no delegation block."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+
+    body, status_code = _post_console_decision(rid, "reject", "too risky")
+
+    assert status_code == 200, body
+    assert 'data-testid="approval-delegation"' not in body
+
+
+@pytest.mark.parametrize("action", ["approve", "reject"])
+def test_delegated_reason_missing_instruction_is_refused_in_modal(action: str) -> None:
+    """An ``Instructed-by:`` reason without ``Instruction:`` is a 422 banner; row stays pending."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+
+    body, status_code = _post_console_decision(
+        rid, action, "ok\n\nInstructed-by: lead@example.com\nRefs: #12"
+    )
+
+    assert status_code == 200, body
+    assert "422" in body
+    assert "Instruction" in body
+    assert "Request approved" not in body
+    assert "Request denied" not in body
+    assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
+
+
+@pytest.mark.parametrize("action", ["approve", "reject"])
+def test_delegated_decision_on_production_is_refused_in_modal(action: str) -> None:
+    """#3693: setting off, a valid delegated decision is a 403 banner; row stays pending."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+
+    body, status_code = _post_console_decision(rid, action, _DELEGATED_REASON)
+
+    assert status_code == 200, body
+    assert "403" in body
+    assert "someone else&#39;s instruction" in body
+    assert "Request approved" not in body
+    assert "Request denied" not in body
+    assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
+
+
+def test_pending_modal_reason_field_is_multiline() -> None:
+    """The shared reason field is a textarea, so a pasted trailer keeps its line breaks.
+
+    A single-line text input joins the ``Instructed-by:`` / ``Instruction:`` /
+    ``Refs:`` lines on paste, and the parser then records an ordinary reason
+    with no delegation. Both confirm forms must still pull the field by id.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    before, after = body.split('id="meho-approval-reason"')
+    assert before.rsplit("<", 1)[1].strip().startswith("textarea")
+    reason_field = after.split(">")[0]
+    assert 'name="reason"' in reason_field
+    assert 'maxlength="2000"' in reason_field
+    assert all('name="reason"' not in tag.split(">")[0] for tag in body.split("<input")[1:])
+    assert body.count('hx-include="#meho-approval-reason"') == 2
+
+
+# ---------------------------------------------------------------------------
+# Approved, but the run failed (#3543)
+# ---------------------------------------------------------------------------
+
+_RUN_AUDIT_ID = "44444444-4444-4444-4444-444444444444"
+
+#: The stored envelope of a run that a connector error ended.
+_FAILED_ENVELOPE: dict[str, object] = {
+    "status": "error",
+    "op_id": "vsphere.vm.create",
+    "error": "connector_error: RuntimeError",
+    "duration_ms": 7.0,
+    "audit_id": _RUN_AUDIT_ID,
+    "extras": {"error_code": "connector_error", "exception_message": "secret detail"},
+}
+
+
+def _seed_ran_request(*, op_id: str, resume_result: dict[str, object]) -> uuid.UUID:
+    return _seed_request(
+        tenant_id=_TENANT_A,
+        op_id=op_id,
+        status_value=ApprovalRequestStatus.APPROVED.value,
+        reviewed_by=_REVIEWER_SUB,
+        decided_at=datetime(2026, 6, 16, 9, 0, tzinfo=UTC),
+        resumed_at=datetime(2026, 6, 16, 9, 0, 1, tzinfo=UTC),
+        resume_result=resume_result,
+    )
+
+
+def test_history_tells_a_failed_run_from_a_run_that_landed() -> None:
+    """The Approved tab shows a run badge next to the ``approved`` pill."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_ran_request(op_id="failed.op", resume_result=_FAILED_ENVELOPE)
+    _seed_ran_request(op_id="landed.op", resume_result={"status": "ok", "op_id": "landed.op"})
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?tab=approved", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-result-state="failed"' in body
+    assert "run failed" in body
+    assert 'data-result-state="executed"' in body
+    assert "ran OK" in body
+
+
+def test_detail_modal_renders_the_failed_run() -> None:
+    """The decided modal names the failed run, its error code and audit row."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_ran_request(op_id="failed.op", resume_result=_FAILED_ENVELOPE)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-testid="approval-outcome"' in body
+    assert "alert-error" in body
+    assert "did not succeed" in body
+    assert "connector_error" in body
+    assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
+    # The free-text error detail stays on the owner-only /result read.
+    assert "secret detail" not in body
+
+
+def test_approve_whose_run_fails_shows_a_failed_card() -> None:
+    """An approve whose run errors does not render the plain success card."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    failed = SimpleNamespace(
+        status="error",
+        op_id="vsphere.vm.create",
+        audit_id=uuid.UUID(_RUN_AUDIT_ID),
+        extras={"error_code": "connector_vault_forbidden"},
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, AsyncMock(return_value=failed)),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/approve",
+                data={"reason": "looks safe"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Approved, but the run failed" in body
+    assert "Request approved" not in body
+    assert "connector_vault_forbidden" in body
+    assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
+
+
+def test_approve_already_resumed_elsewhere_shows_the_approved_card() -> None:
+    """Another resumer won the run claim: that is not a failed run."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    already = result_already_resumed("vsphere.vm.create", rid, 1.0)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, AsyncMock(return_value=already)),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/approve",
+                data={"reason": "looks safe"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Request approved" in body
+    assert "the run failed" not in body
+    assert 'data-testid="approval-outcome"' not in body

@@ -9,8 +9,7 @@ substrate (T1 #313). T3 (#315) layers CLI verbs over this
 surface; T4 (#316) layers the session-preamble assembler that
 reads through the same Pydantic shapes.
 
-G10.12-T0 (#1894): the CRUD + budget + history + pre-allocated-
-audit-id logic now lives in
+G10.12-T0 (#1894): the CRUD + budget + history logic now lives in
 :class:`~meho_backplane.conventions.service.ConventionsService` so the
 in-process console BFF (T1/T2 #1838) can reuse it without copying the
 handlers. These handlers are a thin HTTP shell: they bind the audit
@@ -41,13 +40,11 @@ future preamble assembly ("``kubectl apply --dry-run=server``
 discipline"). ``workflow`` / ``reference`` are not preamble-
 bound and exempt.
 
-Audit row + history row commit in the same transaction. The
-history row's ``audit_id`` soft-FK matches the chassis
-:class:`~meho_backplane.audit.AuditMiddleware` row's ``id`` --
-:class:`~meho_backplane.conventions.service.ConventionsService`
-pre-allocates the uuid (binding it onto the audit contextvar) and
-the middleware honours it; G8's audit-query path joins on that
-soft-FK for forensic queries.
+The convention write and its history row commit in the same
+transaction. The history row is the record of the edit (#3747): it
+carries ``change_kind`` and the request correlation id
+(``request_id``), not a link to the request wrapper row in
+``audit_log``. Rows written before #3747 keep their old ``audit_id``.
 
 Every route binds ``audit_op_id`` / ``audit_op_class`` /
 ``audit_slug`` contextvars before the DB probe so the audit row
@@ -132,13 +129,15 @@ def _not_found() -> HTTPException:
 
 
 def _over_budget_422(exc: OverBudgetError) -> HTTPException:
-    """Map the service's over-budget error to the 422 the wire contract names."""
+    """Map the service's over-budget error to the 422 the wire contract names.
+
+    The detail is the error's own message: it keeps the
+    ``exceeds preamble budget`` phrase and the ``estimated`` /
+    ``budget`` numbers that CLI callers match on.
+    """
     return HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-        detail=(
-            f"convention body exceeds preamble budget "
-            f"(estimated={exc.estimated}, budget={exc.budget})"
-        ),
+        detail=str(exc),
     )
 
 
@@ -307,9 +306,8 @@ async def create_convention(
 ) -> Convention:
     """Create one convention; writes one history row in the same transaction.
 
-    Sequence: budget 422 -> pre-allocate audit_id -> insert
-    convention + history rows -> 409 on duplicate ``(tenant_id,
-    slug)``. The CREATE history row has ``body_before=NULL``;
+    Sequence: budget 422 -> insert convention + history rows -> 409
+    on duplicate ``(tenant_id, slug)``. The CREATE history row has ``body_before=NULL``;
     ``body_after=body.body``.
     """
     structlog.contextvars.bind_contextvars(

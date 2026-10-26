@@ -33,7 +33,10 @@ the engine then redacts the full match span (group 0). Patterns capture
 the *value* shape, not the surrounding context, except for
 ``authorization_header`` where the redacted span is the whole
 ``Authorization: ...`` line because the header name itself is the
-operator-facing signal.
+operator-facing signal. A pattern that must look past variable-width
+context (which a Python look-behind cannot do) names the secret part
+``value``: the engine then replaces only that group and keeps the rest
+of the match in the output (``bind_key_secret``).
 
 **False-positive posture.** Tier-1 is the cheap layer. It will
 *occasionally* over-redact a benign UUID-shaped or FQDN-shaped string,
@@ -142,6 +145,18 @@ _JWT = re.compile(
 # ``password: 'hunter2$plus#tail'`` is redacted whole instead of being
 # truncated at the first out-of-class byte -- the label requirement is
 # what keeps the false-positive posture, not the value alphabet.
+#
+# A value that already is a ``[REDACTED:<name>]`` placeholder is not a
+# secret: an earlier pass (the engine itself, or a read that checks a
+# file before it returns it) wrote it. Matching it again would take the
+# label away with it (``password: [REDACTED:param_name]`` would become
+# ``[REDACTED:api_key]``), so the look-ahead leaves it alone. Only a
+# complete placeholder is skipped: ``[REDACTED:``, a name, ``]`` and
+# then the end of the value (whitespace, a quote or the end of the
+# blob). A value that only starts like one (``[REDACTED:made-up``) or
+# that goes on after the ``]`` (``[REDACTED:x]made-up``) is a value
+# like any other and is redacted whole.
+_NOT_A_PLACEHOLDER: Final[str] = r"(?!\[REDACTED:[^\]\s'\"]+\](?!" + _VALUE_CHARS + "))"
 _API_KEY = re.compile(
     r"\b(?:"
     r"api[_-]?key"
@@ -155,7 +170,7 @@ _API_KEY = re.compile(
     r"|client[_-]?secret"
     r"|token"
     r")"
-    r"\s*[=:]\s*['\"]?" + _VALUE_CHARS + "{8," + str(_VALUE_MAX) + r"}['\"]?",
+    r"\s*[=:]\s*['\"]?" + _NOT_A_PLACEHOLDER + _VALUE_CHARS + "{8," + str(_VALUE_MAX) + r"}['\"]?",
     re.IGNORECASE,
 )
 
@@ -167,6 +182,41 @@ _API_KEY = re.compile(
 # pointless, so we redact the full match.
 _KUBECONFIG = re.compile(
     r"apiVersion\s*:\s*v1\s*\n(?:.*\n){0,80}?kind\s*:\s*Config(?:\n(?:.*\n){0,200}?(?:\n|$))?",
+    re.IGNORECASE,
+)
+
+# BIND key secrets (#4617). A ``named.conf`` ``key`` block carries the
+# shared secret of a TSIG or rndc key as ``secret "<base64>";``. The
+# keyword is followed by whitespace, not ``=`` / ``:``, so ``api_key``
+# does not see it. BIND also allows comments (``/* */``, ``//``, ``#``)
+# between the keyword and the value. A look-behind cannot skip them
+# (it must be fixed-width), so the match covers the keyword, any
+# comments, and the quoted value, and the ``value`` group marks the
+# part the engine replaces. The keyword and the comments stay in the
+# output, so the file stays readable.
+#
+# Two guards keep a key *name* that ends in ``secret`` (``key
+# "transfer-secret"``, ``key "secret"``, ``key "my secret"``) from
+# matching the wrong pair of quotes: the keyword may not sit directly
+# after a quote, a hyphen, or another word character, and the value
+# must be base64 (BIND lets whitespace split it). The text from a
+# name's closing quote to the real value's opening quote holds ``{``
+# and ``;``, so it never passes as a value.
+#
+# The gap between the keyword and the value is matched once and never
+# re-tried (possessive ``*+``). A line comment runs to the end of its
+# line, so a value on the same line after ``#`` or ``//`` is commented
+# out in BIND and is not matched. Without the possessive quantifier a
+# run of ``#`` characters with no quoted value after it could be split
+# into comments in exponentially many ways, and one short payload kept
+# the middleware busy for seconds (#4620 review).
+_BIND_COMMENT = r"(?:/\*[^*]*(?:\*(?!/)[^*]*)*\*/|//[^\n]*|#[^\n]*)"
+_BIND_KEY_SECRET = re.compile(
+    r"(?<![\w\"'-])secret(?:\s|"
+    + _BIND_COMMENT
+    + r')*+(?P<value>"[A-Za-z0-9+/=\s]{1,'
+    + str(_VALUE_MAX)
+    + r'}")',
     re.IGNORECASE,
 )
 
@@ -234,6 +284,7 @@ NAMED_PATTERNS: Final[dict[str, re.Pattern[str]]] = {
     "jwt": _JWT,
     "api_key": _API_KEY,
     "kubeconfig": _KUBECONFIG,
+    "bind_key_secret": _BIND_KEY_SECRET,
     "uuid": _UUID,
     "ipv4": _IPV4,
     "ipv6": _IPV6,

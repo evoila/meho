@@ -29,8 +29,7 @@ import (
 // importDoc is the on-disk root: a single `targets:` list, matching
 // the consumer's existing `targets.yaml` shape (see
 // docs/cross-repo/targets-yaml.md and the consumer source-of-truth
-// file at
-// https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/rdc-hetzner-dc/targets.yaml).
+// `targets.yaml` file in the consumer's private repo).
 //
 // We decode into a generic per-entry map (rather than a typed struct)
 // so the mapping logic in importEntry / entryToCreateBody can decide
@@ -553,6 +552,7 @@ func sendRequest(
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+bearer)
+	api.SetWorkRefHeader(req)
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")

@@ -6,11 +6,13 @@
 Three small responsibilities the dispatcher (T5, #396) consults per
 call:
 
-* :func:`compute_params_hash` -- stable SHA-256 over canonicalised
-  params for the audit row's ``params_hash`` field. Two dispatches
-  with identical args produce identical hashes -- correlates retries,
-  composite sub-calls, and reruns without persisting the params
-  themselves to the audit row.
+* :func:`compute_audit_params_hash` / :func:`compute_params_hash` --
+  keyed hashes (HMAC-SHA256 with a server key) over canonicalised
+  params. The audit hash goes on audit records; it leaves secret-named
+  values out, so two calls with the same other values get the same
+  hash. The approval hash covers every value; an approval request
+  stores it and checks it again before the approved call runs.
+  :func:`params_hash_matches` does that check.
 * :func:`validate_params` -- jsonschema 2020-12 (OpenAPI 3.1
   compatible) validation. Returns a list of structured error dicts;
   empty list = valid.
@@ -26,6 +28,7 @@ call:
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from typing import Any, Final
 
@@ -33,10 +36,15 @@ import structlog
 from jsonschema import Draft202012Validator
 from referencing.exceptions import Unresolvable
 
+from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import _more_restrictive, resolve_verdict
+from meho_backplane.broadcast.events import scrub_secret_named_values
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+from meho_backplane.operations._param_errors import describe_violation
+from meho_backplane.sandbox_mode import sandbox_mode_active
+from meho_backplane.settings import get_settings
 
 # Read-class HTTP verbs — the same set the ingest layer pins as
 # ``READ_HTTP_METHODS`` (``operations/ingest/_internals.py``). Duplicated as
@@ -48,11 +56,23 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "InvalidOpSchemaError",
+    "compute_audit_digest_hash",
+    "compute_audit_params_hash",
     "compute_params_hash",
     "ingested_schema_for_validation",
+    "params_hash_candidates",
+    "params_hash_matches",
     "policy_gate",
     "validate_params",
 ]
+
+#: Label for the key derivation in :func:`_params_hash_key`. It keeps this
+#: key different from any other key made from the same secret.
+_PARAMS_HASH_KEY_LABEL: Final[bytes] = b"meho-params-hash-key-v1"
+
+#: Prefix for :func:`compute_audit_digest_hash`, so its output never equals a
+#: params hash of the same text.
+_DIGEST_HASH_PREFIX: Final[bytes] = b"meho-audit-digest-v1\x00"
 
 
 class InvalidOpSchemaError(Exception):
@@ -79,23 +99,118 @@ class InvalidOpSchemaError(Exception):
         super().__init__(f"stored parameter_schema contains an unresolvable $ref: {missing_ref}")
 
 
-def compute_params_hash(params: dict[str, Any]) -> str:
-    """Return a stable SHA-256 hex hash over the canonicalised *params*.
+def _canonical_params(params: Any) -> bytes:
+    """Return the canonical JSON bytes of *params* that every params hash covers.
 
-    Used by the dispatcher's audit row so two dispatches with the same
-    args land identical ``params_hash`` values -- correlates retries,
-    composite sub-calls, and reruns without leaking the params
-    themselves into the row (the full params live in the broadcast
-    payload for non-sensitive op classes and never appear on the audit
-    row in v0.2 -- see :class:`AuditLog`).
-
-    Canonicalisation: ``json.dumps(..., sort_keys=True, default=str,
-    separators=(",", ":"))``. ``default=str`` covers non-JSON natives
-    (e.g. :class:`datetime` or :class:`uuid.UUID`) the caller may slip in
-    without forcing every call site to pre-stringify them.
+    ``json.dumps(..., sort_keys=True, default=str, separators=(",", ":"))``.
+    ``default=str`` covers non-JSON natives (e.g. :class:`datetime` or
+    :class:`uuid.UUID`) the caller may slip in without forcing every call
+    site to pre-stringify them.
     """
-    canonical = json.dumps(params, sort_keys=True, default=str, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return json.dumps(params, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+
+
+def _params_hash_key() -> bytes:
+    """Return the server key for the params hashes.
+
+    The key is derived from ``DATABASE_URL``, the one secret every install
+    has: HMAC-SHA256 of it under :data:`_PARAMS_HASH_KEY_LABEL`. It is never
+    stored or sent anywhere. Every pod of an install gets the same key, so
+    hashes stay comparable inside the install. When ``DATABASE_URL`` changes
+    (for example a new database password), the key changes too, and new
+    hashes no longer match the older ones.
+    """
+    source = get_settings().database_url.encode("utf-8")
+    return hmac.new(_PARAMS_HASH_KEY_LABEL, source, hashlib.sha256).digest()
+
+
+def _keyed_params_hash(params: Any) -> str:
+    """HMAC-SHA256 hex digest of the canonical *params* under the server key."""
+    return hmac.new(_params_hash_key(), _canonical_params(params), hashlib.sha256).hexdigest()
+
+
+def compute_params_hash(params: dict[str, Any]) -> str:
+    """Return the keyed hash that ties an approval request to the exact call.
+
+    HMAC-SHA256 under the server key (:func:`_params_hash_key`) over the
+    canonical JSON of *params*, with every value included. The approval
+    queue stores it on the request and checks it again before the approved
+    call runs (:func:`params_hash_matches`), so a call that differs in any
+    value, a secret value too, does not match. Without the server key the
+    hash cannot be computed again from the params.
+
+    For a hash that is only written to an audit record, use
+    :func:`compute_audit_params_hash`.
+    """
+    return _keyed_params_hash(params)
+
+
+def compute_audit_params_hash(params: Any) -> str:
+    """Return the keyed hash written to audit records as ``params_hash``.
+
+    Like :func:`compute_params_hash`, but every secret-named value is
+    replaced with a fixed marker first. The name check and the value rule
+    are the ones the broadcast params scrub and the approval preview use
+    (:func:`~meho_backplane.broadcast.events.scrub_secret_named_values`):
+    ``password``, ``client_secret``, ``api_key`` and similar names. So the
+    hash covers the parameter names and the other values only: two calls
+    with the same other values get the same hash, whatever their secret
+    values are. For params without secret-named values it equals
+    :func:`compute_params_hash`.
+
+    Two dispatches with the same params land the same hash, which
+    correlates retries, composite sub-calls and reruns without storing the
+    params on the audit row.
+    """
+    masked, _secret_found = scrub_secret_named_values(params)
+    return _keyed_params_hash(masked)
+
+
+def compute_audit_digest_hash(value: str) -> str:
+    """Return the keyed hash an audit record stores in place of *value*.
+
+    For values that are computed from a call's params elsewhere, where the
+    params themselves are not at hand: the satellite runner's params digest,
+    its effect chain ``record_hash`` and the work item's signature. The audit
+    row stores HMAC-SHA256 under the server key (with its own prefix)
+    instead, so the stored value cannot be computed again from the params
+    without the server key. Equal values still give equal hashes inside one
+    install.
+    """
+    message = _DIGEST_HASH_PREFIX + value.encode("utf-8")
+    return hmac.new(_params_hash_key(), message, hashlib.sha256).hexdigest()
+
+
+def _unkeyed_params_hash(params: dict[str, Any]) -> str:
+    """The plain SHA-256 that approval requests stored before the keyed hash.
+
+    Only compared, never stored again: see :func:`params_hash_candidates`.
+    """
+    return hashlib.sha256(_canonical_params(params)).hexdigest()
+
+
+def params_hash_candidates(params: dict[str, Any]) -> tuple[str, str]:
+    """Return the hashes an approval request for *params* can carry.
+
+    The keyed :func:`compute_params_hash` first, then the plain SHA-256 that
+    earlier versions stored. A request that was already waiting for
+    approval when MEHO was upgraded carries the plain one; accepting it
+    keeps that request usable. Both cover every value, so the check is as
+    strict as before.
+    """
+    return compute_params_hash(params), _unkeyed_params_hash(params)
+
+
+def params_hash_matches(params: dict[str, Any], stored: str) -> bool:
+    """True when *stored* (an approval request's ``params_hash``) is a hash of *params*.
+
+    Accepts either value from :func:`params_hash_candidates`.
+    """
+    stored_bytes = stored.encode("utf-8")
+    return any(
+        hmac.compare_digest(stored_bytes, candidate.encode("utf-8"))
+        for candidate in params_hash_candidates(params)
+    )
 
 
 def validate_params(
@@ -104,11 +219,15 @@ def validate_params(
 ) -> list[dict[str, Any]]:
     """Validate *params* against *parameter_schema* via JSON Schema 2020-12.
 
-    Returns a list of validation-error dicts (``[]`` on success). Each
-    entry carries ``path`` (JSON Pointer-ish dotted shape), ``message``,
-    and ``validator`` so the dispatcher's ``invalid_params`` error
-    payload is operator-actionable without leaking the JSON Schema's
-    internals.
+    Returns a list of validation-error dicts (``[]`` on success), one
+    per violation. Each entry carries ``path`` (JSON path of the bad
+    spot), ``validator`` (the failed schema keyword), ``expected`` (what
+    the schema wants there) and ``remediation`` (a short fixed hint),
+    built by :func:`~meho_backplane.operations._param_errors.describe_violation`
+    (#3669). No entry carries the rejected value: jsonschema's own
+    ``message`` quotes it, so it is not used. The list is not capped
+    here; :func:`~meho_backplane.operations._errors.result_invalid_params`
+    caps what reaches the envelope.
 
     Empty / missing schemas validate everything as ok -- typed ops
     registered without a parameter_schema (or with ``{}``) accept any
@@ -129,14 +248,7 @@ def validate_params(
     out: list[dict[str, Any]] = []
     try:
         validator = Draft202012Validator(parameter_schema)
-        for err in validator.iter_errors(params):
-            out.append(
-                {
-                    "path": err.json_path,
-                    "message": err.message,
-                    "validator": err.validator,
-                }
-            )
+        out.extend(describe_violation(err) for err in validator.iter_errors(params))
     except Unresolvable as exc:
         pointer = str(exc.ref)
         missing_ref = f"#{pointer}" if pointer.startswith("/") else pointer
@@ -197,6 +309,13 @@ def _is_mutating(descriptor: EndpointDescriptor) -> bool:
     return descriptor.safety_level != "safe"
 
 
+def _sandbox_delete_grant_note() -> str:
+    """The sentence a park reason adds in sandbox mode (#4622)."""
+    return (
+        "; this instance is in sandbox mode, so a delete grant made in the web console may cover it"
+    )
+
+
 def _service_safety_gate_reason(descriptor: EndpointDescriptor) -> str | None:
     """Extra gating a **service** principal gets from ``safety_level`` (#3152).
 
@@ -213,6 +332,12 @@ def _service_safety_gate_reason(descriptor: EndpointDescriptor) -> str | None:
     Returns the park reason, or ``None`` when the op stays auto-execute.
     """
     if descriptor.safety_level == "destructive":
+        if sandbox_mode_active():
+            return (
+                "safety_level=destructive; service-principal deletes park "
+                "(routed to the approval queue) unless a delete grant made in the "
+                "web console covers them — this instance is in sandbox mode (#4622)"
+            )
         return (
             "safety_level=destructive; service-principal deletes park always "
             "(routed to the approval queue) and are never satisfiable by a "
@@ -317,6 +442,9 @@ async def _service_grant_verdict(
     connector_id: str,
     gate_reason: str | None,
     target_id_str: str | None,
+    preview_hash: str | None = None,
+    params: dict[str, Any] | None = None,
+    decide_only: bool = False,
 ) -> tuple[PermissionVerdict | None, str | None]:
     """Consult a standing grant for a parking service-principal op (#3151 / #3349).
 
@@ -334,8 +462,11 @@ async def _service_grant_verdict(
         descriptor=descriptor,
         target=target,
         connector_id=connector_id,
+        preview_hash=preview_hash,
+        params=params,
+        record=not decide_only,
     )
-    if grant_id is not None:
+    if grant_id is not None and not decide_only:
         _log.info(
             "policy_gate_standing_grant_auto_approved",
             operator_sub=operator.sub,
@@ -346,6 +477,7 @@ async def _service_grant_verdict(
             target_id=target_id_str,
             grant_id=str(grant_id),
         )
+    if grant_id is not None:
         return PermissionVerdict.AUTO_EXECUTE, f"auto-granted by standing grant {grant_id}"
 
     hint = await _null_target_park_hint(
@@ -365,6 +497,9 @@ async def _non_agent_verdict(
     descriptor: EndpointDescriptor,
     target: Any,
     connector_id: str | None,
+    preview_hash: str | None = None,
+    params: dict[str, Any] | None = None,
+    decide_only: bool = False,
 ) -> tuple[PermissionVerdict, str | None]:
     """Resolve the verdict for a human / service (non-agent) principal.
 
@@ -399,6 +534,8 @@ async def _non_agent_verdict(
             "non-agent principal parks (routed to the approval queue), never "
             "auto-executes, and no standing grant can pre-clear it (#3183)"
         )
+        if is_service and sandbox_mode_active():
+            gate_reason += _sandbox_delete_grant_note()
     elif descriptor.requires_approval:
         gate_reason = "requires_approval is True; routed to the approval queue (G11.7-T1)"
     elif is_service:
@@ -426,6 +563,9 @@ async def _non_agent_verdict(
             connector_id=connector_id,
             gate_reason=gate_reason,
             target_id_str=target_id_str,
+            preview_hash=preview_hash,
+            params=params,
+            decide_only=decide_only,
         )
         if cleared is not None:
             return cleared, gate_reason
@@ -453,6 +593,9 @@ async def policy_gate(
     descriptor: EndpointDescriptor,
     target: Any,
     connector_id: str | None = None,
+    preview_hash: str | None = None,
+    params: dict[str, Any] | None = None,
+    decide_only: bool = False,
 ) -> tuple[PermissionVerdict, str | None]:
     """G11.2-T3 per-(principal, op, target) policy gate.
 
@@ -490,6 +633,12 @@ async def policy_gate(
     ``requires_approval`` op now routes them to the **approval queue**
     (``needs-approval``) rather than hard-denying.
 
+    **Direct hosted-agent runs** (#4237): when an actor is bound, the call
+    gets the stricter of the caller's and the hosted agent's verdict
+    (:func:`_direct_run_verdict`). This applies to every caller kind: an
+    agent-kind caller keeps its own grants and the hosted agent's grants
+    limit the run on top of them.
+
     **Service principals** (client-credentials, ``principal_kind ==
     service``) additionally consult ``safety_level`` (#3152): a mutating
     ``caution`` / ``dangerous`` op parks even without ``requires_approval``.
@@ -508,20 +657,124 @@ async def policy_gate(
 
     The function is **async** — it opens its own DB session to load the
     caller's :class:`~meho_backplane.db.models.AgentPermission` rows,
-    mirroring the same pattern :func:`audit_and_broadcast_safe` uses.
+    mirroring the same pattern :func:`audit_safe` uses.
+
+    ``preview_hash`` and ``params`` (#4622) matter only to the
+    service-principal grant consult in sandbox mode (a ``destructive``
+    delete must present its own preview hash and a valid blast radius
+    first). ``decide_only`` (#4923) returns the verdict and writes nothing:
+    a grant that would clear the call is reported but not used; the
+    preview relies on this.
     """
-    # --- Human / service principals: default-allow, queue on approval --
-    # (a service principal additionally consults safety_level + standing
-    # grants — see :func:`_non_agent_verdict`).
-    if operator.principal_kind is not PrincipalKind.AGENT:
-        return await _non_agent_verdict(
+    actor_sub = resolve_actor_sub()
+    if actor_sub is not None:
+        return await _direct_run_verdict(
             operator=operator,
+            actor_sub=actor_sub,
             descriptor=descriptor,
             target=target,
             connector_id=connector_id,
+            preview_hash=preview_hash,
+            params=params,
+            decide_only=decide_only,
         )
+    return await _caller_verdict(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        preview_hash=preview_hash,
+        params=params,
+        decide_only=decide_only,
+    )
 
-    # --- Agent principals: per-(principal, op, target) verdict ----------
+
+async def _caller_verdict(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    connector_id: str | None,
+    preview_hash: str | None = None,
+    params: dict[str, Any] | None = None,
+    decide_only: bool = False,
+) -> tuple[PermissionVerdict, str | None]:
+    """Verdict for the caller alone, by its principal kind."""
+    if operator.principal_kind is PrincipalKind.AGENT:
+        return await _agent_verdict(operator=operator, descriptor=descriptor, target=target)
+    return await _non_agent_verdict(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        preview_hash=preview_hash,
+        params=params,
+        decide_only=decide_only,
+    )
+
+
+async def _direct_run_verdict(
+    *,
+    operator: Operator,
+    actor_sub: str,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    connector_id: str | None,
+    preview_hash: str | None = None,
+    params: dict[str, Any] | None = None,
+    decide_only: bool = False,
+) -> tuple[PermissionVerdict, str | None]:
+    """Verdict for a call made by a direct hosted-agent run (#4237).
+
+    The caller who started the run is the subject; the run's agent is the
+    actor. The hosted agent's verdict uses its ``agent:<name>`` grants, the
+    agent safety defaults and the caller's role ceiling. The caller's own
+    verdict uses the caller's principal kind (:func:`_caller_verdict`), so
+    an agent-kind caller keeps its own grants. The stricter of the two
+    verdicts wins.
+
+    The caller's verdict is skipped when it cannot change the outcome. A
+    hosted-agent deny is already the strictest verdict. When the hosted
+    agent needs approval, only an agent-kind caller can still make it
+    stricter (a deny grant); a human or service caller never gets deny
+    (:func:`_non_agent_verdict`), and working out its verdict could record
+    a standing grant as used for a call that then waits for approval.
+    """
+    agent = operator.model_copy(
+        update={"sub": actor_sub, "principal_kind": PrincipalKind.AGENT, "client_id": actor_sub}
+    )
+    agent_verdict, agent_reason = await _agent_verdict(
+        operator=agent, descriptor=descriptor, target=target
+    )
+    agent_result = (agent_verdict, f"agent {actor_sub} acting for {operator.sub}: {agent_reason}")
+    if agent_verdict is PermissionVerdict.DENY:
+        return agent_result
+    if (
+        agent_verdict is PermissionVerdict.NEEDS_APPROVAL
+        and operator.principal_kind is not PrincipalKind.AGENT
+    ):
+        return agent_result
+    verdict, reason = await _caller_verdict(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        preview_hash=preview_hash,
+        params=params,
+        decide_only=decide_only,
+    )
+    if _more_restrictive(verdict, agent_verdict) is verdict:
+        return verdict, reason
+    return agent_result
+
+
+async def _agent_verdict(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+) -> tuple[PermissionVerdict, str | None]:
+    """Resolve the per-(principal, op, target) verdict for an agent principal."""
     target_id = getattr(target, "id", target) if target is not None else None
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:

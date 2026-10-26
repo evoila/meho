@@ -16,7 +16,13 @@ What the seam does
 One :meth:`AgentRun.start` call kicks off a single bounded tool-use loop as
 an in-process :class:`asyncio.Task`:
 
-* **System prompt** — taken from the :class:`AgentDefinition`.
+* **System prompt** — taken from the :class:`AgentDefinition`. A configured
+  definition (one with a ``toolset``) also gets a second system prompt part
+  with the hosted context (#3759,
+  :mod:`meho_backplane.agent.hosted_context`): tenant conventions and a
+  note on which context tools the run has. Its delivery receipt (#3763)
+  is logged as ``agent_hosted_context_delivered`` and returned on
+  :attr:`AgentRunResult.context_receipt`.
 * **Turn budget** — :attr:`AgentDefinition.request_limit` becomes a
   ``UsageLimits(request_limit=...)``; the framework raises
   :class:`~pydantic_ai.exceptions.UsageLimitExceeded` once the loop would
@@ -97,18 +103,30 @@ from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.usage import RunUsage
 
 from meho_backplane.agent.approval_wait import resume_or_surface_awaiting_approval
+from meho_backplane.agent.hosted_context import (
+    ContextOmission,
+    HostedContextReceipt,
+    assemble_hosted_context,
+)
 from meho_backplane.agent.invoke import (
     ChildAgentResolver,
     ChildRunFinalizer,
     ChildRunRecorder,
+    current_agent_run_id_var,
     make_invoke_agent_tool,
 )
+from meho_backplane.agent.meta_tool import connector_errors_reach_model
 from meho_backplane.agent.models import (
     AgentTier,
     ModelResolver,
     ResolverError,
 )
-from meho_backplane.agent.toolset import resolve_agent_tools
+from meho_backplane.agent.tool_audit import ToolCallAudit
+from meho_backplane.agent.toolset import (
+    ToolsetResolution,
+    capability_versions,
+    resolve_agent_toolset,
+)
 from meho_backplane.auth.operator import Operator
 from meho_backplane.operations.meta_tools import call_operation, list_operation_groups
 from meho_backplane.settings import get_settings
@@ -179,8 +197,14 @@ UNEXECUTABLE_RUNBOOK_CLASS = "unexecutable_runbook_reference"
 #: boundary guard, not a parser: a phrasing it misses degrades to today's
 #: behaviour, a phrasing it catches turns a hallucinated success into an
 #: honest typed failure.
+#:
+#: The spaces after the verb and after the article are matched with
+#: ``\s++`` (possessive: spaces once taken are never given back). What comes
+#: next never starts with a space, so the hits are the same as with ``\s+``,
+#: but a long run of spaces is read once instead of being tried again for
+#: every space in it.
 _RUNBOOK_INSTRUCTION_RE: re.Pattern[str] = re.compile(
-    r"\b(?:use|run|execute|follow|start|apply|perform|invoke)\s+(?:(?:the|a|an)\s+)?"
+    r"\b(?:use|run|execute|follow|start|apply|perform|invoke)\s++(?:(?:the|a|an)\s++)?"
     r"(?:"
     r"runbook\b(?:\s+template\b)?"
     r"(?:(?:\s*:\s*|\s+)(?P<q1>[`'\"]?)(?P<slug>[a-z](?:[a-z0-9.\-]*[a-z0-9])?)(?P=q1))?"
@@ -225,7 +249,15 @@ _THIRD_PERSON_SUBJECTS = frozenset({"operators", "users", "we", "they", "people"
 #: The last word of the clause fragment preceding a candidate's verb (only
 #: when the fragment actually ends in a word — a trailing punctuation mark
 #: means the verb opens its own clause and has no subject token).
-_PRECEDING_WORD_RE: re.Pattern[str] = re.compile(r"([a-z]+)\s*$", re.IGNORECASE)
+#:
+#: It is matched on the *reversed* text, because Python's ``re`` only reads
+#: forwards: it skips the spaces before the verb, then takes up to ten
+#: letters. The caller stops the match at the clause start. Ten is one more
+#: than the longest word in :data:`_THIRD_PERSON_SUBJECTS`, so a longer word
+#: never counts as one.
+#: Reading back from the verb takes time in line with the few characters it
+#: reads, however long the clause before it is.
+_REVERSED_WORD_BEFORE_RE: re.Pattern[str] = re.compile(r"\s*+([a-z]{1,10})", re.IGNORECASE)
 
 #: A bare (unquoted, non-slug-structured) word right after ``runbook``
 #: usually makes it a noun compound headed by that word ("runbook
@@ -238,28 +270,33 @@ _CLAUSE_CONTINUATIONS = frozenset(
     {"to", "and", "then", "now", "first", "please", "when", "if", "before", "after"}
 )
 
+#: The check reads at most this many characters (16 KiB) of each text: the
+#: system prompt and the run input are each cut to this length first. Real
+#: prompts are much shorter. A longer text is checked on its first 16,384
+#: characters only, and a hit that the cut reaches is not used (see
+#: :data:`_HIT_TAIL_RE`). Together with a scan whose time grows in line with
+#: the text length, this keeps the check within a few milliseconds for any
+#: prompt. It runs at the start of every agent run.
+_MAX_SCANNED_CHARS = 16 * 1024
 
-def _clause_fragment_before(text: str, start: int) -> str:
-    """The fragment of *text*'s clause that precedes offset *start*."""
-    fragment = text[:start]
-    cut = max(fragment.rfind(boundary) for boundary in _CLAUSE_BOUNDARIES)
-    return fragment[cut + 1 :]
+#: What the instruction pattern may still read after a hit ends: spaces, an
+#: optional ``:`` and more spaces, an optional quote, and one run of slug
+#: characters (the next word). When a text was cut and this part reaches the
+#: cut, the words after the cut could change the hit: "use the runbooks
+#: page" cut to "use the runbook", or "use runbook templates" cut before
+#: "templates". So such a hit is not used, and the run is not refused for it.
+_HIT_TAIL_RE: re.Pattern[str] = re.compile(r"\s*+(?::\s*+)?[`'\"]?[a-z0-9.\-]*+", re.IGNORECASE)
 
 
-def _instructed_runbook(text: str, match: re.Match[str]) -> str | None:
-    """Disposition one raw regex hit against the false-positive guards.
+def _named_runbook(match: re.Match[str]) -> str | None:
+    """Classify one raw regex hit by the words around ``runbook``.
 
     Returns the named slug (lowercased), ``""`` for a genuine but unnamed
-    execution instruction, or ``None`` when the hit is prose (negated,
-    third-person, or a runbook-headed noun compound) and must not refuse
-    the run.
+    execution instruction, or ``None`` when the hit is a runbook-headed
+    noun compound and must not refuse the run. The clause guards
+    (negation, third-person subject) are applied by
+    :func:`_first_instructed_runbook`.
     """
-    clause = _clause_fragment_before(text, match.start())
-    if _NEGATION_RE.search(clause):
-        return None
-    subject = _PRECEDING_WORD_RE.search(clause)
-    if subject is not None and subject.group(1).lower() in _THIRD_PERSON_SUBJECTS:
-        return None
     pre_slug = match.group("pre_slug")
     if pre_slug is not None:
         # "<verb> [the] <word> runbook" — ``runbook`` is the head noun, so
@@ -280,13 +317,66 @@ def _instructed_runbook(text: str, match: re.Match[str]) -> str | None:
     return None
 
 
+def _first_instructed_runbook(text: str, *, cut: bool) -> str | None:
+    """Return the first raw hit in *text* that passes every guard, or ``None``.
+
+    A hit is prose, not an instruction, when it is a runbook-headed noun
+    compound (:func:`_named_runbook`), when a negation comes before its
+    verb in the same clause, or when a third-person subject comes right
+    before its verb.
+
+    The hits come in text order, so the clause guards remember what they
+    have read: each part of the text is searched for clause boundaries
+    and negations only once, and the subject is read back from the verb.
+    So the time grows in line with the length of *text*, even when it
+    holds thousands of hits.
+
+    *cut* means *text* is only the first part of a longer text. Then the
+    scan stops at a hit that the cut reaches (:data:`_HIT_TAIL_RE`): what
+    the hit means is not known, and no later hit can come after it.
+    """
+    size = len(text)
+    reversed_text = ""  # made on first use, for the subject guard
+    clause_start = 0  # offset where the clause of the current hit starts
+    checked = 0  # boundaries and negations before this offset are known
+    negated = False  # a negation comes earlier in the current clause
+    for match in _RUNBOOK_INSTRUCTION_RE.finditer(text):
+        if cut and _HIT_TAIL_RE.fullmatch(text, match.end()):
+            return None
+        found = _named_runbook(match)
+        if found is None:
+            continue
+        start = match.start()
+        last_boundary = max(text.rfind(boundary, checked, start) for boundary in _CLAUSE_BOUNDARIES)
+        if last_boundary >= 0:
+            # The hit is in a new clause, which starts after the boundary.
+            clause_start = last_boundary + 1
+            checked = clause_start
+            negated = False
+        if not negated:
+            negated = _NEGATION_RE.search(text, checked, start) is not None
+        checked = start
+        if negated:
+            continue
+        if not reversed_text:
+            reversed_text = text[::-1]
+        # From offset ``size - start``, *reversed_text* reads *text*
+        # backwards from the character just before the verb. The end
+        # offset ``size - clause_start`` stops it at the clause start.
+        word = _REVERSED_WORD_BEFORE_RE.match(reversed_text, size - start, size - clause_start)
+        if word is not None and word.group(1)[::-1].lower() in _THIRD_PERSON_SUBJECTS:
+            continue
+        return found
+    return None
+
+
 def find_runbook_instruction(*texts: str) -> str | None:
     """Return the runbook a prompt instructs the agent to execute, if any.
 
     Scans each of *texts* (the definition's system prompt and the run's
     user inputs) for an instruct-shaped runbook reference — see
     :data:`_RUNBOOK_INSTRUCTION_RE` for the covered phrase shapes and
-    :func:`_instructed_runbook` for the guards that keep negated,
+    :func:`_first_instructed_runbook` for the guards that keep negated,
     third-person, and noun-compound mentions from refusing the run.
     Returns the referenced slug (lowercased), ``""`` when the instruction
     names no specific runbook ("follow the runbook"), or ``None`` when no
@@ -297,6 +387,13 @@ def find_runbook_instruction(*texts: str) -> str | None:
     cannot mask a real later instruction ("... then use runbook
     disk-cleanup-1").
 
+    Only the first :data:`_MAX_SCANNED_CHARS` characters of each text are
+    read, and the time grows in line with the length read. So the check
+    stays within a few milliseconds for any prompt. It runs at the start
+    of every run. When a text is cut, a hit that the cut reaches is not
+    used, so the cut can make the check miss an instruction but never
+    refuse a run that the full text allows.
+
     Detection is deliberately independent of whether the referenced
     runbook *exists*: the failure being guarded (#2077) is "the agent has
     no tool that can execute any runbook", which holds for present and
@@ -305,10 +402,10 @@ def find_runbook_instruction(*texts: str) -> str | None:
     before refusing the run.
     """
     for text in texts:
-        for match in _RUNBOOK_INSTRUCTION_RE.finditer(text):
-            found = _instructed_runbook(text, match)
-            if found is not None:
-                return found
+        cut = len(text) > _MAX_SCANNED_CHARS
+        found = _first_instructed_runbook(text[:_MAX_SCANNED_CHARS], cut=cut)
+        if found is not None:
+            return found
     return None
 
 
@@ -545,6 +642,12 @@ class AgentRunResult:
     pricing table charges against. Default to 0 so a deterministic
     test model that does not stamp usage (e.g. a function model that
     short-circuits the loop) still produces a valid result.
+
+    ``context_receipt`` (#3763) says what hosted context MEHO supplied to
+    a configured run (see
+    :class:`~meho_backplane.agent.hosted_context.HostedContextReceipt`).
+    It is ``None`` for a legacy run (``toolset is None``), which gets no
+    hosted context.
     """
 
     output: Any
@@ -554,6 +657,25 @@ class AgentRunResult:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    context_receipt: HostedContextReceipt | None = None
+
+
+def _capability_omissions(resolution: ToolsetResolution) -> tuple[ContextOmission, ...]:
+    """Return the requested tools a run did not get, as receipt omissions.
+
+    Tools left out of the spec's allow-list are not listed: the author did
+    not ask for them.
+    """
+    unsupported = (
+        ContextOmission(kind="capability", name=name, reason="unsupported")
+        for name in resolution.missing
+    )
+    denied = (
+        ContextOmission(kind="capability", name=name, reason="role_below_floor")
+        for name, reason in resolution.disabled.items()
+        if reason == "role_below_floor"
+    )
+    return (*unsupported, *denied)
 
 
 class AgentRunEventKind(StrEnum):
@@ -641,8 +763,15 @@ class AgentRun(Protocol):
         definition: AgentDefinition,
         operator: Operator,
         inputs: str,
+        *,
+        run_id: UUID | None = None,
     ) -> AgentRunHandle:
-        """Begin a bounded run; return immediately with a live handle."""
+        """Begin a bounded run; return immediately with a live handle.
+
+        *run_id* is the id the caller already gave out (the durable
+        ``agent_run`` row id). The handle and every error then use it, so the
+        caller can match them. ``None`` makes a fresh id.
+        """
         ...
 
     def poll(self, handle: AgentRunHandle) -> AgentRunStatus:
@@ -694,7 +823,7 @@ def default_model_factory() -> Model:
     only, so the factory is intentionally single-provider.
     """
     from anthropic import AsyncAnthropic
-    from pydantic_ai.models.anthropic import AnthropicModel
+    from pydantic_ai.models.anthropic import AnthropicModel, AnthropicModelSettings
     from pydantic_ai.providers.anthropic import AnthropicProvider
 
     from meho_backplane.settings import get_settings
@@ -714,7 +843,11 @@ def default_model_factory() -> Model:
     # Messages API verbatim and 404s on the ``anthropic:`` prefix, so pass
     # only the bare model id. A deploy-supplied bare id falls through unchanged.
     _, model_name = _split_model_id(settings.agent_default_model)
-    return AnthropicModel(model_name, provider=provider)
+    return AnthropicModel(
+        model_name,
+        provider=provider,
+        settings=AnthropicModelSettings(max_tokens=settings.agent_max_output_tokens),
+    )
 
 
 def _register_default_meta_tools(agent: Agent[Operator, Any]) -> None:
@@ -787,7 +920,8 @@ def _register_default_meta_tools(agent: Agent[Operator, Any]) -> None:
         Use this first to discover which group of operations is relevant
         before searching for a specific operation to call.
         """
-        return await list_operation_groups(ctx.deps, {"connector_id": connector_id})
+        with connector_errors_reach_model():
+            return await list_operation_groups(ctx.deps, {"connector_id": connector_id})
 
 
 def _coerce_output(value: Any) -> Any:
@@ -919,6 +1053,8 @@ class PydanticAgentRun:
         self,
         definition: AgentDefinition,
         operator: Operator,
+        run_id: UUID | None = None,
+        receipts: list[HostedContextReceipt] | None = None,
     ) -> Agent[Operator, Any]:
         """Construct the framework agent for *definition* under *operator*.
 
@@ -928,6 +1064,19 @@ class PydanticAgentRun:
         passed to the framework via the ``tools=`` constructor argument. A
         definition with no toolset (``toolset is None``) falls back to the T1
         default two-meta-tool surface.
+
+        A configured definition (#3759) also gets the hosted context from
+        :func:`~meho_backplane.agent.hosted_context.assemble_hosted_context`
+        as a second system prompt part. ``definition.system_prompt`` stays
+        the first part, unchanged. The legacy ``None`` path gets no hosted
+        context. Each time the hosted context is built, its delivery
+        receipt (#3763) is logged and appended to *receipts* when given.
+        The log line names the run: the durable ``agent_run`` id bound in
+        :data:`~meho_backplane.agent.invoke.current_agent_run_id_var` when
+        there is one (a recorded child run has its own), else *run_id*,
+        the runtime's handle for this run. Two runs of the same definition
+        therefore log distinguishable receipts even with usage collection
+        off, when the receipt itself has no correlation id.
 
         When this runtime carries a :attr:`child_agent_resolver` (G11.1-T5),
         the ``invoke_agent`` composition tool is appended to whichever surface
@@ -945,7 +1094,8 @@ class PydanticAgentRun:
         model = self._resolve_model(definition, operator)
         invoke_tool = self._maybe_build_invoke_tool()
         if definition.toolset is not None:
-            tools = resolve_agent_tools(definition.toolset, operator)
+            resolution = resolve_agent_toolset(definition.toolset, operator)
+            tools = resolution.tools
             if invoke_tool is not None:
                 tools = [*tools, invoke_tool]
             agent: Agent[Operator, Any] = Agent(
@@ -954,7 +1104,33 @@ class PydanticAgentRun:
                 system_prompt=definition.system_prompt,
                 output_type=definition.output_type if definition.output_type is not None else str,
                 tools=tools,
+                capabilities=[ToolCallAudit()],
             )
+            versions = capability_versions(tools)
+            omissions = _capability_omissions(resolution)
+
+            # #3759: a second system prompt part, after the definition's own
+            # prompt. Built at run start under the run's operator.
+            async def _hosted_context(ctx: RunContext[Operator]) -> str:
+                context = await assemble_hosted_context(
+                    ctx.deps,
+                    versions,
+                    capability_omissions=omissions,
+                )
+                logged_run_id = current_agent_run_id_var.get() or run_id
+                _log.info(
+                    "agent_hosted_context_delivered",
+                    run_id=str(logged_run_id) if logged_run_id is not None else None,
+                    agent=definition.name,
+                    operator_sub=ctx.deps.sub,
+                    tenant_id=str(ctx.deps.tenant_id),
+                    receipt=context.receipt.model_dump(mode="json"),
+                )
+                if receipts is not None:
+                    receipts.append(context.receipt)
+                return context.text
+
+            agent.system_prompt(_hosted_context)
             return agent
         agent = Agent(
             model,
@@ -962,6 +1138,7 @@ class PydanticAgentRun:
             system_prompt=definition.system_prompt,
             output_type=definition.output_type if definition.output_type is not None else str,
             tools=[invoke_tool] if invoke_tool is not None else [],
+            capabilities=[ToolCallAudit()],
         )
         _register_default_meta_tools(agent)
         return agent
@@ -1021,6 +1198,7 @@ class PydanticAgentRun:
         operator: Operator,
         inputs: str,
         run_id: UUID,
+        receipts: list[HostedContextReceipt] | None = None,
     ) -> AgentRunResult:
         """Drive one bounded loop and return its result.
 
@@ -1051,6 +1229,7 @@ class PydanticAgentRun:
             output_tokens=usage.output_tokens,
             cache_read_tokens=usage.cache_read_tokens,
             cache_write_tokens=usage.cache_write_tokens,
+            context_receipt=receipts[0] if receipts else None,
         )
         _log.info(
             "agent_run_succeeded",
@@ -1092,6 +1271,10 @@ class PydanticAgentRun:
         loop) and returns the child's output directly rather than a handle: the
         parent tool needs the child's answer to continue, and the child's
         lifecycle is bounded by the parent tool call.
+
+        The child's receipt log line (#3763) names the run id the
+        ``invoke_agent`` tool bound before calling here: the child's own
+        recorded ``agent_run`` id, or the parent's when no recorder is wired.
         """
         child = self._build_agent(definition, operator)
         limits = UsageLimits(request_limit=definition.request_limit)
@@ -1118,8 +1301,15 @@ class PydanticAgentRun:
         definition: AgentDefinition,
         operator: Operator,
         inputs: str,
+        *,
+        run_id: UUID | None = None,
     ) -> AgentRunHandle:
         """Begin a bounded run; return immediately with a live handle.
+
+        *run_id* is the caller's run id (the durable ``agent_run`` row id).
+        The handle, the logs, and a failure message all use it, so they match
+        what ``meho agent run`` and ``run-status`` show (#4232). ``None``
+        makes a fresh id for callers with no durable row.
 
         The loop runs as an :class:`asyncio.Task` on the current event
         loop, so :meth:`start` is non-blocking — callers either
@@ -1136,10 +1326,12 @@ class PydanticAgentRun:
                 "AgentRun.start requires a running event loop; "
                 "the sync invocation surface (T4) bridges at the edge",
             ) from exc
-        agent = self._build_agent(definition, operator)
-        run_id = uuid4()
+        receipts: list[HostedContextReceipt] = []
+        if run_id is None:
+            run_id = uuid4()
+        agent = self._build_agent(definition, operator, run_id, receipts)
         task = asyncio.create_task(
-            self._run_loop(agent, definition, operator, inputs, run_id),
+            self._run_loop(agent, definition, operator, inputs, run_id, receipts),
             name=f"agent-run-{run_id}",
         )
         _log.info(
@@ -1232,7 +1424,7 @@ class PydanticAgentRun:
         """
         emitted_tool_returns = 0
         try:
-            agent = self._build_agent(definition, operator)
+            agent = self._build_agent(definition, operator, run_id)
             limits = UsageLimits(request_limit=definition.request_limit)
             async with agent.iter(inputs, deps=operator, usage_limits=limits) as run:
                 async for node in run:

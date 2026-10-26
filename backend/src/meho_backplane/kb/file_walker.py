@@ -13,6 +13,13 @@ stripped if any was present), and the front-matter metadata dict.
 Filters
 -------
 
+* **Regular files inside the root only** -- a file is read only when
+  it is a regular file and its real location (from
+  :func:`os.path.realpath`) is inside the root. The walk does not
+  follow links: it skips a linked file and does not enter a linked
+  folder. It also skips special files such as pipes, sockets and
+  devices. The same rule applies to ``.kb-ignore``. Each skipped file
+  gets one ``kb_file_skipped`` warning log line with the reason.
 * **Hidden files** -- any path with a component starting with ``.``
   is skipped. Catches editor swap files (``.foo.md.swp``),
   ``.git/`` checkouts, ``.DS_Store`` directories, and the
@@ -72,11 +79,6 @@ Out of scope (deferred)
 * Non-Markdown formats (``.rst`` / ``.org`` / ``.html``) -- the
   consumer's kb is Markdown-only, and supporting more formats means
   picking a multi-format parser. v0.2.next.
-* Symlink loop detection -- :func:`Path.rglob` follows symlinks by
-  default. A pathological kb with a self-referential symlink would
-  raise :class:`OSError` from the underlying walker; the service
-  catches and counts as error. A real cycle detector lands when an
-  operator hits it in practice.
 * Watching for filesystem changes (auto-reingest) -- v0.2 is
   explicitly on-demand only per the parent Initiative.
 """
@@ -84,6 +86,7 @@ Out of scope (deferred)
 from __future__ import annotations
 
 import fnmatch
+import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -113,8 +116,10 @@ KB_IGNORE_FILENAME: str = ".kb-ignore"
 class KbFileRecord:
     """One discovered Markdown file, ready to feed into ``index_document``.
 
-    ``path`` is the absolute path to the source file (useful for
-    error messages and metadata enrichment); ``slug`` is the
+    ``path`` is the absolute path to the source file (used to read
+    it; never stored or returned); ``relative_path`` is the same file
+    relative to the kb root with POSIX separators -- the value stored
+    as provenance and used in error messages; ``slug`` is the
     operator-facing identifier the kb service uses as
     ``documents.source_id``; ``body`` is the file content with
     front-matter stripped; ``metadata`` is the front-matter dict
@@ -126,6 +131,7 @@ class KbFileRecord:
     """
 
     path: Path
+    relative_path: str
     slug: str
     body: str
     metadata: dict[str, object]
@@ -151,8 +157,10 @@ def walk_kb_directory(
 
     Walks *root* recursively, skipping hidden paths and any path
     matched by the optional :data:`KB_IGNORE_FILENAME` patterns at
-    the root. Each yielded record carries the slug (validated) plus
-    the body and metadata extracted from the file's front-matter.
+    the root. Only regular files inside *root* are read; links and
+    special files are skipped (see the module docstring). Each yielded
+    record carries the slug (validated) plus the body and metadata
+    extracted from the file's front-matter.
 
     Per-file error handling depends on whether *errors* is supplied:
 
@@ -162,7 +170,7 @@ def walk_kb_directory(
       terminates iteration. Use this shape when a single bad file
       should abort the run.
     * ``errors`` is a list (best-effort mode) -- per-file failures
-      are caught, formatted as ``"<path>: <reason>"``, and appended
+      are caught, formatted as ``"<relative path>: <reason>"``, and appended
       to the supplied list; the walker continues with the next
       file. Use this shape from :meth:`KbService.ingest_directory`
       where a single bad file must not abort a 44-entry corpus.
@@ -177,8 +185,9 @@ def walk_kb_directory(
         Path to the kb directory. Must exist and be a directory;
         otherwise :class:`NotADirectoryError` / :class:`FileNotFoundError`
         is raised from the underlying :meth:`Path.is_dir` check. The
-        path is resolved (symlinks normalised) once at the top so
-        downstream relative-path computations are stable.
+        path is resolved once at the top with :func:`os.path.realpath`,
+        so *root* itself may be given through a link. Links found
+        inside it are not followed.
     errors
         Optional list to which per-file error strings are appended
         (best-effort mode). When ``None`` (strict mode) per-file
@@ -187,29 +196,32 @@ def walk_kb_directory(
     Yields
     ------
     KbFileRecord
-        One per discovered ingestible file, in lexicographic order
-        within each directory (the order :func:`Path.rglob` produces
-        on a sorted filesystem is platform-dependent, so callers that
-        need deterministic ordering should sort the iterator output
-        explicitly).
+        One per discovered ingestible file, sorted by POSIX relative
+        path. :func:`os.walk` returns files in whatever order the
+        filesystem lists them, so the walker sorts before yielding --
+        the same tree always yields the same sequence.
     """
     log = structlog.get_logger()
-    root = root.resolve()
+    root = Path(os.path.realpath(root))
     if not root.is_dir():
         raise NotADirectoryError(f"kb root is not a directory: {root}")
+    # The separator at the end makes the prefix check match whole folder
+    # names only: "<root>-old/a.md" is not inside "<root>".
+    root_prefix = os.path.join(root, "")
 
-    ignore_patterns = _read_ignore_patterns(root)
-    for path in root.rglob("*.md"):
-        if not path.is_file():
-            continue
+    ignore_patterns = _read_ignore_patterns(root, root_prefix)
+    for rel, path in _list_markdown_files(root):
         if _is_hidden(path, root):
             continue
-        rel = path.relative_to(root).as_posix()
         if _is_ignored(rel, ignore_patterns):
-            log.debug("kb_file_ignored", path=str(path), patterns=ignore_patterns)
+            log.debug("kb_file_ignored", path=rel, patterns=ignore_patterns)
+            continue
+        reason = _skip_reason(path, root_prefix)
+        if reason is not None:
+            log.warning("kb_file_skipped", path=rel, reason=reason)
             continue
         try:
-            yield _build_record(path)
+            yield _build_record(path, rel)
         except (UnicodeDecodeError, KbFileParseError, ValueError, OSError) as exc:
             # ValueError covers InvalidKbSlugError (subclass).
             # OSError covers PermissionError + other read-time
@@ -221,13 +233,51 @@ def walk_kb_directory(
             # and continue.
             if errors is None:
                 raise
-            errors.append(f"{path}: {exc}")
+            errors.append(f"{rel}: {exc}")
 
 
-def _read_ignore_patterns(root: Path) -> tuple[str, ...]:
+def _list_markdown_files(root: Path) -> list[tuple[str, Path]]:
+    """Return ``(relative path, path)`` for each ``*.md`` name under *root*, sorted.
+
+    :func:`os.walk` does not enter linked folders (``followlinks`` is
+    off by default). Linked files and special files are still listed
+    here; :func:`_skip_reason` drops them before anything is read.
+    """
+    found: list[tuple[str, Path]] = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            if name.endswith(".md"):
+                path = Path(dirpath, name)
+                found.append((path.relative_to(root).as_posix(), path))
+    return sorted(found)
+
+
+def _skip_reason(path: Path, root_prefix: str) -> str | None:
+    """Return why *path* must not be read, or ``None`` when it may be read.
+
+    Only a regular file whose real location is inside the root is
+    read. *root_prefix* is the real root path with a separator at the
+    end. :func:`os.path.islink` looks at the entry itself, so a link
+    is never followed here. If the entry turns into a link after that
+    check, the real-location check still catches a link that points
+    outside the root.
+    """
+    if os.path.islink(path):
+        return "link"
+    if not os.path.isfile(path):
+        return "not a regular file"
+    if not os.path.realpath(path).startswith(root_prefix):
+        return "outside the root"
+    return None
+
+
+def _read_ignore_patterns(root: Path, root_prefix: str) -> tuple[str, ...]:
     """Read root's ``.kb-ignore`` file into a tuple of glob patterns.
 
-    Returns an empty tuple when no file exists. Lines starting with
+    Returns an empty tuple when no file exists. A ``.kb-ignore`` that
+    is not a regular file inside the root (for example a link) is not
+    read either: it gets a ``kb_file_skipped`` log line and no
+    patterns apply. Lines starting with
     ``#`` and blank lines are filtered out. Trailing whitespace on
     every pattern is stripped so a stray space at end of line does
     not produce a never-matching pattern. The file is read with
@@ -237,7 +287,11 @@ def _read_ignore_patterns(root: Path) -> tuple[str, ...]:
     silently swallow.
     """
     ignore_file = root / KB_IGNORE_FILENAME
-    if not ignore_file.is_file():
+    if not os.path.lexists(ignore_file):
+        return ()
+    reason = _skip_reason(ignore_file, root_prefix)
+    if reason is not None:
+        structlog.get_logger().warning("kb_file_skipped", path=KB_IGNORE_FILENAME, reason=reason)
         return ()
     lines = ignore_file.read_text(encoding="utf-8").splitlines()
     patterns = tuple(
@@ -259,8 +313,8 @@ def _is_hidden(path: Path, root: Path) -> bool:
         rel = path.relative_to(root)
     except ValueError:
         # ``relative_to`` raises when *path* is not under *root*. The
-        # ``rglob`` iterator never produces a path outside root, but
-        # defensive coding keeps this helper testable in isolation.
+        # walk never produces a path outside root, but defensive
+        # coding keeps this helper testable in isolation.
         return True
     return any(part.startswith(".") for part in rel.parts)
 
@@ -288,8 +342,11 @@ def _is_ignored(rel_path: str, patterns: tuple[str, ...]) -> bool:
     return False
 
 
-def _build_record(path: Path) -> KbFileRecord:
+def _build_record(path: Path, rel: str) -> KbFileRecord:
     """Read *path*, extract front-matter, return a :class:`KbFileRecord`.
+
+    *rel* is the root-relative POSIX path; error messages name it
+    instead of the absolute host path.
 
     The read is UTF-8 with strict decoding -- a binary file
     masquerading as ``.md`` raises :class:`UnicodeDecodeError`,
@@ -312,13 +369,18 @@ def _build_record(path: Path) -> KbFileRecord:
             exc.object,
             exc.start,
             exc.end,
-            f"could not decode {path} as UTF-8: {exc.reason}",
+            f"could not decode {rel} as UTF-8: {exc.reason}",
         ) from exc
+    except OSError as exc:
+        # str(OSError) includes the absolute path; rebuild the message
+        # from the relative path. Same subclass, so callers can still
+        # catch PermissionError and friends.
+        raise type(exc)(f"could not read {rel}: {exc.strerror or type(exc).__name__}") from exc
 
     try:
         post = frontmatter.loads(raw)
     except yaml.YAMLError as exc:
-        raise KbFileParseError(f"front-matter parse error in {path}: {exc}") from exc
+        raise KbFileParseError(f"front-matter parse error in {rel}: {exc}") from exc
 
     metadata = dict(post.metadata)
     body = post.content
@@ -329,4 +391,10 @@ def _build_record(path: Path) -> KbFileRecord:
     else:
         slug = validate_slug(path.stem)
 
-    return KbFileRecord(path=path, slug=slug, body=body, metadata=metadata)
+    return KbFileRecord(
+        path=path,
+        relative_path=rel,
+        slug=slug,
+        body=body,
+        metadata=metadata,
+    )

@@ -34,11 +34,11 @@ PowerShell injection safety
 
 Operator-supplied string values (zone / name / IP / CNAME target) are
 interpolated into the PowerShell script text inside **single-quoted**
-PowerShell string literals with any embedded ``'`` doubled -- the exact
-convention the Holodeck ``pod.info`` handler uses
-(``value.replace("'", "''")``). Inside a single-quoted PowerShell string
-the only metacharacter is ``'`` itself, so doubling it is complete
-escaping. The transport is ``powershell -EncodedCommand`` (base64 UTF-16LE), so
+PowerShell string literals via the shared ``ps_single_quote`` helper.
+Inside a single-quoted PowerShell string the only metacharacters are the
+single-quote characters (``'`` and the typographic quotes U+2018 to
+U+201B), so doubling each of them is complete escaping. The transport is
+``powershell -EncodedCommand`` (base64 UTF-16LE), so
 the *shell* never parses the script -- there is no ``sh -c`` layer to
 escape for, only the PowerShell parser. Integer values (TTL seconds) are
 validated to ``int`` before interpolation. A/CNAME writes prefix
@@ -457,7 +457,8 @@ _REMOVE_WARNING = (
     "record of the given RRType at the name in one ``-Force`` write, so it "
     "rides the same hardest gate as ``bind9.record.remove``: "
     "``safety_level=destructive`` + ``requires_approval=True`` -- mandatory "
-    "human approval always (no agent path, no standing grant, no self-approval "
+    "human approval always (no agent path, no standing grant except on an "
+    "instance in sandbox mode, no self-approval "
     "even under break-glass), a mandatory preview-hash binding, and a mandatory "
     "blast-radius statement (the zone/name/type plus EVERY value that dies) the "
     "four-eyes approver reads before deciding. The change is global: DNS has no "

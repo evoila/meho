@@ -115,6 +115,7 @@ func printRunStatus(w io.Writer, s *api.AgentRunStatusResponse) {
 	fmt.Fprintf(w, "%-16s %s\n", "run_id:", s.RunId.String())
 	fmt.Fprintf(w, "%-16s %s\n", "status:", string(s.Status))
 	fmt.Fprintf(w, "%-16s %d\n", "turns:", s.Turns)
+	fmt.Fprintf(w, "%-16s %s\n", "identity:", runIdentity(s.IdentitySub, s.IdentityAct))
 	if s.Provider != nil {
 		fmt.Fprintf(w, "%-16s %s\n", "provider:", *s.Provider)
 	}

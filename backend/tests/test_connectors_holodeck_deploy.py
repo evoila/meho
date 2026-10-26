@@ -25,8 +25,9 @@ Acceptance-criteria coverage matrix:
   already_applied) + the 9.1 verify-only path (greps, never seds).
 * Uniform op-identity envelope (#2681) on all four (parked proposed_effect for
   the three gated ops; op_id on the safe op's result).
-* Secret hygiene (#1503): router.patch parks op-identity-only (no token) and is
-  pinned credential-class; config.apply's schema admits no plaintext credential.
+* Secret hygiene (#1503): router.patch is pinned credential-class and parks
+  with its own preview (patch ids + files, #4850) that holds no token;
+  config.apply's schema admits no plaintext credential.
 
 Tests mirror the windows_dns / holodeck mocked-pwsh transport pattern
 (test_connectors_holodeck_write.py): pure helpers unit-tested directly, handler
@@ -136,7 +137,7 @@ def test_deploy_ops_safety_and_approval() -> None:
 def test_deploy_ops_carry_transport_note_and_instructions() -> None:
     for op in DEPLOY_OPS:
         instr = op.llm_instructions or {}
-        assert "Holodeck has no REST API" in instr.get("when_to_use", ""), op.op_id
+        assert "Holodeck has no REST API" in instr.get("when_to_call", ""), op.op_id
         assert instr.get("output_shape"), f"{op.op_id} missing output_shape"
 
 
@@ -483,6 +484,25 @@ async def test_instance_start_precheck_pwsh_error_is_fail_fast() -> None:
         result = await connector.instance_start(_StubTarget(), _START_PARAMS)
         mock_launch.assert_not_awaited()
     assert result["started"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quote", ["'", "\u2018", "\u2019", "\u201a", "\u201b"])
+async def test_instance_start_precheck_quotes_config_path_for_powershell(quote: str) -> None:
+    """The precheck script quotes the config path with PowerShell rules, not shell rules."""
+    connector = HolodeckConnector()
+    params = {**_START_PARAMS, "config_id": f"cfg{quote}1"}
+    with (
+        patch(
+            "meho_backplane.connectors.holodeck.ops_deploy.pwsh_run",
+            new_callable=AsyncMock,
+        ) as mock_pwsh,
+        patch.object(connector, "_run_command", new_callable=AsyncMock),
+    ):
+        mock_pwsh.return_value = _LOCKED_ACCOUNT
+        await connector.instance_start(_StubTarget(), params)
+    script = mock_pwsh.await_args.args[2]
+    assert f"Get-Content -Raw '/holodeck-runtime/config/cfg{quote}{quote}1.json' " in script
 
 
 # ===========================================================================
@@ -868,18 +888,23 @@ async def test_gated_ops_carry_uniform_op_identity_envelope(
 
 
 @pytest.mark.asyncio
-async def test_router_patch_parks_op_identity_only_no_token(
+async def test_router_patch_parks_with_patch_preview_no_token(
     holodeck_deploy_e2e: HolodeckConnector,
 ) -> None:
-    """Secret hygiene: router.patch is credential-class -> parked op-identity-only, no token."""
+    """Secret hygiene: router.patch is credential-class; its preview holds no token."""
     assert classify_op("holodeck.router.patch") == "credential_write"
     assert set(HOLODECK_DEPLOY_CREDENTIAL_OPS) == {"holodeck.router.patch"}
     result = await _dispatch("holodeck.router.patch", {}, approved=False)
     assert result["status"] == "awaiting_approval"
     effect = await _parked_effect(result["extras"]["approval_request_id"])
-    # Credential-class + no bespoke builder -> params-echo suppressed.
-    assert effect["preview_populated"] is False
-    assert "params_echo" not in effect and "preview" not in effect
+    # Credential-class: no params echo, but the bespoke preview (#4850) shows
+    # which patches the call checks and which files it may edit.
+    assert effect["preview_populated"] is True
+    assert "params_echo" not in effect
+    preview = effect["preview"]
+    assert preview["hr_version"] == "9.0.2.0"
+    assert preview["verify_only"] is False
+    assert [p["patch_id"] for p in preview["patches"]] == ["C1", "C2", "C3"]
     blob = json.dumps(effect).lower()
     assert "brcm_build_token" not in blob
     assert "broadcombuildtoken" not in blob

@@ -42,7 +42,8 @@ Fixture responses reproduce realistic but minimal pfSense 2.7 output:
 - ``pfctl -sn``        → 1 NAT rule
 - ``ifconfig -a``      → 2-interface output
 - ``cat /cf/conf/config.xml`` → minimal config.xml snippet (gateways +
-  version) used by both ``gateway.list`` and ``config.show``
+  version) used by ``gateway.list``, ``config.show``, ``user.list`` and
+  ``route.static.list``
 - ``cat /var/dhcpd/var/db/dhcpd.leases`` → 2-lease ISC dhcpd DB
   (one active, one past-``ends`` → expired) used by ``dhcp.leases``
 """
@@ -50,6 +51,7 @@ Fixture responses reproduce realistic but minimal pfSense 2.7 output:
 from __future__ import annotations
 
 import asyncio
+import json
 import types
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -61,7 +63,6 @@ import pytest
 from sqlalchemy import select
 
 import meho_backplane.connectors.pfsense  # noqa: F401 -- import for registry side-effects
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.pfsense import PFSENSE_OPS, PfSenseConnector
 from meho_backplane.connectors.registry import all_connectors_v2
@@ -73,6 +74,7 @@ from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
+from tests.test_connectors_pfsense_config_redaction import FAKE_PEM_KEY
 
 # ---------------------------------------------------------------------------
 # Module-level key material (generated once per session)
@@ -228,7 +230,7 @@ async def fake_shell_server() -> AsyncIterator[types.SimpleNamespace]:
 
 
 # ---------------------------------------------------------------------------
-# Environment + DB + broadcast fixtures
+# Environment + DB fixtures
 # ---------------------------------------------------------------------------
 
 
@@ -251,18 +253,6 @@ def _reset_module_state() -> Iterator[None]:
     reset_dispatcher_caches()
     yield
     reset_dispatcher_caches()
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    """Stub out :func:`publish_event` so the broadcast bus doesn't fire."""
-    events: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +286,8 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     "pfsense.gateway.list",
     "pfsense.config.show",
     "pfsense.dhcp.leases",
+    "pfsense.user.list",
+    "pfsense.route.static.list",
 )
 
 #: The mutating ops (#3090). Held separate from ``EXPECTED_OP_IDS`` because
@@ -317,14 +309,22 @@ _DELETE_OP_IDS: frozenset[str] = frozenset(
         "pfsense.route.static.delete",
         "pfsense.gateway.delete",
         "pfsense.alias.member.remove",
+        "pfsense.filter.rule.delete",
     }
 )
+
+#: The approval-gated firewall rule add (#3850): ``dangerous`` +
+#: ``requires_approval``, covered by ``test_connectors_pfsense_filter_rule_ops.py``.
+_DANGEROUS_OP_IDS: frozenset[str] = frozenset({"pfsense.filter.rule.add"})
 
 #: The parameterized read op (meho-internal#252). ``safe`` like the rest of
 #: the read surface, but it takes real params (``sanctioned_src`` /
 #: ``mgmt_nets`` are required), so it is held separate from the empty-params
 #: dispatch/audit sweep (covered by ``test_connectors_pfsense_ops.py``).
 _PARAM_READ_OP_IDS: frozenset[str] = frozenset({"pfsense.mgmt_flow.summary"})
+
+# The governed user writes (#3937): ``dangerous`` + requires_approval.
+_USER_WRITE_OP_IDS: frozenset[str] = frozenset({"pfsense.user.disable", "pfsense.user.enable"})
 
 # ---------------------------------------------------------------------------
 # Target + connector seeding helpers
@@ -402,7 +402,6 @@ def _wire_seeded_connector(host: str, port: int) -> PfSenseConnector:
 @pytest.fixture
 async def pfsense_e2e(
     fake_shell_server: types.SimpleNamespace,
-    captured_events: list[Any],
 ) -> AsyncIterator[_PfsenseE2EBundle]:
     """Set up end-to-end pfSense test state.
 
@@ -436,21 +435,38 @@ async def pfsense_e2e(
 
 
 def test_pfsense_ops_registration_count() -> None:
-    """All 17 pfSense ops registered (9 read/identity + 2 write + 5 delete +
-    1 parameterized mgmt-flow read, meho-internal#252)."""
+    """All 23 pfSense ops registered (11 read/identity + 2 write + 6 delete +
+    1 approval-gated rule add + 1 parameterized mgmt-flow read + 2 user writes,
+    #3937)."""
     op_ids = {op.op_id for op in PFSENSE_OPS}
-    missing = (set(EXPECTED_OP_IDS) | _WRITE_OP_IDS | _DELETE_OP_IDS | _PARAM_READ_OP_IDS) - op_ids
+    missing = (
+        set(EXPECTED_OP_IDS)
+        | _WRITE_OP_IDS
+        | _DELETE_OP_IDS
+        | _DANGEROUS_OP_IDS
+        | _PARAM_READ_OP_IDS
+        | _USER_WRITE_OP_IDS
+    ) - op_ids
     assert not missing, f"Missing ops: {missing}"
-    assert len(PFSENSE_OPS) == 17, f"Expected 17 ops, got {len(PFSENSE_OPS)}"
+    assert len(PFSENSE_OPS) == 23, f"Expected 23 ops, got {len(PFSENSE_OPS)}"
 
 
 def test_pfsense_ops_safety_levels_and_approval() -> None:
     """Read ops 'safe', write ops (#3090) 'caution', delete ops (#3232)
-    'destructive' + requires_approval; nothing else requires approval."""
+    'destructive' + requires_approval, user writes (#3937) 'dangerous' +
+    requires_approval; nothing else requires approval."""
     for op in PFSENSE_OPS:
+        if op.op_id in _DANGEROUS_OP_IDS:
+            assert op.safety_level == "dangerous", f"{op.op_id} should be dangerous"
+            assert op.requires_approval, f"{op.op_id} must require approval"
+            continue
         if op.op_id in _DELETE_OP_IDS:
             assert op.safety_level == "destructive", f"{op.op_id} should be destructive"
             assert op.requires_approval, f"{op.op_id} destructive delete must require approval"
+            continue
+        if op.op_id in _USER_WRITE_OP_IDS:
+            assert op.safety_level == "dangerous", f"{op.op_id} should be dangerous"
+            assert op.requires_approval, f"{op.op_id} user write must require approval"
             continue
         expected = "caution" if op.op_id in _WRITE_OP_IDS else "safe"
         assert op.safety_level == expected, f"{op.op_id} should be safety_level={expected!r}"
@@ -467,7 +483,9 @@ def test_pfsense_read_ops_parameter_schemas_are_empty() -> None:
         if (
             op.op_id not in _WRITE_OP_IDS
             and op.op_id not in _DELETE_OP_IDS
+            and op.op_id not in _DANGEROUS_OP_IDS
             and op.op_id not in _PARAM_READ_OP_IDS
+            and op.op_id not in _USER_WRITE_OP_IDS
         ):
             assert schema.get("properties") == {}, (
                 f"{op.op_id}: read-op parameter_schema must have empty properties"
@@ -514,7 +532,6 @@ def test_pfsense_ops_correct_group_keys() -> None:
 @pytest.mark.asyncio
 async def test_pfsense_e2e_about_dispatches_ok(
     pfsense_e2e: _PfsenseE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """pfsense.about returns vendor/product/version via fake-shell."""
     result = await call_operation(
@@ -535,7 +552,6 @@ async def test_pfsense_e2e_about_dispatches_ok(
 @pytest.mark.asyncio
 async def test_pfsense_e2e_version_dispatches_ok(
     pfsense_e2e: _PfsenseE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """pfsense.version returns version/build/kernel via fake-shell."""
     result = await call_operation(
@@ -556,7 +572,6 @@ async def test_pfsense_e2e_version_dispatches_ok(
 @pytest.mark.asyncio
 async def test_pfsense_e2e_firewall_rules_dispatches_ok(
     pfsense_e2e: _PfsenseE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """pfsense.firewall.rules returns parsed rule rows via fake-shell."""
     result = await call_operation(
@@ -580,7 +595,6 @@ async def test_pfsense_e2e_firewall_rules_dispatches_ok(
 @pytest.mark.asyncio
 async def test_pfsense_e2e_firewall_state_dispatches_ok(
     pfsense_e2e: _PfsenseE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """pfsense.firewall.state returns state-table rows via fake-shell."""
     result = await call_operation(
@@ -604,7 +618,6 @@ async def test_pfsense_e2e_firewall_state_dispatches_ok(
 @pytest.mark.asyncio
 async def test_pfsense_e2e_nat_rules_dispatches_ok(
     pfsense_e2e: _PfsenseE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """pfsense.nat.rules returns parsed NAT rule rows via fake-shell."""
     result = await call_operation(
@@ -626,7 +639,6 @@ async def test_pfsense_e2e_nat_rules_dispatches_ok(
 @pytest.mark.asyncio
 async def test_pfsense_e2e_interface_list_dispatches_ok(
     pfsense_e2e: _PfsenseE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """pfsense.interface.list returns parsed interface rows via fake-shell."""
     result = await call_operation(
@@ -650,7 +662,6 @@ async def test_pfsense_e2e_interface_list_dispatches_ok(
 @pytest.mark.asyncio
 async def test_pfsense_e2e_gateway_list_dispatches_ok(
     pfsense_e2e: _PfsenseE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """pfsense.gateway.list returns parsed gateway rows via fake-shell."""
     result = await call_operation(
@@ -678,7 +689,6 @@ async def test_pfsense_e2e_gateway_list_dispatches_ok(
 @pytest.mark.asyncio
 async def test_pfsense_e2e_config_show_dispatches_ok(
     pfsense_e2e: _PfsenseE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """pfsense.config.show returns config_xml and length via fake-shell."""
     result = await call_operation(
@@ -697,6 +707,213 @@ async def test_pfsense_e2e_config_show_dispatches_ok(
     assert result["result"].get("length", 0) > 0
 
 
+@pytest.mark.asyncio
+async def test_pfsense_e2e_config_show_keeps_secrets_out_of_result_and_audit_row(
+    pfsense_e2e: _PfsenseE2EBundle,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The handler removes secrets before the result leaves it, so neither the
+    caller nor the audit row (``raw_payload`` included) ever holds them.
+    Synthetic values only.
+    """
+    fake_hash = "$2y$10$" + "e" * 53
+    fake_psk = "fake-e2e-pre-shared-key"
+    config = _FIXTURE_CONFIG_XML.replace(
+        "</pfsense>",
+        f"  <system><user><name>u1</name><bcrypt-hash>{fake_hash}</bcrypt-hash></user></system>\n"
+        f"  <ipsec><phase1><pre-shared-key>{fake_psk}</pre-shared-key></phase1></ipsec>\n"
+        "</pfsense>",
+    )
+    monkeypatch.setitem(_FIXTURE_RESPONSES, "cat /cf/conf/config.xml", config)
+
+    result = await call_operation(
+        _OPERATOR,
+        {
+            "connector_id": "pfsense-ssh-2.7",
+            "op_id": "pfsense.config.show",
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
+    )
+    assert result["status"] == "ok", f"pfsense.config.show failed: {result.get('error')}"
+    body = result["result"]
+    assert body["redacted_count"] == 2
+    assert "WAN_DHCP" in body["config_xml"]  # normal content still there
+    secrets = (fake_hash, fake_psk)
+    assert not any(secret in json.dumps(result, default=str) for secret in secrets)
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        db_result = await session.execute(
+            select(AuditLog)
+            .where(AuditLog.method == "DISPATCH", AuditLog.path == "pfsense.config.show")
+            .order_by(AuditLog.occurred_at.desc())
+            .limit(1)
+        )
+        row = db_result.scalar_one()
+    stored = json.dumps([row.payload, row.raw_payload, row.redaction_manifest], default=str)
+    assert not any(secret in stored for secret in secrets)
+    assert "***REDACTED***" in json.dumps(row.raw_payload, default=str)
+
+
+async def _latest_dispatch_row(op_id: str) -> AuditLog:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        db_result = await session.execute(
+            select(AuditLog)
+            .where(AuditLog.method == "DISPATCH", AuditLog.path == op_id)
+            .order_by(AuditLog.occurred_at.desc())
+            .limit(1)
+        )
+        return db_result.scalar_one()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", ["pfsense.user.list", "pfsense.route.static.list"])
+async def test_pfsense_e2e_safe_reads_keep_secrets_out_of_result_and_audit_row(
+    pfsense_e2e: _PfsenseE2EBundle,
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+) -> None:
+    """``pfsense.user.list`` / ``pfsense.route.static.list`` (#3954) return only
+    allow-listed fields through the full dispatch path: neither the caller
+    nor the audit row holds a secret. Synthetic values only.
+    """
+    fake_hash = "$2y$10$" + "f" * 53
+    fake_psk = "fake-e2e-user-pre-shared-key"
+    fake_route_secret = "fake-e2e-route-secret-value"
+    config = _FIXTURE_CONFIG_XML.replace(
+        "</pfsense>",
+        "  <system>\n"
+        "    <group><name>vpn-users</name><member>2000</member></group>\n"
+        "    <user><name>user-a</name><descr>Example User A</descr><scope>user</scope>"
+        f"<uid>2000</uid><bcrypt-hash>{fake_hash}</bcrypt-hash>"
+        f"<ipsecpsk>{fake_psk}</ipsecpsk><disabled/></user>\n"
+        "  </system>\n"
+        "  <staticroutes><route><network>192.0.2.0/24</network>"
+        "<gateway>WAN_DHCP</gateway><descr>example route</descr>"
+        f"<auth_secret>{fake_route_secret}</auth_secret></route></staticroutes>\n"
+        "</pfsense>",
+    )
+    monkeypatch.setitem(_FIXTURE_RESPONSES, "cat /cf/conf/config.xml", config)
+
+    result = await call_operation(
+        _OPERATOR,
+        {
+            "connector_id": "pfsense-ssh-2.7",
+            "op_id": op_id,
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
+    )
+    assert result["status"] == "ok", f"{op_id} failed: {result.get('error')}"
+    rows = result["result"]["rows"]
+    if op_id == "pfsense.user.list":
+        assert rows == [
+            {
+                "name": "user-a",
+                "descr": "Example User A",
+                "scope": "user",
+                "disabled": True,
+                "expires": None,
+                "uid": "2000",
+                "groups": ["vpn-users"],
+            }
+        ]
+    else:
+        assert rows == [
+            {
+                "network": "192.0.2.0/24",
+                "gateway": "WAN_DHCP",
+                "descr": "example route",
+                "disabled": False,
+            }
+        ]
+    secrets = (fake_hash, fake_psk, fake_route_secret)
+    assert not any(secret in json.dumps(result, default=str) for secret in secrets)
+
+    row = await _latest_dispatch_row(op_id)
+    stored = json.dumps([row.payload, row.raw_payload, row.redaction_manifest], default=str)
+    assert not any(secret in stored for secret in secrets)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", ["pfsense.user.list", "pfsense.route.static.list"])
+async def test_pfsense_e2e_safe_reads_redact_secret_shapes_in_text_fields(
+    pfsense_e2e: _PfsenseE2EBundle,
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+) -> None:
+    """A private key in a user ``descr`` and a password in a URL in a route
+    ``descr`` come back as ``***REDACTED***`` through the full dispatch path,
+    and reach neither the result nor the audit row (``raw_payload`` included).
+    Synthetic values only.
+    """
+    pem_body_line = FAKE_PEM_KEY.splitlines()[1]
+    url_password = "fake-e2e-url-pass-0042"
+    # Built from pieces, so the source never holds a literal URL with a password.
+    url = "".join(("https://", "admin", ":", url_password, "@", "198.51.100.7/api"))
+    config = _FIXTURE_CONFIG_XML.replace(
+        "</pfsense>",
+        "  <system><user><name>user-a</name>"
+        f"<descr>{FAKE_PEM_KEY}</descr><uid>2000</uid></user></system>\n"
+        "  <staticroutes><route><network>192.0.2.0/24</network>"
+        f"<gateway>WAN_DHCP</gateway><descr>{url}</descr></route></staticroutes>\n"
+        "</pfsense>",
+    )
+    monkeypatch.setitem(_FIXTURE_RESPONSES, "cat /cf/conf/config.xml", config)
+
+    result = await call_operation(
+        _OPERATOR,
+        {
+            "connector_id": "pfsense-ssh-2.7",
+            "op_id": op_id,
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
+    )
+    assert result["status"] == "ok", f"{op_id} failed: {result.get('error')}"
+    (row_out,) = result["result"]["rows"]
+    assert row_out["descr"] == "***REDACTED***"
+    secrets = (pem_body_line, url_password)
+    assert not any(secret in json.dumps(result, default=str) for secret in secrets)
+
+    row = await _latest_dispatch_row(op_id)
+    stored = json.dumps([row.payload, row.raw_payload, row.redaction_manifest], default=str)
+    assert not any(secret in stored for secret in secrets)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", ["pfsense.user.list", "pfsense.route.static.list"])
+async def test_pfsense_e2e_safe_reads_parse_failure_is_an_error_without_file_content(
+    pfsense_e2e: _PfsenseE2EBundle,
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+) -> None:
+    """A ``config.xml`` that cannot be parsed fails the call (never an empty
+    list), and no part of the file reaches the result or the audit row."""
+    fake_hash = "$2y$10$" + "g" * 53
+    broken = f"<pfsense><system><user><name>u1</name><bcrypt-hash>{fake_hash}</bcrypt-hash>"
+    monkeypatch.setitem(_FIXTURE_RESPONSES, "cat /cf/conf/config.xml", broken)
+
+    result = await call_operation(
+        _OPERATOR,
+        {
+            "connector_id": "pfsense-ssh-2.7",
+            "op_id": op_id,
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
+    )
+    assert result["status"] == "error"
+    assert "PfSenseConfigParseError" in json.dumps(result, default=str)
+    assert fake_hash not in json.dumps(result, default=str)
+
+    row = await _latest_dispatch_row(op_id)
+    stored = json.dumps([row.payload, row.raw_payload, row.redaction_manifest], default=str)
+    assert fake_hash not in stored
+
+
 # ---------------------------------------------------------------------------
 # Acceptance criterion (c) — firewall.state JSONFlux handle path
 # ---------------------------------------------------------------------------
@@ -705,7 +922,6 @@ async def test_pfsense_e2e_config_show_dispatches_ok(
 @pytest.mark.asyncio
 async def test_pfsense_e2e_firewall_state_jsonflux_handle(
     pfsense_e2e: _PfsenseE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """pfsense.firewall.state with the real JsonFluxReducer produces a ResultHandle.
 
@@ -766,7 +982,6 @@ async def test_pfsense_e2e_firewall_state_jsonflux_handle(
 @pytest.mark.asyncio
 async def test_pfsense_e2e_dispatch_writes_audit_row(
     pfsense_e2e: _PfsenseE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """Each dispatch inserts an AuditLog row with op_id + target_id + params_hash.
 
@@ -833,9 +1048,8 @@ async def test_pfsense_e2e_dispatch_writes_audit_row(
 @pytest.mark.asyncio
 async def test_pfsense_e2e_all_ops_write_audit_rows(
     pfsense_e2e: _PfsenseE2EBundle,
-    captured_events: list[Any],
 ) -> None:
-    """All 9 pfSense ops each produce an audit row after dispatch.
+    """All 11 empty-params pfSense ops each produce an audit row after dispatch.
 
     Dispatches every op in EXPECTED_OP_IDS and asserts that each one
     inserted at least one ``DISPATCH`` AuditLog row.

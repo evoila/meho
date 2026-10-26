@@ -31,11 +31,21 @@ from __future__ import annotations
 from typing import Final
 
 from meho_backplane.connectors.vmware_rest.composites import (
+    _alarm,
+    _datastore_files,
+    _drs_rule_delete,
     _host,
     _library,
+    _library_delete,
+    _license,
     _namespace,
+    _snapshot,
     _storage_policy,
     _supervisor,
+    _teardown,
+    _teardown_network,
+    _vm_allocation,
+    _vm_cdrom_tools,
     _write,
 )
 
@@ -50,16 +60,25 @@ _VMWARE_REST_CONNECTOR_ID: Final[str] = "vmware-rest-9.0"
 _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.vm.create": _write._SUB_OPS_VM_CREATE + _write._VIM_SUB_OPS_VM_CREATE,
     "vmware.composite.vm.clone": _write._SUB_OPS_VM_CLONE,
-    "vmware.composite.vm.deploy_from_library": _write._SUB_OPS_VM_DEPLOY_FROM_LIBRARY,
+    "vmware.composite.vm.deploy_from_library": (
+        _write._SUB_OPS_VM_DEPLOY_FROM_LIBRARY + _write._VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY
+    ),
     "vmware.composite.vm.import_from_library": (
         _write._SUB_OPS_VM_IMPORT_FROM_LIBRARY + _write._VIM_SUB_OPS_VM_IMPORT_FROM_LIBRARY
     ),
     "vmware.composite.vm.snapshot.revert": _write._VIM_SUB_OPS_VM_SNAPSHOT_REVERT,
-    "vmware.composite.vm.destroy": _write._VIM_SUB_OPS_VM_DESTROY,
+    "vmware.composite.vm.snapshot.create": _snapshot._VIM_SUB_OPS_VM_SNAPSHOT_CREATE,
+    # The RemoveSnapshot_Task child is delete-shaped, so the discovery surface
+    # flags it un-grantable -- a human always decides.
+    "vmware.composite.vm.snapshot.delete": _snapshot._VIM_SUB_OPS_VM_SNAPSHOT_DELETE,
+    "vmware.composite.vm.destroy": _write._SUB_OPS_VM_DESTROY + _write._VIM_SUB_OPS_VM_DESTROY,
     "vmware.composite.vm.migrate": _write._SUB_OPS_VM_MIGRATE + _write._VIM_SUB_OPS_VM_MIGRATE,
     "vmware.composite.vm.power.bulk": _write._SUB_OPS_VM_POWER_BULK,
     "vmware.composite.vm.power": _write._SUB_OPS_VM_POWER,
     "vmware.composite.vm.disk.grow": _write._VIM_SUB_OPS_VM_DISK_GROW,
+    "vmware.composite.vm.resource_allocation.set": (
+        _vm_allocation._VIM_SUB_OPS_VM_RESOURCE_ALLOCATION_SET
+    ),
     "vmware.composite.vm.disk.attach": _write._VIM_SUB_OPS_VM_DISK_ATTACH,
     "vmware.composite.vm.clone_from_template": _write._VIM_SUB_OPS_VM_CLONE_FROM_TEMPLATE,
     "vmware.composite.host.evacuate": (
@@ -80,6 +99,12 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.cluster.drs_vm_host_rule.create": (
         _write._VIM_SUB_OPS_CLUSTER_DRS_VM_HOST_RULE_CREATE
     ),
+    # The delete's child is the same ReconfigureComputeResource_Task as the
+    # create (a rule removal, not a vim Destroy). The composite itself is
+    # destructive, so a human always decides.
+    "vmware.composite.cluster.drs_rule.delete": (
+        _drs_rule_delete._VIM_SUB_OPS_CLUSTER_DRS_RULE_DELETE
+    ),
     "vmware.composite.resource_pool.create": (
         _write._SUB_OPS_RESOURCE_POOL_CREATE + _write._VIM_SUB_OPS_RESOURCE_POOL_CREATE
     ),
@@ -88,6 +113,10 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.vm.resize": _write._SUB_OPS_VM_RESIZE,
     "vmware.composite.vm.nic.repoint": _write._SUB_OPS_VM_NIC_REPOINT,
     "vmware.composite.vm.device.cdrom": _write._SUB_OPS_VM_DEVICE_CDROM,
+    "vmware.composite.vm.cdrom.add": _vm_cdrom_tools.SUB_OPS_VM_CDROM_ADD,
+    "vmware.composite.vm.tools.installer.unmount": (
+        _vm_cdrom_tools.SUB_OPS_VM_TOOLS_INSTALLER_UNMOUNT
+    ),
     "vmware.composite.guest.customization_spec.create": (
         _write._SUB_OPS_GUEST_CUSTOMIZATION_SPEC_CREATE
     ),
@@ -112,6 +141,30 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.content_library.subscribed.sync": (
         _library._SUB_OPS_CONTENT_LIBRARY_SUBSCRIBED_SYNC
     ),
+    # #3339 teardown deletes (+ the paired datastore.dir.create). The Destroy /
+    # RemovePortGroup / DeleteDatastoreFile / DELETE children are delete-shaped,
+    # so the discovery surface flags them un-grantable -- a human always decides.
+    "vmware.composite.network.portgroup.delete": (
+        _teardown_network._VIM_SUB_OPS_NETWORK_PORTGROUP_DELETE
+    ),
+    "vmware.composite.host.standard_portgroup.delete": (
+        _teardown_network._VIM_SUB_OPS_HOST_STANDARD_PORTGROUP_DELETE
+    ),
+    "vmware.composite.folder.delete": _teardown._VIM_SUB_OPS_FOLDER_DELETE,
+    "vmware.composite.datastore.file.delete": (_datastore_files._VIM_SUB_OPS_DATASTORE_FILE_DELETE),
+    "vmware.composite.datastore.dir.create": _datastore_files._VIM_SUB_OPS_DATASTORE_DIR_CREATE,
+    "vmware.composite.content_library.delete": (
+        _library_delete._SUB_OPS_CONTENT_LIBRARY_DELETE
+        + _library_delete._VIM_SUB_OPS_CONTENT_LIBRARY_MEDIA_CHECK
+    ),
+    "vmware.composite.content_library.item.delete": (
+        _library_delete._SUB_OPS_CONTENT_LIBRARY_ITEM_DELETE
+        + _library_delete._VIM_SUB_OPS_CONTENT_LIBRARY_MEDIA_CHECK
+    ),
+    "vmware.composite.license.assign": _license._VIM_SUB_OPS_LICENSE_ASSIGN,
+    # #4383 alarm changes: one AlarmManager write each, after two reads.
+    "vmware.composite.alarm.acknowledge": _alarm._VIM_SUB_OPS_ALARM_ACKNOWLEDGE,
+    "vmware.composite.alarm.reset": _alarm._VIM_SUB_OPS_ALARM_RESET,
 }
 
 

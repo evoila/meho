@@ -12,9 +12,9 @@ This page explains the three tiers, how a client opts into the operator
 planes, and why an agent can never approve its own work. It is the same
 model whichever client you wired in [Connect clients](index.md).
 
-## The default working surface (25 tools)
+## The default working surface (26 tools)
 
-Every session lists the **25-tool working surface** with no elevation —
+Every session lists the **26-tool working surface** with no elevation —
 enough to discover connectors, run governed operations, page large
 results, and coordinate with other operators. The tools group into ten
 families:
@@ -26,14 +26,14 @@ families:
 | **Operation discovery** | `list_operation_groups`, `search_operations` |
 | **Execution** | `call_operation`, `preview_operation` |
 | **Result handles** | `result_query` |
-| **Knowledge** | `search_knowledge`, `add_to_knowledge` (plus the capability-gated docs add-on: `ask_docs`, `search_docs`, `list_doc_collections`) |
+| **Knowledge** | `search_knowledge`, `add_to_knowledge` (plus the capability-gated docs add-on: `ask_docs`, `search_docs`, `read_docs`, `list_doc_collections`) |
 | **Memory** | `search_memory`, `add_to_memory` |
 | **Broadcast** | `meho_broadcast_recent`, `meho_broadcast_announce`, `meho_broadcast_watch` |
 | **Targets and topology** | `list_targets`, `query_topology` |
 | **Runbooks (run family)** | `meho_runbook_start`, `meho_runbook_next`, `meho_runbook_abort`, `meho_runbook_list_runs`, `meho_runbook_list_templates`, `meho_runbook_show_template` |
 
-Three of the 25 — the grounded-documentation add-on tools `ask_docs`,
-`search_docs`, and `list_doc_collections` — appear only when the tenant
+Four of the 26 — the grounded-documentation add-on tools `ask_docs`,
+`search_docs`, `read_docs`, and `list_doc_collections` — appear only when the tenant
 has provisioned the `meho-docs` capability. A session without that
 capability lists the other 22.
 
@@ -81,16 +81,21 @@ token only on request (the realm grants `mcp:admin` request-only):
   the space-separated scopes you want, adding `mcp:admin`:
 
     ```bash
-    MEHO_MCP_SCOPES="mcp:read mcp:execute mcp:admin"
+    MEHO_MCP_SCOPES="mcp:read mcp:execute offline_access mcp:admin"
     ```
+
+    The variable replaces the whole default list. Keep `offline_access`
+    in it, so the login still lasts between uses.
 
 - **Claude Desktop `.mcpb` bundle** — set the bundle's **OAuth scopes**
   (`scopes`) user-config field to the same value in the install dialog.
 
-Requesting a scope your realm does not grant simply degrades to the
-default working surface — it never fails the connection. Leave the scope
-off entirely and the session stays on the 25-tool working surface, which
-is the right default for almost every agent.
+The `meho-mcp` client on your realm must offer `mcp:admin` as an
+**optional** client scope first. If it does not, Keycloak refuses the
+whole login with `invalid_scope` and issues no token — it does not drop
+the scope silently. Leave the scope off entirely and the session stays on
+the 26-tool working surface, which is the right default for almost every
+agent.
 
 ## The human-only decision verbs (no MCP path)
 

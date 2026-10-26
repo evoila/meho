@@ -67,9 +67,11 @@ workstations.
 
 The backplane is HTTPS, so no `--allow-http` is needed. Set
 `NODE_EXTRA_CA_CERTS=/path/to/internal-ca.pem` in the client's
-environment for an internal-CA deploy — Node does not read the OS trust
-store. Because the header carries the token, `mcp-remote` performs no
-OAuth flow and needs no redirect URI on the realm.
+environment for an internal-CA deploy — by default Node does not read the
+OS trust store. If the root CA is already trusted there, setting
+`NODE_USE_SYSTEM_CA=1` instead makes Node read it (Node 22.19+ / 24.6+).
+Because the header carries the token, `mcp-remote` performs no OAuth flow
+and needs no redirect URI on the realm.
 
 ## Verify
 

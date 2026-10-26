@@ -57,7 +57,7 @@ COPY alembic.ini ./
 # Install ONLY the build backend from the lock (direct-URL download, no index
 # resolve), into /app/.venv.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-install-project --only-group build
+    uv sync --locked --no-build --no-install-project --only-group build
 # Build the wheel reusing the installed backend — no fresh PyPI resolution.
 RUN --mount=type=cache,target=/root/.cache/uv \
     VIRTUAL_ENV=/app/.venv uv build --wheel --no-build-isolation --out-dir /wheels
@@ -109,7 +109,7 @@ WORKDIR /app
 # pyproject without error; it costs ~1 KB on a cache hit.
 COPY pyproject.toml uv.lock README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-install-project
+    uv sync --locked --no-build --no-dev --no-install-project
 
 # Step 2: install the project from the wheel prebuilt in the `wheelbuilder`
 # stage. Installing a built pure-Python wheel needs neither a build backend
@@ -186,36 +186,86 @@ ARG TAILWIND_SHA_ARM64=8f48dcb72be3b351c10563c5329b4638ba8516820dc3b3a1609625a16
 # either way -- so dropping curl removes one moving part without weakening
 # the supply-chain story. `sha256sum` ships in coreutils, which the slim
 # image already includes.
-RUN set -eux; \
-    case "${TARGETPLATFORM:-linux/amd64}" in \
-      linux/amd64) TW_ARCH=linux-x64; TW_SHA="${TAILWIND_SHA_AMD64}" ;; \
-      linux/arm64) TW_ARCH=linux-arm64; TW_SHA="${TAILWIND_SHA_ARM64}" ;; \
-      *) echo "Unsupported TARGETPLATFORM=${TARGETPLATFORM}" >&2; exit 1 ;; \
-    esac; \
-    python -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" \
-      "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VER}/tailwindcss-${TW_ARCH}" \
-      /tmp/tailwindcss; \
-    echo "${TW_SHA}  /tmp/tailwindcss" | sha256sum -c -; \
-    install -m 0755 /tmp/tailwindcss /usr/local/bin/tailwindcss; \
-    rm /tmp/tailwindcss; \
-    UI_SP="$(/app/.venv/bin/python -c 'import os, sysconfig; print(os.path.join(sysconfig.get_paths()["purelib"], "meho_backplane", "ui"))')"; \
-    test -f "${UI_SP}/static/src/styles.css"; \
-    mkdir -p "${UI_SP}/static/dist"; \
-    tailwindcss \
-      -i "${UI_SP}/static/src/styles.css" \
-      -o "${UI_SP}/static/dist/tailwind.css" \
-      --minify; \
-    CSS="${UI_SP}/static/dist/tailwind.css"; \
-    test -s "${CSS}"; \
-    CSS_BYTES="$(wc -c < "${CSS}")"; \
-    if [ "${CSS_BYTES}" -lt 61440 ]; then \
-      echo "ERROR: compiled tailwind bundle is only ${CSS_BYTES} B (< 60 KB floor) -- the @source content scan reached (near) no templates and shipped a preflight-only bundle. See evoila/meho#3647." >&2; \
-      exit 1; \
-    fi; \
-    for cls in '\.btn' '\.card' '\.navbar' 'bg-base' 'badge-error'; do \
-      grep -q "${cls}" "${CSS}" \
-        || { echo "ERROR: compiled tailwind bundle is missing selector '${cls}' -- the @source content scan reached no templates. See evoila/meho#3647." >&2; exit 1; }; \
-    done
+#
+# The download has two time limits and retries. A plain `urlretrieve` call
+# has no time limit: when the connection stops sending data, it waits
+# forever, and the image job only ends when GitHub cancels it at its
+# 45-minute limit (#4167 -- nine runs in two days, each stalled on this one
+# download while the other platform's copy finished in seconds). The
+# `timeout=` below is a socket time limit: it fires on a slow connect and on
+# a read that receives nothing for 30 seconds. It does not fire when the
+# server keeps sending a few bytes every few seconds, so a second limit
+# covers each whole try: an alarm signal (`signal.alarm`) stops the try
+# after 120 seconds no matter what state it is in. A normal download takes
+# 2 to 12 seconds. Five tries with a short growing pause bound the worst
+# case to about 11 minutes; after the last failed try the build stops with
+# a clear error instead of hanging.
+#
+# This step is a Dockerfile heredoc (not a `\`-continued one-liner) only so
+# the Python download script can be written as a plain multi-line script.
+RUN <<'EOF'
+set -eux
+case "${TARGETPLATFORM:-linux/amd64}" in
+  linux/amd64) TW_ARCH=linux-x64; TW_SHA="${TAILWIND_SHA_AMD64}" ;;
+  linux/arm64) TW_ARCH=linux-arm64; TW_SHA="${TAILWIND_SHA_ARM64}" ;;
+  *) echo "Unsupported TARGETPLATFORM=${TARGETPLATFORM}" >&2; exit 1 ;;
+esac
+python - "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VER}/tailwindcss-${TW_ARCH}" /tmp/tailwindcss <<'PY'
+import shutil
+import signal
+import sys
+import time
+import urllib.request
+from http.client import HTTPException
+
+url, dest = sys.argv[1], sys.argv[2]
+attempts = 5
+socket_timeout = 30  # seconds one connect or one read may wait for data
+try_limit = 120  # seconds one whole try may take, from connect to last byte
+
+
+def stop_try(signum, frame):
+    raise TimeoutError(f"download did not finish within {try_limit}s")
+
+
+signal.signal(signal.SIGALRM, stop_try)
+for attempt in range(1, attempts + 1):
+    signal.alarm(try_limit)
+    try:
+        with urllib.request.urlopen(url, timeout=socket_timeout) as resp, open(dest, "wb") as out:
+            shutil.copyfileobj(resp, out)
+    except (OSError, HTTPException) as exc:
+        signal.alarm(0)
+        print(f"tailwind download try {attempt}/{attempts} failed: {exc!r}", file=sys.stderr)
+        if attempt == attempts:
+            sys.exit(1)
+        time.sleep(5 * attempt)
+    else:
+        signal.alarm(0)
+        break
+PY
+echo "${TW_SHA}  /tmp/tailwindcss" | sha256sum -c -
+install -m 0755 /tmp/tailwindcss /usr/local/bin/tailwindcss
+rm /tmp/tailwindcss
+UI_SP="$(/app/.venv/bin/python -c 'import os, sysconfig; print(os.path.join(sysconfig.get_paths()["purelib"], "meho_backplane", "ui"))')"
+test -f "${UI_SP}/static/src/styles.css"
+mkdir -p "${UI_SP}/static/dist"
+tailwindcss \
+  -i "${UI_SP}/static/src/styles.css" \
+  -o "${UI_SP}/static/dist/tailwind.css" \
+  --minify
+CSS="${UI_SP}/static/dist/tailwind.css"
+test -s "${CSS}"
+CSS_BYTES="$(wc -c < "${CSS}")"
+if [ "${CSS_BYTES}" -lt 61440 ]; then
+  echo "ERROR: compiled tailwind bundle is only ${CSS_BYTES} B (< 60 KB floor) -- the @source content scan reached (near) no templates and shipped a preflight-only bundle. See evoila/meho#3647." >&2
+  exit 1
+fi
+for cls in '\.btn' '\.card' '\.navbar' 'bg-base' 'badge-error'; do
+  grep -q "${cls}" "${CSS}" \
+    || { echo "ERROR: compiled tailwind bundle is missing selector '${cls}' -- the @source content scan reached no templates. See evoila/meho#3647." >&2; exit 1; }
+done
+EOF
 
 # ---------- Runtime ----------------------------------------------------------
 FROM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS runtime
@@ -225,38 +275,75 @@ FROM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f713
 # fixable CRITICAL/HIGH, each with the fix already served by the trixie apt
 # repo but NOT yet in a rebuilt upstream python:3.14-slim manifest — so the
 # base-digest bump the Dependabot docker block would normally carry cannot
-# clear them. (As of this layer's last touch the freshly-rebuilt upstream tag
-# picked up util-linux and openssl but still ships the vulnerable perl-base,
-# gzip, libpcre2 and libsqlite3, so a digest bump alone leaves the gate red.)
+# clear them. (As of this layer's last touch the freshly-rebuilt upstream tag,
+# built 2026-10-01, carries openssl 3.5.7-1~deb13u3 but still ships
+# libpcre2-8-0 10.46-1~deb13u2, so a digest bump alone leaves the gate red.)
 # Rather than publish a release image with a known fixable CRITICAL/HIGH, we
 # upgrade just those already-present binaries to the trixie security version in
 # one apt layer (indexes dropped in the same RUN, so no apt metadata persists
 # in the image). This is a targeted --only-upgrade of packages already present
 # — no new package enters the image — the sibling in intent of the pip
 # uninstall below: keep the Trivy scan (and the image workflow's promotion
-# gate) clean. Families and the fix that clears each:
-#   util-linux (+ libuuid1/libmount1/libblkid1/libsmartcols1/liblastlog2-2/
-#     mount/bsdutils/login)   >= 2.41.5-0+deb13u1   CVE-2026-53615
-#   openssl (+ libssl3t64/openssl-provider-legacy)
-#                             >= 3.5.7-1~deb13u2    CVE-2026-14456
-#   perl-base                 >= 5.40.1-6+deb13u1   CVE-2026-8376 (CRITICAL),
+# gate) clean.
+#
+# The security floors live INSIDE the RUN, not only in this comment. CI builds
+# with the GitHub Actions layer cache (image.yml `cache-from: type=gha`), which
+# serves this layer for as long as the RUN text is unchanged: apt is not
+# re-run, so a fix trixie publishes later never reaches the image on its own,
+# and a comment-only edit changes nothing. That is how the openssl and pcre2
+# fixes below were first missed: both packages were already in the list, so
+# the cached layer kept their older versions. Raising a floor in the `case`
+# below (or adding a package and its floor) is therefore the edit that both
+# invalidates the cached layer and fails the build when apt did not deliver at
+# least that version, and a cached layer always satisfies the floors written
+# in its own RUN text. A floor is per Debian SOURCE package, checked against
+# `${source:Version}`: Debian's advisories (and Trivy's matching) are per
+# source package, one floor covers a family, and the epochs on bsdutils
+# (1:2.41…) and login (1:4.16.0-2+really2.41…) cannot make a floor vacuous.
+#
+# Source package (binaries in `pkgs`), floor, and the CVEs each floor clears:
+#   util-linux (util-linux libuuid1 libmount1 libblkid1 libsmartcols1
+#     liblastlog2-2 mount bsdutils login)
+#                             >= 2.41.5-0+deb13u1   CVE-2026-53615
+#   openssl (openssl libssl3t64 openssl-provider-legacy)
+#                             >= 3.5.7-1~deb13u3    CVE-2026-14456,
+#                                                   CVE-2026-75804, CVE-2026-84782
+#   perl (perl-base)          >= 5.40.1-6+deb13u1   CVE-2026-8376 (CRITICAL),
 #                                                   CVE-2026-57433, CVE-2026-57432,
 #                                                   CVE-2026-48962, CVE-2026-42497
-#   gzip                      >= 1.13-1+deb13u1     CVE-2026-41992
-#   libpcre2-8-0              >= 10.46-1~deb13u2    CVE-2026-86145, CVE-2026-89161
-#   libsqlite3-0              >= 3.46.1-7+deb13u2   CVE-2026-11822, CVE-2026-11824
-# Drop each package from this layer once a base-digest bump lands a rebuilt
-# base already carrying that package at (or above) the version listed here.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends --only-upgrade \
-      util-linux libuuid1 libmount1 libblkid1 libsmartcols1 liblastlog2-2 \
-      mount bsdutils login \
-      openssl libssl3t64 openssl-provider-legacy \
-      perl-base \
-      gzip \
-      libpcre2-8-0 \
-      libsqlite3-0 \
- && rm -rf /var/lib/apt/lists/*
+#   gzip (gzip)               >= 1.13-1+deb13u1     CVE-2026-41992
+#   pcre2 (libpcre2-8-0)      >= 10.46-1~deb13u3    CVE-2026-86145, CVE-2026-89161,
+#                                                   CVE-2026-103111
+#   sqlite3 (libsqlite3-0)    >= 3.46.1-7+deb13u2   CVE-2026-11822, CVE-2026-11824
+# Drop a package from `pkgs` once a base-digest bump lands a rebuilt base
+# already carrying it at (or above) its floor, and drop a floor once no
+# package of its source is left.
+RUN set -eu; \
+    pkgs='util-linux libuuid1 libmount1 libblkid1 libsmartcols1 liblastlog2-2 \
+          mount bsdutils login \
+          openssl libssl3t64 openssl-provider-legacy \
+          perl-base gzip libpcre2-8-0 libsqlite3-0'; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends --only-upgrade $pkgs; \
+    rm -rf /var/lib/apt/lists/*; \
+    rows="$(dpkg-query -W -f='${Package}|${source:Package}|${source:Version}\n' $pkgs)"; \
+    for row in $rows; do \
+      pkg="${row%%|*}"; rest="${row#*|}"; src="${rest%%|*}"; have="${rest#*|}"; \
+      case "${src}" in \
+        util-linux) floor='2.41.5-0+deb13u1' ;; \
+        openssl)    floor='3.5.7-1~deb13u3' ;; \
+        perl)       floor='5.40.1-6+deb13u1' ;; \
+        gzip)       floor='1.13-1+deb13u1' ;; \
+        pcre2)      floor='10.46-1~deb13u3' ;; \
+        sqlite3)    floor='3.46.1-7+deb13u2' ;; \
+        *) echo "ERROR: ${pkg} (source ${src}) has no security floor in this layer -- add one to the case list" >&2; exit 1 ;; \
+      esac; \
+      if ! dpkg --compare-versions "${have}" ge "${floor}"; then \
+        echo "ERROR: ${pkg} is at ${src} ${have}, below its security floor ${floor} -- apt did not serve the fix this layer exists for" >&2; \
+        exit 1; \
+      fi; \
+      echo "security floor ok: ${pkg} (${src} ${have} >= ${floor})"; \
+    done
 
 # Non-root user (uid 1001 — fixed for k8s SecurityContext alignment).
 RUN useradd --system --uid 1001 --gid 0 --no-create-home --shell /usr/sbin/nologin meho

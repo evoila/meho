@@ -6,8 +6,8 @@ The tests run the real meho-host without root, without RKE2 and without a
 network, and they change nothing on the machine that runs them:
 
 - MEHO_TEST_ROOT points meho-host to a temporary root folder. It holds the
-  files meho-host reads (RKE2's kubectl, /etc/os-release, the two one-time
-  files) and receives the support bundle.
+  files meho-host reads (RKE2's kubectl and rke2 at their real places,
+  /etc/os-release, the two one-time files) and receives the support bundle.
 - PATH holds only stub commands and links to the few real tools meho-host
   needs. Each stub answers from one file in the "fake" folder and writes its
   arguments to calls.log, so a test changes one answer and reads the calls.
@@ -76,14 +76,6 @@ STUBS = {
           *) exec "$MEHO_REAL_DATE" "$@" ;;
         esac
         """),
-    "rke2": textwrap.dedent("""\
-        case "$1 $2" in
-          "certificate check")
-            cat "$MEHO_FAKE/rke2_cert_table"
-            exit "$(cat "$MEHO_FAKE/rke2_rc")" ;;
-          *) exit 1 ;;
-        esac
-        """),
     "df": textwrap.dedent("""\
         case "$*" in
           -h) cat "$MEHO_FAKE/df_h" ;;
@@ -104,6 +96,15 @@ STUBS = {
     "timedatectl": 'cat "$MEHO_FAKE/timedatectl_out"',
     "journalctl": 'cat "$MEHO_FAKE/journal_out"',
 }
+
+RKE2_STUB = textwrap.dedent("""\
+    case "$1 $2" in
+      "certificate check")
+        cat "$MEHO_FAKE/rke2_cert_table"
+        exit "$(cat "$MEHO_FAKE/rke2_rc")" ;;
+      *) exit 1 ;;
+    esac
+    """)
 
 # The fake kubectl answers each call of meho-host from one file. A request
 # for the content of a Secret (-o ...) answers with kube_secret_data, which
@@ -208,6 +209,7 @@ class FakeHost:
         for name, body in STUBS.items():
             _write_script(self.stubs / name, body)
         _write_script(self.host_path("/var/lib/rancher/rke2/bin/kubectl"), KUBECTL_STUB)
+        _write_script(self.host_path("/usr/local/bin/rke2"), RKE2_STUB)
         for name, content in DEFAULT_ANSWERS.items():
             self.answer(name, content)
         (self.fake / "calls.log").write_text("")

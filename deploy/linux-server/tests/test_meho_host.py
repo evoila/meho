@@ -180,34 +180,34 @@ class CheckTests(HostTestCase):
         self.assertEqual(1, result.returncode)
         self.assertIn(
             "[FAIL] pods: no pod in namespace meho, so the MEHO core is not installed. "
-            f"Fix: run install.sh again. If it fails, {SUPPORT_HINT}",
+            f"Fix: {SUPPORT_HINT}",
             result.stdout,
         )
 
     def test_a_disk_below_20_percent_free_warns_and_the_exit_code_stays_0(self) -> None:
-        self.host.answer("df_meho", df_answer(200, 30))
+        self.host.answer("df_meho", df_answer(200, 36))
 
         result = self.host.run("check")
 
         self.assertEqual(0, result.returncode, self.output(result))
         self.assertIn(
-            "[WARN] disk: /var/lib/rancher has 150 GB free (75%); /var/lib/meho has 30 GB free "
-            "(15%). Fix: free space on the disk or make it larger, before it falls below 10%.",
+            "[WARN] disk: /var/lib/rancher has 150 GB free (75%); /var/lib/meho has 36 GB free "
+            "(18%). Fix: free space on the disk or make it larger, before it falls below 15%.",
             result.stdout,
         )
         checks = json.loads(self.host.run("check", "--json").stdout)["checks"]
         self.assertEqual("warn", checks[2]["status"])
         self.assertTrue(checks[2]["hint"].startswith("free space"), checks[2])
 
-    def test_a_disk_below_10_percent_free_is_red(self) -> None:
-        self.host.answer("df_rancher", df_answer(200, 10))
+    def test_a_disk_below_15_percent_free_is_red(self) -> None:
+        self.host.answer("df_rancher", df_answer(200, 24))
 
         result = self.host.run("check")
 
         self.assertEqual(1, result.returncode)
         self.assertIn(
-            "[FAIL] disk: /var/lib/rancher has 10 GB free (5%); /var/lib/meho has 150 GB free "
-            "(75%). Fix: free space on the disk or make it larger. Below 10% the built-in "
+            "[FAIL] disk: /var/lib/rancher has 24 GB free (12%); /var/lib/meho has 150 GB free "
+            "(75%). Fix: free space on the disk or make it larger. Below 15% the built-in "
             "Kubernetes stops pods to protect the disk.",
             result.stdout,
         )
@@ -320,7 +320,10 @@ class SupportBundleTests(HostTestCase):
         """Run support-bundle, check the printed path, and return the archive's files."""
         result = self.host.run("support-bundle")
         self.assertEqual(0, result.returncode, self.output(result))
-        self.assertEqual(BUNDLE_PATH + "\n", result.stdout)
+        lines = result.stdout.splitlines()
+        self.assertEqual(BUNDLE_PATH, lines[0])
+        self.assertIn("then delete it", lines[1])
+        self.assertEqual(2, len(lines))
         files = {}
         with tarfile.open(self.host.host_path(BUNDLE_PATH)) as archive:
             for member in archive.getmembers():
@@ -366,26 +369,31 @@ class SupportBundleTests(HostTestCase):
         self.assertEqual("crashed earlier\n", files["pods/meho.meho-keycloak-0.previous.log"])
 
     def test_no_password_token_or_key_is_in_the_bundle(self) -> None:
-        password = "Fake-Admin-Password-7f3a"
+        admin_pass = "Fake-Admin-Password-7f3a"
+        approver_pass = "Fake-Approver-Password-9c1d"
         token = "fake-token-9c1d2e"
         unseal_key = "fake-unseal-key-5e2b8a4c"
         self.host.host_file(
             "/var/lib/meho/first-login-passwords",
-            f"admin_password={password}\nadmin_username=admin\n",
+            f"admin_password={admin_pass}\nadmin_username=admin\n"
+            f"approver_password={approver_pass}\napprover_username=approver\n",
         )
         self.host.host_file("/var/lib/meho/unseal-key", f"{unseal_key}\n")
         self.host.answer(
             "kube_secret_data",
-            f"apiVersion: v1\nkind: Secret\nstringData:\n  credentials: {password}\n",
+            f"apiVersion: v1\nkind: Secret\nstringData:\n  credentials: {admin_pass}\n",
         )
         self.host.answer(
             "kube_logs",
             f"2026-10-23T11:00:00Z KEYCLOAK_ADMIN_TOKEN={token}\n"
-            f"2026-10-23T11:00:01Z the admin logs in with {password}\n"
-            f"2026-10-23T11:00:02Z unseal key {unseal_key} loaded\n",
+            f"2026-10-23T11:00:01Z the admin logs in with {admin_pass}\n"
+            f"2026-10-23T11:00:02Z unseal key {unseal_key} loaded\n"
+            f'{{"event": "login", "user": "approver", "password": "{approver_pass}"}}\n'
+            f'{{"token":"{token}"}}\n'
+            f"token:{token}\n",
         )
         self.host.answer(
-            "journal_out", f"2026-10-23T11:00:00+0000 meho rke2[1234]: Db-Password: {password}\n"
+            "journal_out", f"2026-10-23T11:00:00+0000 meho rke2[1234]: Db-Password: {admin_pass}\n"
         )
         self.host.answer(
             "kube_node_describe", f"Name: meho.example.com\nAnnotations: api_secret_key={token}\n"
@@ -394,13 +402,16 @@ class SupportBundleTests(HostTestCase):
         files = self.bundle()
 
         for name, text in files.items():
-            for value in (password, token, unseal_key):
+            for value in (admin_pass, approver_pass, token, unseal_key):
                 with self.subTest(file=name, value=value):
                     self.assertNotIn(value, text)
         log = files["pods/meho.meho-keycloak-0.log"]
         self.assertIn("KEYCLOAK_ADMIN_TOKEN=[removed]", log)
-        self.assertIn("logs in with [removed]", log)
+        self.assertIn("the admin logs in with [removed]", log)
         self.assertIn("unseal key [removed] loaded", log)
+        self.assertIn('{"event": "login", "user": "approver", "password": "[removed]"}', log)
+        self.assertIn('{"token":"[removed]"}', log)
+        self.assertIn("token:[removed]", log)
         self.assertIn("Db-Password: [removed]", files["rke2-server.journal.txt"])
         self.assertIn("api_secret_key=[removed]", files["node.txt"])
         self.assertIn("meho-core-first-login", files["objects/meho.secrets.txt"])

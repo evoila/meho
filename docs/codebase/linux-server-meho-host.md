@@ -16,7 +16,8 @@ This version has two commands:
   Every line that is not ok ends with `Fix:` and what to do.
 - **`meho-host support-bundle`** writes one file for evoila support to
   `/var/lib/meho/support/` and prints its path. Passwords, tokens and keys
-  are removed from it.
+  are removed from it. The customer sends the file to support and then
+  deletes it; the command says so on its second line.
 
 Both need root. Exit codes: `check` exits 0 when every line is ok or a
 warning, and 1 when a line is red; `support-bundle` exits 0 when the file is
@@ -54,17 +55,19 @@ are printed at the end, as text or as JSON, in this order:
 | --- | --- | --- | --- | --- |
 | `node` | every node has the condition Ready | never | a node is not Ready, or RKE2 does not answer | `kubectl get nodes -o jsonpath=...` |
 | `pods` | every pod in `meho`, `kube-system` and `local-path-storage` is Running and Ready, or Succeeded | never | a pod is in another state, there is no pod in `meho`, or RKE2 does not answer | `kubectl get pods -A -o jsonpath=...` |
-| `disk` | `/var/lib/rancher` and `/var/lib/meho` both have 20 % or more free | the lower of the two is below 20 % | below 10 %, or a path cannot be read | `df -P -k <path>` |
-| `certificates` | every row of RKE2's list expires in 30 days or more | a row has less than 30 days left | a row is EXPIRED or its date has passed; the command did not run; the list is empty | `rke2 certificate check --output table` |
+| `disk` | `/var/lib/rancher` and `/var/lib/meho` both have 20 % or more free | the lower of the two is below 20 % | below 15 %, or a path cannot be read | `df -P -k <path>` |
+| `certificates` | every row of RKE2's list expires in 30 days or more | a row has less than 30 days left | a row is EXPIRED or its date has passed; the command did not run; the list is empty | `/usr/local/bin/rke2 certificate check --output table` (by its path: sudo's `PATH` on RHEL has no `/usr/local/bin`) |
 
 **Why Succeeded counts as fine.** RKE2's `helm-install-*` Jobs in
 `kube-system` and the core's bootstrap Job leave finished pods behind. They
 are in phase Succeeded and never Ready. A rule "every pod is Running and
 Ready" would never be green.
 
-**Why 10 % is red.** The kubelet starts to evict pods when the free space of
-the node's file system falls below 10 %, its default
-`nodefs.available<10%` threshold.
+**Why 15 % is red.** The kubelet evicts pods when the free space of the file
+system that holds the container images falls below 15 % (its default
+`imagefs.available<15%`), and when the node's own file system falls below
+10 % (`nodefs.available<10%`). On a form-2 machine both are
+`/var/lib/rancher`, so 15 % is the line that matters.
 
 **How the certificate table is read.** The table has the columns FILENAME,
 SUBJECT, USAGES, EXPIRES, RESIDUAL TIME and STATUS. SUBJECT and USAGES may
@@ -110,12 +113,16 @@ with `status` one of `ok`, `warn` and `fail`. `hint` is empty on an ok line.
 
 3. Scrub every file in the work folder with one `sed` run:
    - the value of any variable whose name holds PASSWORD, TOKEN, SECRET or
-     KEY, in any case, written as `NAME=value` or `NAME: value`, becomes
-     `[removed]`;
+     KEY, in any case, written as `NAME=value`, `NAME: value` (with or
+     without the space) or as the JSON pair `"name": "value"` (MEHO's own
+     logs are JSON lines), becomes `[removed]`;
    - every value of the two one-time files (`/var/lib/meho/unseal-key`, and
-     the part after `=` of each line of
+     the part after `=` of each `*_password` line of
      `/var/lib/meho/first-login-passwords`) becomes `[removed]` wherever it
-     appears, for example in a log line.
+     appears, for example in a log line. The `*_username` lines of that file
+     hold plain names such as `admin`, so they are left alone: removing
+     "admin" everywhere would also hit `client-admin.crt` and
+     `/admin/realms/`.
 
    Secret data never gets in: the bundle asks for Secrets as a table, which
    shows names, types and the number of keys, never a value. A test fills
@@ -123,13 +130,15 @@ with `status` one of `ok`, `warn` and `fail`. `hint` is empty on an ok line.
    and checks that no call asks for it.
 4. Pack with `umask 077` into `meho-support-<host>-<UTC time>.tar.gz`
    (mode 0600; `<host>` is `hostname -f` in lower case, and the time is
-   `date -u +%Y%m%dT%H%M%SZ`), and print the path.
+   `date -u +%Y%m%dT%H%M%SZ`), print the path, and on a second line say to
+   send the file to support and then delete it. Old bundles are not removed
+   by the command.
 
 ## Testing
 
 `tests/host_harness.py` builds a fake installed machine for each test, the
 way `tests/harness.py` does for `install.sh`: `MEHO_TEST_ROOT` is a temporary
-root folder with RKE2's kubectl stub at its real place, and `PATH` holds
+root folder with the `kubectl` and `rke2` stubs at their real places, and `PATH` holds
 only stubs and links to a few real tools (`bash`, `awk`, `sed`, `grep`,
 `find`, `tar`, `gzip` and some coreutils). The `date` stub answers "now"
 (2026-10-23 12:00 UTC) and the bundle's time stamp from files, and passes
@@ -161,8 +170,13 @@ On the machine: bash, coreutils (`date`, `df`, `find`, `mktemp`), `sed`,
   `rke2-traefik` chart names them (the `helm-install-rke2-traefik` Job pod
   is left out). The week-4 lab install (#4741) proves it.
 - **The scrub reads whole lines.** In the `NAME=value` form a value with a
-  space in it is removed only up to the space. The two one-time files hold
-  no spaces, and their values are removed as a whole.
+  space in it is removed only up to the space, unless it is in quotes. The
+  two one-time files hold no spaces, and their values are removed as a
+  whole.
+- **Text the scrub misses.** `Authorization: Bearer <token>`, a password
+  inside a database address, written as `user:password@host`, and SQL
+  `PASSWORD '<value>'` are not removed. They are rare in MEHO's logs; a
+  follow-up adds them.
 - **No size limit on the logs.** A pod with a very large log makes a large
   bundle. `kubectl logs --tail` can be added when that happens.
 - **Not root is a `[FAIL]` line, not JSON.** `meho doctor` (#4740) runs

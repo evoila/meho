@@ -45,6 +45,8 @@ readonly MEHO_INSTALL_RECORD=/etc/meho/install.json
 readonly RKE2_DATA_DIR=/var/lib/rancher
 readonly RKE2_KUBECONFIG=/etc/rancher/rke2/rke2.yaml
 readonly RKE2_KUBECTL=/var/lib/rancher/rke2/bin/kubectl
+# RKE2's installer puts rke2 here. sudo's PATH on RHEL does not hold it.
+readonly RKE2_BINARY=/usr/local/bin/rke2
 readonly RKE2_LOG_COMMAND="journalctl -u rke2-server -e"
 readonly RKE2_RESTART_COMMAND="systemctl restart rke2-server"
 readonly SUPPORT_HINT="run 'meho-host support-bundle' and send the file to support."
@@ -54,7 +56,7 @@ readonly MEHO_NAMESPACE=meho
 readonly CHECK_NAMESPACES=(meho kube-system local-path-storage)
 readonly DISK_PATHS=("$RKE2_DATA_DIR" "$MEHO_STATE_DIR")
 readonly DISK_WARN_PERCENT=20
-readonly DISK_FAIL_PERCENT=10
+readonly DISK_FAIL_PERCENT=15
 readonly CERT_WARN_DAYS=30
 readonly JOURNAL_SINCE=-24h
 # One line per pod: namespace, name, phase and the Ready condition.
@@ -92,6 +94,7 @@ Commands:
                     Traefik, the state of the built-in Kubernetes, RKE2's log
                     of the last 24 hours and facts about the operating
                     system. Passwords, tokens and keys are removed from it.
+                    Send the file to support, then delete it.
   -h, --help        Show this help and stop.
 
 Exit codes:
@@ -210,7 +213,7 @@ check_pods() {
     done <<<"$pods"
     if ((in_meho == 0)); then
         result pods fail "no pod in namespace $MEHO_NAMESPACE, so the MEHO core is not installed." \
-            "run install.sh again. If it fails, $SUPPORT_HINT"
+            "$SUPPORT_HINT"
     elif ((${#bad[@]} > 0)); then
         result pods fail "$(join_by ', ' "${bad[@]}")." "$SUPPORT_HINT"
     else
@@ -256,7 +259,7 @@ check_disk() {
 # long time, and a restart is the fix.
 check_certificates() {
     local table now line filename expires status seconds days count=0 expired=() soon=()
-    if ! table=$(rke2 certificate check --output table 2>/dev/null); then
+    if ! table=$("${HOST_ROOT}${RKE2_BINARY}" certificate check --output table 2>/dev/null); then
         result certificates fail "'rke2 certificate check' did not run." \
             "check that RKE2 is installed: ls -l /usr/local/bin/rke2. Then $SUPPORT_HINT"
         return 0
@@ -448,7 +451,9 @@ regex_literal() {
 }
 
 # secret_values: every value of the two one-time files, one per line: the
-# unseal key, and the part after "=" of each line of the first-login file.
+# unseal key, and the part after "=" of each *_password line of the
+# first-login file. Its *_username lines hold plain names such as admin,
+# which must stay in the bundle.
 secret_values() {
     local file="${HOST_ROOT}${MEHO_UNSEAL_KEY_FILE}"
     if [[ -r $file ]]; then
@@ -456,20 +461,23 @@ secret_values() {
     fi
     file="${HOST_ROOT}${MEHO_FIRST_LOGIN_FILE}"
     if [[ -r $file ]]; then
-        sed -n 's/^[^=]*=//p' "$file"
+        sed -n 's/^[^=]*_password=//p' "$file"
     fi
 }
 
 # scrub_bundle <folder>: no password leaves the machine. Every file loses
 # the value of any variable whose name holds PASSWORD, TOKEN, SECRET or KEY,
-# written as NAME=value or NAME: value, and every value of the two one-time
-# files, wherever it appears. Secret data never gets in: the bundle lists
-# Secrets by name only.
+# written as NAME=value, NAME: value (with or without the space) or as the
+# JSON pair "name": "value" (MEHO's own logs are JSON lines), and every
+# value of the two one-time files, wherever it appears. Secret data never
+# gets in: the bundle lists Secrets by name only.
 scrub_bundle() {
-    local work=$1 names value
+    local work=$1 names name value
     names="$(any_case password)|$(any_case token)|$(any_case secret)|$(any_case key)"
+    name="[A-Za-z0-9_.-]*(${names})[A-Za-z0-9_.-]*"
     local -a expressions=(
-        -e "s/([A-Za-z0-9_.-]*(${names})[A-Za-z0-9_.-]*)(=|: )[^[:space:]]+/\\1\\3[removed]/g"
+        -e "s/(\"${name}\"[[:space:]]*:[[:space:]]*)\"[^\"]*\"/\\1\"[removed]\"/g"
+        -e "s/(${name}[[:space:]]*(=|:)[[:space:]]*)(\"[^\"]*\"|[^[:space:]\",}]+)/\\1[removed]/g"
     )
     while IFS= read -r value; do
         [[ -n $value ]] || continue
@@ -501,6 +509,7 @@ command_support_bundle() {
     (umask 077 && tar -czf "$support_dir/$name" -C "$BUNDLE_WORK" .)
     chmod 0600 "$support_dir/$name"
     printf '%s\n' "$MEHO_SUPPORT_DIR/$name"
+    printf 'Send it to evoila support, then delete it: it holds the logs and the state of this machine.\n'
 }
 
 main() {

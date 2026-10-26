@@ -11,15 +11,16 @@
 # Commands in this version:
 #   check [--json]    a red/green list of the built-in Kubernetes (RKE2)
 #   support-bundle    one file for evoila support, with no passwords in it
+#   admin-network     the addresses that may use SSH, in the MEHO firewall
+#   uninstall         remove MEHO and RKE2; the MEHO firewall stays on
 #
 # Later Tasks add the hardening lines to check (#4638) and the commands
-# certificate, keyholder and unseal (#4738), admin-network and uninstall
-# (#4739).
+# certificate, keyholder and unseal (#4738).
 #
 # Exit codes:
-#   0  check: every line is ok or a warning; support-bundle: the file is written
+#   0  check: every line is ok or a warning; the other commands: done
 #   1  check: a line is red. Otherwise: the command failed, and the [FAIL]
-#      line says what to fix
+#      line says what to fix; or the admin answered a question with no
 #   2  wrong usage: an unknown command or option
 #
 # The tests in tests/ run this script against a fake machine. See
@@ -42,6 +43,23 @@ readonly MEHO_SUPPORT_DIR=/var/lib/meho/support
 readonly MEHO_FIRST_LOGIN_FILE=/var/lib/meho/first-login-passwords
 readonly MEHO_UNSEAL_KEY_FILE=/var/lib/meho/unseal-key
 readonly MEHO_INSTALL_RECORD=/etc/meho/install.json
+readonly MEHO_ETC_DIR=/etc/meho
+# The MEHO host firewall of lib/firewall.sh (#4635): one nftables file, its
+# boot unit, and the drop-in that lets RKE2 start only while it is loaded.
+readonly MEHO_FIREWALL_FILE=/etc/meho/firewall.nft
+readonly MEHO_FIREWALL_UNIT=meho-firewall.service
+readonly MEHO_FIREWALL_UNIT_FILE=/etc/systemd/system/meho-firewall.service
+readonly RKE2_FIREWALL_DROPIN=/etc/systemd/system/rke2-server.service.d/meho-firewall.conf
+# uninstall leaves the firewall in place (ADR 0009). This removes it.
+readonly FIREWALL_REMOVE_COMMAND="systemctl disable $MEHO_FIREWALL_UNIT && rm -r $MEHO_FIREWALL_UNIT_FILE $MEHO_ETC_DIR && systemctl daemon-reload && nft delete table inet meho"
+# RKE2's own uninstall script of a tarball install
+# (https://docs.rke2.io/install/uninstall). It removes RKE2, its units and
+# the cluster data, and itself.
+readonly RKE2_UNINSTALL=/usr/local/bin/rke2-uninstall.sh
+# The IPv4 patterns of lib/net.sh, which is not on the machine.
+readonly IPV4_OCTET_RE='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+readonly IPV4_RE="^(${IPV4_OCTET_RE}\\.){3}${IPV4_OCTET_RE}\$"
+readonly PREFIX_RE='^([0-9]|[12][0-9]|3[0-2])$'
 readonly RKE2_DATA_DIR=/var/lib/rancher
 readonly RKE2_KUBECONFIG=/etc/rancher/rke2/rke2.yaml
 readonly RKE2_KUBECTL=/var/lib/rancher/rke2/bin/kubectl
@@ -93,6 +111,8 @@ meho-host: the host command of MEHO on this Linux server (install form 2).
 Run it as root:
   sudo meho-host check
   sudo meho-host support-bundle
+  sudo meho-host admin-network 10.0.50.0/24
+  sudo meho-host uninstall
 
 Commands:
   check [--json]    Check the built-in Kubernetes (RKE2) and print a
@@ -106,15 +126,32 @@ Commands:
                     of the last 24 hours and facts about the operating
                     system. Passwords, tokens and keys are removed from it.
                     Send the file to support, then delete it.
+  admin-network <range>
+  admin-network none
+                    Set the addresses that may use SSH, in the MEHO
+                    firewall file /etc/meho/firewall.nft: one IPv4 range
+                    such as 10.0.50.0/24, or one address. none closes SSH
+                    from every address, so only the console works. Only
+                    the SSH rule changes; every other rule stays. Over
+                    SSH, it asks first when the new range does not hold
+                    your own address.
+  uninstall         Remove MEHO and the built-in Kubernetes from this
+                    machine, with all their data. It asks twice. The MEHO
+                    firewall stays on, and the last line names the
+                    command that removes it.
   -h, --help        Show this help and stop.
 
 Exit codes:
-  0  check: every line is ok or a warning; support-bundle: the file is written
+  0  check: every line is ok or a warning; the other commands: done
   1  check: a line is red. Otherwise: the command failed, and the [FAIL]
-     line says what to fix
+     line says what to fix; or you answered a question with no
   2  wrong usage: an unknown command or option
 HELP
 }
+
+ok() { printf '[ok]   %s\n' "$*"; }
+
+warn() { printf '[WARN] %s\n' "$*" >&2; }
 
 # fail <problem> <fix>: one [FAIL] line that says what is wrong and what to
 # do about it, then stop with exit code 1.
@@ -170,6 +207,20 @@ in_list() {
 check_root() {
     [[ $(id -u) == 0 ]] ||
         fail "meho-host does not run as root." "run it with sudo: sudo meho-host $COMMAND"
+}
+
+# ask <question>: print the question and read one line. True only for "yes",
+# so a closed standard input (a script, a service) counts as no.
+ask() {
+    local answer=""
+    printf '%s Type yes to go on: ' "$1"
+    read -r answer || true
+    [[ $answer == yes ]]
+}
+
+stop_unchanged() {
+    printf 'Stopped. Nothing was changed.\n'
+    exit 1
 }
 
 # RKE2's own kubectl with RKE2's own access file. False when RKE2 is not
@@ -573,6 +624,158 @@ command_support_bundle() {
     printf 'Send it to evoila support, then delete it: it holds the logs and the state of this machine.\n'
 }
 
+is_ipv4() {
+    [[ $1 =~ $IPV4_RE ]]
+}
+
+# is_ipv4_range <text>: one address such as 10.0.0.5, or a range such as
+# 10.0.50.0/24.
+is_ipv4_range() {
+    if [[ $1 == */* ]]; then
+        is_ipv4 "${1%/*}" && [[ ${1#*/} =~ $PREFIX_RE ]]
+    else
+        is_ipv4 "$1"
+    fi
+}
+
+ipv4_to_int() {
+    local a b c d
+    IFS=. read -r a b c d <<<"$1"
+    printf '%d' "$(((10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d))"
+}
+
+# range_holds <address or range> <address>: true when the range holds the
+# address. An address without a prefix is a range of one address.
+range_holds() {
+    local range=$1 address prefix mask
+    [[ $range == */* ]] || range+=/32
+    prefix=${range#*/}
+    mask=$((prefix == 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF))
+    address=$(ipv4_to_int "$2")
+    (((address & mask) == ($(ipv4_to_int "${range%/*}") & mask)))
+}
+
+# ssh_client_address: the address of the SSH session that runs meho-host,
+# or nothing on the machine's console. sudo removes SSH_CLIENT and
+# SSH_CONNECTION from the environment, so the function also reads the
+# environment of the processes above this one, up to the shell of the SSH
+# login, the way install.sh does.
+ssh_client_address() {
+    local value="${SSH_CLIENT:-${SSH_CONNECTION:-}}" pid=$PPID depth=0 entry
+    while [[ -z $value ]] && ((depth++ < 32 && pid > 1)); do
+        if [[ -r ${HOST_ROOT}/proc/$pid/environ ]]; then
+            while IFS= read -r -d '' entry; do
+                case $entry in
+                    SSH_CLIENT=* | SSH_CONNECTION=*)
+                        value=${entry#*=}
+                        break
+                        ;;
+                esac
+            done <"${HOST_ROOT}/proc/$pid/environ"
+        fi
+        pid=$(awk '$1 == "PPid:" { print $2; exit }' "${HOST_ROOT}/proc/$pid/status" 2>/dev/null) || pid=0
+        [[ $pid =~ ^[0-9]+$ ]] || pid=0
+    done
+    value=${value%% *}
+    printf '%s\n' "${value#::ffff:}"
+}
+
+# rules_with_admin_network <rules file> <range, or "" for nobody>: print
+# the MEHO firewall file with only the set admin_network changed: its
+# elements line, and the note above the set. Every other line stays as
+# it is, so a customer's own rules survive.
+rules_with_admin_network() {
+    awk -v elements="$2" '
+        /^    # The addresses that may use SSH/ {
+            print
+            if ((getline line) > 0) {
+                if (line ~ /^    # /) line = "    # Set with meho-host admin-network."
+                print line
+            }
+            next
+        }
+        /^    set admin_network \{/ { in_set = 1 }
+        in_set && /^        elements = / { next }
+        in_set && /^        flags interval$/ {
+            print
+            if (elements != "") print "        elements = { " elements " }"
+            next
+        }
+        in_set && /^    \}/ { in_set = 0 }
+        { print }
+    ' "$1"
+}
+
+command_admin_network() {
+    (($# == 1)) || usage_error "admin-network takes one value: an IPv4 range such as 10.0.50.0/24, one address, or none."
+    local wanted=$1 range="" rules client new_file output
+    if [[ $wanted != none ]]; then
+        is_ipv4_range "$wanted" ||
+            usage_error "admin-network: '$wanted' is not an IPv4 range such as 10.0.50.0/24, one address, or none."
+        range=$wanted
+    fi
+    check_root
+    rules="${HOST_ROOT}${MEHO_FIREWALL_FILE}"
+    grep -qx '    set admin_network {' "$rules" 2>/dev/null ||
+        fail "$MEHO_FIREWALL_FILE has no set admin_network, so meho-host cannot find the SSH rule." \
+            "check that the file is the one install.sh wrote. Then $SUPPORT_HINT"
+    client=$(ssh_client_address)
+    if [[ -z $range && -n $client ]]; then
+        warn "admin-network none closes SSH for every address. This session stays open, but no new SSH login works after it ends: only the console does."
+        ask "Close SSH anyway?" || stop_unchanged
+    elif [[ -n $range && -n $client ]] && ! { is_ipv4 "$client" && range_holds "$range" "$client"; }; then
+        warn "This SSH session comes from $client, which is outside $range. This session stays open, but a new SSH login from $client would get no answer."
+        ask "Change the SSH rule anyway?" || stop_unchanged
+    fi
+    # The new file is checked before it takes the old one's place, so a
+    # file nft refuses changes nothing.
+    new_file=$(mktemp "${rules}.XXXXXX")
+    rules_with_admin_network "$rules" "$range" >"$new_file"
+    if ! output=$(nft -c -f "$new_file" 2>&1); then
+        rm -f "$new_file"
+        printf '%s\n' "$output" >&2
+        fail "nft does not accept the new firewall file, so $MEHO_FIREWALL_FILE was not changed." \
+            "read nft's message above. Then $SUPPORT_HINT"
+    fi
+    mv -f "$new_file" "$rules"
+    nft -f "$rules" ||
+        fail "nft could not load $MEHO_FIREWALL_FILE. The file holds the new SSH rule, but the old rules are still loaded." \
+            "run: systemctl reload $MEHO_FIREWALL_UNIT. Then $SUPPORT_HINT"
+    if [[ -n $range ]]; then
+        ok "SSH is allowed from $range"
+    else
+        ok "SSH is closed for every address; only the console works"
+    fi
+}
+
+command_uninstall() {
+    (($# == 0)) || usage_error "uninstall takes no option: $1"
+    check_root
+    local uninstall="${HOST_ROOT}${RKE2_UNINSTALL}" etc_dir="${HOST_ROOT}${MEHO_ETC_DIR}"
+    printf 'This removes MEHO and the built-in Kubernetes (RKE2) from this machine, with all their data: %s, %s and the cluster data in %s. There is no way back without a backup.\n' \
+        "$MEHO_STATE_DIR" "$MEHO_ETC_DIR" "$RKE2_DATA_DIR"
+    ask "Remove MEHO from this machine?" || stop_unchanged
+    ask "Last question: the data is gone afterwards. Remove MEHO?" || stop_unchanged
+    if [[ -x $uninstall ]]; then
+        "$uninstall" ||
+            fail "RKE2's uninstall script $RKE2_UNINSTALL failed, and the MEHO files were not removed yet." \
+                "read its message above, then run meho-host uninstall again."
+        ok "removed RKE2 and the cluster data with $RKE2_UNINSTALL"
+    else
+        printf '[note] %s is not on this machine, so RKE2 is already gone.\n' "$RKE2_UNINSTALL"
+    fi
+    rm -rf "${HOST_ROOT}${MEHO_STATE_DIR}"
+    if [[ -d $etc_dir ]]; then
+        find "$etc_dir" -mindepth 1 -maxdepth 1 ! -name "${MEHO_FIREWALL_FILE##*/}" -exec rm -rf {} +
+    fi
+    # The drop-in would stop a later RKE2 install once the firewall is gone.
+    rm -f "${HOST_ROOT}${RKE2_FIREWALL_DROPIN}"
+    systemctl daemon-reload
+    ok "removed $MEHO_STATE_DIR and $MEHO_ETC_DIR, except the firewall file"
+    printf 'The MEHO firewall stays on, so this machine is never without one. When your own firewall is ready, remove it with: %s\n' \
+        "$FIREWALL_REMOVE_COMMAND"
+}
+
 main() {
     (($# > 0)) || usage_error "no command given."
     COMMAND=$1
@@ -582,6 +785,8 @@ main() {
         -h | --help) usage ;;
         check) command_check "$@" ;;
         support-bundle) command_support_bundle "$@" ;;
+        admin-network) command_admin_network "$@" ;;
+        uninstall) command_uninstall "$@" ;;
         *) usage_error "unknown command: $COMMAND" ;;
     esac
 }

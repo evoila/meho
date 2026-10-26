@@ -14,7 +14,10 @@ network, and they change nothing on the machine that runs them:
   Each wrapper logs its arguments the same way and then runs the real tool,
   so a test can check that no secret value was on any command line. The
   date stub answers "now" from a file and passes every other call on to the
-  real date, which parses the expiry dates of the certificates.
+  real date, which parses the expiry dates of the certificates. The nft
+  stub accepts every file, and the systemctl stub only reloads.
+- Standard input is empty unless a test gives answers (stdin="yes\n"), and
+  there is no SSH session unless a test gives one (ssh_client=...).
 
 The default answers describe a healthy machine on 2026-10-23 at 12:00 UTC:
 the node is Ready, every pod runs or has finished, both disks have most of
@@ -102,6 +105,14 @@ STUBS = {
         """),
     "timedatectl": 'cat "$MEHO_FAKE/timedatectl_out"',
     "journalctl": 'cat "$MEHO_FAKE/journal_out"',
+    "nft": textwrap.dedent("""\
+        case "$*" in
+          "-c -f "*) cat "$MEHO_FAKE/nft_check_out"; exit "$(cat "$MEHO_FAKE/nft_check_rc")" ;;
+          "-f "*) exit 0 ;;
+          *) exit 1 ;;
+        esac
+        """),
+    "systemctl": 'case "$1" in daemon-reload) exit 0 ;; *) exit 1 ;; esac',
 }
 
 RKE2_STUB = textwrap.dedent("""\
@@ -197,6 +208,8 @@ DEFAULT_ANSWERS = {
     "ip_route": "default via 10.0.0.1 dev ens18\n",
     "timedatectl_out": "System clock synchronized: yes\n",
     "journal_out": "2026-10-23T11:00:00+0000 meho rke2[1234]: fake journal line\n",
+    "nft_check_rc": "0",
+    "nft_check_out": "",
 }
 
 
@@ -248,8 +261,11 @@ class FakeHost:
         """Every stub call so far, one line each: the command and its arguments."""
         return (self.fake / "calls.log").read_text()
 
-    def run(self, *args: str) -> subprocess.CompletedProcess[str]:
-        """Run meho-host with the arguments."""
+    def run(
+        self, *args: str, stdin: str = "", ssh_client: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        """Run meho-host with the arguments. stdin holds the answers to its
+        questions; ssh_client is the SSH_CLIENT value of an SSH session."""
         env = {
             "PATH": f"{self.stubs}:{self.tools}",
             "MEHO_TEST_ROOT": str(self.root),
@@ -257,11 +273,14 @@ class FakeHost:
             "MEHO_REAL_DATE": shutil.which("date") or "/bin/date",
             "LC_ALL": "C",
         }
+        if ssh_client is not None:
+            env["SSH_CLIENT"] = ssh_client
         return subprocess.run(
             [str(MEHO_HOST), *args],
             capture_output=True,
             text=True,
             env=env,
+            input=stdin,
             check=False,
             timeout=60,
         )

@@ -9,7 +9,7 @@ customer never needs kubectl: that is ADR 0007 decision 2 (the support rule)
 and the form-2 design, section 5, the `meho-host` table (meho-internal
 `docs/design/2026-10-10-install-forms/form-2-linux-server.md`).
 
-This version has two commands:
+This version has four commands:
 
 - **`meho-host check [--json]`** prints a red/green list of the built-in
   Kubernetes (RKE2): the node, the pods, the disk and RKE2's certificates.
@@ -18,27 +18,37 @@ This version has two commands:
   `/var/lib/meho/support/` and prints its path. Passwords, tokens and keys
   are removed from it. The customer sends the file to support and then
   deletes it; the command says so on its second line.
+- **`meho-host admin-network <range>`** and **`meho-host admin-network none`**
+  (#4739) set the addresses that may use SSH, in the MEHO firewall file
+  `/etc/meho/firewall.nft` (#4635): one IPv4 range such as `10.0.50.0/24`,
+  or one address. `none` closes SSH from every address, so only the console
+  works. Only the SSH rule changes. Over SSH, the command asks first when
+  the new range does not hold the admin's own address.
+- **`meho-host uninstall`** (#4739) removes MEHO and the built-in Kubernetes
+  from the machine, with all their data. It asks twice. The MEHO firewall
+  stays on, and the last line names the command that removes it.
 
-Both need root. Exit codes: `check` exits 0 when every line is ok or a
-warning, and 1 when a line is red; `support-bundle` exits 0 when the file is
-written. Any command exits 1 with one `[FAIL]` line when it cannot do its
-job, and 2 for wrong usage.
+All need root. Exit codes: `check` exits 0 when every line is ok or a
+warning, and 1 when a line is red; the other commands exit 0 when they are
+done. Any command exits 1 with one `[FAIL]` line when it cannot do its job,
+or with `Stopped. Nothing was changed.` when the admin answers a question
+with anything but `yes`, and 2 for wrong usage.
 
-Later Tasks add to this file: the hardening lines of `check` (#4638), the
-commands `certificate`, `keyholder` and `unseal` (#4738), and
-`admin-network` and `uninstall` (#4739). `meho doctor` runs `check --json`
-when it runs on the server (#4740).
+Later Tasks add to this file: the hardening lines of `check` (#4638) and
+the commands `certificate`, `keyholder` and `unseal` (#4738). `meho doctor`
+runs `check --json` when it runs on the server (#4740).
 
 ## Key files
 
 | File | What it holds |
 | --- | --- |
-| `meho-host` | One self-contained bash script: the output helpers, the four checks, the bundle and its scrub. It sources nothing, because `lib/` is not on the machine after the install. |
+| `meho-host` | One self-contained bash script: the output helpers, the four checks, the bundle and its scrub, the SSH rule rewrite and the uninstall. It sources nothing, because `lib/` is not on the machine after the install, so it carries its own copies of the IPv4 helpers of `lib/net.sh` and of the firewall paths of `lib/firewall.sh`. |
 | `lib/prepare.sh` | `install_meho_host`: the copy to `/usr/local/sbin`, mode 0755. |
 | `lib/common.sh` | `MEHO_HOST_FILE`, `MEHO_HOST_PATH`, and `meho-host` in `DOWNLOAD_FILES`. |
 | `packaging/parts.sh`, `packaging/common.sh` | The download ships `meho-host` next to `install.sh`, executable. |
-| `tests/host_harness.py` | A fake installed machine: stub `kubectl`, `rke2`, `journalctl`, `df`, `free`, `ip`, `date` and friends. |
-| `tests/test_meho_host.py` | The tests of both commands, and of the install by `install.sh`. |
+| `tests/host_harness.py` | A fake installed machine: stub `kubectl`, `rke2`, `journalctl`, `df`, `free`, `ip`, `date`, `nft`, `systemctl` and friends. `run()` takes the answers to the questions (`stdin`) and an SSH session (`ssh_client`). |
+| `tests/test_meho_host.py` | The tests of the four commands, and of the install by `install.sh`. |
+| `tests/fixtures/firewall-admin-network.nft` | The firewall file `install.sh` writes with `--admin-network 10.0.50.0/24`; the `admin-network` and `uninstall` tests start from it. |
 
 The script has the same shape as `install.sh`: `set -Eeuo pipefail`, an ERR
 trap that prints one `[FAIL]` line, `fail` and `usage_error`, and the
@@ -158,6 +168,55 @@ with `status` one of `ok`, `warn` and `fail`. `hint` is empty on an ok line.
    send the file to support and then delete it. Old bundles are not removed
    by the command.
 
+### `admin-network`
+
+1. Check the value: `none`, or an IPv4 address or range (the patterns of
+   `lib/net.sh`). Anything else is a usage error, before root is checked.
+2. Find the set `admin_network` in `/etc/meho/firewall.nft`. Without it,
+   the file is not the one `install.sh` wrote, and the command stops with
+   a `[FAIL]` line.
+3. Find the admin's own address: `SSH_CLIENT` or `SSH_CONNECTION`, and when
+   sudo has removed both from the environment, the same values in the
+   environment of the processes above this one, as `ssh_connection` in
+   `lib/firewall.sh` does. On the console there is none. When there is one
+   and the new range does not hold it (`none` holds no address; an IPv6
+   session is outside every IPv4 range), the command warns that this
+   session stays open but a new login would get no answer, and asks. Only
+   `yes` goes on; a closed standard input counts as no.
+4. Write the new file next to the old one with `mktemp` (root only), with
+   only two lines changed: the `elements` line of the set, which `none`
+   removes, and the note above the set, which becomes
+   `# Set with meho-host admin-network.` Every other line stays, so a
+   customer's own rules survive. `awk` does the rewrite.
+5. Check the new file with `nft -c -f`. When nft refuses it, the new file
+   is removed, nft's message is printed, and the old file stays, unchanged
+   and still loaded.
+6. Move the new file over the old one and load it with `nft -f`. The file
+   replaces only the table `inet meho` (#4635), so this is what
+   `systemctl reload meho-firewall.service` does, without depending on
+   which unit loads the file: on the appliance that is `nftables.service`.
+   Packets of connections that are already open always pass the rules, so
+   the SSH session that runs the command stays open.
+
+### `uninstall`
+
+1. Print what is removed, then ask twice. Only `yes` goes on.
+2. Run `/usr/local/bin/rke2-uninstall.sh`, RKE2's own uninstall script of
+   a tarball install. It stops RKE2 and removes its units, its binaries,
+   the cluster data in `/var/lib/rancher` and itself. When it fails, the
+   command stops before the MEHO files, and a second run goes on. When the
+   script is not there, RKE2 is already gone, and the command says so and
+   goes on.
+3. Remove `/var/lib/meho` (the volumes and the one-time files) and every
+   entry of `/etc/meho` except `firewall.nft`, and the drop-in
+   `/etc/systemd/system/rke2-server.service.d/meho-firewall.conf`, which
+   would stop a later RKE2 install once the firewall is gone. Then
+   `systemctl daemon-reload`.
+4. The firewall file, its boot unit and the loaded table stay, so the
+   machine is never without a firewall (ADR 0009). The last line names the
+   command that removes them, for when the customer's own firewall is
+   ready. `meho-host` itself stays on the machine too.
+
 ## Testing
 
 `tests/host_harness.py` builds a fake installed machine for each test, the
@@ -170,6 +229,15 @@ every other call on to the real `date`, which parses the certificate dates.
 `certificate_table`, `pod_line` and `df_answer` build the stubs' answers.
 Every real tool runs behind a wrapper that logs its arguments like a stub,
 so the bundle test checks that no secret value was on any command line.
+The `admin-network` tests start from the fixture file and read the calls
+log to prove that `nft -c -f` ran on the new file before `nft -f` on the
+real one; a stubbed `nft` that refuses the file proves the old file stays.
+The `uninstall` tests put a fake `rke2-uninstall.sh` on the fake machine,
+which removes RKE2's unit and data the way the real one does.
+
+The parent-process walk of `admin-network` reads `/proc` below the fake
+root, so the test process must not be PID 1: in a container, run the tests
+with `docker run --init`.
 
 ```bash
 python3 -m unittest discover -s deploy/linux-server/tests -v
@@ -177,7 +245,8 @@ shellcheck deploy/linux-server/meho-host
 ```
 
 The scripts need bash 4 or newer and GNU `date` and `sed`, so on macOS run
-the tests in a Linux container. CI (`.github/workflows/linux-server-test.yml`)
+the tests in a Linux container, for example
+`docker run --rm --init -v "$PWD/deploy/linux-server:/work/deploy/linux-server:ro" -w /work python:3.14-slim python -m unittest discover -s deploy/linux-server/tests`. CI (`.github/workflows/linux-server-test.yml`)
 runs shellcheck on `meho-host` too: it finds every file with a shell shebang
 in the folder.
 
@@ -185,9 +254,11 @@ in the folder.
 
 On the machine: bash, coreutils (`date`, `df`, `find`, `mktemp`), `sed`,
 `awk`, `grep`, `tar`, `gzip`, `hostname`, `free` (procps), `ip` (iproute2),
-`journalctl` and `timedatectl` (systemd), RKE2's own `kubectl` at
-`/var/lib/rancher/rke2/bin/kubectl` with `/etc/rancher/rke2/rke2.yaml`, and
-`rke2` at `/usr/local/bin/rke2`. Ubuntu 24.04 has all of them.
+`journalctl`, `systemctl` and `timedatectl` (systemd), `nft` (nftables,
+which `install.sh` step 1 requires), RKE2's own `kubectl` at
+`/var/lib/rancher/rke2/bin/kubectl` with `/etc/rancher/rke2/rke2.yaml`,
+`rke2` at `/usr/local/bin/rke2` and `rke2-uninstall.sh` next to it. Ubuntu
+24.04 has all of them.
 
 ## Known issues
 
@@ -207,6 +278,13 @@ On the machine: bash, coreutils (`date`, `df`, `find`, `mktemp`), `sed`,
   bundle. `kubectl logs --tail` can be added when that happens.
 - **Not root is a `[FAIL]` line, not JSON.** `meho doctor` (#4740) runs
   `check --json` only as root.
+- **`admin-network` finds the set by its exact lines.** It looks for
+  `    set admin_network {` and `        flags interval` as `install.sh`
+  writes them. A customer who reformats the set by hand gets a `[FAIL]`
+  line, or an unchanged set, and `nft -c -f` cannot tell. The rewrite is
+  meant for the file as `install.sh` wrote it.
+- **`uninstall` leaves the OS packages that RKE2's installer added**, and
+  `meho-host` itself (out of scope in #4739).
 
 ## References
 
@@ -232,3 +310,13 @@ On the machine: bash, coreutils (`date`, `df`, `find`, `mktemp`), `sed`,
   https://kubernetes.io/docs/concepts/scheduling-eviction/node-pressure-eviction/
 - ADR 0007 decision 2 (the support rule), meho-internal
   `docs/decisions/0007-kubernetes-inside-and-ha-path.md`.
+- ADR 0009 (closed by default; "Work": how the customer sets the admin
+  network after the install), meho-internal
+  `docs/decisions/0009-closed-by-default.md`; the form-2 design, section 5
+  (`admin-network`, `uninstall`) and section 11 (SSH and the admin network).
+- The MEHO firewall file and its unit: `docs/codebase/linux-server-install.md`, "The host firewall"
+  (#4635), `lib/firewall.sh`.
+- RKE2 uninstall (`/usr/local/bin/rke2-uninstall.sh` for a tarball install):
+  https://docs.rke2.io/install/uninstall
+- `nft(8)`: `-c`, `--check` checks a rule file without applying it; `-f`
+  reads the rules from a file.

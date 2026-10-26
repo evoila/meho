@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 """Tests of meho-host: the check list, its JSON form and exit codes, the
-support bundle and what is removed from it, and the install of meho-host by
-install.sh."""
+support bundle and what is removed from it, the SSH rule of the firewall
+(admin-network), uninstall, and the install of meho-host by install.sh."""
 
 from __future__ import annotations
 
 import json
+import os
 import stat
 import tarfile
 import unittest
@@ -24,6 +25,25 @@ from host_harness import (
 )
 
 SUPPORT_HINT = "run 'meho-host support-bundle' and send the file to support."
+RULES = "/etc/meho/firewall.nft"
+# The file install.sh writes with --admin-network 10.0.50.0/24.
+RULES_FIXTURE = LINUX_SERVER / "tests" / "fixtures" / "firewall-admin-network.nft"
+FIREWALL_UNIT = "/etc/systemd/system/meho-firewall.service"
+RKE2_DROPIN = "/etc/systemd/system/rke2-server.service.d/meho-firewall.conf"
+RKE2_UNIT = "/etc/systemd/system/rke2-server.service"
+RKE2_UNINSTALL = "/usr/local/bin/rke2-uninstall.sh"
+# The fake rke2-uninstall.sh removes what the real one removes: RKE2's
+# unit, its data, its binaries and itself.
+RKE2_UNINSTALL_STUB = (
+    '#!/bin/sh\nprintf \'%s\\n\' "rke2-uninstall.sh" >> "$MEHO_FAKE/calls.log"\n'
+    f'rm -rf "$MEHO_TEST_ROOT{RKE2_UNIT}" "$MEHO_TEST_ROOT/var/lib/rancher" '
+    '"$MEHO_TEST_ROOT/usr/local/bin/rke2" "$0"\n'
+)
+REMOVE_FIREWALL = (
+    "systemctl disable meho-firewall.service && rm -r "
+    "/etc/systemd/system/meho-firewall.service /etc/meho && systemctl daemon-reload && "
+    "nft delete table inet meho"
+)
 OK_LINES = [
     "[ok]   node: Ready",
     "[ok]   pods: all 7 pods in meho, kube-system, local-path-storage run",
@@ -62,7 +82,13 @@ class UsageTests(HostTestCase):
         result = self.host.run("--help")
 
         self.assertEqual(0, result.returncode, result.stderr)
-        for text in ("check [--json]", "support-bundle", "Exit codes:"):
+        for text in (
+            "check [--json]",
+            "support-bundle",
+            "admin-network",
+            "uninstall",
+            "Exit codes:",
+        ):
             self.assertIn(text, result.stdout)
         self.assertNotIn("id -u", self.host.calls())
         self.assertFalse(self.host.host_path("/var/lib/meho/support").exists())
@@ -507,6 +533,222 @@ class SupportBundleTests(HostTestCase):
         self.assertEqual(["fail", "fail"], [check["status"] for check in checks[:2]])
         self.assertIn("(this command failed with exit code 1)", files["node.txt"])
         self.assertEqual([], [name for name in files if name.startswith("pods/")])
+
+
+class AdminNetworkTests(HostTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.host.host_file(RULES, RULES_FIXTURE.read_text())
+
+    def rules(self) -> str:
+        return self.host.host_path(RULES).read_text()
+
+    def admin_set(self) -> str:
+        rules = self.rules()
+        start = rules.index("    set admin_network {")
+        return rules[start : rules.index("    }\n", start) + 6]
+
+    def test_a_range_changes_only_the_ssh_rule(self) -> None:
+        before = self.rules().splitlines()
+
+        result = self.host.run("admin-network", "10.0.60.0/24")
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertEqual("[ok]   SSH is allowed from 10.0.60.0/24\n", result.stdout)
+        after = self.rules().splitlines()
+        self.assertEqual(len(before), len(after))
+        changed = [(old, new) for old, new in zip(before, after, strict=True) if old != new]
+        self.assertEqual(
+            [
+                (
+                    "    # Given with --admin-network at the install.",
+                    "    # Set with meho-host admin-network.",
+                ),
+                ("        elements = { 10.0.50.0/24 }", "        elements = { 10.0.60.0/24 }"),
+            ],
+            changed,
+        )
+        # The new file is checked before it takes the old one's place, then
+        # loaded from its place.
+        calls = self.host.calls()
+        self.assertRegex(calls, r"nft -c -f \S*/etc/meho/firewall\.nft\.\S+\n")
+        self.assertIn(f"nft -f {self.host.host_path(RULES)}\n", calls)
+        self.assertLess(calls.index("nft -c -f"), calls.index("nft -f "))
+        self.assertEqual(["firewall.nft"], os.listdir(self.host.host_path("/etc/meho")))
+
+    def test_one_address_is_a_range_too(self) -> None:
+        result = self.host.run("admin-network", "10.0.50.9")
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertIn("        elements = { 10.0.50.9 }\n", self.admin_set())
+
+    def test_none_closes_ssh_from_every_address(self) -> None:
+        result = self.host.run("admin-network", "none")
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertIn("SSH is closed for every address; only the console works", result.stdout)
+        self.assertNotIn("elements", self.admin_set())
+        self.assertIn("ip saddr @admin_network tcp dport 22 accept", self.rules())
+        self.assertNotIn("Type yes", self.output(result))
+
+    def test_over_ssh_from_outside_the_range_it_asks_and_stops_without_yes(self) -> None:
+        before = self.rules()
+
+        result = self.host.run("admin-network", "192.168.1.0/24", ssh_client="10.0.0.5 51234 22")
+
+        self.assertEqual(1, result.returncode, self.output(result))
+        self.assertIn(
+            "[WARN] This SSH session comes from 10.0.0.5, which is outside 192.168.1.0/24.",
+            result.stderr,
+        )
+        self.assertIn("Change the SSH rule anyway? Type yes to go on: ", result.stdout)
+        self.assertIn("Stopped. Nothing was changed.", result.stdout)
+        self.assertEqual(before, self.rules())
+        self.assertNotIn("\nnft ", self.host.calls())
+
+    def test_over_ssh_a_yes_changes_the_rule(self) -> None:
+        result = self.host.run(
+            "admin-network", "192.168.1.0/24", stdin="yes\n", ssh_client="10.0.0.5 51234 22"
+        )
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertIn("        elements = { 192.168.1.0/24 }\n", self.admin_set())
+
+    def test_over_ssh_inside_the_range_it_does_not_ask(self) -> None:
+        result = self.host.run("admin-network", "10.0.0.0/16", ssh_client="10.0.0.5 51234 22")
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertNotIn("Type yes", self.output(result))
+        self.assertEqual("", result.stderr)
+
+    def test_none_over_ssh_asks_too(self) -> None:
+        result = self.host.run("admin-network", "none", ssh_client="10.0.0.5 51234 22")
+
+        self.assertEqual(1, result.returncode, self.output(result))
+        self.assertIn("closes SSH for every address", result.stderr)
+        self.assertIn("        elements = { 10.0.50.0/24 }\n", self.admin_set())
+
+    def test_under_sudo_the_session_is_found_in_a_parent_process(self) -> None:
+        # sudo resets the environment, so meho-host itself has no SSH_CLIENT.
+        # The processes above it are read from /proc, which the fake root holds.
+        parent = os.getpid()
+        self.host.host_file(f"/proc/{parent}/environ", "HOME=/root\0TERM=xterm\0")
+        self.host.host_file(f"/proc/{parent}/status", "Name:\tsudo\nPPid:\t4242\n")
+        self.host.host_file(
+            "/proc/4242/environ", "USER=admin\0SSH_CONNECTION=10.0.50.7 40000 10.0.0.5 22\0"
+        )
+
+        result = self.host.run("admin-network", "192.168.1.0/24")
+
+        self.assertEqual(1, result.returncode, self.output(result))
+        self.assertIn("This SSH session comes from 10.0.50.7", result.stderr)
+
+    def test_a_file_nft_refuses_keeps_the_old_file(self) -> None:
+        self.host.answer("nft_check_rc", "1")
+        self.host.answer("nft_check_out", "Error: syntax error, unexpected end of file\n")
+        before = self.rules()
+
+        result = self.host.run("admin-network", "10.0.60.0/24")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("Error: syntax error, unexpected end of file", result.stderr)
+        self.assertIn(
+            "[FAIL] nft does not accept the new firewall file, so /etc/meho/firewall.nft was "
+            "not changed.",
+            result.stderr,
+        )
+        self.assertEqual(before, self.rules())
+        self.assertNotIn("nft -f ", self.host.calls())
+        self.assertEqual(["firewall.nft"], os.listdir(self.host.host_path("/etc/meho")))
+
+    def test_a_file_without_the_set_is_red(self) -> None:
+        self.host.host_file(RULES, "table inet meho {\n}\n")
+
+        result = self.host.run("admin-network", "10.0.60.0/24")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("has no set admin_network", result.stderr)
+
+    def test_a_bad_value_is_a_usage_error(self) -> None:
+        for value in ("10.0.0", "10.0.50.0/33", "fe80::1", "all"):
+            with self.subTest(value=value):
+                self.assert_usage_error(
+                    self.host.run("admin-network", value), f"'{value}' is not an IPv4 range"
+                )
+        self.assert_usage_error(self.host.run("admin-network"), "takes one value")
+
+
+class UninstallTests(HostTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.host.host_file("/var/lib/meho/volumes/postgres/data", "rows\n")
+        self.host.host_file("/var/lib/meho/first-login-passwords", "admin_password=x\n")
+        self.host.host_file("/etc/meho/install.json", "{}\n")
+        self.host.host_file("/etc/meho/values-place.yaml", "tenant: x\n")
+        self.host.host_file(RULES, RULES_FIXTURE.read_text())
+        self.host.host_file(FIREWALL_UNIT, "[Unit]\n")
+        self.host.host_file(RKE2_DROPIN, "[Unit]\n")
+        self.host.host_file(RKE2_UNIT, "[Unit]\n")
+        self.host.host_file("/var/lib/rancher/rke2/server/db/state.db", "etcd\n")
+        uninstall = self.host.host_path(RKE2_UNINSTALL)
+        uninstall.write_text(RKE2_UNINSTALL_STUB)
+        uninstall.chmod(0o755)
+
+    def assert_nothing_removed(self) -> None:
+        for path in ("/var/lib/meho/volumes/postgres/data", "/etc/meho/install.json", RKE2_UNIT):
+            self.assertTrue(self.host.host_path(path).exists(), path)
+        self.assertNotIn("rke2-uninstall.sh", self.host.calls())
+
+    def test_it_asks_twice_and_stops_without_two_yes(self) -> None:
+        for answers in ("", "no\n", "yes\n", "yes\nno\n"):
+            with self.subTest(answers=answers):
+                result = self.host.run("uninstall", stdin=answers)
+
+                self.assertEqual(1, result.returncode, self.output(result))
+                self.assertIn("Stopped. Nothing was changed.", result.stdout)
+                self.assert_nothing_removed()
+
+    def test_after_two_yes_meho_and_rke2_are_gone_and_the_firewall_stays(self) -> None:
+        result = self.host.run("uninstall", stdin="yes\nyes\n")
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertEqual(2, result.stdout.count("Type yes to go on: "))
+        self.assertIn("rke2-uninstall.sh\n", self.host.calls())
+        for path in (RKE2_UNIT, "/var/lib/rancher", "/var/lib/meho", RKE2_DROPIN):
+            self.assertFalse(self.host.host_path(path).exists(), path)
+        self.assertEqual(["firewall.nft"], os.listdir(self.host.host_path("/etc/meho")))
+        self.assertEqual(RULES_FIXTURE.read_text(), self.host.host_path(RULES).read_text())
+        self.assertTrue(self.host.host_path(FIREWALL_UNIT).exists())
+        self.assertNotIn("\nnft ", self.host.calls())
+        self.assertIn("systemctl daemon-reload\n", self.host.calls())
+        self.assertEqual(
+            "The MEHO firewall stays on, so this machine is never without one. When your own "
+            f"firewall is ready, remove it with: {REMOVE_FIREWALL}",
+            result.stdout.splitlines()[-1],
+        )
+
+    def test_without_the_rke2_script_the_meho_files_still_go(self) -> None:
+        self.host.host_path(RKE2_UNINSTALL).unlink()
+
+        result = self.host.run("uninstall", stdin="yes\nyes\n")
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertIn(f"[note] {RKE2_UNINSTALL} is not on this machine", result.stdout)
+        self.assertFalse(self.host.host_path("/var/lib/meho").exists())
+        self.assertEqual(["firewall.nft"], os.listdir(self.host.host_path("/etc/meho")))
+
+    def test_a_failed_rke2_script_stops_before_the_meho_files(self) -> None:
+        self.host.host_path(RKE2_UNINSTALL).write_text("#!/bin/sh\necho 'rke2: no' >&2\nexit 1\n")
+
+        result = self.host.run("uninstall", stdin="yes\nyes\n")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("rke2: no", result.stderr)
+        self.assertIn("[FAIL] RKE2's uninstall script", result.stderr)
+        self.assertTrue(self.host.host_path("/var/lib/meho/volumes/postgres/data").exists())
+
+    def test_uninstall_takes_no_option(self) -> None:
+        self.assert_usage_error(self.host.run("uninstall", "--yes"), "uninstall takes no option")
 
 
 class InstallTests(InstallTestCase):

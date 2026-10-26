@@ -47,6 +47,7 @@ from meho_backplane.connectors._shared.credential_backend import (
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_BASIC_CREDENTIAL_FIELDS,
     DEFAULT_KV_MOUNT,
+    OperatorTokenRequiredError,
     VaultCredentialsReadError,
     load_basic_credentials,
 )
@@ -223,6 +224,9 @@ async def test_empty_jwt_fails_closed_before_touching_vault(
     with pytest.raises(VaultCredentialsReadError) as exc:
         await load_basic_credentials(_Target(), _make_operator(jwt=""))
 
+    # The refusal is its own subclass so the topology scheduler (#4952)
+    # can treat it as expected without hiding other read failures.
+    assert isinstance(exc.value, OperatorTokenRequiredError)
     msg = str(exc.value)
     assert "operator-context credential read requires an authenticated operator" in msg
     assert "vc-lab-01" in msg

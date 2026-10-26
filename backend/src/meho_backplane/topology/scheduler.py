@@ -47,6 +47,35 @@ rest of the sweep. A failing target is put on exponential backoff —
 ``2 x interval`` per consecutive failure, capped at 4 h — tracked
 in-memory; a success clears the backoff. The next sweep skips a target
 still inside its backoff window.
+
+Expected refusals (#4952)
+-------------------------
+
+Two failures are expected outcomes, not crashes, and are not logged with
+a stack trace:
+
+* Vault refused the credential read because the run has no person's
+  token
+  (:class:`~meho_backplane.connectors._shared.vault_creds.OperatorTokenRequiredError`).
+  The scheduled run carries ``raw_jwt=""``, and MEHO does not read a
+  target's credentials from Vault without one. Every connector that
+  reads credentials to fill the map — today the Kubernetes connector —
+  fails this way on every scheduled run when the target's credentials
+  live in Vault. A deployment whose credential store is GCP Secret
+  Manager reads with its own service identity instead, so its scheduled
+  refreshes are not affected.
+* No connector supports the target's product
+  (:class:`~meho_backplane.connectors.resolver.NoMatchingConnector`).
+  That is a problem in the target record, not in the code.
+
+Both still go on backoff. They count under their own metric outcome
+(``skipped_no_credentials`` / ``no_connector``), and the first time per
+target after a start they log one ``warning`` line without a stack
+trace. Later failures of the same kind for that target log nothing,
+even when a refusal of the other kind came in between. A success clears
+the markers, so a refusal that comes back after a success is logged
+again. Any other failure, including a credential store that cannot be
+reached, still counts as ``error`` and logs the stack trace every time.
 """
 
 from __future__ import annotations
@@ -63,6 +92,8 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.vault_creds import OperatorTokenRequiredError
+from meho_backplane.connectors.resolver import NoMatchingConnector
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target, Tenant
 from meho_backplane.metrics import TOPOLOGY_REFRESH_TOTAL, note_loop_tick
@@ -87,6 +118,25 @@ _SYSTEM_OPERATOR_SUB = "system:topology-scheduler"
 #: at most every 4 hours regardless of how small the base interval is.
 _MAX_BACKOFF_SECONDS = 4 * 3600
 
+#: Expected per-target refusals (#4952): the exception class, the metric
+#: ``outcome`` it counts under, and the plain reason the one-time warning
+#: carries. Checked in order; the first match wins.
+_EXPECTED_REFUSALS: tuple[tuple[type[Exception], str, str], ...] = (
+    (
+        OperatorTokenRequiredError,
+        "skipped_no_credentials",
+        "Vault refused the credential read; the scheduled refresh runs "
+        "without a person's token and MEHO does not read target "
+        "credentials from Vault without one, so run "
+        "'meho topology refresh <target>' as a logged-in operator",
+    ),
+    (
+        NoMatchingConnector,
+        "no_connector",
+        "no registered connector supports the target's product and version; fix the target record",
+    ),
+)
+
 
 def _advisory_lock_key(tenant_id: uuid.UUID, target_id: uuid.UUID) -> int:
     """Map a ``(tenant, target)`` pair to a stable signed-63-bit lock key.
@@ -107,6 +157,10 @@ class _TargetBackoff:
     consecutive_failures: int = 0
     #: ``time.monotonic()`` value before which the target is skipped.
     skip_until: float = 0.0
+    #: The expected-refusal ``outcome`` values already warned about for
+    #: this target, so later failures of the same kind log nothing, even
+    #: when a refusal of another kind came in between (#4952).
+    warned_outcomes: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -119,10 +173,19 @@ class _SchedulerState:
 def _system_operator(tenant_id: uuid.UUID) -> Operator:
     """Build the synthetic per-tenant operator scheduled refreshes run as.
 
-    ``raw_jwt`` is the empty string — scheduled refreshes never forward
-    a token to a downstream vendor (the connector uses the target's own
-    stored credentials). ``OPERATOR`` role satisfies the model's
-    required field; the refresh path does not gate on role.
+    ``raw_jwt`` is the empty string — a scheduled refresh has no person's
+    token to forward. MEHO reads a target's credentials from Vault only
+    under a person's token (the guard in
+    :meth:`~meho_backplane.connectors._shared.vault_creds.VaultCredentialBackend.load_secret_data`),
+    so a connector that needs the target's credentials to fill the map —
+    today the Kubernetes connector — refuses the scheduled run with an
+    :class:`~meho_backplane.connectors._shared.vault_creds.OperatorTokenRequiredError`
+    when the target's credentials live in Vault. The scheduler reports
+    that as an expected outcome (#4952); an operator updates such targets
+    with ``meho topology refresh <target>``. A GCP Secret Manager store
+    reads with the service's own identity and is not affected.
+    ``OPERATOR`` role satisfies the model's required field; the refresh
+    path does not gate on role.
     """
     return Operator(
         sub=_SYSTEM_OPERATOR_SUB,
@@ -190,25 +253,69 @@ async def _refresh_one_target(
             await refresh_target_topology(target, _system_operator(tenant_id))
             TOPOLOGY_REFRESH_TOTAL.labels(outcome="ok").inc()
             state.backoff.pop(target_id, None)
-        except Exception:
-            TOPOLOGY_REFRESH_TOTAL.labels(outcome="error").inc()
-            bo = state.backoff.setdefault(target_id, _TargetBackoff())
-            bo.consecutive_failures += 1
-            interval = get_settings().topology_refresh_interval_seconds
-            delay = min(
-                interval * (2**bo.consecutive_failures),
-                _MAX_BACKOFF_SECONDS,
-            )
-            bo.skip_until = time.monotonic() + delay
-            _log.exception(
-                "topology_refresh_target_failed",
-                target_id=str(target_id),
-                tenant_id=str(tenant_id),
-                consecutive_failures=bo.consecutive_failures,
-                backoff_seconds=delay,
-            )
+        except Exception as exc:
+            _record_failure(target, state, exc)
         finally:
             await _advisory_unlock(lock_session, key)
+
+
+def _classify_expected_refusal(exc: Exception) -> tuple[str, str] | None:
+    """Return ``(outcome, reason)`` when *exc* is an expected refusal, else ``None``."""
+    for exc_type, outcome, reason in _EXPECTED_REFUSALS:
+        if isinstance(exc, exc_type):
+            return outcome, reason
+    return None
+
+
+def _record_failure(target: Target, state: _SchedulerState, exc: Exception) -> None:
+    """Put *target* on backoff and report the failure.
+
+    Must be called from inside the ``except`` block that caught *exc*:
+    the unexpected-error branch uses ``_log.exception``, which reads the
+    active exception for the stack trace.
+
+    An expected refusal (see :data:`_EXPECTED_REFUSALS`) counts under its
+    own metric outcome and logs one ``warning`` without a stack trace the
+    first time it is seen for the target; repeats log nothing. Anything
+    else counts as ``error`` and logs ``topology_refresh_target_failed``
+    with the full stack trace on every failure.
+    """
+    bo = state.backoff.setdefault(target.id, _TargetBackoff())
+    bo.consecutive_failures += 1
+    interval = get_settings().topology_refresh_interval_seconds
+    delay = min(interval * (2**bo.consecutive_failures), _MAX_BACKOFF_SECONDS)
+    bo.skip_until = time.monotonic() + delay
+
+    expected = _classify_expected_refusal(exc)
+    if expected is None:
+        TOPOLOGY_REFRESH_TOTAL.labels(outcome="error").inc()
+        _log.exception(
+            "topology_refresh_target_failed",
+            target_id=str(target.id),
+            target_name=target.name,
+            tenant_id=str(target.tenant_id),
+            product=target.product,
+            consecutive_failures=bo.consecutive_failures,
+            backoff_seconds=delay,
+        )
+        return
+
+    outcome, reason = expected
+    TOPOLOGY_REFRESH_TOTAL.labels(outcome=outcome).inc()
+    if outcome in bo.warned_outcomes:
+        return
+    bo.warned_outcomes.add(outcome)
+    _log.warning(
+        "topology_refresh_target_skipped",
+        target_id=str(target.id),
+        target_name=target.name,
+        tenant_id=str(target.tenant_id),
+        product=target.product,
+        outcome=outcome,
+        reason=reason,
+        detail=str(exc),
+        backoff_seconds=delay,
+    )
 
 
 async def _run_one_sweep(state: _SchedulerState) -> None:

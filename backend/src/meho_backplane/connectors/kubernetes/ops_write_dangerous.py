@@ -419,6 +419,7 @@ async def _resolve_secret_refs(
     refs: dict[str, str],
     *,
     mount: str,
+    op_id: str = "k8s.secret.create",
 ) -> dict[str, str]:
     """Resolve a ``{secret-key: ref}`` map to ``{secret-key: value}``.
 
@@ -437,6 +438,9 @@ async def _resolve_secret_refs(
     404) -- so the caller, not the backend, owns fragment->field selection,
     uniformly for the ``vault:`` and ``gsm:`` schemes the issue's grammar
     (``{key: "<scheme>:<path>#<field>"}``) spans.
+
+    *op_id* names the calling op in the error message (``k8s.secret.update``
+    reuses this helper).
     """
     resolved: dict[str, str] = {}
     for secret_key, raw_ref in refs.items():
@@ -452,7 +456,7 @@ async def _resolve_secret_refs(
         stripped = strip_credential_value(value) if isinstance(value, str) else None
         if not stripped:
             raise KubernetesSecretRefError(
-                f"k8s.secret.create secret_ref for key {secret_key!r} (ref={store_ref!r}) "
+                f"{op_id} secret_ref for key {secret_key!r} (ref={store_ref!r}) "
                 f"carries no usable string value under field {field!r}. Store the value "
                 f"under that field (or name it with a '#field' fragment) so the Secret "
                 f"can source it without the value ever appearing in op params."

@@ -134,7 +134,7 @@ async def build_composite_preview(
     via :func:`_synthetic_proposed_effect`) so the calling agent reads the same
     effect block the approver sees. Only reached for the ``destructive`` /
     ``requires_approval`` tiers (the gate in
-    :func:`~meho_backplane.operations._request_preview._resolve_previewable_descriptor`);
+    :func:`~meho_backplane.operations._request_preview._gate_and_validate`);
     every other typed/composite op keeps the ``"unavailable"`` contract. No
     handler runs and nothing is sent.
     """

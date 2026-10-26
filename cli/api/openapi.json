@@ -4177,7 +4177,7 @@
           "operations"
         ],
         "summary": "Post Preview",
-        "description": "Resolve an op + params to the literal would-be HTTP request, without sending.\n\nDelegates to :func:`preview_operation` (#1683). The read-only diagnosis\nsibling of ``POST /api/v1/operations/call``: it resolves the same op +\ntarget + params and returns the literal request\n(``{method, resolved_path, query, redacted_body}``) for an\n``source_kind='ingested'`` op **instead of dispatching it**. Use it to\ndiagnose a write 4xx from the inside -- the audit row persists only a\nhashed ``params_hash``, so the wire shape is otherwise unrecoverable.\n\nReturns ``200`` with the structured envelope; operator-input faults\n(unknown op, invalid params, unresolvable connector) land inside the\nenvelope (``status=\"error\"`` / ``status=\"unavailable\"`` +\n``extras.error_code``) rather than as HTTP 4xx, the same contract as\n``/call``. Target-failure outcomes ride the envelope identically to\n``/call`` (#136, completed by #2110): ``target_required`` for a missing /\nempty / ``name``-less target, ``target_invalid_type`` for a ``target`` of\na wrong JSON type, ``no_target`` for a supplied-but-unresolvable name,\n``ambiguous_target`` for a name matching more than one target \u2014 all HTTP\n200, no target-failure 4xx remains. The body is redacted\nthrough the same connector-boundary pipeline the response path uses;\nnothing is written to the audit row.",
+        "description": "Resolve an op + params to the literal would-be HTTP request, without sending.\n\nDelegates to :func:`preview_operation` (#1683). The read-only diagnosis\nsibling of ``POST /api/v1/operations/call``: it resolves the same op +\ntarget + params and returns the literal request\n(``{method, resolved_path, query, redacted_body}``) for an\n``source_kind='ingested'`` op **instead of dispatching it**. Use it to\ndiagnose a write 4xx from the inside -- the audit row persists only a\nhashed ``params_hash``, so the wire shape is otherwise unrecoverable.\n\nReturns ``200`` with the structured envelope; operator-input faults\n(unknown op, invalid params, unresolvable connector) land inside the\nenvelope (``status=\"error\"`` / ``status=\"unavailable\"`` +\n``extras.error_code``) rather than as HTTP 4xx, the same contract as\n``/call``. Target-failure outcomes ride the envelope identically to\n``/call`` (#136, completed by #2110): ``target_required`` for a missing /\nempty / ``name``-less target, ``target_invalid_type`` for a ``target`` of\na wrong JSON type, ``no_target`` for a supplied-but-unresolvable name,\n``ambiguous_target`` for a name matching more than one target \u2014 all HTTP\n200, no target-failure 4xx remains. The body is redacted\nthrough the same connector-boundary pipeline the response path uses;\nnothing is written to the audit row.\n\nEvery envelope whose op resolved also carries the risk level and the\npolicy verdict for this caller and target (#4923): ``safety_level``,\n``requires_approval``, ``policy_verdict`` (``auto-execute`` /\n``needs-approval`` / ``deny`` \u2014 what ``/call`` would do with the same\narguments, decided by the same policy gate) and ``policy_reason``\n(the gate's reason, or ``null`` when it gives none). The envelope is\ntyped as :class:`PreviewOperationResponse` for OpenAPI and the generated\nclients; only the keys the envelope carries are serialised, so the wire\nshape of every preview status is unchanged.",
         "operationId": "post_preview_api_v1_operations_preview_post",
         "parameters": [
           {
@@ -4207,9 +4207,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Post Preview Api V1 Operations Preview Post"
+                  "$ref": "#/components/schemas/PreviewOperationResponse"
                 }
               }
             }
@@ -31911,6 +31909,130 @@
         ],
         "title": "PreviewOperationBody",
         "description": "Request body for the ``POST /api/v1/operations/preview`` route.\n\nSame field shape as :class:`CallOperationBody` (#1683) -- a preview\nresolves the *same* op + target + params a real ``call_operation``\nwould, then returns the literal would-be HTTP request instead of\nsending it. Keeping the body identical means an operator who hit a\nwrite 4xx can re-issue the exact arguments against ``/preview`` to see\nwhat was put on the wire (the audit row persists only a hashed\n``params_hash``, so the request shape is otherwise unrecoverable).\n\n``target`` accepts the same three shapes as ``call_operation`` (bare\nstring, dict ``{\"name\": ...}``, or ``None``); see\n:class:`CallOperationBody` for the convention. A wrong-JSON-typed\n``target`` rides the ``target_invalid_type`` envelope instead of a 422\n(#2110; see :data:`_TargetArg`), identical to ``/call``.\n``extra=\"forbid\"`` keeps a typo in ``connector_id`` failing loud rather\nthan silently previewing nothing."
+      },
+      "PreviewOperationResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "error",
+              "unavailable",
+              "rate_limited"
+            ],
+            "title": "Status",
+            "description": "ok: the would-be request (or the synthetic preview) resolved. error: a structured fault, see `error` and `extras.error_code`. unavailable: a typed/composite op outside the approval tiers has no request to preview. rate_limited: over the per-minute dispatch cap for this principal."
+          },
+          "op_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Op Id",
+            "description": "Echo of the requested op id."
+          },
+          "connector_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Connector Id",
+            "description": "The connector the preview resolved against. May differ from the requested id when a sibling catalog serves the target."
+          },
+          "source_kind": {
+            "type": "string",
+            "nullable": true,
+            "title": "Source Kind",
+            "description": "`ingested`, `typed` or `composite`; absent when the op is unknown."
+          },
+          "method": {
+            "type": "string",
+            "nullable": true,
+            "title": "Method",
+            "description": "Resolved HTTP verb (status=ok); `COMPOSITE` for a synthetic preview."
+          },
+          "resolved_path": {
+            "type": "string",
+            "nullable": true,
+            "title": "Resolved Path",
+            "description": "Fully resolved request path, placeholders substituted and mount prefix applied (status=ok); the op id for a synthetic preview."
+          },
+          "query": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Query",
+            "description": "Query-string params, or null when there are none (status=ok)."
+          },
+          "redacted_body": {
+            "title": "Redacted Body",
+            "description": "The would-be request body after the connector-boundary redaction pipeline; null when the op declares no body (status=ok)."
+          },
+          "preview_hash": {
+            "type": "string",
+            "nullable": true,
+            "title": "Preview Hash",
+            "description": "Stable SHA-256 over the resolved request (status=ok). Present it as `preview_hash` on the governed call of a destructive-tier op."
+          },
+          "safety_level": {
+            "type": "string",
+            "nullable": true,
+            "title": "Safety Level",
+            "description": "The op's risk level: safe, caution, dangerous or destructive. Present on every preview whose op resolved (every status except unknown_op / unknown_connector)."
+          },
+          "requires_approval": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Requires Approval",
+            "description": "True when the op is marked as needing a human approval before it runs. Present whenever `safety_level` is."
+          },
+          "policy_verdict": {
+            "$ref": "#/components/schemas/PermissionVerdict",
+            "nullable": true,
+            "description": "What MEHO would do with this call for this caller and target: run it at once (auto-execute), wait for a second person's approval (needs-approval) or refuse it (deny). Decided the same way the call is decided; nothing is written. Present whenever `safety_level` is."
+          },
+          "policy_reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Policy Reason",
+            "description": "The policy gate's reason for the verdict; null when it gives none (a person's call that runs at once)."
+          },
+          "proposed_effect": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Proposed Effect",
+            "description": "The plan of what the op will change, the same block the approval request shows. Present only on a synthetic preview whose plan can be built without contacting the target."
+          },
+          "plan_shown": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Plan Shown",
+            "description": "Synthetic preview only: true when `proposed_effect` is present. False means the plan needs the target and is shown on the approval request."
+          },
+          "plan_note": {
+            "type": "string",
+            "nullable": true,
+            "title": "Plan Note",
+            "description": "Plain reason the plan is not shown (when `plan_shown` is false)."
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "title": "Error",
+            "description": "Human-readable fault (status=error / unavailable / rate_limited)."
+          },
+          "extras": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Extras",
+            "description": "Structured fault details, for example `error_code` or `validation_errors`."
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "PreviewOperationResponse",
+        "description": "Response envelope of ``POST /api/v1/operations/preview`` (#4923).\n\nTypes the envelope :func:`preview_operation` returns so the OpenAPI\ndocument and the generated clients know its fields. The route serialises\nonly the keys the envelope carries (``response_model_exclude_unset``):\nan ``error`` envelope has no ``method``, an ingested ``ok`` preview has no\n``plan_shown``, and so on. ``extra=\"allow\"`` keeps the keys a\ntarget-resolution or rate-limit envelope adds (``duration_ms``,\n``retry_after_seconds``, ...) on the wire unchanged."
       },
       "PrincipalKind": {
         "type": "string",

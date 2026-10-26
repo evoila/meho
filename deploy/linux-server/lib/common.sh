@@ -24,6 +24,7 @@ readonly RKE2_KUBECONFIG=/etc/rancher/rke2/rke2.yaml
 readonly RKE2_KUBECTL=/var/lib/rancher/rke2/bin/kubectl
 readonly RKE2_IMAGES_DIR=/var/lib/rancher/rke2/agent/images
 readonly RKE2_MANIFESTS_DIR=/var/lib/rancher/rke2/server/manifests
+readonly TRAEFIK_CONFIG_MANIFEST=rke2-traefik-config.yaml
 
 # Files of the download that steps 1 to 3 use, relative to the folder of
 # install.sh. The layout is the one of the form-2 design, section 4.
@@ -62,6 +63,17 @@ usage_error() {
     printf 'install.sh: %s\n' "$1" >&2
     printf "Run 'install.sh --help' to see the options.\n" >&2
     exit 2
+}
+
+# write_root_file <path on the machine> <mode>: write stdin to the file in
+# one step, so a reader never sees half a file.
+write_root_file() {
+    local target="${HOST_ROOT}$1" mode=$2 temporary
+    mkdir -p "${target%/*}"
+    temporary=$(mktemp "${target}.XXXXXX")
+    cat >"$temporary"
+    chmod "$mode" "$temporary"
+    mv -f "$temporary" "$target"
 }
 
 # join_by <separator> <item>...: print the items with the separator between them.

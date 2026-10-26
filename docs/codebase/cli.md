@@ -1394,9 +1394,12 @@ narrow-waist contract.
   `--preview-hash` from a prior preview of the identical
   `(connector_id, op_id, target, params)`. Without this verb the CLI
   had no way to obtain the hash, so the destructive tier was
-  MCP-only. For an ingested op the human output also prints the
-  `safety_level` and, when the op needs a human approval, an
-  `approval: needs approval` line (#3973). The verb exits 1 on a non-ok
+  MCP-only. Whenever the op resolved, the human output also prints one
+  plain line with the risk level and what MEHO would do with this call
+  for this caller and target (#3973 / #4923) — for example "Risk level:
+  dangerous. This call waits for approval." — and `--json` carries
+  `safety_level`, `requires_approval`, `policy_verdict` and
+  `policy_reason`. The verb exits 1 on a non-ok
   envelope (`status="error"` for input faults, `status="unavailable"` for
   a typed/composite op with no literal HTTP request to preview).
 - `meho operation result-query <handle_id> [--offset N] [--limit N] | [--where ...] [--select ...] [--group-by ...] [--aggregate ...] [--order-by ...] [--query-limit N] | [--path <pointer>]`

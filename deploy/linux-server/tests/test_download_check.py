@@ -63,6 +63,7 @@ class LayoutTests(PackagingTestCase):
         self.assertIn("images/meho-images.linux-amd64.tar.zst", files)
         self.assertIn("LICENSES/README.txt", files)
         self.assertIn("lib/common.sh", files)
+        self.assertIn("lib/firewall.sh", files)
         self.assertEqual(len(files), len(set(files)))
 
     def test_the_layout_holds_every_file_install_sh_reads(self) -> None:

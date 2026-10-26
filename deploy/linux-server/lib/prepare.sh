@@ -4,8 +4,9 @@
 #
 # Step 2 of install.sh: prepare the machine (form-2 design, section 5, step 2).
 # It writes the MEHO folders, RKE2's settings, the join token, the MEHO image
-# archive and the storage manifest, and installs the meho-host command. This
-# file is sourced, not run.
+# archive, the storage manifest and the settings of RKE2's Traefik, and
+# installs the meho-host command. The host firewall of step 2 is in
+# lib/firewall.sh. This file is sourced, not run.
 
 prepare_folders() {
     mkdir -p "${HOST_ROOT}${MEHO_STATE_DIR}" "${HOST_ROOT}${MEHO_CONFIG_DIR}"
@@ -71,6 +72,40 @@ copy_storage_manifest() {
     mkdir -p "$target"
     install -m 0600 "$download_dir/$STORAGE_MANIFEST" "$target/local-path-storage.yaml"
     ok "copied the storage manifest to $RKE2_MANIFESTS_DIR"
+}
+
+# render_traefik_config: port 80 answers only with a redirect to 443
+# (ADR 0009). RKE2 passes these values to its own Traefik chart
+# (rke2-traefik 41.2.003 in RKE2 v1.37.1), which turns them into
+# --entryPoints.web.http.redirections.entryPoint.* arguments of Traefik.
+# A HelmChartConfig must have the name and namespace of RKE2's HelmChart
+# (https://docs.rke2.io/helm).
+render_traefik_config() {
+    cat <<'EOF'
+# Written by MEHO install.sh. Port 80 answers only with a redirect to 443.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    ports:
+      web:
+        http:
+          redirections:
+            entryPoint:
+              to: websecure
+              scheme: https
+              permanent: true
+EOF
+}
+
+# RKE2 applies every manifest in this folder when it starts, and again when
+# the file changes.
+write_traefik_config() {
+    render_traefik_config | write_root_file "$RKE2_MANIFESTS_DIR/$TRAEFIK_CONFIG_MANIFEST" 0600
+    ok "wrote the setting that makes RKE2's Traefik redirect port 80 to 443 ($RKE2_MANIFESTS_DIR/$TRAEFIK_CONFIG_MANIFEST)"
 }
 
 # install_meho_host <download dir>: the host command, for the customer's work

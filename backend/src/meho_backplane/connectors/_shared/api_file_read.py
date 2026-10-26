@@ -15,6 +15,11 @@ This module holds the steps that do not depend on the vendor:
   body is decoded here in bounded steps, so the decoded bytes never grow
   past the limit (:class:`ApiFileTooLargeError`). A compressed stream
   that ends early, or bytes after a ``deflate`` stream, are refused.
+* :func:`fetch_checked_api_file` is the step every read calls: the fetch,
+  the file check and the flight recorder call in one. The recorder gets
+  the checked copy of the file, never the body as it came, and no body
+  when the file is refused. A ``401`` is raised with a checked body (or
+  none), so the dispatcher still logs in again and retries once.
 * :func:`decode_text` returns the body as UTF-8 text or refuses it with
   its content type (:class:`ApiFileNotTextError`).
 * :func:`text_items` and :func:`split_parts` cut the text into parts of
@@ -35,22 +40,28 @@ This module holds the steps that do not depend on the vendor:
 * :func:`redirect_target` turns a ``Location`` header into the path the
   caller should read next.
 
-The steps are the same as in the ``fleet.api_file.get`` read
-(:mod:`meho_backplane.connectors.vcf_fleet.api_file`); the Site Recovery
-Manager read uses them.
+The ``fleet.api_file.get``, ``hcx.api_file.get``, ``srm.api_file.get``
+and ``vr.api_file.get`` reads use these steps; each adds only its path
+rule, its version read and its answer.
 """
 
 from __future__ import annotations
 
 import zlib
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, NoReturn
 
 import httpx
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.api_file_secrets import (
+    ApiFileFormatError,
+    CheckedApiFile,
+    check_api_file,
+)
 from meho_backplane.connectors._shared.api_file_values import TextRule
 from meho_backplane.connectors.result_handle_store import rows_record_bytes
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.redaction.middleware import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
 
@@ -62,6 +73,7 @@ __all__ = [
     "assert_fits_result_handle",
     "assert_not_redacted",
     "decode_text",
+    "fetch_checked_api_file",
     "fetch_without_redirects",
     "redirect_target",
     "split_parts",
@@ -296,6 +308,131 @@ async def fetch_without_redirects(
         headers=kept_headers,
         content=b"".join(chunks),
         request=request,
+        extensions=response.extensions,
+    )
+
+
+async def fetch_checked_api_file(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    path: str,
+    headers: dict[str, str],
+    extensions: dict[str, Any],
+    max_bytes: int,
+    text_rule: TextRule | None,
+    error_text_rule: TextRule,
+) -> tuple[httpx.Response, CheckedApiFile]:
+    """Fetch one API file, check it, and give the flight recorder only the checked copy.
+
+    One ``GET`` through :func:`fetch_without_redirects`, then the file
+    check (:func:`check_api_file`) with *text_rule* on the body of every
+    answer that is not a ``401``. *path* is the path without its query:
+    the check reads the file ending from it. The answer and the checked
+    copy come back together.
+
+    The flight recorder gets the vendor call with the checked copy as its
+    body (``response_body=``), never the body as it came:
+
+    * a file the check refuses (not text, does not parse) is recorded
+      with no body, and the refusal is raised;
+    * a ``401`` is raised as :exc:`httpx.HTTPStatusError`, so the
+      dispatcher drops the login, logs in again and retries once. The
+      raised answer and the recorded call carry the ``401`` body as the
+      file check writes it with *error_text_rule*, or no body when it
+      cannot be checked. The status and the headers stay, so the retry
+      still runs. *error_text_rule* is MEHO's general redaction rules
+      (:func:`text_redactor`): the ``401`` body is never returned as a
+      file, so nothing stops it from being redacted;
+    * a transport fault is recorded without a body, and raised.
+
+    A body over *max_bytes* stops inside the fetch, before an answer
+    exists; nothing is recorded for it.
+    """
+    span = flight_recorder_capture.span_start()
+    try:
+        response = await fetch_without_redirects(
+            client, url, headers=headers, extensions=extensions, max_bytes=max_bytes
+        )
+    except httpx.TransportError as exc:
+        flight_recorder_capture.record_vendor_call_error(span, method="GET", exc=exc)
+        raise
+    if response.status_code == httpx.codes.UNAUTHORIZED:
+        _raise_unauthorized(span, headers, response, path, error_text_rule)
+    return response, _check_and_record(span, headers, response, path, text_rule)
+
+
+def _raise_unauthorized(
+    span: flight_recorder_capture.SpanStart | None,
+    headers: dict[str, str],
+    response: httpx.Response,
+    path: str,
+    text_rule: TextRule,
+) -> NoReturn:
+    """Record the ``401`` with a checked body (or none) and raise it with that body."""
+    expired = _with_checked_body(response, path, text_rule)
+    _record(span, headers, expired, expired.content)
+    expired.raise_for_status()
+    raise AssertionError("a 401 answer always raises")  # pragma: no cover
+
+
+def _check_and_record(
+    span: flight_recorder_capture.SpanStart | None,
+    headers: dict[str, str],
+    response: httpx.Response,
+    path: str,
+    text_rule: TextRule | None,
+) -> CheckedApiFile:
+    """Check the file and record the call with the checked copy, or with no body if refused."""
+    try:
+        checked = check_api_file(
+            decode_text(response, path),
+            content_type=response.headers.get("content-type"),
+            path=path,
+            text_rule=text_rule,
+        )
+    except (ApiFileNotTextError, ApiFileFormatError):
+        _record(span, headers, response, b"")
+        raise
+    _record(span, headers, response, checked.text.encode("utf-8"))
+    return checked
+
+
+def _record(
+    span: flight_recorder_capture.SpanStart | None,
+    headers: dict[str, str],
+    response: httpx.Response,
+    body: bytes,
+) -> None:
+    """Record the vendor call with *body* in place of the body as it came."""
+    flight_recorder_capture.record_vendor_call(
+        span, method="GET", request_headers=headers, response=response, response_body=body
+    )
+
+
+def _checked_body(response: httpx.Response, path: str, text_rule: TextRule) -> bytes:
+    """The body as the file check writes it back, or no body when it cannot be checked."""
+    try:
+        checked = check_api_file(
+            decode_text(response, path),
+            content_type=response.headers.get("content-type"),
+            path=path,
+            text_rule=text_rule,
+        )
+    except (ApiFileNotTextError, ApiFileFormatError):
+        return b""
+    return checked.text.encode("utf-8")
+
+
+def _with_checked_body(response: httpx.Response, path: str, text_rule: TextRule) -> httpx.Response:
+    """The same answer with a checked body (:func:`_checked_body`); status and headers stay."""
+    return httpx.Response(
+        status_code=response.status_code,
+        headers=[
+            (k, v) for k, v in response.headers.multi_items() if k.lower() != "content-length"
+        ],
+        content=_checked_body(response, path, text_rule),
+        request=response.request,
         extensions=response.extensions,
     )
 

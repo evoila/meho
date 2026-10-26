@@ -54,6 +54,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.api_file_read import (
+    PART_BYTES,
+    ApiFileTooLargeError,
+    assert_fits_result_handle,
+    split_parts,
+)
 from meho_backplane.connectors._shared.api_file_secrets import REDACTED
 from meho_backplane.connectors.hcx import (
     HCX_CONNECTOR_ID,
@@ -65,11 +71,8 @@ from meho_backplane.connectors.hcx import (
     register_hcx_typed_operations,
 )
 from meho_backplane.connectors.hcx.api_file import (
-    PART_BYTES,
     HcxApiFilePathError,
-    HcxApiFileTooLargeError,
     check_path,
-    split_parts,
 )
 from meho_backplane.connectors.hcx.connector import parse_manager_version
 from meho_backplane.connectors.registry import (
@@ -79,7 +82,8 @@ from meho_backplane.connectors.registry import (
 )
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import AuditLog, EndpointDescriptor
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.operations import dispatch, reset_dispatcher_caches, set_default_reducer
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
@@ -775,8 +779,6 @@ class _FakeValkey:
 
 def _largest_file_that_passes_the_check(limit: int) -> bytes:
     """The largest ``x``-file (in steps of 16 bytes) whose stored record fits *limit*."""
-    import meho_backplane.connectors.hcx.api_file as api_file
-
     answer = {
         "path": "/hybridity/docs/fit.json",
         "status": 200,
@@ -796,10 +798,14 @@ def _largest_file_that_passes_the_check(limit: int) -> bytes:
         items = [{"index": i, "text": p.decode()} for i, p in enumerate(split_parts(data))]
         answer.update(size=size, sha256=hashlib.sha256(data).hexdigest(), parts=len(items))
         try:
-            api_file._assert_fits_result_handle(
-                answer, items, operator_sub="op-reads-hcx", max_bytes=limit
+            assert_fits_result_handle(
+                answer,
+                items,
+                operator_sub="op-reads-hcx",
+                op_id="hcx.api_file.get",
+                max_bytes=limit,
             )
-        except HcxApiFileTooLargeError:
+        except ApiFileTooLargeError:
             size -= 16
             continue
         return data
@@ -879,7 +885,7 @@ async def test_page_the_redaction_rules_would_change_stops_with_an_error(
     message = result.extras["exception_message"]
     assert "strip-authorization-header" in message
     assert "1 place(s)" in message
-    assert "the file cannot be returned" in message
+    assert "the exact file cannot be returned" in message
     assert "example-token-value" not in json.dumps(result.result) + json.dumps(
         result.extras, default=str
     )
@@ -916,7 +922,7 @@ async def test_secret_that_crosses_a_part_boundary_stops_with_an_error(
 
     assert result.status == "error"
     message = result.extras["exception_message"]
-    assert "the file cannot be returned" in message
+    assert "the exact file cannot be returned" in message
     assert "1 place(s)" in message
     assert "example-secret-value" not in json.dumps(result.result) + json.dumps(
         result.extras, default=str
@@ -1127,3 +1133,106 @@ async def test_auth_headers_rejects_other_auth_models() -> None:
     target.auth_model = "per_user"
     with pytest.raises(NotImplementedError, match="per_user"):
         await connector.auth_headers(target, _make_operator())
+
+
+# ---------------------------------------------------------------------------
+# The flight recorder and the 401 body: only the checked copy leaves the read
+# ---------------------------------------------------------------------------
+
+_RECORDER_SECRET = "made-up-recorder-secret"
+_SECRET_JSON = json.dumps({"swagger": "2.0", "x-example": {"password": _RECORDER_SECRET}})
+_SECRET_FILE = "/hybridity/docs/secret.json"
+
+
+def _recorded_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Catch what the read hands the flight recorder."""
+    recorded: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        flight_recorder_capture,
+        "record_vendor_call",
+        lambda _span, **kwargs: recorded.append(kwargs),
+    )
+    return recorded
+
+
+def _file_calls(recorded: list[dict[str, Any]], path: str) -> list[dict[str, Any]]:
+    return [call for call in recorded if call["response"].url.path == path]
+
+
+async def _audit_payloads(op_id: str) -> list[str]:
+    async with get_sessionmaker()() as fresh:
+        rows = (await fresh.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
+    return [json.dumps(row.payload, default=str) for row in rows]
+
+
+@pytest.mark.asyncio
+async def test_flight_recorder_gets_the_checked_file_not_the_password(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded = _recorded_calls(monkeypatch)
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_version(mock)
+        mock.get(_SECRET_FILE).respond(
+            200, text=_SECRET_JSON, headers={"Content-Type": "application/json"}
+        )
+        result = await _dispatch(_SECRET_FILE)
+
+    assert result.status == "ok", result.error
+    (call,) = _file_calls(recorded, _SECRET_FILE)
+    assert REDACTED.encode() in call["response_body"]
+    assert _RECORDER_SECRET.encode() not in call["response_body"]
+
+
+@pytest.mark.asyncio
+async def test_flight_recorder_gets_no_body_when_the_file_is_refused(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded = _recorded_calls(monkeypatch)
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_version(mock)
+        mock.get(_SECRET_FILE).respond(
+            200, text=_SECRET_JSON[:-2], headers={"Content-Type": "application/json"}
+        )
+        result = await _dispatch(_SECRET_FILE)
+
+    assert result.status == "error"
+    (call,) = _file_calls(recorded, _SECRET_FILE)
+    assert call["response_body"] == b""
+
+
+@pytest.mark.asyncio
+async def test_401_body_is_checked_before_it_is_raised_and_the_retry_still_runs(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded = _recorded_calls(monkeypatch)
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        login = mock.post(_SESSIONS)
+        login.side_effect = [
+            httpx.Response(200, headers={"x-hm-authorization": "typed-hm-token-1"}),
+            httpx.Response(200, headers={"x-hm-authorization": "typed-hm-token-2"}),
+        ]
+        mock.post(_APPLIANCES).respond(200, json=_APPLIANCES_PAYLOAD)
+        docs = mock.get(_SECRET_FILE).respond(
+            401, text=_SECRET_JSON, headers={"Content-Type": "application/json"}
+        )
+        result = await _dispatch(_SECRET_FILE)
+
+    assert result.status == "error"
+    assert "401" in (result.error or "")
+    assert docs.call_count == 2
+    assert login.call_count == 2
+    rendered = (
+        (result.error or "") + json.dumps(result.result) + json.dumps(result.extras, default=str)
+    )
+    assert _RECORDER_SECRET not in rendered
+    calls = _file_calls(recorded, _SECRET_FILE)
+    assert len(calls) == 2
+    for call in calls:
+        assert REDACTED.encode() in call["response_body"]
+        assert _RECORDER_SECRET.encode() not in call["response_body"]
+    payloads = await _audit_payloads("hcx.api_file.get")
+    assert payloads
+    assert all(_RECORDER_SECRET not in payload for payload in payloads)

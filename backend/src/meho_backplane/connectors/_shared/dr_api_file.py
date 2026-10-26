@@ -44,14 +44,12 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.api_file_read import (
     assert_fits_result_handle,
     assert_not_redacted,
-    decode_text,
-    fetch_without_redirects,
+    fetch_checked_api_file,
     redirect_target,
     text_items,
     text_redactor,
 )
-from meho_backplane.connectors._shared.api_file_secrets import check_api_file, scrub_query_string
-from meho_backplane.flight_recorder import capture as flight_recorder_capture
+from meho_backplane.connectors._shared.api_file_secrets import scrub_query_string
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
@@ -79,9 +77,12 @@ async def dr_api_file_get(
 ) -> dict[str, Any]:
     """``GET`` one API file on the appliance and return it checked, text in parts.
 
-    A ``401`` is raised as :exc:`httpx.HTTPStatusError` so the dispatcher
-    drops this target's session and dispatches once more. Every other
-    status is reported in ``status``.
+    The fetch, the file check and the flight recorder call are the shared
+    :func:`fetch_checked_api_file`: the recorder gets the checked copy
+    only. A ``401`` is raised as :exc:`httpx.HTTPStatusError`, with a
+    checked body or none, so the dispatcher drops this target's session
+    and dispatches once more. Every other status is reported in
+    ``status``.
     """
     op_id = f"{connector.product}.api_file.get"
     connector_id = connector.connector_id
@@ -89,31 +90,18 @@ async def dr_api_file_get(
     max_bytes = get_settings().result_handle_max_record_bytes
     client = await connector._http_client(target)
     headers = await connector.auth_headers(target, operator)
-    span = flight_recorder_capture.span_start()
-    try:
-        response = await fetch_without_redirects(
-            client,
-            path,
-            headers=headers,
-            extensions=connector._request_extensions(target),
-            max_bytes=max_bytes,
-        )
-    except httpx.TransportError as exc:
-        flight_recorder_capture.record_vendor_call_error(span, method="GET", exc=exc)
-        raise
-    flight_recorder_capture.record_vendor_call(
-        span, method="GET", request_headers=headers, response=response
-    )
-    if response.status_code == httpx.codes.UNAUTHORIZED:
-        response.raise_for_status()
-
-    content_type = response.headers.get("content-type")
-    checked = check_api_file(
-        decode_text(response, path),
-        content_type=content_type,
+    text_rule = text_redactor(operator, connector_id=connector_id, op_id=op_id)
+    response, checked = await fetch_checked_api_file(
+        client,
+        path,
         path=path,
-        text_rule=text_redactor(operator, connector_id=connector_id, op_id=op_id),
+        headers=headers,
+        extensions=connector._request_extensions(target),
+        max_bytes=max_bytes,
+        text_rule=text_rule,
+        error_text_rule=text_rule,
     )
+    content_type = response.headers.get("content-type")
     text = checked.text
     body = text.encode("utf-8")
     items = text_items(body)

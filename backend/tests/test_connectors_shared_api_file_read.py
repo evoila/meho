@@ -12,7 +12,10 @@ The steps are called directly, with an ``httpx.MockTransport``:
   with an error, and an encoding the read cannot bound is refused;
 * the parts keep characters whole and join back to the file;
 * text checks, the stored-record check, the one redaction pass over the
-  whole text, the redaction check and the redirect path.
+  whole text, the redaction check and the redirect path;
+* the one step every read calls: the flight recorder gets the checked
+  copy, no body for a refused file, and a ``401`` is raised with a
+  checked body or none.
 
 Fixture values are made up.
 """
@@ -38,13 +41,20 @@ from meho_backplane.connectors._shared.api_file_read import (
     assert_fits_result_handle,
     assert_not_redacted,
     decode_text,
+    fetch_checked_api_file,
     fetch_without_redirects,
     redirect_target,
     split_parts,
     text_items,
     text_redactor,
 )
-from meho_backplane.connectors._shared.api_file_secrets import check_api_file
+from meho_backplane.connectors._shared.api_file_secrets import (
+    REDACTED,
+    ApiFileFormatError,
+    CheckedApiFile,
+    check_api_file,
+)
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.settings import get_settings
 
 _BASE = "https://files.test.invalid"
@@ -276,3 +286,110 @@ def test_text_redactor_as_the_text_rule_keeps_the_file_format() -> None:
 )
 def test_redirect_target_shapes(location: str | None, expected: str | None) -> None:
     assert redirect_target(location, httpx.URL(f"{_BASE}/dir/file.yaml")) == expected
+
+
+# ---------------------------------------------------------------------------
+# fetch_checked_api_file: what the flight recorder and a raised 401 carry
+# ---------------------------------------------------------------------------
+
+_SECRET = "made-up-recorder-secret"
+_SECRET_JSON = b'{"swagger": "2.0", "x-example": {"password": "made-up-recorder-secret"}}'
+# A credential inside a text value under a key that is not a secret name. The
+# JSON escape is a literal backslash-n on the wire; only the parsed value
+# holds the line break the header rule crosses.
+_CREDENTIAL_IN_TEXT = b'{"detail": "Authorization:\\nBasic made-up-recorder-secret"}'
+_REDACTED_HEADER = b"[REDACTED:authorization_header]"
+_JSON = {"Content-Type": "application/json"}
+
+
+def _recorded_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    recorded: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        flight_recorder_capture,
+        "record_vendor_call",
+        lambda _span, **kwargs: recorded.append(kwargs),
+    )
+    return recorded
+
+
+async def _fetch_checked(response: httpx.Response) -> tuple[httpx.Response, CheckedApiFile]:
+    rule = text_redactor(_operator(), connector_id="made-rest-1.0", op_id="made.up.get")
+    async with _client(lambda _request: response) as client:
+        return await fetch_checked_api_file(
+            client,
+            "/file.json?group=a",
+            path="/file.json",
+            headers={"x-made-up": "1"},
+            extensions={},
+            max_bytes=4096,
+            text_rule=None,
+            error_text_rule=rule,
+        )
+
+
+@pytest.mark.asyncio
+async def test_fetch_checked_gives_the_recorder_the_checked_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded = _recorded_calls(monkeypatch)
+    answer, checked = await _fetch_checked(_wire(200, _SECRET_JSON, headers=_JSON))
+
+    assert answer.status_code == 200
+    assert REDACTED in checked.text
+    (call,) = recorded
+    assert call["method"] == "GET"
+    assert call["request_headers"] == {"x-made-up": "1"}
+    assert call["response_body"] == checked.text.encode()
+    assert _SECRET.encode() not in call["response_body"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "headers", "error"),
+    [
+        (_SECRET_JSON[:-2], _JSON, ApiFileFormatError),
+        (b"\x89PNG", {"Content-Type": "image/png"}, ApiFileNotTextError),
+    ],
+)
+async def test_fetch_checked_gives_the_recorder_no_body_for_a_refused_file(
+    monkeypatch: pytest.MonkeyPatch, body: bytes, headers: dict[str, str], error: type[Exception]
+) -> None:
+    recorded = _recorded_calls(monkeypatch)
+    with pytest.raises(error):
+        await _fetch_checked(_wire(200, body, headers=headers))
+
+    (call,) = recorded
+    assert call["response"].status_code == 200
+    assert call["response_body"] == b""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "headers", "expected"),
+    [
+        (_SECRET_JSON, _JSON, REDACTED.encode()),
+        (_CREDENTIAL_IN_TEXT, _JSON, _REDACTED_HEADER),
+        (b"password=made-up-recorder-secret", {"Content-Type": "text/plain"}, b""),
+        (b"\xff\xfe", {"Content-Type": "application/octet-stream"}, b""),
+    ],
+)
+async def test_fetch_checked_raises_a_401_with_a_checked_body_or_none(
+    monkeypatch: pytest.MonkeyPatch, body: bytes, headers: dict[str, str], expected: bytes
+) -> None:
+    """The status and the headers stay, so the dispatcher's login retry still runs."""
+    recorded = _recorded_calls(monkeypatch)
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        await _fetch_checked(_wire(401, body, headers={**headers, "x-vendor": "kept"}))
+
+    raised = caught.value.response
+    assert raised.status_code == 401
+    assert raised.headers["x-vendor"] == "kept"
+    assert raised.request.url.path == "/file.json"
+    if expected:
+        assert expected in raised.content
+    else:
+        assert raised.content == b""
+    assert _SECRET.encode() not in raised.content
+    (call,) = recorded
+    assert call["response"].status_code == 401
+    assert call["response_body"] == raised.content

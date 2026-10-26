@@ -97,9 +97,11 @@ The split is proven by
   version and build from `GET /lcm/lcops/api/v2/about` as one value:
   `version`, `build` and `error`. The method never raises; on VCF 9.0
   builds the call answers HTTP 500 and `error` names it.
-- **`fleet_api_file_get_impl`**, **`check_path`**, **`split_parts`**,
-  **`DOCS_PAGES`**, **`DOCS_FOLDERS`** (`api_file.py`) — the body of
-  `fleet.api_file.get`, the path rule and the part splitter.
+- **`fleet_api_file_get_impl`**, **`check_path`**, **`DOCS_PAGES`**,
+  **`DOCS_FOLDERS`** (`api_file.py`) — the body of `fleet.api_file.get`
+  and the path rule. The fetch, the file check, the part splitter and
+  the flight recorder call are the shared steps in
+  `connectors/_shared/api_file_read.py`.
 - **`load_credentials_from_vault`** (`session.py`) — default loader,
   stubbed `NotImplementedError` until the live operator-context per-target
   Vault read lands. Mirrors `load_credentials_from_vault` in
@@ -279,6 +281,15 @@ host is reported as `scheme://host/path`, so the caller sees it cannot be
 read through this target. Only a `401` is raised, so the dispatcher drops
 the cached login; every other status (for example `404`) is reported in
 `status` with the body as text.
+
+The fetch, the file check and the flight recorder call are one shared
+step, `fetch_checked_api_file` in `connectors/_shared/api_file_read.py`.
+The flight recorder (the stored record of each vendor call) gets the
+checked copy of the file, never the body as it came, and no body when the
+file is refused. A `401` body goes through the same check before the
+error is raised, or the error is raised with no body. So neither the
+stored call record nor the error result can carry a password the
+appliance put in a file.
 
 The body is read in a stream. The read asks for `gzip` or `deflate` only
 and decodes the wire chunks itself with `zlib`, in steps that never

@@ -5895,31 +5895,64 @@ def _maintenance_exit_envelope(
     return envelope
 
 
-def _maintenance_exit_timeout_envelope(
-    host_moid: str, state: _HostMaintenanceState, task: str
+async def _maintenance_exit_timed_out(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    host_moid: str,
+    task: str,
 ) -> dict[str, Any]:
-    """The ``timeout`` answer: the task still runs, the call did not fail (a warning issue)."""
+    """The ``timeout`` answer: the task still runs, the call did not fail (a warning issue).
+
+    The host read after the timeout is best effort. MEHO already stopped
+    waiting, so a failed read must not turn the answer into a failed call
+    that loses the task id. The answer then keeps the ``timeout`` status and
+    the task id, leaves the four state fields ``None`` and says the current
+    host state is unavailable (the fault class only, like the preview).
+    """
+    seconds = int(_MAINTENANCE_TASK_TIMEOUT_SECONDS)
+    guidance = (
+        f"MEHO stopped waiting after {seconds}s, but the exit-maintenance-mode task {task} "
+        "still runs on vCenter. The call did not fail. Check the task (vmware.tasks.recent) "
+        "and read the host again before you put VMs on it."
+    )
+    issues = [
+        issue(
+            "connector",
+            "warning",
+            f"exit-maintenance-mode task {task} on host {host_moid!r} still runs after "
+            f"{seconds}s; the host may still be in maintenance mode",
+        )
+    ]
+    try:
+        state = await _read_host_maintenance_state(
+            connector=connector, target=target, operator=operator, host_moid=host_moid
+        )
+    except Exception as exc:
+        state = _HostMaintenanceState(
+            name=None, connection_state=None, in_maintenance_mode=None, ha_state=None
+        )
+        guidance += (
+            " The current host state is unavailable: the host read after the timeout "
+            "failed, so the state fields are empty."
+        )
+        issues.append(
+            issue(
+                "connector",
+                "warning",
+                f"the host read after the timeout failed ({type(exc).__name__}); the current "
+                f"state of host {host_moid!r} is unavailable",
+            )
+        )
     envelope = _maintenance_exit_envelope(
         status="timeout",
         host_moid=host_moid,
         state=state,
         maintenance_task=task,
-        guidance=(
-            f"MEHO stopped waiting after {int(_MAINTENANCE_TASK_TIMEOUT_SECONDS)}s, but the "
-            f"exit-maintenance-mode task {task} still runs on vCenter. The call did not fail. "
-            "Check the task (vmware.tasks.recent) and read the host again before you put VMs "
-            "on it."
-        ),
+        guidance=guidance,
     )
-    envelope["issues"] = [
-        issue(
-            "connector",
-            "warning",
-            f"exit-maintenance-mode task {task} on host {host_moid!r} still runs after "
-            f"{int(_MAINTENANCE_TASK_TIMEOUT_SECONDS)}s; the host may still be in "
-            "maintenance mode",
-        )
-    ]
+    envelope["issues"] = issues
     return envelope
 
 
@@ -5943,7 +5976,8 @@ async def host_maintenance_exit_composite(
        step) and poll it.
     3. Read the host again and return its maintenance state, connection
        state and vSphere HA state. A poll timeout is the ``timeout`` status
-       with the task id, not a failure; a faulted task is a failed call.
+       with the task id, not a failure, and its host read is best effort;
+       a faulted task is a failed call.
     """
     host_moid = params["host"]
     before = await _read_host_maintenance_state(
@@ -5984,11 +6018,17 @@ async def host_maintenance_exit_composite(
         reason = _maintenance_task_failure(outcome, _OP_EXIT_MAINTENANCE_TASK, host_moid)
         raise RuntimeError(f"host.maintenance.exit: {reason}")
 
+    if outcome.timed_out:
+        return await _maintenance_exit_timed_out(
+            connector=connector,
+            target=target,
+            operator=operator,
+            host_moid=host_moid,
+            task=outcome.task,
+        )
     after = await _read_host_maintenance_state(
         connector=connector, target=target, operator=operator, host_moid=host_moid
     )
-    if outcome.timed_out:
-        return _maintenance_exit_timeout_envelope(host_moid, after, outcome.task)
     return _maintenance_exit_envelope(
         status="exited", host_moid=host_moid, state=after, maintenance_task=outcome.task
     )

@@ -5862,7 +5862,8 @@ class _MaintenanceExitConnector:
     """Recording double for host.maintenance.exit: sequential host reads + the exit task.
 
     The handler reads the host before and after the exit, so the two
-    ``HostSystem`` reads are served in order from *host_reads*. The task
+    ``HostSystem`` reads are served in order from *host_reads*; an exception
+    in that list is raised by its read, so a test can fail one read. The task
     poll serves *task_state* (``success`` / ``error`` / ``running``); the
     ``ExitMaintenanceMode_Task`` POST is recorded so a refused call is
     provably off the wire.
@@ -5870,7 +5871,7 @@ class _MaintenanceExitConnector:
 
     def __init__(
         self,
-        host_reads: list[dict[str, Any]],
+        host_reads: list[dict[str, Any] | Exception],
         *,
         task_state: str = "success",
         task_error: str | None = None,
@@ -5890,7 +5891,10 @@ class _MaintenanceExitConnector:
             return _task_moref(self._task_moid)
         spec_type = json["specSet"][0]["propSet"][0]["type"]
         if spec_type == "HostSystem":
-            return self._host_reads.pop(0)
+            read = self._host_reads.pop(0)
+            if isinstance(read, Exception):
+                raise read
+            return read
         if spec_type == "Task":
             return _task_info_result(self._task_moid, self._task_state, self._task_error)
         raise AssertionError(f"unexpected RetrievePropertiesEx type {spec_type!r}")
@@ -6071,6 +6075,46 @@ async def test_host_maintenance_exit_poll_timeout_reports_the_running_task(
             ),
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_host_maintenance_exit_poll_timeout_keeps_the_task_id_when_the_host_read_fails(
+    gate: _GateRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed host read after the timeout never loses the timeout answer or the task id."""
+    monkeypatch.setattr(_write, "_MAINTENANCE_TASK_TIMEOUT_SECONDS", 0.0)
+    conn = _MaintenanceExitConnector(
+        [
+            _host_state_result("host-1", in_maintenance=True),
+            httpx.ReadTimeout("read timed out"),
+        ],
+        task_state="running",
+        task_moid="task-exit-9",
+    )
+    out = await _run_maintenance_exit(conn, {"host": "host-1"})
+    assert isinstance(out, dict)
+    assert out["status"] == "timeout"
+    assert out["maintenance_task"] == "task-exit-9"
+    assert out["host"] == "host-1"
+    assert out["name"] is None
+    assert out["connection_state"] is None
+    assert out["in_maintenance_mode"] is None
+    assert out["ha_state"] is None
+    assert "task task-exit-9 still runs" in out["guidance"]
+    assert "did not fail" in out["guidance"]
+    assert "current host state is unavailable" in out["guidance"]
+    assert [i["severity"] for i in out["issues"]] == ["warning", "warning"]
+    assert out["issues"][1] == {
+        "category": "connector",
+        "severity": "warning",
+        "message": (
+            "the host read after the timeout failed (ReadTimeout); the current state of "
+            "host 'host-1' is unavailable"
+        ),
+    }
+    assert "read timed out" not in json.dumps(out)
+    assert len(conn.exit_calls) == 1
+    assert len(conn.host_read_path_sets) == 2
 
 
 @pytest.mark.asyncio

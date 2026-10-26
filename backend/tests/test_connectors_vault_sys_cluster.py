@@ -74,8 +74,8 @@ _ONE_NODE_SENTENCE = (
 _HA_NODES = [
     {
         "hostname": "vault-0",
-        "api_address": "https://10.0.0.1:8200",
-        "cluster_address": "https://10.0.0.1:8201",
+        "api_address": "https://node-a.example:8200",
+        "cluster_address": "https://node-a.example:8201",
         "active_node": True,
         "last_echo": None,
         "version": "1.17.0",
@@ -86,8 +86,8 @@ _HA_NODES = [
     },
     {
         "hostname": "vault-1",
-        "api_address": "https://10.0.0.2:8200",
-        "cluster_address": "https://10.0.0.2:8201",
+        "api_address": "https://node-b.example:8200",
+        "cluster_address": "https://node-b.example:8201",
         "active_node": False,
         "last_echo": "2026-10-24T08:05:48.403148+00:00",
         "version": "1.17.0",
@@ -96,8 +96,8 @@ _HA_NODES = [
     },
     {
         "hostname": "vault-2",
-        "api_address": "https://10.0.0.3:8200",
-        "cluster_address": "https://10.0.0.3:8201",
+        "api_address": "https://node-c.example:8200",
+        "cluster_address": "https://node-c.example:8201",
         "active_node": False,
         "last_echo": "2026-10-24T08:05:49.000000+00:00",
         "version": "1.17.0",
@@ -113,7 +113,7 @@ _AUTOPILOT_BODY: dict[str, Any] = {
     "voters": ["vault_1", "vault_2", "vault_3"],
     "servers": {
         "vault_2": {
-            "address": "10.0.0.2:8201",
+            "address": "node-b.example:8201",
             "healthy": False,
             "id": "vault_2",
             "last_contact": "35.2s",
@@ -127,7 +127,7 @@ _AUTOPILOT_BODY: dict[str, Any] = {
             "version": "1.17.3",
         },
         "vault_1": {
-            "address": "10.0.0.1:8201",
+            "address": "node-a.example:8201",
             "healthy": True,
             "id": "vault_1",
             "last_contact": "0s",
@@ -141,7 +141,7 @@ _AUTOPILOT_BODY: dict[str, Any] = {
             "version": "1.17.3",
         },
         "vault_3": {
-            "address": "10.0.0.3:8201",
+            "address": "node-c.example:8201",
             "healthy": True,
             "id": "vault_3",
             "last_contact": "678.6ms",
@@ -311,7 +311,7 @@ async def test_ha_status_returns_one_row_per_node(
     assert [n["hostname"] for n in nodes] == ["vault-0", "vault-1", "vault-2"]
     assert [n["active_node"] for n in nodes] == [True, False, False]
     assert nodes[1]["last_echo"] == "2026-10-24T08:05:48.403148+00:00"
-    assert nodes[0]["api_address"] == "https://10.0.0.1:8200"
+    assert nodes[0]["api_address"] == "https://node-a.example:8200"
     assert nodes[0]["version"] == "1.17.0"
 
 
@@ -375,7 +375,7 @@ async def test_autopilot_state_reports_unhealthy_server_and_failure_tolerance(
     assert by_id["vault_2"]["last_contact"] == "35.2s"
     assert by_id["vault_2"]["status"] == "voter"
     assert by_id["vault_1"]["status"] == "leader"
-    assert by_id["vault_1"]["address"] == "10.0.0.1:8201"
+    assert by_id["vault_1"]["address"] == "node-a.example:8201"
 
 
 async def test_autopilot_state_rows_carry_only_documented_fields(

@@ -152,13 +152,13 @@ class OperationRunService:
         is persisted, never the raw params (the run never resumes, and a
         params blob would be a new secret surface).
         """
-        from meho_backplane.operations._validate import compute_params_hash
+        from meho_backplane.operations._validate import compute_audit_params_hash
         from meho_backplane.operations.meta_tools import call_operation
 
         connector_id = str(arguments["connector_id"])
         op_id = str(arguments["op_id"])
         params: dict[str, Any] = arguments.get("params") or {}
-        params_hash = compute_params_hash(params) if params else None
+        params_hash = compute_audit_params_hash(params) if params else None
 
         owner = _lease_owner()
         run_id = await self._create_and_claim(
@@ -200,12 +200,12 @@ class OperationRunService:
         process sessionmaker keeps its loaded columns readable in the
         background task.
         """
-        from meho_backplane.operations._validate import compute_params_hash
+        from meho_backplane.operations._validate import compute_audit_params_hash
         from meho_backplane.operations.approval_queue import resume_dispatch_after_approval
 
         effective_params = params if params is not None else request.params
         params_hash = (
-            compute_params_hash(effective_params)
+            compute_audit_params_hash(effective_params)
             if isinstance(effective_params, dict) and effective_params
             else None
         )

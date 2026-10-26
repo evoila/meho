@@ -443,7 +443,7 @@ as "the gate is broken" -- the meta-tests rule out the second case.
 **Where the gate runs.** The harness is a standard pytest file
 under `backend/tests/`, so it is picked up by the required unit
 sweep in `.github/workflows/ci.yml` — since #3251 the
-`python-unit-shard` matrix (whichever stride slice its file lands
+`python-unit-shard` matrix (whichever shard its file lands
 in), reported through the `python-unit-lane` fan-in that carries
 the branch-protection required context. That check is in the
 required-status-checks set, so a round-trip mismatch blocks merge
@@ -889,6 +889,22 @@ decisions" section — the destructive family joins the hard-exclusion set
 now; the reciprocal pointer back from that doc is the deferred edit. When
 the `destructive` safety tier ([#3196](https://github.com/evoila/meho/issues/3196))
 lands, the classifier already covers it via the tag it promotes.
+
+Deployment specs and depot credentials are kept out of trace bodies like
+credential writes: the operations that send a domain spec, an SddcSpec or the
+depot password (`sddc.domain.validate` / `create`,
+`installer.sddc.spec.validate`, `installer.sddc.bringup.start` / `retry`,
+`installer.composite.sddc.bringup`, `installer.system.depot.set`) carry the
+tag `credential`, a secret tag word (`SECRET_FAMILY_TAGS`).
+
+The dispatcher's error path uses the same secret check (#4854). For an
+operation that `classify_op` pins as `credential_write`, or whose tags
+have a word from `SECRET_FAMILY_TAGS`, the vendor's text in an error
+result is replaced with one fixed text before the audit row is written
+(`operations/_vendor_text.py`, through the shared
+`families.secret_tag_tokens`). So the error result and the audit row of
+such an operation keep no vendor text either. The details are in
+`docs/codebase/error-message-shape.md` ("The info-leak boundary").
 
 **F2 uncertainty (the F5 degrade)**. Any state the engine cannot *prove*
 fully redacted returns `uncertain=True`, which the caller must map to

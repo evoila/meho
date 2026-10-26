@@ -96,7 +96,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast import compute_effective_broadcast_detail
 from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.db.models import AuditEventClass
-from meho_backplane.mcp.audit import compute_params_hash, write_mcp_audit_row
+from meho_backplane.mcp.audit import write_mcp_audit_row
 from meho_backplane.mcp.human_only import human_only_remediation
 from meho_backplane.mcp.registry import (
     ResourceTemplateDefinition,
@@ -119,6 +119,7 @@ from meho_backplane.mcp.server import (
     McpPermissionDeniedError,
     register_method,
 )
+from meho_backplane.operations._validate import compute_audit_params_hash
 from meho_backplane.operations.delivery_budget import tool_result_text
 from meho_backplane.request_usage.collector import (
     current_request_id,
@@ -153,6 +154,22 @@ _ERROR_STATUSES: Final[frozenset[str]] = frozenset({"error", "denied", "rate_lim
 def _tool_result_is_error(name: str, result: dict[str, Any]) -> bool:
     """Return the MCP ``isError`` flag for a handler's result."""
     return name in _OPERATION_RESULT_TOOLS and result.get("status") in _ERROR_STATUSES
+
+
+def _schema_error_text(exc: jsonschema.ValidationError) -> str:
+    """Return the human-readable part of a schema-violation message.
+
+    ``jsonschema``'s own ``maxLength`` message repeats the whole offending
+    value (``'xxxx…' is too long``) and never names the limit. A too-long
+    free-text argument is the one case where that is both useless and
+    costly — the value can be tens of kilobytes — so it is rendered as
+    ``<field>: at most <n> characters`` instead. Every other violation keeps
+    the library's message.
+    """
+    if exc.validator != "maxLength":
+        return exc.message
+    field = ".".join(str(part) for part in exc.path) or "value"
+    return f"{field}: at most {exc.validator_value} characters"
 
 
 #: MCP-defined error code for "Resource not found" per spec
@@ -359,7 +376,7 @@ async def handle_tools_call(
             status_code = 400
             raise McpInvalidParamsError("tools/call: 'arguments' must be an object")
 
-        audit_payload["params_hash"] = compute_params_hash(arguments)
+        audit_payload["params_hash"] = compute_audit_params_hash(arguments)
 
         # Human-only surface (#3155): approve / reject / grant-elevate
         # have no MCP path under any claim set — deciding a parked op and
@@ -489,7 +506,7 @@ async def handle_tools_call(
         except jsonschema.ValidationError as exc:
             status_code = 400
             raise McpInvalidParamsError(
-                f"tools/call {name!r}: arguments failed inputSchema: {exc.message}",
+                f"tools/call {name!r}: arguments failed inputSchema: {_schema_error_text(exc)}",
             ) from exc
 
         result = await handler(operator, arguments)

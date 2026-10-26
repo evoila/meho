@@ -39,6 +39,8 @@ import pytest
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.kubernetes import KubernetesConnector
 from meho_backplane.operations._preview import (
+    _PERMISSION_PREFLIGHTS,
+    _PREVIEW_BUILDERS,
     PreviewContext,
     build_permission_preflight,
     build_proposed_effect,
@@ -372,18 +374,19 @@ async def test_no_builder_credential_class_op_yields_none() -> None:
     """A credential-class op with no builder still parks with no preview.
 
     Since #1856 a no-builder op gets the generic params-echo default, but
-    the credential-class suppression runs *first*: ``vault.auth.userpass.write``
-    is ``credential_write`` with no bespoke builder, so it collapses to the
-    identifier-only default (caller fallback) rather than echoing its
-    (secret-bearing) params. (``vault.kv.put`` now ships a bespoke builder,
-    #2332, so the exemplar here is a still-builderless credential op.)
+    the credential-class suppression runs *first*:
+    ``vmware.composite.vm.guest.env.read`` is ``credential_write`` with no
+    bespoke builder, so it collapses to the identifier-only default (caller
+    fallback) rather than echoing its params. (The userpass writes got
+    bespoke builders in #4850; this ``safe`` read never waits for approval,
+    so it is a still-builderless credential op.)
     """
     ctx = PreviewContext(
-        descriptor=_FakeDescriptor(op_id="vault.auth.userpass.write"),  # type: ignore[arg-type]
+        descriptor=_FakeDescriptor(op_id="vmware.composite.vm.guest.env.read"),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),
-        params={"username": "svc", "password": "s3kret"},
+        params={"vm": "vm-42", "password": "s3kret"},
     )
     assert await build_proposed_effect(ctx) is None
 
@@ -703,22 +706,22 @@ async def test_credential_class_op_generic_echo_suppressed() -> None:
     The generic params-echo default (#1856) can only do generic key-name /
     value-shape redaction and is not trusted to scrub a connector-specific
     secret shape, so an op classifying credential-class (here
-    ``k8s.secret.create`` → ``credential_write``) with no registered
-    builder collapses to the identifier-only default -- the durable
-    approval row must not carry secret material.
+    ``vmware.composite.vm.guest.env.read`` → ``credential_write``) with no
+    registered builder collapses to the identifier-only default -- the
+    durable approval row must not carry secret material.
     """
     ctx = PreviewContext(
-        descriptor=_FakeDescriptor(op_id="k8s.secret.create"),  # type: ignore[arg-type]
+        descriptor=_FakeDescriptor(op_id="vmware.composite.vm.guest.env.read"),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),
-        params={"name": "creds", "namespace": "ns", "string_data": {"k": "v"}},
+        params={"vm": "vm-42", "guest_secret_ref": "targets/app-vm"},
     )
     assert await build_proposed_effect(ctx) is None
 
 
 @pytest.mark.asyncio
-async def test_credential_class_op_bespoke_builder_runs() -> None:
+async def test_credential_class_op_bespoke_builder_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     """A *bespoke* builder runs even for a credential-class op (#1857).
 
     Unlike the generic echo, a registered builder is trusted to own its
@@ -738,13 +741,15 @@ async def test_credential_class_op_bespoke_builder_runs() -> None:
         # surfaced", not "result blindly trusted".
         return {"username": "svc-meho", "password": "***REDACTED***"}
 
-    register_preview_builder("k8s.secret.create", _scrubbed)
+    # setitem, not register_preview_builder: the stub must not stay in the
+    # process-wide registry after this test.
+    monkeypatch.setitem(_PREVIEW_BUILDERS, "vmware.composite.vm.guest.env.read", _scrubbed)
     ctx = PreviewContext(
-        descriptor=_FakeDescriptor(op_id="k8s.secret.create"),  # type: ignore[arg-type]
+        descriptor=_FakeDescriptor(op_id="vmware.composite.vm.guest.env.read"),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),
-        params={"name": "creds", "namespace": "ns", "string_data": {"k": "v"}},
+        params={"vm": "vm-42", "guest_secret_ref": "targets/app-vm"},
     )
     effect = await build_proposed_effect(ctx)
     assert builder_ran is True, "a bespoke builder must run for a credential-class op"
@@ -759,17 +764,20 @@ async def test_credential_class_op_bespoke_builder_runs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_permission_preflight_runs_for_credential_class_op() -> None:
+async def test_permission_preflight_runs_for_credential_class_op(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A permission preflight runs even when the op classifies credential-class.
 
-    This is the whole point of the separate hook: ``vault.auth.userpass.write``
-    IS ``credential_write`` with no bespoke preview builder (so its
+    This is the whole point of the separate hook:
+    ``vmware.composite.vm.guest.env.read`` IS ``credential_write`` with no
+    bespoke preview builder (so its
     *preview* is suppressed), yet its capability-only *permission* check
     must still run — it carries no secret material, and a credential write
     is exactly the op whose write Vault may deny post-approval. (The
-    exemplar is a builderless credential op because ``vault.kv.put`` now
-    ships a bespoke preview builder, #2332, so its preview is no longer
-    suppressed.)
+    exemplar is a builderless credential op because ``vault.kv.put`` (#2332)
+    and the userpass writes (#4850) now ship bespoke preview builders, so
+    their previews are no longer suppressed.)
     """
     ran = False
 
@@ -778,13 +786,13 @@ async def test_permission_preflight_runs_for_credential_class_op() -> None:
         ran = True
         return {"check": "vault.capabilities-self", "will_be_denied": True}
 
-    register_permission_preflight("vault.auth.userpass.write", _preflight)
+    monkeypatch.setitem(_PERMISSION_PREFLIGHTS, "vmware.composite.vm.guest.env.read", _preflight)
     ctx = PreviewContext(
-        descriptor=_FakeDescriptor(op_id="vault.auth.userpass.write"),  # type: ignore[arg-type]
+        descriptor=_FakeDescriptor(op_id="vmware.composite.vm.guest.env.read"),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),
-        params={"username": "svc", "password": "s3kret"},
+        params={"vm": "vm-42", "password": "s3kret"},
     )
 
     # The preview is suppressed (credential class), proving the preflight

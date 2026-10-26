@@ -264,7 +264,7 @@ Shipped as increment 2 of [#3065](https://github.com/evoila/meho/issues/3065).
 ### Operation contracts
 
 The 14 typed ops and the bring-up composite meet the VMware operation-contract
-check (`backend/tests/test_vmware_operation_contracts.py`), with one gap left
+check (`backend/tests/test_operation_contracts.py`), with one gap left
 (see below):
 
 - **Response schemas** live in `_response_schemas.py` (split out for the

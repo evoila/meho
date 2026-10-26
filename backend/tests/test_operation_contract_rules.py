@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests of the VMware operation contract checker, with small fake operations.
+"""Tests of the operation contract checker, with small fake operations.
 
-The live check is in :mod:`tests.test_vmware_operation_contracts`. These tests
-prove each rule fails with a message that names the problem, without a
-database.
+The live check is in :mod:`tests.test_operation_contracts`. These tests prove
+each rule fails with a message that names the problem, without a database.
 """
 
 from __future__ import annotations
@@ -14,9 +13,10 @@ from typing import Any, Final
 
 import pytest
 
-from tests.test_vmware_operation_contracts import (
+from tests.test_operation_contracts import (
     DESCRIPTION_MAX,
     GAPS_FILE,
+    READS_WITH_A_WRITE_WORD,
     SUMMARY_MAX,
     OperationContract,
     check_operation,
@@ -145,7 +145,9 @@ def test_missing_guidance_key_fails() -> None:
 
 def test_a_read_needs_no_preconditions() -> None:
     guidance = {"when_to_call": "x", "output_shape": "y", "next_step": "z"}
-    op = _good_op(safety_level="safe", requires_approval=False, llm_instructions=guidance)
+    op = _good_op(
+        op_id="fake.vm.get", safety_level="safe", requires_approval=False, llm_instructions=guidance
+    )
     assert check_operation(op) == {}
 
 
@@ -190,6 +192,32 @@ def test_destructive_without_preview_builder_fails() -> None:
     assert check_operation(_good_op(safety_level="destructive", has_preview_builder=True)) == {}
 
 
+def test_safe_operation_with_a_write_word_fails() -> None:
+    problems = _only_rule(
+        _good_op(op_id="fake.vm.power.get", safety_level="safe", requires_approval=False),
+        "write_name",
+    )
+    assert "'power'" in problems[0]
+    assert "READS_WITH_A_WRITE_WORD" in problems[0]
+
+
+def _safe_op(op_id: str) -> OperationContract:
+    return _good_op(op_id=op_id, safety_level="safe", requires_approval=False)
+
+
+@pytest.mark.parametrize("op_id", ["fake.vm.settings.get", "fake.node.runtime.show"])
+def test_a_write_word_inside_a_longer_word_does_not_count(op_id: str) -> None:
+    assert check_operation(_safe_op(op_id)) == {}
+
+
+def test_an_allow_listed_read_passes_the_name_rule() -> None:
+    assert check_operation(_safe_op(next(iter(READS_WITH_A_WRITE_WORD)))) == {}
+
+
+def test_a_change_may_carry_a_write_word() -> None:
+    assert check_operation(_good_op(op_id="fake.vm.power.start")) == {}
+
+
 def test_a_new_gap_and_a_gone_gap_each_name_the_operation_and_rule() -> None:
     problems = {("vmware-rest", "fake.vm.update", "examples"): ["no example"]}
     known = {("nsx-rest", "fake.segment.list", "summary")}
@@ -219,6 +247,7 @@ _NESTED_FIELD_NO_DESCRIPTION: Final[dict[str, Any]] = {
         ({"parameter_schema": {**_GOOD_PARAMS, "examples": [{"vm": 1}]}}, "examples"),
         ({"requires_approval": False}, "requires_approval"),
         ({"safety_level": "destructive"}, "preview_builder"),
+        ({"safety_level": "safe", "requires_approval": False}, "write_name"),
     ],
 )
 def test_each_bad_operation_fails_with_a_message_naming_operation_and_rule(

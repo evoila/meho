@@ -28,8 +28,8 @@ This module ships:
 * :meth:`LinuxSshConnector.about` -- operator-facing wrapper around
   :meth:`fingerprint` (the ``linux.about`` typed op).
 * The per-op bound-method handler shims (``file_read`` / ``log_tail`` /
-  ``service_status`` / ``sysctl_read`` / ``firewall_show`` / ``mount_list``)
-  delegating to the per-domain op modules.
+  ``service_status`` / ``sysctl_read`` / ``dns_lookup`` / ``firewall_show`` /
+  ``mount_list``) delegating to the per-domain op modules.
 * :meth:`LinuxSshConnector.execute` -- the G0.6 dispatcher shim (same
   shape as :meth:`Rke2SshConnector.execute` / :meth:`Bind9Connector.execute`).
 
@@ -425,6 +425,17 @@ class LinuxSshConnector(SshConnector):
         from meho_backplane.connectors.linux.ops_host import linux_sysctl_read
 
         return await linux_sysctl_read(self, target, params, operator)
+
+    async def dns_lookup(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``linux.dns.lookup`` (group ``network``)."""
+        from meho_backplane.connectors.linux.ops_host import linux_dns_lookup
+
+        return await linux_dns_lookup(self, target, params, operator)
 
     async def firewall_show(
         self,

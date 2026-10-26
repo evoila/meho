@@ -16,9 +16,9 @@ Coverage matrix (per Task #3360 acceptance criteria):
   ``os_release_unreadable`` / ``systemd_absent``).
 * :meth:`LinuxSshConnector.about` -- identity snapshot + the #986
   ConnectorUnreachableError on an unreachable target.
-* The six read handlers -- command construction, output parsing, the
-  ``{rows, total}`` envelope for set-shaped verbs, and the
-  systemctl-absent connector error.
+* The seven read handlers -- command construction, output parsing, the
+  ``{rows, total}`` envelope for set-shaped verbs, the systemctl-absent
+  connector error, and the ``dns.lookup`` not-found verdict.
 * ``shlex.quote`` injection-safety on every parameterized command, and
   path-confinement (:func:`confine_read_path` / :func:`ensure_path_under_root`).
 * ``LINUX_OPS`` registration shape -- op count, all safe / read-only /
@@ -64,9 +64,14 @@ from meho_backplane.connectors.linux.ops_file import (
 )
 from meho_backplane.connectors.linux.ops_firewall import parse_firewall_output
 from meho_backplane.connectors.linux.ops_host import (
+    DNS_LOOKUP_TIMEOUT_S,
+    LinuxDnsLookupProbeError,
     LinuxServiceStatusProbeError,
+    build_dns_lookup_command,
     build_service_status_command,
     build_sysctl_read_command,
+    parse_dns_lookup_output,
+    validate_host_name,
     validate_sysctl_key,
     validate_unit_name,
 )
@@ -586,6 +591,192 @@ def test_validate_sysctl_key_rejects_shell_metacharacters() -> None:
 
 
 # ---------------------------------------------------------------------------
+# dns.lookup
+# ---------------------------------------------------------------------------
+
+_GETENT_TWO_ADDRESSES = (
+    "140.82.121.4    STREAM registry.example.com\n"
+    "140.82.121.4    DGRAM  \n"
+    "140.82.121.4    RAW    \n"
+    "2001:db8::4     STREAM registry.example.com\n"
+    "2001:db8::4     DGRAM  \n"
+    "2001:db8::4     RAW    \n"
+)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["registry.example.com", "localhost", "node-01.internal.", "a", "10.0.0.1"],
+)
+def test_build_dns_lookup_command_is_exactly_getent_ahosts_quoted(name: str) -> None:
+    """AC: a valid name builds exactly ``getent ahosts '<name>'``."""
+    assert build_dns_lookup_command(name) == f"getent ahosts '{name}'"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "a b",
+        "example.com; reboot",
+        "$(id)",
+        "`id`",
+        "example.com|cat",
+        "example.com>x",
+        "-h",
+        "-example.com",
+        ".example.com",
+        "exa'mple.com",
+        "",
+        "a" * 254,
+        None,
+        42,
+    ],
+)
+def test_validate_host_name_refuses_bad_names_before_any_command(bad: Any) -> None:
+    """AC: spaces, ; $ ` | > and a leading '-' are refused before a command is built."""
+    with pytest.raises(ValueError):
+        validate_host_name(bad)
+    with pytest.raises(ValueError):
+        build_dns_lookup_command(bad)
+
+
+def test_validate_host_name_accepts_the_253_character_limit() -> None:
+    label = "a" * 63
+    name = ".".join([label, label, label, "a" * 61])
+    assert len(name) == 253
+    assert validate_host_name(name) == name
+
+
+def test_parse_dns_lookup_output_collects_unique_addresses_in_order() -> None:
+    """AC: the parser turns getent output into ``addresses``."""
+    result = parse_dns_lookup_output("registry.example.com", _GETENT_TWO_ADDRESSES, 0)
+    assert result == {
+        "name": "registry.example.com",
+        "found": True,
+        "addresses": ["140.82.121.4", "2001:db8::4"],
+        "exit_code": 0,
+    }
+
+
+def test_parse_dns_lookup_output_not_found_is_a_verdict_not_an_error() -> None:
+    """AC: exit code 2 (not found) gives ``found: false``."""
+    assert parse_dns_lookup_output("nope.example.com", "", 2) == {
+        "name": "nope.example.com",
+        "found": False,
+        "addresses": [],
+        "exit_code": 2,
+    }
+
+
+def test_parse_dns_lookup_output_empty_success_is_not_found() -> None:
+    result = parse_dns_lookup_output("x.example.com", "", 0)
+    assert result["found"] is False
+    assert result["addresses"] == []
+
+
+@pytest.mark.parametrize("exit_status", [1, 3, 127])
+def test_parse_dns_lookup_output_other_failures_raise(exit_status: int) -> None:
+    with pytest.raises(LinuxDnsLookupProbeError):
+        parse_dns_lookup_output("x.example.com", "", exit_status)
+
+
+@pytest.mark.asyncio
+async def test_dns_lookup_runs_fixed_command_with_timeout() -> None:
+    connector = LinuxSshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_GETENT_TWO_ADDRESSES, exit_status=0)
+        result = await connector.dns_lookup(_TARGET, {"name": "registry.example.com"})
+    assert result["found"] is True
+    assert result["addresses"] == ["140.82.121.4", "2001:db8::4"]
+    assert _cmd_of(mock_cmd) == "getent ahosts 'registry.example.com'"
+    assert mock_cmd.await_args_list[0].kwargs["timeout"] == DNS_LOOKUP_TIMEOUT_S
+
+
+@pytest.mark.asyncio
+async def test_dns_lookup_not_found_returns_found_false() -> None:
+    connector = LinuxSshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="", exit_status=2)
+        result = await connector.dns_lookup(_TARGET, {"name": "nope.example.com"})
+    assert result == {
+        "name": "nope.example.com",
+        "found": False,
+        "addresses": [],
+        "exit_code": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_dns_lookup_rejects_bad_name_before_ssh() -> None:
+    connector = LinuxSshConnector()
+    with (
+        patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd,
+        pytest.raises(ValueError),
+    ):
+        await connector.dns_lookup(_TARGET, {"name": "example.com; reboot"})
+    mock_cmd.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_dns_lookup_sensor_can_be_created_over_the_registered_op() -> None:
+    """AC: a sensor (a scheduled MEHO check) can be created with ``linux.dns.lookup``.
+
+    Registers the real op rows into the test database, then runs the
+    sensor service's safe-only create guard against ``linux-ssh-1.x`` /
+    ``linux.dns.lookup`` with a ``found`` must-be-true assertion.
+    """
+    import uuid
+
+    from sqlalchemy import select
+
+    from meho_backplane.checks.schemas import SensorCreate
+    from meho_backplane.checks.service import SensorAdminService
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import Tenant
+
+    tenant_id = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        existing = await session.execute(select(Tenant).where(Tenant.id == tenant_id))
+        if existing.scalar_one_or_none() is None:
+            session.add(Tenant(id=tenant_id, slug="tenant-a", name="Tenant A"))
+            await session.commit()
+    await LinuxSshConnector.register_operations()
+
+    entry = await SensorAdminService().create(
+        tenant_id=tenant_id,
+        created_by_sub="op-admin",
+        payload=SensorCreate(
+            name="node-dns",
+            connector_id="linux-ssh-1.x",
+            op_id="linux.dns.lookup",
+            params={"name": "registry.example.com"},
+            assertion={
+                "select": {"path": "$.found"},
+                "compare": {"type": "bool", "expect": True},
+            },
+            cadence_kind="interval",
+            interval_seconds=300,
+        ),
+    )
+    assert entry.op_id == "linux.dns.lookup"
+    assert entry.status.value == "active"
+
+
+def test_dns_lookup_op_is_safe_read_without_approval() -> None:
+    """AC: the operation is ``safe`` and needs no approval."""
+    op = next(op for op in LINUX_OPS if op.op_id == "linux.dns.lookup")
+    assert op.safety_level == "safe"
+    assert op.requires_approval is False
+    assert "read-only" in op.tags
+    assert op.group_key == "network"
+    assert op.parameter_schema["required"] == ["name"]
+    assert op.parameter_schema["properties"]["name"]["maxLength"] == 253
+    for key in ("when_to_call", "output_shape", "next_step"):
+        assert op.llm_instructions[key].strip(), key
+
+
+# ---------------------------------------------------------------------------
 # firewall.show
 # ---------------------------------------------------------------------------
 
@@ -759,7 +950,7 @@ def test_normalise_json_rows_envelope() -> None:
 # ---------------------------------------------------------------------------
 
 
-#: The T1 read floor (about + six read verbs). Every one is ``safe`` +
+#: The read floor (about + seven read verbs). Every one is ``safe`` +
 #: ``requires_approval=False`` + carries the ``read-only`` tag.
 _READ_OP_IDS: frozenset[str] = frozenset(
     {
@@ -768,6 +959,7 @@ _READ_OP_IDS: frozenset[str] = frozenset(
         "linux.log.tail",
         "linux.service.status",
         "linux.sysctl.read",
+        "linux.dns.lookup",
         "linux.firewall.show",
         "linux.mount.list",
     }
@@ -788,7 +980,7 @@ _EXPECTED_OP_IDS: frozenset[str] = _READ_OP_IDS | _WRITE_OP_IDS
 
 
 def test_linux_ops_count_matches_expected() -> None:
-    # about + six read verbs + five write verbs = twelve.
+    # about + seven read verbs + five write verbs = thirteen.
     assert len(LINUX_OPS) == len(_EXPECTED_OP_IDS)
 
 
@@ -858,7 +1050,9 @@ def test_linux_path_ops_require_path() -> None:
 def test_linux_ops_have_ssh_transport_when_to_use() -> None:
     for op in LINUX_OPS:
         assert op.llm_instructions, f"{op.op_id!r} missing llm_instructions"
-        when_to_use = op.llm_instructions.get("when_to_use", "")
+        when_to_use = op.llm_instructions.get("when_to_call") or op.llm_instructions.get(
+            "when_to_use", ""
+        )
         assert when_to_use.strip(), f"{op.op_id!r} empty when_to_use"
         assert "SSH" in when_to_use, f"{op.op_id!r} when_to_use lacks SSH transport note"
 
@@ -900,7 +1094,16 @@ def test_no_op_declares_a_secret_value_parameter() -> None:
 
 def test_every_declared_group_has_a_curated_when_to_use() -> None:
     declared = {op.group_key for op in LINUX_OPS if op.group_key is not None}
-    assert declared == {"system", "file", "log", "service", "firewall", "storage", "exec"}
+    assert declared == {
+        "system",
+        "file",
+        "log",
+        "service",
+        "firewall",
+        "storage",
+        "exec",
+        "network",
+    }
     for key in declared:
         blurb = LINUX_WHEN_TO_USE_BY_GROUP.get(key)
         assert blurb and blurb.strip(), f"group {key!r} has no curated when_to_use"

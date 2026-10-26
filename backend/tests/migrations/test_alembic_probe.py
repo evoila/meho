@@ -44,7 +44,11 @@ from meho_backplane.db.engine import (
     dispose_engine,
     reset_engine_for_testing,
 )
-from meho_backplane.db.migrations import alembic_config, db_migration_probe
+from meho_backplane.db.migrations import (
+    alembic_config,
+    db_migration_probe,
+    db_migration_status,
+)
 from meho_backplane.health import (
     ProbeResult,
     clear_probes,
@@ -229,6 +233,90 @@ async def test_probe_unhealthy_when_db_unreachable(
     # name — anything else is a leak.
     assert "127.0.0.1" not in result.detail
     assert "nobody" not in result.detail
+
+
+# ---------------------------------------------------------------------------
+# db_migration_status — the revisions as values (#4830)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_status_carries_matching_revisions(sqlite_engine: AsyncEngine) -> None:
+    """Database at head: ``revision == head`` and the probe is the ``/ready`` one."""
+    await _create_alembic_version_table(sqlite_engine, "0036")
+
+    with patch("meho_backplane.db.migrations.ScriptDirectory.from_config") as fake_from_config:
+        fake_from_config.return_value.get_current_head.return_value = "0036"
+        status = await db_migration_status()
+
+    assert status.revision == "0036"
+    assert status.head == "0036"
+    assert status.probe.ok is True
+    assert status.probe.detail == "revision=0036"
+
+
+@pytest.mark.asyncio
+async def test_status_carries_revisions_when_db_behind(sqlite_engine: AsyncEngine) -> None:
+    """Database behind: both revisions are values, no parsing of the detail text."""
+    await _create_alembic_version_table(sqlite_engine, "0035")
+
+    with patch("meho_backplane.db.migrations.ScriptDirectory.from_config") as fake_from_config:
+        fake_from_config.return_value.get_current_head.return_value = "0036"
+        status = await db_migration_status()
+
+    assert status.revision == "0035"
+    assert status.head == "0036"
+    assert status.probe.ok is False
+    assert status.probe.detail == "current=0035 head=0036"
+
+
+@pytest.mark.asyncio
+async def test_status_carries_revisions_when_db_ahead(sqlite_engine: AsyncEngine) -> None:
+    """Database ahead (after a rollback): healthy, with the newer revision visible."""
+    await _create_alembic_version_table(sqlite_engine, "0037")
+
+    with patch("meho_backplane.db.migrations.ScriptDirectory.from_config") as fake_from_config:
+        fake_script = fake_from_config.return_value
+        fake_script.get_current_head.return_value = "0036"
+        fake_script.get_revision.side_effect = CommandError("Can't locate revision '0037'")
+        status = await db_migration_status()
+
+    assert status.revision == "0037"
+    assert status.head == "0036"
+    assert status.probe.ok is True
+    assert status.probe.detail == "current=0037 head=0036 db_ahead=true"
+
+
+@pytest.mark.asyncio
+async def test_status_keeps_head_when_db_read_fails(sqlite_engine: AsyncEngine) -> None:
+    """Scripts loaded but the database read failed: ``head`` stays, ``revision`` is None."""
+    with (
+        patch("meho_backplane.db.migrations.ScriptDirectory.from_config") as fake_from_config,
+        patch(
+            "meho_backplane.db.migrations._read_current_revision",
+            side_effect=RuntimeError("boom"),
+        ),
+    ):
+        fake_from_config.return_value.get_current_head.return_value = "0036"
+        status = await db_migration_status()
+
+    assert status.revision is None
+    assert status.head == "0036"
+    assert status.probe.ok is False
+    assert status.probe.detail == "check_failed: RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_probe_is_the_status_verdict(sqlite_engine: AsyncEngine) -> None:
+    """``db_migration_probe`` returns exactly the probe half of the status."""
+    await _create_alembic_version_table(sqlite_engine, "0036")
+
+    with patch("meho_backplane.db.migrations.ScriptDirectory.from_config") as fake_from_config:
+        fake_from_config.return_value.get_current_head.return_value = "0036"
+        probe = await db_migration_probe()
+        status = await db_migration_status()
+
+    assert probe == status.probe
 
 
 @pytest.mark.asyncio

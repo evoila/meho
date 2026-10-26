@@ -11,9 +11,11 @@ payload through as it is.
 Field names come from the pinned VCF Operations 9.0 Suite API file
 (``vcf-operations-openapi.ingestable.json``, ``components.schemas``:
 ``version``, ``alerts`` / ``alert``, ``resources`` / ``resource``,
-``stats-of-resources`` / ``stats``, ``product-licensing``, ``LicenseInfo``).
-The 8.x connector shares these operations, except the licence read, which is
-9.x only; no 8.x Suite API file is on the spec shelf.
+``stats-of-resources`` / ``stats``, ``resource-kind-attributes`` /
+``resource-kind-attribute``, ``product-licensing``, ``LicenseInfo``). The 8.x
+connector shares these operations, except the resource kind properties read
+and the licence read, which are 9.x only; no 8.x Suite API file is on the
+spec shelf.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ __all__ = [
     "VROPS_LICENSING_PAYLOAD_RESPONSE",
     "VROPS_LICENSING_VCENTER_QUERY_RESPONSE",
     "VROPS_LIVENESS_RESPONSE",
+    "VROPS_RESOURCE_KIND_PROPERTIES_RESPONSE",
     "VROPS_RESOURCE_QUERY_RESPONSE",
     "VROPS_RESOURCE_STATS_RESPONSE",
 ]
@@ -215,6 +218,31 @@ VROPS_RESOURCE_STATS_RESPONSE: dict[str, Any] = _object(
     },
 )
 
+VROPS_RESOURCE_KIND_PROPERTIES_RESPONSE: dict[str, Any] = _object(
+    "The properties one resource kind has (vendor resource-kind-attributes object).",
+    {
+        "resourceTypeAttributes": _list_of(
+            "One row per property.",
+            {
+                "key": _field("string", "The property key, e.g. config|guestFullName."),
+                "name": _field("string", "The display name of the property."),
+                "description": _field("string", "What the property holds."),
+                "dataType2": _field(
+                    "string",
+                    "The data type: STRING, INTEGER, HOST, IP, ENUM, PASSWORD, BOOLEAN, "
+                    "FLOAT or UNKNOWN.",
+                ),
+                "dataType": _field("string", "The old data type field (deprecated)."),
+                "unit": _field("string", "The unit of the value, if any."),
+                "property": _field("boolean", "True when the row is a property."),
+                "defaultMonitored": _field(
+                    "boolean", "True when the property is collected by default."
+                ),
+            },
+        ),
+    },
+)
+
 VROPS_LICENSE_INFO_RESPONSE: dict[str, Any] = _object(
     "The edition and the licence of this instance (vendor product-licensing and "
     "LicenseInfo objects in one object).",
@@ -227,8 +255,9 @@ VROPS_LICENSE_INFO_RESPONSE: dict[str, Any] = _object(
         "licenseName": _field("string", "The licence name."),
         "expirationDate": _field("integer", "When the licence expires, in epoch milliseconds."),
         "licenseKey": _field(
-            "string",
-            "The licence key, masked by MEHO: only the last 5 characters show. For VCF "
+            ["string", "null"],
+            "The licence key, masked by MEHO: only the last 5 characters show. Null "
+            "when the vendor sends an empty key or a key that is not text. For VCF "
             "licences the vendor puts the licence name here.",
         ),
     },

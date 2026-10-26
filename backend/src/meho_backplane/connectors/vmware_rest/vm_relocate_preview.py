@@ -47,6 +47,7 @@ from meho_backplane.connectors.vmware_rest.vim_body import (
     fault_type_name,
     retrieve_properties_body,
 )
+from meho_backplane.connectors.vmware_rest.vim_retrieve import retrieve_all_pages
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
@@ -70,7 +71,6 @@ __all__ = [
 
 _log = structlog.get_logger(__name__)
 
-_RETRIEVE_PROPERTIES_PATH: Final = "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
 _VM_MO_TYPE: Final = "VirtualMachine"
 _DATASTORE_MO_TYPE: Final = "Datastore"
 _PROP_NAME: Final = "name"
@@ -211,16 +211,11 @@ async def _retrieve(
 ) -> tuple[dict[str, dict[str, Any]], dict[str, tuple[str, ...]]]:
     """One ``RetrievePropertiesEx`` read: ``({moid: {property: value}}, unreadable)``.
 
-    *unreadable* names, per object, the properties vCenter could not read
-    (:func:`_unreadable_by_moid`).
+    Every page of the answer is read (#4862), so the datastore read gets each
+    datastore even when vCenter splits the answer. *unreadable* names, per
+    object, the properties vCenter could not read (:func:`_unreadable_by_moid`).
     """
-    result = await connector._post_vmomi_json(
-        target,
-        _RETRIEVE_PROPERTIES_PATH,
-        operator=operator,
-        json=body,
-        promote_managed_object_not_found=True,
-    )
+    result = await retrieve_all_pages(connector, target, operator, body, promote_missing=True)
     return _extract_props_by_moid(result), _unreadable_by_moid(result)
 
 

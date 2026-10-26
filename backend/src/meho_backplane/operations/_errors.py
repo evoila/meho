@@ -36,7 +36,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 from uuid import UUID
 
 import httpx
@@ -51,6 +51,8 @@ if TYPE_CHECKING:
     from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
 
 __all__ = [
+    "UPSTREAM_SAID",
+    "VAULT_SAID",
     "result_already_resumed",
     "result_ambiguous_connector",
     "result_ambiguous_target",
@@ -111,6 +113,14 @@ _UPSTREAM_MESSAGE_CAP: int = 2048
 #: on the never-raises error path. Returning the raw text instead would
 #: reintroduce exactly the passthrough this sanitizer exists to close.
 _TEXT_WITHHELD: str = "<diagnostic text withheld: redaction unavailable>"
+
+
+#: What joins the vendor's text to the end of an ``error`` summary. The
+#: dispatcher finds the vendor's part by these markers when it hides the
+#: vendor's text of an operation that sends a secret (#4854,
+#: :mod:`meho_backplane.operations._vendor_text`).
+UPSTREAM_SAID: Final = " Upstream said: "
+VAULT_SAID: Final = " Vault said: "
 
 
 def _sanitize_free_text(text: str, *, cap: int = _EXC_MESSAGE_CAP) -> str:
@@ -1164,6 +1174,11 @@ def result_connector_error(
             else None
         )
     _add_attached_upstream_fault(extras, exc)
+    remediation = getattr(exc, "remediation", None)
+    if isinstance(remediation, str) and remediation:
+        # MEHO's own next step, set by the raising connector. It stays when the
+        # dispatcher withholds the vendor text of an op that sends a secret.
+        extras["remediation"] = _sanitize_free_text(remediation, cap=_UPSTREAM_MESSAGE_CAP)
     return OperationResult(
         status="error",
         op_id=op_id,
@@ -1772,7 +1787,7 @@ def result_connector_http_403(
         "convention."
     )
     if upstream_message is not None:
-        summary = f"{summary} Upstream said: {upstream_message}"
+        summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"
     extras: dict[str, Any] = {
         "error_code": "connector_http_403",
         "http_status": 403,
@@ -1839,7 +1854,7 @@ def result_connector_http_422(
         "convention."
     )
     if upstream_message is not None:
-        summary = f"{summary} Upstream said: {upstream_message}"
+        summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"
     extras: dict[str, Any] = {
         "error_code": "connector_http_422",
         "http_status": 422,
@@ -2179,7 +2194,7 @@ def result_connector_auth_failed(
         relogin=relogin,
     )
     if upstream_message is not None:
-        summary = f"{summary} Upstream said: {upstream_message}"
+        summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"
     extras: dict[str, Any] = {
         "error_code": "connector_auth_failed",
         "cause": cause,
@@ -2298,7 +2313,7 @@ def result_connector_vault_forbidden(
     if msg:
         # hvac renders Forbidden as "permission denied, on GET <url>" —
         # the URL is the operator-supplied path, never secret material.
-        summary = f"{summary} Vault said: {msg}"
+        summary = f"{summary}{VAULT_SAID}{msg}"
     return OperationResult(
         status="error",
         op_id=op_id,
@@ -2351,7 +2366,8 @@ def result_connector_vault_write_forbidden(
     can succeed end to end — park → approve → re-dispatch — and the write
     still fails at Vault's ACL because the identity the connector dispatches
     with lacks the required capability on the path the op authorizes against
-    (``create``/``update`` on ``<mount>/data/<path>`` for ``put``/``patch``,
+    (``create``/``update`` on ``<mount>/data/<path>`` for ``put``,
+    ``read``/``update`` there for ``patch`` — #4831,
     ``update`` on ``<mount>/delete/<path>`` for the ``vault.kv.delete``
     version soft-delete — #3274; ``read``/``delete`` on
     ``<mount>/metadata/<path>`` for the permanent
@@ -2399,14 +2415,17 @@ def result_connector_vault_write_forbidden(
     target_clause = _vault_write_target_clause(target_name, vault_role)
     # #3274: the capability + path kind is op-aware. A version soft-delete
     # (``vault.kv.delete``) authorizes with ``update`` on the ``/delete/``
-    # path; ``put`` / ``patch`` with ``create``/``update`` on the ``/data/``
-    # path. Keep the message consistent with the ``write_path`` rendered by
+    # path; ``put`` with ``create``/``update`` on the ``/data/`` path; ``patch``
+    # reads before it writes, so ``read``/``update`` there (#4831). Keep the
+    # message consistent with the ``write_path`` rendered by
     # ``vault_kv_write_target_path`` so the two never disagree. The permanent
     # delete (#3424) reads and deletes on the ``/metadata/`` path.
     if op_id == "vault.kv.delete":
         capability_clause = "lacks 'update' on that delete path"
     elif op_id == "vault.kv.metadata.delete":
         capability_clause = "lacks 'read' or 'delete' on that metadata path"
+    elif op_id == "vault.kv.patch":
+        capability_clause = "lacks 'read'/'update' on that data path"
     else:
         capability_clause = "lacks 'create'/'update' on that data path"
     summary = (
@@ -2428,7 +2447,7 @@ def result_connector_vault_write_forbidden(
     if msg:
         # hvac renders Forbidden as "permission denied, on POST <url>" — the
         # URL is the operator-supplied data path, never secret material.
-        summary = f"{summary} Vault said: {msg}"
+        summary = f"{summary}{VAULT_SAID}{msg}"
     return OperationResult(
         status="error",
         op_id=op_id,

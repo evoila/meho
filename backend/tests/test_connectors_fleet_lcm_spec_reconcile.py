@@ -50,6 +50,14 @@ prefix), and the ``_paths`` constants declare the same raw ``/v1/*`` — the
 comparison is byte-for-byte against what an operator ingest of the same spec
 would dispatch.
 
+The VCF Operations login paths (#4476) are checked against the VCF Operations
+files, not the fleet file: ``token/acquire`` against the pinned 9.0 file, and
+both ``token/acquire`` and ``token/exchange`` against the 9.1 file (the
+exchange path is new in 9.1). Like the 9.0 file, the vendor's 9.1 file fails
+``parse_openapi``'s metaschema check (empty ``required`` arrays), so the lane
+reads the ``.ingestable.json`` copy the shelf keeps next to it. Each check
+skips until its file is on the shelf.
+
 A red lane here is the guard surfacing a real finding, not harness noise —
 triage per docs/decisions/spec-reconcile-guards-standard.md.
 """
@@ -58,6 +66,7 @@ from __future__ import annotations
 
 from meho_backplane.connectors.fleet_lcm import _paths
 from meho_backplane.connectors.fleet_lcm import connector as _connector
+from meho_backplane.connectors.fleet_lcm import session as _session
 from meho_backplane.connectors.fleet_lcm.typed_ops import FLEET_LCM_TYPED_OPS
 from tests._spec_shelf import (
     assert_op_ids_served,
@@ -169,3 +178,36 @@ def test_declared_op_ids_are_served_by_the_pinned_spec() -> None:
     spec_path = require_shelf_spec(_SPEC_DIR, _SPEC_FILE)
     served = openapi_served_op_ids(spec_path)
     assert_op_ids_served(_declared_op_ids(), served, spec_label=_SPEC_LABEL)
+
+
+#: The VCF Operations login op_ids, per the vendor file (server base
+#: ``/suite-api`` folded onto the path keys, #1796).
+_ACQUIRE_OP_ID = f"POST:{_session._TOKEN_ACQUIRE_PATH}"
+_EXCHANGE_OP_ID = f"POST:{_session._TOKEN_EXCHANGE_PATH}"
+_OPS_SPEC_FILE = "vcf-operations-openapi.ingestable.json"
+
+
+def test_login_paths_are_pinned() -> None:
+    """Guard: the login op_ids the connector sends (runs without a shelf)."""
+    assert _ACQUIRE_OP_ID == "POST:/suite-api/api/auth/token/acquire"
+    assert _EXCHANGE_OP_ID == "POST:/suite-api/api/auth/token/exchange"
+
+
+def test_acquire_path_is_served_by_the_pinned_vcf_operations_9_0_spec() -> None:
+    """``token/acquire`` is in the pinned VCF Operations 9.0 file."""
+    spec_path = require_shelf_spec("vcf-operations-9.0", _OPS_SPEC_FILE)
+    served = openapi_served_op_ids(spec_path)
+    assert_op_ids_served(
+        {_ACQUIRE_OP_ID}, served, spec_label=f"vcf-operations-9.0/{_OPS_SPEC_FILE}"
+    )
+
+
+def test_login_paths_are_served_by_the_vcf_operations_9_1_spec() -> None:
+    """``token/acquire`` and ``token/exchange`` are in the VCF Operations 9.1 file."""
+    spec_path = require_shelf_spec("vcf-operations-9.1", _OPS_SPEC_FILE)
+    served = openapi_served_op_ids(spec_path)
+    assert_op_ids_served(
+        {_ACQUIRE_OP_ID, _EXCHANGE_OP_ID},
+        served,
+        spec_label=f"vcf-operations-9.1/{_OPS_SPEC_FILE}",
+    )

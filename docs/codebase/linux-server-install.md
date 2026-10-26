@@ -50,7 +50,7 @@ Later Tasks add their steps to `main()` in `install.sh`:
 | `lib/firewall.sh` | The host firewall: the checks of step 1 (`nft`, the admin network), the files and the start in step 2, `firewall_state` and `firewall_port_list`. |
 | `lib/prepare.sh` | Step 2: folders, `config.yaml`, join token, image archive, storage manifest, the Traefik redirect. |
 | `lib/rke2.sh` | Step 3: RKE2's installer, the start, and the wait with one time limit. |
-| `storage/local-path-storage.yaml` | Rancher's local-path provisioner v0.0.37 manifest with three changes. |
+| `storage/local-path-storage.yaml` | Rancher's local-path provisioner v0.0.37 manifest with five changes. |
 | `tests/` | Python `unittest` suites that run `install.sh` against a fake machine. |
 | `.shellcheckrc` | Lets shellcheck follow the `source` lines of `install.sh`. |
 
@@ -324,20 +324,34 @@ and `permanent=true` (checked with `helm template` against
 ## The storage manifest
 
 `storage/local-path-storage.yaml` is the upstream v0.0.37 manifest with
-three changes:
+five changes:
 
 - the StorageClass `local-path` has `storageclass.kubernetes.io/is-default-class: "true"`;
 - the volumes live in `/var/lib/meho/volumes`;
 - both images are pinned by digest. Upstream names the helper image
   `busybox` with no tag, so it is pinned to `busybox:1.37`. The digests are
-  the multi-platform index digests on Docker Hub.
+  the multi-platform index digests on Docker Hub;
+- the provisioner requests and is limited to `100m` CPU and `128Mi` memory.
+  These values come from the example in the
+  [upstream v0.0.37 chart values](https://github.com/rancher/local-path-provisioner/blob/v0.0.37/deploy/chart/local-path-provisioner/values.yaml#L123-L133).
+  They reserve room for the controller and bound its resource use. Upstream
+  leaves resources unset by default. These are initial bounds, not measured
+  MEHO usage. Check CPU throttling and memory use before changing them for
+  a larger number of volumes;
+- the provisioner container has `securityContext.allowPrivilegeEscalation: false`.
+  So a process in it cannot gain more rights than it started with, for
+  example through a program with the setuid bit. The provisioner only talks
+  to the Kubernetes API and starts the helper pods, so it needs no extra
+  rights. This matters because the strict pod security rule does not check
+  the storage namespace (#4636): the container's own `securityContext` is
+  the only guard there. Upstream v0.0.37 sets no `securityContext`.
 
 `tests/fixtures/local-path-storage-v0.0.37.yaml` is the upstream file,
 unchanged. A test compares the two files and accepts only these changes.
 The CI job also compares the fixture with the file on GitHub.
 
 To move to a newer provisioner: replace the fixture with the new upstream
-file, apply the three changes again, and update the digests and the
+file, apply the five changes again, and update the digests and the
 `sha256` in `tests/test_storage_manifest.py`.
 
 ## Testing

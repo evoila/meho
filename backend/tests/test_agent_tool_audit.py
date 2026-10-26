@@ -25,6 +25,7 @@ The tests drive real runs through :class:`AgentInvoker` with a scripted
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock
@@ -49,6 +50,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentRun as AgentRunRow
 from meho_backplane.db.models import AgentRunStatus, AuditEventClass, AuditLog
 from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations._validate import compute_audit_params_hash
 from meho_backplane.settings import get_settings
 from tests.test_agent_invocation import (
     _make_operator,
@@ -417,3 +419,22 @@ async def test_cancelled_run_records_ended_at() -> None:
     run = await _run_row(outcome.run_id)
     assert run.status == AgentRunStatus.CANCELLED.value
     assert run.ended_at is not None
+
+
+async def test_params_hash_is_the_audit_hash_and_leaves_secret_values_out() -> None:
+    """The row's hash is the keyed audit hash the MCP rows use.
+
+    A secret-named value does not change it, and raw JSON text (arguments that
+    failed validation) hashes like the parsed object.
+    """
+    args = {
+        "connector_id": "vault-1.x",
+        "op_id": "vault.auth.userpass.update_password",
+        "params": {"username": "user-a", "password": "first-test-value"},
+    }
+    swapped = {**args, "params": {"username": "user-a", "password": "second-test-value"}}
+
+    assert tool_audit._params_hash(args) == compute_audit_params_hash(args)
+    assert tool_audit._params_hash(args) == tool_audit._params_hash(swapped)
+    assert tool_audit._params_hash(json.dumps(args)) == tool_audit._params_hash(args)
+    assert tool_audit._params_hash("not json {") == compute_audit_params_hash("not json {")

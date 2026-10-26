@@ -38,8 +38,10 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | `proxmox-api-8.x` | `proxmox` | >=7.0,<9.0 | — |
 | `rabbitmq-management-3.x` | `rabbitmq` | >=3.8,<5.0 | — |
 | `rke2-ssh-1.x` | `rke2` | — | — |
+| `salt-raas-8.18` | `salt` | >=8.0,<10.0 | — |
 | `sddc-rest-9.0` | `sddc` | >=9.0,<10.0 | generic |
 | `sddc-vcf5-5.0` | `sddc` | >=5.0,<9.0 | — |
+| `srm-rest-9.1` | `srm` | >=8.8,<10.0 | — |
 | `tempo-api-2.x` | `tempo` | >=2.0,<3.0 | — |
 | `vault-1.x` | `vault` | — | typed |
 | `vcd-rest-10.6` | `vcd` | >=10.0,<11.0 | — |
@@ -47,8 +49,10 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | `vcfa-vra8-8.0` | `vcfa` | >=8.0,<9.0 | — |
 | `vmware-rest-8.0` | `vmware` | >=8.0,<8.1 | generic |
 | `vmware-rest-9.0` | `vmware` | >=8.5,<10.0 | generic |
+| `vr-rest-9.1` | `vr` | >=8.8,<10.0 | — |
 | `vrli-rest-9.0` | `vrli` | >=9.0,<10.0 | — |
 | `vrli-vrli8-8.0` | `vrli` | >=8.0,<9.0 | — |
+| `vro-rest-9.0` | `vro` | >=8.0,<10.0 | — |
 | `vrops-rest-9.0` | `vrops` | >=9.0,<10.0 | — |
 | `vrops-vrops8-8.0` | `vrops` | >=8.0,<9.0 | — |
 | `windns-ssh-2016.x` | `windns` | — | — |

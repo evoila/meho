@@ -232,6 +232,17 @@ async def provider_org_create(
 # ---------------------------------------------------------------------------
 
 
+#: Op param -> ``ZoneAssignmentSpecification`` field.
+_ZONE_FIELDS = {
+    "zone_id": "zoneId",
+    "priority": "priority",
+    "max_instances": "maxNumberInstances",
+    "cpu_limit": "cpuLimit",
+    "memory_limit_mb": "memoryLimitMB",
+    "storage_limit_gb": "storageLimitGB",
+}
+
+
 def project_create_body(params: Mapping[str, Any]) -> dict[str, Any]:
     """The ``POST /iaas/api/projects`` body (``ProjectSpecification``)."""
     body: dict[str, Any] = {"name": params["name"]}
@@ -241,6 +252,18 @@ def project_create_body(params: Mapping[str, Any]) -> dict[str, Any]:
         principals = params.get(key)
         if principals:
             body[key] = [{"email": p["email"], "type": p.get("type") or "user"} for p in principals]
+    if params.get("zones"):
+        body["zoneAssignmentConfigurations"] = [
+            {wire: zone[key] for key, wire in _ZONE_FIELDS.items() if key in zone}
+            for zone in params["zones"]
+        ]
+    if params.get("network_constraints"):
+        body["constraints"] = {
+            "network": [
+                {"expression": rule["expression"], "mandatory": rule.get("mandatory", True)}
+                for rule in params["network_constraints"]
+            ]
+        }
     return body
 
 
@@ -265,7 +288,8 @@ async def tenant_project_create(
             "status": "unchanged",
             "project": _project_view(existing),
             "guidance": (
-                f"a project named {existing.get('name')!r} already exists; nothing was written"
+                f"a project named {existing.get('name')!r} already exists; nothing was "
+                "written, and its users, zones and network rules were not changed"
             ),
         }
     created = await connector._post_json(

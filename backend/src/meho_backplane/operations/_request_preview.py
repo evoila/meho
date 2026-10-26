@@ -83,7 +83,11 @@ from meho_backplane.operations._lookup import (
 )
 from meho_backplane.operations._op_miss import op_miss_result
 from meho_backplane.operations._preview import _SENSITIVE_CLASSES
-from meho_backplane.operations._validate import InvalidOpSchemaError, validate_params
+from meho_backplane.operations._validate import (
+    InvalidOpSchemaError,
+    policy_gate,
+    validate_params,
+)
 from meho_backplane.redaction import apply_connector_boundary_redaction
 
 __all__ = ["compute_preview_hash", "preview_dispatch"]
@@ -116,8 +120,8 @@ def compute_preview_hash(envelope: Mapping[str, Any]) -> str:
     the identical hash, and the dispatcher can recompute it to detect a
     param-swap between preview and the governed call.
 
-    Canonicalisation matches
-    :func:`~meho_backplane.operations._validate.compute_params_hash`
+    Canonicalisation matches the params hashes in
+    :mod:`meho_backplane.operations._validate`
     (``json.dumps(..., sort_keys=True, default=str, separators=(",", ":"))``)
     so the hashing discipline is uniform across the two binding hashes.
     """
@@ -224,38 +228,26 @@ def _is_previewable(descriptor: EndpointDescriptor) -> bool:
     return descriptor.requires_approval and classify_op(descriptor.op_id) not in _SENSITIVE_CLASSES
 
 
-async def _resolve_previewable_descriptor(
+async def _resolve_descriptor(
     *,
     operator: Operator,
     connector_id: str,
     op_id: str,
     target: Any,
-    params: dict[str, Any],
 ) -> tuple[EndpointDescriptor, str] | dict[str, Any]:
-    """Run dispatch Steps 2-3 + the previewability gate; return descriptor or error.
+    """Run dispatch Step 2 + the catalog choice; return the descriptor or an error.
 
-    Returns the validated :class:`EndpointDescriptor` and the connector id it
-    belongs to when the op resolves, is previewable (:func:`_is_previewable` —
-    ``source_kind='ingested'``, or a governed-tier non-ingested op), and its
-    params pass the schema. For an ingested op, the catalog choice is the
-    same one ``dispatch`` makes
+    Returns the :class:`EndpointDescriptor` and the connector id it belongs
+    to. The catalog choice is the same one ``dispatch`` makes
     (:func:`~meho_backplane.operations._catalog_guard.choose_catalog_for_target`):
     when a sibling catalog serves the target (#3600), the sibling's
     descriptor and connector id come back, so the ``preview_hash`` matches
     the dispatch. When no catalog serves the target, the preview stays on
     the named catalog; ``dispatch`` reports ``unqualified_target_version``.
-    Otherwise returns the structured envelope the caller propagates verbatim:
 
-    * ``unknown_connector`` / ``unknown_op`` -- the natural key resolved no
-      descriptor; :func:`~._op_miss.op_miss_result` picks the code and
-      names other connectors that have the op (#4031).
-    * ``preview_unavailable`` (status ``"unavailable"``) -- a ``typed`` /
-      ``composite`` op outside the governed approval tiers.
-    * ``invalid_params`` -- params failed the descriptor's
-      ``parameter_schema`` (same validation ``dispatch`` runs).
-    * ``invalid_op_schema`` -- the stored ``parameter_schema`` itself
-      carries an unresolvable ``$ref`` (#3095); same structured envelope
-      ``dispatch`` returns for the same broken descriptor.
+    Returns the ``unknown_connector`` / ``unknown_op`` envelope when the
+    natural key resolves no descriptor; :func:`~._op_miss.op_miss_result`
+    picks the code and names other connectors that have the op (#4031).
     """
     product, version, impl_id = parse_connector_id(connector_id)
 
@@ -292,8 +284,31 @@ async def _resolve_previewable_descriptor(
     )
     if isinstance(choice, CatalogSelection):
         descriptor, connector_id = choice.descriptor, choice.connector_id
+    return descriptor, connector_id
 
-    # --- Previewability gate (see :func:`_is_previewable`) -----------------
+
+def _gate_and_validate(
+    *,
+    descriptor: EndpointDescriptor,
+    connector_id: str,
+    op_id: str,
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Run the previewability gate + dispatch Step 3; return an envelope on a fault.
+
+    Returns ``None`` when the op is previewable (:func:`_is_previewable` —
+    ``source_kind='ingested'``, or a governed-tier non-ingested op) and its
+    params pass the schema. Otherwise returns the structured envelope the
+    caller propagates:
+
+    * ``preview_unavailable`` (status ``"unavailable"``) -- a ``typed`` /
+      ``composite`` op outside the governed approval tiers.
+    * ``invalid_params`` -- params failed the descriptor's
+      ``parameter_schema`` (same validation ``dispatch`` runs).
+    * ``invalid_op_schema`` -- the stored ``parameter_schema`` itself
+      carries an unresolvable ``$ref`` (#3095); same structured envelope
+      ``dispatch`` returns for the same broken descriptor.
+    """
     # A non-ingested op previews as "unavailable" unless it is in a governed
     # approval tier (destructive #3198 / non-credential requires_approval
     # #3312), which routes to the synthetic preview.
@@ -319,8 +334,41 @@ async def _resolve_previewable_descriptor(
             source_kind=descriptor.source_kind,
             validation_errors=validation_errors,
         )
+    return None
 
-    return descriptor, connector_id
+
+async def _governance_fields(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    connector_id: str,
+) -> dict[str, Any]:
+    """The risk level and the policy verdict for this caller and target (#4923).
+
+    ``safety_level`` and ``requires_approval`` come off the descriptor.
+    ``policy_verdict`` is what the dispatcher would do with the call —
+    ``auto-execute``, ``needs-approval`` or ``deny`` — from the same
+    :func:`~meho_backplane.operations._validate.policy_gate` the dispatcher
+    runs (Step 4), called with ``decide_only=True`` so it writes nothing: no
+    audit row, no approval request, no standing-grant use. ``policy_reason``
+    is the gate's reason string, or ``None`` when the gate gives none (a
+    person's call that runs at once). All four are advisory: none is in
+    :data:`_PREVIEW_HASH_KEYS`, so the hash does not change.
+    """
+    verdict, reason = await policy_gate(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        decide_only=True,
+    )
+    return {
+        "safety_level": descriptor.safety_level,
+        "requires_approval": descriptor.requires_approval,
+        "policy_verdict": verdict.value,
+        "policy_reason": reason,
+    }
 
 
 def _invalid_params_envelope(
@@ -473,7 +521,9 @@ def _ok_ingested_envelope(
     :func:`compute_preview_hash` over the resolved-request projection, so a
     caller can present it on the subsequent governed ``call_operation`` of a
     ``destructive``-tier op. Only ``status="ok"`` previews carry the hash: a
-    non-resolvable request has no literal effect to bind.
+    non-resolvable request has no literal effect to bind. The risk level and
+    policy verdict (#3973 / #4923) are added by :func:`preview_dispatch` on
+    every envelope, not here.
     """
     redacted_body = _redact_request_body(
         request.body, connector_id=connector_id, operator=operator, op_id=op_id
@@ -513,23 +563,27 @@ async def preview_dispatch(
 
     The read-only sibling of :func:`~meho_backplane.operations.dispatcher.dispatch`.
     Runs the same Steps 1-3 (parse connector id, look up descriptor, validate
-    params — via :func:`_resolve_previewable_descriptor`) and Step 5 (resolve
-    connector instance), then — instead of executing — resolves the literal
-    request via :func:`~meho_backplane.operations._branches.resolve_ingested_request`
+    params — via :func:`_resolve_descriptor` and :func:`_gate_and_validate`)
+    and Step 5 (resolve connector instance), then — instead of executing —
+    resolves the literal request via
+    :func:`~meho_backplane.operations._branches.resolve_ingested_request`
     and returns it with the body redacted (:func:`_redact_request_body`). A
     non-ingested op in a governed approval tier (``destructive`` #3198 /
     non-credential ``requires_approval`` #3312 — see :func:`_is_previewable`)
     instead gets the synthetic preview
     (:func:`~meho_backplane.operations._composite_preview.build_composite_preview`).
-    Never sends, never audits, never parks;
-    the policy gate (Step 4) is skipped — a preview carries no side effect to
-    authorize (both surfaces stay ``OPERATOR``-gated at the route/tool layer).
+    Never sends, never audits, never parks. The policy gate (Step 4) runs in
+    decide-only mode (:func:`_governance_fields`, #4923): it reports what the
+    dispatcher would do with the call but writes nothing.
 
     Returns a JSON-shaped envelope: ``status`` ``"ok"`` (request/synthetic
     preview resolved), ``"error"`` (structured ``unknown_op`` /
     ``invalid_params`` / ``no_connector`` / ``ambiguous_connector`` /
     ``dispatch_error``), or ``"unavailable"`` (a non-governed typed/composite
     op). ``op_id`` / ``connector_id`` / ``source_kind`` echo for correlation.
+    Every envelope whose op resolved (every status except ``unknown_op`` /
+    ``unknown_connector``) carries ``safety_level``, ``requires_approval``,
+    ``policy_verdict`` and ``policy_reason`` (#4923).
     On ``ok``: ``method``, ``resolved_path``, ``query``, ``redacted_body``,
     ``preview_hash`` (#3197 — the binding a caller presents on the governed
     ``call_operation``), and, for a synthetic preview whose builder populated,
@@ -537,16 +591,47 @@ async def preview_dispatch(
     Never raises for operator-input faults — they ride the ``error`` envelope,
     mirroring the dispatcher's never-raises contract.
     """
-    resolved = await _resolve_previewable_descriptor(
+    resolved = await _resolve_descriptor(
         operator=operator,
         connector_id=connector_id,
         op_id=op_id,
         target=target,
-        params=params,
     )
     if isinstance(resolved, dict):
-        return resolved  # structured unknown_op / unavailable / invalid_params
+        return resolved  # structured unknown_op / unknown_connector
     descriptor, connector_id = resolved
+    envelope = await _preview_resolved_op(
+        operator=operator,
+        connector_id=connector_id,
+        op_id=op_id,
+        descriptor=descriptor,
+        target=target,
+        params=params,
+    )
+    governance = await _governance_fields(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+    )
+    return {**envelope, **governance}
+
+
+async def _preview_resolved_op(
+    *,
+    operator: Operator,
+    connector_id: str,
+    op_id: str,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """The preview envelope for a resolved descriptor, before the governance fields."""
+    fault = _gate_and_validate(
+        descriptor=descriptor, connector_id=connector_id, op_id=op_id, params=params
+    )
+    if fault is not None:
+        return fault  # structured unavailable / invalid_params / invalid_op_schema
     if descriptor.source_kind != "ingested":
         # A destructive/requires_approval typed/composite op cleared the
         # previewability gate (#3198/#3312) — bind the logical request tuple

@@ -631,7 +631,7 @@ Every `meho keycloak …` dispatch writes an audit row to the
 - `connector_id = "keycloak-admin-26.x"`
 - `op_id` = the dispatched op (e.g. `keycloak.client.list`)
 - `target_id` = the resolved target row ID
-- `params_hash` = SHA-256 of the input params (for replay detection)
+- `params_hash` = keyed hash of the input params, with secret-named values left out (for replay detection)
 - `status` = `ok` / `error` / `denied`
 - `duration_ms` = connector wall-clock time
 

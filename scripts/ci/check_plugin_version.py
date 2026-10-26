@@ -66,6 +66,17 @@ def _git(root: pathlib.Path, *args: str) -> str:
     ).stdout
 
 
+def resolve_base(root: pathlib.Path, base: str) -> str:
+    """Resolve a commit before using it in commands that accept Git options."""
+    try:
+        return _git(root, "rev-parse", "--verify", "--end-of-options", f"{base}^{{commit}}").strip()
+    except subprocess.CalledProcessError as exc:
+        raise ValueError(
+            f"--base {base!r} does not name an available commit. "
+            "Use a branch, tag, or commit; fetch it first if it is missing."
+        ) from exc
+
+
 def read_versions(root: pathlib.Path) -> dict[str, str]:
     """Return every place the plugin version is written, keyed by a label."""
     plugin = json.loads((root / PLUGIN_MANIFEST).read_text(encoding="utf-8"))
@@ -103,6 +114,7 @@ def shipped_changes(root: pathlib.Path, base: str) -> list[str]:
 
 def check_raised(root: pathlib.Path, base: str, head_version: str) -> list[str]:
     """Rule 2: a change to the plugin raises the ``plugin.json`` version."""
+    base = resolve_base(root, base)
     changed = shipped_changes(root, base)
     if not changed:
         return []
@@ -146,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         errors = check_agree(versions)
         head_version = versions[f"{PLUGIN_MANIFEST} version"]
         parse_version(head_version)
-        if not errors and args.base:
+        if not errors and args.base is not None:
             errors = check_raised(args.root, args.base, head_version)
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         errors = [f"Could not check the plugin version: {exc}"]

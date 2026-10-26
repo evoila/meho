@@ -21,7 +21,8 @@ threshold (>50 rows or >4 KB by default), the caller gets back:
   so the summary stays smaller than the 4 KB threshold that caused the
   reduction. The skipped values are not lost: they are stored with the
   rows, and `result_query` reads one back with `query={"path":
-  "/<field name>"}` (or all of them with `path: ""`). The drill-in
+  "/<field name>"}` (or all of them with `path: ""`); the CLI form is
+  `meho operation result-query <handle_id> --path /<field name>`. The drill-in
   rationale names that read when the count is above zero and the store
   kept the fields. When they leave no room for the rows under the
   per-record cap, the store drops them, keeps the rows, and reports
@@ -30,7 +31,9 @@ threshold (>50 rows or >4 KB by default), the caller gets back:
   Credential-class ops do not get this default copy;
   they keep only the scalars their `result_scalars` hint lists (#3084).
   Lists and objects are never copied by default (objects need the
-  bounded `result_objects` hint); and
+  bounded `result_objects` hint). An object that hint names is stored
+  whole next to the omitted scalars, so a `path` read returns what the
+  bounded inline projection left out; and
 - a `ResultHandle` on `OperationResult.handle` carrying `summary_md`,
   `schema_`, `total_rows`, `sample_rows`, and the self-documenting
   `fetch_more` envelope. `schema_` comes from the result field catalog
@@ -325,7 +328,9 @@ the reducer keeps it **whole** as a document record under a handle:
   inline envelope (`delivery: "unavailable"`) rather than ship it whole.
 
 Read it with `result_query` and `query={"path": "<RFC 6901 JSON
-Pointer>"}`. The pointer rules follow RFC 6901: `""` is the whole
+Pointer>"}`, or from the CLI with `meho operation result-query <handle_id>
+--path "<RFC 6901 JSON Pointer>"` (#4888; `--offset` / `--limit` page an
+array value). The pointer rules follow RFC 6901: `""` is the whole
 document, each `/` starts one step, and in a step `~1` means `/` and `~0`
 means `~` (in that order, so `/a~1b~0c` reads the key `a/b~c`). An array
 index has no leading zero, and `-` never resolves. On a rows handle, the
@@ -390,6 +395,7 @@ is how to read the rows; the receipt is how to prove the call ran.
 | `POST /api/v1/operations/result-query` | `backend/src/meho_backplane/api/v1/operations.py` | REST read surface; misses surface as a `404` with `reason=handle_not_found` (#3179) |
 | `_reduce_or_error` | `backend/src/meho_backplane/operations/dispatcher.py` | Builds `reducer_context` (`tenant_id`, `operator_sub`, `op_id`, hints) from the authenticated `Operator` |
 | `handle_owner_sub_var` | `backend/src/meho_backplane/operations/reducer.py` | Optional handle owner `sub`; the approval resume binds the parking principal so it owns the spill (#3548) |
+| `FullResultCapture` / `full_result_capture_var` | `backend/src/meho_backplane/operations/reducer.py` | Optional capture of the full redacted payload before the reduce; the sensor runner sets it so its rule sees every row (#4117) |
 
 ## Control flow (dispatch path)
 
@@ -403,6 +409,14 @@ is how to read the rows; the receipt is how to prove the call ran.
    the parker's `sub`, so the parker can read the handle that
    `GET /api/v1/approvals/{id}/result` gives it (#3548). See
    [`approvals.md`](approvals.md).
+   A second seam, `full_result_capture_var`, lets one caller read the
+   full redacted payload beside the shortened result (#4117). When it is
+   set, `_reduce_or_error` copies the payload reference into the
+   `FullResultCapture` before the reduce and then reduces as usual, so
+   the wire result, the handle, and the spill do not change. Only the
+   sensor runner sets it (`checks/runner.py`): a sensor rule runs over
+   every row, not over the summary. See
+   [`sensor.md`](sensor.md#the-rule-runs-over-the-full-result-4117).
 2. The reducer validates the captured payload and derives schema, summary,
    and preview directly from raw rows, then `_spill()`:
    - an admission-limit breach returns an unprofiled handle with no spill,
@@ -648,6 +662,7 @@ expected value on purpose and say why in the commit.
 - #3631 — the result field catalog built from every captured row.
 - #3633 — document records and RFC 6901 `path` reads.
 - #3635 — catalog-checked queries and raw-row output.
+- #4117 — the sensor runner checks its rule against the full result.
 - #3636 — the `audit_id` receipt on a completed operation.
 - RFC 6901 (JSON Pointer): https://www.rfc-editor.org/rfc/rfc6901
 - `docs/architecture/jsonflux.md` — engine provenance + full reducer

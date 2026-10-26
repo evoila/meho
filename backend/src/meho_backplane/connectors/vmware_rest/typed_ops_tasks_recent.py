@@ -20,8 +20,11 @@ Two PropertyCollector reads (no history collector, no traversal):
 
 1. ``TaskManager.recentTask`` -- the list of recent Task MoRefs vCenter
    maintains (bounded by vCenter, typically the last ~200).
-2. ``Task.info`` on those MoRefs (a single ``RetrievePropertiesEx`` with
-   one ``objectSet`` entry per task) -- the :class:`TaskInfo` per task.
+2. ``Task.info`` on those MoRefs (one ``RetrievePropertiesEx`` with one
+   ``objectSet`` entry per task) -- the :class:`TaskInfo` per task. vCenter
+   may split this answer into pages; the shared
+   :func:`~meho_backplane.connectors.vmware_rest.vim_retrieve.retrieve_all_pages`
+   reads every page, so no task comes back without its info.
 
 Field names are the vim25 / VI-JSON wire contract (camelCase); the
 ``state`` enum (``queued`` / ``running`` / ``success`` / ``error``) is
@@ -42,6 +45,7 @@ from meho_backplane.connectors.vmware_rest.vim_body import (
     retrieve_properties_body,
     unwrap_vim_value,
 )
+from meho_backplane.connectors.vmware_rest.vim_retrieve import retrieve_all_pages
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
@@ -183,8 +187,10 @@ async def tasks_recent_impl(
 
     1. ``POST .../RetrievePropertiesEx`` reading
        ``TaskManager.recentTask`` -- the recent Task MoRefs.
-    2. ``POST .../RetrievePropertiesEx`` reading ``Task.info``
-       on those MoRefs (capped at ``max_tasks``) -- a single round trip.
+    2. ``POST .../RetrievePropertiesEx`` reading ``Task.info`` on those
+       MoRefs (capped at ``max_tasks``), with ``ContinueRetrievePropertiesEx``
+       for every further page vCenter sends. A failed page fails the
+       operation (``connector_error``); it never returns rows without info.
 
     Both vmomi reads route through
     :meth:`VmwareRestConnector._post_vmomi_json`, which mounts them on the
@@ -210,11 +216,8 @@ async def tasks_recent_impl(
         _log.info("vmware_tasks_recent_read", target=target.name, task_count=0)
         return {"tasks": []}
 
-    info_result = await connector._post_vmomi_json(
-        target,
-        _RETRIEVE_PROPERTIES_PATH,
-        operator=operator,
-        json=build_task_info_retrieve_params(task_moids),
+    info_result = await retrieve_all_pages(
+        connector, target, operator, build_task_info_retrieve_params(task_moids)
     )
     info_by_moid = _parse_task_info_results(info_result)
     tasks = [_parse_task_info(moid, info_by_moid.get(moid)) for moid in task_moids]

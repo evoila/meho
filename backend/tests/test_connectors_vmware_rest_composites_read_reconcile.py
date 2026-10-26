@@ -126,6 +126,7 @@ def test_read_sub_op_constants_are_the_reconciled_keys() -> None:
         "POST:/PerformanceManager/{moId}/QueryAvailablePerfMetric",
         "POST:/PerformanceManager/{moId}/QueryPerf",
         "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
     }
     # #2986: the DRS config read rides vim now -- no REST DRS constant
     # may reappear (the pinned vcenter.yaml serves no cluster DRS

@@ -267,8 +267,8 @@ and no value ever rests in a durable artifact.
    to `EXPIRED` is no longer decidable (`/decide` → 409).
 
 5. **`params_hash` tamper-evidence on the approved intent.** The approval
-   request stores a `params_hash` — a SHA-256 over the canonicalised
-   params. The approver decides against the exact `{from, to, reason}`
+   request stores a `params_hash` — a keyed hash (HMAC-SHA256 with a
+   server key) over the canonicalised params. The approver decides against the exact `{from, to, reason}`
    references that were submitted; a post-approval tamper of the params
    would not match the hash the approval was granted against.
 

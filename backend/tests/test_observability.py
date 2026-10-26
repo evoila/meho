@@ -39,6 +39,7 @@ import sys
 from collections.abc import Iterator
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 import structlog
 from fastapi.testclient import TestClient
@@ -532,6 +533,22 @@ def test_stdlib_logger_warning_carries_request_id(monkeypatch: pytest.MonkeyPatc
     assert record["request_id"] == "req-2887-abc"
     # ISO 8601 UTC timestamp (structlog's ``TimeStamper(utc=True)``).
     assert isinstance(record["timestamp"], str) and record["timestamp"].endswith("Z")
+
+
+def test_httpx_request_line_keeps_only_method_and_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """httpx logs the full URL of every request. The path and the query can
+    be a credential, so the bridge keeps only the scheme and the host."""
+    url = httpx.URL("https://vc.example.test:8443/cls/data/session-1/disk.vmdk?token=secret-1")
+
+    with _stdlib_bridge_capture(monkeypatch) as buf:
+        _bridged_stdlib_logger("httpx").info(
+            'HTTP Request: %s %s "%s %d %s"', "GET", url, "HTTP/1.1", 200, "OK"
+        )
+        lines = _read_log_lines(buf)
+
+    assert [line["event"] for line in lines] == [
+        'HTTP Request: GET https://vc.example.test:8443 "HTTP/1.1 200 OK"'
+    ]
 
 
 def test_stdlib_exception_strips_frame_locals(monkeypatch: pytest.MonkeyPatch) -> None:

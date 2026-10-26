@@ -131,6 +131,16 @@ class MintReviewAppTokenTests(unittest.TestCase):
         self.assertEqual(b"test-installation-token\n", result.stdout)
         self.assert_no_secret_persisted(result)
 
+    def test_manual_key_path_keeps_spaces_and_globs_literal(self) -> None:
+        key_path = self.temp / "test key [one]*.pem"
+        key_path.write_bytes(self.key.read_bytes())
+        result = self.run_helper(
+            "--client-id", "test-client-id", "--key-file", str(key_path)
+        )
+        self.assertEqual(0, result.returncode, result.stderr.decode())
+        self.assertEqual(b"test-installation-token\n", result.stdout)
+        self.assert_no_secret_persisted(result)
+
     def test_missing_governed_private_key_fails_closed(self) -> None:
         self._stub(
             "meho",

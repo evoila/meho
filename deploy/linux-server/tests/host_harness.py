@@ -8,11 +8,13 @@ network, and they change nothing on the machine that runs them:
 - MEHO_TEST_ROOT points meho-host to a temporary root folder. It holds the
   files meho-host reads (RKE2's kubectl and rke2 at their real places,
   /etc/os-release, the two one-time files) and receives the support bundle.
-- PATH holds only stub commands and links to the few real tools meho-host
+- PATH holds only stub commands and wrappers of the few real tools meho-host
   needs. Each stub answers from one file in the "fake" folder and writes its
   arguments to calls.log, so a test changes one answer and reads the calls.
-  The date stub answers "now" from a file and passes every other call on to
-  the real date, which parses the expiry dates of the certificates.
+  Each wrapper logs its arguments the same way and then runs the real tool,
+  so a test can check that no secret value was on any command line. The
+  date stub answers "now" from a file and passes every other call on to the
+  real date, which parses the expiry dates of the certificates.
 
 The default answers describe a healthy machine on 2026-10-23 at 12:00 UTC:
 the node is Ready, every pod runs or has finished, both disks have most of
@@ -54,6 +56,11 @@ def certificate_table(*rows: tuple[str, str, int, str]) -> str:
             f"{expires(days):<25}{'1 year':<16}{status}"
         )
     return "\n".join(lines) + "\n"
+
+
+def pod_line(namespace: str, name: str, phase: str, ready: str = "", reason: str = "") -> str:
+    """One line of the fake answer of 'kubectl get pods -A': the fields with "|" between them."""
+    return f"{namespace}|{name}|{phase}|{ready}|{reason}\n"
 
 
 def df_answer(size_gb: int, free_gb: int) -> str:
@@ -106,9 +113,10 @@ RKE2_STUB = textwrap.dedent("""\
     esac
     """)
 
-# The fake kubectl answers each call of meho-host from one file. A request
-# for the content of a Secret (-o ...) answers with kube_secret_data, which
-# a test fills with a known password: the bundle must never ask for it.
+# The fake kubectl answers each call of meho-host from one file. The values
+# of the Secrets (kube_secret_values, one key=value per line) are answered
+# only to the Go template the bundle uses; any other request for Secret
+# content fails, so the bundle cannot read them in another way.
 KUBECTL_STUB = textwrap.dedent("""\
     rc=$(cat "$MEHO_FAKE/kubectl_rc")
     [ "$rc" = 0 ] || exit "$rc"
@@ -122,7 +130,10 @@ KUBECTL_STUB = textwrap.dedent("""\
         cat "$MEHO_FAKE/kube_logs_previous"
         exit "$(cat "$MEHO_FAKE/kube_logs_previous_rc")" ;;
       *" logs "*) cat "$MEHO_FAKE/kube_logs" ;;
-      *"get secret"*" -o "*) cat "$MEHO_FAKE/kube_secret_data" ;;
+      *"get secrets -o go-template="*) cat "$MEHO_FAKE/kube_secret_values" ;;
+      *"get secret"*" -o "*)
+        echo "error: the fake kubectl gives Secret content only to the Go template" >&2
+        exit 1 ;;
       *"get secrets"*) cat "$MEHO_FAKE/kube_secret_names" ;;
       *"get all,"*) cat "$MEHO_FAKE/kube_objects" ;;
       *"get events"*) cat "$MEHO_FAKE/kube_events" ;;
@@ -134,13 +145,13 @@ KUBECTL_STUB = textwrap.dedent("""\
 MEHO_PODS = ("meho-backplane-7d9f8-x2k4p", "meho-keycloak-0", "meho-core-bootstrap-abc12")
 TRAEFIK_POD = "rke2-traefik-5c7d9-m3n8q"
 HEALTHY_PODS = (
-    "meho meho-backplane-7d9f8-x2k4p Running True\n"
-    "meho meho-keycloak-0 Running True\n"
-    "meho meho-core-bootstrap-abc12 Succeeded False\n"
-    "kube-system rke2-canal-k9x2p Running True\n"
-    f"kube-system {TRAEFIK_POD} Running True\n"
-    "kube-system helm-install-rke2-traefik-zx9v2 Succeeded False\n"
-    "local-path-storage local-path-provisioner-6f8b7-q4w2e Running True\n"
+    pod_line("meho", "meho-backplane-7d9f8-x2k4p", "Running", "True")
+    + pod_line("meho", "meho-keycloak-0", "Running", "True")
+    + pod_line("meho", "meho-core-bootstrap-abc12", "Succeeded", "False")
+    + pod_line("kube-system", "rke2-canal-k9x2p", "Running", "True")
+    + pod_line("kube-system", TRAEFIK_POD, "Running", "True")
+    + pod_line("kube-system", "helm-install-rke2-traefik-zx9v2", "Succeeded", "False")
+    + pod_line("local-path-storage", "local-path-provisioner-6f8b7-q4w2e", "Running", "True")
 )
 
 DEFAULT_ANSWERS = {
@@ -162,7 +173,7 @@ DEFAULT_ANSWERS = {
     "kube_secret_names": (
         "NAME                    TYPE     DATA   AGE\nmeho-core-first-login   Opaque   4      3h\n"
     ),
-    "kube_secret_data": "apiVersion: v1\nkind: Secret\nstringData:\n  credentials: none\n",
+    "kube_secret_values": "admin_password=Fake-Default-Password-0a1b\nadmin_username=admin\n",
     "kube_objects": (
         "NAME                             READY   STATUS    RESTARTS   AGE\n"
         "pod/meho-backplane-7d9f8-x2k4p   1/1     Running   0          3h\n"
@@ -205,7 +216,7 @@ class FakeHost:
             found = shutil.which(tool)
             if found is None:
                 raise RuntimeError(f"the tests need '{tool}' on PATH")
-            (self.tools / tool).symlink_to(found)
+            _write_script(self.tools / tool, f'exec "{found}" "$@"')
         for name, body in STUBS.items():
             _write_script(self.stubs / name, body)
         _write_script(self.host_path("/var/lib/rancher/rke2/bin/kubectl"), KUBECTL_STUB)

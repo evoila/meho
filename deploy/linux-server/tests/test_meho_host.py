@@ -20,6 +20,7 @@ from host_harness import (
     HostTestCase,
     certificate_table,
     df_answer,
+    pod_line,
 )
 
 SUPPORT_HINT = "run 'meho-host support-bundle' and send the file to support."
@@ -63,7 +64,8 @@ class UsageTests(HostTestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         for text in ("check [--json]", "support-bundle", "Exit codes:"):
             self.assertIn(text, result.stdout)
-        self.assertEqual("", self.host.calls())
+        self.assertNotIn("id -u", self.host.calls())
+        self.assertFalse(self.host.host_path("/var/lib/meho/support").exists())
 
     def test_no_command_is_a_usage_error(self) -> None:
         self.assert_usage_error(self.host.run(), "no command given")
@@ -101,7 +103,7 @@ class CheckTests(HostTestCase):
         self.assertEqual("", result.stderr)
 
     def test_a_finished_job_pod_counts_as_fine(self) -> None:
-        self.assertIn("Succeeded False", HEALTHY_PODS)
+        self.assertIn("|Succeeded|False|", HEALTHY_PODS)
 
         self.assertEqual(0, self.host.run("check").returncode)
 
@@ -150,9 +152,9 @@ class CheckTests(HostTestCase):
     def test_a_pod_that_waits_or_is_not_ready_is_named(self) -> None:
         self.host.answer(
             "kube_pods",
-            "meho meho-backplane-7d9f8-x2k4p Pending \n"
-            "meho meho-keycloak-0 Running False\n"
-            "kube-system rke2-canal-k9x2p Running True\n",
+            pod_line("meho", "meho-backplane-7d9f8-x2k4p", "Pending")
+            + pod_line("meho", "meho-keycloak-0", "Running", "False")
+            + pod_line("kube-system", "rke2-canal-k9x2p", "Running", "True"),
         )
 
         result = self.host.run("check")
@@ -165,7 +167,7 @@ class CheckTests(HostTestCase):
         )
 
     def test_pods_of_other_namespaces_are_not_checked(self) -> None:
-        self.host.answer("kube_pods", HEALTHY_PODS + "default debug-shell Pending \n")
+        self.host.answer("kube_pods", HEALTHY_PODS + pod_line("default", "debug-shell", "Pending"))
 
         result = self.host.run("check")
 
@@ -173,7 +175,9 @@ class CheckTests(HostTestCase):
         self.assertIn(OK_LINES[1], result.stdout)
 
     def test_no_pod_in_meho_means_the_core_is_not_installed(self) -> None:
-        self.host.answer("kube_pods", "kube-system rke2-canal-k9x2p Running True\n")
+        self.host.answer(
+            "kube_pods", pod_line("kube-system", "rke2-canal-k9x2p", "Running", "True")
+        )
 
         result = self.host.run("check")
 
@@ -183,6 +187,29 @@ class CheckTests(HostTestCase):
             f"Fix: {SUPPORT_HINT}",
             result.stdout,
         )
+
+    def test_an_evicted_pod_is_a_warning_with_a_fix(self) -> None:
+        evicted = pod_line("meho", "meho-backplane-7d9f8-old", "Failed", "False", "Evicted")
+        self.host.answer("kube_pods", HEALTHY_PODS + evicted)
+
+        result = self.host.run("check")
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertIn(
+            "[WARN] pods: evicted by the kubelet when the disk was full: "
+            "meho/meho-backplane-7d9f8-old; the other pods run. Fix: check the disk line. "
+            "An evicted entry does no harm, and support removes it.",
+            result.stdout,
+        )
+
+    def test_a_pod_that_failed_for_another_reason_is_red(self) -> None:
+        failed = pod_line("meho", "meho-core-bootstrap-x", "Failed", "False", "DeadlineExceeded")
+        self.host.answer("kube_pods", HEALTHY_PODS + failed)
+
+        result = self.host.run("check")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("[FAIL] pods: meho/meho-core-bootstrap-x is Failed.", result.stdout)
 
     def test_a_disk_below_20_percent_free_warns_and_the_exit_code_stays_0(self) -> None:
         self.host.answer("df_meho", df_answer(200, 36))
@@ -272,6 +299,24 @@ class CheckTests(HostTestCase):
         self.assertIn(
             "[FAIL] certificates: expired: client-kube-proxy.crt. Fix: restart RKE2, which "
             "renews them: systemctl restart rke2-server. Then run the check again.",
+            result.stdout,
+        )
+
+    def test_a_certificate_that_is_not_yet_valid_is_red(self) -> None:
+        self.host.answer(
+            "rke2_cert_table",
+            certificate_table(
+                ("client-admin.crt", "system:admin", 365, "NOT YET VALID"),
+                ("server-ca.crt", "rke2-server-ca", 3650, "OK"),
+            ),
+        )
+
+        result = self.host.run("check")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn(
+            "[FAIL] certificates: not yet valid: client-admin.crt. Fix: the clock of this machine "
+            f"or the certificate is wrong. Check the time: timedatectl. Then {SUPPORT_HINT}",
             result.stdout,
         )
 
@@ -368,11 +413,15 @@ class SupportBundleTests(HostTestCase):
 
         self.assertEqual("crashed earlier\n", files["pods/meho.meho-keycloak-0.previous.log"])
 
-    def test_no_password_token_or_key_is_in_the_bundle(self) -> None:
+    def test_no_secret_is_in_the_bundle_or_on_a_command_line(self) -> None:
         admin_pass = "Fake-Admin-Password-7f3a"
         approver_pass = "Fake-Approver-Password-9c1d"
+        db_pass = "Fake-Database-Password-3e5f"
         token = "fake-token-9c1d2e"
         unseal_key = "fake-unseal-key-5e2b8a4c"
+        secrets = (admin_pass, approver_pass, db_pass, token, unseal_key)
+        # The customer deletes the two one-time files after the first login,
+        # so the database password is only in the core's Secrets.
         self.host.host_file(
             "/var/lib/meho/first-login-passwords",
             f"admin_password={admin_pass}\nadmin_username=admin\n"
@@ -380,14 +429,18 @@ class SupportBundleTests(HostTestCase):
         )
         self.host.host_file("/var/lib/meho/unseal-key", f"{unseal_key}\n")
         self.host.answer(
-            "kube_secret_data",
-            f"apiVersion: v1\nkind: Secret\nstringData:\n  credentials: {admin_pass}\n",
+            "kube_secret_values",
+            f"admin_password={admin_pass}\nadmin_username=admin\n"
+            f"approver_username=approver\ndb_password={db_pass}\nshort=abc\n",
         )
         self.host.answer(
             "kube_logs",
             f"2026-10-23T11:00:00Z KEYCLOAK_ADMIN_TOKEN={token}\n"
             f"2026-10-23T11:00:01Z the admin logs in with {admin_pass}\n"
             f"2026-10-23T11:00:02Z unseal key {unseal_key} loaded\n"
+            f"2026-10-23T11:00:03Z the db password is {db_pass}\n"
+            f"2026-10-23T11:00:04Z api_key={token} KEYCLOAK_ADMIN_URL: http://meho-keycloak:8080/auth\n"
+            "2026-10-23T11:00:05Z short values such as abc stay\n"
             f'{{"event": "login", "user": "approver", "password": "{approver_pass}"}}\n'
             f'{{"token":"{token}"}}\n'
             f"token:{token}\n",
@@ -398,26 +451,44 @@ class SupportBundleTests(HostTestCase):
         self.host.answer(
             "kube_node_describe", f"Name: meho.example.com\nAnnotations: api_secret_key={token}\n"
         )
+        self.host.answer(
+            "kube_events",
+            "LAST SEEN   TYPE     REASON   OBJECT                MESSAGE\n"
+            "3h          Normal   Pulled   pod/meho-keycloak-0   "
+            "image quay.io/keycloak/keycloak:26.8.1\n",
+        )
 
         files = self.bundle()
 
         for name, text in files.items():
-            for value in (admin_pass, approver_pass, token, unseal_key):
+            for value in secrets:
                 with self.subTest(file=name, value=value):
                     self.assertNotIn(value, text)
         log = files["pods/meho.meho-keycloak-0.log"]
         self.assertIn("KEYCLOAK_ADMIN_TOKEN=[removed]", log)
         self.assertIn("the admin logs in with [removed]", log)
         self.assertIn("unseal key [removed] loaded", log)
+        self.assertIn("the db password is [removed]", log)
+        self.assertIn("api_key=[removed] KEYCLOAK_ADMIN_URL: http://meho-keycloak:8080/auth", log)
+        self.assertIn("short values such as abc stay", log)
         self.assertIn('{"event": "login", "user": "approver", "password": "[removed]"}', log)
         self.assertIn('{"token":"[removed]"}', log)
         self.assertIn("token:[removed]", log)
         self.assertIn("Db-Password: [removed]", files["rke2-server.journal.txt"])
         self.assertIn("api_secret_key=[removed]", files["node.txt"])
+        self.assertIn("quay.io/keycloak/keycloak:26.8.1", files["events.txt"])
         self.assertIn("meho-core-first-login", files["objects/meho.secrets.txt"])
-        for call in self.host.calls().splitlines():
-            if "secret" in call:
-                self.assertNotIn(" -o ", call, call)
+        # No value was on the command line of any command the script ran,
+        # and the files with the values and the sed rules are gone.
+        calls = self.host.calls()
+        self.assertIn("sed -E -i -f ", calls)
+        for value in secrets:
+            with self.subTest(value=value):
+                self.assertNotIn(value, calls)
+        folder = self.host.host_path("/var/lib/meho/support")
+        self.assertEqual(
+            [self.host.host_path(BUNDLE_PATH).name], [path.name for path in folder.iterdir()]
+        )
 
     def test_the_bundle_is_written_when_rke2_is_down(self) -> None:
         self.host.answer("kubectl_rc", "1")

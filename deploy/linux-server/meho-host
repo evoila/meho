@@ -59,8 +59,14 @@ readonly DISK_WARN_PERCENT=20
 readonly DISK_FAIL_PERCENT=15
 readonly CERT_WARN_DAYS=30
 readonly JOURNAL_SINCE=-24h
-# One line per pod: namespace, name, phase and the Ready condition.
-readonly POD_TEMPLATE='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{" "}{.status.phase}{" "}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}'
+# One line per pod: namespace, name, phase, the Ready condition and the
+# reason, with "|" between them, so an empty field keeps its place.
+readonly POD_TEMPLATE='{range .items[*]}{.metadata.namespace}{"|"}{.metadata.name}{"|"}{.status.phase}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.status.reason}{"\n"}{end}'
+# kubectl prints the values of every Secret of a namespace with this
+# template, decoded, one key=value per line. The $-names are the template's
+# own, not shell variables.
+# shellcheck disable=SC2016
+readonly SECRET_VALUES_TEMPLATE='{{range .items}}{{range $key, $value := .data}}{{$key}}={{base64decode $value}}{{"\n"}}{{end}}{{end}}'
 # EXPIRES in the table of "rke2 certificate check", for example
 # "Jun 12, 2026 11:12 UTC" (the Go layout "Jan 02, 2006 15:04 MST"). A row
 # is read by this date and by its STATUS at the end, so a space in SUBJECT or
@@ -70,6 +76,8 @@ readonly CERT_ROW_RE="^([^[:space:]]+)[[:space:]]+.*[[:space:]](${CERT_EXPIRES_R
 
 COMMAND=""
 BUNDLE_WORK=""
+BUNDLE_SECRETS=""
+BUNDLE_SCRIPT=""
 CHECK_NAMES=()
 CHECK_STATUSES=()
 CHECK_DETAILS=()
@@ -191,12 +199,12 @@ check_node() {
 }
 
 check_pods() {
-    local pods namespace name phase ready counted=0 in_meho=0 bad=()
+    local pods namespace name phase ready reason counted=0 in_meho=0 bad=() evicted=()
     if ! pods=$(rke2_kubectl get pods -A -o jsonpath="$POD_TEMPLATE" 2>/dev/null); then
         result pods fail "RKE2 does not answer." "$SUPPORT_HINT"
         return 0
     fi
-    while read -r namespace name phase ready; do
+    while IFS='|' read -r namespace name phase ready reason; do
         [[ -n $name ]] || continue
         in_list "$namespace" "${CHECK_NAMESPACES[@]}" || continue
         counted=$((counted + 1))
@@ -204,10 +212,19 @@ check_pods() {
             in_meho=1
         fi
         # The pod of a finished Job (RKE2's helm-install Jobs, the core's
-        # bootstrap Job) is Succeeded and never Ready. That is fine.
+        # bootstrap Job) is Succeeded and never Ready. That is fine. A pod
+        # the kubelet evicted when the disk was full stays in the list as
+        # Failed after its replacement runs, so it is a warning, not red.
         case $phase in
             Succeeded) ;;
             Running) [[ $ready == True ]] || bad+=("$namespace/$name is not Ready") ;;
+            Failed)
+                if [[ $reason == Evicted ]]; then
+                    evicted+=("$namespace/$name")
+                else
+                    bad+=("$namespace/$name is $phase")
+                fi
+                ;;
             *) bad+=("$namespace/$name is $phase") ;;
         esac
     done <<<"$pods"
@@ -216,6 +233,9 @@ check_pods() {
             "$SUPPORT_HINT"
     elif ((${#bad[@]} > 0)); then
         result pods fail "$(join_by ', ' "${bad[@]}")." "$SUPPORT_HINT"
+    elif ((${#evicted[@]} > 0)); then
+        result pods warn "evicted by the kubelet when the disk was full: $(join_by ', ' "${evicted[@]}"); the other pods run." \
+            "check the disk line. An evicted entry does no harm, and support removes it."
     else
         result pods ok "all $counted pods in $(join_by ', ' "${CHECK_NAMESPACES[@]}") run"
     fi
@@ -258,7 +278,7 @@ check_disk() {
 # certificate with less than 30 days left means RKE2 has not restarted for a
 # long time, and a restart is the fix.
 check_certificates() {
-    local table now line filename expires status seconds days count=0 expired=() soon=()
+    local table now line filename expires status seconds days count=0 expired=() soon=() early=()
     if ! table=$("${HOST_ROOT}${RKE2_BINARY}" certificate check --output table 2>/dev/null); then
         result certificates fail "'rke2 certificate check' did not run." \
             "check that RKE2 is installed: ls -l /usr/local/bin/rke2. Then $SUPPORT_HINT"
@@ -276,7 +296,10 @@ check_certificates() {
             return 0
         fi
         days=$(((seconds - now) / 86400))
-        if [[ $status == EXPIRED ]] || ((seconds <= now)); then
+        # For NOT YET VALID, the EXPIRES column holds the start date instead.
+        if [[ $status == "NOT YET VALID" ]]; then
+            early+=("$filename")
+        elif [[ $status == EXPIRED ]] || ((seconds <= now)); then
             expired+=("$filename")
         elif ((days < CERT_WARN_DAYS)); then
             soon+=("$filename ($days days)")
@@ -287,6 +310,9 @@ check_certificates() {
     elif ((${#expired[@]} > 0)); then
         result certificates fail "expired: $(join_by ', ' "${expired[@]}")." \
             "restart RKE2, which renews them: $RKE2_RESTART_COMMAND. Then run the check again."
+    elif ((${#early[@]} > 0)); then
+        result certificates fail "not yet valid: $(join_by ', ' "${early[@]}")." \
+            "the clock of this machine or the certificate is wrong. Check the time: timedatectl. Then $SUPPORT_HINT"
     elif ((${#soon[@]} > 0)); then
         result certificates warn "less than $CERT_WARN_DAYS days left: $(join_by ', ' "${soon[@]}")." \
             "restart RKE2, which renews a certificate with less than 120 days left: $RKE2_RESTART_COMMAND."
@@ -450,12 +476,24 @@ regex_literal() {
     printf '%s' "$1" | sed -e 's/[][\.*^$/(){}+?|]/\\&/g'
 }
 
-# secret_values: every value of the two one-time files, one per line: the
-# unseal key, and the part after "=" of each *_password line of the
-# first-login file. Its *_username lines hold plain names such as admin,
-# which must stay in the bundle.
+# write_secret_values <file>: the values of the core's Secrets in namespace
+# meho go from kubectl straight into the file, decoded, one key=value per
+# line, for root only. No value touches a command line. The file stays
+# empty when RKE2 does not answer.
+write_secret_values() {
+    rke2_kubectl -n "$MEHO_NAMESPACE" get secrets -o go-template="$SECRET_VALUES_TEMPLATE" >"$1" 2>/dev/null || true
+}
+
+# secret_values <secrets file>: every value to remove, one per line: the
+# unseal key, the *_password lines of the first-login file, and the values
+# of the core's Secrets. The guide tells the customer to delete the two
+# one-time files after the first login, so the Secrets are the source that
+# stays. Keys with "user" in the name hold plain names such as admin, and
+# values shorter than 8 characters are words, not secrets: both stay in the
+# bundle. A value on more than one line, such as a certificate, gives only
+# its first line.
 secret_values() {
-    local file="${HOST_ROOT}${MEHO_UNSEAL_KEY_FILE}"
+    local secrets_file=$1 file="${HOST_ROOT}${MEHO_UNSEAL_KEY_FILE}"
     if [[ -r $file ]]; then
         cat "$file"
     fi
@@ -463,33 +501,47 @@ secret_values() {
     if [[ -r $file ]]; then
         sed -n 's/^[^=]*_password=//p' "$file"
     fi
+    awk -F= 'NF >= 2 && tolower($1) !~ /user/ {
+        value = substr($0, length($1) + 2)
+        if (length(value) >= 8) print value
+    }' "$secrets_file"
 }
 
-# scrub_bundle <folder>: no password leaves the machine. Every file loses
-# the value of any variable whose name holds PASSWORD, TOKEN, SECRET or KEY,
-# written as NAME=value, NAME: value (with or without the space) or as the
-# JSON pair "name": "value" (MEHO's own logs are JSON lines), and every
-# value of the two one-time files, wherever it appears. Secret data never
-# gets in: the bundle lists Secrets by name only.
+# scrub_bundle <folder> <secrets file> <sed script>: no password leaves the
+# machine. Every file loses the value of any variable whose name holds
+# PASSWORD, TOKEN, SECRET or KEY, written as NAME=value, NAME: value (with
+# or without the space) or as the JSON pair "name": "value" (MEHO's own
+# logs are JSON lines), and every value of secret_values, wherever it
+# appears. The rules go into a sed script file for root only, never on
+# sed's command line: every user on the machine can read the arguments of
+# a running process.
 scrub_bundle() {
-    local work=$1 names name value
-    names="$(any_case password)|$(any_case token)|$(any_case secret)|$(any_case key)"
-    name="[A-Za-z0-9_.-]*(${names})[A-Za-z0-9_.-]*"
-    local -a expressions=(
-        -e "s/(\"${name}\"[[:space:]]*:[[:space:]]*)\"[^\"]*\"/\\1\"[removed]\"/g"
-        -e "s/(${name}[[:space:]]*(=|:)[[:space:]]*)(\"[^\"]*\"|[^[:space:]\",}]+)/\\1[removed]/g"
-    )
-    while IFS= read -r value; do
-        [[ -n $value ]] || continue
-        expressions+=(-e "s/$(regex_literal "$value")/[removed]/g")
-    done < <(secret_values)
-    find "$work" -type f -exec sed -E -i "${expressions[@]}" {} +
+    local work=$1 secrets_file=$2 script=$3 names key name value
+    names="$(any_case password)|$(any_case token)|$(any_case secret)"
+    # "key" counts only as a word of its own (api_key, unseal-key, KEY), so
+    # that keycloak is not a key name: support needs Keycloak's addresses.
+    key=$(any_case key)
+    name="([A-Za-z0-9_.-]*(${names})[A-Za-z0-9_.-]*|([A-Za-z0-9_.-]*[0-9_.-])?${key}([0-9_.-][A-Za-z0-9_.-]*)?)"
+    {
+        printf '%s\n' "s/(\"${name}\"[[:space:]]*:[[:space:]]*)\"[^\"]*\"/\\1\"[removed]\"/g"
+        printf '%s\n' "s/(${name}[[:space:]]*(=|:)[[:space:]]*)(\"[^\"]*\"|[^[:space:]\",}]+)/\\1[removed]/g"
+        while IFS= read -r value; do
+            [[ -n $value ]] || continue
+            printf 's/%s/[removed]/g\n' "$(regex_literal "$value")"
+        done < <(secret_values "$secrets_file")
+    } >"$script"
+    find "$work" -type f -exec sed -E -i -f "$script" {} +
 }
 
-remove_work_folder() {
-    if [[ -n $BUNDLE_WORK ]]; then
-        rm -rf "$BUNDLE_WORK"
-    fi
+# remove_bundle_files: the EXIT trap of support-bundle. The work folder, the
+# file with the Secret values and the sed script never outlive the command.
+remove_bundle_files() {
+    local path
+    for path in "$BUNDLE_WORK" "$BUNDLE_SECRETS" "$BUNDLE_SCRIPT"; do
+        if [[ -n $path ]]; then
+            rm -rf "$path"
+        fi
+    done
 }
 
 command_support_bundle() {
@@ -502,10 +554,15 @@ command_support_bundle() {
     support_dir="${HOST_ROOT}${MEHO_SUPPORT_DIR}"
     mkdir -p "$support_dir"
     chmod 0700 "$support_dir"
+    # The three temporary paths are outside the work folder, so they never
+    # go into the archive. mktemp makes them for root only.
     BUNDLE_WORK=$(mktemp -d "$support_dir/.build.XXXXXX")
-    trap remove_work_folder EXIT
+    BUNDLE_SECRETS=$(mktemp "$support_dir/.secrets.XXXXXX")
+    BUNDLE_SCRIPT=$(mktemp "$support_dir/.sed.XXXXXX")
+    trap remove_bundle_files EXIT
     collect_bundle "$BUNDLE_WORK"
-    scrub_bundle "$BUNDLE_WORK"
+    write_secret_values "$BUNDLE_SECRETS"
+    scrub_bundle "$BUNDLE_WORK" "$BUNDLE_SECRETS" "$BUNDLE_SCRIPT"
     (umask 077 && tar -czf "$support_dir/$name" -C "$BUNDLE_WORK" .)
     chmod 0600 "$support_dir/$name"
     printf '%s\n' "$MEHO_SUPPORT_DIR/$name"

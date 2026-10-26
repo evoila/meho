@@ -54,14 +54,20 @@ are printed at the end, as text or as JSON, in this order:
 | Line | ok when | warn when | red when | Source of the facts |
 | --- | --- | --- | --- | --- |
 | `node` | every node has the condition Ready | never | a node is not Ready, or RKE2 does not answer | `kubectl get nodes -o jsonpath=...` |
-| `pods` | every pod in `meho`, `kube-system` and `local-path-storage` is Running and Ready, or Succeeded | never | a pod is in another state, there is no pod in `meho`, or RKE2 does not answer | `kubectl get pods -A -o jsonpath=...` |
+| `pods` | every pod in `meho`, `kube-system` and `local-path-storage` is Running and Ready, or Succeeded | a pod the kubelet evicted (phase Failed, reason Evicted) while the other pods run | a pod is in another state, there is no pod in `meho`, or RKE2 does not answer | `kubectl get pods -A -o jsonpath=...` |
 | `disk` | `/var/lib/rancher` and `/var/lib/meho` both have 20 % or more free | the lower of the two is below 20 % | below 15 %, or a path cannot be read | `df -P -k <path>` |
-| `certificates` | every row of RKE2's list expires in 30 days or more | a row has less than 30 days left | a row is EXPIRED or its date has passed; the command did not run; the list is empty | `/usr/local/bin/rke2 certificate check --output table` (by its path: sudo's `PATH` on RHEL has no `/usr/local/bin`) |
+| `certificates` | every row of RKE2's list expires in 30 days or more | a row has less than 30 days left | a row is EXPIRED or its date has passed; a row is NOT YET VALID (the clock or the certificate is wrong; its EXPIRES column holds the start date); the command did not run; the list is empty | `/usr/local/bin/rke2 certificate check --output table` (by its path: sudo's `PATH` on RHEL has no `/usr/local/bin`) |
 
 **Why Succeeded counts as fine.** RKE2's `helm-install-*` Jobs in
 `kube-system` and the core's bootstrap Job leave finished pods behind. They
 are in phase Succeeded and never Ready. A rule "every pod is Running and
 Ready" would never be green.
+
+**Why an evicted pod is a warning.** When the disk was full, the kubelet
+evicts a pod and leaves it in the list as Failed with the reason Evicted.
+After the disk is free again and the replacement runs, the entry stays
+until someone removes it, and the customer has no kubectl. So it is a
+warning with a fix, not a red line the customer cannot clear.
 
 **Why 15 % is red.** The kubelet evicts pods when the free space of the file
 system that holds the container images falls below 15 % (its default
@@ -91,8 +97,10 @@ with `status` one of `ok`, `warn` and `fail`. `hint` is empty on an ok line.
 
 ### `support-bundle`
 
-1. Make a work folder `/var/lib/meho/support/.build.XXXXXX` (the support
-   folder is 0700). An EXIT trap removes it.
+1. Make a work folder `/var/lib/meho/support/.build.XXXXXX`, and two files
+   next to it for the Secret values and the sed rules (`.secrets.XXXXXX`,
+   `.sed.XXXXXX`). `mktemp` makes all three for root only, and the support
+   folder is 0700. An EXIT trap removes all three.
 2. Collect, each part into its own file. `collect <file> <command>` keeps
    the command's output and error messages. When a command fails, the file
    says so at its end, and the bundle is still written: support needs it
@@ -111,23 +119,34 @@ with `status` one of `ok`, `warn` and `fail`. `hint` is empty on an ok line.
    | `os/*.txt` | facts about the operating system | `/etc/os-release`, `uname -a`, `free -m`, `df -h`, `ip addr`, `ip route`, `timedatectl` |
    | `install.json` | the install record, when it exists | a copy of `/etc/meho/install.json` |
 
-3. Scrub every file in the work folder with one `sed` run:
-   - the value of any variable whose name holds PASSWORD, TOKEN, SECRET or
+3. Scrub every file in the work folder with one `sed` run. The rules go
+   into the sed script file, never on `sed`'s command line: every user on
+   the machine can read the arguments of a running process, and a form-2
+   machine is the customer's server.
+   - The value of any variable whose name holds PASSWORD, TOKEN, SECRET or
      KEY, in any case, written as `NAME=value`, `NAME: value` (with or
      without the space) or as the JSON pair `"name": "value"` (MEHO's own
-     logs are JSON lines), becomes `[removed]`;
-   - every value of the two one-time files (`/var/lib/meho/unseal-key`, and
-     the part after `=` of each `*_password` line of
-     `/var/lib/meho/first-login-passwords`) becomes `[removed]` wherever it
-     appears, for example in a log line. The `*_username` lines of that file
-     hold plain names such as `admin`, so they are left alone: removing
-     "admin" everywhere would also hit `client-admin.crt` and
-     `/admin/realms/`.
+     logs are JSON lines), becomes `[removed]`. `key` counts only as a word
+     of its own (`api_key`, `unseal-key`, `KEY`), so `keycloak` is not a key
+     name and Keycloak's addresses and image names stay readable.
+   - Every known secret value becomes `[removed]` wherever it appears, for
+     example in a log line. The values come from the core's Secrets in
+     namespace `meho`: `kubectl get secrets -o go-template=...` decodes
+     them straight into the root-only values file, the way `install.sh`
+     reads the first-login Secret. Keys with `user` in the name hold plain
+     names such as `admin`, and values shorter than 8 characters are words,
+     so both stay: removing "admin" everywhere would also hit
+     `client-admin.crt` and `/admin/realms/`. A value on more than one line,
+     such as a certificate, gives only its first line. The two one-time
+     files (`/var/lib/meho/unseal-key` and the `*_password` lines of
+     `/var/lib/meho/first-login-passwords`) are read too while they exist;
+     the guide tells the customer to delete them after the first login, so
+     the Secrets are the source that stays.
 
-   Secret data never gets in: the bundle asks for Secrets as a table, which
-   shows names, types and the number of keys, never a value. A test fills
-   the fake kubectl's answer for `get secret ... -o` with a known password
-   and checks that no call asks for it.
+   Secret data never gets into the bundle: it lists Secrets by name only,
+   and the values file is removed with the work folder. The fake kubectl of
+   the tests gives Secret content only to that Go template, so the bundle
+   cannot read it in another way.
 4. Pack with `umask 077` into `meho-support-<host>-<UTC time>.tar.gz`
    (mode 0600; `<host>` is `hostname -f` in lower case, and the time is
    `date -u +%Y%m%dT%H%M%SZ`), print the path, and on a second line say to
@@ -143,7 +162,9 @@ only stubs and links to a few real tools (`bash`, `awk`, `sed`, `grep`,
 `find`, `tar`, `gzip` and some coreutils). The `date` stub answers "now"
 (2026-10-23 12:00 UTC) and the bundle's time stamp from files, and passes
 every other call on to the real `date`, which parses the certificate dates.
-`certificate_table` and `df_answer` build the stubs' answers.
+`certificate_table`, `pod_line` and `df_answer` build the stubs' answers.
+Every real tool runs behind a wrapper that logs its arguments like a stub,
+so the bundle test checks that no secret value was on any command line.
 
 ```bash
 python3 -m unittest discover -s deploy/linux-server/tests -v
@@ -175,8 +196,8 @@ On the machine: bash, coreutils (`date`, `df`, `find`, `mktemp`), `sed`,
   whole.
 - **Text the scrub misses.** `Authorization: Bearer <token>`, a password
   inside a database address, written as `user:password@host`, and SQL
-  `PASSWORD '<value>'` are not removed. They are rare in MEHO's logs; a
-  follow-up adds them.
+  `PASSWORD '<value>'` are not removed. They are rare in MEHO's logs; #5012
+  adds them.
 - **No size limit on the logs.** A pod with a very large log makes a large
   bundle. `kubectl logs --tail` can be added when that happens.
 - **Not root is a `[FAIL]` line, not JSON.** `meho doctor` (#4740) runs

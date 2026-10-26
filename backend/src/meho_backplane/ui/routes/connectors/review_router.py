@@ -48,7 +48,7 @@ keeps the whole family ahead of the bare detail route.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from meho_backplane.auth.operator import Operator
@@ -125,22 +125,58 @@ async def _edit_handler(
     # least one field" rule, surfaced as a panel).
     custom_description: str | None = Form(default=None, max_length=_CUSTOM_DESCRIPTION_MAX),
     safety_level: str | None = Form(default=None),
-    requires_approval: bool | None = Form(default=None),
-    is_enabled: bool | None = Form(default=None),
+    # The two toggles are read as TEXT, not ``bool``: FastAPI 0.147+ turns
+    # an omitted ``bool`` form field into ``False`` (unchecked-checkbox
+    # semantics), which would make a risk-level-only edit also clear the
+    # approval flag and disable the op. Each micro-form sends only its own
+    # field, so "omitted" must stay "no edit" (``None``).
+    requires_approval: str | None = Form(default=None),
+    is_enabled: str | None = Form(default=None),
     session_ctx: UISessionContext = _require_session_dep,
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
     """``PATCH .../{connector_id}/operations/{op_id:path}`` -- one per-op edit."""
+    # FastAPI hands an EMPTY form value (``requires_approval=``) to the
+    # handler as ``None``, the same as an omitted field. The raw form
+    # (already parsed and cached by Starlette) tells the two apart, so an
+    # empty toggle is refused instead of being read as "no edit".
+    form = await request.form()
     return await submit_op_edit(
         request,
         connector_id=connector_id,
         op_id=op_id,
         custom_description=custom_description,
         safety_level=safety_level,
-        requires_approval=requires_approval,
-        is_enabled=is_enabled,
+        requires_approval=_parse_flag(
+            requires_approval,
+            submitted="requires_approval" in form,
+            field="requires_approval",
+        ),
+        is_enabled=_parse_flag(is_enabled, submitted="is_enabled" in form, field="is_enabled"),
         session_ctx=session_ctx,
         operator=operator,
+    )
+
+
+def _parse_flag(value: str | None, *, submitted: bool, field: str) -> bool | None:
+    """Turn a toggle's submitted text into a flag; an omitted field is ``None``.
+
+    ``None`` means "do not change this field" all the way down to
+    :func:`~meho_backplane.operations.ingest._internals.apply_op_overrides`.
+    The row template submits exactly ``"true"`` / ``"false"``; anything
+    else -- including an empty value, which FastAPI delivers as ``None``
+    while *submitted* is true -- is a hand-crafted request and is refused
+    with 422.
+    """
+    if not submitted:
+        return None
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise HTTPException(
+        status_code=422,
+        detail=f"{field} must be 'true' or 'false', got {value or ''!r}",
     )
 
 

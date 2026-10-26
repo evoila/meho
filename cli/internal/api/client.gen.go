@@ -2839,8 +2839,8 @@ type BodyUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPost struct {
 // BodyUiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatch defines model for Body_ui_connectors_registry_op_edit_ui_connectors_registry__connector_id__operations__op_id__patch.
 type BodyUiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatch struct {
 	CustomDescription *string `json:"custom_description"`
-	IsEnabled         *bool   `json:"is_enabled"`
-	RequiresApproval  *bool   `json:"requires_approval"`
+	IsEnabled         *string `json:"is_enabled"`
+	RequiresApproval  *string `json:"requires_approval"`
 	SafetyLevel       *string `json:"safety_level"`
 
 	// SessionCtx Per-request session identity exposed on ``request.state``.

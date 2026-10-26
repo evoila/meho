@@ -149,6 +149,25 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   a cluster id that does not exist gives `not_found`. It never returns
   empty health fields that look like a healthy cluster. How the call is
   sent: see "vSAN calls" below.
+  The stored result (`#4922`): by default vSAN runs a fresh health check
+  for every call. While a host of the cluster is in maintenance mode or
+  powered off, that check can take longer than the 30-second read limit
+  of the shared HTTP client (`adapters/http.py`), and the call failed
+  with `connector_timeout` and no health data. Now `from_cache: true`
+  sends vSAN's `fetchFromCache: true`, so vCenter answers with its last
+  stored summary in well under a second. The answer always carries
+  `checked_at` (the summary's `timestamp`, the time of the check the
+  result comes from; a stored result keeps the time of its check) and
+  `from_cache`. Without `from_cache`, a fresh check that ends with
+  `httpx.ReadTimeout` is followed by exactly one call with
+  `fetchFromCache: true`; its result is returned with `from_cache: true`,
+  `fresh_check: "timed_out"` and a plain `note` ("The fresh vSAN check did
+  not finish within 30 seconds. A host of the cluster may be down or in
+  maintenance mode. This is the last stored result."). When that call
+  fails too, the operation raises the read timeout again with the same
+  plain text, so the answer is `connector_timeout` as before, now with
+  the explanation in `exception_message`. A timed-out `from_cache: true`
+  call is not retried. The shared 30-second limit itself is unchanged.
 - **Write composites** (`composites/_write.py`) — the module-level
   `async def` handlers (`vm_create_composite`, `vm_clone_composite`,
   `vm_deploy_from_library_composite`, `vm_import_from_library_composite`,
@@ -4236,6 +4255,11 @@ a key; flight-recorder spans, with a control case without the tag),
     dropped the idle session) makes the call log in again and retry once.
     SOAP has no list marker, so a list with one entry comes back as a
     single dict; the operation turns its list fields back into lists.
+    The codec writes two argument types (`_argument_xml`): a managed
+    object reference (`<cluster type="ClusterComputeResource">domain-c7</cluster>`)
+    and, since `#4922`, a true/false value as `xsd:boolean` text
+    (`<fetchFromCache>true</fetchFromCache>`). Any other type raises
+    `TypeError`; an operation that needs one adds it there, with a test.
   - An unknown version stays on VI-JSON. A legacy `/rest` session
     (vcsim) mounts the same `/vsan/...` path on `/rest`.
 

@@ -593,6 +593,13 @@ async def post_preview(
     200, no target-failure 4xx remains. The body is redacted
     through the same connector-boundary pipeline the response path uses;
     nothing is written to the audit row.
+
+    Every envelope whose op resolved also carries the risk level and the
+    policy verdict for this caller and target (#4923): ``safety_level``,
+    ``requires_approval``, ``policy_verdict`` (``auto-execute`` /
+    ``needs-approval`` / ``deny`` — what ``/call`` would do with the same
+    arguments, decided by the same policy gate) and ``policy_reason``
+    (the gate's reason, or ``null`` when it gives none).
     """
     return await preview_operation(operator, body.model_dump())
 

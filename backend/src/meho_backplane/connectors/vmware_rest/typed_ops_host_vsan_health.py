@@ -485,14 +485,10 @@ VMWARE_HOST_VSAN_HEALTH_OP = VmwareTypedOp(
     handler_attr="host_vsan_health",
     summary="vSAN health of one cluster: the overall colour and each group of health tests.",
     description=(
-        "Returns the vSAN health summary of one cluster: the overall colour and each health "
-        "group with its tests (id, name, colour, short text), plus the time of the check "
-        "(checked_at). By default vSAN runs a fresh check. With from_cache: true it returns "
-        "the last stored result in well under a second; use that while a host of the cluster "
-        "is down or in maintenance mode. When a fresh check does not finish within MEHO's "
-        "30-second limit, the call returns the last stored result with fresh_check: "
-        "'timed_out' and a note. When the vSAN call fails, the call returns an error with "
-        "vCenter's fault, not an empty answer. Read-only."
+        "Returns the vSAN health of one cluster: the overall colour, each health group with "
+        "its tests, and the time of the check (checked_at). With from_cache: true it returns "
+        "the last stored result fast; use it while a host is down. A fresh check that is too "
+        "slow falls back to the stored result. Read-only."
     ),
     parameter_schema=_PARAMETER_SCHEMA,
     response_schema=_RESPONSE_SCHEMA,

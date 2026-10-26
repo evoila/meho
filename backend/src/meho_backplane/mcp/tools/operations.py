@@ -16,7 +16,7 @@ the G0.5 tool registry:
   ``required_role=OPERATOR``.
 * ``preview_operation`` -- resolve the same op + target + params a
   ``call_operation`` would, and return the literal would-be HTTP
-  request without dispatching it. ``required_role=OPERATOR``.
+  request (for ingested HTTP operations) without dispatching it. ``required_role=OPERATOR``.
 
 Tool descriptions are load-bearing
 ==================================
@@ -35,7 +35,7 @@ Each description below names:
 
 These descriptions are part of the contract; rewording them is a
 behavioural change. Measure a description change on the #4067 job
-list, scored by the runner of #4253 -- the same rule the tool-text
+list with the runner that #4253 builds -- the same rule the tool-text
 tasks #4111 and #4112 follow.
 
 inputSchema / outputSchema

@@ -36,7 +36,8 @@ session.
 """
 
 # Import for the side-effect: registers the approval previews of
-# k8s.secret.create and k8s.job.create (#4850).
+# k8s.secret.create and k8s.job.create (#4850), and of k8s.secret.update
+# and k8s.secret.delete.
 from meho_backplane.connectors.kubernetes import (  # noqa: F401
     ops_secret_write_preview,
     ops_write_preview,

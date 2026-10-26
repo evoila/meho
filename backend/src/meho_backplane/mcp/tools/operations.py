@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Three MCP tools backing the G0.6 operation meta-tool surface.
+"""Four MCP tools backing the G0.6 operation meta-tool surface.
 
-G0.6-T8 (#399) of Initiative #388. Registers three MCP tools against
+G0.6-T8 (#399) of Initiative #388. Registers four MCP tools against
 the G0.5 tool registry:
 
 * ``list_operation_groups`` -- enumerate enabled operation groups for a
@@ -14,12 +14,14 @@ the G0.5 tool registry:
   ``required_role=OPERATOR``.
 * ``call_operation`` -- invoke the dispatcher for a resolved op_id.
   ``required_role=OPERATOR``.
+* ``preview_operation`` -- resolve the same op + target + params a
+  ``call_operation`` would, and return the literal would-be HTTP
+  request (for ingested HTTP operations) without dispatching it. ``required_role=OPERATOR``.
 
 Tool descriptions are load-bearing
 ==================================
 
-Per :doc:`../../../../../.claude/skills/implement-issue/ai_engineering_best_practices`
-and the G0.5-T4 ``meho_status`` reference impl, the ``description``
+Per the G0.5-T4 ``meho_status`` reference impl, the ``description``
 field is the agent's prompt for *when to call this tool*. Imprecise
 descriptions get tools called incorrectly or never invoked at all.
 Each description below names:
@@ -32,8 +34,9 @@ Each description below names:
    passing ``limit=1`` and then complaining about miss rates, etc.).
 
 These descriptions are part of the contract; rewording them is a
-behavioural change that requires re-evaluating against the agent
-recipe-completion bench (post-G6).
+behavioural change. Measure a description change on the #4067 job
+list with the runner that #4253 builds -- the same rule the tool-text
+tasks #4111 and #4112 follow.
 
 inputSchema / outputSchema
 ==========================

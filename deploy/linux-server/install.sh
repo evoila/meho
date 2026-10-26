@@ -6,17 +6,26 @@
 # internet. It runs as root from the unpacked download (form-2 design,
 # section 4, in meho-internal docs/design/2026-10-10-install-forms/).
 #
-# This version runs steps 1 to 3 of the design (section 5):
-#   1. check the machine                    lib/checks.sh, lib/firewall.sh
-#   2. prepare the machine: the host        lib/firewall.sh, lib/prepare.sh
+# It runs the six steps of the design (section 5):
+#   1. check the machine                        lib/checks.sh, lib/firewall.sh
+#   2. prepare the machine: the host            lib/firewall.sh, lib/prepare.sh
 #      firewall first, then RKE2's files
-#   3. install and start RKE2, then wait    lib/rke2.sh
+#   3. install and start RKE2, then wait        lib/rke2.sh
+#   4. install the MEHO core with Helm          lib/core.sh
+#   5. write the two one-time files             lib/core.sh
+#   6. install the meho command, write the
+#      install record and print the result      lib/core.sh
+#
+# --from-disk runs only the steps that need the host name: RKE2's settings,
+# the start of RKE2, and steps 4 to 6. It leaves the firewall alone. The
+# appliance's first start uses it.
 #
 # Later Tasks add their steps in main() below: the CIS host steps between
-# installing and starting RKE2 (#4636), and the core after step 3 (#4735).
+# installing and starting RKE2 (#4636), meho-host (#4737), and the
+# first-start list to step 6 (#4042).
 #
 # Exit codes:
-#   0  RKE2 and its default storage class are ready
+#   0  MEHO is installed
 #   1  a check or a step failed; the [FAIL] line says what to fix
 #   2  wrong usage: an unknown option or a bad value
 #
@@ -47,22 +56,35 @@ source "$DOWNLOAD_DIR/lib/firewall.sh"
 source "$DOWNLOAD_DIR/lib/prepare.sh"
 # shellcheck source=lib/rke2.sh
 source "$DOWNLOAD_DIR/lib/rke2.sh"
+# shellcheck source=lib/core.sh
+source "$DOWNLOAD_DIR/lib/core.sh"
 
 HOSTNAME_FQDN=""
 PUBLIC_ADDRESS=""
+FIRST_TENANT_ID=""
+ADMIN_USER="admin"
+APPROVER_USER="approver"
 CLUSTER_CIDR="10.42.0.0/16"
 SERVICE_CIDR="10.43.0.0/16"
 JOIN_ADDRESS=""
 JOIN_TOKEN_FILE=""
 ADMIN_NETWORK=""
+FROM_DISK=0
+
+readonly UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+# The user names go into Helm values and the install record as they are,
+# so they take only characters that need no escaping there. Keycloak keeps
+# user names in lower case, so set_option lowers them first.
+readonly USER_NAME_RE='^[a-z0-9][a-z0-9@._-]*$'
 
 usage() {
     cat <<'HELP'
 install.sh: install MEHO on this Linux server, with no internet (form 2).
 
-This version checks the machine, sets the host firewall, prepares the
-machine, and installs and starts RKE2 (the built-in Kubernetes) with its
-default storage class.
+It checks the machine, sets the host firewall, prepares the machine,
+installs and starts RKE2 (the built-in Kubernetes), installs the MEHO
+core, writes the first-login passwords and the unseal key to two files for
+root only, and installs the meho command.
 
 Run it as root from the folder of the unpacked download:
   sudo ./install.sh --hostname meho.example.com --admin-network 10.0.50.0/24
@@ -82,6 +104,14 @@ Options:
                              address of the SSH session that runs
                              install.sh. On the machine's console the
                              option is required.
+  --first-tenant-id <uuid>   The id of the first tenant. Default: a new
+                             random id. Give the old id to keep it on a
+                             move to another machine.
+  --admin-user <name>        The user name of the first admin, stored in
+                             lower case. Default: admin.
+  --approver-user <name>     The user name of the second person, who
+                             approves, stored in lower case.
+                             Default: approver.
   --cluster-cidr <cidr>      The address range of the pods.
                              Default: 10.42.0.0/16.
   --service-cidr <cidr>      The address range of the services.
@@ -90,12 +120,18 @@ Options:
                              together with --join-token-file. Not tested yet.
   --join-token-file <path>   A file that holds the join token. The token is
                              copied to /etc/meho/join-token and never printed.
+  --from-disk                Only on a machine where RKE2's own state was
+                             removed, but its files, the chart and the
+                             images are still on the disk: write RKE2's
+                             settings, start RKE2 and install the core
+                             again. It needs no download and does not check
+                             the machine. The appliance's first start uses it.
   -h, --help                 Show this help and stop.
 
-Each option also takes the form --option=value.
+Each option with a value also takes the form --option=value.
 
 Exit codes:
-  0  RKE2 and its default storage class are ready
+  0  MEHO is installed
   1  a check or a step failed; the [FAIL] line says what to fix
   2  wrong usage: an unknown option or a bad value
 HELP
@@ -106,6 +142,9 @@ set_option() {
     case $1 in
         --hostname) HOSTNAME_FQDN=${2,,} ;;
         --public-address) PUBLIC_ADDRESS=$2 ;;
+        --first-tenant-id) FIRST_TENANT_ID=${2,,} ;;
+        --admin-user) ADMIN_USER=${2,,} ;;
+        --approver-user) APPROVER_USER=${2,,} ;;
         --cluster-cidr) CLUSTER_CIDR=$2 ;;
         --service-cidr) SERVICE_CIDR=$2 ;;
         --join-address) JOIN_ADDRESS=$2 ;;
@@ -123,6 +162,11 @@ parse_options() {
             -h | --help)
                 usage
                 exit 0
+                ;;
+            --from-disk)
+                FROM_DISK=1
+                shift
+                continue
                 ;;
             --*=*)
                 name=${1%%=*}
@@ -147,6 +191,15 @@ validate_options() {
     if [[ -n $PUBLIC_ADDRESS ]] && ! is_ipv4 "$PUBLIC_ADDRESS"; then
         usage_error "--public-address must be an IPv4 address, for example 192.0.2.10."
     fi
+    if [[ -n $FIRST_TENANT_ID && ! $FIRST_TENANT_ID =~ $UUID_RE ]]; then
+        usage_error "--first-tenant-id must be a UUID, for example 3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c."
+    fi
+    [[ $ADMIN_USER =~ $USER_NAME_RE ]] ||
+        usage_error "--admin-user must be a user name of letters, digits and . _ - @, for example admin."
+    [[ $APPROVER_USER =~ $USER_NAME_RE ]] ||
+        usage_error "--approver-user must be a user name of letters, digits and . _ - @, for example approver."
+    [[ $ADMIN_USER != "$APPROVER_USER" ]] ||
+        usage_error "--admin-user and --approver-user must be two different names."
     is_ipv4_cidr "$CLUSTER_CIDR" ||
         usage_error "--cluster-cidr must be an IPv4 range, for example 10.42.0.0/16."
     is_ipv4_cidr "$SERVICE_CIDR" ||
@@ -165,6 +218,9 @@ validate_options() {
         [[ -f $JOIN_TOKEN_FILE && -r $JOIN_TOKEN_FILE && -s $JOIN_TOKEN_FILE ]] ||
             usage_error "--join-token-file $JOIN_TOKEN_FILE is not a readable file with a token in it."
     fi
+    if ((FROM_DISK)) && [[ -n $PUBLIC_ADDRESS ]]; then
+        usage_error "--from-disk runs no DNS check, so --public-address has no effect. Leave it out."
+    fi
 }
 
 # on_error <exit code> <line> <file>: the ERR trap. A command substitution
@@ -182,7 +238,8 @@ on_error() {
 check_machine() {
     check_root
     check_os
-    check_download "$DOWNLOAD_DIR"
+    check_download "$DOWNLOAD_DIR" "${DOWNLOAD_FILES[@]}"
+    read_download_version "$DOWNLOAD_DIR"
     check_cpus
     check_memory
     check_disk
@@ -217,16 +274,44 @@ main() {
     fi
     trap 'on_error "$?" "$LINENO" "${BASH_SOURCE[0]##*/}"' ERR
 
-    step "Step 1: check the machine"
-    check_machine
-    step "Step 2: prepare the machine"
-    prepare_machine
-    step "Step 3: install and start RKE2"
-    install_rke2 "$DOWNLOAD_DIR"
+    if ((FROM_DISK)); then
+        step "Step 1: check the host name and the files on the disk"
+        check_root
+        check_hostname "$HOSTNAME_FQDN"
+        check_download "$DOWNLOAD_DIR" "${CORE_DOWNLOAD_FILES[@]}"
+        read_download_version "$DOWNLOAD_DIR"
+        step "Step 2: write RKE2's settings"
+        write_rke2_config "$HOSTNAME_FQDN" "$CLUSTER_CIDR" "$SERVICE_CIDR" "$JOIN_ADDRESS"
+        step "Step 3: start RKE2"
+    else
+        step "Step 1: check the machine"
+        check_machine
+        step "Step 2: prepare the machine"
+        prepare_machine
+        step "Step 3: install and start RKE2"
+        install_rke2 "$DOWNLOAD_DIR"
+    fi
     start_rke2
     wait_for_rke2
 
-    printf '\ninstall.sh: RKE2 and its default storage class are ready on %s.\n' "$HOSTNAME_FQDN"
+    step "Step 4: install the MEHO core"
+    if [[ -z $FIRST_TENANT_ID ]]; then
+        FIRST_TENANT_ID=$(tenant_id)
+    fi
+    write_place_values "$HOSTNAME_FQDN" "$FIRST_TENANT_ID" "$ADMIN_USER" "$APPROVER_USER" "$CLUSTER_CIDR"
+    install_core "$DOWNLOAD_DIR"
+
+    step "Step 5: write the two one-time files"
+    copy_first_login
+    local unseal_key_written=1
+    copy_unseal_key || unseal_key_written=0
+
+    step "Step 6: install the meho command and write the install record"
+    install_cli "$DOWNLOAD_DIR"
+    write_install_record "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "$HOSTNAME_FQDN" "$PUBLIC_ADDRESS" "$FIRST_TENANT_ID" "$ADMIN_USER" "$APPROVER_USER" \
+        "$CLUSTER_CIDR" "$SERVICE_CIDR" "$FROM_DISK"
+    print_result "$HOSTNAME_FQDN" "$unseal_key_written"
 }
 
 main "$@"

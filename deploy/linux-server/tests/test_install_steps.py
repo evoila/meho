@@ -59,9 +59,7 @@ class RKE2StartTests(InstallTestCase):
         ):
             with self.subTest(line=line):
                 self.assertIn(line, result.stdout)
-        self.assertIn(
-            "RKE2 and its default storage class are ready on meho.example.com.", result.stdout
-        )
+        self.assertIn("MEHO 0.36.0 is installed on meho.example.com.", result.stdout)
 
     def test_the_script_waits_until_the_node_is_ready(self) -> None:
         counter = self.machine.fake / "node_queries"

@@ -132,7 +132,9 @@ The mapping (`inventory_to_csv`):
 - Left out, with the reason: a server without name, cores, memory or OS
   name (`missing_required_field`, with the reasons from `missing`); a
   server already in the file through another source, found by BIOS UUID
-  (`same_machine_as`); servers past 20,000 (`over_file_limit`).
+  (`same_machine_as`); servers past 20,000 (`over_file_limit`). Required
+  values are checked first, so when one record of a machine lacks a value,
+  a complete record of the same machine from another source goes in.
 - Names must be unique, because Azure Migrate updates a server imported
   again with the same name. A repeated name (case does not count) gets its
   `source_id` added, and `renamed` says so.

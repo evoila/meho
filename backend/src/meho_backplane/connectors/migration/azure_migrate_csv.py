@@ -17,8 +17,10 @@ Rules:
   workloads are counted in ``skipped_records``.
 * A server without a required value (name, cores, memory, OS name) is left
   out and listed with the reasons from its ``missing`` map.
-* A server whose BIOS UUID was already seen (one machine read through two
-  sources) is left out and names the record it repeats.
+* A server whose BIOS UUID belongs to a record already in the file (one
+  machine read through two sources) is left out and names that record.
+  Required values are checked first, so a complete second record still
+  goes in when the first one lacks a value.
 * Server names must be unique, because Azure Migrate updates a server
   that is imported again with the same name. A repeated name gets its
   ``source_id`` added, and ``renamed`` says so.
@@ -251,32 +253,12 @@ def _row(server: ServerRecord, csv_name: str, disk_groups: int) -> list[str]:
 def _select(
     servers: list[ServerRecord], duplicates: Iterable[Duplicate]
 ) -> tuple[list[ServerRecord], list[LeftOutServer]]:
-    same_machine = {d.source_id: d.same_as for d in duplicates if d.match == "bios_uuid"}
+    # Every record of one machine maps to the same key: the first record's id.
+    machine_of = {d.source_id: d.same_as for d in duplicates if d.match == "bios_uuid"}
     kept: list[ServerRecord] = []
     left_out: list[LeftOutServer] = []
-    seen_ids: set[str] = set()
+    in_file: dict[str, str] = {}
     for server in servers:
-        if server.source_id in seen_ids:
-            left_out.append(
-                LeftOutServer(
-                    source_id=server.source_id,
-                    name=server.name,
-                    reason="same_machine_as",
-                    same_as=server.source_id,
-                )
-            )
-            continue
-        seen_ids.add(server.source_id)
-        if server.source_id in same_machine:
-            left_out.append(
-                LeftOutServer(
-                    source_id=server.source_id,
-                    name=server.name,
-                    reason="same_machine_as",
-                    same_as=same_machine[server.source_id],
-                )
-            )
-            continue
         missing = _required_missing(server)
         if missing:
             left_out.append(
@@ -288,12 +270,28 @@ def _select(
                 )
             )
             continue
+        machine = machine_of.get(server.source_id, server.source_id)
+        if machine in in_file:
+            # Leave a repeat out only when the record it repeats is in the file.
+            left_out.append(
+                LeftOutServer(
+                    source_id=server.source_id,
+                    name=server.name,
+                    reason="same_machine_as",
+                    same_as=in_file[machine],
+                )
+            )
+            continue
+        if len(kept) >= MAX_SERVERS_PER_FILE:
+            left_out.append(
+                LeftOutServer(
+                    source_id=server.source_id, name=server.name, reason="over_file_limit"
+                )
+            )
+            continue
+        in_file[machine] = server.source_id
         kept.append(server)
-    for server in kept[MAX_SERVERS_PER_FILE:]:
-        left_out.append(
-            LeftOutServer(source_id=server.source_id, name=server.name, reason="over_file_limit")
-        )
-    return kept[:MAX_SERVERS_PER_FILE], left_out
+    return kept, left_out
 
 
 def _unique_names(servers: list[ServerRecord]) -> tuple[list[str], list[RenamedServer]]:

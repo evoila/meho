@@ -584,6 +584,28 @@ def test_csv_leaves_out_servers_without_required_values() -> None:
     assert export.csv.splitlines()[0].startswith("*Server name,")
 
 
+def test_csv_keeps_a_machine_whose_first_record_lacks_a_required_value() -> None:
+    no_os = _vcenter_inventory()
+    linux = next(r for r in no_os["records"] if r["source_id"] == _linux_vm()["source_id"])
+    linux["os"] = None
+    linux["missing"]["os"] = "powered_off"
+    vcenter = InventoryEnvelope.model_validate(no_os)
+    guest = InventoryEnvelope.model_validate(_guest_inventory())
+    records, duplicates = merge_inventories([vcenter, guest])
+    assert [d.match for d in duplicates] == ["bios_uuid"]
+
+    export = inventory_to_csv(records, duplicates)
+
+    # The Linux machine has one row, built from the complete guest OS record.
+    assert export.row_count == 2
+    rows = list(csv.DictReader(io.StringIO(export.csv)))
+    assert [row["*Server name"] for row in rows] == ["app-win-01", "db-lnx-01"]
+    assert (rows[1]["*Memory (In MB)"], rows[1]["*OS name"]) == ("7976", "Ubuntu Linux")
+    assert [(s.source_id, s.reason, s.same_as) for s in export.left_out] == [
+        (_linux_vm()["source_id"], "missing_required_field", None)
+    ]
+
+
 def test_csv_makes_repeated_names_unique_and_cleans_text() -> None:
     first = _linux_vm()
     second = _windows_vm()

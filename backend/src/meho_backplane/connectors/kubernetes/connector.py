@@ -646,15 +646,25 @@ class KubernetesConnector(Connector):
 
         ``operator`` is keyword-only with a ``None`` default to keep the
         :class:`Connector` ABC signature unchanged while letting the
-        refresh service forward the per-tenant system operator the
-        scheduler synthesises
-        (:func:`~meho_backplane.topology.scheduler._system_operator`).
-        The forwarded operator flows through :meth:`_get_api_client` so
-        the operator-context Vault → kubeconfig chain reads under the
-        scheduler's synthetic tenant identity. The ``None`` fall-back
-        synthesises the system operator the fingerprint/probe paths
-        already use, so a direct caller (test, future on-demand surface
-        that doesn't yet thread the operator) still works closed-loop.
+        refresh service forward the acting operator. The forwarded
+        operator flows through :meth:`_get_api_client`, which reads the
+        target's kubeconfig from Vault under the operator's own token.
+
+        **The scheduled run cannot read the kubeconfig today (#4952).**
+        The per-tenant system operator the scheduler synthesises
+        (:func:`~meho_backplane.topology.scheduler._system_operator`)
+        has no person's token (``raw_jwt=""``), and MEHO does not read a
+        target's credentials from Vault without one. So the scheduled
+        refresh fails for every Kubernetes target with a
+        :class:`~meho_backplane.connectors._shared.vault_creds.VaultCredentialsReadError`,
+        which the scheduler reports as an expected outcome. The map is
+        updated for Kubernetes targets only when a logged-in operator
+        runs ``meho topology refresh <target>``.
+
+        The ``None`` fall-back synthesises the system operator the
+        fingerprint/probe paths already use, so a direct caller (test,
+        future on-demand surface that doesn't yet thread the operator)
+        still works closed-loop.
         """
         from meho_backplane.connectors.kubernetes._topology import build_topology_hints
 

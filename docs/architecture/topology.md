@@ -39,6 +39,13 @@ operator (or an agent, before recommending a destructive op) can ask
   `TOPOLOGY_REFRESH_INTERVAL_SECONDS` cadence (default 3600), per-target
   guarded by a PG advisory lock so two replicas don't stampede the same
   target, with per-target exponential backoff on failure.
+  **The scheduled loop does not update Kubernetes targets today
+  (#4952):** it runs without a person's token, and MEHO does not read a
+  target's credentials from Vault without one, so the Kubernetes
+  populator cannot load the kubeconfig. The scheduler reports this as an
+  expected outcome (one warning per target, no stack trace). A
+  logged-in operator updates these targets with
+  `meho topology refresh <target>`.
 - **Three read verbs via recursive CTE** — in `topology/query.py`:
   - `find_dependents(operator, name, *, kind=None, depth=16, kind_filter=None)`
     — reverse closure, "what depends on me".

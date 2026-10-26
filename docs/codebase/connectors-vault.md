@@ -130,7 +130,7 @@ target registration) is documented in
   `credential_read` (decision #3 — aggregate-only broadcast).
 - **`sys` op group** (`ops_sys.py`, G3.3-T2 #546; policy ops
   G3.15-T2 #1410; bootstrap ops G3.15-T5 #1413) —
-  `register_vault_sys_typed_operations()` registers four read-only
+  `register_vault_sys_typed_operations()` registers six read-only
   diagnostics ops, the four ACL-policy ops, and the four bootstrap
   enable/tune ops under group key `sys`. The diagnostics ops are all
   `safety_level='safe'`,
@@ -144,12 +144,66 @@ target registration) is documented in
     signature but is unused.
   - `vault.sys.seal_status` — `GET /v1/sys/seal-status`. Returns the
     raw seal-status object.
+
+    `health` and `seal_status` answer for the **one node** behind the
+    target's address. In a cluster with integrated storage (raft) that
+    address reaches the active node, so both say `sealed: false` even
+    when a standby node came back sealed after a restart. Their
+    descriptions and `llm_instructions` say so and point to the two
+    cluster-wide reads below.
+  - `vault.sys.ha_status` — `GET /v1/sys/ha-status`. Returns
+    `{nodes: [...]}`, one row per node the active node has heard from
+    (`hostname`, `api_address`, `cluster_address`, `active_node`,
+    `last_echo`, `version`, `clock_skew_ms`, `echo_duration_ms`).
+    Vault puts the list under `data.Nodes` (capital N); the handler
+    also accepts a lower-case key. Enterprise-only fields are dropped.
+  - `vault.sys.raft.autopilot_state` —
+    `GET /v1/sys/storage/raft/autopilot/state`. Returns `healthy`,
+    `failure_tolerance` (how many more nodes may fail before Vault
+    stops), `leader`, and `{servers: [...]}` with one row per raft
+    server sorted by id (`id`, `name`, `address`, `status`,
+    `node_status`, `node_type`, `healthy`, `last_contact`, `last_index`,
+    `last_term`, `stable_since`, `version`). Vault returns `servers` as
+    a map keyed by raft id; the handler turns it into a list so the
+    answer is set-shaped. Vault's `voters` id list is left out on
+    purpose: a second top-level list would stop the result reduction
+    from finding the server rows, and each row's `status` already says
+    whether the server is the leader, a voter or a non-voter. The
+    `result_scalars` hint keeps `healthy`, `failure_tolerance` and
+    `leader` next to the reduced rows. Only clusters with raft storage
+    answer; a Vault on another storage backend returns an error, which
+    surfaces as `connector_error`.
+
+    Both live in `ops_sys_cluster.py` (split out to keep `ops_sys.py`
+    small) and are registered from
+    `register_vault_sys_typed_operations()`. hvac 2.4.0 has no helper
+    for either endpoint, so they call `client.adapter.get(<api path>)`
+    through the operator client. A 403 raises
+    `hvac.exceptions.Forbidden`, which the dispatcher turns into the
+    normal `connector_vault_forbidden` error.
+
+    **Vault policy the two reads need.** Both paths need the `read`
+    capability. Neither is sudo-protected (Vault's root-protected
+    endpoint list does not name them). The autopilot read must run in
+    the root namespace. Add this to the policy of MEHO's Vault role
+    (the role the operator JWT logs in to, `VAULT_OIDC_ROLE`):
+
+    ```hcl
+    path "sys/ha-status" {
+      capabilities = ["read"]
+    }
+    path "sys/storage/raft/autopilot/state" {
+      capabilities = ["read"]
+    }
+    ```
+
+    Without the grant the ops return `connector_vault_forbidden`.
   - `vault.sys.mounts.list` — `GET /v1/sys/mounts`. Returns the
     envelope's `data` under a `mounts` key.
   - `vault.sys.auth.list` — `GET /v1/sys/auth`. Returns the envelope's
     `data` under an `auth_methods` key.
 
-  The three authenticated ops forward the operator JWT via
+  The five authenticated ops forward the operator JWT via
   `vault_client_for_operator` and offload the blocking `hvac` call with
   `asyncio.to_thread`.
 
@@ -684,11 +738,12 @@ raw >50-key list once a handle is produced.
    broadcast event, and reduces the result (JSONFlux).
 4. `op_class` for audit/broadcast is **derived from the op-id suffix**
    by `broadcast.events.classify_op`, not passed at registration. The
-   four `sys` ops classify as `read` — `.list` was already a read
-   suffix; `.health` and `.seal_status` were added to the read-suffix
-   tuple by #546 (no secret content, so they broadcast at the same
-   sensitivity as `.list`/`.get` rather than falling through to the
-   full-detail `other` class).
+   six `sys` diagnostics ops classify as `read` — `.list` was already a
+   read suffix; `.health` and `.seal_status` were added to the
+   read-suffix tuple by #546, and `.ha_status` / `.autopilot_state` for
+   the cluster-wide reads (no secret content, so they broadcast at the
+   same sensitivity as `.list`/`.get` rather than falling through to
+   the full-detail `other` class).
 
 ## Error handling
 
@@ -788,6 +843,11 @@ and a real Postgres audit store (reusing the integration conftest's
   call. Acceptable under v0.2 dogfood load (per-request login is
   already the v0.1/v0.2 model); revisit if a per-operator token cache
   lands.
+- `vault.sys.health` and `vault.sys.seal_status` see only the node
+  behind the target's address. Use `vault.sys.ha_status` or
+  `vault.sys.raft.autopilot_state` for the whole cluster. There is no
+  per-node seal read yet (that would need a per-node address on the
+  target).
 - `sys` policy writes (`policy.write` / `policy.delete`) landed in
   G3.15-T2 (#1410), approval-gated; the sys bootstrap writes
   (`auth.enable` / `auth.tune` / `mounts.enable` / `mounts.tune`)

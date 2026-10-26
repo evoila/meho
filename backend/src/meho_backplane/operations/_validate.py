@@ -444,6 +444,7 @@ async def _service_grant_verdict(
     target_id_str: str | None,
     preview_hash: str | None = None,
     params: dict[str, Any] | None = None,
+    decide_only: bool = False,
 ) -> tuple[PermissionVerdict | None, str | None]:
     """Consult a standing grant for a parking service-principal op (#3151 / #3349).
 
@@ -463,8 +464,9 @@ async def _service_grant_verdict(
         connector_id=connector_id,
         preview_hash=preview_hash,
         params=params,
+        record=not decide_only,
     )
-    if grant_id is not None:
+    if grant_id is not None and not decide_only:
         _log.info(
             "policy_gate_standing_grant_auto_approved",
             operator_sub=operator.sub,
@@ -475,6 +477,7 @@ async def _service_grant_verdict(
             target_id=target_id_str,
             grant_id=str(grant_id),
         )
+    if grant_id is not None:
         return PermissionVerdict.AUTO_EXECUTE, f"auto-granted by standing grant {grant_id}"
 
     hint = await _null_target_park_hint(
@@ -496,6 +499,7 @@ async def _non_agent_verdict(
     connector_id: str | None,
     preview_hash: str | None = None,
     params: dict[str, Any] | None = None,
+    decide_only: bool = False,
 ) -> tuple[PermissionVerdict, str | None]:
     """Resolve the verdict for a human / service (non-agent) principal.
 
@@ -561,6 +565,7 @@ async def _non_agent_verdict(
             target_id_str=target_id_str,
             preview_hash=preview_hash,
             params=params,
+            decide_only=decide_only,
         )
         if cleared is not None:
             return cleared, gate_reason
@@ -590,6 +595,7 @@ async def policy_gate(
     connector_id: str | None = None,
     preview_hash: str | None = None,
     params: dict[str, Any] | None = None,
+    decide_only: bool = False,
 ) -> tuple[PermissionVerdict, str | None]:
     """G11.2-T3 per-(principal, op, target) policy gate.
 
@@ -653,11 +659,12 @@ async def policy_gate(
     caller's :class:`~meho_backplane.db.models.AgentPermission` rows,
     mirroring the same pattern :func:`audit_safe` uses.
 
-    ``preview_hash`` and ``params`` (#4622) are read only by the
-    service-principal grant consult on an instance in sandbox mode: a
-    ``destructive`` delete under a delete grant must present the hash of
-    its own preview and a valid blast radius before the grant use is
-    recorded. Every other path ignores them.
+    ``preview_hash`` and ``params`` (#4622) matter only to the
+    service-principal grant consult in sandbox mode (a ``destructive``
+    delete must present its own preview hash and a valid blast radius
+    first). ``decide_only`` (#4923) returns the verdict and writes nothing:
+    a grant that would clear the call is reported but not used; the
+    preview relies on this.
     """
     actor_sub = resolve_actor_sub()
     if actor_sub is not None:
@@ -669,6 +676,7 @@ async def policy_gate(
             connector_id=connector_id,
             preview_hash=preview_hash,
             params=params,
+            decide_only=decide_only,
         )
     return await _caller_verdict(
         operator=operator,
@@ -677,6 +685,7 @@ async def policy_gate(
         connector_id=connector_id,
         preview_hash=preview_hash,
         params=params,
+        decide_only=decide_only,
     )
 
 
@@ -688,6 +697,7 @@ async def _caller_verdict(
     connector_id: str | None,
     preview_hash: str | None = None,
     params: dict[str, Any] | None = None,
+    decide_only: bool = False,
 ) -> tuple[PermissionVerdict, str | None]:
     """Verdict for the caller alone, by its principal kind."""
     if operator.principal_kind is PrincipalKind.AGENT:
@@ -699,6 +709,7 @@ async def _caller_verdict(
         connector_id=connector_id,
         preview_hash=preview_hash,
         params=params,
+        decide_only=decide_only,
     )
 
 
@@ -711,6 +722,7 @@ async def _direct_run_verdict(
     connector_id: str | None,
     preview_hash: str | None = None,
     params: dict[str, Any] | None = None,
+    decide_only: bool = False,
 ) -> tuple[PermissionVerdict, str | None]:
     """Verdict for a call made by a direct hosted-agent run (#4237).
 
@@ -749,6 +761,7 @@ async def _direct_run_verdict(
         connector_id=connector_id,
         preview_hash=preview_hash,
         params=params,
+        decide_only=decide_only,
     )
     if _more_restrictive(verdict, agent_verdict) is verdict:
         return verdict, reason

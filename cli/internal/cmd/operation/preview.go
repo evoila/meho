@@ -27,10 +27,11 @@ import (
 // On `status="ok"` the envelope carries the literal would-be request
 // (`method` / `resolved_path` / `query` / `redacted_body`) plus the
 // `preview_hash` (#3197) — the stable binding a caller presents on the
-// subsequent governed `call_operation` of a `destructive`-tier op. An
-// ingested op's preview also carries `safety_level` and
-// `requires_approval` (#3973), so the operator sees before the real call
-// that it needs a human approval. On
+// subsequent governed `call_operation` of a `destructive`-tier op. Every
+// preview whose op resolved also carries `safety_level`,
+// `requires_approval`, `policy_verdict` and `policy_reason` (#3973 /
+// #4923), so the operator sees before the real call whether it runs at
+// once, waits for approval, or is refused. On
 // `status="error"` / `status="unavailable"` the `error` string and the
 // `extras.error_code` describe why no preview (and no hash) was produced.
 // `query` / `redacted_body` / `extras` stay `json.RawMessage` so the
@@ -51,10 +52,13 @@ type PreviewResult struct {
 	Query        json.RawMessage `json:"query,omitempty"`
 	RedactedBody json.RawMessage `json:"redacted_body,omitempty"`
 	PreviewHash  string          `json:"preview_hash"`
-	// SafetyLevel / RequiresApproval are absent on non-ingested previews
-	// and on older backplanes, so both stay optional.
-	SafetyLevel      string `json:"safety_level,omitempty"`
-	RequiresApproval *bool  `json:"requires_approval,omitempty"`
+	// SafetyLevel / RequiresApproval / PolicyVerdict / PolicyReason are
+	// absent when the op did not resolve and on older backplanes, so all
+	// four stay optional.
+	SafetyLevel      string  `json:"safety_level,omitempty"`
+	RequiresApproval *bool   `json:"requires_approval,omitempty"`
+	PolicyVerdict    string  `json:"policy_verdict,omitempty"`
+	PolicyReason     *string `json:"policy_reason,omitempty"`
 	// ProposedEffect is the plan of what the op will change (#4028).
 	ProposedEffect json.RawMessage `json:"proposed_effect,omitempty"`
 	// PlanShown is nil on an ingested preview, which has no plan slot.
@@ -125,7 +129,13 @@ func newPreviewCmd() *cobra.Command {
 			"(`proposed_effect`) when the plan can be built without contacting " +
 			"the target. When the plan needs the target, the preview says so: " +
 			"the plan is built when you send the call and is shown on the " +
-			"approval request.",
+			"approval request.\n\n" +
+			"Every preview whose op resolved also says the risk level and what " +
+			"MEHO would do with this call for you and this target: run it at " +
+			"once, wait for a second person's approval, or refuse it. The " +
+			"decision is made the same way `meho operation call` makes it, but " +
+			"nothing is written. With --json the fields are `safety_level`, " +
+			"`requires_approval`, `policy_verdict` and `policy_reason`.",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -271,6 +281,9 @@ func postPreview(
 func printPreviewResult(w io.Writer, connectorID, opID string, r *PreviewResult) {
 	fmt.Fprintf(w, "%s %s — status=%s (source_kind=%s)\n",
 		connectorID, opID, r.Status, r.SourceKind)
+	if line := policyLine(r); line != "" {
+		fmt.Fprintln(w, line)
+	}
 	if r.Status != "ok" {
 		// status == "error" / "unavailable": surface the reason + extras.
 		if r.Error != nil && *r.Error != "" {
@@ -284,12 +297,6 @@ func printPreviewResult(w io.Writer, connectorID, opID string, r *PreviewResult)
 	}
 	fmt.Fprintf(w, "  method:        %s\n", r.Method)
 	fmt.Fprintf(w, "  resolved_path: %s\n", r.ResolvedPath)
-	if r.SafetyLevel != "" {
-		fmt.Fprintf(w, "  safety_level:  %s\n", r.SafetyLevel)
-	}
-	if r.RequiresApproval != nil && *r.RequiresApproval {
-		fmt.Fprintln(w, "  approval:      needs approval — a second person must approve before it runs")
-	}
 	if len(r.Query) > 0 && string(r.Query) != "null" {
 		fmt.Fprintln(w, "  query:")
 		printPrettyOrRaw(w, r.Query)
@@ -313,6 +320,34 @@ func printPreviewResult(w io.Writer, connectorID, opID string, r *PreviewResult)
 	fmt.Fprintf(w,
 		"  → pass to a governed dispatch: meho operation call %s %s --preview-hash %s [--target … --params …]\n",
 		connectorID, opID, r.PreviewHash)
+}
+
+// policyLine is the one plain line that says the risk level and what MEHO
+// would do with this call (#4923): "Risk level: dangerous. This call waits
+// for approval." It is empty when the backplane sent no risk level (the op
+// did not resolve, or an older backplane). Without a policy_verdict (an
+// older backplane that only sent requires_approval, #3973) the line falls
+// back to the approval flag.
+func policyLine(r *PreviewResult) string {
+	if r.SafetyLevel == "" {
+		return ""
+	}
+	line := "Risk level: " + r.SafetyLevel + "."
+	switch r.PolicyVerdict {
+	case "auto-execute":
+		return line + " This call runs at once."
+	case "needs-approval":
+		return line + " This call waits for approval."
+	case "deny":
+		if r.PolicyReason != nil && *r.PolicyReason != "" {
+			return line + " This call is refused: " + *r.PolicyReason
+		}
+		return line + " This call is refused."
+	}
+	if r.RequiresApproval != nil && *r.RequiresApproval {
+		return line + " This call waits for approval."
+	}
+	return line
 }
 
 // printPrettyOrRaw pretty-prints a JSON fragment, falling back to the

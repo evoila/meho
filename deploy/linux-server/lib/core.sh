@@ -89,21 +89,9 @@ networkPolicy:
 EOF
 }
 
-# write_file <machine path> <render function> [argument]...: write what the
-# function prints to the path, below HOST_ROOT, for root only. It replaces
-# an older file in one step.
-write_file() {
-    local target="${HOST_ROOT}$1" temporary
-    shift
-    mkdir -p "${target%/*}"
-    temporary=$(mktemp "${target}.XXXXXX")
-    "$@" >"$temporary"
-    mv -f "$temporary" "$target"
-}
-
 # write_place_values takes the arguments of render_place_values.
 write_place_values() {
-    write_file "$MEHO_PLACE_VALUES" render_place_values "$@"
+    render_place_values "$@" | write_root_file "$MEHO_PLACE_VALUES" 0600
     ok "wrote the answers of this place to $MEHO_PLACE_VALUES"
 }
 
@@ -202,7 +190,7 @@ EOF
 
 # write_install_record takes the arguments of render_install_record.
 write_install_record() {
-    write_file "$MEHO_INSTALL_RECORD" render_install_record "$@"
+    render_install_record "$@" | write_root_file "$MEHO_INSTALL_RECORD" 0600
     ok "wrote the install record to $MEHO_INSTALL_RECORD"
 }
 

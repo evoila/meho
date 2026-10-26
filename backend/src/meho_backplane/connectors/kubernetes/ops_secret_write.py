@@ -40,7 +40,11 @@ neither shows a Secret value anywhere.
     waits for approval.
 
 The handlers return key names only, never a value. Errors name the Secret,
-never a value.
+never a value. ``k8s.secret.update`` sends a secret, so the dispatcher
+withholds the message of a raised error from the result (#4854). Each error
+class here therefore also carries its text as ``remediation``: that field
+is MEHO's own text, names no value, and stays in the result, the audit row
+and the stored approval result. So the caller still reads what to do next.
 
 References
 ----------
@@ -93,20 +97,39 @@ class KubernetesSecretNotFoundError(ValueError):
 
     Subclasses :class:`ValueError` so the dispatcher's ``connector_error``
     envelope tags ``extras.exception_class="KubernetesSecretNotFoundError"``.
-    The message names the Secret and the op that creates one.
+    The message names the Secret and the op that creates one. The same text
+    is ``remediation``, so it reaches the caller when the message is withheld.
     """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.remediation = message
 
 
 class KubernetesSecretImmutableError(ValueError):
-    """The Secret has ``immutable: true``; Kubernetes refuses every change to it."""
+    """The Secret has ``immutable: true``; Kubernetes refuses every change to it.
+
+    The message says to delete the Secret and create it again. The same text
+    is ``remediation``, so it reaches the caller when the message is withheld.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.remediation = message
 
 
 class KubernetesSecretConflictError(ConnectorUpstreamError):
     """The Secret changed between the read and the write (HTTP 409).
 
     Raised only in ``replace`` mode. Nothing was written; the caller reads
-    the Secret again and runs the op again.
+    the Secret again and runs the op again. The message says so; the same
+    text is ``remediation``, so it reaches the caller when the message and
+    the API server's text are withheld.
     """
+
+    def __init__(self, message: str, *, http_status: int, upstream_message: str | None) -> None:
+        super().__init__(message, http_status=http_status, upstream_message=upstream_message)
+        self.remediation = message
 
 
 def secret_key_names(secret: Any) -> list[str]:

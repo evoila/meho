@@ -74,6 +74,7 @@ from meho_backplane.operations._preview import (
     build_proposed_effect,
 )
 from meho_backplane.operations._request_preview import preview_dispatch
+from meho_backplane.operations._vendor_text import VENDOR_TEXT_WITHHELD
 from meho_backplane.settings import get_settings
 
 from ._vault_fakes import install_fake_client
@@ -794,6 +795,89 @@ async def test_update_values_never_reach_result_audit_approval_row_or_preview(
     assert _UPDATE in audit
     assert _INLINE_VALUE not in audit
     assert _REF_VALUE not in audit
+
+
+# ``k8s.secret.update`` sends a secret, so the dispatcher withholds the text of
+# a raised error (#4854). MEHO's own guidance must still reach the caller
+# through ``extras.remediation``.
+
+_UPDATE_PARAMS: dict[str, Any] = {
+    "name": "db-creds",
+    "namespace": "apps",
+    "string_data": {"password": _INLINE_VALUE},
+}
+
+
+async def _approved_update(core: MagicMock, params: dict[str, Any]) -> Any:
+    with _core_v1_patch() as core_cls:
+        core_cls.return_value = core
+        return await dispatch(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_UPDATE,
+            target=_TARGET,
+            params=params,
+            _approved=True,
+        )
+
+
+def _assert_message_withheld_but_guidance_kept(
+    result: Any, *, exception_class: str, guidance: str
+) -> None:
+    assert result.status == "error", result
+    assert result.error == f"connector_error: {exception_class}"
+    assert result.extras["exception_class"] == exception_class
+    assert result.extras["exception_message"] == VENDOR_TEXT_WITHHELD
+    assert guidance in result.extras["remediation"]
+    assert _INLINE_VALUE not in json.dumps(result.model_dump(mode="json"), default=str)
+
+
+async def test_dispatch_of_a_missing_secret_keeps_the_create_guidance(
+    _registered_ops: None, _fake_api_client: MagicMock
+) -> None:
+    core = _core_v1(ApiException(status=404, reason="Not Found"))
+    result = await _approved_update(core, dict(_UPDATE_PARAMS))
+    _assert_message_withheld_but_guidance_kept(
+        result,
+        exception_class="KubernetesSecretNotFoundError",
+        guidance="use k8s.secret.create to create it",
+    )
+    assert "Secret apps/db-creds does not exist" in result.extras["remediation"]
+    core.patch_namespaced_secret.assert_not_awaited()
+    audit = await _audit_blobs()
+    assert "use k8s.secret.create to create it" in audit
+    assert _INLINE_VALUE not in audit
+
+
+async def test_dispatch_of_an_immutable_secret_keeps_the_delete_guidance(
+    _registered_ops: None, _fake_api_client: MagicMock
+) -> None:
+    core = _core_v1(_existing_secret(immutable=True))
+    result = await _approved_update(core, dict(_UPDATE_PARAMS))
+    _assert_message_withheld_but_guidance_kept(
+        result,
+        exception_class="KubernetesSecretImmutableError",
+        guidance=f"Delete it with {_DELETE} and create it again with k8s.secret.create",
+    )
+    core.patch_namespaced_secret.assert_not_awaited()
+    core.replace_namespaced_secret.assert_not_awaited()
+
+
+async def test_dispatch_of_a_replace_conflict_keeps_the_retry_guidance(
+    _registered_ops: None, _fake_api_client: MagicMock
+) -> None:
+    core = _core_v1(_existing_secret())
+    core.replace_namespaced_secret = AsyncMock(
+        side_effect=ApiException(status=409, reason="Conflict")
+    )
+    result = await _approved_update(core, {**_UPDATE_PARAMS, "mode": "replace"})
+    _assert_message_withheld_but_guidance_kept(
+        result,
+        exception_class="KubernetesSecretConflictError",
+        guidance=f"nothing was written. Run {_UPDATE} again",
+    )
+    assert result.extras["http_status"] == 409
+    assert result.extras["upstream_message"] == VENDOR_TEXT_WITHHELD
 
 
 async def test_delete_without_a_preview_hash_is_refused(

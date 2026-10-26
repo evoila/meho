@@ -570,6 +570,14 @@ two ops in the `config` group, next to `k8s.secret.create`.
   read and the write makes the API server answer 409
   (`KubernetesSecretConflictError`, a `ConnectorUpstreamError`). Nothing is
   lost without notice.
+- The op sends a secret, so the dispatcher withholds the message of a raised
+  error from the result (#4854, `_vendor_text.py`). Each of the three error
+  classes above also sets `remediation` to its own text (the Secret's name
+  and what to do next, never a value). `result_connector_error` copies that
+  attribute into `extras.remediation`, which the withholding keeps. So the
+  caller, the audit row and the stored approval result still say "use
+  `k8s.secret.create`", "delete it and create it again" or "nothing was
+  written, run it again".
 - Result: `{name, namespace, type, mode, data_keys, keys_set, keys_removed,
   updated}`. Key names only, never a value.
 - The op is pinned in `_CREDENTIAL_WRITE_OPS` like `k8s.secret.create`.

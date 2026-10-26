@@ -73,20 +73,20 @@ usage_exit() {
   exit 2
 }
 
-while [ $# -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
   case "$1" in
-    --client-id) [ $# -ge 2 ] || usage_exit "missing value for --client-id"; CLIENT_ID="$2"; shift 2 ;;
-    --key-file)  [ $# -ge 2 ] || usage_exit "missing value for --key-file";  KEY_FILE="$2";  shift 2 ;;
-    --credential-source) [ $# -ge 2 ] || usage_exit "missing value for --credential-source"; CREDENTIAL_SOURCE="$2"; shift 2 ;;
-    --vault-target) [ $# -ge 2 ] || usage_exit "missing value for --vault-target"; VAULT_TARGET="$2"; shift 2 ;;
-    --vault-path) [ $# -ge 2 ] || usage_exit "missing value for --vault-path"; VAULT_PATH="$2"; shift 2 ;;
-    --vault-client-id-field) [ $# -ge 2 ] || usage_exit "missing value for --vault-client-id-field"; VAULT_CLIENT_ID_FIELD="$2"; shift 2 ;;
-    --vault-private-key-field) [ $# -ge 2 ] || usage_exit "missing value for --vault-private-key-field"; VAULT_PRIVATE_KEY_FIELD="$2"; shift 2 ;;
-    --op-vault) [ $# -ge 2 ] || usage_exit "missing value for --op-vault"; OP_VAULT="$2"; shift 2 ;;
-    --op-item) [ $# -ge 2 ] || usage_exit "missing value for --op-item"; OP_ITEM="$2"; shift 2 ;;
-    --op-client-id-field) [ $# -ge 2 ] || usage_exit "missing value for --op-client-id-field"; OP_CLIENT_ID_FIELD="$2"; shift 2 ;;
-    --op-private-key-field) [ $# -ge 2 ] || usage_exit "missing value for --op-private-key-field"; OP_PRIVATE_KEY_FIELD="$2"; shift 2 ;;
-    --repo)      [ $# -ge 2 ] || usage_exit "missing value for --repo";      REPO="$2";      shift 2 ;;
+    --client-id) [[ $# -ge 2 ]] || usage_exit "missing value for --client-id"; CLIENT_ID="$2"; shift 2 ;;
+    --key-file)  [[ $# -ge 2 ]] || usage_exit "missing value for --key-file";  KEY_FILE="$2";  shift 2 ;;
+    --credential-source) [[ $# -ge 2 ]] || usage_exit "missing value for --credential-source"; CREDENTIAL_SOURCE="$2"; shift 2 ;;
+    --vault-target) [[ $# -ge 2 ]] || usage_exit "missing value for --vault-target"; VAULT_TARGET="$2"; shift 2 ;;
+    --vault-path) [[ $# -ge 2 ]] || usage_exit "missing value for --vault-path"; VAULT_PATH="$2"; shift 2 ;;
+    --vault-client-id-field) [[ $# -ge 2 ]] || usage_exit "missing value for --vault-client-id-field"; VAULT_CLIENT_ID_FIELD="$2"; shift 2 ;;
+    --vault-private-key-field) [[ $# -ge 2 ]] || usage_exit "missing value for --vault-private-key-field"; VAULT_PRIVATE_KEY_FIELD="$2"; shift 2 ;;
+    --op-vault) [[ $# -ge 2 ]] || usage_exit "missing value for --op-vault"; OP_VAULT="$2"; shift 2 ;;
+    --op-item) [[ $# -ge 2 ]] || usage_exit "missing value for --op-item"; OP_ITEM="$2"; shift 2 ;;
+    --op-client-id-field) [[ $# -ge 2 ]] || usage_exit "missing value for --op-client-id-field"; OP_CLIENT_ID_FIELD="$2"; shift 2 ;;
+    --op-private-key-field) [[ $# -ge 2 ]] || usage_exit "missing value for --op-private-key-field"; OP_PRIVATE_KEY_FIELD="$2"; shift 2 ;;
+    --repo)      [[ $# -ge 2 ]] || usage_exit "missing value for --repo";      REPO="$2";      shift 2 ;;
     -h|--help)   usage; exit 0 ;;
     *)           usage_exit "unknown argument: $1" ;;
   esac
@@ -107,10 +107,10 @@ read_1password_field() {
 read_key() {
   case "$CREDENTIAL_SOURCE" in
     manual)
-      if [ "$KEY_FILE" = "-" ]; then
+      if [[ "$KEY_FILE" = "-" ]]; then
         cat <&3
       else
-        [ -s "$KEY_FILE" ] || { err "key file is missing or empty: $KEY_FILE"; return 1; }
+        [[ -s "$KEY_FILE" ]] || { err "key file is missing or empty: $KEY_FILE"; return 1; }
         cat -- "$KEY_FILE"
       fi
       ;;
@@ -121,24 +121,24 @@ read_key() {
 
 case "$CREDENTIAL_SOURCE" in
   manual)
-    [ -n "$CLIENT_ID" ] || usage_exit "no client id (--client-id or MEHO_REVIEW_APP_CLIENT_ID)"
-    [ -n "$KEY_FILE" ] || usage_exit "no key file (--key-file or MEHO_REVIEW_APP_KEY_FILE)"
+    [[ -n "$CLIENT_ID" ]] || usage_exit "no client id (--client-id or MEHO_REVIEW_APP_CLIENT_ID)"
+    [[ -n "$KEY_FILE" ]] || usage_exit "no key file (--key-file or MEHO_REVIEW_APP_KEY_FILE)"
     # The signing pipeline gets its own stdin for JWT bytes. Preserve the
     # caller's streamed PEM on a separate inherited descriptor first.
-    [ "$KEY_FILE" != "-" ] || exec 3<&0
+    [[ "$KEY_FILE" != "-" ]] || exec 3<&0
     ;;
   governed-vault)
     command -v meho >/dev/null 2>&1 || { err "missing dependency: meho (required for governed-vault)"; exit 3; }
-    [ -n "$VAULT_TARGET" ] || usage_exit "no Vault target (--vault-target or MEHO_REVIEW_APP_VAULT_TARGET)"
-    [ -n "$VAULT_PATH" ] || usage_exit "no Vault path (--vault-path or MEHO_REVIEW_APP_VAULT_PATH)"
+    [[ -n "$VAULT_TARGET" ]] || usage_exit "no Vault target (--vault-target or MEHO_REVIEW_APP_VAULT_TARGET)"
+    [[ -n "$VAULT_PATH" ]] || usage_exit "no Vault path (--vault-path or MEHO_REVIEW_APP_VAULT_PATH)"
     CLIENT_ID="$(read_governed_field "$VAULT_CLIENT_ID_FIELD")" || { err "governed Vault read failed for client id"; exit 4; }
-    [ -n "$CLIENT_ID" ] || { err "governed Vault client-id field is empty"; exit 4; }
+    [[ -n "$CLIENT_ID" ]] || { err "governed Vault client-id field is empty"; exit 4; }
     ;;
   1password)
     command -v op >/dev/null 2>&1 || { err "missing dependency: op (required for 1password)"; exit 3; }
-    [ -n "$OP_VAULT" ] || usage_exit "no 1Password vault (--op-vault or MEHO_REVIEW_APP_OP_VAULT)"
+    [[ -n "$OP_VAULT" ]] || usage_exit "no 1Password vault (--op-vault or MEHO_REVIEW_APP_OP_VAULT)"
     CLIENT_ID="$(read_1password_field "$OP_CLIENT_ID_FIELD")" || { err "1Password read failed for client id"; exit 4; }
-    [ -n "$CLIENT_ID" ] || { err "1Password client-id field is empty"; exit 4; }
+    [[ -n "$CLIENT_ID" ]] || { err "1Password client-id field is empty"; exit 4; }
     ;;
   *) usage_exit "unsupported credential source: $CREDENTIAL_SOURCE (choose manual, governed-vault, or 1password)" ;;
 esac
@@ -157,7 +157,7 @@ payload="$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$iat" "$exp" "$CLIENT_ID" | 
 # cannot mint a token. OpenSSL consumes the key exactly once; do not
 # pre-validate with `openssl pkey`, which would consume a stream twice.
 sign_jwt() {
-  if [ "$CREDENTIAL_SOURCE" = "manual" ] && [ "$KEY_FILE" != "-" ]; then
+  if [[ "$CREDENTIAL_SOURCE" = "manual" ]] && [[ "$KEY_FILE" != "-" ]]; then
     printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign "$KEY_FILE" -binary
   else
     read_key | {
@@ -169,11 +169,11 @@ sign_jwt() {
 }
 
 if ! signature="$(sign_jwt | b64url)"; then
-  [ "$CREDENTIAL_SOURCE" != "manual" ] || [ "$KEY_FILE" != "-" ] || exec 3<&-
+  [[ "$CREDENTIAL_SOURCE" != "manual" ]] || [[ "$KEY_FILE" != "-" ]] || exec 3<&-
   err "private key is not a readable private key (PEM expected), or credential read failed"
   exit 4
 fi
-[ "$CREDENTIAL_SOURCE" != "manual" ] || [ "$KEY_FILE" != "-" ] || exec 3<&-
+[[ "$CREDENTIAL_SOURCE" != "manual" ]] || [[ "$KEY_FILE" != "-" ]] || exec 3<&-
 jwt="${header}.${payload}.${signature}"
 
 gh_api() {
@@ -208,7 +208,7 @@ case "$status" in
 esac
 
 installation_id="$(printf '%s' "$installation" | jq -r '.id // empty')"
-[ -n "$installation_id" ] || { err "installation response carried no id"; exit 8; }
+[[ -n "$installation_id" ]] || { err "installation response carried no id"; exit 8; }
 
 response="$(gh_api POST "/app/installations/${installation_id}/access_tokens")" || {
   err "network failure minting the token on installation ${installation_id}"
@@ -216,13 +216,13 @@ response="$(gh_api POST "/app/installations/${installation_id}/access_tokens")" 
 }
 status="${response##*$'\n'}"
 token_response="${response%$'\n'*}"
-[ "$status" = "201" ] || {
+[[ "$status" = "201" ]] || {
   err "token mint failed with HTTP ${status} on installation ${installation_id}"
   exit 9
 }
 
 token="$(printf '%s' "$token_response" | jq -r '.token // empty')"
-[ -n "$token" ] || { err "token response carried no token field"; exit 9; }
+[[ -n "$token" ]] || { err "token response carried no token field"; exit 9; }
 
 expires_at="$(printf '%s' "$token_response" | jq -r '.expires_at // "unknown"')"
 err "minted installation token for ${REPO} (installation ${installation_id}), expires ${expires_at}"

@@ -67,6 +67,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from meho_backplane.agent.invocation import (
+    RUN_INPUT_MAX_CHARS,
     AgentDisabledError,
     AgentNotFoundError,
     AgentRunNotFoundError,
@@ -121,7 +122,13 @@ class AgentRunRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    input: str = Field(min_length=1, description="The user prompt to run the agent on.")
+    input: str = Field(
+        min_length=1,
+        max_length=RUN_INPUT_MAX_CHARS,
+        description=(
+            f"The user prompt to run the agent on. At most {RUN_INPUT_MAX_CHARS} characters."
+        ),
+    )
     async_: bool = Field(
         default=False,
         alias="async",

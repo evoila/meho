@@ -138,6 +138,8 @@ spec:
               value: /etc/config/
             - name: HEALTH_PORT
               value: "8080"
+          securityContext:
+            allowPrivilegeEscalation: false
       volumes:
         - name: config-volume
           configMap:

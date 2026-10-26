@@ -68,7 +68,7 @@ Later Tasks add their steps to `main()` in `install.sh`:
 | `lib/rke2.sh` | Step 3: RKE2's installer, the start, and the wait with one time limit. |
 | `lib/core.sh` | Steps 4 to 6: the versions of the download, the place values, the Helm call, the two one-time files, the `meho` command, the install record, the result lines. |
 | `values-single-node.yaml` | The Helm values for one node. The download ships it as `chart/values-single-node.yaml`. |
-| `storage/local-path-storage.yaml` | Rancher's local-path provisioner v0.0.37 manifest with four changes. |
+| `storage/local-path-storage.yaml` | Rancher's local-path provisioner v0.0.37 manifest with five changes. |
 | `tests/` | Python `unittest` suites that run `install.sh` against a fake machine. |
 | `.shellcheckrc` | Lets shellcheck follow the `source` lines of `install.sh`. |
 
@@ -265,7 +265,7 @@ see [linux-server-download.md](linux-server-download.md).
 ## The storage manifest
 
 `storage/local-path-storage.yaml` is the upstream v0.0.37 manifest with
-four changes:
+five changes:
 
 - the StorageClass `local-path` has `storageclass.kubernetes.io/is-default-class: "true"`;
 - the volumes live in `/var/lib/meho/volumes`;
@@ -278,14 +278,21 @@ four changes:
   They reserve room for the controller and bound its resource use. Upstream
   leaves resources unset by default. These are initial bounds, not measured
   MEHO usage. Check CPU throttling and memory use before changing them for
-  a larger number of volumes.
+  a larger number of volumes;
+- the provisioner container has `securityContext.allowPrivilegeEscalation: false`.
+  So a process in it cannot gain more rights than it started with, for
+  example through a program with the setuid bit. The provisioner only talks
+  to the Kubernetes API and starts the helper pods, so it needs no extra
+  rights. This matters because the strict pod security rule does not check
+  the storage namespace (#4636): the container's own `securityContext` is
+  the only guard there. Upstream v0.0.37 sets no `securityContext`.
 
 `tests/fixtures/local-path-storage-v0.0.37.yaml` is the upstream file,
 unchanged. A test compares the two files and accepts only these changes.
 The CI job also compares the fixture with the file on GitHub.
 
 To move to a newer provisioner: replace the fixture with the new upstream
-file, apply the four changes again, and update the digests and the
+file, apply the five changes again, and update the digests and the
 `sha256` in `tests/test_storage_manifest.py`.
 
 ## Testing

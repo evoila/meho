@@ -598,6 +598,18 @@ not a raised exception, so an SSE consumer always sees a terminal frame.
 
 All fronts require the `operator` role and are tenant-scoped via the JWT.
 
+The run input has one size limit on every front: 65,536 characters
+(`RUN_INPUT_MAX_CHARS` in `agent/invocation.py`, the same size as the
+knowledge and memory body caps). REST declares it as `max_length` on
+`AgentRunRequest.input`, so a longer body is a 422 (`string_too_long`,
+`ctx.max_length`) before the route runs. MCP declares it as `maxLength` on
+`meho_agents_run.input`; the dispatcher renders a `maxLength` violation as
+`<field>: at most <n> characters` instead of repeating the value. The CLI
+checks `--input` with `utf8.RuneCountInString` before it sends, so a
+too-long input is one short error line, not a 422 body that echoes the
+input. The console keeps its own, smaller prompt limit (`INPUT_MAX` in
+`ui/routes/agents/run.py`).
+
 ### Why the SSE events route is a POST that starts a fresh run
 
 The issue's literal shape was `GET …/runs/{handle}/events`. SSE needs the

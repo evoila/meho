@@ -48,7 +48,7 @@ import contextvars
 import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
@@ -1076,6 +1076,30 @@ async def _run_definition(toolset: dict[str, Any] | None, operator: Operator) ->
 async def _audit_row_count() -> int:
     async with get_sessionmaker()() as session:
         return (await session.execute(select(func.count()).select_from(AuditLog))).scalar_one()
+
+
+@pytest.mark.parametrize(
+    ("kind", "reason", "invalid_field"),
+    [("invalid", "unsupported", "kind"), ("capability", "invalid", "reason")],
+)
+def test_receipt_revalidates_existing_omissions(kind: str, reason: str, invalid_field: str) -> None:
+    # A frozen stdlib dataclass does not enforce its own Literal annotations.
+    # The receipt must check an already-created instance at its input boundary.
+    omission = ContextOmission(kind=cast("Any", kind), name="tool", reason=cast("Any", reason))
+    with pytest.raises(ValidationError) as error:
+        HostedContextReceipt(
+            conventions_revision="revision",
+            capabilities={},
+            context_chars=0,
+            context_tokens_estimate=0,
+            conventions_delivered=0,
+            conventions_tokens_estimate=0,
+            omissions=(omission,),
+        )
+    assert any(
+        item["loc"] == ("omissions", 0, invalid_field) and item["type"] == "literal_error"
+        for item in error.value.errors()
+    )
 
 
 async def test_receipt_fixture_configured_empty() -> None:

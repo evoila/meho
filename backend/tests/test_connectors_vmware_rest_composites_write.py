@@ -41,7 +41,7 @@ import asyncio
 import copy
 import json
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -4099,6 +4099,85 @@ async def test_drain_deploy_cleanup_cancel_then_failure_still_cancels() -> None:
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=5)
     assert task.cancelled()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("child_first", [True, False])
+async def test_drain_deploy_cleanup_preserves_simultaneous_cancellation(child_first: bool) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def cleanup() -> list[dict[str, Any]]:
+        started.set()
+        await release.wait()
+        raise asyncio.CancelledError
+
+    caller = asyncio.create_task(_write._drain_deploy_cleanup(cleanup()))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    if child_first:
+        release.set()
+        caller.cancel()
+    else:
+        caller.cancel()
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(caller, timeout=5)
+    assert caller.cancelled()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("previous_cancellation", [True, False])
+async def test_drain_deploy_cleanup_child_cancel_returns_warning(
+    previous_cancellation: bool,
+) -> None:
+    async def cleanup() -> list[dict[str, Any]]:
+        raise asyncio.CancelledError
+
+    async def run() -> list[dict[str, Any]]:
+        if previous_cancellation:
+            current = asyncio.current_task()
+            assert current is not None
+            current.cancel()
+            with suppress(asyncio.CancelledError):
+                await asyncio.sleep(0)
+        return await _write._drain_deploy_cleanup(cleanup())
+
+    issues = await asyncio.wait_for(asyncio.create_task(run()), timeout=5)
+    assert issues == [
+        {
+            "category": "cleanup",
+            "severity": "warning",
+            "message": "the cleanup was cancelled; check vCenter by hand",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_count", [1, 2])
+async def test_drain_deploy_cleanup_drains_repeated_caller_cancel(cancel_count: int) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def cleanup() -> list[dict[str, Any]]:
+        started.set()
+        await release.wait()
+        finished.set()
+        return []
+
+    caller = asyncio.create_task(_write._drain_deploy_cleanup(cleanup()))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    for _ in range(cancel_count):
+        caller.cancel()
+        resumed = asyncio.Event()
+        asyncio.get_running_loop().call_soon(resumed.set)
+        await resumed.wait()
+        assert not caller.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(caller, timeout=5)
+    assert finished.is_set()
+    assert caller.cancelled()
 
 
 @pytest.mark.asyncio

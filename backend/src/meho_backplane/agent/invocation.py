@@ -128,6 +128,7 @@ from meho_backplane.operations.identity_budget import TokenUsage
 from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
+    "RUN_INPUT_MAX_CHARS",
     "AgentDisabledError",
     "AgentInvocationError",
     "AgentInvoker",
@@ -143,6 +144,13 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
+
+#: Upper bound on a direct run's ``input`` text, in characters. The REST
+#: body model, the MCP tool schema and the Go CLI all name this one number,
+#: so a caller sees the same limit on every front. It is the same size as
+#: the knowledge-base and memory body caps (``64 * 1024``); real run inputs
+#: are a few sentences, so the bound stops no normal use.
+RUN_INPUT_MAX_CHARS: Final[int] = 64 * 1024
 
 
 class AgentInvocationError(Exception):

@@ -159,14 +159,21 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "the pods behind each Service via label selectors."
     ),
     "config": (
-        "Use for ConfigMap data inspection: ``k8s.configmap.list`` "
-        "(keys-only -- one row per ConfigMap with its data keys but "
-        "no values) and ``k8s.configmap.info`` (full data payload for "
-        "one named ConfigMap). The right group for 'what config is "
-        "this workload reading?' or 'which env var lives in which "
-        "ConfigMap?'. The list / info split is deliberate -- the "
-        "agent surveys keys cheaply via list, then fetches values "
-        "only for the specific ConfigMap it needs."
+        "Use for ConfigMap data inspection and for Secrets. ConfigMaps: "
+        "``k8s.configmap.list`` (keys-only -- one row per ConfigMap with "
+        "its data keys but no values) and ``k8s.configmap.info`` (full "
+        "data payload for one named ConfigMap). The right group for "
+        "'what config is this workload reading?' or 'which env var lives "
+        "in which ConfigMap?'. The list / info split is deliberate -- the "
+        "agent surveys keys cheaply via list, then fetches values only "
+        "for the specific ConfigMap it needs. Secrets: "
+        "``k8s.secret.create`` makes a new Secret, ``k8s.secret.update`` "
+        "changes the values of an existing one (rotate a token or "
+        "password), ``k8s.secret.delete`` removes one after a preview "
+        "that lists the workloads using it, and ``k8s.secret.read_to_ref`` "
+        "copies a Secret value into the credential store and returns only "
+        "a reference. No Secret op ever shows a value; all of them wait "
+        "for approval."
     ),
     "events": (
         "Use for cluster-event observability and troubleshooting: "
@@ -1639,6 +1646,28 @@ class KubernetesConnector(Connector):
         )
 
         return await k8s_secret_read_to_ref(self, target, operator, params)
+
+    async def k8s_secret_update(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.secret.update``."""
+        from meho_backplane.connectors.kubernetes.ops_secret_write import k8s_secret_update
+
+        return await k8s_secret_update(self, target, operator, params)
+
+    async def k8s_secret_delete(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.secret.delete``."""
+        from meho_backplane.connectors.kubernetes.ops_secret_write import k8s_secret_delete
+
+        return await k8s_secret_delete(self, target, operator, params)
 
     @classmethod
     async def register_operations(cls) -> None:

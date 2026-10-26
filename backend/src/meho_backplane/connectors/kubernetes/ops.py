@@ -187,7 +187,8 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
     / ``k8s.cr.list`` / ``k8s.cr.info``) + ``k8s.logs`` (T5) +
     ``k8s.exec`` + the write ops + ``CRONJOB_OPS`` (``k8s.cronjob.run``:
     start a CronJob's job now) + ``SECRET_READ_OPS`` (#3496 governed
-    guest-cluster kubeconfig read: ``k8s.secret.read_to_ref``).
+    guest-cluster kubeconfig read: ``k8s.secret.read_to_ref``) +
+    ``SECRET_WRITE_OPS`` (``k8s.secret.update`` / ``k8s.secret.delete``).
 
     Implemented as a function call rather than a literal-and-splat at
     module level so the import order stays linear: ``ops.py`` defines
@@ -215,6 +216,7 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
     )
     from meho_backplane.connectors.kubernetes.ops_network import NETWORK_OPS
     from meho_backplane.connectors.kubernetes.ops_secret_read import SECRET_READ_OPS
+    from meho_backplane.connectors.kubernetes.ops_secret_write import SECRET_WRITE_OPS
     from meho_backplane.connectors.kubernetes.ops_storage import STORAGE_OPS
     from meho_backplane.connectors.kubernetes.ops_workload import WORKLOAD_OPS
     from meho_backplane.connectors.kubernetes.ops_write_meta import (
@@ -269,6 +271,7 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
         *CRONJOB_OPS,
         *WRITE_DANGEROUS_OPS,
         *SECRET_READ_OPS,
+        *SECRET_WRITE_OPS,
     )
 
 

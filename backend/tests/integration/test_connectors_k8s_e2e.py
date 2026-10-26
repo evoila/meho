@@ -178,6 +178,10 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     # approval-gated): reads a Secret's data value and stages it to a
     # tenant-scoped Vault secret_ref.
     "k8s.secret.read_to_ref",
+    # Change or delete an existing Secret (approval-gated; delete is
+    # destructive and needs a preview hash).
+    "k8s.secret.update",
+    "k8s.secret.delete",
 )
 
 

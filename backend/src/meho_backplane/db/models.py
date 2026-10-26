@@ -8743,6 +8743,17 @@ class CheckDashboardSensor(Base):
         primary_key=True,
         nullable=False,
     )
+    # The member's state as this Dashboard last counted it (#5068): the
+    # severity-capped, hold-time-applied state the rollup folds. The
+    # transition claim (``checks.investigate``) is its only writer and
+    # compare-and-swaps it like ``check_dashboards.last_rollup_state``, so
+    # a member that gets worse while the Dashboard's own state stays the
+    # same still produces exactly one mail. Lives on the link row, not the
+    # ``sensor`` row, because one Sensor can sit on several Dashboards and
+    # each Dashboard mails on its own. NULL means "not counted yet" (every
+    # row from before migration 0116): the first claim records the state
+    # without mailing.
+    last_member_state: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     __table_args__ = (
         # Reverse lookup "which Dashboards reference this Sensor" + the index
@@ -8751,6 +8762,12 @@ class CheckDashboardSensor(Base):
             "check_dashboard_sensors_sensor_idx",
             "sensor_id",
             postgresql_using="btree",
+        ),
+        # ``last_member_state`` over exactly #2504's ``CheckState`` members;
+        # NULL is admitted (the state is unwritten until the first claim).
+        sa.CheckConstraint(
+            _ck_in("last_member_state", _CHECK_DASHBOARD_ROLLUP_STATES),
+            name="ck_check_dashboard_sensors_last_member_state",
         ),
     )
 

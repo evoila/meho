@@ -59,6 +59,26 @@ cannot be evaluated is a degradation, matching the Initiative's
 ``skip`` edge never clears the bar **on its own**; ``critical -> skip``
 still mails, because the ``critical`` side does.
 
+A new problem on a Dashboard that is already red (#5068)
+=======================================================
+
+The edge rule above only sees the Dashboard's overall state. A Dashboard
+that is already ``critical`` because of one Sensor therefore hid every
+later problem on it: a second Sensor turning ``critical`` did not move the
+overall state, so no mail went out. Since #5068 the claim also
+compare-and-swaps each member's counted state (the link row's
+``last_member_state``) and hands a :class:`DashboardNotice` carrying a
+:class:`MemberChange` to this module when one member got worse while the
+overall state stayed the same. The notice is delivered through the same
+gates as a Dashboard edge, with the member's own edge standing in for the
+Dashboard's: the ``notify_min_state`` floor applies to the member's new
+state, and the flap window is keyed per ``(tenant, dashboard, sensor,
+state)`` so a flapping member is bounded like a flapping Dashboard. The
+subject names the member and says the Dashboard is still red; the body
+lists every non-green member and marks the new one. A member recovering
+while the Dashboard stays red is not mailed (the #5068 boundary), and a
+member change never reaches the investigator.
+
 Exactly-once, and the flap window
 =================================
 
@@ -153,6 +173,7 @@ from meho_backplane.settings import get_settings
 __all__ = [
     "DashboardNotice",
     "FindingNotice",
+    "MemberChange",
     "NotifyMember",
     "notify_dashboard_transition",
     "notify_finding",
@@ -246,6 +267,23 @@ class NotifyMember:
 
 
 @dataclass(frozen=True, slots=True)
+class MemberChange:
+    """One member Sensor that got worse while its Dashboard stayed red (#5068).
+
+    :attr:`previous_state` -> :attr:`current_state` is the member's edge as
+    the Dashboard counts it (severity-capped, hold-time applied) -- the edge
+    the floor and the flap window are judged on when this rides along on a
+    :class:`DashboardNotice`. :attr:`sensor_id` keys the member's own flap
+    window.
+    """
+
+    sensor_id: uuid.UUID
+    name: str
+    previous_state: str
+    current_state: str
+
+
+@dataclass(frozen=True, slots=True)
 class DashboardNotice:
     """One claimed transition, detached for the background send.
 
@@ -256,6 +294,11 @@ class DashboardNotice:
     :attr:`tenant_id` exists for the #2732 suppression key -- the same
     per-tenant prefix discipline the #2718 advisory key follows, and what
     keeps the Valkey namespace greppable per tenant.
+
+    :attr:`member_change` set (#5068) makes this a "new problem" notice:
+    :attr:`previous_state` and :attr:`current_state` are then both the
+    Dashboard's unchanged state, and the member's own edge is what the
+    gates judge (:func:`_edge`).
     """
 
     tenant_id: uuid.UUID
@@ -266,6 +309,31 @@ class DashboardNotice:
     notify_email: str | None
     notify_min_state: str
     members: tuple[NotifyMember, ...]
+    member_change: MemberChange | None = None
+
+
+def _edge(notice: DashboardNotice) -> tuple[str, str]:
+    """The ``(previous, current)`` edge the gates judge this notice on.
+
+    The member's edge for a "new problem" notice, the Dashboard's otherwise.
+    """
+    if notice.member_change is not None:
+        return notice.member_change.previous_state, notice.member_change.current_state
+    return notice.previous_state, notice.current_state
+
+
+def _log_fields(notice: DashboardNotice) -> dict[str, object]:
+    """The structured fields every outcome log for *notice* carries."""
+    previous, current = _edge(notice)
+    fields: dict[str, object] = {
+        "dashboard_id": str(notice.dashboard_id),
+        "previous_state": previous,
+        "current_state": current,
+    }
+    if notice.member_change is not None:
+        fields["member_name"] = notice.member_change.name
+        fields["member_sensor_id"] = str(notice.member_change.sensor_id)
+    return fields
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,7 +377,13 @@ def _crosses_threshold(previous: str, current: str, min_state: str) -> bool:
     return max(_NOTIFY_RANK.get(previous, 0), _NOTIFY_RANK.get(current, 0)) >= floor
 
 
-def _suppression_key(tenant_id: uuid.UUID, dashboard_id: uuid.UUID, state: str) -> str:
+def _suppression_key(
+    tenant_id: uuid.UUID,
+    dashboard_id: uuid.UUID,
+    state: str,
+    *,
+    sensor_id: uuid.UUID | None = None,
+) -> str:
     """Valkey key bounding one ``(tenant, dashboard, state)`` per window (#2732).
 
     Unlike the #2718 advisory's key there is no caller segment: the
@@ -319,7 +393,15 @@ def _suppression_key(tenant_id: uuid.UUID, dashboard_id: uuid.UUID, state: str) 
     Dashboard (#2764) -- it cannot burn N windows. Every segment is a UUID or
     a CHECK-constrained vocabulary word, so the ``:`` delimiter cannot alias
     two keys.
+
+    With *sensor_id* the key bounds one ``(tenant, dashboard, sensor,
+    state)`` -- the "new problem" window (#5068). The literal ``member``
+    segment keeps it apart from the Dashboard-level keys, which
+    :func:`_clear_suppression` deletes on recovery; member keys are left to
+    expire on their own.
     """
+    if sensor_id is not None:
+        return f"meho:checks:notify:{tenant_id}:{dashboard_id}:member:{sensor_id}:{state}"
     return f"meho:checks:notify:{tenant_id}:{dashboard_id}:{state}"
 
 
@@ -338,7 +420,14 @@ async def _claim_suppression(notice: DashboardNotice, window_seconds: int) -> bo
     Fail-open: any Valkey error warn-logs ``checks_notify_suppression_failed``
     and returns ``True`` -- a missed alert is worse than a duplicate.
     """
-    key = _suppression_key(notice.tenant_id, notice.dashboard_id, notice.current_state)
+    _, current = _edge(notice)
+    change = notice.member_change
+    key = _suppression_key(
+        notice.tenant_id,
+        notice.dashboard_id,
+        current,
+        sensor_id=change.sensor_id if change is not None else None,
+    )
     try:
         claimed = await get_broadcast_client().set(key, "1", nx=True, ex=window_seconds)
     except Exception:
@@ -413,20 +502,41 @@ def _subject(notice: DashboardNotice) -> str:
     An "all clear" prefix keys on *no member being non-green* rather than on
     the edge improving: ``critical -> degraded`` improves but still has
     failures to name, and the recipient's filter rule cares about whether
-    anything is still broken.
+    anything is still broken. A "new problem" notice (#5068) names the
+    member and its edge, and says the Dashboard is still in its state --
+    the Sensor name is operator-authored text, so it is folded like the
+    Dashboard name.
     """
-    prefix = "" if notice.members else "all clear - "
     name = _single_line(notice.name)
+    change = notice.member_change
+    if change is not None:
+        member = _single_line(change.name)
+        return (
+            f"[MEHO] {name}: new problem {member} "
+            f"{change.previous_state} -> {change.current_state} "
+            f"(dashboard still {notice.current_state})"
+        )
+    prefix = "" if notice.members else "all clear - "
     return f"[MEHO] {prefix}{name}: {notice.previous_state} -> {notice.current_state}"
 
 
 def _body(notice: DashboardNotice) -> str:
-    """Build the plain-text body: the edge, then the non-green members."""
-    lines = [
-        f"Dashboard: {notice.name}",
-        f"State: {notice.previous_state} -> {notice.current_state}",
-        "",
-    ]
+    """Build the plain-text body: the edge, then the non-green members.
+
+    A "new problem" notice (#5068) states the unchanged Dashboard state and
+    the member's edge up front, then marks that member ``(new)`` in the
+    list so the recipient finds it without reading every block.
+    """
+    change = notice.member_change
+    lines = [f"Dashboard: {notice.name}"]
+    if change is not None:
+        lines.append(f"State: {notice.current_state} (unchanged)")
+        lines.append(
+            f"New problem: {_clip(change.name)} {change.previous_state} -> {change.current_state}"
+        )
+    else:
+        lines.append(f"State: {notice.previous_state} -> {notice.current_state}")
+    lines.append("")
     if not notice.members:
         lines.append("All clear - no member sensor is in a failing state.")
         return "\n".join(lines) + "\n"
@@ -435,7 +545,8 @@ def _body(notice: DashboardNotice) -> str:
     lines.append(f"Non-green members ({len(notice.members)}):")
     lines.append("")
     for member in shown:
-        lines.append(f"- {_clip(member.name)} [{member.effective_state}]")
+        marker = " (new)" if change is not None and member.name == change.name else ""
+        lines.append(f"- {_clip(member.name)} [{member.effective_state}]{marker}")
         lines.append(f"    last value: {_clip(member.last_value)}")
         lines.append(f"    evidence:   {_clip(member.last_evidence)}")
     if len(notice.members) > len(shown):
@@ -511,11 +622,9 @@ async def _deliver(notice: DashboardNotice, recipients: list[str]) -> None:
         return
     _log().info(
         "checks_notify_sent",
-        dashboard_id=str(notice.dashboard_id),
-        previous_state=notice.previous_state,
-        current_state=notice.current_state,
         member_count=len(notice.members),
         recipient_count=len(recipients),
+        **_log_fields(notice),
     )
 
 
@@ -542,6 +651,11 @@ async def notify_dashboard_transition(notice: DashboardNotice) -> None:
     (:func:`_allowed_recipients`) and :func:`_deliver` fans one
     :func:`~meho_backplane.connectors.mail.transport.send_email` call out to
     the allowlisted survivors (#2764).
+
+    A "new problem" notice (#5068) runs the same gates on the member's own
+    edge (:func:`_edge`): the floor is judged on the member's new state and
+    the flap window is the member's. Its new state is always non-green, so
+    it never clears the Dashboard's windows.
     """
     if not notice.notify_email:
         _log().info(
@@ -549,17 +663,16 @@ async def notify_dashboard_transition(notice: DashboardNotice) -> None:
             dashboard_id=str(notice.dashboard_id),
         )
         return
+    previous, current = _edge(notice)
     window_minutes = get_settings().checks_notify_suppression_window_minutes
-    suppressible = notice.current_state in _SUPPRESSIBLE_STATES
+    suppressible = current in _SUPPRESSIBLE_STATES
     if window_minutes > 0 and not suppressible:
         await _clear_suppression(notice)
-    if not _crosses_threshold(notice.previous_state, notice.current_state, notice.notify_min_state):
+    if not _crosses_threshold(previous, current, notice.notify_min_state):
         _log().info(
             "checks_notify_skipped_below_threshold",
-            dashboard_id=str(notice.dashboard_id),
-            previous_state=notice.previous_state,
-            current_state=notice.current_state,
             notify_min_state=notice.notify_min_state,
+            **_log_fields(notice),
         )
         return
     if (
@@ -569,10 +682,8 @@ async def notify_dashboard_transition(notice: DashboardNotice) -> None:
     ):
         _log().info(
             "checks_notify_suppressed",
-            dashboard_id=str(notice.dashboard_id),
-            previous_state=notice.previous_state,
-            current_state=notice.current_state,
             window_minutes=window_minutes,
+            **_log_fields(notice),
         )
         return
     recipients = _allowed_recipients(notice.notify_email, dashboard_id=str(notice.dashboard_id))

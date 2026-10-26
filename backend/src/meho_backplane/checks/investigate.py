@@ -50,6 +50,16 @@ That consumer acts on **both** edge directions (an operator paged for
 ``critical`` needs the all-clear too) and applies its own per-Dashboard floor,
 so the worsening gate described above governs the investigator alone.
 
+Since #5068 the claim also watches each **member** of the Dashboard. A
+Dashboard that is already ``critical`` because of one Sensor used to hide
+every later problem on it: a second Sensor turning ``critical`` did not
+change the overall state, so nothing happened. Now the claim keeps a
+per-``(dashboard, sensor)`` memo (``check_dashboard_sensors.last_member_state``,
+the member's state as the rollup counts it) and compare-and-swaps it the
+same way as the Dashboard memo. A member that gets worse while the
+Dashboard's state stays the same produces one "new problem" mail through
+the same notifier. Member changes never reach the investigator.
+
 Operator context, and the emailed finding (#2721)
 =================================================
 
@@ -137,10 +147,10 @@ from meho_backplane.agent.run import BudgetExceededError
 from meho_backplane.auth.agent_token import AgentTokenError
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.checks.assertions import CheckState
-from meho_backplane.checks.dashboard_repository import members_by_dashboard
 from meho_backplane.checks.notify import (
     DashboardNotice,
     FindingNotice,
+    MemberChange,
     NotifyMember,
     schedule_dashboard_notification,
     schedule_finding_notification,
@@ -352,6 +362,27 @@ class _ClaimedTransition:
 
 
 @dataclass(frozen=True, slots=True)
+class _DashboardClaims:
+    """Everything one Dashboard's claim produced for this caller (#5068).
+
+    :attr:`transition` is the Dashboard-level edge, or ``None`` when the
+    overall state did not move or a concurrent caller won it.
+    :attr:`member_notices` holds one notice per member Sensor that got
+    worse while the overall state stayed the same -- empty whenever
+    :attr:`transition` is set, because the Dashboard mail already lists
+    every non-green member.
+    """
+
+    transition: _ClaimedTransition | None
+    member_notices: list[DashboardNotice]
+
+
+#: One member row as the claim reads it: the link row (carrying the
+#: per-Dashboard member memo), the Sensor, and its evaluation against ``now``.
+_MemberRow = tuple[CheckDashboardSensor, Sensor, MemberEvaluation]
+
+
+@dataclass(frozen=True, slots=True)
 class _CauseGroup:
     """One correlated cause: the Sensors a single investigation covers.
 
@@ -419,6 +450,10 @@ async def _process_transition(
     ``notify_min_state`` floor -- so a ``critical -> ok`` recovery mails the
     all-clear without the investigator ever seeing it. No Broadcast event is
     published (#3758).
+
+    A member Sensor that got worse while the Dashboard's state stayed the
+    same (#5068) is handed to the notifier only, as a "new problem" notice;
+    the investigator keeps its Dashboard-edge gate.
     """
     now = now or datetime.now(UTC)
     sessionmaker = get_sessionmaker()
@@ -429,12 +464,14 @@ async def _process_transition(
         return
 
     pending: list[_ClaimedTransition] = []
+    member_notices: list[DashboardNotice] = []
     for dashboard_id in dashboard_ids:
-        claimed = await _claim_dashboard_transition(
+        claims = await _claim_dashboard_transition(
             sessionmaker, tenant_id=tenant_id, dashboard_id=dashboard_id, now=now
         )
-        if claimed is not None:
-            pending.append(claimed)
+        if claims.transition is not None:
+            pending.append(claims.transition)
+        member_notices.extend(claims.member_notices)
 
     # Claims committed under the per-(tenant, dashboard) lock; spawn the
     # expensive work off the runner's persist path. Investigation and
@@ -449,6 +486,8 @@ async def _process_transition(
                 tenant_id=tenant_id, dashboard=claim.dashboard, members=claim.non_green
             )
         schedule_dashboard_notification(claim.notice)
+    for notice in member_notices:
+        schedule_dashboard_notification(notice)
 
 
 async def _claim_dashboard_transition(
@@ -457,8 +496,8 @@ async def _claim_dashboard_transition(
     tenant_id: uuid.UUID,
     dashboard_id: uuid.UUID,
     now: datetime,
-) -> _ClaimedTransition | None:
-    """Atomically claim one Dashboard's rollup transition; ``None`` if not owned.
+) -> _DashboardClaims:
+    """Atomically claim one Dashboard's rollup transition and its member changes.
 
     Serialises concurrent evaluations of the same ``(tenant, dashboard)`` behind a
     transaction-scoped Postgres advisory lock (auto-released at commit; a no-op on
@@ -475,6 +514,13 @@ async def _claim_dashboard_transition(
     filter that used to live here now sits at the single routing site in
     :func:`_process_transition`, unchanged in meaning.
 
+    Inside the same transaction, and under the same lock, each member's
+    counted state is compare-and-swapped against the link row's
+    ``last_member_state`` memo (#5068, :func:`_claim_member_changes`). A
+    member that got worse while the overall state stayed the same yields a
+    "new problem" notice; when the overall state moved, the Dashboard mail
+    covers every member and the member memos are only brought up to date.
+
     The snapshots are detached while the ORM rows are live (before commit)
     because the backgrounded investigation opens its own sessions and the
     backgrounded notification opens none at all.
@@ -485,23 +531,24 @@ async def _claim_dashboard_transition(
         )
         dashboard = await session.get(CheckDashboard, dashboard_id)
         if dashboard is None or dashboard.tenant_id != tenant_id:
-            return None
-        members = (await members_by_dashboard(session, dashboard_ids=[dashboard_id])).get(
-            dashboard_id, []
-        )
-        evaluations = [(s, evaluate_member(_member_state(s), now)) for s in members]
-        current = fold([e for _, e in evaluations])
+            return _DashboardClaims(transition=None, member_notices=[])
+        evaluations: list[_MemberRow] = [
+            (link, s, evaluate_member(_member_state(s), now))
+            for link, s in await _member_rows(session, dashboard_id=dashboard_id)
+        ]
+        current = fold([e for _, _, e in evaluations])
         previous_memo = dashboard.last_rollup_state
         previous = previous_memo or "ok"
         worsening = _is_worsening(previous, current)
         dashboard_snapshot = _dashboard_snapshot(dashboard, previous, current)
         non_green = [
             _member_snapshot(s, ev)
-            for s, ev in evaluations
+            for _, s, ev in evaluations
             if ev.effective_state not in ("ok", "skip")
         ]
         claimed = False
-        if current != previous_memo:
+        dashboard_edge = current != previous_memo
+        if dashboard_edge:
             # Compare-and-swap: the memo tracks the freshly computed state so a
             # still-non-green Dashboard fires exactly once (on the edge), and the
             # rowcount is the atomic claim token that coalesces concurrent callers.
@@ -509,16 +556,71 @@ async def _claim_dashboard_transition(
                 session, dashboard_id, expected=previous_memo, new=current
             )
         notice = _dashboard_notice(dashboard, dashboard_snapshot, non_green)
+        changes = await _claim_member_changes(session, evaluations, dashboard_edge=dashboard_edge)
+        member_notices = [
+            _dashboard_notice(dashboard, dashboard_snapshot, non_green, member_change=change)
+            for change in changes
+        ]
         await session.commit()
 
-    if not claimed:
-        return None
-    return _ClaimedTransition(
-        dashboard=dashboard_snapshot,
-        non_green=non_green,
-        worsening=worsening,
-        notice=notice,
-    )
+    transition = None
+    if claimed:
+        transition = _ClaimedTransition(
+            dashboard=dashboard_snapshot,
+            non_green=non_green,
+            worsening=worsening,
+            notice=notice,
+        )
+    return _DashboardClaims(transition=transition, member_notices=member_notices)
+
+
+async def _claim_member_changes(
+    session: AsyncSession,
+    evaluations: list[_MemberRow],
+    *,
+    dashboard_edge: bool,
+) -> list[MemberChange]:
+    """Compare-and-swap each member's counted state; return the changes to mail.
+
+    The memo holds the member's **effective** state -- after the Sensor's
+    ``severity`` cap and its ``for_seconds`` hold, exactly what the rollup
+    folds -- so a held or capped member counts here as the Dashboard counts
+    it. Members whose state did not move issue no write at all, so a steady
+    Dashboard costs nothing extra per evaluation.
+
+    A change is returned only when all of these hold:
+
+    * this caller won the conditional ``UPDATE`` (:func:`_claim_member_state`),
+      so two MEHO copies produce one notice, not two;
+    * the overall Dashboard state did **not** move (*dashboard_edge* is
+      false) -- otherwise the Dashboard mail already names every non-green
+      member and a second mail would be noise;
+    * the memo was already set -- a ``NULL`` memo (a link row from before
+      migration 0116) is recorded silently, so an upgrade never mails for
+      problems that are already visible;
+    * the edge is worsening (:func:`_is_worsening`): ``ok`` / ``skip`` ->
+      ``degraded`` / ``critical``, or ``degraded`` -> ``critical``. A member
+      recovering while the Dashboard stays non-green is memoised but not
+      mailed (#5068 boundary).
+    """
+    changes: list[MemberChange] = []
+    for link, sensor, evaluation in evaluations:
+        previous = link.last_member_state
+        current = evaluation.effective_state
+        if current == previous:
+            continue
+        won = await _claim_member_state(session, link, expected=previous, new=current)
+        if not won or dashboard_edge or previous is None or not _is_worsening(previous, current):
+            continue
+        changes.append(
+            MemberChange(
+                sensor_id=sensor.id,
+                name=sensor.name,
+                previous_state=previous,
+                current_state=current,
+            )
+        )
+    return changes
 
 
 def _dashboard_transition_lock_key(tenant_id: uuid.UUID, dashboard_id: uuid.UUID) -> int:
@@ -577,6 +679,57 @@ async def _claim_rollup_transition(
         .values(last_rollup_state=new)
     )
     return (result.rowcount or 0) == 1  # type: ignore[attr-defined]
+
+
+async def _claim_member_state(
+    session: AsyncSession,
+    link: CheckDashboardSensor,
+    *,
+    expected: str | None,
+    new: str,
+) -> bool:
+    """Compare-and-swap one link row's ``last_member_state``; ``True`` iff won.
+
+    The member-level twin of :func:`_claim_rollup_transition`: one
+    conditional ``UPDATE`` guarded on the memo still equalling the value this
+    caller read (``IS NOT DISTINCT FROM`` so a ``NULL`` memo compares
+    cleanly). ``rowcount == 1`` means this caller moved the memo and owns the
+    change; ``0`` means a concurrent caller already moved it. Atomic at the
+    database, so the single-notice guarantee holds on the lockless SQLite
+    path too.
+    """
+    result = await session.execute(
+        update(CheckDashboardSensor)
+        .where(
+            CheckDashboardSensor.dashboard_id == link.dashboard_id,
+            CheckDashboardSensor.sensor_id == link.sensor_id,
+            CheckDashboardSensor.last_member_state.is_not_distinct_from(expected),
+        )
+        .values(last_member_state=new)
+    )
+    return (result.rowcount or 0) == 1  # type: ignore[attr-defined]
+
+
+async def _member_rows(
+    session: AsyncSession,
+    *,
+    dashboard_id: uuid.UUID,
+) -> list[tuple[CheckDashboardSensor, Sensor]]:
+    """Load the Dashboard's members as ``(link row, sensor row)`` pairs.
+
+    The claim needs the link row too (its ``last_member_state`` memo, #5068),
+    which ``dashboard_repository.members_by_dashboard`` -- the read-path
+    query -- does not return. Ordered by Sensor name so a multi-member
+    change produces notices in a stable order.
+    """
+    stmt = (
+        select(CheckDashboardSensor, Sensor)
+        .join(Sensor, Sensor.id == CheckDashboardSensor.sensor_id)
+        .where(CheckDashboardSensor.dashboard_id == dashboard_id)
+        .order_by(Sensor.name, Sensor.id)
+    )
+    result = await session.execute(stmt)
+    return [(link, sensor) for link, sensor in result.all()]
 
 
 async def _dashboards_for_sensor(
@@ -657,13 +810,17 @@ def _dashboard_notice(
     dashboard: CheckDashboard,
     snapshot: _DashboardSnapshot,
     non_green: list[_MemberSnapshot],
+    *,
+    member_change: MemberChange | None = None,
 ) -> DashboardNotice:
     """Detach the claim into the notifier's input (#2719).
 
     Built inside the claim transaction, while the ``check_dashboards`` row is
     still live, because the recipient config (``notify_email`` /
     ``notify_min_state``) lives on that row and the send runs on a background
-    task with no session of its own.
+    task with no session of its own. With *member_change* set the notice is
+    a "new problem" notice (#5068): the Dashboard's state is unchanged and
+    the change names the one member that got worse.
     """
     return DashboardNotice(
         tenant_id=dashboard.tenant_id,
@@ -673,6 +830,7 @@ def _dashboard_notice(
         current_state=snapshot.current_state,
         notify_email=dashboard.notify_email,
         notify_min_state=dashboard.notify_min_state,
+        member_change=member_change,
         members=tuple(
             NotifyMember(
                 name=m.name,

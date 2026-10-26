@@ -22,10 +22,11 @@ Coverage matrix (Task #450 acceptance criteria):
   ``TOPOLOGY_REFRESH_INTERVAL_SECONDS`` between sweeps.
 * **start/stop lifecycle** — the lifespan helpers create and cleanly
   cancel the background task.
-* **Expected refusals (#4952)** — a credential-read refusal or a
+* **Expected refusals (#4952)** — Vault's no-token refusal or a
   missing connector logs one warning without a stack trace, counts under
-  its own metric outcome, and stays quiet on repeats; any other error
-  still logs with the stack trace every time.
+  its own metric outcome, and stays quiet on repeats (also when the two
+  kinds alternate); any other error, including another credential-store
+  failure, still logs with the stack trace every time.
 """
 
 from __future__ import annotations
@@ -39,7 +40,11 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from prometheus_client import REGISTRY
 
-from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.gsm_creds import GcpSecretManagerReadError
+from meho_backplane.connectors._shared.vault_creds import (
+    OperatorTokenRequiredError,
+    VaultCredentialsReadError,
+)
 from meho_backplane.connectors.resolver import NoMatchingConnector
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target, Tenant
@@ -307,7 +312,7 @@ async def _refresh_twice(target: Target, exc: Exception) -> tuple[Mock, Mock]:
     ("exc", "outcome"),
     [
         (
-            VaultCredentialsReadError("operator-context credential read requires a token"),
+            OperatorTokenRequiredError("operator-context credential read requires a token"),
             "skipped_no_credentials",
         ),
         (NoMatchingConnector("no connector for product"), "no_connector"),
@@ -339,11 +344,22 @@ async def test_expected_refusal_warns_once_without_traceback(exc: Exception, out
 
 
 @pytest.mark.asyncio
-async def test_unexpected_error_logs_traceback_every_time() -> None:
+@pytest.mark.parametrize(
+    "exc",
+    [
+        RuntimeError("connector down"),
+        GcpSecretManagerReadError("secret manager unavailable"),
+        VaultCredentialsReadError("payload is missing field 'kubeconfig'"),
+    ],
+    ids=["runtime_error", "gsm_store_failure", "vault_read_failure"],
+)
+async def test_unexpected_error_logs_traceback_every_time(exc: Exception) -> None:
+    """Only Vault's no-token refusal is expected; other store failures stay errors."""
     _, target = await _seed_target("tenant-a", "vc-a")
     errors_before = _refresh_count("error")
+    skipped_before = _refresh_count("skipped_no_credentials")
 
-    first, second = await _refresh_twice(target, RuntimeError("connector down"))
+    first, second = await _refresh_twice(target, exc)
 
     for log in (first, second):
         assert log.exception.call_count == 1
@@ -353,6 +369,33 @@ async def test_unexpected_error_logs_traceback_every_time() -> None:
         assert kwargs["target_id"] == str(target.id)
         assert kwargs["target_name"] == "vc-a"
     assert _refresh_count("error") == errors_before + 2
+    assert _refresh_count("skipped_no_credentials") == skipped_before
+
+
+@pytest.mark.asyncio
+async def test_alternating_refusals_warn_once_per_kind() -> None:
+    """Each refusal kind warns once per target, even when the kinds alternate."""
+    _, target = await _seed_target("tenant-a", "k8s-a")
+    state = _SchedulerState()
+    sequence = [
+        OperatorTokenRequiredError("no token"),
+        NoMatchingConnector("no connector"),
+        OperatorTokenRequiredError("no token"),
+        NoMatchingConnector("no connector"),
+    ]
+
+    logs: list[Mock] = []
+    for exc in sequence:
+        with patch(_REFRESH, new=AsyncMock(side_effect=exc)), patch(_LOG) as log:
+            await _refresh_one_target(target, state)
+        state.backoff[target.id].skip_until = 0.0
+        logs.append(log)
+
+    assert [log.warning.call_count for log in logs] == [1, 1, 0, 0]
+    assert all(log.exception.call_count == 0 for log in logs)
+    assert logs[0].warning.call_args.kwargs["outcome"] == "skipped_no_credentials"
+    assert logs[1].warning.call_args.kwargs["outcome"] == "no_connector"
+    assert state.backoff[target.id].consecutive_failures == 4
 
 
 @pytest.mark.asyncio
@@ -360,7 +403,7 @@ async def test_success_resets_expected_refusal_warning() -> None:
     """A refusal that comes back after a success is warned about again."""
     _, target = await _seed_target("tenant-a", "k8s-a")
     state = _SchedulerState()
-    exc = VaultCredentialsReadError("no token")
+    exc = OperatorTokenRequiredError("no token")
 
     with patch(_REFRESH, new=AsyncMock(side_effect=exc)), patch(_LOG) as first:
         await _refresh_one_target(target, state)

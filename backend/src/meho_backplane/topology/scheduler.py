@@ -54,12 +54,16 @@ Expected refusals (#4952)
 Two failures are expected outcomes, not crashes, and are not logged with
 a stack trace:
 
-* The target's credentials could not be read
-  (:class:`~meho_backplane.connectors._shared.credential_backend.CredentialsReadError`).
-  The scheduled run has no person's token (``raw_jwt=""``), and MEHO does
-  not read a target's credentials from Vault without one. Every
-  connector that reads credentials to fill the map — today the
-  Kubernetes connector — fails this way on every scheduled run.
+* Vault refused the credential read because the run has no person's
+  token
+  (:class:`~meho_backplane.connectors._shared.vault_creds.OperatorTokenRequiredError`).
+  The scheduled run carries ``raw_jwt=""``, and MEHO does not read a
+  target's credentials from Vault without one. Every connector that
+  reads credentials to fill the map — today the Kubernetes connector —
+  fails this way on every scheduled run when the target's credentials
+  live in Vault. A deployment whose credential store is GCP Secret
+  Manager reads with its own service identity instead, so its scheduled
+  refreshes are not affected.
 * No connector supports the target's product
   (:class:`~meho_backplane.connectors.resolver.NoMatchingConnector`).
   That is a problem in the target record, not in the code.
@@ -67,9 +71,11 @@ a stack trace:
 Both still go on backoff. They count under their own metric outcome
 (``skipped_no_credentials`` / ``no_connector``), and the first time per
 target after a start they log one ``warning`` line without a stack
-trace. Later failures of the same kind for that target log nothing. A
-success clears the marker, so a refusal that comes back after a success
-is logged again.
+trace. Later failures of the same kind for that target log nothing,
+even when a refusal of the other kind came in between. A success clears
+the markers, so a refusal that comes back after a success is logged
+again. Any other failure, including a credential store that cannot be
+reached, still counts as ``error`` and logs the stack trace every time.
 """
 
 from __future__ import annotations
@@ -86,7 +92,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
+from meho_backplane.connectors._shared.vault_creds import OperatorTokenRequiredError
 from meho_backplane.connectors.resolver import NoMatchingConnector
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target, Tenant
@@ -117,10 +123,10 @@ _MAX_BACKOFF_SECONDS = 4 * 3600
 #: carries. Checked in order; the first match wins.
 _EXPECTED_REFUSALS: tuple[tuple[type[Exception], str, str], ...] = (
     (
-        CredentialsReadError,
+        OperatorTokenRequiredError,
         "skipped_no_credentials",
-        "the target's credentials could not be read; the scheduled refresh "
-        "runs without a person's token and MEHO does not read target "
+        "Vault refused the credential read; the scheduled refresh runs "
+        "without a person's token and MEHO does not read target "
         "credentials from Vault without one, so run "
         "'meho topology refresh <target>' as a logged-in operator",
     ),
@@ -151,9 +157,10 @@ class _TargetBackoff:
     consecutive_failures: int = 0
     #: ``time.monotonic()`` value before which the target is skipped.
     skip_until: float = 0.0
-    #: The expected-refusal ``outcome`` already warned about for this
-    #: target, so later failures of the same kind log nothing (#4952).
-    warned_outcome: str | None = None
+    #: The expected-refusal ``outcome`` values already warned about for
+    #: this target, so later failures of the same kind log nothing, even
+    #: when a refusal of another kind came in between (#4952).
+    warned_outcomes: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -171,12 +178,14 @@ def _system_operator(tenant_id: uuid.UUID) -> Operator:
     under a person's token (the guard in
     :meth:`~meho_backplane.connectors._shared.vault_creds.VaultCredentialBackend.load_secret_data`),
     so a connector that needs the target's credentials to fill the map —
-    today the Kubernetes connector — refuses the scheduled run with a
-    :class:`~meho_backplane.connectors._shared.vault_creds.VaultCredentialsReadError`.
-    The scheduler reports that as an expected outcome (#4952); an
-    operator updates such targets with ``meho topology refresh
-    <target>``. ``OPERATOR`` role satisfies the model's required field;
-    the refresh path does not gate on role.
+    today the Kubernetes connector — refuses the scheduled run with an
+    :class:`~meho_backplane.connectors._shared.vault_creds.OperatorTokenRequiredError`
+    when the target's credentials live in Vault. The scheduler reports
+    that as an expected outcome (#4952); an operator updates such targets
+    with ``meho topology refresh <target>``. A GCP Secret Manager store
+    reads with the service's own identity and is not affected.
+    ``OPERATOR`` role satisfies the model's required field; the refresh
+    path does not gate on role.
     """
     return Operator(
         sub=_SYSTEM_OPERATOR_SUB,
@@ -293,9 +302,9 @@ def _record_failure(target: Target, state: _SchedulerState, exc: Exception) -> N
 
     outcome, reason = expected
     TOPOLOGY_REFRESH_TOTAL.labels(outcome=outcome).inc()
-    if bo.warned_outcome == outcome:
+    if outcome in bo.warned_outcomes:
         return
-    bo.warned_outcome = outcome
+    bo.warned_outcomes.add(outcome)
     _log.warning(
         "topology_refresh_target_skipped",
         target_id=str(target.id),

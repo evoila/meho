@@ -4,8 +4,9 @@
 #
 # Step 2 of install.sh: prepare the machine (form-2 design, section 5, step 2).
 # It writes the MEHO folders, RKE2's settings, the join token, the MEHO image
-# archive, the storage manifest and the settings of RKE2's Traefik. The host
-# firewall of step 2 is in lib/firewall.sh. This file is sourced, not run.
+# archive, the storage manifest and the settings of RKE2's Traefik, and
+# installs the meho-host command. The host firewall of step 2 is in
+# lib/firewall.sh. This file is sourced, not run.
 
 prepare_folders() {
     mkdir -p "${HOST_ROOT}${MEHO_STATE_DIR}" "${HOST_ROOT}${MEHO_CONFIG_DIR}"
@@ -105,4 +106,14 @@ EOF
 write_traefik_config() {
     render_traefik_config | write_root_file "$RKE2_MANIFESTS_DIR/$TRAEFIK_CONFIG_MANIFEST" 0600
     ok "wrote the setting that makes RKE2's Traefik redirect port 80 to 443 ($RKE2_MANIFESTS_DIR/$TRAEFIK_CONFIG_MANIFEST)"
+}
+
+# install_meho_host <download dir>: the host command, for the customer's work
+# on the machine after the install (form-2 design, section 5). Every run of
+# install.sh installs the version of its download.
+install_meho_host() {
+    local download_dir=$1 target="${HOST_ROOT}${MEHO_HOST_PATH}"
+    mkdir -p "${target%/*}"
+    install -m 0755 "$download_dir/$MEHO_HOST_FILE" "$target"
+    ok "installed meho-host to $MEHO_HOST_PATH"
 }

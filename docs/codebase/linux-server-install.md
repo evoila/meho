@@ -19,7 +19,9 @@ The script runs the six steps of the design:
    Then it writes RKE2's settings, copies the join token when the join
    options are given, copies the MEHO image archive and the storage
    manifest to the folders where RKE2 reads them, and writes the setting
-   that makes RKE2's Traefik redirect port 80 to 443.
+   that makes RKE2's Traefik redirect port 80 to 443. It also
+   installs the host command `meho-host`
+   ([linux-server-meho-host.md](linux-server-meho-host.md)).
 3. **Install and start RKE2.** It runs RKE2's own installer in offline
    mode, starts `rke2-server`, and waits until the node is Ready, until
    `local-path` is the default storage class, and until the storage
@@ -56,7 +58,6 @@ Later Tasks add their steps to `main()` in `install.sh`:
   `meho status --first-start`.
 - #4736 makes a second run an update, which reads `install.json` and
   `values-place.yaml`.
-- #4737 adds `meho-host`, which `install.sh` installs.
 
 ## Key files
 
@@ -71,6 +72,7 @@ Later Tasks add their steps to `main()` in `install.sh`:
 | `lib/rke2.sh` | Step 3: RKE2's installer, the start, and the wait with one time limit. |
 | `lib/core.sh` | Steps 4 to 6: the versions of the download, the place values, the Helm call, the two one-time files, the `meho` command, the install record, the result lines. |
 | `values-single-node.yaml` | The Helm values for one node. The download ships it as `chart/values-single-node.yaml`. |
+| `meho-host` | The host command, `check` and `support-bundle`; see [linux-server-meho-host.md](linux-server-meho-host.md). |
 | `storage/local-path-storage.yaml` | Rancher's local-path provisioner v0.0.37 manifest with five changes. |
 | `tests/` | Python `unittest` suites that run `install.sh` against a fake machine. |
 | `.shellcheckrc` | Lets shellcheck follow the `source` lines of `install.sh`. |
@@ -129,6 +131,7 @@ service.
 | `/var/lib/rancher/rke2/agent/images/meho-images.linux-amd64.tar.zst` | 0600 | the MEHO image archive |
 | `/var/lib/rancher/rke2/server/manifests/local-path-storage.yaml` | 0600 | the storage manifest |
 | `/var/lib/rancher/rke2/server/manifests/rke2-traefik-config.yaml` | 0600 | a `HelmChartConfig` for `rke2-traefik`: port 80 redirects to 443 |
+| `/usr/local/sbin/meho-host` | 0755 | the host command, a copy of `meho-host` from the download |
 
 The join token goes from file to file with `install`. It is never on a
 command line, in the output or in `config.yaml`.

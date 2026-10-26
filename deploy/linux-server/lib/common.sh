@@ -18,6 +18,7 @@ HOST_ROOT="${MEHO_TEST_ROOT:-}"
 readonly MEHO_STATE_DIR=/var/lib/meho
 readonly MEHO_CONFIG_DIR=/etc/meho
 readonly MEHO_JOIN_TOKEN_FILE=/etc/meho/join-token
+readonly MEHO_HOST_PATH=/usr/local/sbin/meho-host
 readonly MEHO_PLACE_VALUES=/etc/meho/values-place.yaml
 readonly MEHO_INSTALL_RECORD=/etc/meho/install.json
 readonly MEHO_FIRST_LOGIN_FILE=/var/lib/meho/first-login-passwords
@@ -37,6 +38,7 @@ readonly TRAEFIK_CONFIG_MANIFEST=rke2-traefik-config.yaml
 # checks it.
 readonly MEHO_IMAGES_ARCHIVE=images/meho-images.linux-amd64.tar.zst
 readonly STORAGE_MANIFEST=storage/local-path-storage.yaml
+readonly MEHO_HOST_FILE=meho-host
 readonly VERSION_FILE=VERSION
 readonly SINGLE_NODE_VALUES=chart/values-single-node.yaml
 readonly HELM_FILE=bin/helm
@@ -48,6 +50,7 @@ readonly RKE2_DOWNLOAD_FILES=(
     rke2/sha256sum-amd64.txt
     "$MEHO_IMAGES_ARCHIVE"
     "$STORAGE_MANIFEST"
+    "$MEHO_HOST_FILE"
 )
 readonly CORE_DOWNLOAD_FILES=("$VERSION_FILE" "$SINGLE_NODE_VALUES" "$HELM_FILE" "$CLI_FILE")
 readonly DOWNLOAD_FILES=("${RKE2_DOWNLOAD_FILES[@]}" "${CORE_DOWNLOAD_FILES[@]}")

@@ -264,6 +264,7 @@ class FakeMachine:
     def _copy_download(self) -> None:
         self.download.mkdir()
         shutil.copy2(INSTALL_SH, self.download / "install.sh")
+        shutil.copy2(LINUX_SERVER / "meho-host", self.download / "meho-host")
         shutil.copytree(LINUX_SERVER / "lib", self.download / "lib")
         shutil.copytree(LINUX_SERVER / "storage", self.download / "storage")
         (self.download / "chart").mkdir()

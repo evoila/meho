@@ -22,11 +22,11 @@ The layout follows the form-2 design (meho-internal
 
 The tar has one top folder, `meho-linux-<version>-amd64/`. Every file in it
 is owned by root (0/0), and only root can change it. `install.sh`,
-`rke2/install.sh`, `bin/helm` and `bin/meho` are executable.
+`meho-host`, `rke2/install.sh`, `bin/helm` and `bin/meho` are executable.
 
 | Path | What | Source |
 | --- | --- | --- |
-| `install.sh`, `lib/*.sh`, `storage/local-path-storage.yaml` | the install script ([linux-server-install.md](linux-server-install.md)) | `deploy/linux-server/` |
+| `install.sh`, `meho-host`, `lib/*.sh`, `storage/local-path-storage.yaml` | the install script and the host command ([linux-server-install.md](linux-server-install.md), [linux-server-meho-host.md](linux-server-meho-host.md)) | `deploy/linux-server/` |
 | `VERSION` | `MEHO_VERSION`, `MEHO_IMAGE_TAG`, `CHART_VERSION`, `RKE2_VERSION`, `HELM_VERSION`, `BUILD_DATE`, one `KEY=value` per line | written by the build |
 | `rke2/install.sh` | RKE2's installer at the RKE2 release tag | GitHub, `rancher/rke2` at `v1.37.1+rke2r1`, sha256 pinned |
 | `rke2/rke2.linux-amd64.tar.gz`, `rke2/rke2-images.linux-amd64.tar.zst`, `rke2/sha256sum-amd64.txt` | RKE2 and its images | the RKE2 release; the checksum file is pinned by sha256 and checks the other two |
@@ -77,7 +77,7 @@ environment:
 
 Steps, in order:
 
-1. Copy `install.sh`, `lib/`, `storage/` and `values-single-node.yaml`.
+1. Copy `install.sh`, `meho-host`, `lib/`, `storage/` and `values-single-node.yaml`.
 2. Download Helm and check its sha256. The build uses this `helm` too.
 3. Check and copy the CLI.
 4. Wait until the chart and the image of the version are on ghcr.io and

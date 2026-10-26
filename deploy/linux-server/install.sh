@@ -9,7 +9,8 @@
 # It runs the six steps of the design (section 5):
 #   1. check the machine                        lib/checks.sh, lib/firewall.sh
 #   2. prepare the machine: the host            lib/firewall.sh, lib/prepare.sh
-#      firewall first, then RKE2's files
+#      firewall first, then RKE2's files and
+#      meho-host
 #   3. install and start RKE2, then wait        lib/rke2.sh
 #   4. install the MEHO core with Helm          lib/core.sh
 #   5. write the two one-time files             lib/core.sh
@@ -21,8 +22,8 @@
 # appliance's first start uses it.
 #
 # Later Tasks add their steps in main() below: the CIS host steps between
-# installing and starting RKE2 (#4636), meho-host (#4737), and the
-# first-start list to step 6 (#4042).
+# installing and starting RKE2 (#4636), and the first-start list to step 6
+# (#4042).
 #
 # Exit codes:
 #   0  MEHO is installed
@@ -262,6 +263,7 @@ prepare_machine() {
     copy_images "$DOWNLOAD_DIR"
     copy_storage_manifest "$DOWNLOAD_DIR"
     write_traefik_config
+    install_meho_host "$DOWNLOAD_DIR"
 }
 
 main() {

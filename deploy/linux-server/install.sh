@@ -7,8 +7,9 @@
 # section 4, in meho-internal docs/design/2026-10-10-install-forms/).
 #
 # It runs the six steps of the design (section 5):
-#   1. check the machine                        lib/checks.sh
-#   2. prepare the machine                      lib/prepare.sh
+#   1. check the machine                        lib/checks.sh, lib/firewall.sh
+#   2. prepare the machine: the host            lib/firewall.sh, lib/prepare.sh
+#      firewall first, then RKE2's files
 #   3. install and start RKE2, then wait        lib/rke2.sh
 #   4. install the MEHO core with Helm          lib/core.sh
 #   5. write the two one-time files             lib/core.sh
@@ -16,11 +17,12 @@
 #      install record and print the result      lib/core.sh
 #
 # --from-disk runs only the steps that need the host name: RKE2's settings,
-# the start of RKE2, and steps 4 to 6. The appliance's first start uses it.
+# the start of RKE2, and steps 4 to 6. It leaves the firewall alone. The
+# appliance's first start uses it.
 #
-# Later Tasks add their steps in main() below: the host firewall to step 2
-# (#4635), the CIS host steps between installing and starting RKE2 (#4636),
-# meho-host (#4737), and the first-start list to step 6 (#4042).
+# Later Tasks add their steps in main() below: the CIS host steps between
+# installing and starting RKE2 (#4636), meho-host (#4737), and the
+# first-start list to step 6 (#4042).
 #
 # Exit codes:
 #   0  MEHO is installed
@@ -48,6 +50,8 @@ source "$DOWNLOAD_DIR/lib/common.sh"
 source "$DOWNLOAD_DIR/lib/net.sh"
 # shellcheck source=lib/checks.sh
 source "$DOWNLOAD_DIR/lib/checks.sh"
+# shellcheck source=lib/firewall.sh
+source "$DOWNLOAD_DIR/lib/firewall.sh"
 # shellcheck source=lib/prepare.sh
 source "$DOWNLOAD_DIR/lib/prepare.sh"
 # shellcheck source=lib/rke2.sh
@@ -64,6 +68,7 @@ CLUSTER_CIDR="10.42.0.0/16"
 SERVICE_CIDR="10.43.0.0/16"
 JOIN_ADDRESS=""
 JOIN_TOKEN_FILE=""
+ADMIN_NETWORK=""
 FROM_DISK=0
 
 readonly UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
@@ -76,12 +81,13 @@ usage() {
     cat <<'HELP'
 install.sh: install MEHO on this Linux server, with no internet (form 2).
 
-It checks the machine, prepares it, installs and starts RKE2 (the built-in
-Kubernetes), installs the MEHO core, writes the first-login passwords and
-the unseal key to two files for root only, and installs the meho command.
+It checks the machine, sets the host firewall, prepares the machine,
+installs and starts RKE2 (the built-in Kubernetes), installs the MEHO
+core, writes the first-login passwords and the unseal key to two files for
+root only, and installs the meho command.
 
 Run it as root from the folder of the unpacked download:
-  sudo ./install.sh --hostname meho.example.com
+  sudo ./install.sh --hostname meho.example.com --admin-network 10.0.50.0/24
 
 Options:
   --hostname <fqdn>          The full DNS name of this machine. It must
@@ -91,6 +97,13 @@ Options:
   --public-address <ipv4>    Only behind address translation inside your
                              network: the address that the DNS name points
                              to, when this machine does not have it.
+  --admin-network <range>    The IPv4 addresses that may use SSH: a range
+                             such as 10.0.50.0/24, one address, or "none"
+                             to close SSH. From every other address, only
+                             ports 80 and 443 answer. Default: only the
+                             address of the SSH session that runs
+                             install.sh. On the machine's console the
+                             option is required.
   --first-tenant-id <uuid>   The id of the first tenant. Default: a new
                              random id. Give the old id to keep it on a
                              move to another machine.
@@ -136,6 +149,7 @@ set_option() {
         --service-cidr) SERVICE_CIDR=$2 ;;
         --join-address) JOIN_ADDRESS=$2 ;;
         --join-token-file) JOIN_TOKEN_FILE=$2 ;;
+        --admin-network) ADMIN_NETWORK=$2 ;;
         *) usage_error "unknown option: $1" ;;
     esac
     [[ -n $2 && $2 != --* ]] || usage_error "$1 needs a value."
@@ -190,6 +204,12 @@ validate_options() {
         usage_error "--cluster-cidr must be an IPv4 range, for example 10.42.0.0/16."
     is_ipv4_cidr "$SERVICE_CIDR" ||
         usage_error "--service-cidr must be an IPv4 range, for example 10.43.0.0/16."
+    if [[ -n $ADMIN_NETWORK && $ADMIN_NETWORK != none ]] && ! is_ipv4 "$ADMIN_NETWORK"; then
+        is_ipv4_cidr "$ADMIN_NETWORK" ||
+            usage_error "--admin-network must be an IPv4 range such as 10.0.50.0/24, one IPv4 address, or none."
+        is_ipv4_network "$ADMIN_NETWORK" ||
+            usage_error "--admin-network $ADMIN_NETWORK does not start at the first address of its range. Give the first address, for example 10.0.50.0/24, or one address without a prefix."
+    fi
     if [[ -n $JOIN_ADDRESS || -n $JOIN_TOKEN_FILE ]]; then
         [[ -n $JOIN_ADDRESS && -n $JOIN_TOKEN_FILE ]] ||
             usage_error "--join-address and --join-token-file go together. Give both, or neither."
@@ -229,14 +249,19 @@ check_machine() {
     check_hostname "$HOSTNAME_FQDN"
     check_dns "$HOSTNAME_FQDN" "$PUBLIC_ADDRESS"
     check_ranges "$CLUSTER_CIDR" "$SERVICE_CIDR"
+    check_nftables
+    check_admin_network "$ADMIN_NETWORK"
+    check_join_firewall "$JOIN_ADDRESS"
 }
 
 prepare_machine() {
     prepare_folders
+    set_up_firewall "$CLUSTER_CIDR" "$SERVICE_CIDR"
     write_rke2_config "$HOSTNAME_FQDN" "$CLUSTER_CIDR" "$SERVICE_CIDR" "$JOIN_ADDRESS"
     copy_join_token "$JOIN_TOKEN_FILE"
     copy_images "$DOWNLOAD_DIR"
     copy_storage_manifest "$DOWNLOAD_DIR"
+    write_traefik_config
 }
 
 main() {

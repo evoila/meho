@@ -89,6 +89,7 @@ __all__ = [
     "VAULT_KV_WRITE_CAPABILITIES",
     "VaultPathShapeError",
     "register_vault_typed_operations",
+    "vault_capability_preflight",
     "vault_kv_delete",
     "vault_kv_list",
     "vault_kv_metadata_delete",
@@ -1191,6 +1192,82 @@ def _capabilities_grant_write(granted: list[str], required: frozenset[str]) -> b
     return required.issubset(granted_set)
 
 
+async def vault_capability_preflight(
+    operator: Operator,
+    op_id: str,
+    auth_path: str,
+    required: frozenset[str],
+    target: Any = None,
+    *,
+    report_probe_failure: bool = False,
+) -> dict[str, Any] | None:
+    """Ask Vault (``sys/capabilities-self``) whether a write on *auth_path* will be denied.
+
+    The shared probe behind :func:`vault_kv_write_capability_preflight`
+    and the token-role write preflight
+    (:mod:`meho_backplane.connectors.vault.ops_token_role`). It logs in
+    the way the real write does -- through
+    :func:`~meho_backplane.connectors.vault.target_auth.vault_client_for_target`,
+    under the target's Vault role -- and compares the capabilities Vault
+    reports on *auth_path* against *required*. The answer holds only
+    capability names, never a secret value.
+
+    Returns ``None`` when the probe itself fails (fail-soft: a missing
+    check must never block the park). ``report_probe_failure=True``
+    turns that failure into an explicit ``will_be_denied`` block with a
+    ``probe_failed:<ExceptionClass>`` reason instead.
+    """
+    try:
+        async with vault_client_for_target(operator, target) as client:
+            response = await asyncio.to_thread(
+                client.sys.get_capabilities,
+                paths=[auth_path],
+            )
+    except Exception as exc:
+        # Fail-soft: the park is the safety-relevant action; a probe that
+        # cannot reach Vault (or whose role login transiently fails) must
+        # not block it. The reviewer falls back to the identifier-only
+        # default and the post-approval write surfaces any real denial.
+        import structlog as _structlog
+
+        _structlog.get_logger(__name__).warning(
+            "vault_capability_preflight_failed",
+            op_id=op_id,
+            path=auth_path,
+            operator_sub=operator.sub,
+            exc_info=True,
+        )
+        if not report_probe_failure:
+            return None
+        return {
+            "check": "vault.capabilities-self",
+            "path": auth_path,
+            "required": sorted(required),
+            "granted": [],
+            "will_be_denied": True,
+            "reason": f"probe_failed:{type(exc).__name__}",
+            "principal_sub": operator.sub,
+        }
+
+    # ``sys/capabilities-self`` returns the per-path capability list under
+    # the path key, with a top-level ``capabilities`` mirror for a single
+    # path. Prefer the path key; fall back to the mirror.
+    granted_raw = response.get(auth_path)
+    if granted_raw is None:
+        granted_raw = response.get("capabilities")
+    granted = [str(c) for c in granted_raw] if isinstance(granted_raw, list) else []
+
+    will_be_denied = not _capabilities_grant_write(granted, required)
+    return {
+        "check": "vault.capabilities-self",
+        "path": auth_path,
+        "required": sorted(required),
+        "granted": sorted(granted),
+        "will_be_denied": will_be_denied,
+        "principal_sub": operator.sub,
+    }
+
+
 async def vault_kv_write_capability_preflight(
     operator: Operator,
     op_id: str,
@@ -1253,57 +1330,14 @@ async def vault_kv_write_capability_preflight(
     required = VAULT_KV_WRITE_CAPABILITIES.get(op_id)
     if required is None:
         return None
-
-    auth_path = vault_kv_write_target_path(op_id, params)
-    try:
-        async with vault_client_for_target(operator, target) as client:
-            response = await asyncio.to_thread(
-                client.sys.get_capabilities,
-                paths=[auth_path],
-            )
-    except Exception as exc:
-        # Fail-soft: the park is the safety-relevant action; a probe that
-        # cannot reach Vault (or whose role login transiently fails) must
-        # not block it. The reviewer falls back to the identifier-only
-        # default and the post-approval write surfaces any real denial.
-        import structlog as _structlog
-
-        _structlog.get_logger(__name__).warning(
-            "vault_capability_preflight_failed",
-            op_id=op_id,
-            path=auth_path,
-            operator_sub=operator.sub,
-            exc_info=True,
-        )
-        if not report_probe_failure:
-            return None
-        return {
-            "check": "vault.capabilities-self",
-            "path": auth_path,
-            "required": sorted(required),
-            "granted": [],
-            "will_be_denied": True,
-            "reason": f"probe_failed:{type(exc).__name__}",
-            "principal_sub": operator.sub,
-        }
-
-    # ``sys/capabilities-self`` returns the per-path capability list under
-    # the path key, with a top-level ``capabilities`` mirror for a single
-    # path. Prefer the path key; fall back to the mirror.
-    granted_raw = response.get(auth_path)
-    if granted_raw is None:
-        granted_raw = response.get("capabilities")
-    granted = [str(c) for c in granted_raw] if isinstance(granted_raw, list) else []
-
-    will_be_denied = not _capabilities_grant_write(granted, required)
-    return {
-        "check": "vault.capabilities-self",
-        "path": auth_path,
-        "required": sorted(required),
-        "granted": sorted(granted),
-        "will_be_denied": will_be_denied,
-        "principal_sub": operator.sub,
-    }
+    return await vault_capability_preflight(
+        operator,
+        op_id,
+        vault_kv_write_target_path(op_id, params),
+        required,
+        target,
+        report_probe_failure=report_probe_failure,
+    )
 
 
 #: Per-op registration specs for the KV-v2 group. One dict per op

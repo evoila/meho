@@ -48,6 +48,7 @@ import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator
 
 __all__ = [
+    "VAULT_SYS_CLUSTER_PARAMETER_SCHEMA",
     "VAULT_SYS_HA_STATUS_LLM_INSTRUCTIONS",
     "VAULT_SYS_HA_STATUS_RESPONSE_SCHEMA",
     "VAULT_SYS_RAFT_AUTOPILOT_STATE_LLM_INSTRUCTIONS",
@@ -58,6 +59,16 @@ __all__ = [
 
 HA_STATUS_API_PATH = "/v1/sys/ha-status"
 RAFT_AUTOPILOT_STATE_API_PATH = "/v1/sys/storage/raft/autopilot/state"
+
+#: Neither read takes a parameter. ``additionalProperties=False`` rejects a
+#: stray key with a clear validation error; the empty example is the one
+#: valid call shape.
+VAULT_SYS_CLUSTER_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": False,
+    "examples": [{}],
+}
 
 #: Node fields copied from each ``ha-status`` entry. The Enterprise-only
 #: extras (``upgrade_version``, ``redundancy_zone``, ...) are dropped so
@@ -175,7 +186,7 @@ VAULT_SYS_RAFT_AUTOPILOT_STATE_RESPONSE_SCHEMA: dict[str, Any] = {
 
 
 VAULT_SYS_HA_STATUS_LLM_INSTRUCTIONS: dict[str, Any] = {
-    "when_to_use": (
+    "when_to_call": (
         "List every node of a Vault cluster with its address, whether it "
         "is the active node, and when the active node last heard from it. "
         "Use when an operator asks 'is every Vault node up?' or after a "
@@ -192,11 +203,18 @@ VAULT_SYS_HA_STATUS_LLM_INSTRUCTIONS: dict[str, Any] = {
         "permission error (the meho Vault role needs 'read' on "
         "'sys/ha-status')."
     ),
+    "next_step": (
+        "If a node is missing or its last_echo is old, call "
+        "vault.sys.raft.autopilot_state for its health and the cluster's "
+        "failure tolerance. Then check the node's pod or host with the "
+        "Kubernetes or SSH connector; a sealed node needs an unseal by an "
+        "operator."
+    ),
 }
 
 
 VAULT_SYS_RAFT_AUTOPILOT_STATE_LLM_INSTRUCTIONS: dict[str, Any] = {
-    "when_to_use": (
+    "when_to_call": (
         "Check the health of every raft server in a Vault cluster with "
         "integrated storage, plus how many more nodes may fail before "
         "Vault stops (failure_tolerance). Use when a node restarted and "
@@ -216,6 +234,15 @@ VAULT_SYS_RAFT_AUTOPILOT_STATE_LLM_INSTRUCTIONS: dict[str, Any] = {
         "Vault permission error (the meho Vault role needs 'read' on "
         "'sys/storage/raft/autopilot/state')."
     ),
+    "next_step": (
+        "For a server with healthy=false, check its pod or host with the "
+        "Kubernetes or SSH connector and ask an operator to unseal it if it "
+        "is sealed. Use vault.sys.ha_status for the nodes' API addresses. "
+        "A failure_tolerance of 0 means the next failure stops Vault."
+    ),
+    # Keep the cluster verdict next to the reduced server list when the
+    # result is turned into a stored result.
+    "result_scalars": {"keys": ["healthy", "failure_tolerance", "leader"]},
 }
 
 

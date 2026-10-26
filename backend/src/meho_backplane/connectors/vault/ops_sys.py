@@ -117,6 +117,7 @@ from meho_backplane.connectors.vault.ops_sys_bootstrap import (
     vault_sys_mounts_tune,
 )
 from meho_backplane.connectors.vault.ops_sys_cluster import (
+    VAULT_SYS_CLUSTER_PARAMETER_SCHEMA,
     VAULT_SYS_HA_STATUS_LLM_INSTRUCTIONS,
     VAULT_SYS_HA_STATUS_RESPONSE_SCHEMA,
     VAULT_SYS_RAFT_AUTOPILOT_STATE_LLM_INSTRUCTIONS,
@@ -615,10 +616,8 @@ async def register_vault_sys_typed_operations(
         description=(
             "Reads GET /v1/sys/seal-status and returns the raw seal-"
             "status object (type, sealed, initialized, threshold t, "
-            "shares n, progress, version). Read-only; no secret "
-            "content. Login/transport failures surface as a structured "
-            "connector_error OperationResult. Answers for the one node "
-            "behind the target's address; use "
+            "shares n, progress, version). Read-only; no secret content. "
+            "Answers for the one node behind the target's address; use "
             "vault.sys.raft.autopilot_state to see every node."
         ),
         parameter_schema=_NO_PARAMS_SCHEMA,
@@ -688,15 +687,13 @@ async def register_vault_sys_typed_operations(
         handler=vault_sys_ha_status,
         summary="List every node of a HashiCorp Vault cluster and which one is active.",
         description=(
-            "Reads GET /v1/sys/ha-status via the operator's OIDC-forwarded "
-            "JWT and returns one row per cluster node under a 'nodes' key "
-            "(hostname, api_address, active_node, last_echo, version, "
-            "...). Use it instead of sys.health / sys.seal_status when the "
-            "question is about the whole cluster, not the one node behind "
-            "the target's address. Read-only; no secret content. Needs "
-            "'read' on 'sys/ha-status' in the meho Vault role."
+            "Reads GET /v1/sys/ha-status and returns one row per cluster "
+            "node under 'nodes' (hostname, api_address, active_node, "
+            "last_echo, version). Shows the whole cluster, not only the "
+            "node behind the target's address. Read-only; no secret "
+            "content. Needs 'read' on 'sys/ha-status'."
         ),
-        parameter_schema=_NO_PARAMS_SCHEMA,
+        parameter_schema=VAULT_SYS_CLUSTER_PARAMETER_SCHEMA,
         response_schema=VAULT_SYS_HA_STATUS_RESPONSE_SCHEMA,
         group_key="sys",
         when_to_use=sys_when_to_use,
@@ -714,16 +711,13 @@ async def register_vault_sys_typed_operations(
         handler=vault_sys_raft_autopilot_state,
         summary="Show the health of every raft server in a HashiCorp Vault cluster.",
         description=(
-            "Reads GET /v1/sys/storage/raft/autopilot/state via the "
-            "operator's OIDC-forwarded JWT and returns healthy, "
-            "failure_tolerance, leader, voters, and one row per raft "
-            "server under a 'servers' key (id, address, status, healthy, "
-            "last_contact, ...). A sealed or unreachable standby shows as "
-            "healthy=false. Only clusters with integrated (raft) storage "
-            "answer. Read-only; no secret content. Needs 'read' on "
-            "'sys/storage/raft/autopilot/state' in the meho Vault role."
+            "Reads GET /v1/sys/storage/raft/autopilot/state and returns "
+            "healthy, failure_tolerance, leader, voters, and one row per "
+            "raft server under 'servers'. A sealed standby shows as "
+            "healthy=false. Raft storage only. Read-only; no secret "
+            "content. Needs 'read' on 'sys/storage/raft/autopilot/state'."
         ),
-        parameter_schema=_NO_PARAMS_SCHEMA,
+        parameter_schema=VAULT_SYS_CLUSTER_PARAMETER_SCHEMA,
         response_schema=VAULT_SYS_RAFT_AUTOPILOT_STATE_RESPONSE_SCHEMA,
         group_key="sys",
         when_to_use=sys_when_to_use,

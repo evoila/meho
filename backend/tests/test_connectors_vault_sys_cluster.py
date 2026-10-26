@@ -263,6 +263,7 @@ async def test_cluster_op_registers_safe_no_approval_in_sys_group(
         "type": "object",
         "properties": {},
         "additionalProperties": False,
+        "examples": [{}],
     }
     assert group.group_key == "sys"
 

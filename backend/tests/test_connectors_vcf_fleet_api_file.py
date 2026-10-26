@@ -31,7 +31,10 @@ What is covered, with a respx-mocked appliance and no ingested catalog:
 * content that is not text is refused with its content type;
 * the version read fails (the VCF 9.0 HTTP 500) and the file still comes
   back, with the ``Lcm-API-Version`` header and the reason;
-* no password in the result; registration-shape invariants.
+* no password in the result; registration-shape invariants;
+* the flight recorder gets the checked copy of the file, and no body when
+  the file is refused; a 401 body is checked before it is raised, and the
+  error result and the audit row hold no secret.
 
 Fixture values are made up; no real host, user or id appears here.
 """
@@ -56,6 +59,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.api_file_read import (
+    PART_BYTES,
+    ApiFileTooLargeError,
+    assert_fits_result_handle,
+    split_parts,
+)
 from meho_backplane.connectors._shared.api_file_secrets import REDACTED
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
@@ -70,15 +79,13 @@ from meho_backplane.connectors.vcf_fleet import (
 from meho_backplane.connectors.vcf_fleet.api_file import (
     DOCS_FOLDERS,
     DOCS_PAGES,
-    PART_BYTES,
     FleetApiFilePathError,
-    FleetApiFileTooLargeError,
     check_path,
-    split_parts,
 )
 from meho_backplane.connectors.vcf_fleet.version import parse_appliance_version
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import AuditLog, EndpointDescriptor
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.operations import dispatch, reset_dispatcher_caches, set_default_reducer
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
@@ -759,8 +766,6 @@ class _FakeValkey:
 
 def _largest_file_that_passes_the_check(limit: int) -> bytes:
     """The largest ``x``-file (in steps of 16 bytes) whose stored record fits *limit*."""
-    import meho_backplane.connectors.vcf_fleet.api_file as api_file
-
     answer = {
         "path": "/api/swagger-ui/fit.json",
         "status": 200,
@@ -781,10 +786,14 @@ def _largest_file_that_passes_the_check(limit: int) -> bytes:
         items = [{"index": i, "text": p.decode()} for i, p in enumerate(split_parts(data))]
         answer.update(size=size, sha256=hashlib.sha256(data).hexdigest(), parts=len(items))
         try:
-            api_file._assert_fits_result_handle(
-                answer, items, operator_sub="op-reads-fleet", max_bytes=limit
+            assert_fits_result_handle(
+                answer,
+                items,
+                operator_sub="op-reads-fleet",
+                op_id="fleet.api_file.get",
+                max_bytes=limit,
             )
-        except FleetApiFileTooLargeError:
+        except ApiFileTooLargeError:
             size -= 16
             continue
         return data
@@ -864,7 +873,7 @@ async def test_page_the_redaction_rules_would_change_stops_with_an_error(
     message = result.extras["exception_message"]
     assert "strip-authorization-header" in message
     assert "1 place(s)" in message
-    assert "the file cannot be returned" in message
+    assert "the exact file cannot be returned" in message
     assert "example-token-value" not in json.dumps(result.result) + json.dumps(
         result.extras, default=str
     )
@@ -897,7 +906,7 @@ async def test_secret_that_crosses_a_part_boundary_stops_with_an_error(
 
     assert result.status == "error"
     message = result.extras["exception_message"]
-    assert "the file cannot be returned" in message
+    assert "the exact file cannot be returned" in message
     assert "1 place(s)" in message
     assert "example-secret-value" not in json.dumps(result.result) + json.dumps(
         result.extras, default=str
@@ -1118,3 +1127,122 @@ async def test_registered_op_is_typed_safe_and_documented(
     assert row.parameter_schema["examples"] == [{"path": "<path>"}]
     assert {"when_to_call", "output_shape", "next_step"} <= set(row.llm_instructions)
     assert "\n" not in row.summary and len(row.description) <= 300
+
+
+# ---------------------------------------------------------------------------
+# The flight recorder and the 401 body: only the checked copy leaves the read
+# ---------------------------------------------------------------------------
+
+_RECORDER_SECRET = "made-up-recorder-secret"
+_SECRET_JSON = json.dumps({"swagger": "2.0", "x-example": {"password": _RECORDER_SECRET}})
+_SECRET_FILE = "/api/swagger-ui/secret.json"
+
+
+def _recorded_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Catch what the read hands the flight recorder."""
+    recorded: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        flight_recorder_capture,
+        "record_vendor_call",
+        lambda _span, **kwargs: recorded.append(kwargs),
+    )
+    return recorded
+
+
+def _file_calls(recorded: list[dict[str, Any]], path: str) -> list[dict[str, Any]]:
+    return [call for call in recorded if call["response"].url.path == path]
+
+
+async def _audit_payloads(op_id: str) -> list[str]:
+    async with get_sessionmaker()() as fresh:
+        rows = (await fresh.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
+    return [json.dumps(row.payload, default=str) for row in rows]
+
+
+@pytest.mark.asyncio
+async def test_flight_recorder_gets_the_checked_file_not_the_password(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded = _recorded_calls(monkeypatch)
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        mock.get(_SECRET_FILE).respond(
+            200, text=_SECRET_JSON, headers={"Content-Type": "application/json"}
+        )
+        result = await _dispatch(_SECRET_FILE)
+
+    assert result.status == "ok", result.error
+    (call,) = _file_calls(recorded, _SECRET_FILE)
+    assert REDACTED.encode() in call["response_body"]
+    assert _RECORDER_SECRET.encode() not in call["response_body"]
+
+
+@pytest.mark.asyncio
+async def test_flight_recorder_gets_no_body_when_the_file_is_refused(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded = _recorded_calls(monkeypatch)
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        mock.get(_SECRET_FILE).respond(
+            200, text=_SECRET_JSON[:-2], headers={"Content-Type": "application/json"}
+        )
+        result = await _dispatch(_SECRET_FILE)
+
+    assert result.status == "error"
+    (call,) = _file_calls(recorded, _SECRET_FILE)
+    assert call["response_body"] == b""
+
+
+@pytest.mark.asyncio
+async def test_flight_recorder_gets_no_body_when_the_stored_record_does_not_fit(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file fits the download limit, but its stored record does not: no body is recorded."""
+    recorded = _recorded_calls(monkeypatch)
+    monkeypatch.setenv("RESULT_HANDLE_MAX_RECORD_BYTES", "1000")
+    get_settings.cache_clear()
+    await _register_and_resolve(_stub_embedding)
+    data = b'"' + b'\\"' * 494 + b'"'
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        mock.get("/api/swagger-ui/quotes.json").respond(200, content=data)
+        result = await _dispatch("/api/swagger-ui/quotes.json")
+
+    assert result.status == "error"
+    assert "does not fit in one result handle" in result.extras["exception_message"]
+    (call,) = _file_calls(recorded, "/api/swagger-ui/quotes.json")
+    assert call["response"].status_code == 200
+    assert call["response_body"] == b""
+
+
+@pytest.mark.asyncio
+async def test_401_body_is_checked_before_it_is_raised_and_the_login_is_dropped(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The HTTP Basic login has no session to renew, so a 401 is the answer; the body is checked."""
+    recorded = _recorded_calls(monkeypatch)
+    _, loader = await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        docs = mock.get(_SECRET_FILE).respond(
+            401, text=_SECRET_JSON, headers={"Content-Type": "application/json"}
+        )
+        result = await _dispatch(_SECRET_FILE)
+
+    assert result.status == "error"
+    assert "401" in (result.error or "")
+    assert docs.call_count == 1
+    assert loader.calls == docs.call_count
+    rendered = (
+        (result.error or "") + json.dumps(result.result) + json.dumps(result.extras, default=str)
+    )
+    assert _RECORDER_SECRET not in rendered
+    (call,) = _file_calls(recorded, _SECRET_FILE)
+    assert REDACTED.encode() in call["response_body"]
+    assert _RECORDER_SECRET.encode() not in call["response_body"]
+    payloads = await _audit_payloads("fleet.api_file.get")
+    assert payloads
+    assert all(_RECORDER_SECRET not in payload for payload in payloads)

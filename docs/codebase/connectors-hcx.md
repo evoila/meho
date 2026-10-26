@@ -70,8 +70,9 @@ covers, so none stops early with a version message.
 - `HcxTypedOp`, `HCX_TYPED_OPS`, `register_hcx_typed_operations`
   (`typed_ops.py`) -- the op metadata and the registrar that writes the
   `source_kind="typed"` row at start-up.
-- `hcx_api_file_get_impl`, `check_path`, `split_parts` (`api_file.py`) --
-  the read's body, the path rule and the part splitter.
+- `hcx_api_file_get_impl`, `check_path` (`api_file.py`) -- the read's body
+  and the path rule; the fetch, the file check, the part splitter and the
+  flight recorder call are the shared steps in `_shared/api_file_read.py`.
 - `HCX_READ_OPS`, `HCX_READ_WHEN_TO_USE_BY_GROUP` (`read_ops.py`) -- the
   metadata of the first eight reads and the group texts of all of them.
   `HCX_DIAGNOSTICS_OPS` (`diagnostics_ops.py`) and `HCX_INVENTORY_OPS`
@@ -146,6 +147,19 @@ reported as `scheme://host/path`, so the caller sees it cannot be read
 through this target. Only a `401` is raised, so the dispatcher can log in
 again; every other status (for example `404`) is reported in `status`
 with the body as text.
+
+The fetch and the file check are one shared step,
+`fetch_checked_api_file` in `connectors/_shared/api_file_read.py`. The
+size check of the stored record, the last redaction check and the flight
+recorder call are a second shared step, `finish_api_file_read`. The
+flight recorder (the stored record of each vendor call) gets the checked
+copy of the file, never the body as it came, and only after every check
+has passed: a file the read refuses, for any reason, is recorded with no
+body. A `401` body goes through the same check before the error is
+raised, or the error is raised with no body, also when the body is too
+big or cannot be decoded; the status and the headers stay, so the login
+retry still runs. So neither the stored call record nor the error result
+can carry a password the Manager put in a file.
 
 The body is read in a stream. The read asks for `gzip` or `deflate` only
 and decodes the wire chunks itself with `zlib`, in steps that never

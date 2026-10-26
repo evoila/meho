@@ -12,7 +12,11 @@ The steps are called directly, with an ``httpx.MockTransport``:
   with an error, and an encoding the read cannot bound is refused;
 * the parts keep characters whole and join back to the file;
 * text checks, the stored-record check, the one redaction pass over the
-  whole text, the redaction check and the redirect path.
+  whole text, the redaction check and the redirect path;
+* the steps every read starts and ends with: the flight recorder gets
+  the checked copy only after the last checks pass, no body for a
+  refused file, and a ``401`` is raised with a checked body or none,
+  also when its body cannot be read.
 
 Fixture values are made up.
 """
@@ -35,16 +39,24 @@ from meho_backplane.connectors._shared.api_file_read import (
     ApiFileNotTextError,
     ApiFileRedactedError,
     ApiFileTooLargeError,
+    FetchedApiFile,
     assert_fits_result_handle,
     assert_not_redacted,
     decode_text,
+    fetch_checked_api_file,
     fetch_without_redirects,
+    finish_api_file_read,
     redirect_target,
     split_parts,
     text_items,
     text_redactor,
 )
-from meho_backplane.connectors._shared.api_file_secrets import check_api_file
+from meho_backplane.connectors._shared.api_file_secrets import (
+    REDACTED,
+    ApiFileFormatError,
+    check_api_file,
+)
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.settings import get_settings
 
 _BASE = "https://files.test.invalid"
@@ -276,3 +288,232 @@ def test_text_redactor_as_the_text_rule_keeps_the_file_format() -> None:
 )
 def test_redirect_target_shapes(location: str | None, expected: str | None) -> None:
     assert redirect_target(location, httpx.URL(f"{_BASE}/dir/file.yaml")) == expected
+
+
+# ---------------------------------------------------------------------------
+# fetch_checked_api_file: what the flight recorder and a raised 401 carry
+# ---------------------------------------------------------------------------
+
+_SECRET = "made-up-recorder-secret"
+_SECRET_JSON = b'{"swagger": "2.0", "x-example": {"password": "made-up-recorder-secret"}}'
+# A credential inside a text value under a key that is not a secret name. The
+# JSON escape is a literal backslash-n on the wire; only the parsed value
+# holds the line break the header rule crosses.
+_CREDENTIAL_IN_TEXT = b'{"detail": "Authorization:\\nBasic made-up-recorder-secret"}'
+_REDACTED_HEADER = b"[REDACTED:authorization_header]"
+_JSON = {"Content-Type": "application/json"}
+
+
+def _recorded_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    recorded: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        flight_recorder_capture,
+        "record_vendor_call",
+        lambda _span, **kwargs: recorded.append(kwargs),
+    )
+    return recorded
+
+
+async def _fetch_checked(response: httpx.Response) -> FetchedApiFile:
+    rule = text_redactor(_operator(), connector_id="made-rest-1.0", op_id="made.up.get")
+    async with _client(lambda _request: response) as client:
+        return await fetch_checked_api_file(
+            client,
+            "/file.json?group=a",
+            path="/file.json",
+            headers={"x-made-up": "1"},
+            extensions={},
+            max_bytes=4096,
+            text_rule=None,
+            error_text_rule=rule,
+        )
+
+
+@pytest.mark.asyncio
+async def test_fetch_checked_records_nothing_until_the_read_records_the_checked_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded = _recorded_calls(monkeypatch)
+    fetched = await _fetch_checked(_wire(200, _SECRET_JSON, headers=_JSON))
+
+    assert fetched.response.status_code == 200
+    assert REDACTED in fetched.checked.text
+    assert recorded == []
+    fetched.record(fetched.checked.text.encode())
+    (call,) = recorded
+    assert call["method"] == "GET"
+    assert call["request_headers"] == {"x-made-up": "1"}
+    assert call["response"] is fetched.response
+    assert call["response_body"] == fetched.checked.text.encode()
+    assert _SECRET.encode() not in call["response_body"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "headers", "error"),
+    [
+        (_SECRET_JSON[:-2], _JSON, ApiFileFormatError),
+        (b"\x89PNG", {"Content-Type": "image/png"}, ApiFileNotTextError),
+    ],
+)
+async def test_fetch_checked_gives_the_recorder_no_body_for_a_refused_file(
+    monkeypatch: pytest.MonkeyPatch, body: bytes, headers: dict[str, str], error: type[Exception]
+) -> None:
+    recorded = _recorded_calls(monkeypatch)
+    with pytest.raises(error):
+        await _fetch_checked(_wire(200, body, headers=headers))
+
+    (call,) = recorded
+    assert call["response"].status_code == 200
+    assert call["response_body"] == b""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "headers", "expected"),
+    [
+        (_SECRET_JSON, _JSON, REDACTED.encode()),
+        (_CREDENTIAL_IN_TEXT, _JSON, _REDACTED_HEADER),
+        (b"password=made-up-recorder-secret", {"Content-Type": "text/plain"}, b""),
+        (b"\xff\xfe", {"Content-Type": "application/octet-stream"}, b""),
+        # A lone surrogate parses, but the checked copy cannot be encoded.
+        (b'{"message": "\\ud800"}', _JSON, b""),
+        # A number longer than Python parses from text stops the JSON parse.
+        (b'{"n": ' + b"9" * 4500 + b"}", _JSON, b""),
+    ],
+)
+async def test_fetch_checked_raises_a_401_with_a_checked_body_or_none(
+    monkeypatch: pytest.MonkeyPatch, body: bytes, headers: dict[str, str], expected: bytes
+) -> None:
+    """The status and the headers stay, so the dispatcher's login retry still runs."""
+    recorded = _recorded_calls(monkeypatch)
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        await _fetch_checked(_wire(401, body, headers={**headers, "x-vendor": "kept"}))
+
+    raised = caught.value.response
+    assert raised.status_code == 401
+    assert raised.headers["x-vendor"] == "kept"
+    assert raised.request.url.path == "/file.json"
+    if expected:
+        assert expected in raised.content
+    else:
+        assert raised.content == b""
+    assert _SECRET.encode() not in raised.content
+    (call,) = recorded
+    assert call["response"].status_code == 401
+    assert call["response_body"] == raised.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "body", "headers"),
+    [
+        ("declared over the limit", b"x" * 5000, {"Content-Length": "5000"}),
+        ("streamed over the limit", b"x" * 5000, {}),
+        ("encoding the read cannot bound", b"x", {"Content-Encoding": "br"}),
+        ("cut gzip stream", gzip.compress(b"x" * 100)[:-8], {"Content-Encoding": "gzip"}),
+        (
+            "bytes after the deflate stream",
+            zlib.compress(b"x") + b"tail",
+            {"Content-Encoding": "deflate"},
+        ),
+    ],
+)
+async def test_401_whose_body_cannot_be_read_comes_back_with_no_body(
+    name: str, body: bytes, headers: dict[str, str]
+) -> None:
+    """The dispatcher must see the ``401``, whatever the body holds."""
+    answer = await _fetch(_wire(401, body, headers={**headers, "x-vendor": "kept"}))
+
+    assert answer.status_code == 401, name
+    assert answer.content == b""
+    assert answer.headers["x-vendor"] == "kept"
+    assert "content-encoding" not in answer.headers
+    assert "content-length" not in answer.headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "body", "headers"),
+    [
+        ("streamed over the limit", b"x" * 5000, {}),
+        ("encoding the read cannot bound", b"x", {"Content-Encoding": "br"}),
+        ("cut gzip stream", gzip.compress(b"x" * 100)[:-8], {"Content-Encoding": "gzip"}),
+    ],
+)
+async def test_fetch_checked_raises_a_401_whose_body_cannot_be_read_with_no_body(
+    monkeypatch: pytest.MonkeyPatch, name: str, body: bytes, headers: dict[str, str]
+) -> None:
+    recorded = _recorded_calls(monkeypatch)
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        await _fetch_checked(_wire(401, body, headers={**headers, **_JSON}))
+
+    raised = caught.value.response
+    assert raised.status_code == 401, name
+    assert raised.content == b""
+    (call,) = recorded
+    assert call["response"].status_code == 401
+    assert call["response_body"] == b""
+
+
+def _answer_for(body: bytes, items: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "path": "/file.json",
+        "status": 200,
+        "size": len(body),
+        "sha256": "0" * 64,
+        "version": None,
+        "parts": len(items),
+    }
+
+
+@pytest.mark.asyncio
+async def test_finish_records_the_checked_copy_only_when_the_last_checks_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The size boundary: the file fits the download limit but not the stored record."""
+    recorded = _recorded_calls(monkeypatch)
+    fetched = await _fetch_checked(_wire(200, _SECRET_JSON, headers=_JSON))
+    body = fetched.checked.text.encode()
+    items = text_items(body)
+    assert recorded == []
+    operator = _operator()
+    common: dict[str, Any] = {"connector_id": "made-rest-1.0", "op_id": "made.up.get"}
+
+    with pytest.raises(ApiFileTooLargeError):
+        finish_api_file_read(
+            fetched, _answer_for(body, items), items, operator, max_bytes=len(body), **common
+        )
+    (refused,) = recorded
+    assert refused["response_body"] == b""
+
+    answer = finish_api_file_read(
+        fetched, _answer_for(body, items), items, operator, max_bytes=4096, **common
+    )
+    assert answer["items"] == items
+    assert [call["response_body"] for call in recorded] == [b"", body]
+    assert _SECRET.encode() not in body
+
+
+@pytest.mark.asyncio
+async def test_finish_records_no_body_when_the_redaction_check_refuses_the_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded = _recorded_calls(monkeypatch)
+    wire = b'{"detail": "Authorization: Bearer made-up-token-value-0123456789"}'
+    fetched = await _fetch_checked(_wire(200, wire, headers=_JSON))
+    body = fetched.checked.text.encode()
+    items = text_items(body)
+
+    with pytest.raises(ApiFileRedactedError):
+        finish_api_file_read(
+            fetched,
+            _answer_for(body, items),
+            items,
+            _operator(),
+            connector_id="made-rest-1.0",
+            op_id="made.up.get",
+            max_bytes=4096,
+        )
+    (refused,) = recorded
+    assert refused["response_body"] == b""

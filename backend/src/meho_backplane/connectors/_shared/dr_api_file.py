@@ -42,16 +42,13 @@ import httpx
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.api_file_read import (
-    assert_fits_result_handle,
-    assert_not_redacted,
-    decode_text,
-    fetch_without_redirects,
+    fetch_checked_api_file,
+    finish_api_file_read,
     redirect_target,
     text_items,
     text_redactor,
 )
-from meho_backplane.connectors._shared.api_file_secrets import check_api_file, scrub_query_string
-from meho_backplane.flight_recorder import capture as flight_recorder_capture
+from meho_backplane.connectors._shared.api_file_secrets import scrub_query_string
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
@@ -79,9 +76,14 @@ async def dr_api_file_get(
 ) -> dict[str, Any]:
     """``GET`` one API file on the appliance and return it checked, text in parts.
 
-    A ``401`` is raised as :exc:`httpx.HTTPStatusError` so the dispatcher
-    drops this target's session and dispatches once more. Every other
-    status is reported in ``status``.
+    The fetch and the file check are the shared
+    :func:`fetch_checked_api_file`; the stored-record check, the
+    redaction check and the flight recorder call are the shared
+    :func:`finish_api_file_read`. The recorder gets the checked copy, and
+    only for a file the read returns. A ``401`` is raised as
+    :exc:`httpx.HTTPStatusError`, with a checked body or none, so the
+    dispatcher drops this target's session and dispatches once more.
+    Every other status is reported in ``status``.
     """
     op_id = f"{connector.product}.api_file.get"
     connector_id = connector.connector_id
@@ -89,33 +91,20 @@ async def dr_api_file_get(
     max_bytes = get_settings().result_handle_max_record_bytes
     client = await connector._http_client(target)
     headers = await connector.auth_headers(target, operator)
-    span = flight_recorder_capture.span_start()
-    try:
-        response = await fetch_without_redirects(
-            client,
-            path,
-            headers=headers,
-            extensions=connector._request_extensions(target),
-            max_bytes=max_bytes,
-        )
-    except httpx.TransportError as exc:
-        flight_recorder_capture.record_vendor_call_error(span, method="GET", exc=exc)
-        raise
-    flight_recorder_capture.record_vendor_call(
-        span, method="GET", request_headers=headers, response=response
-    )
-    if response.status_code == httpx.codes.UNAUTHORIZED:
-        response.raise_for_status()
-
-    content_type = response.headers.get("content-type")
-    checked = check_api_file(
-        decode_text(response, path),
-        content_type=content_type,
+    text_rule = text_redactor(operator, connector_id=connector_id, op_id=op_id)
+    fetched = await fetch_checked_api_file(
+        client,
+        path,
         path=path,
-        text_rule=text_redactor(operator, connector_id=connector_id, op_id=op_id),
+        headers=headers,
+        extensions=connector._request_extensions(target),
+        max_bytes=max_bytes,
+        text_rule=text_rule,
+        error_text_rule=text_rule,
     )
-    text = checked.text
-    body = text.encode("utf-8")
+    response, checked = fetched.response, fetched.checked
+    content_type = response.headers.get("content-type")
+    body = checked.text.encode("utf-8")
     items = text_items(body)
     redirect_to, redirect_replaced = _redirect(response)
     version = await connector.server_version(target, operator)
@@ -133,12 +122,15 @@ async def dr_api_file_get(
         "redirect_to": redirect_to,
         "parts": len(items),
     }
-    assert_fits_result_handle(
-        answer, items, operator_sub=operator.sub, op_id=op_id, max_bytes=max_bytes
+    return finish_api_file_read(
+        fetched,
+        answer,
+        items,
+        operator,
+        connector_id=connector_id,
+        op_id=op_id,
+        max_bytes=max_bytes,
     )
-    answer["items"] = items
-    assert_not_redacted(answer, text, operator, connector_id=connector_id, op_id=op_id)
-    return answer
 
 
 def _redirect(response: httpx.Response) -> tuple[str | None, int]:

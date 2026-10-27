@@ -67,6 +67,13 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     "SUBSCRIPTION_PATH": (("GET",), "SUBSCRIPTIONS_API_VERSION"),
     "LOCATIONS_PATH": (("GET",), "SUBSCRIPTIONS_API_VERSION"),
     "RESOURCE_GRAPH_PATH": (("POST",), "RESOURCE_GRAPH_API_VERSION"),
+    # ---- storage (Task #5086) ----
+    "STORAGE_ACCOUNTS_PATH": (("GET",), "STORAGE_API_VERSION"),
+    "BLOB_CONTAINERS_PATH": (("GET",), "STORAGE_API_VERSION"),
+    # Data-plane paths, relative to the account's blob host. The check cuts the
+    # fixed query part, so List Blobs compares as GET /{container}.
+    "BLOB_LIST_PATH": (("GET",), "BLOB_API_VERSION"),
+    "BLOB_PATH": (("GET", "HEAD"), "BLOB_API_VERSION"),
 }
 
 _PARAMETER = re.compile(r"\{[^}]*\}")
@@ -142,7 +149,12 @@ def test_the_checked_paths_are_pinned() -> None:
     """The list of checked paths, so a change to it is always on purpose."""
     assert sorted(_declared_op_ids()) == [
         "GET:/subscriptions/{}/locations@2022-12-01",
+        "GET:/subscriptions/{}/providers/microsoft.storage/storageaccounts@2026-09-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.storage/storageaccounts/{}/blobservices/default/containers@2026-09-01",
         "GET:/subscriptions/{}@2022-12-01",
+        "GET:/{}/{}@2026-10-06",
+        "GET:/{}@2026-10-06",
+        "HEAD:/{}/{}@2026-10-06",
         "POST:/providers/microsoft.resourcegraph/resources@2024-04-01",
     ]
 

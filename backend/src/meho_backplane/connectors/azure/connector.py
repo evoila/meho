@@ -65,6 +65,7 @@ from meho_backplane.connectors.azure.session import (
     load_credentials_from_vault,
     resolve_target_config,
 )
+from meho_backplane.connectors.azure.storage import StorageOps
 from meho_backplane.connectors.schemas import (
     AuthModel,
     FingerprintResult,
@@ -119,6 +120,7 @@ def _may_use_cache(operator: Operator) -> bool:
 
 class AzureConnector(
     # Family mixin classes first, one per line in alphabetical order; the HTTP base last.
+    StorageOps,
     HttpConnector,
 ):
     """Azure Resource Manager connector. One target is one subscription.
@@ -165,11 +167,13 @@ class AzureConnector(
         return token
 
     async def authorize(
-        self, target: AzureTargetLike, operator: Operator
+        self, target: AzureTargetLike, operator: Operator, *, scope: str | None = None
     ) -> tuple[dict[str, str], tuple[str, str]]:
         """Return the ``Authorization`` header and the login (Azure tenant ID, client ID).
 
-        The transport uses the login to apply the limit per Azure login.
+        The token is for *scope*, the API it is sent to; without it, for
+        Resource Manager. The transport uses the login to apply the limit per
+        Azure login.
         """
         auth_model = getattr(target, "auth_model", None)
         if not is_acceptable_auth_model(auth_model):
@@ -178,18 +182,23 @@ class AzureConnector(
                 f"{AuthModel.SHARED_SERVICE_ACCOUNT.value!r}; target {target.name!r} "
                 f"asked for auth_model={auth_model!r}"
             )
-        token, login = await self._token_and_login(target, operator)
+        token, login = await self._token_and_login(target, operator, scope=scope)
         return {"Authorization": f"Bearer {token.value}"}, login
 
     async def _token_and_login(
-        self, target: AzureTargetLike, operator: Operator
+        self, target: AzureTargetLike, operator: Operator, *, scope: str | None = None
     ) -> tuple[MicrosoftAccessToken, tuple[str, str]]:
-        """Return a token for *target* and the login it belongs to."""
+        """Return a token for *target* and the login it belongs to.
+
+        The token is for *scope*; without it, for Resource Manager. The cache
+        keeps one token per scope, so a token for one API never goes to
+        another (the storage reads ask for Azure Storage's scope).
+        """
         config = resolve_target_config(target)
         credentials = await self._credentials_for(target, operator)
         check_tenant_match(target, config, credentials)
         login = (credentials.tenant_id, credentials.client_id)
-        scope = config.cloud.arm_scope
+        scope = config.cloud.arm_scope if scope is None else scope
         key: _TokenKey = (*target_cache_key(target), *login, scope)
         use_cache = _may_use_cache(operator)
         cached = self._tokens.get(key)

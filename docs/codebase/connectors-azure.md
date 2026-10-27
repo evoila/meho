@@ -542,3 +542,158 @@ as MEHO's system identity, which cannot read the secret, so it reports
   <https://learn.microsoft.com/en-us/azure/azure-government/compare-azure-government-global-azure>
 - Related pages: `connectors-keycloak.md` (the same client credentials request),
   `connectors-shared-vault-creds.md`, `error-message-shape.md`.
+
+## storage
+
+The `storage` family reads Azure Storage: the storage accounts of the
+target's subscription, the containers of one account, the files (blobs) of
+one container, and one small text file. All four operations are in the group
+`storage`, all are `safe`, and none needs approval. Nothing changes in Azure,
+and MEHO never reads account keys, SAS tokens or connection strings.
+
+Files: `storage.py` (group text, guidance for the AI, operation table, and
+the `StorageOps` methods `AzureConnector` inherits), `storage_schemas.py`
+(parameter and response schemas), `storage_parse.py` (name checks, rows, the
+XML of the blob list, the text check) and `storage_reads.py` (the calls).
+
+### Operations
+
+| Operation | Host and call | Version | Parameters |
+|---|---|---|---|
+| `azure.storage.account.list` | Resource Manager: `GET /subscriptions/{id}/providers/Microsoft.Storage/storageAccounts` | api-version 2026-09-01 | none |
+| `azure.storage.container.list` | Resource Manager: `GET .../storageAccounts/{account}/blobServices/default/containers` | api-version 2026-09-01 | `resource_group`, `account` |
+| `azure.storage.blob.list` | Blob host: `GET /{container}?restype=container&comp=list` with `maxresults`, `prefix`, `marker` | x-ms-version 2026-10-06 | `account`, `container`, `prefix` (optional), `max_results` (1 to 10,000, default 5,000) |
+| `azure.storage.blob.read` | Blob host: `HEAD /{container}/{name}`, then `GET` with `x-ms-range` | x-ms-version 2026-10-06 | `account`, `container`, `name` |
+
+Roles: Reader on the subscription (or the account) allows the account and
+container lists. The blob list and the file read need a data role, Storage
+Blob Data Reader, on the account or the container; Reader alone gives no
+access to the files. A new role can take up to 10 minutes to work.
+
+### Two hosts, two tokens
+
+The account and container lists go to Resource Manager with the usual
+Resource Manager token. The blob list and the file read go to the account's
+own blob host, `https://<account>.blob.core.windows.net` (in the other
+clouds `blob.core.usgovcloudapi.net` and `blob.core.chinacloudapi.cn`). That
+host needs a token for Azure Storage: scope `https://storage.azure.com/.default`,
+the same in every cloud. It answers in XML, and the Blob service version goes
+in the `x-ms-version` header.
+
+- **Token cache.** `AzureConnector.authorize` and `_token_and_login` take a
+  `scope`; without it the token is for Resource Manager. The cache key holds
+  the scope, so a target has one Resource Manager token and one storage
+  token, and a token never goes to the other API. The 401 hook drops both.
+- **Through the shared transport.** The blob calls use `send()` in `_http.py`
+  like every Azure call: one retry budget, the wait when Azure throttles, one
+  new login after a 401, the limit per login and the URL check. `send()` asks
+  its connector for the request headers before each try. `_StorageCaller` in
+  `storage_reads.py` answers that question with the storage token and the
+  Blob service headers; everything else is the connector's own.
+- **Accounts of this subscription only.** Before a blob call, MEHO reads the
+  subscription's storage accounts (one list call) and looks for the account
+  by name. An account of another subscription is `not_found`, and nothing
+  goes to its host.
+- **The host is built, never taken.** The account name must pass Azure's rule
+  (3 to 24 lower-case letters and digits) before the host
+  `<name>.blob.<cloud suffix>` is built from it, so no parameter can change
+  the host. The host must also be the blob endpoint Azure reports for the
+  account (`primaryEndpoints.blob`). An account with another endpoint, for
+  example an Azure DNS zone endpoint, is refused. The URL check admits this
+  one host for the call and no other.
+- **Names in paths.** Container names follow Azure's rule (or are `$root`,
+  `$web`, `$logs`). A file name may hold any character and is sent
+  percent-encoded, but no part between slashes may be `.` or `..`: the HTTP
+  client would remove such a part and read another file. Every query value
+  goes in `params`, because `httpx` replaces a URL's own query with `params`.
+
+### What each operation returns
+
+Every list answer has the rows under `value`, their number in `count`, and
+the paging fields (`truncated`, `omission`, `omission_kind`, `pages_read`).
+More than 50 rows (or 4 KB) go to a stored result. The container list and
+the blob list also return `account: {name, resource_group}`; their guidance
+carries a `result_objects` hint, so this object stays next to the
+stored-result link. The blob list also returns `container` and `prefix`.
+
+- **Accounts**: `name`, `resource_group` (from the account's id), `location`,
+  `kind`, `sku`, `access_tier`, `shared_key_access`,
+  `public_network_access`, `network_default_action`. Azure documents a
+  missing `allowSharedKeyAccess` as true, so MEHO shows it as `true`.
+  `network_default_action` (Allow or Deny) says what the account's firewall
+  does with a network without a rule; it explains a public network access of
+  `Enabled`.
+- **Containers**: `name`, `public_access` (None, Blob or Container),
+  `last_modified`, `lease_state`, `has_immutability_policy`,
+  `has_legal_hold`, `version_immutability`.
+- **Blobs**: `name`, `size` (bytes), `last_modified` (ISO 8601 UTC, from
+  Azure's HTTP date), `content_md5` (Azure's base64 MD5 as 32 hex digits, or
+  null), `content_type`, `access_tier`. A name Azure sends percent-encoded
+  (`Encoded="true"`) is decoded. MEHO follows `NextMarker` page by page, up to
+  5,000 rows a page, until the list ends, `max_results` is reached or a
+  paging limit stops it; the omission then says so.
+- **File read**: `account`, `container`, `name`, `size`, `content_type`,
+  `content_md5`, `last_modified`, `encoding` (always `utf-8`) and `content`.
+  A long file comes back as a stored-result link; `result_query` with the
+  path `/content` reads it in parts.
+
+### The file read
+
+1. `HEAD` reads the file's properties. A file over 1 MiB (1,048,576 bytes) is
+   refused with its size named; so is a file in the Archive tier, a file
+   whose content type is image, audio, video, font or model, and a file
+   stored with a content encoding such as gzip (the HTTP client would unpack
+   it, and unpacked it can be far bigger than the limit). None of these bytes
+   are read. An empty file is returned without a second call.
+2. `GET` with `x-ms-range: bytes=0-1048575` reads the bytes, so a file that
+   grew in between is never read past the limit. The `ETag` is compared with
+   the first answer before the bytes are touched, then the size: when either
+   differs, the file changed while MEHO read it, and the read is refused.
+3. The bytes must be UTF-8 text: a byte order mark is dropped; invalid UTF-8,
+   a NUL byte or another control character that text never has means binary,
+   and the read is refused. Binary content is never returned as text.
+
+The content is untrusted data. Like every result, it passes MEHO's secret
+filter before the caller sees it.
+
+### Errors
+
+- A 403 from the blob host becomes `AzureForbiddenError` with MEHO's text: the
+  login needs Storage Blob Data Reader on the account or the container, the
+  Reader role alone is not enough, and the account's network rules may block
+  MEHO. The blob host answers in XML, which `error_for_response` does not
+  read, so Azure's own storage error code is not shown.
+- A 404 from the blob host is `not_found` and names the container or the
+  file.
+- A parameter that breaks a name rule fails before any request with
+  `StorageParameterError`; a refused file, an unusual account endpoint or an
+  unreadable list fails with `StorageReadError`. Both carry a `remediation`.
+
+### Secrets
+
+Rows are built field by field, so a key, a SAS token or a connection string
+in an Azure answer never reaches a result. The file read copies only the
+properties it needs from the answer headers; `x-ms-copy-source`, which can
+hold a SAS token, is never copied. MEHO never calls `listKeys`.
+
+### Limits and choices
+
+- Each blob list and file read starts with one storage account list call on
+  Resource Manager. Azure allows about 100 such list calls per 5 minutes per
+  subscription.
+- Blob service version 2026-10-06: the pinned spec files hold 2026-10-06 and
+  2026-12-06. The newer one is dated after this code was written, so the
+  service may not take it yet. The lab proof checks which version the lab
+  account accepts.
+- Spec path check: the blob paths are data-plane paths, relative to the
+  account's host. The check cuts the fixed query part, so List Blobs compares
+  as `GET /{container}`, which Get Container Properties also matches.
+
+### Proven
+
+Nothing is proven live yet: the lab login does not exist. Every behaviour
+above is proven with mocked HTTP in `backend/tests/test_connectors_azure_storage.py`,
+built from Microsoft's documented answer shapes. The lab proof lists a real
+account, container and blobs with real sizes and MD5 values, reads a small
+checksum file, and checks the "needs Storage Blob Data Reader" message with a
+Reader-only login.

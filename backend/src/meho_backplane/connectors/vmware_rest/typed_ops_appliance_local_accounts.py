@@ -62,15 +62,12 @@ APPLIANCE_LOCAL_ACCOUNTS_WHEN_TO_USE: Final = (
 )
 
 _TIME_NOTE: Final = "ISO 8601 date and time"
+#: The SSO group every operation of this group needs; reads and changes alike.
 _SERVICE_ACCOUNT_NOTE: Final = (
     "The vCenter service account of the target needs the appliance super administrator "
-    "level for this change: membership in the SSO group "
-    "SystemConfiguration.BashShellAdministrators."
-)
-_PERMISSION_NEXT_STEP: Final = (
-    "On HTTP 403 (or HTTP 500 for one account) the vCenter service account may lack the "
-    "appliance role. Changes need membership in the SSO group "
-    "SystemConfiguration.BashShellAdministrators."
+    "level for this operation: membership in the SSO group "
+    "SystemConfiguration.BashShellAdministrators. After a group change, MEHO's next login "
+    "to vCenter (by default within 20 minutes) carries the new group."
 )
 
 _ACCOUNT_PROPERTIES: Final[dict[str, Any]] = {
@@ -210,7 +207,7 @@ VMWARE_APPLIANCE_LOCAL_ACCOUNT_LIST_OP = VmwareTypedOp(
         "next_step": (
             "For one account, use vmware.appliance.local_account.get. To set a new password, "
             "use vmware.appliance.local_account.password.set; to change when it expires, use "
-            f"vmware.appliance.local_account.policy.set. {_PERMISSION_NEXT_STEP}"
+            f"vmware.appliance.local_account.policy.set. {_SERVICE_ACCOUNT_NOTE}"
         ),
     },
 )
@@ -250,7 +247,7 @@ VMWARE_APPLIANCE_LOCAL_ACCOUNT_GET_OP = VmwareTypedOp(
             "If password_expired is true or days_until_password_expires is small, set a new "
             "password with vmware.appliance.local_account.password.set or change the expiry "
             "with vmware.appliance.local_account.policy.set. A missing account answers "
-            f"not_found. {_PERMISSION_NEXT_STEP}"
+            f"not_found. {_SERVICE_ACCOUNT_NOTE}"
         ),
     },
 )

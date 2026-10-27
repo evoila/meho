@@ -187,8 +187,13 @@ The mapping (`inventory_to_csv`):
 A read-only multi-step operation of the vCenter connector
 (`connectors/vmware_rest/composites/_migration_inventory*.py`), registered
 on both vCenter catalogs (`vmware-rest-8.0` and `vmware-rest-9.0`), group
-`migration`, `safe`, no approval. It returns one inventory envelope; a
-large one comes back as a handle for `migration.inventory.csv`.
+`migration`, `safe`, no approval. It returns one inventory envelope, always
+as a stored result: the operation's `result_document: {"always": true}`
+hint makes the reducer keep the inventory whole under a handle whatever its
+size, so even a one-VM inventory has a handle for `migration.inventory.csv`.
+The caller sees the reducer's document summary (`result_record`,
+`top_level_fields`, the small scalars) and reads the rest with
+`result_query` and a path (for example `/counts` or `/records`).
 
 Parameters: `vcf_operations_target` (optional), `utilization_days` (1 to
 365, default 30), and `cluster` or `folder` (an id) to narrow the scope.

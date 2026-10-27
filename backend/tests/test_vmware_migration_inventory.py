@@ -19,6 +19,7 @@ vCenter counts five VMs; three records plus two omissions match that count.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -45,6 +46,9 @@ from meho_backplane.connectors.vmware_rest.composites._migration_inventory impor
 from meho_backplane.connectors.vmware_rest.composites._migration_inventory_map import (
     nearest_rank_stat,
 )
+from meho_backplane.connectors.vmware_rest.composites._migration_inventory_schemas import (
+    MIGRATION_INVENTORY_LLM_INSTRUCTIONS,
+)
 from meho_backplane.connectors.vmware_rest.composites._migration_inventory_usage import (
     interval_for_days,
 )
@@ -55,6 +59,7 @@ from meho_backplane.connectors.vmware_rest.composites._register import (
 )
 from meho_backplane.delete_names import write_word_in_op_id
 from meho_backplane.operations._validate import validate_params
+from meho_backplane.operations.dispatcher import _result_document_from_descriptor
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.settings import get_settings
 
@@ -507,6 +512,33 @@ async def test_same_bios_uuid_is_flagged_and_not_counted_twice_in_the_csv() -> N
     assert [(row.name, row.reason) for row in export.left_out] == [
         ("db-lin-01-copy", "same_machine_as")
     ]
+
+
+async def test_a_small_inventory_is_stored_too_with_the_default_size_limit() -> None:
+    """One VM makes a small inventory; it still comes back as a stored result."""
+    vms = {"vm-102": dict(_VMS["vm-102"])}
+    result = await _run(vcenter=_FakeVcenter(vms=vms, failing=frozenset()))
+    assert result["counts"]["server"] == 1
+
+    store = ResultHandleStore(_MemoryValkey())  # type: ignore[arg-type]
+    operator = _operator()
+    descriptor = SimpleNamespace(llm_instructions=MIGRATION_INVENTORY_LLM_INSTRUCTIONS)
+    hint = _result_document_from_descriptor(descriptor)  # type: ignore[arg-type]
+    assert hint == {"always": True}
+    context = {**_reduce_context(operator), "result_document": hint}
+
+    _plain, no_handle = await JsonFluxReducer(store=store).reduce(
+        result, None, context=_reduce_context(operator)
+    )
+    summary, handle = await JsonFluxReducer(store=store).reduce(result, None, context=context)
+
+    assert no_handle is None, "without the hint a small inventory would stay inline"
+    assert handle is not None
+    assert summary["result_record"] == "document"
+    loaded = await load_inventories(operator, [str(handle.handle_id)], store=store)
+    assert [record.name for record in loaded.records] == ["db-lin-01"]
+    export = inventory_to_csv(loaded.records, loaded.duplicates)
+    assert export.row_count == 1
 
 
 async def test_repeated_instance_uuid_gets_a_vm_id_and_is_flagged() -> None:

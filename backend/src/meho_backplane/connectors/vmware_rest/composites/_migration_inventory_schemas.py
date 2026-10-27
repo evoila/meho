@@ -76,7 +76,7 @@ MIGRATION_INVENTORY_DESCRIPTION: Final = (
 
 MIGRATION_GROUP_WHEN_TO_USE: Final = (
     "Use to collect a vCenter's VMs for a migration assessment, in MEHO's common "
-    "inventory shape. The result is stored and its handle feeds the migration "
+    "inventory shape. The result is always stored and its handle feeds the migration "
     "operations (for example migration.inventory.csv). Read-only."
 )
 
@@ -97,10 +97,16 @@ MIGRATION_INVENTORY_LLM_INSTRUCTIONS: dict[str, Any] = {
     "output_shape": (
         "One inventory: {schema_version, source, records: [server records], omissions, "
         "counts: {server, source_totals, reconciliation: [{kind, source_total, records, "
-        "omitted, difference, matches}]}, duplicates}. Large results come back as a handle."
+        "omitted, difference, matches}]}, duplicates}. It is always stored whole: the "
+        "answer is a short summary with the handle, whatever the size."
     ),
     "next_step": (
+        "Pass the handle to migration.inventory.csv for an Azure Migrate file. Read the "
+        "inventory with result_query and a path, for example '/counts' or '/duplicates'. "
         "Check counts.reconciliation (matches true, else name the difference) and the "
-        "duplicates. Pass the handle to migration.inventory.csv for an Azure Migrate file."
+        "duplicates."
     ),
+    # The migration operations load the inventory by its handle, so a small
+    # inventory (one VM) must be stored too. See the reducer's document hint.
+    "result_document": {"always": True},
 }

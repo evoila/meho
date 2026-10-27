@@ -12,6 +12,9 @@ The first part, in this package today:
 - **One assessment result shape** (`contracts.py`).
 - **A loader** that reads stored inventories back by handle id and
   merges them (`inventory_load.py`).
+- **Readiness flags per server**, `migration.assess.readiness`: the rule
+  table (`readiness_rules.py`), the checks (`readiness_checks.py`) and
+  the operation (`readiness_op.py`).
 - **The Azure Migrate CSV mapping** (`azure_migrate_csv.py`) and the
   read `migration.inventory.csv` (`ops.py`).
 
@@ -20,8 +23,9 @@ operations are registered under the natural key
 `(product="migration", version="1.x", impl_id="migration-assess")`, so the
 connector id is `migration-assess-1.x`. The handlers are module-level
 functions; the dispatcher calls them with `target=None`. The package
-`__init__` queues `register_migration_operations` on the lifespan
-registrar list (`register_typed_op_registrar`).
+`__init__` queues `register_migration_operations` and
+`register_readiness_operation` on the lifespan registrar list
+(`register_typed_op_registrar`).
 
 ## Key types
 
@@ -87,6 +91,12 @@ names of the `assumptions` it used, `calculation_version`, and
 `unknown_reason` when `value` is `null`. The model refuses a figure that
 cites an assumption that is not set.
 
+An item can also carry `readiness` (set only by the readiness check):
+`state` and `findings`. A finding (`ReadinessFinding`) has the rule's
+`flag`, its `state`, the `reason`, the `inputs` it read, and its source:
+`source_title`, `source_url`, `source_checked_on`. The model refuses a
+`state` that is not the worst state of the findings (`worst_readiness`).
+
 `inventory_json_schema()` and `assessment_result_json_schema()` export the
 two shapes as JSON Schema for the operations' response schemas.
 
@@ -115,6 +125,68 @@ handle_ids)`:
    `duplicates`; the caller decides what that means. A repeated record's
    BIOS UUID still counts, so a machine whose first record had no BIOS
    UUID is still matched to a later record from another source.
+
+### `migration.assess.readiness`
+
+Group `assessment`, `safe`, `requires_approval: false`. A typed operation:
+it only reads stored results and runs no other operation. In:
+`inventory_handles` (1 to 20) and an optional `region`, which is only
+recorded in the assumptions. Out: the assessment result, plus `counts`
+(servers per state), `skipped_records` (records that are not servers, per
+kind) and `duplicates` (from the loader). A server read through two
+sources (same `source_id` or BIOS UUID) is checked once, from its first
+record.
+
+Every server gets one state, the worst of its findings:
+
+| State | Meaning |
+|---|---|
+| `ready` | Can move to an Azure VM as it is. |
+| `ready_with_conditions` | Can move after some work, or runs without full support. |
+| `unknown` | The inventory lacks data a rule needs. Never counted as ready. |
+| `not_ready` | Cannot run in Azure as it is. |
+
+The rules (`RULES` in `readiness_rules.py`; each names its source in
+`SOURCES`, checked on 2026-10-27):
+
+- **OS.** Windows Server: supported until the last day of Microsoft support
+  (2016, 2019, 2022, 2025, from the lifecycle pages), then
+  `os.end_of_support` (a condition). 2003, 2008 and 2008 R2 are always past
+  it. A name like "2016 or later" (vCenter) counts as the oldest version it
+  names; once that one is out of support the state is unknown. Windows
+  client systems are a condition. Linux: the endorsed distributions are
+  ready (Ubuntu 22.04, 24.04, 26.04; Debian 11, 12; SLES 12 SP5, 15 SP5 to
+  SP7, 16; RHEL, Oracle Linux, AlmaLinux, Rocky Linux and Flatcar with any
+  version, because Microsoft's page names none); other versions and
+  distributions are a condition. A version that is needed but missing
+  ("Ubuntu Linux (64-bit)" from vCenter) is unknown. FreeBSD, Solaris and
+  similar systems are a condition. No OS or "Other" is unknown. A 32-bit
+  system is a condition. The support dates are compared with the day the
+  check runs (`support_dates_as_of` in the assumptions).
+- **Boot.** BIOS gives a generation 1 VM, UEFI a generation 2 VM. UEFI with
+  Windows Server 2003, 2008 or 2008 R2 is not ready. Secure boot on is a
+  condition (Trusted launch after the move). No boot type is unknown.
+- **Limits.** More than 1,792 cores or 30,400 GB of memory (the biggest
+  Azure VM size) is not ready. The first disk is taken as the OS disk: over
+  2,048 GB on BIOS or over 4,096 GB is not ready. A data disk over 32,768 GB
+  is a condition (Azure Migrate copies up to that size), over 65,536 GB is
+  not ready (the biggest managed disk). More than 64 data disks is not
+  ready. Missing cores, memory, disks or disk sizes are unknown.
+- **Features.** Shared disks, raw device mappings, independent disks and
+  snapshots are conditions: remove or merge them before the move. A
+  feature a source did not report (`null`) makes the server unknown, so
+  source adapters should report `false` when a platform has no such
+  feature.
+
+Unknown findings are also listed in `unknowns`. Source text (OS names, disk
+labels) goes into reasons on one line and cut to 80 characters.
+
+The architecture is optional: a server without one gets no 32-bit check.
+Region availability of the very large sizes is not checked.
+
+Tests: `backend/tests/test_migration_readiness.py` changes one fact of a
+ready, made-up server per test and checks the flag and the state, and runs
+the operation over two stored inventories.
 
 ### `migration.inventory.csv`
 

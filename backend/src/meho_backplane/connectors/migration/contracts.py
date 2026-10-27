@@ -50,6 +50,9 @@ __all__ = [
     "Nic",
     "Omission",
     "OperatingSystem",
+    "Readiness",
+    "ReadinessFinding",
+    "ReadinessState",
     "RecordKind",
     "ServerRecord",
     "Stat",
@@ -59,6 +62,7 @@ __all__ = [
     "assessment_result_json_schema",
     "inventory_json_schema",
     "missing_reason",
+    "worst_readiness",
 ]
 
 #: The inventory shape version this code reads and writes. A reader refuses
@@ -417,6 +421,50 @@ class AssessmentInputs(_Shape):
     generated_at: datetime
 
 
+#: Readiness of one server for Azure, from best to worst.
+ReadinessState = Literal["ready", "ready_with_conditions", "unknown", "not_ready"]
+
+_READINESS_ORDER: Final[tuple[str, ...]] = (
+    "ready",
+    "ready_with_conditions",
+    "unknown",
+    "not_ready",
+)
+
+
+def worst_readiness(states: list[ReadinessState]) -> ReadinessState:
+    """The worst of *states*. Unknown ranks below not ready but above every ready state."""
+    return max(states, key=_READINESS_ORDER.index)
+
+
+class ReadinessFinding(_Shape):
+    """One checked fact about a server, with the rule's reason and its source."""
+
+    flag: str = Field(min_length=1, description="Rule name, for example 'features.snapshots'.")
+    state: ReadinessState
+    reason: str = Field(min_length=1)
+    inputs: dict[str, str | float | int | bool | None] = Field(
+        default_factory=dict, description="The inventory values the rule read."
+    )
+    source_title: str = Field(min_length=1)
+    source_url: str = Field(min_length=1)
+    source_checked_on: date = Field(description="When the source page was last checked.")
+
+
+class Readiness(_Shape):
+    """Readiness of one server: the worst state of its findings."""
+
+    state: ReadinessState
+    findings: list[ReadinessFinding] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _state_is_the_worst_finding(self) -> Readiness:
+        worst = worst_readiness([finding.state for finding in self.findings])
+        if self.state != worst:
+            raise ValueError(f"state {self.state!r} does not match the worst finding {worst!r}")
+        return self
+
+
 class AssessmentItem(_Shape):
     """The numbers and flags for one record."""
 
@@ -424,6 +472,9 @@ class AssessmentItem(_Shape):
     name: str
     figures: dict[str, Figure] = Field(default_factory=dict)
     flags: list[str] = Field(default_factory=list)
+    readiness: Readiness | None = Field(
+        default=None, description="Set by the readiness assessment; null in other assessments."
+    )
 
 
 class Unknown(_Shape):

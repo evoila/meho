@@ -97,7 +97,9 @@ async def _result_query_handler(
         handle_id = UUID(str(raw_handle))
     except (ValueError, TypeError) as exc:
         raise McpInvalidParamsError(
-            f"handle_id is not a valid UUID: {raw_handle!r}",
+            f"handle_id is not a valid UUID: {raw_handle!r}. "
+            "`result_query` reads stored results only. To read a knowledge "
+            "entry, call `search_knowledge` with `slug`.",
             data={"reason": "invalid_handle_id", "handle_id": str(raw_handle)},
         ) from exc
 

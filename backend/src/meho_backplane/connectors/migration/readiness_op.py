@@ -105,7 +105,26 @@ def _response_schema() -> dict[str, Any]:
             },
         },
     }
-    schema["required"] = [*schema.get("required", []), "counts", "skipped_records", "duplicates"]
+    properties["lists"] = {
+        "type": "object",
+        "description": (
+            "The same unknowns, omissions and duplicates as the top-level lists. A large "
+            "result keeps this object with the stored rows, so result_query with a path "
+            "such as /lists/unknowns reads them back."
+        ),
+        "properties": {
+            "unknowns": properties["unknowns"],
+            "omissions": properties["omissions"],
+            "duplicates": properties["duplicates"],
+        },
+    }
+    schema["required"] = [
+        *schema.get("required", []),
+        "counts",
+        "skipped_records",
+        "duplicates",
+        "lists",
+    ]
     return schema
 
 
@@ -144,14 +163,31 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
         "The assessment result: 'items' (per server 'readiness': {state, findings: "
         "[{flag, state, reason, inputs, source_title, source_url, source_checked_on}]} "
         "and 'flags', the flags that are not ready), 'unknowns', 'omissions', "
-        "'assumptions', 'inputs', 'counts' per state, 'skipped_records', 'duplicates'."
+        "'assumptions', 'inputs', 'counts' per state, 'skipped_records', 'duplicates', "
+        "and 'lists' (the unknowns, omissions and duplicates once more, kept with a "
+        "stored result)."
     ),
     "next_step": (
         "Show the counts first, then the not-ready and unknown servers with their "
         "reasons and sources. Unknown means data is missing: run the inventory read "
-        "with more access, not a guess. A large result comes back as a handle; read "
-        "'items' with result_query."
+        "with more access, not a guess. A large result comes back as a handle: page "
+        "'items' with result_query, and read the rest with a path: /counts, "
+        "/assumptions, /inputs, /skipped_records, /lists/unknowns, /lists/omissions "
+        "or /lists/duplicates."
     ),
+    # The reducer keeps only the rows and the plain values next to them. These
+    # hints keep the other parts with the stored rows (and a short copy inline)
+    # until the reducer does that on its own (#5139). Lists cannot be hinted,
+    # so the three lists ride inside the ``lists`` object.
+    "result_objects": {
+        "objects": {
+            "counts": list(_STATES),
+            "inputs": ["generated_at", "inventories"],
+            "assumptions": ["region"],
+            "skipped_records": ["application", "kubernetes_workload"],
+            "lists": ["unknowns", "omissions", "duplicates"],
+        }
+    },
 }
 
 _ASSUMPTIONS: Final[dict[str, str]] = {
@@ -183,7 +219,8 @@ def _first_records(loaded: LoadedInventory) -> tuple[list[ServerRecord], Counter
     """Servers to check, once per machine, and the count of other records per kind.
 
     A record whose ``source_id`` or BIOS UUID was seen before is left out; the
-    loader lists it in ``duplicates``.
+    loader lists it in ``duplicates``. An empty BIOS UUID identifies nothing,
+    so it never matches, as in the loader.
     """
     servers: list[ServerRecord] = []
     skipped: Counter[str] = Counter()
@@ -194,9 +231,9 @@ def _first_records(loaded: LoadedInventory) -> tuple[list[ServerRecord], Counter
             skipped[record.kind] += 1
             continue
         bios = record.identity_hints.bios_uuid
-        repeated = record.source_id in seen_ids or (bios is not None and bios in seen_bios)
+        repeated = record.source_id in seen_ids or (bool(bios) and bios in seen_bios)
         seen_ids.add(record.source_id)
-        if bios is not None:
+        if bios:
             seen_bios.add(bios)
         if not repeated:
             servers.append(record)
@@ -250,6 +287,11 @@ async def migration_assess_readiness(
         {"source_id": d.source_id, "same_as": d.same_as, "match": d.match}
         for d in loaded.duplicates
     ]
+    result["lists"] = {
+        "unknowns": result["unknowns"],
+        "omissions": result["omissions"],
+        "duplicates": result["duplicates"],
+    }
     return result
 
 

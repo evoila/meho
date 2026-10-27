@@ -133,9 +133,22 @@ it only reads stored results and runs no other operation. In:
 `inventory_handles` (1 to 20) and an optional `region`, which is only
 recorded in the assumptions. Out: the assessment result, plus `counts`
 (servers per state), `skipped_records` (records that are not servers, per
-kind) and `duplicates` (from the loader). A server read through two
-sources (same `source_id` or BIOS UUID) is checked once, from its first
-record.
+kind), `duplicates` (from the loader) and `lists` (the `unknowns`,
+`omissions` and `duplicates` once more, in one object). A server read
+through two sources (same `source_id` or BIOS UUID) is checked once, from
+its first record. An empty BIOS UUID identifies nothing and never matches.
+
+A result with more than about three servers comes back as a handle. The
+reducer keeps only the `items` rows and the plain values next to them, so
+the operation registers a `result_objects` hint for `counts`, `inputs`,
+`assumptions`, `skipped_records` and `lists`. Those objects are stored
+whole with the rows, and a short copy of the listed fields rides inline.
+`result_query` with `query={"path": "/counts"}` (or `/lists/unknowns`,
+`/lists/omissions`, `/lists/duplicates`, `/assumptions`, `/inputs`,
+`/skipped_records`) reads each one back. The hint cannot name a list,
+which is why the three lists ride inside `lists`. The hint and the `lists`
+object are a workaround until the reducer keeps every part on its own
+(#5139).
 
 Every server gets one state, the worst of its findings:
 
@@ -187,11 +200,14 @@ The rules (`RULES` in `readiness_rules.py`; each names its source in
   with one disk has no data disk. More than 64 data disks is not ready.
   Missing cores, memory, disks or disk sizes are unknown. Disk findings name
   each disk with its size and the limit, in the reason and in `inputs`.
-- **Features.** Shared disks, raw device mappings, independent disks and
-  snapshots are conditions: remove or merge them before the move. A
-  feature a source did not report (`null`) makes the server unknown, so
-  source adapters should report `false` when a platform has no such
-  feature.
+- **Features.** Shared disks, raw device mappings and independent disks
+  are conditions (the VMware migration support page): remove them before
+  the move. Snapshots are a condition too, from Microsoft's page on
+  agentless replication errors: changed block tracking cannot be turned
+  on while snapshots exist (error 31453), so delete them all and
+  consolidate the disks first. A feature a source did not report (`null`)
+  makes the server unknown, so source adapters should report `false` when
+  a platform has no such feature.
 
 Unknown findings are also listed in `unknowns`. Source text (OS names, disk
 labels) goes into reasons on one line and cut to 80 characters.
@@ -199,8 +215,9 @@ labels) goes into reasons on one line and cut to 80 characters.
 Region availability of the very large sizes is not checked.
 
 Tests: `backend/tests/test_migration_readiness.py` changes one fact of a
-ready, made-up server per test and checks the flag and the state, and runs
-the operation over two stored inventories.
+ready, made-up server per test and checks the flag and the state, runs
+the operation over two stored inventories, and reduces a large result
+through the reducer and reads the kept parts back from the handle.
 
 ### `migration.inventory.csv`
 
@@ -277,6 +294,10 @@ header, column for column.
 - Duplicate servers are matched by exact BIOS UUID only. Some guest
   systems report the BIOS UUID with the first three groups byte-swapped;
   the source adapters must normalise it before it reaches `identity_hints`.
+- The readiness result carries `unknowns`, `omissions` and `duplicates`
+  twice: at the top level (the assessment shape) and inside `lists` (so a
+  stored result keeps them). Once the reducer keeps every part of a result
+  (#5139), the `lists` object and the `result_objects` hint can go.
 
 ## References
 

@@ -468,6 +468,15 @@ def test_disk_features_must_be_removed_first(field: str, flag: str) -> None:
     assert next(f.inputs for f in readiness.findings if f.flag == flag) == {"disks": "'data-1'"}
 
 
+def test_snapshots_cite_the_replication_error_page() -> None:
+    finding = next(f for f in _assess(snapshot_count=2).findings if f.flag == "features.snapshots")
+
+    assert finding.state == "ready_with_conditions"
+    assert "31453" in finding.reason
+    assert finding.source_url.endswith("/troubleshoot-changed-block-tracking-replication")
+    assert finding.source_checked_on == date(2026, 10, 27)
+
+
 def test_snapshots_must_be_removed_or_merged() -> None:
     readiness = _assess(snapshot_count=3)
     assert _flags(readiness)["features.snapshots"] == "ready_with_conditions"
@@ -595,9 +604,131 @@ async def test_readiness_operation(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result["calculation_version"] == "readiness-1"
     assert [i["handle_id"] for i in result["inputs"]["inventories"]] == [first, second]
     assert len(result["omissions"]) == 2
+    assert result["lists"] == {
+        "unknowns": result["unknowns"],
+        "omissions": result["omissions"],
+        "duplicates": result["duplicates"],
+    }
     assert set(readiness_op.MIGRATION_ASSESS_READINESS_RESPONSE_SCHEMA["properties"]) >= set(result)
-    core = {k: v for k, v in result.items() if k not in {"counts", "skipped_records", "duplicates"}}
+    extra = {"counts", "skipped_records", "duplicates", "lists"}
+    core = {k: v for k, v in result.items() if k not in extra}
     assert AssessmentResult.model_validate(core).items[0].readiness is not None
+
+
+async def test_empty_bios_uuid_never_matches_another_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ResultHandleStore(MemoryValkey())  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        "meho_backplane.connectors.migration.inventory_load.get_result_handle_store",
+        lambda: store,
+    )
+    tenant = uuid4()
+    servers = [
+        _server(source_id=f"vmware:vc-example:vm-{n}", name=f"srv-{n}", identity_hints=hints)
+        for n, hints in enumerate(
+            [{"bios_uuid": ""}, {"bios_uuid": " "}, {"bios_uuid": ""}], start=1
+        )
+    ]
+    servers.append(
+        _server(
+            source_id="vmware:vc-example:vm-4",
+            name="srv-4",
+            identity_hints={},
+            missing={"identity_hints.bios_uuid": "not_reported_by_source"},
+        )
+    )
+    handle = await _store(store, tenant, _envelope(servers, "vc-example", []))
+
+    result = await readiness_op.migration_assess_readiness(
+        _operator(tenant), None, {"inventory_handles": [handle]}
+    )
+
+    assert [item["name"] for item in result["items"]] == ["srv-1", "srv-2", "srv-3", "srv-4"]
+    assert result["duplicates"] == []
+    assert result["counts"]["ready"] == 4
+
+
+async def test_large_result_keeps_its_summary_parts_in_the_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reducer stores the rows; the hinted objects ride with them and read back by path."""
+    from meho_backplane.jsonflux.query.json_pointer import parse_json_pointer, resolve_json_pointer
+    from meho_backplane.operations.dispatcher import _result_objects_from_descriptor
+
+    store = ResultHandleStore(MemoryValkey())  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        "meho_backplane.connectors.migration.inventory_load.get_result_handle_store",
+        lambda: store,
+    )
+    tenant = uuid4()
+    servers = [
+        _server(
+            source_id=f"vmware:vc-example:vm-{n}",
+            name=f"srv-{n:03d}",
+            identity_hints={"bios_uuid": f"4203a1b2-0000-4000-8000-{n:012d}"},
+            boot_type=None,
+        )
+        for n in range(1, 301)
+    ]
+    handle = await _store(store, tenant, _envelope(servers, "vc-example", []))
+    result = await readiness_op.migration_assess_readiness(
+        _operator(tenant), None, {"inventory_handles": [handle], "region": "westeurope"}
+    )
+    descriptor = type("Descriptor", (), {"llm_instructions": readiness_op._LLM_INSTRUCTIONS})()
+    hint = _result_objects_from_descriptor(descriptor)  # type: ignore[arg-type]
+    assert hint is not None
+
+    reduced, reduced_handle = await JsonFluxReducer(store=store).reduce(
+        result,
+        None,
+        context={
+            "tenant_id": str(tenant),
+            "operator_sub": _OPERATOR_SUB,
+            "op_id": readiness_op.MIGRATION_ASSESS_READINESS_OP_ID,
+            "result_objects": hint,
+        },
+    )
+
+    assert reduced_handle is not None
+    assert reduced["source_key"] == "items"
+    assert (
+        reduced["counts"]
+        == result["counts"]
+        == {
+            "ready": 0,
+            "ready_with_conditions": 0,
+            "not_ready": 0,
+            "unknown": 300,
+        }
+    )
+    assert reduced["assumptions"] == {"region": "westeurope"}
+    assert reduced["inputs"]["inventories"][0]["handle_id"] == handle
+    assert reduced["lists"]["omissions"] == result["omissions"]
+    assert 0 < len(reduced["lists"]["unknowns"]) < 300
+    assert "unknowns" in reduced["result_object_truncations"]["lists"]
+    assert "/lists" in reduced["result_object_note"]
+    stored = await store.fetch_document(
+        tenant_id=tenant, operator_sub=_OPERATOR_SUB, handle_id=reduced_handle.handle_id
+    )
+    assert stored is not None
+    document = stored.document
+    for key in ("counts", "inputs", "assumptions", "skipped_records", "lists"):
+        assert resolve_json_pointer(document, parse_json_pointer(f"/{key}")) == result[key]
+    unknowns = resolve_json_pointer(document, parse_json_pointer("/lists/unknowns"))
+    assert len(unknowns) == 300
+    assert unknowns[299]["source_id"] == "vmware:vc-example:vm-300"
+    assert resolve_json_pointer(document, parse_json_pointer("/assumptions/other/os_disk"))
+    assert resolve_json_pointer(document, parse_json_pointer("/lists/duplicates")) == []
+    window = await store.fetch_window(
+        tenant_id=tenant,
+        operator_sub=_OPERATOR_SUB,
+        handle_id=reduced_handle.handle_id,
+        offset=0,
+        limit=500,
+    )
+    assert window is not None
+    assert len(window.rows) == 300
 
 
 async def test_unknown_findings_are_listed_as_unknowns(monkeypatch: pytest.MonkeyPatch) -> None:

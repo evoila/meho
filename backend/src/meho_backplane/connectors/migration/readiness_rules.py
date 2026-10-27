@@ -76,6 +76,10 @@ SOURCES: Final[dict[str, Source]] = {
         "Support for VMware vSphere migration in Azure Migrate",
         f"{_LEARN}/azure/migrate/migrate-support-matrix-vmware-migration",
     ),
+    "replication_troubleshooting": Source(
+        "Troubleshoot replication issues in agentless VMware VM migration (error 31453)",
+        f"{_LEARN}/azure/migrate/troubleshoot-changed-block-tracking-replication",
+    ),
     "generation_2": Source(
         "Azure support for Generation 2 VMs",
         f"{_LEARN}/azure/virtual-machines/generation-2",
@@ -285,8 +289,10 @@ _RULE_LIST: Final[tuple[Rule, ...]] = (
     Rule(
         "features.snapshots",
         "ready_with_conditions",
-        "The server has {count} snapshot(s). Remove or merge them before the migration.",
-        "migration",
+        "The server has {count} snapshot(s). Changed block tracking cannot be turned on "
+        "while snapshots exist (error 31453): delete them all and consolidate the disks "
+        "before the migration.",
+        "replication_troubleshooting",
     ),
     Rule(
         "features.unknown",

@@ -408,6 +408,14 @@ class AzureConnector(NetworkOps, HttpConnector):
 
         return await azure_about_impl(self, operator, target, params)
 
+    async def location_list(
+        self, operator: Operator, target: AzureTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``azure.location.list``: the Azure regions of this target's subscription."""
+        from meho_backplane.connectors.azure.typed_reads import azure_location_list_impl
+
+        return await azure_location_list_impl(self, operator, target, params)
+
     async def operation_status(
         self, operator: Operator, target: AzureTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:

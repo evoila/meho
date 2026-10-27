@@ -14,13 +14,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.azure._paging import list_all_pages
+from meho_backplane.connectors.azure._paths import SUBSCRIPTIONS_API_VERSION, locations_path
 from meho_backplane.connectors.azure._polling import OperationReference, read_operation_state
-from meho_backplane.connectors.azure.session import AzureTargetLike
+from meho_backplane.connectors.azure.session import AzureTargetLike, resolve_target_config
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.azure.connector import AzureConnector
 
-__all__ = ["azure_about_impl", "azure_operation_status_impl"]
+__all__ = ["azure_about_impl", "azure_location_list_impl", "azure_operation_status_impl"]
 
 
 async def azure_about_impl(
@@ -47,6 +49,55 @@ async def azure_about_impl(
         "app_id": login.app_id,
         "object_id": login.object_id,
     }
+
+
+def _location_row(item: object) -> dict[str, Any] | None:
+    """One row of ``azure.location.list`` from one Azure ``Location``."""
+    if not isinstance(item, dict):
+        return None
+    metadata = item.get("metadata")
+    meta: dict[str, Any] = metadata if isinstance(metadata, dict) else {}
+    paired = meta.get("pairedRegion")
+    paired_names = [
+        region["name"]
+        for region in (paired if isinstance(paired, list) else [])
+        if isinstance(region, dict) and isinstance(region.get("name"), str)
+    ]
+    return {
+        "name": item.get("name"),
+        "display_name": item.get("displayName"),
+        "region_type": meta.get("regionType"),
+        # geography is the Azure geography (Europe, Germany, United States).
+        # geographyGroup is the wider group (Europe, US) and can change.
+        "geography": meta.get("geography"),
+        "geography_group": meta.get("geographyGroup"),
+        "paired_regions": paired_names,
+    }
+
+
+async def azure_location_list_impl(
+    connector: AzureConnector,
+    operator: Operator,
+    target: AzureTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``azure.location.list``: ``GET /subscriptions/{subscriptionId}/locations``.
+
+    Returns one row per Azure region the subscription can use: name, display
+    name, region type, geography and paired regions. Azure has more than 50
+    regions, so the dispatcher stores the rows and returns a link to them.
+    """
+    del params  # the operation takes no parameters
+    config = resolve_target_config(target)
+    paged = await list_all_pages(
+        connector,
+        target,
+        locations_path(config.subscription_id),
+        operator=operator,
+        api_version=SUBSCRIPTIONS_API_VERSION,
+    )
+    paged.rows = [row for row in map(_location_row, paged.rows) if row is not None]
+    return paged.as_dict()
 
 
 async def azure_operation_status_impl(

@@ -646,6 +646,23 @@ async def test_too_few_measurements_make_right_sizing_unknown(
     assert "right_sized_unknown" in item["flags"]
 
 
+async def test_older_inventory_without_a_sample_interval_is_sized_by_allocation(
+    store: ResultHandleStore,
+) -> None:
+    """A version-1 inventory written before the sample interval existed still assesses."""
+    utilization = dict(WINDOWS["utilization"])
+    del utilization["sample_interval_minutes"]
+    older = {**WINDOWS, "utilization": utilization}
+    result = await _assess(store, [older], pricing=["pay_as_you_go"])
+    item = _item(result, "vc:win-01")
+    assert item["figures"]["size.allocated"]["inputs"]["size"] == "Standard_D4s_v5"
+    assert item["figures"]["compute.allocated.pay_as_you_go"]["value"] == 274.48
+    measured = item["figures"]["size.measured"]
+    assert measured["value"] is None
+    assert "does not say how often it sampled" in measured["unknown_reason"]
+    assert "right_sized_unknown" in item["flags"]
+
+
 async def test_coverage_uses_the_source_sample_interval(store: ResultHandleStore) -> None:
     """The same 300 samples over 30 days are enough for a 2-hour source, not for a 5-minute one."""
     sized: dict[int, Any] = {}

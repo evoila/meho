@@ -340,6 +340,25 @@ def test_windows_vm_with_three_disks_round_trips() -> None:
     assert again == record
 
 
+def test_older_inventory_without_a_sample_interval_still_loads() -> None:
+    """A version-1 record written before ``sample_interval_minutes`` existed."""
+    older = _windows_vm()
+    del older["utilization"]["sample_interval_minutes"]
+    record = ServerRecord.model_validate(older)
+    assert record.utilization is not None
+    assert record.utilization.sample_interval_minutes is None
+    assert record.missing["utilization.sample_interval_minutes"] == "not_reported_by_source"
+    assert ServerRecord.model_validate_json(record.model_dump_json()) == record
+    # The whole inventory loads, and the CSV export keeps the server.
+    envelope = InventoryEnvelope.model_validate(_envelope([older], "vmware-rest-9.0", "vc-lab-a"))
+    assert inventory_to_csv(list(envelope.records)).row_count == 1
+    # A producer that writes null still has to say why.
+    explicit = _windows_vm()
+    explicit["utilization"]["sample_interval_minutes"] = None
+    with pytest.raises(ValidationError, match=r"\['utilization.sample_interval_minutes'\] are"):
+        ServerRecord.model_validate(explicit)
+
+
 def test_linux_vm_without_utilization_needs_a_reason() -> None:
     record = ServerRecord.model_validate(_linux_vm())
     assert record.utilization is None

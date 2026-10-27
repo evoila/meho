@@ -250,6 +250,31 @@ class ServerRecord(_Record):
     nics: list[Nic] | None = None
     utilization: Utilization | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _older_utilization_has_no_interval(cls, data: Any) -> Any:
+        """An inventory written before the sample interval existed: the interval is unknown.
+
+        The key is absent, not ``null``, so the record is from a producer that did
+        not know the field. It gets the reason itself. A producer that writes
+        ``null`` still has to say why.
+        """
+        if not isinstance(data, Mapping):
+            return data
+        utilization = data.get("utilization")
+        missing = data.get("missing")
+        if not isinstance(utilization, Mapping) or "sample_interval_minutes" in utilization:
+            return data
+        if missing is not None and not isinstance(missing, Mapping):
+            return data
+        return {
+            **data,
+            "missing": {
+                "utilization.sample_interval_minutes": "not_reported_by_source",
+                **(missing or {}),
+            },
+        }
+
 
 class ApplicationRecord(_Record):
     """Software found on one or more servers (a database engine, a web server)."""

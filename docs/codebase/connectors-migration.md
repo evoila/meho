@@ -77,6 +77,11 @@ Rules every record follows:
   breaks this rule.
 - Unknown fields are refused (`extra="forbid"`), so a typo in a producer
   fails at once.
+- An inventory written before `utilization.sample_interval_minutes`
+  existed still loads. The absent interval is unknown with the reason
+  `not_reported_by_source`, so the server is sized by what it has today
+  and its measured size is unknown. A producer that writes `null` still
+  has to give the reason itself.
 
 ### Assessment result (`AssessmentResult`)
 

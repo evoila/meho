@@ -35,6 +35,7 @@ import uuid
 import warnings
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from html.parser import HTMLParser
 from typing import Any
 
 import pytest
@@ -1121,6 +1122,63 @@ def test_operations_ui_run_modal_destructive_has_preview_step_and_red_banner() -
     assert drawer.status_code == 200, drawer.text
     assert "Destructive — deletes something that cannot be undone" in drawer.text
     assert "Safe — read or non-impacting" not in drawer.text
+
+
+class _FormFieldAttrs(HTMLParser):
+    """Collect the attributes of every ``input`` / ``textarea`` / ``button`` by name or action."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fields: dict[str, dict[str, str | None]] = {}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag not in {"input", "textarea", "button"}:
+            return
+        attr_map = dict(attrs)
+        key = attr_map.get("name") or attr_map.get("data-action")
+        if key:
+            self.fields[key] = attr_map
+
+
+def test_operations_ui_run_modal_destructive_edit_aborts_pending_preview() -> None:
+    """#5015: editing the target or the params cancels a preview still in flight.
+
+    Scenario: the person clicks Preview, then edits before the response
+    arrives. Without the abort, the late response fills the region with the
+    old preview and its hidden hash, and the next Run sends changed values
+    with that stale hash. The input handler must send ``htmx:abort`` to the
+    Preview button (htmx drops an aborted request, nothing is swapped) BEFORE
+    it clears the region. There is no browser in this suite, so the test
+    checks the handler the template renders.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    desc_id = _seed_destructive_op()
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        modal = client.get(f"/ui/operations/run/{desc_id}")
+    assert modal.status_code == 200, modal.text
+    parser = _FormFieldAttrs()
+    parser.feed(modal.text)
+    fields = parser.fields
+    # The Preview button is the element that owns the in-flight request, so
+    # it is the element the abort event must be sent to.
+    assert fields["run-preview"]["hx-post"] == "/ui/operations/preview"
+    for name in ("target", "params"):
+        handler = fields[name].get("hx-on:input")
+        assert handler, f"{name} has no input handler"
+        assert "data-clears-preview" in fields[name]
+        abort_at = handler.find("htmx:abort")
+        clear_at = handler.find("replaceChildren")
+        assert abort_at >= 0, handler
+        assert clear_at >= 0, handler
+        assert abort_at < clear_at, "abort the pending preview before clearing the region"
+        assert "[data-action=run-preview]" in handler
+        assert "operations-run-preview-region" in handler
+    # The work ref is not part of the previewed call, so editing it keeps the preview.
+    assert "hx-on:input" not in fields["work_ref"]
 
 
 def test_operations_ui_run_modal_non_destructive_has_no_preview_step() -> None:

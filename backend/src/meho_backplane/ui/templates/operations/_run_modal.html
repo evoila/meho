@@ -30,7 +30,9 @@
   same call (#3197). The Preview button posts the form to
   ``/ui/operations/preview``; the preview fragment carries a hidden
   ``preview_hash`` input, so the next Run sends it. Editing the target or the
-  params clears the preview, so a stale hash is never sent.
+  params aborts a preview that is still in flight (``htmx:abort`` sent to the
+  Preview button) and clears the preview, so a stale hash is never shown or
+  sent -- not even when the old response arrives after the edit.
 
   Context:
     descriptor            -- OperationDescriptor: the full read shape
@@ -41,6 +43,12 @@
     csrf_token            -- str: minted double-submit token for the call POST
 -#}
 {% from "_icons.html" import icon %}
+{#- Shared by the target + params inputs of a destructive op. Abort first:
+    a late response to an earlier preview would otherwise fill the region
+    with a hash for values the person has already changed. -#}
+{% set clear_preview_js -%}
+htmx.trigger(this.form.querySelector('[data-action=run-preview]'), 'htmx:abort'); document.getElementById('operations-run-preview-region').replaceChildren()
+{%- endset %}
 <dialog id="operations-drawer" class="modal" aria-label="Run operation">
   <div class="modal-box max-w-2xl">
     <div class="flex items-start justify-between gap-4">
@@ -148,7 +156,7 @@
           placeholder="e.g. rdc-vcenter"
           aria-label="Target name"
           autocomplete="off"
-          {% if safety == "destructive" %}hx-on:input="document.getElementById('operations-run-preview-region').replaceChildren()"{% endif %}
+          {% if safety == "destructive" %}data-clears-preview hx-on:input="{{ clear_preview_js }}"{% endif %}
         />
       </label>
 
@@ -161,7 +169,7 @@
           class="textarea textarea-bordered textarea-sm w-full font-mono text-xs"
           placeholder='{"path": "secret/data/app"}'
           aria-label="Operation params as JSON"
-          {% if safety == "destructive" %}hx-on:input="document.getElementById('operations-run-preview-region').replaceChildren()"{% endif %}
+          {% if safety == "destructive" %}data-clears-preview hx-on:input="{{ clear_preview_js }}"{% endif %}
         ></textarea>
       </label>
 

@@ -237,7 +237,9 @@ named-pattern catalogue and policy resolution.
 - **Console:** `POST /ui/operations/preview` in the operation drawer and in
   the run window. For a `destructive` op the run window has a preview step:
   the preview shows the `proposed_effect` and the `preview_hash`, and the
-  run form sends that hash with the call (#5015).
+  run form sends that hash with the call (#5015). Editing the target or the
+  params aborts a preview still in flight and clears the shown preview, so a
+  late response cannot bring back a stale hash.
 
 ## Dependencies
 

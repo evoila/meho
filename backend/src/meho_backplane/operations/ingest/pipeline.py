@@ -125,6 +125,7 @@ from meho_backplane.operations.ingest.exceptions import (
     ProductImplIdMismatch,
     VersionMismatchError,
 )
+from meho_backplane.operations.ingest.ingest_auth_store import save_ingest_auth_profile
 from meho_backplane.operations.ingest.ingest_profile import build_ingest_execution_profile
 from meho_backplane.operations.ingest.llm_groups import (
     GroupingResult,
@@ -1167,6 +1168,7 @@ class IngestionPipelineService:
                     connector_id=connector_id,
                     tenant_id=tenant_id,
                     execution_profile=execution_profile,
+                    sessionmaker=sessionmaker,
                 )
                 or connector_registered
             )
@@ -1249,8 +1251,9 @@ class IngestionPipelineService:
         connector_id: str,
         tenant_id: UUID | None,
         execution_profile: ExecutionProfile,
+        sessionmaker: async_sessionmaker[AsyncSession],
     ) -> bool:
-        """Stamp a profiled connector synthesised from *execution_profile*.
+        """Save the login type, then stamp a profiled connector built from it.
 
         The non-catalog on-ramp (#2289) sibling of
         :func:`~meho_backplane.operations.ingest.boot_stamp.stamp_catalog_profiled_connectors`:
@@ -1263,7 +1266,22 @@ class IngestionPipelineService:
         no-op (the triple is already served by a stamped / hand-coded class).
         The stamp writes a ``meho_connector_profile_stamp`` audit row under
         the ingesting operator and never enables an op (#1971).
+
+        The login type is saved first (#5016), so the class can be built
+        again after a restart or on another replica
+        (:func:`~meho_backplane.operations.ingest.ingest_auth_store.restore_ingested_profiled_connectors`).
+        A failed save stops the ingest before anything is registered, so a
+        retry saves and stamps again.
         """
+        await save_ingest_auth_profile(
+            sessionmaker,
+            tenant_id=tenant_id,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            profile=execution_profile,
+            operator_sub=self._operator.sub,
+        )
         connector_class = synthesise_profiled_class(
             product=product, version=version, impl_id=impl_id, profile=execution_profile
         )

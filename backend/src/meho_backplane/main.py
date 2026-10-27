@@ -189,6 +189,7 @@ from meho_backplane.operations.approval_expiry import (
 from meho_backplane.operations.ingest import (
     build_anthropic_ingest_llm_client,
     load_catalog,
+    restore_ingested_profiled_connectors,
     stamp_catalog_profiled_connectors,
     validate_catalog_registry_coverage,
     validate_shipped_artifacts,
@@ -455,6 +456,11 @@ async def _run_lifespan_startup() -> None:
     # (the #1971 review gate stays the interlock). Runs after the dry-run
     # validator above, so it only ever sees well-formed profiles.
     await stamp_catalog_profiled_connectors()
+    # Connectors an operator ingested with a login type (#5016): build their
+    # profiled classes again from the saved choice, so they still run calls
+    # after a restart. Runs after the catalog stamp so a shipped profile keeps
+    # its key; like the catalog stamp it never enables an op.
+    await restore_ingested_profiled_connectors()
     # Production spec-ingestion grouping LLM client (#1386). Installs the
     # Anthropic-backed factory so non-dry-run `--catalog` ingest grouping
     # works on deployed backplanes (reusing settings.anthropic_api_key)

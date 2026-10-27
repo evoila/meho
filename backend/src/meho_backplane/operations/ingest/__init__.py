@@ -98,6 +98,9 @@ from meho_backplane.operations.ingest.exceptions import (
     UpstreamNotSpecError,
     VersionMismatchError,
 )
+from meho_backplane.operations.ingest.ingest_auth_store import (
+    restore_ingested_profiled_connectors,
+)
 from meho_backplane.operations.ingest.jobs import (
     IngestJob,
     IngestJobNotFoundError,
@@ -254,6 +257,7 @@ __all__ = [
     "read_spec_info_version",
     "register_ingested_operations",
     "reset_job_registry_for_tests",
+    "restore_ingested_profiled_connectors",
     "run_ingest_job",
     "run_llm_grouping",
     "stamp_catalog_profiled_connectors",

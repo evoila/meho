@@ -263,6 +263,7 @@ from typing import Any, Literal
 import httpx
 import hvac.exceptions
 import structlog
+from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
@@ -509,6 +510,26 @@ def descriptor_requires_target(descriptor: EndpointDescriptor) -> bool:
     return False
 
 
+async def _restore_saved_ingest_profiles() -> bool:
+    """Build missing ingested connector classes from their saved login type.
+
+    #5016: another replica may have taken the ingest after this one
+    started, so its class exists only there. Reading the saved login types
+    on a miss lets this replica build the class and run the call. Returns
+    whether any class was registered. A database error is logged and the
+    miss stands.
+    """
+    from meho_backplane.operations.ingest.ingest_auth_store import (
+        restore_ingested_profiled_connectors,
+    )
+
+    try:
+        return await restore_ingested_profiled_connectors() > 0
+    except SQLAlchemyError:
+        _log.warning("ingested_profile_restore_on_miss_failed", exc_info=True)
+        return False
+
+
 async def _resolve_connector_instance(
     descriptor: EndpointDescriptor,
     target: Any,
@@ -574,6 +595,8 @@ async def _resolve_connector_instance(
     """
     if descriptor.source_kind == "ingested":
         cls, label, exc_message = resolve_connector_or_label(target)
+        if label == "no_connector" and await _restore_saved_ingest_profiles():
+            cls, label, exc_message = resolve_connector_or_label(target)
         if label is not None:
             return None, label, exc_message
         # cls is guaranteed non-None here (label is None ⇔ cls is set).

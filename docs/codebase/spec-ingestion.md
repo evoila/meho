@@ -1107,6 +1107,35 @@ connector lands dispatchable-but-unreviewed (`kind="profiled-but-unreviewed"`)
 and the operator clears the gate per-op via the normal review/enable flow.
 Omitting `auth_scheme` keeps the historical bare-shim behaviour byte-identical.
 
+**The choice is saved, so the connector survives a restart (#5016).** The
+connector table in `connectors/registry.py` lives in memory. Before #5016 a
+restart dropped the stamped class: the ops stayed enabled, but every call
+failed with `no_connector` and the list showed `ingested-shim`. Now:
+
+* `_stamp_profiled_connector` first saves the choice through
+  `ingest/ingest_auth_store.py::save_ingest_auth_profile` into the
+  `ingested_auth_profile` table (migration `0118`). One row per
+  `(tenant_id, product, version, impl_id)`. It holds the scheme name and the
+  secret field **names** only, never values. A re-ingest with a login type
+  replaces the row.
+* At start, `main.py` calls `restore_ingested_profiled_connectors()` right
+  after the catalog stamp. It rebuilds the profile with
+  `build_ingest_execution_profile` and stamps it through the same
+  `record_profile_stamp` step (audit sub `system:ingested-profile-restore`).
+  A key that already has a class is skipped, so a shipped profile or a
+  hand-written class keeps its key. A row that no longer builds a valid
+  profile is logged (`ingested_profile_restore_skipped`) and skipped.
+* A replica that was already running when another replica took the ingest
+  catches up on the first call: when the dispatcher finds no class for an
+  ingested op, it runs the same restore once and resolves again. Until then
+  that replica's `meho connector list` still shows the old kind.
+* A connector delete removes the row, so the class does not come back.
+* Restoring never enables an op, lowers a risk level, or removes an
+  approval; the review gate stays the interlock.
+
+A connector ingested before this change has no saved row. Ingest it once
+more with the same `--auth-scheme` to save it.
+
 ### Authoring-mode `kind` on the list / review surfaces (G0.28-T6 #1979)
 
 The enable-time advisory above surfaces the connector tier only at the
@@ -2752,9 +2781,12 @@ All three delegate to `ReviewService.delete_connector`
   rows from scratch.
 * **Process-local deregistration.** The registry pop applies to the
   serving pod; sibling replicas keep the class until their next
-  restart (no startup path re-registers ingest shims, so restarts
+  restart (no startup path re-registers bare ingest shims, so restarts
   converge every pod on the post-delete state). The DB rows are the
-  durable truth and are gone everywhere immediately.
+  durable truth and are gone everywhere immediately. The delete also
+  removes the saved login type (`ingested_auth_profile`, #5016), so the
+  start-up restore does not build a profiled class for a deleted
+  connector.
 
 ## Known issues
 

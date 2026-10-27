@@ -68,12 +68,12 @@ from dataclasses import dataclass
 from typing import Any
 
 import structlog
-from sqlalchemy import CursorResult, case, delete, func, select
+from sqlalchemy import CursorResult, Delete, case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.connectors.base import shim_kind
 from meho_backplane.connectors.registry import all_connectors_v2, deregister_connector_v2
-from meho_backplane.db.models import EndpointDescriptor, OperationGroup
+from meho_backplane.db.models import EndpointDescriptor, IngestedAuthProfile, OperationGroup
 from meho_backplane.operations.ingest._internals import ConnectorScope
 from meho_backplane.operations.ingest._llm_grouping_internals import build_connector_id
 from meho_backplane.operations.ingest.exceptions import ConnectorNotFoundError
@@ -310,10 +310,27 @@ async def _delete_scoped_rows(
     # see through AsyncSession.execute's Result annotation.
     descriptor_result: CursorResult[Any] = await session.execute(descriptor_stmt)  # type: ignore[assignment]
     group_result: CursorResult[Any] = await session.execute(group_stmt)  # type: ignore[assignment]
+    await session.execute(_saved_auth_profile_delete(scope))
     return (
         max(descriptor_result.rowcount or 0, 0),
         max(group_result.rowcount or 0, 0),
     )
+
+
+def _saved_auth_profile_delete(scope: ConnectorScope) -> Delete:
+    """Build the delete of the scope's saved login type (#5016).
+
+    Without it a deleted connector's profiled class would be built again
+    at the next start.
+    """
+    stmt = delete(IngestedAuthProfile).where(
+        IngestedAuthProfile.product == scope.product,
+        IngestedAuthProfile.version == scope.version,
+        IngestedAuthProfile.impl_id == scope.impl_id,
+    )
+    if scope.tenant_id is None:
+        return stmt.where(IngestedAuthProfile.tenant_id.is_(None))
+    return stmt.where(IngestedAuthProfile.tenant_id == scope.tenant_id)
 
 
 def _build_warnings(

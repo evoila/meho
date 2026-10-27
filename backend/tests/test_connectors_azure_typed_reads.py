@@ -290,7 +290,7 @@ async def test_the_operation_is_stored_as_typed_and_enabled(
         .all()
     )
     by_op = {row.op_id: row for row in rows}
-    assert set(by_op) == {"azure.about", "azure.operation.status"}
+    assert set(by_op) == {op.op_id for op in AZURE_TYPED_OPS}
     for row in rows:
         assert row.source_kind == "typed"
         assert row.is_enabled is True
@@ -320,9 +320,10 @@ async def test_the_account_group_is_enabled_with_its_text(
         .scalars()
         .all()
     )
-    assert {group.group_key for group in groups} == {"account"}
+    by_key = {group.group_key: group for group in groups}
+    assert set(by_key) == set(AZURE_TYPED_WHEN_TO_USE_BY_GROUP)
     assert all(group.review_status == "enabled" for group in groups)
-    assert groups[0].when_to_use == AZURE_TYPED_WHEN_TO_USE_BY_GROUP["account"]
+    assert by_key["account"].when_to_use == AZURE_TYPED_WHEN_TO_USE_BY_GROUP["account"]
 
 
 @pytest.mark.asyncio
@@ -340,7 +341,7 @@ async def test_search_operations_finds_azure_about(
 
 
 def test_every_operation_is_a_safe_read_with_guidance() -> None:
-    assert [op.op_id for op in AZURE_TYPED_OPS] == ["azure.about", "azure.operation.status"]
+    assert {"azure.about", "azure.operation.status"} <= {op.op_id for op in AZURE_TYPED_OPS}
     for op in AZURE_TYPED_OPS:
         assert op.safety_level == "safe" and op.requires_approval is False
         assert "read-only" in op.tags

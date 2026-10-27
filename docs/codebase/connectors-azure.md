@@ -471,3 +471,84 @@ as MEHO's system identity, which cannot read the secret, so it reports
   <https://learn.microsoft.com/en-us/azure/azure-government/compare-azure-government-global-azure>
 - Related pages: `connectors-keycloak.md` (the same client credentials request),
   `connectors-shared-vault-creds.md`, `error-message-shape.md`.
+
+## network
+
+The network family reads the networking of the target's subscription. All
+ten operations are in group `network`, are `safe` and need no approval:
+they only read, and nothing changes in Azure.
+
+| Operation | Reads | Parameters |
+|---|---|---|
+| `azure.network.vnet.list` | every virtual network: address ranges, DNS servers, subnet and peering counts | none |
+| `azure.network.vnet.show` | one virtual network: every subnet (address ranges, network security group, route table, NAT gateway, delegations) and every peering (network on the other side, state, sync level, gateway transit, remote gateways) | `resource_group`, `name` |
+| `azure.network.nsg.list` | every network security group: custom rule count, how many subnets and network cards use it | none |
+| `azure.network.nsg.show` | one network security group with every custom and default rule: direction, priority, access, protocol, ports, address prefixes, application security groups | `resource_group`, `name` |
+| `azure.network.lb.list` | every load balancer: SKU, front-end addresses, pool, rule, probe and NAT rule counts | none |
+| `azure.network.publicip.list` | every public IP address: address, allocation, SKU, zones, DNS name, and the resource that uses it | none |
+| `azure.network.gateway.list` | the VPN and ExpressRoute gateways of one resource group: type, SKU, VPN type, generation, BGP on or off, network | `resource_group` (required: Azure lists gateways per resource group only) |
+| `azure.network.expressroute.list` | every ExpressRoute circuit: provider, peering location, bandwidth, SKU, state on Microsoft's and on the provider's side | none |
+| `azure.network.routetable.list` | every route table with its routes (destination, next hop type and address) and subnet count | none |
+| `azure.network.privatedns.list` | every private DNS zone: record set count, linked networks, networks that register their names | none |
+
+**API versions.** `Microsoft.Network` reads use `2026-01-01`
+(`NETWORK_API_VERSION`), private DNS zones `2024-06-01`
+(`PRIVATE_DNS_API_VERSION`). Both are pinned on the spec shelf, and every
+path is a `*_PATH` constant in the `network` section of `_paths.py`.
+
+**Files.** `network.py` holds the group text, the guidance for the AI, the
+operation table (`OPS`) and the mixin `NetworkOps`, whose thin methods
+`AzureConnector` inherits. `network_reads.py` holds the bodies,
+`network_rows.py` builds the rows, `network_schemas.py` holds the schemas.
+
+**Names in a URL path.** `resource_group` and `name` go into the URL path,
+so they are checked twice: by the parameter schema (the dispatcher answers
+`invalid_params`) and again in the body. A resource group has 1 to 90
+letters, digits, `_`, `-`, `.`, `(` or `)` and does not end with `.`; a name
+starts and ends with a letter, a digit or `_` (Microsoft's naming rules).
+Both are percent-encoded, like Microsoft's own SDK does. So `..`, `/`, `?` or
+`#` can never move the call to another path or another subscription, and no
+request is sent.
+
+**Result shapes.**
+
+- A list has its rows under `value`, plus `truncated`, `omission`,
+  `omission_kind` and `pages_read` from the paging helper. More than 50 rows
+  (or more than 4 KB) come back as a link to the stored result; the paging
+  fields stay inline because they are plain values. Each row starts with
+  `name`, `resource_group` (read from the resource ID), `location` and `id`.
+- `azure.network.nsg.show` returns the rules as rows under `value`, sorted
+  by direction and then priority (the order Azure checks them), and the group
+  itself as the object `network_security_group`. Its `llm_instructions`
+  carry a `result_objects` hint, so with more than 50 rules the group's name,
+  resource group, ID, rule counts, use counts and subnet IDs stay inline next
+  to the link. The whole object is kept with the rows and can be read with
+  `result_query` and `query={"path": "/network_security_group"}`.
+- `azure.network.vnet.show` returns one object with two lists (`subnets`,
+  `peerings`). A small one comes back whole. A large one is kept as a stored
+  document: its plain values (name, counts, ...) stay inline, and the lists
+  are read with `result_query` and `query={"path": "/subnets"}` or
+  `{"path": "/peerings"}`, page by page.
+
+**Secrets.** Every row is built from a fixed list of fields; nothing else
+from Azure's answer is passed on. An ExpressRoute circuit's answer holds its
+service key, its authorization keys and the BGP keys of its peerings; none
+of them reaches a result. Because the flight recorder would otherwise keep
+Azure's raw answer in the trace, `azure.network.expressroute.list` carries
+the tag `keys-withheld`: its `keys` word is a secret word for the flight
+recorder, so the trace of this call keeps no body. A gateway's answer no
+longer holds the RADIUS secret (Microsoft removed it from the list answer),
+so `azure.network.gateway.list` needs no such tag. The description of a
+security rule is text from Azure; it is filtered with `clean_azure_text`
+like Azure's error text.
+
+**Tests.** `backend/tests/test_connectors_azure_network.py` runs every
+operation through the real dispatcher with mocked HTTP: the row shapes, a
+list of 60 rows per list operation through the real result reduction and
+`result_query`, a stopped list with its omission, a large network read by
+`path`, a large security group with its object kept inline, refused names,
+`not_found`, and the trace of the circuit list without its keys.
+
+**Proven live:** nothing yet. The lab login does not exist yet, so the live
+read of real objects (hub and spoke peerings, one security group, public IP
+addresses, the hub's gateways, private DNS zones) is still open.

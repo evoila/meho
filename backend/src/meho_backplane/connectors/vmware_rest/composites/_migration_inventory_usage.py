@@ -15,6 +15,8 @@ Two sources, one answer shape (:class:`~...migration.contracts.Utilization`):
   ``vrops.resource.stats`` operations, run as child operations on the named
   VCF Operations target. That read gives the latest values only, so the
   window is the time of those samples and ``samples`` says how few they are.
+  A child answer that came back as a stored result (a handle, because it
+  was large) is read back from the result store for the caller's tenant.
 
 A VM with no samples gets ``None`` and a reason: ``powered_off``,
 ``not_measured``, ``no_permission`` or ``collection_failed``. Never zero.
@@ -26,11 +28,17 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
+from uuid import UUID
 
 import httpx
 import structlog
 
 from meho_backplane.connectors.migration.contracts import MissingReason, Stat, Utilization
+from meho_backplane.connectors.result_handle_store import (
+    ResultHandleStore,
+    ResultRecordKindError,
+    get_result_handle_store,
+)
 from meho_backplane.connectors.vmware_rest.composites._migration_inventory_map import (
     as_dict,
     nearest_rank_stat,
@@ -299,10 +307,18 @@ class VropsUsage:
     """
 
     def __init__(
-        self, dispatch_child: DispatchChild, vrops_target: Any, *, vcenter_uuid: str | None
+        self,
+        dispatch_child: DispatchChild,
+        vrops_target: Any,
+        *,
+        operator: Operator,
+        vcenter_uuid: str | None,
+        store: ResultHandleStore | None = None,
     ) -> None:
         self._dispatch_child = dispatch_child
         self._target = vrops_target
+        self._operator = operator
+        self._store = store
         self._vcenter_uuid = (vcenter_uuid or "").lower() or None
         self.stopped: MissingReason | None = None
         self.problem: str | None = None
@@ -320,7 +336,15 @@ class VropsUsage:
                 result.reasons[vm.moid] = reason
         return result
 
-    async def _call(self, op_id: str, params: dict[str, Any]) -> dict[str, Any] | MissingReason:
+    async def _call(
+        self, op_id: str, params: dict[str, Any], *, collection: str
+    ) -> dict[str, Any] | MissingReason:
+        """The child's answer, or the reason there is none.
+
+        *collection* names the list the answer carries. When the answer was
+        large, the child came back as a stored result and the list is read
+        back from the result store under that name.
+        """
         child: OperationResult = await self._dispatch_child(
             connector_id=VROPS_CONNECTOR_ID, op_id=op_id, params=params, target=self._target
         )
@@ -328,9 +352,35 @@ class VropsUsage:
             self.stopped = "no_permission"
             self.problem = f"{op_id} was {child.status} on the VCF Operations target"
             return "no_permission"
-        if child.status != "ok" or child.handle is not None or not isinstance(child.result, dict):
+        if child.status != "ok":
+            return "collection_failed"
+        if child.handle is not None:
+            stored = await self._stored(child.handle.handle_id, collection)
+            if stored is None:
+                return "collection_failed"
+            return {collection: stored}
+        if not isinstance(child.result, dict):
             return "collection_failed"
         return child.result
+
+    async def _stored(self, handle_id: UUID, collection: str) -> list[Any] | None:
+        """The *collection* list of a stored child result; ``None`` when it cannot be read."""
+        store = self._store if self._store is not None else get_result_handle_store()
+        operator = self._operator
+        try:
+            rows = await store.fetch_rows(
+                tenant_id=operator.tenant_id, operator_sub=operator.sub, handle_id=handle_id
+            )
+        except ResultRecordKindError:
+            document = await store.fetch_document(
+                tenant_id=operator.tenant_id, operator_sub=operator.sub, handle_id=handle_id
+            )
+            value = as_dict(document.document).get(collection) if document is not None else None
+            return value if isinstance(value, list) else None
+        if rows is None:
+            _log.info("migration_inventory_vrops_result_missing", handle_id=str(handle_id))
+            return None
+        return rows.rows
 
     async def _one(self, vm: VmIdentity) -> tuple[Utilization | None, MissingReason]:
         if vm.name is None:
@@ -338,6 +388,7 @@ class VropsUsage:
         found = await self._call(
             "vrops.resource.query",
             {"adapterKind": ["VMWARE"], "resourceKind": ["VirtualMachine"], "name": [vm.name]},
+            collection="resourceList",
         )
         if isinstance(found, str):
             return None, found
@@ -345,7 +396,9 @@ class VropsUsage:
         if resource_id is None:
             return None, "not_measured"
         stats = await self._call(
-            "vrops.resource.stats", {"resourceId": [resource_id], "statKey": list(_VROPS_STATS)}
+            "vrops.resource.stats",
+            {"resourceId": [resource_id], "statKey": list(_VROPS_STATS)},
+            collection="values",
         )
         if isinstance(stats, str):
             return None, stats

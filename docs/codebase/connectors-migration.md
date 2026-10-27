@@ -240,7 +240,9 @@ Utilization:
 - **With `vcf_operations_target`**: per VM, the child operations
   `vrops.resource.query` (by name, then matched on the VM id and vCenter
   UUID, or the instance UUID) and `vrops.resource.stats` on that target. Each
-  child has its own policy check and audit row. That read gives the latest
+  child has its own policy check and audit row. A child answer that came
+  back as a stored result (a handle, because it was large) is read back from
+  the result store for the caller's tenant. That read gives the latest
   values only, so the window is the time of those samples and `samples` is
   small; `source` is `vcf-operations-latest`. The first child answer that is
   denied or waits for approval stops the source: the rest of the VMs get

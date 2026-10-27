@@ -513,7 +513,7 @@ async def migration_inventory_composite(
             connector, target, operator, perf_manager=perf_manager, days=days, now=now
         ),
         vrops=(
-            VropsUsage(dispatch_child, vrops_target, vcenter_uuid=vcenter_uuid)
+            VropsUsage(dispatch_child, vrops_target, operator=operator, vcenter_uuid=vcenter_uuid)
             if vrops_target is not None
             else None
         ),

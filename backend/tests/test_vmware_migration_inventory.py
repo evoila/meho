@@ -35,7 +35,10 @@ from meho_backplane.connectors.migration.contracts import (
 )
 from meho_backplane.connectors.migration.inventory_load import load_inventories
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
-from meho_backplane.connectors.vmware_rest.composites import _migration_inventory
+from meho_backplane.connectors.vmware_rest.composites import (
+    _migration_inventory,
+    _migration_inventory_usage,
+)
 from meho_backplane.connectors.vmware_rest.composites._migration_inventory import (
     migration_inventory_composite,
 )
@@ -620,7 +623,36 @@ class _VropsTarget:
     product = "vrops"
 
 
-def _vrops_child(status: str = "ok") -> tuple[list[tuple[str, dict[str, Any]]], Any]:
+def _vrops_answer(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    if op_id == "vrops.resource.query":
+        name = params["name"][0]
+        moid = {"app-win-01": "vm-101", "db-lin-01": "vm-102"}.get(name)
+        if moid is None:
+            return {"resourceList": []}
+        identifiers = [
+            {"identifierType": {"name": "VMEntityObjectID"}, "value": moid},
+            {"identifierType": {"name": "VMEntityVCID"}, "value": _VC_UUID},
+        ]
+        resource = {
+            "identifier": f"res-{moid}",
+            "resourceKey": {"name": name, "resourceIdentifiers": identifiers},
+        }
+        return {"resourceList": [resource]}
+    stamp = int(datetime(2026, 10, 20, 8, tzinfo=UTC).timestamp() * 1000)
+    stats = [
+        {"statKey": {"key": "cpu|usage_average"}, "timestamps": [stamp], "data": [12.5]},
+        {"statKey": {"key": "mem|usage_average"}, "timestamps": [stamp], "data": [40.0]},
+    ]
+    return {"values": [{"resourceId": params["resourceId"][0], "stat-list": {"stat": stats}}]}
+
+
+def _vrops_child(
+    status: str = "ok",
+    *,
+    operator: Operator | None = None,
+    store: ResultHandleStore | None = None,
+) -> tuple[list[tuple[str, dict[str, Any]]], Any]:
+    """A fake VCF Operations child. With *store*, every answer comes back as a stored result."""
     calls: list[tuple[str, dict[str, Any]]] = []
 
     async def dispatch_child(
@@ -631,57 +663,48 @@ def _vrops_child(status: str = "ok") -> tuple[list[tuple[str, dict[str, Any]]], 
         calls.append((op_id, params))
         if status != "ok":
             return OperationResult(status=status, op_id=op_id, duration_ms=1.0)
-        if op_id == "vrops.resource.query":
-            name = params["name"][0]
-            moid = {"app-win-01": "vm-101", "db-lin-01": "vm-102"}.get(name)
-            if moid is None:
-                return OperationResult(
-                    status="ok", op_id=op_id, result={"resourceList": []}, duration_ms=1.0
-                )
-            identifiers = [
-                {"identifierType": {"name": "VMEntityObjectID"}, "value": moid},
-                {"identifierType": {"name": "VMEntityVCID"}, "value": _VC_UUID},
-            ]
-            resource = {
-                "identifier": f"res-{moid}",
-                "resourceKey": {"name": name, "resourceIdentifiers": identifiers},
-            }
-            return OperationResult(
-                status="ok", op_id=op_id, result={"resourceList": [resource]}, duration_ms=1.0
-            )
-        stamp = int(datetime(2026, 10, 20, 8, tzinfo=UTC).timestamp() * 1000)
-        stats = [
-            {"statKey": {"key": "cpu|usage_average"}, "timestamps": [stamp], "data": [12.5]},
-            {"statKey": {"key": "mem|usage_average"}, "timestamps": [stamp], "data": [40.0]},
-        ]
+        answer = _vrops_answer(op_id, params)
+        if store is None or operator is None:
+            return OperationResult(status="ok", op_id=op_id, result=answer, duration_ms=1.0)
+        # An empty list stays inline; every other answer is stored under a handle.
+        summary, handle = await JsonFluxReducer(byte_threshold=1, store=store).reduce(
+            answer, None, context={**_reduce_context(operator), "op_id": op_id}
+        )
         return OperationResult(
-            status="ok",
-            op_id=op_id,
-            result={
-                "values": [{"resourceId": params["resourceId"][0], "stat-list": {"stat": stats}}]
-            },
-            duration_ms=1.0,
+            status="ok", op_id=op_id, result=summary, handle=handle, duration_ms=1.0
         )
 
     return calls, dispatch_child
 
 
-async def _run_vrops(monkeypatch: pytest.MonkeyPatch, status: str = "ok") -> tuple[Any, list[Any]]:
+async def _run_vrops(
+    monkeypatch: pytest.MonkeyPatch, status: str = "ok", *, reduced: bool = False
+) -> tuple[Any, list[Any]]:
     async def _resolve(operator: Any, name: str) -> _VropsTarget:
         assert name == "vrops-fixture"
         return _VropsTarget()
 
     monkeypatch.setattr(_migration_inventory, "_resolve_vrops_target", _resolve)
-    calls, dispatch_child = _vrops_child(status)
+    operator = _operator()
+    store: ResultHandleStore | None = None
+    valkey = _MemoryValkey()
+    if reduced:
+        store = ResultHandleStore(valkey)  # type: ignore[arg-type]
+        monkeypatch.setattr(_migration_inventory_usage, "get_result_handle_store", lambda: store)
+    calls, dispatch_child = _vrops_child(status, operator=operator, store=store)
     vcenter = _FakeVcenter()
     result = await migration_inventory_composite(
-        operator=_operator(),
+        operator=operator,
         target=_Target(),
         params={"vcf_operations_target": "vrops-fixture"},
         connector=vcenter,  # type: ignore[arg-type]
         dispatch_child=dispatch_child,
     )
     assert vcenter.perf_queries == []
+    if reduced:
+        # Two VMs are found (one query and one stats answer each); the third
+        # VM's empty query answer is small and stays inline.
+        assert len(valkey.values) == 4
     return result, calls
 
 
@@ -698,6 +721,22 @@ async def test_utilization_comes_from_vcf_operations_when_named(
     assert usage["window_start"] == usage["window_end"]
     assert records["app-win-01"]["missing"]["utilization.network_in_mb_per_s"] == "not_measured"
     assert records["db-lin-01-copy"]["missing"]["utilization"] == "not_measured"
+
+
+async def test_a_stored_vcf_operations_answer_is_read_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A large child answer comes back as a handle; the values are read from the store."""
+    result, calls = await _run_vrops(monkeypatch, reduced=True)
+
+    records = _by_name(result)
+    usage = records["app-win-01"]["utilization"]
+    assert usage["source"] == "vcf-operations-latest"
+    assert usage["cpu_percent"] == {"average": 12.5, "p95": 12.5, "maximum": 12.5}
+    assert records["db-lin-01"]["utilization"]["memory_percent"]["average"] == 40.0
+    assert [op for op, _ in calls].count("vrops.resource.stats") == 2
+    problems = [o for o in result["omissions"] if o["kind"] is None]
+    assert problems == []
 
 
 async def test_a_denied_vcf_operations_read_stops_the_source(

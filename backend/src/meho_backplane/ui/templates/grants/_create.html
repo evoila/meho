@@ -55,9 +55,9 @@
         </div>
         <label class="block space-y-1"><span class="text-sm font-medium">Reason</span><textarea name="reason" class="textarea textarea-bordered w-full" :required="kind === 'service'" maxlength="2048" rows="3" placeholder="Why this service may run this operation unattended">{{ values.get('reason', '') }}</textarea></label>
         {% if sandbox_mode_on %}
-        <div class="alert alert-warning text-sm" data-sandbox-delete-grant-note><span>This instance is in sandbox mode. A grant for a delete operation, or for a delete step of a multi-step operation, is a delete grant. It needs an expiry within {{ delete_grant_max_days }} days, and MEHO never renews it by itself. Composite operations require a grant for each governed child operation.</span></div>
+        <div class="alert alert-warning text-sm" data-sandbox-delete-grant-note><span>This instance is in sandbox mode. A grant for a delete operation, or for a delete step of a multi-step operation, is a delete grant. It needs an expiry within {{ delete_grant_max_days }} days, and MEHO never renews it by itself. A multi-step operation needs a grant on the operation itself and one grant on each of its write steps. Without the grant on the operation, the whole call waits for approval. A write step without a grant waits for approval. Read steps need no grant.</span></div>
         {% else %}
-        <div class="alert alert-warning text-sm"><span>Delete-shaped operations cannot be granted. Composite operations require a grant for each governed child operation.</span></div>
+        <div class="alert alert-warning text-sm"><span>Delete-shaped operations cannot be granted. A multi-step operation needs a grant on the operation itself and one grant on each of its write steps. Without the grant on the operation, the whole call waits for approval. A write step without a grant waits for approval. Read steps need no grant.</span></div>
         {% endif %}
       </fieldset>
 

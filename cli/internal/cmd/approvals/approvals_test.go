@@ -995,6 +995,7 @@ func TestPrintDecisionRendersDelegation(t *testing.T) {
 func TestApproveSurfacesDecide422DelegatedReason(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
 		"POST /api/v1/approvals/" + stubID + "/decide": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnprocessableEntity)
 			_, _ = w.Write([]byte(`{"detail":"delegated_reason_invalid: missing or empty: Refs"}`))
 		},

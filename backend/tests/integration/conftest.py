@@ -440,6 +440,8 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   table referenced in a foreign key constraint``.
         # * ``sandbox_delete_grant`` — migration 0115 (#4622 sandbox mode delete
         #   grants) carries the same real ``REFERENCES tenant(id)`` FK.
+        # * ``service_principal_read_scope`` — migration 0117 (#4992 read scope)
+        #   carries the same real ``REFERENCES tenant(id)`` FK.
         # * ``service_principal_grant`` — migration 0078 (#3151/#3152 standing
         #   grants) carries a real ``REFERENCES tenant(id)`` FK; must be listed
         #   here or PG rejects the per-test TRUNCATE of ``tenant`` with ``cannot
@@ -488,7 +490,8 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
                 "scheduled_trigger, sensor_results, sensor, "
                 "check_dashboard_sensors, check_dashboards, "
                 "event_outbox, event_source, gateway_command, runner_effect_chain, "
-                "service_principal_grant, sandbox_delete_grant, addon_pairing, operation_run, "
+                "service_principal_grant, sandbox_delete_grant, "
+                "service_principal_read_scope, addon_pairing, operation_run, "
                 "addon_capability, addon_orchestration_run, "
                 "service_principal_grant, sandbox_delete_grant, addon_pairing, addon_step_event, "
                 "agent_run, audit_log, identity_budget, "
@@ -564,7 +567,8 @@ async def pg_engine_empty_tenant(
                 "scheduled_trigger, sensor_results, sensor, "
                 "check_dashboard_sensors, check_dashboards, "
                 "event_outbox, event_source, gateway_command, runner_effect_chain, "
-                "service_principal_grant, sandbox_delete_grant, addon_pairing, operation_run, "
+                "service_principal_grant, sandbox_delete_grant, "
+                "service_principal_read_scope, addon_pairing, operation_run, "
                 "addon_capability, addon_orchestration_run, "
                 "service_principal_grant, sandbox_delete_grant, addon_pairing, addon_step_event, "
                 "agent_run, audit_log, identity_budget, "

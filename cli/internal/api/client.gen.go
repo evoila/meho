@@ -7413,6 +7413,27 @@ type ReadDocsRequest struct {
 // ReadDocsRequestMode defines model for ReadDocsRequest.Mode.
 type ReadDocsRequestMode string
 
+// ReadScopeEntry One entry of a read scope. Exactly one shape per entry.
+//
+//   - “target_id“ -- exactly that target.
+//   - “target_product“ and/or “target_name_pattern“ -- a selector:
+//     “product“ exact, “name“ an “fnmatch“ glob. It is checked at
+//     call time, so a target registered after the scope was set can match.
+//   - “no_target: true“ -- allow “safe“ calls that have no target.
+type ReadScopeEntry struct {
+	// NoTarget Allow safe calls that have no target. Not set: such calls are refused.
+	NoTarget *bool `json:"no_target,omitempty"`
+
+	// TargetId Allow reads on exactly this target.
+	TargetId *openapi_types.UUID `json:"target_id"`
+
+	// TargetNamePattern Selector: allow reads on every target whose name matches this fnmatch glob.
+	TargetNamePattern *string `json:"target_name_pattern"`
+
+	// TargetProduct Selector: allow reads on every target whose product equals this value.
+	TargetProduct *string `json:"target_product"`
+}
+
 // ReadinessCheck One readiness check, as “/ready“ reports it (#4830).
 type ReadinessCheck struct {
 	Detail *string `json:"detail,omitempty"`
@@ -9039,6 +9060,23 @@ type ServiceGrantRead struct {
 	TargetNamePattern *string             `json:"target_name_pattern"`
 	TargetProduct     *string             `json:"target_product"`
 	TenantId          openapi_types.UUID  `json:"tenant_id"`
+}
+
+// ServiceReadScopeRead The stored read scope of one service principal.
+type ServiceReadScopeRead struct {
+	Entries      []ReadScopeEntry   `json:"entries"`
+	PrincipalSub string             `json:"principal_sub"`
+	SetAt        time.Time          `json:"set_at"`
+	SetBySub     string             `json:"set_by_sub"`
+	TenantId     openapi_types.UUID `json:"tenant_id"`
+}
+
+// ServiceReadScopeSet Body for “PUT /api/v1/service-principals/read-scopes/{principal_sub}“.
+//
+// Replaces the whole scope. At least one entry: a scope with no entry
+// would refuse every read, which is a job for revoking the principal.
+type ServiceReadScopeSet struct {
+	Entries []ReadScopeEntry `json:"entries"`
 }
 
 // ShowTemplateResponse Full template surface returned by “meho_runbook_show_template“.
@@ -11430,6 +11468,21 @@ type ShowGrantApiV1ServicePrincipalsGrantsGrantIdGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteParams defines parameters for ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDelete.
+type ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetParams defines parameters for ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGet.
+type ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams defines parameters for SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPut.
+type SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ListTargetsApiV1TargetsGetParams defines parameters for ListTargetsApiV1TargetsGet.
 type ListTargetsApiV1TargetsGetParams struct {
 	Product       *string `form:"product,omitempty" json:"product,omitempty"`
@@ -12130,6 +12183,9 @@ type CreateSensorApiV1SensorsPostJSONRequestBody = SensorCreate
 
 // CreateGrantApiV1ServicePrincipalsGrantsPostJSONRequestBody defines body for CreateGrantApiV1ServicePrincipalsGrantsPost for application/json ContentType.
 type CreateGrantApiV1ServicePrincipalsGrantsPostJSONRequestBody = ServiceGrantCreate
+
+// SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutJSONRequestBody defines body for SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPut for application/json ContentType.
+type SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutJSONRequestBody = ServiceReadScopeSet
 
 // CreateTargetApiV1TargetsPostJSONRequestBody defines body for CreateTargetApiV1TargetsPost for application/json ContentType.
 type CreateTargetApiV1TargetsPostJSONRequestBody = TargetCreate
@@ -14662,6 +14718,17 @@ type ClientInterface interface {
 
 	// ShowGrantApiV1ServicePrincipalsGrantsGrantIdGet request
 	ShowGrantApiV1ServicePrincipalsGrantsGrantIdGet(ctx context.Context, grantId openapi_types.UUID, params *ShowGrantApiV1ServicePrincipalsGrantsGrantIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDelete request
+	ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDelete(ctx context.Context, principalSub string, params *ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGet request
+	ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGet(ctx context.Context, principalSub string, params *ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutWithBody request with any body
+	SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutWithBody(ctx context.Context, principalSub string, params *SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPut(ctx context.Context, principalSub string, params *SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams, body SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListTargetsApiV1TargetsGet request
 	ListTargetsApiV1TargetsGet(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -18130,6 +18197,54 @@ func (c *Client) RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDelete(ctx contex
 
 func (c *Client) ShowGrantApiV1ServicePrincipalsGrantsGrantIdGet(ctx context.Context, grantId openapi_types.UUID, params *ShowGrantApiV1ServicePrincipalsGrantsGrantIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewShowGrantApiV1ServicePrincipalsGrantsGrantIdGetRequest(c.Server, grantId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDelete(ctx context.Context, principalSub string, params *ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteRequest(c.Server, principalSub, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGet(ctx context.Context, principalSub string, params *ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetRequest(c.Server, principalSub, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutWithBody(ctx context.Context, principalSub string, params *SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutRequestWithBody(c.Server, principalSub, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPut(ctx context.Context, principalSub string, params *SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams, body SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutRequest(c.Server, principalSub, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -32485,6 +32600,166 @@ func NewShowGrantApiV1ServicePrincipalsGrantsGrantIdGetRequest(server string, gr
 	return req, nil
 }
 
+// NewClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteRequest generates requests for ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDelete
+func NewClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteRequest(server string, principalSub string, params *ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "principal_sub", runtime.ParamLocationPath, principalSub)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/service-principals/read-scopes/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetRequest generates requests for ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGet
+func NewShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetRequest(server string, principalSub string, params *ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "principal_sub", runtime.ParamLocationPath, principalSub)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/service-principals/read-scopes/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewSetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutRequest calls the generic SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPut builder with application/json body
+func NewSetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutRequest(server string, principalSub string, params *SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams, body SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutRequestWithBody(server, principalSub, params, "application/json", bodyReader)
+}
+
+// NewSetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutRequestWithBody generates requests for SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPut with any type of body
+func NewSetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutRequestWithBody(server string, principalSub string, params *SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "principal_sub", runtime.ParamLocationPath, principalSub)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/service-principals/read-scopes/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PUT", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewListTargetsApiV1TargetsGetRequest generates requests for ListTargetsApiV1TargetsGet
 func NewListTargetsApiV1TargetsGetRequest(server string, params *ListTargetsApiV1TargetsGetParams) (*http.Request, error) {
 	var err error
@@ -45773,6 +46048,17 @@ type ClientWithResponsesInterface interface {
 	// ShowGrantApiV1ServicePrincipalsGrantsGrantIdGetWithResponse request
 	ShowGrantApiV1ServicePrincipalsGrantsGrantIdGetWithResponse(ctx context.Context, grantId openapi_types.UUID, params *ShowGrantApiV1ServicePrincipalsGrantsGrantIdGetParams, reqEditors ...RequestEditorFn) (*ShowGrantApiV1ServicePrincipalsGrantsGrantIdGetResponse, error)
 
+	// ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteWithResponse request
+	ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteWithResponse(ctx context.Context, principalSub string, params *ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteParams, reqEditors ...RequestEditorFn) (*ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteResponse, error)
+
+	// ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetWithResponse request
+	ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetWithResponse(ctx context.Context, principalSub string, params *ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetParams, reqEditors ...RequestEditorFn) (*ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetResponse, error)
+
+	// SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutWithBodyWithResponse request with any body
+	SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutWithBodyWithResponse(ctx context.Context, principalSub string, params *SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse, error)
+
+	SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutWithResponse(ctx context.Context, principalSub string, params *SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams, body SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutJSONRequestBody, reqEditors ...RequestEditorFn) (*SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse, error)
+
 	// ListTargetsApiV1TargetsGetWithResponse request
 	ListTargetsApiV1TargetsGetWithResponse(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*ListTargetsApiV1TargetsGetResponse, error)
 
@@ -50206,6 +50492,74 @@ func (r ShowGrantApiV1ServicePrincipalsGrantsGrantIdGetResponse) Status() string
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ShowGrantApiV1ServicePrincipalsGrantsGrantIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ServiceReadScopeRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ServiceReadScopeRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -57428,6 +57782,41 @@ func (c *ClientWithResponses) ShowGrantApiV1ServicePrincipalsGrantsGrantIdGetWit
 		return nil, err
 	}
 	return ParseShowGrantApiV1ServicePrincipalsGrantsGrantIdGetResponse(rsp)
+}
+
+// ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteWithResponse request returning *ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteResponse
+func (c *ClientWithResponses) ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteWithResponse(ctx context.Context, principalSub string, params *ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteParams, reqEditors ...RequestEditorFn) (*ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteResponse, error) {
+	rsp, err := c.ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDelete(ctx, principalSub, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteResponse(rsp)
+}
+
+// ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetWithResponse request returning *ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetResponse
+func (c *ClientWithResponses) ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetWithResponse(ctx context.Context, principalSub string, params *ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetParams, reqEditors ...RequestEditorFn) (*ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetResponse, error) {
+	rsp, err := c.ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGet(ctx, principalSub, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetResponse(rsp)
+}
+
+// SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutWithBodyWithResponse request with arbitrary body returning *SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse
+func (c *ClientWithResponses) SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutWithBodyWithResponse(ctx context.Context, principalSub string, params *SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse, error) {
+	rsp, err := c.SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutWithBody(ctx, principalSub, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse(rsp)
+}
+
+func (c *ClientWithResponses) SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutWithResponse(ctx context.Context, principalSub string, params *SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams, body SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutJSONRequestBody, reqEditors ...RequestEditorFn) (*SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse, error) {
+	rsp, err := c.SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPut(ctx, principalSub, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse(rsp)
 }
 
 // ListTargetsApiV1TargetsGetWithResponse request returning *ListTargetsApiV1TargetsGetResponse
@@ -65462,6 +65851,98 @@ func ParseShowGrantApiV1ServicePrincipalsGrantsGrantIdGetResponse(rsp *http.Resp
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest ServiceGrantRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteResponse parses an HTTP response from a ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteWithResponse call
+func ParseClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteResponse(rsp *http.Response) (*ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ClearReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetResponse parses an HTTP response from a ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetWithResponse call
+func ParseShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetResponse(rsp *http.Response) (*ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ServiceReadScopeRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse parses an HTTP response from a SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutWithResponse call
+func ParseSetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse(rsp *http.Response) (*SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ServiceReadScopeRead
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

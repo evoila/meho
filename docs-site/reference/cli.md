@@ -4557,6 +4557,51 @@ meho service-principals grants show <grant-id> [flags]
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit raw ServiceGrantRead JSON
 
+### `meho service-principals read-scope`
+
+Limit which targets a service principal may read (operator)
+
+```
+meho service-principals read-scope
+```
+
+#### `meho service-principals read-scope clear`
+
+Clear the read scope of a service principal, so it reads every target again (operator)
+
+```
+meho service-principals read-scope clear <principal-sub> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--confirm` — confirm the clear
+- `--json` — emit a machine-readable result JSON
+
+#### `meho service-principals read-scope set`
+
+Set (replace) the read scope of a service principal (operator)
+
+```
+meho service-principals read-scope set <principal-sub> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw ServiceReadScopeRead JSON
+- `--no-target` — also allow safe calls that have no target
+- `--selector` — target selector `product=<product>` and/or `name=<fnmatch glob>`, joined by a comma (repeatable); matches targets registered later too
+- `--target` — target UUID the principal may read (repeatable)
+
+#### `meho service-principals read-scope show`
+
+Show the read scope of a service principal (operator)
+
+```
+meho service-principals read-scope show <principal-sub> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw ServiceReadScopeRead JSON
+
 ## `meho status`
 
 Show operator identity + backplane health; --watch streams live activity

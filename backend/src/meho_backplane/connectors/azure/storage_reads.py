@@ -361,10 +361,11 @@ async def blob_read_impl(
     """``azure.storage.blob.read``: one small UTF-8 text file, from the blob data plane.
 
     Reads the file's properties first (HEAD) and refuses a file over
-    :data:`MAX_TEXT_BYTES`, an archived file or one whose content type is
-    never text, without reading its bytes. Then reads the bytes with a range
-    that stops at the size limit, checks that the file did not change in
-    between, and refuses bytes that are not UTF-8 text.
+    :data:`MAX_TEXT_BYTES`, an archived file, a file stored with a content
+    encoding (for example gzip) or one whose content type is never text,
+    without reading its bytes. Then reads the bytes with a range that stops
+    at the size limit, checks that the file did not change in between, and
+    refuses bytes that are not UTF-8 text.
     """
     name = account_name(params.get("account"), target.name)
     container = container_name(params.get("container"), target.name)

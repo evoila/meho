@@ -934,6 +934,18 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     failed has null fields and a `read_note` (vCenter can answer HTTP 500
     instead of 403 for an account the caller may not read). No field holds a
     password: vCenter sends only `has_password`.
+  - **When vCenter refuses a read.** An HTTP 403 on the list or on the read
+    of one account becomes `LocalAccountRefusedError` (a
+    `ConnectorUpstreamError`). It keeps the HTTP status and the vAPI error
+    text, says that vCenter refused the read, and names the SSO group. An
+    HTTP 500 with the message id `com.vmware.appliance.failed_fetch_user` on
+    the read of one account gets the same error, but it says the service
+    account *may* lack the group. A list row whose account read got one of
+    these answers has the same hint in its `read_note`. The hint is also the
+    error's `remediation`, so the dispatcher passes it on in full even when
+    it cuts the message short. A 404 still answers `not_found`, and a 401 and
+    every other status are raised as they are, so the dispatcher still logs
+    in again on a 401.
   - **The policy change** reads the account first (a missing account stops the
     call before any change), sends only the given fields, and reads the
     account again. It returns `requested`, `before` and `after`. The day
@@ -969,15 +981,18 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
       again and retries once; but its response holds only the vAPI error type
       and messages, and its request has neither the session header nor the
       body. Any other status becomes `ConnectorUpstreamError` with the HTTP
-      status and the same safe text (a 403 also names the SSO group the
-      service account needs). When any vendor text holds the password (as is,
+      status and the same safe text (a 403 is a `LocalAccountRefusedError`
+      that also names the SSO group the service account needs, as its
+      `remediation` too). When any vendor text holds the password (as is,
       JSON-escaped, URL-encoded or HTML-escaped), all vendor text is dropped.
       The new error is raised after the `except` block, so it does not keep
       the original error (raw response and request) as its context. A failed
       read after a change gives a `read_note` with the same safe text.
     - The result is `{username, password_set, password_expires_at,
       read_note}`.
-  - **The service account of the target needs an appliance role.** The vendor
+  - **The service account of the target needs the SSO group
+    `SystemConfiguration.BashShellAdministrators` for all four operations.**
+    The texts of all four operations say so. The vendor
     maps three levels to SSO groups: `operator` and `admin` to
     `SystemConfiguration.Administrators`, and `superAdmin` to
     `SystemConfiguration.BashShellAdministrators`
@@ -986,14 +1001,24 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     altering user accounts"
     ([Using the SuperAdmin Role](https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere-sdks-tools/8-0/vmware-vsphere-automation-rest-programming-guide-8-0/vcenter-server-management-1/authorization-model-for-administration-of-vcenter-server-1/using-the-superadmin-role-1.html)).
     So both changes need the service account in
-    `SystemConfiguration.BashShellAdministrators`. The vendor names no level
-    for the reads; a service account in neither group gets HTTP 403 on the
-    list. Members of `SystemConfiguration.BashShellAdministrators` can also
-    open the appliance Bash shell with near-root rights, so keep the group
-    small.
+    `SystemConfiguration.BashShellAdministrators`. The reads need it too. The
+    vendor says the list needs the super administrator level
+    ([Get a List of the Local User Accounts in vCenter Server](https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/8-0/vcenter-configuration/configuring-vcenter-server-using-the-appliance-shell/managing-local-user-accounts-in-vcenter-server/get-a-list-of-the-local-user-accounts.html)).
+    On a vCenter 8.0.3, a service account without the group got HTTP 403
+    (`vapi.security.authorization.invalid`) on the list and HTTP 500
+    (`com.vmware.appliance.failed_fetch_user`) on the read of one account.
+    Other appliance reads, such as the backup schedules or the global
+    password policy, worked with the same account. The appliance checks its
+    own rights: vCenter roles and global permissions do not count for it.
+    After a group change, MEHO's next login to vCenter carries the new group;
+    MEHO logs in again at the latest when its session is 20 minutes old (the
+    default of `VMWARE_SOAP_SESSION_MAX_AGE_SECONDS`). Members of
+    `SystemConfiguration.BashShellAdministrators` can also open the appliance
+    Bash shell with near-root rights, so keep the group small.
   - **Tests.** `tests/test_connectors_vmware_rest_typed_appliance_local_accounts.py`
     (rows and expiry, refused names and values, `not_found`, the Vault read,
-    the error rule for every status, the approval preview, the
+    the error rule for every status, the SSO group in all four operation
+    texts and in the read refusals, the approval preview, the
     flight-recorder span); `tests/test_connectors_vmware_rest_appliance_password_e2e.py`
     (one password change through the dispatcher, the approval queue and the
     real connector over respx: the password is in the `PATCH` body and not in

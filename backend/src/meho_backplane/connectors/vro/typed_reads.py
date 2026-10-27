@@ -29,6 +29,19 @@ is one of the names listed here that the shared rule leaves out (bare
 is replaced too. The connector masks the same fields before the flight
 recorder records a vendor answer.
 
+**Checksum.** ``vro.workflow.get`` returns ``content_sha256``: the SHA-256
+of the workflow content in a fixed form (JSON with sorted keys and no
+spaces), so the same content always gives the same checksum.
+
+**Outcome.** ``vro.execution.get`` returns ``outcome`` next to the vendor
+``state``: a plain result from :data:`OUTCOME_BY_STATE`. A state that is
+not in the table gives ``unknown``. When the server does not answer, the
+read returns ``outcome: not_reachable`` with the run id and the time.
+
+**More rows.** Every list read returns ``more_rows``: it asks the server
+for one row more than it returns, and the extra row only tells whether
+more rows exist.
+
 **Log text.** A log line's text is cut at :data:`LOG_TEXT_MAX` characters.
 The shared secret rules run on the whole text first: they need the label
 and the whole value, and a cut could leave a fragment too short for them
@@ -40,8 +53,13 @@ The paths come from the vendor's Orchestrator REST API reference (9.0 and
 
 from __future__ import annotations
 
+import hashlib
+import json
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import quote
+
+import httpx
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.events import is_secret_param_name
@@ -57,8 +75,10 @@ __all__ = [
     "ABOUT_PATH",
     "DEFAULT_LIST_LIMIT",
     "LOG_TEXT_MAX",
+    "OUTCOME_BY_STATE",
     "REDACTED",
     "VENDOR_CALLS",
+    "content_sha256",
     "flat_rows",
     "redact_secrets",
     "vro_about_impl",
@@ -101,6 +121,22 @@ _DEFAULT_LOG_LINES: Final = 200
 #: Longest log text kept per line; a longer text is cut and the row is marked.
 LOG_TEXT_MAX: Final = 2000
 _LOGS_OP_ID: Final = "vro.execution.logs"
+
+#: The plain outcome of each run state of the vendor reference
+#: (canceled, completed, running, suspended, waiting, waiting-signal,
+#: failed, initializing). A suspended run waits for someone to resume it.
+OUTCOME_BY_STATE: Final[dict[str, str]] = {
+    "completed": "completed",
+    "failed": "failed",
+    "canceled": "canceled",
+    "running": "running",
+    "initializing": "running",
+    "waiting": "waiting",
+    "waiting-signal": "waiting",
+    "suspended": "waiting",
+}
+_OUTCOME_UNKNOWN: Final = "unknown"
+_OUTCOME_NOT_REACHABLE: Final = "not_reachable"
 
 #: Written in place of a secret value; the key stays, so the shape is stable.
 REDACTED: Final = "***REDACTED***"
@@ -222,22 +258,35 @@ def flat_rows(links: Any) -> list[dict[str, Any]]:
     return rows
 
 
+def _max_results(params: dict[str, Any]) -> int:
+    return int(params.get("max_results", DEFAULT_LIST_LIMIT))
+
+
 def _page_query(params: dict[str, Any]) -> dict[str, Any]:
-    """The vendor ``maxResult`` / ``startIndex`` query of a list read."""
+    """The vendor ``maxResult`` / ``startIndex`` query of a list read.
+
+    Asks for one row more than ``max_results``; :func:`_page_answer` drops
+    it and sets ``more_rows``.
+    """
     return {
-        "maxResult": int(params.get("max_results", DEFAULT_LIST_LIMIT)),
+        "maxResult": _max_results(params) + 1,
         "startIndex": int(params.get("start_index", 0)),
     }
 
 
-def _page_answer(envelope: Any, rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """``{items, total, start_index, count}`` from a vendor list envelope."""
+def _page_answer(envelope: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """``{items, total, start_index, count, more_rows}`` from a vendor list envelope."""
     page = envelope if isinstance(envelope, dict) else {}
+    links = page.get("link")
+    links = links if isinstance(links, list) else []
+    limit = _max_results(params)
+    rows = flat_rows(links[:limit])
     return {
         "items": redact_secrets(rows),
         "total": page.get("total"),
         "start_index": page.get("startIndex"),
         "count": len(rows),
+        "more_rows": len(links) > limit,
     }
 
 
@@ -326,7 +375,7 @@ async def vro_workflow_list_impl(
     if conditions:
         query["conditions"] = conditions
     payload = await connector._vro_get(target, _WORKFLOWS_PATH, operator=operator, params=query)
-    return _page_answer(payload, flat_rows(payload.get("link")))
+    return _page_answer(payload, params)
 
 
 def _declared_parameters(declaration: Any) -> list[dict[str, Any]]:
@@ -341,6 +390,20 @@ def _declared_parameters(declaration: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _with_secret_flag(params: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add ``secret``: true for a ``SecureString`` parameter, false otherwise."""
+    return [
+        {**p, "secret": isinstance(p["type"], str) and "securestring" in p["type"].lower()}
+        for p in params
+    ]
+
+
+def content_sha256(content: Any) -> str:
+    """SHA-256 of *content* in a fixed form: JSON with sorted keys and no spaces."""
+    fixed = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(fixed.encode("utf-8")).hexdigest()
+
+
 async def vro_workflow_get_impl(
     connector: VroConnector,
     operator: Operator,
@@ -351,8 +414,10 @@ async def vro_workflow_get_impl(
 
     ``GET /vco/api/workflows/{workflowId}`` gives the name, version,
     description and category; ``GET .../content`` gives the declared
-    inputs and outputs. Default values are not returned: they can hold
-    secrets and are not needed to call the workflow.
+    inputs and outputs, and ``content_sha256`` is the checksum of that
+    content. Each input has ``secret`` (true for a ``SecureString``).
+    Default values are not returned: they can hold secrets and are not
+    needed to call the workflow.
     """
     workflow_id = _segment("workflow", params.get("workflow_id"))
     workflow = await connector._vro_get(
@@ -370,7 +435,10 @@ async def vro_workflow_get_impl(
         "version": workflow.get("version"),
         "description": workflow.get("description"),
         "category_id": workflow.get("category-id"),
-        "inputs": inputs or _declared_parameters(workflow.get("inputParameters")),
+        "content_sha256": content_sha256(content),
+        "inputs": _with_secret_flag(
+            inputs or _declared_parameters(workflow.get("inputParameters"))
+        ),
         "outputs": outputs or _declared_parameters(workflow.get("outputParameters")),
     }
 
@@ -389,9 +457,7 @@ async def vro_execution_list_impl(
         operator=operator,
         params=_page_query(params),
     )
-    relations = payload.get("relations")
-    relations = relations if isinstance(relations, dict) else {}
-    return _page_answer(relations, flat_rows(relations.get("link")))
+    return _page_answer(payload.get("relations"), params)
 
 
 def _run_parameters(params: Any) -> list[dict[str, Any]]:
@@ -409,25 +475,46 @@ def _run_parameters(params: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _outcome(state: Any) -> str:
+    """The plain outcome of a vendor run state; ``unknown`` when the state is not known."""
+    if not isinstance(state, str):
+        return _OUTCOME_UNKNOWN
+    return OUTCOME_BY_STATE.get(state.strip().lower(), _OUTCOME_UNKNOWN)
+
+
 async def vro_execution_get_impl(
     connector: VroConnector,
     operator: Operator,
     target: VroTargetLike,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    """``vro.execution.get`` -- one run: state, dates, user, error, inputs and outputs."""
+    """``vro.execution.get`` -- one run: state, outcome, dates, user, error, inputs and outputs.
+
+    When the server does not answer (a connection or time-out error after
+    the retries), returns ``outcome: not_reachable`` with the run id and
+    ``checked_at``; every other field is empty.
+    """
     workflow_id = _segment("workflow", params.get("workflow_id"))
     execution_id = _segment("execution", params.get("execution_id"))
-    payload = await connector._vro_get(
-        target,
-        _EXECUTION_PATH.format(workflowId=workflow_id, executionId=execution_id),
-        operator=operator,
-    )
+    checked_at = datetime.now(UTC).isoformat()
+    try:
+        payload = await connector._vro_get(
+            target,
+            _EXECUTION_PATH.format(workflowId=workflow_id, executionId=execution_id),
+            operator=operator,
+        )
+    except httpx.TransportError:
+        payload = {"id": params.get("execution_id")}
+        outcome = _OUTCOME_NOT_REACHABLE
+    else:
+        outcome = _outcome(payload.get("state"))
     return _redact_object(
         {
             "id": payload.get("id"),
             "name": payload.get("name"),
             "state": payload.get("state"),
+            "outcome": outcome,
+            "checked_at": checked_at,
             "business_state": payload.get("business-state"),
             "start_date": payload.get("start-date"),
             "end_date": payload.get("end-date"),
@@ -500,8 +587,10 @@ async def vro_execution_logs_impl(
     logs = payload.get("logs")
     entries = [entry for entry in logs or [] if isinstance(entry, dict)]
     rows = [_log_row(entry, redact) for entry in entries[:max_lines]]
+    more = len(entries) > max_lines
     return {
         "items": redact_secrets(rows),
         "lines": len(rows),
-        "more_lines": len(entries) > max_lines,
+        "more_lines": more,
+        "more_rows": more,
     }

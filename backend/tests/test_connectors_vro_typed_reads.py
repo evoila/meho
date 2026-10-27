@@ -438,11 +438,12 @@ async def test_workflow_list_returns_flat_rows_and_sends_the_conditions(
     assert result.status == "ok", result.error
     params = route.calls[0].request.url.params
     assert params.get_list("conditions") == ["name~<part>", "categoryName=<category>"]
-    assert params["maxResult"] == "50"
+    assert params["maxResult"] == "51"
     assert params["startIndex"] == "0"
     body = result.result
     assert body["total"] == 1
     assert body["count"] == 1
+    assert body["more_rows"] is False
     assert body["items"][0]["id"] == _WF
     assert body["items"][0]["categoryName"] == "<category>"
     assert body["items"][0]["href"].endswith(f"/{_WF}/")

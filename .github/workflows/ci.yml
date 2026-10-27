@@ -576,7 +576,7 @@ jobs:
           path: spec-shelf
           # Cone-mode sparse checkout of the shelf directories only +
           # lazy blob filter: the runner materialises just the pinned
-          # spec files (~0.4 MB argocd-3.3 + ~11 MB azure-arm-2026.10 +
+          # spec files (~0.4 MB argocd-3.3 + ~9.8 MB azure-arm-2026.10 +
           # ~13 MB esxi-9.0 + ~0.2 MB
           # hetzner-robot-2026-04 + ~33 MB nsx-9.0 +
           # ~0.1 MB salt-raas-8.18 + ~2 MB sddc-manager-9.0 +

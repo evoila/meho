@@ -652,7 +652,11 @@ the paging fields of `PagedRows.as_dict()` (`truncated`, `omission`,
   with `values` (not `value`) and no next page, so this read is one GET
   without paging fields. Rows and patch versions are sorted by version
   number, so `1.29.10` comes after `1.29.9`. A cluster version that is in no
-  row's `patch_versions` is no longer offered in the region.
+  row's `patch_versions` is no longer offered in the region, and its support
+  ends after a short grace period. A minor version in no row is out of
+  regular support. A row whose `support_plans` holds only
+  `AKSLongTermSupport` is supported only for clusters on the long-term
+  support plan (`support_plan` `AKSLongTermSupport`).
 
 ### Parameter checks
 

@@ -62,6 +62,20 @@ groups, risk levels and guidance for the AI.
 - `OperationReference`, `operation_reference`, `read_operation_state`,
   `wait_for_operation` (`_polling.py`): following long-running operations.
 
+## Package layout
+
+Each family of operations (inventory, compute, network and so on) has its own
+module, `<family>.py`, so families built at the same time do not edit the same
+lines. The module holds the family's group text (`WHEN_TO_USE`), its
+operations (`OPS`), their bodies and a mixin class: a class with the thin
+methods that `AzureConnector` takes over.
+
+- `_model.py` holds what every family imports: `AzureTypedOp`, `NO_PARAMS`
+  and `TEXT_OR_NULL`.
+- `typed_ops.py` and `connector.py` collect the families: an import and one
+  line per list for each family, in alphabetical order.
+- `_paths.py` keeps the paths, in one marked section per family.
+
 ## Target shape
 
 | Field | Value |

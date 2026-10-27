@@ -141,6 +141,9 @@ including `ok -> unknown`, since `unknown` shares rank 1 with
    on the link row (`check_dashboard_sensors.last_member_state`) and
    returns one "new problem" `DashboardNotice` per member that got worse
    while the Dashboard's state stayed the same (`_claim_member_changes`).
+   When the Dashboard's state did move, the members that got worse ride
+   along on the Dashboard notice instead (`member_changes`), and a caller
+   that lost the Dashboard edge leaves the member memos to the winner.
 2. **Routing** (`investigate._process_transition`). The worsening filter
    that used to live inside the claim now sits at this single site,
    unchanged in meaning: `worsening and non_green` → investigator. Every
@@ -154,7 +157,11 @@ including `ok -> unknown`, since `unknown` shares rank 1 with
    allowlist screening (`_allowed_recipients`, #2764); then one
    `send_email` fan-out to the survivors. Screening sits **after** the
    suppression claim, so the claim stays per-edge (one window covers all
-   recipients) and the attempt-based contract is unchanged.
+   recipients) and the attempt-based contract is unchanged. A Dashboard
+   mail that won its claim also claims the member window of every
+   non-green member it names (`_claim_member_windows`, #5068); a
+   Dashboard mail that lost its claim mails its `member_changes` riders
+   one by one as "new problem" notices instead (see below).
 4. **Outcome logging.** `checks_notify_sent` (info, with
    `recipient_count`) on delivery; `checks_notify_failed` (warning, with
    the transport's stable reason code) on a `sent=False` result or an
@@ -192,8 +199,15 @@ Dashboard's overall state stays the same:
 - The Dashboard's `notify_min_state` floor applies to the member's **new**
   state: at the default `critical` floor, a member turning `ok → degraded`
   stays silent; at `degraded` it mails.
-- When the member's change also moves the Dashboard's overall state, only
-  the Dashboard mail goes out. It already lists every non-green member.
+- When the member's change also moves the Dashboard's overall state, the
+  Dashboard mail goes out and lists every non-green member. The members
+  that got worse ride along on that notice (`member_changes`). They get
+  their own "new problem" mail only when the Dashboard mail is suppressed
+  by its flap window: for example A turns `critical` (mail) and drops to
+  `degraded` (mail), then B turns `critical` for the first time inside the
+  same window. The Dashboard edge `degraded -> critical` is suppressed by
+  A's earlier mail, so B is mailed on its own, once, through B's own
+  window. Without this, B's memo would advance and B would never mail.
 
 **Where the memo lives, and why.** Each link row
 (`check_dashboard_sensors`) carries `last_member_state`, added by
@@ -222,16 +236,23 @@ Dashboard mail and records every member.
 The Sensor name is folded like the Dashboard name (header safety). Body:
 the Dashboard, `State: <state> (unchanged)`, `New problem: <sensor>
 <previous> -> <current>`, then the usual non-green member blocks with the
-new member marked `(new)`.
+new member **first** and marked `(new)`, so the member-line limit
+(`_MAX_MEMBER_LINES`) can never drop it. When the mail is the fallback
+for a suppressed Dashboard mail, the subject says `(dashboard <previous>
+-> <current>)` and the body `State: <previous> -> <current>` instead.
 
 **Cool-down.** The #2732 window applies per `(tenant, dashboard, sensor,
 state)`: key `meho:checks:notify:<tenant>:<dashboard>:member:<sensor>:<state>`,
 same `SET NX EX`, same `CHECKS_NOTIFY_SUPPRESSION_WINDOW_MINUTES`, same
 fail-open posture. A member that recovers and fails again inside the
 window is suppressed (`checks_notify_suppressed` with `member_name`).
-Member keys are not cleared by a Dashboard recovery; they expire on their
-own. Escalation is a different state and therefore a different key, so
-`degraded → critical` on the same member mails at once.
+A Dashboard mail that goes out claims the same key for every non-green
+member it names (`_claim_member_windows`): the recipient was just told
+about that member at that state, so neither a later fallback nor a
+recover-and-fail-again mails it again inside the window. Member keys are
+not cleared by a Dashboard recovery; they expire on their own. Escalation
+is a different state and therefore a different key, so `degraded →
+critical` on the same member mails at once.
 
 **Logs.** The same events as the Dashboard mail (`checks_notify_sent`,
 `checks_notify_skipped_below_threshold`, `checks_notify_suppressed`, …)

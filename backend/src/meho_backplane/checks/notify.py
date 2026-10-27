@@ -75,9 +75,16 @@ Dashboard's: the ``notify_min_state`` floor applies to the member's new
 state, and the flap window is keyed per ``(tenant, dashboard, sensor,
 state)`` so a flapping member is bounded like a flapping Dashboard. The
 subject names the member and says the Dashboard is still red; the body
-lists every non-green member and marks the new one. A member recovering
-while the Dashboard stays red is not mailed (the #5068 boundary), and a
-member change never reaches the investigator.
+lists every non-green member, the new one first and marked. A member
+recovering while the Dashboard stays red is not mailed (the #5068
+boundary), and a member change never reaches the investigator.
+
+When the member's change also moves the Dashboard, the members that got
+worse ride along on the Dashboard notice (``member_changes``). A sent
+Dashboard mail claims every named member's own window, so none of them
+mails again on its own inside it; a Dashboard mail suppressed by its own
+window hands each rider to the member path instead, so a member turning
+red for the first time behind a flapping Dashboard still mails once.
 
 Exactly-once, and the flap window
 =================================
@@ -157,7 +164,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final, cast
 
 import structlog
@@ -257,9 +264,11 @@ class NotifyMember:
     A narrow, notifier-owned projection rather than a reuse of the
     investigator's briefing snapshot: this module must not depend on
     :mod:`meho_backplane.checks.investigate` (which imports *it*), and the
-    mail needs four fields where the briefing needs ten.
+    mail needs five fields where the briefing needs ten. :attr:`sensor_id`
+    keys the member's own flap window (#5068).
     """
 
+    sensor_id: uuid.UUID
     name: str
     effective_state: str
     last_value: object
@@ -296,9 +305,14 @@ class DashboardNotice:
     keeps the Valkey namespace greppable per tenant.
 
     :attr:`member_change` set (#5068) makes this a "new problem" notice:
-    :attr:`previous_state` and :attr:`current_state` are then both the
-    Dashboard's unchanged state, and the member's own edge is what the
-    gates judge (:func:`_edge`).
+    the member's own edge is what the gates judge (:func:`_edge`), while
+    :attr:`previous_state` and :attr:`current_state` carry the Dashboard's
+    edge -- usually unchanged, both the same state.
+
+    :attr:`member_changes` rides on a Dashboard-edge notice: the members
+    that got worse on that edge. The Dashboard mail already names them, so
+    they mail on their own only when the Dashboard mail is suppressed by
+    its flap window (see :func:`notify_dashboard_transition`).
     """
 
     tenant_id: uuid.UUID
@@ -310,6 +324,12 @@ class DashboardNotice:
     notify_min_state: str
     members: tuple[NotifyMember, ...]
     member_change: MemberChange | None = None
+    member_changes: tuple[MemberChange, ...] = ()
+
+
+def _member_notice(notice: DashboardNotice, change: MemberChange) -> DashboardNotice:
+    """The "new problem" notice for one member that rode along on *notice*."""
+    return replace(notice, member_change=change, member_changes=())
 
 
 def _edge(notice: DashboardNotice) -> tuple[str, str]:
@@ -441,6 +461,37 @@ async def _claim_suppression(notice: DashboardNotice, window_seconds: int) -> bo
     return bool(claimed)
 
 
+async def _claim_member_windows(notice: DashboardNotice, window_seconds: int) -> None:
+    """Claim the window of every ``(sensor, state)`` a Dashboard mail reports.
+
+    Runs once the Dashboard mail has claimed its own window, so a member
+    the mail names at a state is not mailed again on its own at that state
+    inside the window: neither by the ``member_changes`` fallback of a later
+    suppressed Dashboard mail, nor by a "new problem" notice after the
+    member recovered and failed again (#5068). One ``SET NX EX`` per
+    non-green member; a window a member notice already holds is left as it
+    is. Fail-open like the claim: one warning, and the Dashboard mail still
+    goes out.
+    """
+    client = get_broadcast_client()
+    try:
+        for member in notice.members:
+            key = _suppression_key(
+                notice.tenant_id,
+                notice.dashboard_id,
+                member.effective_state,
+                sensor_id=member.sensor_id,
+            )
+            await client.set(key, "1", nx=True, ex=window_seconds)
+    except Exception:
+        _log().warning(
+            "checks_notify_suppression_failed",
+            dashboard_id=str(notice.dashboard_id),
+            phase="members",
+            exc_info=True,
+        )
+
+
 async def _clear_suppression(notice: DashboardNotice) -> None:
     """Drop the Dashboard's suppression keys on a recovery crossing (#2732).
 
@@ -511,10 +562,15 @@ def _subject(notice: DashboardNotice) -> str:
     change = notice.member_change
     if change is not None:
         member = _single_line(change.name)
+        dashboard = (
+            f"still {notice.current_state}"
+            if notice.previous_state == notice.current_state
+            else f"{notice.previous_state} -> {notice.current_state}"
+        )
         return (
             f"[MEHO] {name}: new problem {member} "
             f"{change.previous_state} -> {change.current_state} "
-            f"(dashboard still {notice.current_state})"
+            f"(dashboard {dashboard})"
         )
     prefix = "" if notice.members else "all clear - "
     return f"[MEHO] {prefix}{name}: {notice.previous_state} -> {notice.current_state}"
@@ -523,35 +579,41 @@ def _subject(notice: DashboardNotice) -> str:
 def _body(notice: DashboardNotice) -> str:
     """Build the plain-text body: the edge, then the non-green members.
 
-    A "new problem" notice (#5068) states the unchanged Dashboard state and
-    the member's edge up front, then marks that member ``(new)`` in the
-    list so the recipient finds it without reading every block.
+    A "new problem" notice (#5068) states the Dashboard state and the
+    member's edge up front, then lists that member first and marks it
+    ``(new)`` so the recipient finds it without reading every block -- and
+    so the member-line limit can never drop it.
     """
     change = notice.member_change
     lines = [f"Dashboard: {notice.name}"]
+    members = notice.members
     if change is not None:
-        lines.append(f"State: {notice.current_state} (unchanged)")
+        if notice.previous_state == notice.current_state:
+            lines.append(f"State: {notice.current_state} (unchanged)")
+        else:
+            lines.append(f"State: {notice.previous_state} -> {notice.current_state}")
         lines.append(
             f"New problem: {_clip(change.name)} {change.previous_state} -> {change.current_state}"
         )
+        members = tuple(sorted(members, key=lambda m: m.sensor_id != change.sensor_id))
     else:
         lines.append(f"State: {notice.previous_state} -> {notice.current_state}")
     lines.append("")
-    if not notice.members:
+    if not members:
         lines.append("All clear - no member sensor is in a failing state.")
         return "\n".join(lines) + "\n"
 
-    shown = notice.members[:_MAX_MEMBER_LINES]
-    lines.append(f"Non-green members ({len(notice.members)}):")
+    shown = members[:_MAX_MEMBER_LINES]
+    lines.append(f"Non-green members ({len(members)}):")
     lines.append("")
     for member in shown:
-        marker = " (new)" if change is not None and member.name == change.name else ""
+        marker = " (new)" if change is not None and member.sensor_id == change.sensor_id else ""
         lines.append(f"- {_clip(member.name)} [{member.effective_state}]{marker}")
         lines.append(f"    last value: {_clip(member.last_value)}")
         lines.append(f"    evidence:   {_clip(member.last_evidence)}")
-    if len(notice.members) > len(shown):
+    if len(members) > len(shown):
         lines.append("")
-        lines.append(f"({len(notice.members) - len(shown)} further member(s) not shown.)")
+        lines.append(f"({len(members) - len(shown)} further member(s) not shown.)")
     return "\n".join(lines) + "\n"
 
 
@@ -656,6 +718,17 @@ async def notify_dashboard_transition(notice: DashboardNotice) -> None:
     edge (:func:`_edge`): the floor is judged on the member's new state and
     the flap window is the member's. Its new state is always non-green, so
     it never clears the Dashboard's windows.
+
+    A Dashboard-edge notice carries the members that got worse on that
+    edge (``member_changes``). When the Dashboard mail goes out it names
+    every non-green member, and it claims each one's own window for the
+    state it reports (:func:`_claim_member_windows`), so a member the
+    recipient was just told about is not mailed again on its own inside
+    the window. When the Dashboard mail is suppressed by its window, each
+    member that got worse is mailed as its own "new problem" notice through
+    the same gates -- so a member turning red for the first time is never
+    hidden behind a Dashboard that flapped back into a state it already
+    mailed.
     """
     if not notice.notify_email:
         _log().info(
@@ -675,17 +748,19 @@ async def notify_dashboard_transition(notice: DashboardNotice) -> None:
             **_log_fields(notice),
         )
         return
-    if (
-        window_minutes > 0
-        and suppressible
-        and not await _claim_suppression(notice, window_minutes * 60)
-    ):
-        _log().info(
-            "checks_notify_suppressed",
-            window_minutes=window_minutes,
-            **_log_fields(notice),
-        )
-        return
+    if window_minutes > 0 and suppressible:
+        window_seconds = window_minutes * 60
+        if not await _claim_suppression(notice, window_seconds):
+            _log().info(
+                "checks_notify_suppressed",
+                window_minutes=window_minutes,
+                **_log_fields(notice),
+            )
+            for change in notice.member_changes:
+                await notify_dashboard_transition(_member_notice(notice, change))
+            return
+        if notice.member_change is None:
+            await _claim_member_windows(notice, window_seconds)
     recipients = _allowed_recipients(notice.notify_email, dashboard_id=str(notice.dashboard_id))
     if not recipients:
         _log().warning(

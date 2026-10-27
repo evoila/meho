@@ -369,8 +369,10 @@ class _DashboardClaims:
     overall state did not move or a concurrent caller won it.
     :attr:`member_notices` holds one notice per member Sensor that got
     worse while the overall state stayed the same -- empty whenever
-    :attr:`transition` is set, because the Dashboard mail already lists
-    every non-green member.
+    :attr:`transition` is set, because the members that got worse on a
+    Dashboard edge ride along on the Dashboard notice instead
+    (``DashboardNotice.member_changes``), for the notifier to mail on
+    their own only when it suppresses the Dashboard mail.
     """
 
     transition: _ClaimedTransition | None
@@ -555,12 +557,24 @@ async def _claim_dashboard_transition(
             claimed = await _claim_rollup_transition(
                 session, dashboard_id, expected=previous_memo, new=current
             )
-        notice = _dashboard_notice(dashboard, dashboard_snapshot, non_green)
-        changes = await _claim_member_changes(session, evaluations, dashboard_edge=dashboard_edge)
-        member_notices = [
-            _dashboard_notice(dashboard, dashboard_snapshot, non_green, member_change=change)
-            for change in changes
-        ]
+        changes: list[MemberChange] = []
+        if claimed or not dashboard_edge:
+            # A caller that lost the Dashboard edge leaves the member memos
+            # to the winner, which read the same rows. Moving a memo here
+            # would silence that member for good: its change belongs to a
+            # Dashboard mail this caller does not own.
+            changes = await _claim_member_changes(session, evaluations)
+        member_notices: list[DashboardNotice] = []
+        if dashboard_edge:
+            notice = _dashboard_notice(
+                dashboard, dashboard_snapshot, non_green, member_changes=tuple(changes)
+            )
+        else:
+            notice = _dashboard_notice(dashboard, dashboard_snapshot, non_green)
+            member_notices = [
+                _dashboard_notice(dashboard, dashboard_snapshot, non_green, member_change=change)
+                for change in changes
+            ]
         await session.commit()
 
     transition = None
@@ -577,10 +591,8 @@ async def _claim_dashboard_transition(
 async def _claim_member_changes(
     session: AsyncSession,
     evaluations: list[_MemberRow],
-    *,
-    dashboard_edge: bool,
 ) -> list[MemberChange]:
-    """Compare-and-swap each member's counted state; return the changes to mail.
+    """Compare-and-swap each member's counted state; return the worsening changes.
 
     The memo holds the member's **effective** state -- after the Sensor's
     ``severity`` cap and its ``for_seconds`` hold, exactly what the rollup
@@ -592,9 +604,6 @@ async def _claim_member_changes(
 
     * this caller won the conditional ``UPDATE`` (:func:`_claim_member_state`),
       so two MEHO copies produce one notice, not two;
-    * the overall Dashboard state did **not** move (*dashboard_edge* is
-      false) -- otherwise the Dashboard mail already names every non-green
-      member and a second mail would be noise;
     * the memo was already set -- a ``NULL`` memo (a link row from before
       migration 0116) is recorded silently, so an upgrade never mails for
       problems that are already visible;
@@ -602,6 +611,11 @@ async def _claim_member_changes(
       ``degraded`` / ``critical``, or ``degraded`` -> ``critical``. A member
       recovering while the Dashboard stays non-green is memoised but not
       mailed (#5068 boundary).
+
+    The caller decides what a change becomes: its own "new problem" notice
+    when the overall Dashboard state did not move, or a rider on the
+    Dashboard notice when it did (the Dashboard mail names every non-green
+    member, so the rider mails only if that mail is suppressed).
     """
     changes: list[MemberChange] = []
     for link, sensor, evaluation in evaluations:
@@ -610,7 +624,7 @@ async def _claim_member_changes(
         if current == previous:
             continue
         won = await _claim_member_state(session, link, expected=previous, new=current)
-        if not won or dashboard_edge or previous is None or not _is_worsening(previous, current):
+        if not won or previous is None or not _is_worsening(previous, current):
             continue
         changes.append(
             MemberChange(
@@ -812,6 +826,7 @@ def _dashboard_notice(
     non_green: list[_MemberSnapshot],
     *,
     member_change: MemberChange | None = None,
+    member_changes: tuple[MemberChange, ...] = (),
 ) -> DashboardNotice:
     """Detach the claim into the notifier's input (#2719).
 
@@ -820,7 +835,10 @@ def _dashboard_notice(
     ``notify_min_state``) lives on that row and the send runs on a background
     task with no session of its own. With *member_change* set the notice is
     a "new problem" notice (#5068): the Dashboard's state is unchanged and
-    the change names the one member that got worse.
+    the change names the one member that got worse. *member_changes* rides
+    on a Dashboard-edge notice: the members that got worse on that edge,
+    which the notifier mails one by one only when it suppresses the
+    Dashboard mail.
     """
     return DashboardNotice(
         tenant_id=dashboard.tenant_id,
@@ -831,8 +849,10 @@ def _dashboard_notice(
         notify_email=dashboard.notify_email,
         notify_min_state=dashboard.notify_min_state,
         member_change=member_change,
+        member_changes=member_changes,
         members=tuple(
             NotifyMember(
+                sensor_id=m.sensor_id,
                 name=m.name,
                 effective_state=m.effective_state,
                 last_value=m.last_value,

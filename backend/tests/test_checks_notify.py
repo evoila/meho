@@ -223,6 +223,7 @@ def _notice(
     name: str = "prod-health",
     dashboard_id: UUID | None = None,
     member_change: MemberChange | None = None,
+    member_changes: tuple[MemberChange, ...] = (),
 ) -> DashboardNotice:
     return DashboardNotice(
         tenant_id=_TENANT,
@@ -234,6 +235,7 @@ def _notice(
         notify_min_state=min_state,
         members=members,
         member_change=member_change,
+        member_changes=member_changes,
     )
 
 
@@ -243,8 +245,10 @@ def _member(
     state: str = "critical",
     last_value: object = 3,
     evidence: dict[str, object] | None = None,
+    sensor_id: UUID | None = None,
 ) -> NotifyMember:
     return NotifyMember(
+        sensor_id=sensor_id or uuid4(),
         name=name,
         effective_state=state,
         last_value=last_value,
@@ -984,9 +988,15 @@ async def test_new_problem_mail_names_the_member_and_marks_it(
 ) -> None:
     """The subject names the member and its edge; the body marks it ``(new)``."""
     fake = _install_transport(monkeypatch)
-    members = (_member("sensor-a"), _member("sensor-b"))
+    sid_b = uuid4()
+    members = (_member("sensor-a"), _member("sensor-b", sensor_id=sid_b))
     await notify_dashboard_transition(
-        _notice(previous="critical", current="critical", members=members, member_change=_change())
+        _notice(
+            previous="critical",
+            current="critical",
+            members=members,
+            member_change=_change(sensor_id=sid_b),
+        )
     )
     assert len(fake.calls) == 1
     assert fake.calls[0]["subject"] == (
@@ -997,6 +1007,41 @@ async def test_new_problem_mail_names_the_member_and_marks_it(
     assert "New problem: sensor-b ok -> critical" in body
     assert "- sensor-a [critical]\n" in body, "the old problem is listed, unmarked"
     assert "- sensor-b [critical] (new)\n" in body, "the new problem is marked"
+    assert body.index("sensor-b [critical] (new)") < body.index("sensor-a [critical]"), (
+        "the new problem leads the list"
+    )
+
+
+@pytest.mark.asyncio
+async def test_new_problem_is_shown_beyond_the_member_line_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new problem that sorts past the line limit is still shown and marked.
+
+    The members arrive sorted by name. With more failing members than the
+    mail shows, the new one would fall off the end; the body lists it first
+    instead, and the limit drops an old problem.
+    """
+    fake = _install_transport(monkeypatch)
+    sid_new = uuid4()
+    total = notify._MAX_MEMBER_LINES + 5
+    members = tuple(
+        _member(f"sensor-{i:03d}", sensor_id=sid_new if i == total - 1 else None)
+        for i in range(total)
+    )
+    await notify_dashboard_transition(
+        _notice(
+            previous="critical",
+            current="critical",
+            members=members,
+            member_change=_change(f"sensor-{total - 1:03d}", sensor_id=sid_new),
+        )
+    )
+    body = fake.calls[0]["body"]
+    assert f"- sensor-{total - 1:03d} [critical] (new)\n" in body
+    assert "- sensor-000 [critical]\n" in body
+    assert f"sensor-{notify._MAX_MEMBER_LINES - 1:03d}" not in body, "an old one gives way"
+    assert "(5 further member(s) not shown.)" in body
 
 
 @pytest.mark.asyncio
@@ -1005,12 +1050,13 @@ async def test_new_problem_subject_folds_control_characters_in_the_member_name(
 ) -> None:
     """A Sensor name is operator text too -- it cannot inject a header."""
     fake = _install_transport(monkeypatch)
+    sid = uuid4()
     await notify_dashboard_transition(
         _notice(
             previous="critical",
             current="critical",
-            members=(_member("evil\r\nBcc: x"),),
-            member_change=_change("evil\r\nBcc: x"),
+            members=(_member("evil\r\nBcc: x", sensor_id=sid),),
+            member_change=_change("evil\r\nBcc: x", sensor_id=sid),
         )
     )
     assert "\n" not in fake.calls[0]["subject"]
@@ -1252,6 +1298,7 @@ async def test_member_flap_inside_the_window_is_suppressed(
     member_key = f"meho:checks:notify:{_TENANT}:{dash}:member:{sid_b}:critical"
     assert [name for name, _ in suppression_store.set_calls] == [
         f"meho:checks:notify:{_TENANT}:{dash}:critical",
+        f"meho:checks:notify:{_TENANT}:{dash}:member:{sid_a}:critical",
         member_key,
         member_key,
     ]
@@ -1261,6 +1308,111 @@ async def test_member_flap_inside_the_window_is_suppressed(
         await _set_sensor_state(sid_b, state)
         await _evaluate(sid_b)
     assert len(fake.calls) == 3, "an expired window delivers the member again"
+
+
+@pytest.mark.asyncio
+async def test_new_problem_behind_a_suppressed_dashboard_mail_still_mails_once(
+    monkeypatch: pytest.MonkeyPatch,
+    suppression_store: _FakeSuppressionStore,
+) -> None:
+    """A member turning red for the first time is not hidden by the Dashboard's window.
+
+    A turns ``critical`` (mail) and drops to ``degraded`` (mail). Inside the
+    same window B turns ``critical`` for the first time. The Dashboard edge
+    ``degraded -> critical`` is suppressed by A's earlier mail, so B is
+    mailed on its own, exactly once. B staying ``critical`` sends nothing;
+    A going back to ``critical`` sends nothing either, because the first
+    Dashboard mail already reported A at ``critical`` inside the window.
+    """
+    fake = _install_transport(monkeypatch)
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
+    await _seed_tenant()
+    sid_a = await _seed_sensor(name="sensor-a", last_state="critical")
+    sid_b = await _seed_sensor(name="sensor-b", last_state="ok")
+    dash = await _seed_dashboard(name="prod-health", sensor_ids=[sid_a, sid_b])
+    await _evaluate(sid_a)
+    await _set_sensor_state(sid_a, "degraded")
+    await _evaluate(sid_a)
+    assert [c["subject"] for c in fake.calls] == [
+        "[MEHO] prod-health: ok -> critical",
+        "[MEHO] prod-health: critical -> degraded",
+    ]
+
+    await _set_sensor_state(sid_b, "critical")
+    with capture_logs() as logs:
+        await _evaluate(sid_b)
+
+    assert len(fake.calls) == 3, "B must mail although the Dashboard edge is suppressed"
+    assert fake.calls[2]["subject"] == (
+        "[MEHO] prod-health: new problem sensor-b ok -> critical (dashboard degraded -> critical)"
+    )
+    body = fake.calls[2]["body"]
+    assert "State: degraded -> critical" in body
+    assert "- sensor-b [critical] (new)\n" in body
+    assert "- sensor-a [degraded]\n" in body
+    suppressed = [e for e in logs if e["event"] == "checks_notify_suppressed"]
+    assert [(e["previous_state"], e["current_state"]) for e in suppressed] == [
+        ("degraded", "critical")
+    ], "only the Dashboard edge was suppressed"
+    assert await _member_memo(dash, sid_b) == "critical"
+    assert f"meho:checks:notify:{_TENANT}:{dash}:member:{sid_b}:critical" in [
+        name for name, _ in suppression_store.set_calls
+    ], "B's mail claims B's own window"
+
+    for _ in range(2):
+        await _evaluate(sid_b)
+        await _evaluate(sid_a)
+    assert len(fake.calls) == 3, "B staying critical sends nothing new"
+
+    await _set_sensor_state(sid_a, "critical")
+    await _evaluate(sid_a)
+    assert len(fake.calls) == 3, "A was already reported at critical inside the window"
+
+    suppression_store.advance(_WINDOW_SECONDS + 1)
+    for state in ("ok", "critical"):
+        await _set_sensor_state(sid_b, state)
+        await _evaluate(sid_b)
+    assert len(fake.calls) == 4, "after the window B's next problem mails again"
+    assert "new problem sensor-b" in fake.calls[3]["subject"]
+
+
+@pytest.mark.asyncio
+async def test_suppressed_dashboard_mail_falls_back_to_its_member_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The notifier alone: riders mail only when the Dashboard mail is suppressed.
+
+    The first Dashboard mail goes out and claims its members' windows, so
+    its rider (A) never mails on its own. The second, same-state Dashboard
+    mail is suppressed; its rider B mails once through B's own window, and
+    a repeat of the same rider inside the window is suppressed.
+    """
+    fake = _install_transport(monkeypatch)
+    dash = uuid4()
+    sid_a, sid_b = uuid4(), uuid4()
+    member_a = _member("sensor-a", sensor_id=sid_a)
+    member_b = _member("sensor-b", sensor_id=sid_b)
+    change_a = _change("sensor-a", sensor_id=sid_a)
+    change_b = _change("sensor-b", sensor_id=sid_b)
+
+    await notify_dashboard_transition(
+        _notice(dashboard_id=dash, members=(member_a,), member_changes=(change_a,))
+    )
+    assert [c["subject"] for c in fake.calls] == ["[MEHO] prod-health: ok -> critical"]
+
+    for _ in range(2):
+        await notify_dashboard_transition(
+            _notice(
+                previous="degraded",
+                dashboard_id=dash,
+                members=(member_a, member_b),
+                member_changes=(change_a, change_b),
+            )
+        )
+    assert [c["subject"] for c in fake.calls] == [
+        "[MEHO] prod-health: ok -> critical",
+        "[MEHO] prod-health: new problem sensor-b ok -> critical (dashboard degraded -> critical)",
+    ]
 
 
 @pytest.mark.asyncio

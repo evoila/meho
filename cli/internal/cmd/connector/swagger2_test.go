@@ -237,6 +237,55 @@ func TestConvertSwagger2RefusesCrossDocumentRef(t *testing.T) {
 	}
 }
 
+func TestConvertSwagger2AcceptsUnquotedVersion(t *testing.T) {
+	in := strings.Replace(sampleSwagger2YAML, `swagger: "2.0"`, `swagger: 2.0`, 1)
+	if !isSwagger2([]byte(in)) {
+		t.Fatal("isSwagger2: unquoted swagger: 2.0 not detected")
+	}
+	_, conv, err := convertSwagger2([]byte(in))
+	if err != nil {
+		t.Fatalf("convertSwagger2: %v", err)
+	}
+	if conv.Operations != 2 {
+		t.Errorf("summary = %+v, want 2 operations", conv)
+	}
+	if isSwagger2([]byte(`openapi: 3.0.3`)) || isSwagger2([]byte(`swagger: 3`)) {
+		t.Error("isSwagger2: only version 2.0 counts")
+	}
+}
+
+func TestConvertSwagger2AllowsRefKeyInExampleData(t *testing.T) {
+	in := strings.Replace(sampleSwagger2YAML, "definitions:\n", `x-sample:
+  $ref: other.json#/Thing
+definitions:
+`, 1)
+	in = strings.Replace(in, "  Widget:\n    type: object\n", `  Widget:
+    type: object
+    example:
+      $ref: https://specs.widgets.example/sample.json
+`, 1)
+	if !strings.Contains(in, "example:") || !strings.Contains(in, "x-sample:") {
+		t.Fatal("test setup: sample spec changed shape")
+	}
+	if _, _, err := convertSwagger2([]byte(in)); err != nil {
+		t.Fatalf("a $ref key inside example data or an x- extension must not be refused: %v", err)
+	}
+}
+
+func TestConvertSwagger2RefusesRefInPropertyNamedExample(t *testing.T) {
+	in := strings.Replace(sampleSwagger2YAML, "    properties:\n", `    properties:
+      example:
+        $ref: common.yaml#/definitions/Sample
+`, 1)
+	if !strings.Contains(in, "common.yaml") {
+		t.Fatal("test setup: sample spec changed shape")
+	}
+	_, _, err := convertSwagger2([]byte(in))
+	if err == nil || !strings.Contains(err.Error(), "#/definitions/Widget/properties/example") {
+		t.Fatalf("a property named example is a schema; its external $ref must be refused: %v", err)
+	}
+}
+
 func TestConvertSwagger2SpecsLeavesOthersUnchanged(t *testing.T) {
 	specs := []api.SpecSource{
 		{Uri: "file:///specs/openapi.yaml", Content: strPtr(sampleOpenAPI3YAML)},

@@ -88,8 +88,21 @@ func isSwagger2(content []byte) bool {
 			return false
 		}
 	}
-	s, ok := head.Swagger.(string)
-	return ok && s == "2.0"
+	return isSwagger2Version(head.Swagger)
+}
+
+// isSwagger2Version accepts the string "2.0" and also the number 2, because
+// YAML reads an unquoted `swagger: 2.0` as a number.
+func isSwagger2Version(v any) bool {
+	switch n := v.(type) {
+	case string:
+		return n == "2.0"
+	case float64:
+		return n == 2
+	case int:
+		return n == 2
+	}
+	return false
 }
 
 // convertSwagger2 converts one Swagger 2.0 document (JSON or YAML) to an
@@ -104,7 +117,17 @@ func convertSwagger2(content []byte) ([]byte, swagger2Conversion, error) {
 	if err := json.Unmarshal(asJSON, &tree); err != nil {
 		return nil, conv, fmt.Errorf("read document: %w", err)
 	}
-	if ref, where, found := findExternalRef(tree, "#"); found {
+	if root, ok := tree.(map[string]any); ok && isSwagger2Version(root["swagger"]) {
+		if _, isText := root["swagger"].(string); !isText {
+			// An unquoted `swagger: 2.0` arrives as a number; the
+			// Swagger 2.0 reader wants the text "2.0".
+			root["swagger"] = "2.0"
+			if asJSON, err = json.Marshal(root); err != nil {
+				return nil, conv, fmt.Errorf("read document: %w", err)
+			}
+		}
+	}
+	if ref, where, found := findExternalRef(tree, "#", false); found {
 		return nil, conv, fmt.Errorf(
 			"the reference %q at %s points to another file or a URL; MEHO reads one "+
 				"self-contained file and fetches nothing. Put the referenced definitions "+
@@ -143,11 +166,18 @@ func convertSwagger2(content []byte) ([]byte, swagger2Conversion, error) {
 // with "#"), plus a JSON-pointer-like location. Map keys are visited in
 // sorted order so the reported reference is stable. Keys are escaped as in
 // a JSON pointer ("~" as "~0", "/" as "~1").
-func findExternalRef(node any, where string) (string, string, bool) {
+//
+// Example data (`example`, `examples`) and `x-` extensions are free data,
+// not part of the spec, so a "$ref" key inside them is not a reference and
+// is skipped. In a map of names (named is true, for example the keys under
+// `properties` or `definitions`) these keys are names, so they are walked.
+func findExternalRef(node any, where string, named bool) (string, string, bool) {
 	switch v := node.(type) {
 	case map[string]any:
-		if ref, ok := v["$ref"].(string); ok && !strings.HasPrefix(ref, "#") {
-			return ref, where, true
+		if !named {
+			if ref, ok := v["$ref"].(string); ok && !strings.HasPrefix(ref, "#") {
+				return ref, where, true
+			}
 		}
 		keys := make([]string, 0, len(v))
 		for k := range v {
@@ -155,13 +185,17 @@ func findExternalRef(node any, where string) (string, string, bool) {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			if ref, at, found := findExternalRef(v[k], where+"/"+pointerEscaper.Replace(k)); found {
+			if !named && (k == "example" || k == "examples" || strings.HasPrefix(k, "x-")) {
+				continue
+			}
+			childNamed := !named && namedMapKeys[k]
+			if ref, at, found := findExternalRef(v[k], where+"/"+pointerEscaper.Replace(k), childNamed); found {
 				return ref, at, true
 			}
 		}
 	case []any:
 		for i, item := range v {
-			if ref, at, found := findExternalRef(item, fmt.Sprintf("%s/%d", where, i)); found {
+			if ref, at, found := findExternalRef(item, fmt.Sprintf("%s/%d", where, i), false); found {
 				return ref, at, true
 			}
 		}
@@ -183,6 +217,16 @@ func printSwagger2Conversions(w io.Writer, convs []swagger2Conversion, savedTo s
 }
 
 var pointerEscaper = strings.NewReplacer("~", "~0", "/", "~1")
+
+// namedMapKeys are the Swagger 2.0 keys whose value is a map from a name
+// the spec author picked to a spec object.
+var namedMapKeys = map[string]bool{
+	"definitions":         true,
+	"parameters":          true,
+	"properties":          true,
+	"responses":           true,
+	"securityDefinitions": true,
+}
 
 // errNothingToSave is returned when --save-converted is set but no spec
 // was Swagger 2.0.

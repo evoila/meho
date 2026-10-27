@@ -215,8 +215,9 @@ register_mcp_tool(
             "'watch_checkpoint' to miss nothing after this read. 'gap' not "
             "null means older announcements were removed, so the answer is "
             "not complete. 'filter' narrows by 'principal', 'target', "
-            "'work_ref' and 'active_only'. Filtering runs after the read, "
-            "so a page can hold fewer events than 'limit'."
+            "'work_ref' and 'active_only'. Do not use 'op_class' or "
+            "'actor_sub': they match no announcement. Filtering runs after "
+            "the read, so a page can hold fewer events than 'limit'."
         ),
         inputSchema={
             "type": "object",

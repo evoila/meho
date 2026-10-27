@@ -667,6 +667,7 @@ const (
 // Defines values for TargetCreateProduct.
 const (
 	TargetCreateProductArgocd     TargetCreateProduct = "argocd"
+	TargetCreateProductAzure      TargetCreateProduct = "azure"
 	TargetCreateProductBind9      TargetCreateProduct = "bind9"
 	TargetCreateProductFleet      TargetCreateProduct = "fleet"
 	TargetCreateProductGcloud     TargetCreateProduct = "gcloud"

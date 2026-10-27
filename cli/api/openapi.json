@@ -35595,6 +35595,7 @@
             "title": "Product",
             "enum": [
               "argocd",
+              "azure",
               "bind9",
               "fleet",
               "gcloud",

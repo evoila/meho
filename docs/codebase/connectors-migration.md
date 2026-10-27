@@ -14,6 +14,9 @@ The first part, in this package today:
   merges them (`inventory_load.py`).
 - **The Azure Migrate CSV mapping** (`azure_migrate_csv.py`) and the
   read `migration.inventory.csv` (`ops.py`).
+- **The source adapters**: one multi-step read per source connector that
+  collects the estate into the inventory shape (`source_*.py`, shared parts
+  in `adapter_kit.py`, registrar in `source_register.py`).
 
 Like `connectors/audit/`, the package has no connector class. Its
 operations are registered under the natural key
@@ -164,6 +167,89 @@ The mapping (`inventory_to_csv`):
 - Line ends are CRLF (RFC 4180); `LINE_END` in `azure_migrate_csv.py`.
   The file has no byte order mark.
 
+### Source adapters
+
+One multi-step read per source, registered on the source's own connector
+(not on `migration-assess-1.x`), group `migration`, `safe`,
+`requires_approval: false` on purpose:
+
+| Op | Connector | Records | Module |
+|---|---|---|---|
+| `hyperv.migration.inventory` | `hyperv-ssh-2022.x` | one server per VM | `source_hyperv.py` |
+| `proxmox.migration.inventory` | `proxmox-api-8.x` | one server per QEMU VM | `source_proxmox.py` |
+| `linux.migration.inventory` | `linux-ssh-1.x` | one server: the host | `source_hosts.py` |
+| `winsrv.migration.inventory` | `winsrv-ssh-2022.x` | one server: the host | `source_hosts.py` |
+| `k8s.migration.inventory` | `k8s-1.x` | one server per node, one workload per Deployment / StatefulSet / DaemonSet | `source_k8s.py` |
+
+How every adapter works (`adapter_kit.py`):
+
+1. It reads the source only through its connector's own operations, as
+   child calls (`dispatch_child`). Each child call has its own audit row,
+   linked to the adapter's row. `read_child` takes the child's **full**
+   answer from the dispatcher's capture (`full_result_capture_var`, the
+   same seam the sensor runner uses), because a large child answer reaches
+   the parent only as a summary plus a handle. At most four child reads run
+   at a time.
+2. A failed child read is an omission with a reason (`no_permission` when
+   the child was denied, `collection_failed` otherwise). The item stays in
+   the inventory with the affected fields unknown. Only an item that cannot
+   be a record at all (a Proxmox template, a node without a name) is left
+   out; it is counted in `left_out_items`.
+3. `record_with_reasons` gives every null field without a special reason
+   the default reason `not_reported_by_source`. Fields MEHO does not read
+   for a source are `not_supported`; measurements are `not_measured`.
+4. The inventory is **always stored**, also when it is small, as a
+   document record of the result handle store (the record kind the
+   JSONFlux reducer writes for a large single object, one hour). The answer
+   is short: `inventory_handle`, `expires_at`, `connector_id`, `target`,
+   `collected_at`, `record_counts`, `source_totals`, `left_out_items`,
+   `counts_match`, `omission_count`, `omissions`. So every adapter answer
+   has a handle `migration.inventory.csv` can read, and `result_query`
+   reads the records (path `/records`).
+5. `counts_match` is true when, for each kind the source counts, records
+   plus left-out items equal the source's own total.
+
+Per source:
+
+- **Hyper-V.** `hyperv.vms.list` (the source total), `hyperv.vms.guest.list`
+  (BIOS GUID and guest OS from the integration services), and per VM
+  `hyperv.vms.config`, `hyperv.disks.vm.list`, `hyperv.disks.vhd.get` per
+  disk, `hyperv.checkpoints.list`. `source_id` is `hyperv:<VM id>`; the VM
+  id stays the same when a VM moves between cluster nodes, so reading every
+  node and merging finds each VM once. Generation 1 is BIOS, generation 2 is
+  UEFI. Configured memory is the startup memory; assigned memory is what
+  the VM has now (it differs with dynamic memory; unknown when off). Disk
+  size is the VHDX size, used space is the file size on the host, a shared
+  disk is `SupportPersistentReservations`. Checkpoints count as snapshots.
+  Hyper-V allows two VMs with the same name, and the per-VM reads find a VM
+  by name, so for a repeated name those reads are skipped (`not_supported`).
+- **Proxmox VE.** Only `proxmox.api.get`: `nodes`, `nodes/{node}/qemu`,
+  each VM's `config` and `snapshot`, and for a running VM with the guest
+  agent on, `agent/get-osinfo`. Cores are cores times sockets. `ovmf` is
+  UEFI; Secure Boot is on when the EFI disk has `pre-enrolled-keys=1`.
+  The SMBIOS `uuid` and the network cards' MAC addresses are identity
+  hints. Templates are counted and left out. `source_id` is
+  `proxmox:<target>:<vmid>`.
+- **Linux host.** `linux.about` and `linux.file.read` of
+  `/sys/devices/system/cpu/online` (cores), `/proc/meminfo` (`MemTotal`,
+  a little less than the installed memory), `/proc/partitions` (whole
+  disks), `/sys/firmware/efi` (exists only on UEFI),
+  `/sys/class/dmi/id/product_uuid` (root only; empty without root, so
+  `no_permission`), `sys_vendor` / `product_name` (a known hypervisor
+  name makes it `virtual`), `/etc/machine-id` (the stable `source_id`).
+- **Windows Server host.** `winsrv.system.os-info`,
+  `winsrv.system.hardware`, `winsrv.storage.disk.list`. `source_id` is the
+  product UUID, or the host name when the UUID is missing or a placeholder.
+- **Kubernetes.** `k8s.node.list` (one server per node, with
+  `system_uuid` as BIOS UUID and the node capacity), `k8s.workload.list`
+  for each kind, all namespaces, page by page (at most 40 pages of 500),
+  `k8s.persistentvolumeclaim.list` (claim sizes), and per workload
+  `k8s.pod.list` with its `pod_selector`. A workload's `nodes` holds the
+  `source_id` of its nodes' records, so workloads link to nodes. CPU and
+  memory are sums over the containers per replica, given only when every
+  container sets the value. A node that is a VM has the VM's BIOS UUID, so
+  the merge lists it as a duplicate of the VM record.
+
 ## Dependencies
 
 - `pydantic` v2 models (`model_validator`, discriminated union on `kind`).
@@ -173,6 +259,16 @@ The mapping (`inventory_to_csv`):
 - Python's `csv` module.
 
 ## Tests
+
+`backend/tests/test_migration_source_adapters.py` runs each adapter with a
+fake `dispatch_child` and made-up child answers, stores the inventory in an
+in-memory result store, and reads it back through the loader. It covers
+failed and denied child reads, the counts check, a VM name used twice, a
+shortened child answer, and a Kubernetes node that matches a Hyper-V VM.
+`backend/tests/test_migration_source_reads.py` covers the reads added for
+the adapters (`hyperv.vms.guest.list`, `winsrv.system.hardware`,
+`k8s.workload.list`, and the new `k8s.node.list` fields).
+
 
 `backend/tests/test_migration_contracts.py` pins the shapes with made-up
 fixtures: a Windows VM with three disks, a Linux VM with no utilization,
@@ -185,9 +281,14 @@ header, column for column.
 
 ## Known issues
 
-- Only handles are accepted. An inventory small enough to come back inline
-  has no handle yet; the inventory reads of the later work decide how they
-  store their result.
+- Only handles are accepted. The source adapters always store their
+  inventory, so this holds for them.
+- Hyper-V reads one host. A cluster is read node by node; the VM id merges
+  the results.
+- A bare-metal Kubernetes node has no disk, firmware or boot data; only the
+  OS and capacity from the node object.
+- Disk speeds and utilization are not read by any adapter yet
+  (`not_measured`), so sizing from these inventories is "allocated".
 - Duplicate servers are matched by exact BIOS UUID only. Some guest
   systems report the BIOS UUID with the first three groups byte-swapped;
   the source adapters must normalise it before it reaches `identity_hints`.

@@ -332,13 +332,14 @@ real operator through the same loader.
 | `k8s.about`            | safe   | Product / version / platform via `VersionApi.get_code`.           |
 | `k8s.ls`               | safe   | Synthetic walker: root / namespace / namespace+kind.              |
 | `k8s.namespace.list`   | safe   | `CoreV1Api.list_namespace()` -- name / status / age.              |
-| `k8s.node.list`        | safe   | `CoreV1Api.list_node()` -- status / roles / version.              |
+| `k8s.node.list`        | safe   | `CoreV1Api.list_node()` -- status / roles / version, plus `system_uuid` (the node's BIOS UUID), `os_image`, `architecture`, `cpu_capacity`, `memory_capacity` (`_node_identity.py`). |
 | `k8s.pod.list`         | safe   | Pods with selectors + server-side pagination.                     |
 | `k8s.pod.info`         | safe   | Full pod detail; exact name or unique prefix.                     |
 | `k8s.deployment.list`  | safe   | Deployments with live replica counts + image + strategy.          |
 | `k8s.deployment.info`  | safe   | Full deployment detail; exact name or unique prefix.              |
 | `k8s.job.list`         | safe   | `BatchV1Api.list_namespaced_job()` / `list_job_for_all_namespaces()` -- one row per Job with a one-word `state`, pod counts, `completions`, start / completion times. Same selectors + paging as `k8s.pod.list`. (`ops_job.py`) |
 | `k8s.job.info`         | safe   | One Job by exact name or unique prefix: the row fields plus conditions (reason + message), `backoff_limit`, `active_deadline_seconds`, template containers, `pod_selector` and up to 50 of its pods, newest first. (`ops_job.py`) |
+| `k8s.workload.list`    | safe   | `AppsV1Api` list for one `kind` (Deployment / StatefulSet / DaemonSet): desired `replicas` (DaemonSet: pods it should run), per-container `requests` / `limits` as API quantities, images, `volumes` with `claim_name`, StatefulSet `volume_claim_templates`, and `pod_selector`. Same selectors + paging as `k8s.deployment.list`. (`ops_workload_set.py`) |
 | `k8s.service.list`     | safe   | `CoreV1Api.list_namespaced_service()` / `list_service_for_all_namespaces()` -- type / cluster_ip / ports / selector / lb_ingress (LoadBalancer VIP from `status.loadBalancer.ingress`, `[]` otherwise) + `label_selector`. |
 | `k8s.ingress.list`     | safe   | `NetworkingV1Api.list_namespaced_ingress()` / `list_ingress_for_all_namespaces()` -- class / hosts / TLS / rules + `label_selector`. |
 | `k8s.configmap.list`   | safe   | `CoreV1Api.list_namespaced_config_map()` / `list_config_map_for_all_namespaces()` -- **keys only, NO values** + `label_selector`. |
@@ -353,6 +354,11 @@ real operator through the same loader.
 | `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap. |
 | `k8s.exec`             | **dangerous** (`requires_approval=True`) | `CoreV1Api.connect_get_namespaced_pod_exec()` over the `WsApiClient` websocket transport -- bounded argv command-and-capture: stdout / stderr demuxed from the `v4.channel.k8s.io` channels + exit code parsed from the channel-3 status frame, per-stream 1 MiB cap, bounded timeout. Interactive `-it` deferred. |
 | `k8s.secret.read_to_ref` | **caution** (`requires_approval=True`) | `CoreV1Api.read_namespaced_secret()` -- reads one Secret's `data[data_key]` (default `value`), decodes it, and stages the value to a **tenant-scoped Vault `secret_ref`** via `vault.kv.put`; returns **only** the ref + provenance (SHA-256 / byte length), never the value. Classified `credential_read` (audit + broadcast aggregate-only). The governed VKS guest-kubeconfig read (`ops_secret_read.py`, #3496). |
+
+The multi-step read `k8s.migration.inventory` (group `migration`, `safe`)
+collects the cluster's nodes and workloads in the common migration inventory
+shape. It lives in `connectors/migration/source_k8s.py`; see
+`connectors-migration.md`.
 
 ### `k8s.exec` -- websocket command-and-capture (`ops_exec.py`)
 

@@ -32,21 +32,25 @@ import (
 // (#3633, #4888): Path is a pointer so the empty pointer `""` (the whole
 // document) still shows in --json; Value stays raw JSON because it is one
 // node of the document, of any JSON type. An array value arrives in Rows
-// instead, paged by offset / limit.
+// instead, paged by offset / limit. A text value arrives in parts (#4994):
+// Value holds the part, and ReturnedChars / TotalChars say how long the
+// part and the whole text are (pointers, so a zero count still shows).
 type ResultQueryResult struct {
-	HandleID     string            `json:"handle_id"`
-	Rows         []json.RawMessage `json:"rows"`
-	Offset       int               `json:"offset"`
-	Limit        int               `json:"limit"`
-	ReturnedRows int               `json:"returned_rows"`
-	TotalRows    int               `json:"total_rows"`
-	StoredRows   int               `json:"stored_rows"`
-	Truncated    bool              `json:"truncated"`
-	Coverage     string            `json:"coverage,omitempty"`
-	CoverageNote *string           `json:"coverage_note,omitempty"`
-	Path         *string           `json:"path,omitempty"`
-	ValueType    string            `json:"value_type,omitempty"`
-	Value        json.RawMessage   `json:"value,omitempty"`
+	HandleID      string            `json:"handle_id"`
+	Rows          []json.RawMessage `json:"rows"`
+	Offset        int               `json:"offset"`
+	Limit         int               `json:"limit"`
+	ReturnedRows  int               `json:"returned_rows"`
+	TotalRows     int               `json:"total_rows"`
+	StoredRows    int               `json:"stored_rows"`
+	Truncated     bool              `json:"truncated"`
+	Coverage      string            `json:"coverage,omitempty"`
+	CoverageNote  *string           `json:"coverage_note,omitempty"`
+	Path          *string           `json:"path,omitempty"`
+	ValueType     string            `json:"value_type,omitempty"`
+	Value         json.RawMessage   `json:"value,omitempty"`
+	ReturnedChars *int              `json:"returned_chars,omitempty"`
+	TotalChars    *int              `json:"total_chars,omitempty"`
 }
 
 // IsPathRead reports whether the result answers a path read (--path).
@@ -128,7 +132,11 @@ func newResultQueryCmd() *cobra.Command {
 			"by RFC 6901 JSON Pointer. --path \"\" is the whole document; " +
 			"/a/0/b goes one step per / (object key or array index); in a step " +
 			"~1 means / and ~0 means ~. An array value pages with --offset / " +
-			"--limit; any other value comes back whole. On a rows handle, " +
+			"--limit. A text value comes back in parts: --offset and --limit " +
+			"count characters, a part is as long as fits the output budget " +
+			"when --limit is not given, and the header says where the part " +
+			"ends and whether more follows. Any other value comes back whole. " +
+			"On a rows handle, " +
 			"--path /<field> reads a top-level field that was left out of the " +
 			"inline summary (counted in `omitted_scalar_count`). --path cannot be " +
 			"combined with the query flags.\n\n" +
@@ -148,6 +156,7 @@ func newResultQueryCmd() *cobra.Command {
 				HandleID:          args[0],
 				Offset:            offset,
 				Limit:             limit,
+				LimitSet:          cmd.Flags().Changed("limit"),
 				WhereTerms:        whereTerms,
 				SelectCols:        selectCols,
 				GroupByCols:       groupByCols,
@@ -163,9 +172,9 @@ func newResultQueryCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVar(&offset, "offset", 0,
-		"paging: zero-based index of the first row to return (advance by --limit)")
+		"paging: zero-based index of the first row to return (advance by --limit); for a text value read by --path, the first character")
 	cmd.Flags().IntVar(&limit, "limit", 50,
-		"paging: page size; default 50, max 500 (matches the result_query MCP tool)")
+		"paging: page size; default 50, max 500 (matches the result_query MCP tool); for a text value read by --path, characters per part (default: as many as fit the output budget)")
 	cmd.Flags().StringArrayVar(&whereTerms, "where", nil,
 		"query: WHERE predicate \"<field> <op> [value]\" (repeatable; op = != < <= > >= IN 'IS NULL')")
 	cmd.Flags().StringArrayVar(&selectCols, "select", nil,
@@ -191,6 +200,7 @@ type resultQueryOptions struct {
 	HandleID          string
 	Offset            int
 	Limit             int
+	LimitSet          bool
 	WhereTerms        []string
 	SelectCols        []string
 	GroupByCols       []string
@@ -226,7 +236,13 @@ func runResultQuery(cmd *cobra.Command, opts resultQueryOptions) error {
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	result, err := postResultQuery(cmd.Context(), client, handleID, opts.Offset, opts.Limit, spec)
+	// --limit is sent only when given: the backplane's default depends on
+	// what is read (50 rows, or as much text as fits the output budget).
+	var limit *int
+	if opts.LimitSet {
+		limit = &opts.Limit
+	}
+	result, err := postResultQuery(cmd.Context(), client, handleID, opts.Offset, limit, spec)
 	if err != nil {
 		if msg, ok := outputTooLargeMessage(err); ok {
 			return output.RenderError(cmd.ErrOrStderr(),
@@ -457,13 +473,13 @@ func postResultQuery(
 	client operationsAPI,
 	handleID openapi_types.UUID,
 	offset int,
-	limit int,
+	limit *int,
 	spec *api.ResultQuerySpec,
 ) (*ResultQueryResult, error) {
 	body := api.ResultQueryBody{
 		HandleId: handleID,
 		Offset:   &offset,
-		Limit:    &limit,
+		Limit:    limit,
 		Query:    spec,
 	}
 	apiParams := &api.PostResultQueryApiV1OperationsResultQueryPostParams{}

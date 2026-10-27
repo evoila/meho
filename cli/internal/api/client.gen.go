@@ -7662,9 +7662,11 @@ type ResultIngestResponse struct {
 // “handle_id“ is the UUID minted onto a reduced “/call“ response's
 // “result.handle.handle_id“ / “fetch_more.drill_in.example_call“, and
 // “offset“ / “limit“ window the spilled set. The bounds mirror the MCP
-// schema (“offset >= 0“; “1 <= limit <= MAX_LIMIT“) so the two surfaces
-// validate identically. “extra="forbid"“ rejects unknown body fields with
-// a 422, matching the sibling “CallOperationBody“ posture.
+// schema (“offset >= 0“; “limit >= 1“) so the two surfaces validate
+// identically; the row cap (“MAX_LIMIT“) is checked by the shared core,
+// because a text value read by “path“ counts characters and one part
+// may hold more (#4994). “extra="forbid"“ rejects unknown body fields
+// with a 422, matching the sibling “CallOperationBody“ posture.
 //
 // “query“ (#3366) is the optional structured query: when present, the
 // handle is queried server-side as one bounded read-only “SELECT“
@@ -7677,8 +7679,8 @@ type ResultQueryBody struct {
 	// HandleId The result handle's UUID, taken from a reduced `/call` response's `result.handle.handle_id` or `fetch_more.drill_in.example_call.args.handle_id`.
 	HandleId openapi_types.UUID `json:"handle_id"`
 
-	// Limit Page size (paging mode). Default 50; max 500. Matches the `result_query` MCP tool's upper bound.
-	Limit *int `json:"limit,omitempty"`
+	// Limit Page size. Rows, and the items of an array value read by `path`: default 50, at most 500 (a bigger value is refused). Characters of a text value read by `path`: default as many as fit the output budget; a bigger part is cut to fit. Matches the `result_query` MCP tool.
+	Limit *int `json:"limit"`
 
 	// Offset Zero-based index of the first row to return (paging mode). Page by advancing this by the previous `limit`.
 	Offset *int `json:"offset,omitempty"`

@@ -70,6 +70,7 @@ from meho_backplane.operations.meta_tools import (
 )
 from meho_backplane.operations.operation_run_service import get_operation_run_service
 from meho_backplane.operations.result_query import (
+    DEFAULT_LIMIT,
     MAX_LIMIT,
     QueryContractError,
     ResultHandleNotFoundError,
@@ -380,9 +381,11 @@ class ResultQueryBody(BaseModel):
     ``handle_id`` is the UUID minted onto a reduced ``/call`` response's
     ``result.handle.handle_id`` / ``fetch_more.drill_in.example_call``, and
     ``offset`` / ``limit`` window the spilled set. The bounds mirror the MCP
-    schema (``offset >= 0``; ``1 <= limit <= MAX_LIMIT``) so the two surfaces
-    validate identically. ``extra="forbid"`` rejects unknown body fields with
-    a 422, matching the sibling ``CallOperationBody`` posture.
+    schema (``offset >= 0``; ``limit >= 1``) so the two surfaces validate
+    identically; the row cap (``MAX_LIMIT``) is checked by the shared core,
+    because a text value read by ``path`` counts characters and one part
+    may hold more (#4994). ``extra="forbid"`` rejects unknown body fields
+    with a 422, matching the sibling ``CallOperationBody`` posture.
 
     ``query`` (#3366) is the optional structured query: when present, the
     handle is queried server-side as one bounded read-only ``SELECT``
@@ -410,13 +413,15 @@ class ResultQueryBody(BaseModel):
             "by advancing this by the previous `limit`."
         ),
     )
-    limit: int = Field(
-        default=50,
+    limit: int | None = Field(
+        default=None,
         ge=1,
-        le=MAX_LIMIT,
         description=(
-            f"Page size (paging mode). Default 50; max {MAX_LIMIT}. Matches "
-            "the `result_query` MCP tool's upper bound."
+            f"Page size. Rows, and the items of an array value read by `path`: "
+            f"default {DEFAULT_LIMIT}, at most {MAX_LIMIT} (a bigger value is "
+            "refused). Characters of a text value read by `path`: default as "
+            "many as fit the output budget; a bigger part is cut to fit. "
+            "Matches the `result_query` MCP tool."
         ),
     )
     query: ResultQuerySpec | None = Field(
@@ -429,7 +434,8 @@ class ResultQueryBody(BaseModel):
             "there is no raw-SQL argument. For a document handle, or for the "
             "fields a rows handle left out of its inline summary, send only "
             "`path` (an RFC 6901 JSON Pointer); an array value then pages with "
-            "`offset` / `limit`."
+            "`offset` / `limit`, and a text value comes back in parts of "
+            "`limit` characters from character `offset`."
         ),
     )
 

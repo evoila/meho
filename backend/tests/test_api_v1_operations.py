@@ -1742,3 +1742,66 @@ def test_post_result_query_path_over_wire_ceiling_returns_422(
     assert detail["reason"] == "output_too_large"
     assert detail["delivery"] == "unavailable"
     assert "256-byte delivery limit" in detail["message"]
+
+
+def test_post_result_query_reads_a_large_text_value_in_parts(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A string over the output budget comes back part by part over REST (#4994)."""
+    handle_id = uuid.uuid4()
+    text = "".join(f"<item n='{i}'/>\n" for i in range(400))
+    store = MemoryResultStore()
+    store.seed_document(
+        tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+        operator_sub="op-1",
+        handle_id=handle_id,
+        document={"config_xml": text},
+    )
+    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: store)
+    monkeypatch.setenv("RESULT_QUERY_MAX_OUTPUT_BYTES", "2048")
+    get_settings.cache_clear()
+    key = make_rsa_keypair("kid-A")
+    parts: list[str] = []
+    offset = 0
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        for _ in range(100):
+            response = client.post(
+                "/api/v1/operations/result-query",
+                json={
+                    "handle_id": str(handle_id),
+                    "query": {"path": "/config_xml"},
+                    "offset": offset,
+                },
+                headers={"Authorization": f"Bearer {_operator_token(key)}"},
+            )
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["value_type"] == "string"
+            assert payload["total_chars"] == len(text)
+            assert payload["returned_chars"] == len(payload["value"]) <= 2048
+            parts.append(payload["value"])
+            offset += payload["returned_chars"]
+            if not payload["truncated"]:
+                break
+    assert len(parts) > 1
+    assert "".join(parts) == text
+
+
+def test_post_result_query_text_limit_above_the_row_cap_is_accepted(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`limit` counts characters for a text value: 1500 is fine on a `path` read."""
+    body = {
+        "handle_id": str(uuid.uuid4()),
+        "query": {"path": "/name"},
+        "offset": 1,
+        "limit": 1500,
+    }
+    response = _post_document_read(client, monkeypatch, body)
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["value"] == "od-1"
+    assert payload["returned_chars"] == 4
+    assert payload["total_chars"] == 5
+    assert payload["truncated"] is False

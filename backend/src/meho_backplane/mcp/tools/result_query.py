@@ -45,6 +45,7 @@ from meho_backplane.jsonflux.query.json_pointer import MAX_POINTER_LENGTH
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
 from meho_backplane.operations.result_query import (
+    DEFAULT_LIMIT,
     MAX_LIMIT,
     QueryContractError,
     ResultHandleNotFoundError,
@@ -60,9 +61,12 @@ __all__: list[str] = []
 
 #: Mirror of the inline-sample upper bound's sibling list tools: a single
 #: page returns at most this many rows so one read-back can't pull an
-#: unbounded slice in one call. Sourced from the transport-neutral core so
-#: the MCP ``inputSchema`` and the REST body share one ceiling (#3179).
+#: unbounded slice in one call. Sourced from the transport-neutral core,
+#: which checks it, so the MCP tool and the REST body share one ceiling
+#: (#3179). The schema names it but does not pin it: a text value read by
+#: ``path`` counts characters, and one part may hold more (#4994).
 _MAX_LIMIT = MAX_LIMIT
+_DEFAULT_LIMIT = DEFAULT_LIMIT
 
 
 async def _result_query_handler(
@@ -98,7 +102,8 @@ async def _result_query_handler(
         ) from exc
 
     offset = int(arguments.get("offset", 0))
-    limit = int(arguments.get("limit", 50))
+    raw_limit = arguments.get("limit")
+    limit = int(raw_limit) if raw_limit is not None else None
 
     raw_query = arguments.get("query")
     if raw_query is not None:
@@ -125,7 +130,7 @@ async def _run_query(
     handle_id: UUID,
     raw_query: Any,
     offset: int,
-    limit: int,
+    limit: int | None,
 ) -> dict[str, Any]:
     """Validate the ``query`` argument and run the bounded structured query.
 
@@ -215,8 +220,14 @@ register_mcp_tool(
             '`result_record: "document"` (one large object, not a list), read '
             'one part with `query={"path": "/key/0/name"}` (an RFC '
             '6901 JSON Pointer; `""` is the whole document). An array '
-            "value pages with `offset` / `limit`; any other value comes back "
-            "in `value`. A rows handle with `omitted_scalar_count` keeps the "
+            "value pages with `offset` / `limit`. A text value "
+            "(`value_type: string`) comes back in parts: `offset` and "
+            "`limit` count characters, `value` holds the part (as much as "
+            "fits the output budget when `limit` is absent), and "
+            "`returned_chars`, `total_chars` and `truncated` say where it "
+            "ends; continue with `offset` = `offset` + `returned_chars`. "
+            "Any other value comes back whole in `value`. "
+            "A rows handle with `omitted_scalar_count` keeps the "
             "fields that did not fit its inline summary the same way when its "
             "`fetch_more.drill_in.rationale` says so: read one with "
             '`query={"path": "/<field name>"}`. `path` cannot be '
@@ -249,11 +260,13 @@ register_mcp_tool(
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": _MAX_LIMIT,
-                    "default": 50,
                     "description": (
-                        f"Page size (paging mode). Default 50; max {_MAX_LIMIT}. "
-                        "Matches the sibling list tools' upper bound."
+                        f"Page size. Rows, and the items of an array value read "
+                        f"by `path`: default {_DEFAULT_LIMIT}, at most {_MAX_LIMIT} "
+                        "(the sibling list tools' upper bound; a bigger value is "
+                        "refused). Characters of a text value read by `path`: "
+                        "default as many as fit the output budget; a bigger part "
+                        "is cut to fit."
                     ),
                 },
                 "query": {
@@ -366,7 +379,9 @@ register_mcp_tool(
                                 '`/status/conditions/0`; `""` is the whole '
                                 "document. `~1` means `/` and `~0` means `~` "
                                 "inside a key. An array value pages with the "
-                                "top-level `offset` / `limit`. Cannot be "
+                                "top-level `offset` / `limit`; a text value comes "
+                                "back in parts of `limit` characters from "
+                                "character `offset`. Cannot be "
                                 "combined with `filter`, `select`, `group_by`, "
                                 "`aggregate`, `order_by`, or `limit`."
                             ),
@@ -410,12 +425,30 @@ register_mcp_tool(
                     "enum": ["object", "array", "string", "number", "boolean", "null"],
                     "description": (
                         "Path reads only. The JSON type of the value at `path`. "
-                        "An `array` pages in `rows`; any other type is in `value`."
+                        "An `array` pages in `rows`; a `string` comes back in "
+                        "parts in `value`; any other type is whole in `value`."
                     ),
                 },
                 "value": {
                     "description": (
-                        "Path reads only, when `value_type` is not `array`: the value at `path`."
+                        "Path reads only, when `value_type` is not `array`: the value "
+                        "at `path`. For a `string`, the part from character `offset`."
+                    ),
+                },
+                "returned_chars": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": (
+                        "Path reads of a text value only. How many characters "
+                        "`value` holds. Continue with `offset` + `returned_chars`."
+                    ),
+                },
+                "total_chars": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": (
+                        "Path reads of a text value only. The full length of the "
+                        "text, in characters."
                     ),
                 },
             },

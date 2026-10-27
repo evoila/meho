@@ -147,6 +147,12 @@ from meho_backplane.connectors.vmware_rest.composites._library_delete import (
     content_library_delete_composite,
     content_library_item_delete_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._library_local import (
+    CONTENT_LIBRARY_CREATE_COMPOSITE,
+)
+from meho_backplane.connectors.vmware_rest.composites._library_upload import (
+    CONTENT_LIBRARY_ITEM_UPLOAD_COMPOSITE,
+)
 from meho_backplane.connectors.vmware_rest.composites._license import (
     LICENSE_ASSIGN_LLM_INSTRUCTIONS,
     LICENSE_ASSIGN_PARAMETER_SCHEMA,
@@ -619,7 +625,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "'networking' for the workload / management network context."
     ),
     "content_library": (
-        "Use for the governed SUBSCRIBED content-library surface -- create a "
+        "Use for governed content libraries, local and SUBSCRIBED. Subscribed: "
+        "create a "
         "content library subscribed to a remote publisher, force / confirm its "
         "synchronisation, and list its items. The right group for standing up "
         "the Tanzu Kubernetes release (TKr / VKr) image source a vSphere "
@@ -634,7 +641,11 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "library', or 'which TKr images are available?'. Distinct from the "
         "content-library *item* deploy/import (the 'vm' group's "
         "deploy_from_library / import_from_library) -- this group is the "
-        "library-container lifecycle, not the VM deploy. Teardown (#3339 / "
+        "library-container lifecycle, not the VM deploy. Local libraries "
+        "(caution, needs approval): make one on a datastore "
+        "(content_library.create) and let vCenter download an ISO, OVA or OVF "
+        "file from an http(s) URL into a new item (content_library.item.upload). "
+        "Teardown (#3339 / "
         "#3331; destructive, always needs approval): delete a whole local or "
         "subscribed library (content_library.delete -- refused while another "
         "library subscribes to it; a library with items needs "
@@ -2012,6 +2023,10 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "vmware.composite.content_library.item.delete"
         ],
     ),
+    # Create a local content library and add a file to one from a URL
+    # (caution + approval); the rows live in their own modules.
+    _CompositeSpec(**CONTENT_LIBRARY_CREATE_COMPOSITE),
+    _CompositeSpec(**CONTENT_LIBRARY_ITEM_UPLOAD_COMPOSITE),
     # Add a CD drive and unmount the VMware Tools installer; the rows live in
     # their own module.
     *(_CompositeSpec(**row) for row in VM_CDROM_TOOLS_COMPOSITES),

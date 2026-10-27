@@ -23,7 +23,6 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 
-import meho_backplane.operations.result_query as rq
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.migration import azure_migrate_csv
 from meho_backplane.connectors.migration import ops as migration_ops
@@ -897,7 +896,9 @@ async def test_large_csv_is_read_back_in_pages_through_result_query(
 ) -> None:
     """A 10,000-server file is over the read limit as one string; as lines it pages."""
     store = ResultHandleStore(_MemoryValkey())  # type: ignore[arg-type]
-    monkeypatch.setattr(rq, "get_result_handle_store", lambda: store)
+    monkeypatch.setattr(
+        "meho_backplane.operations.result_query.get_result_handle_store", lambda: store
+    )
     tenant = uuid4()
     export = inventory_to_csv(
         [ServerRecord.model_validate(_small_server(n)) for n in range(10_000)]

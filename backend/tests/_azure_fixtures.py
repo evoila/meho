@@ -62,7 +62,7 @@ def location_answer(name: str, paired: tuple[str, ...] = ()) -> dict[str, Any]:
         "metadata": {
             "regionType": "Physical",
             "regionCategory": "Recommended",
-            "geography": "Example Country",
+            "geography": "Example Geography",
             "geographyGroup": "Example Group",
             "longitude": "1.0",
             "latitude": "2.0",

@@ -79,7 +79,7 @@ identity, so the Vault policy must let your operators read this path (see
 [`connector-vault-policy.md`](connector-vault-policy.md)).
 
 ```bash
-vault kv put kv/azure/example-subscription \
+vault kv put -mount=secret azure/example-subscription \
   tenant_id="<tenant id>" \
   client_id="<client id>" \
   client_secret="<client secret>"
@@ -102,7 +102,7 @@ targets:
     product: azure
     host: management.azure.com
     port: 443
-    secret_ref: kv/data/azure/example-subscription
+    secret_ref: azure/example-subscription
     auth_model: shared_service_account
     extras:
       subscription_id: 00000000-0000-0000-0000-000000000000
@@ -117,10 +117,10 @@ targets:
 | `extras.tenant_id` | optional: when set, it must equal `tenant_id` in the secret |
 | `extras.cloud` | optional: `AzureCloud` (default), `AzureUSGovernment` or `AzureChinaCloud` |
 
-Only `AzureCloud` is proven on a real tenant so far. MEHO sends the token
-only to the Resource Manager host of the target's cloud, over https on
-port 443 with the certificate checked. Any other host or port fails before
-the login.
+No cloud is proven on a real tenant yet. The first live proof uses
+`AzureCloud`. MEHO sends the token only to the Resource Manager host of the
+target's cloud, over https on port 443 with the certificate checked. Any
+other host or port fails before the login.
 
 ```bash
 meho targets import example-subscription.yaml
@@ -144,7 +144,7 @@ meho operation call azure-arm-2026.10 azure.location.list --target example-subsc
 handle), because Azure has more than 50 regions. Read the rows with:
 
 ```bash
-meho operation result-query <handle_id> --where "geography = Europe"
+meho operation result-query <handle_id> --where "geography = Germany"
 ```
 
 From an agent, use the same path:

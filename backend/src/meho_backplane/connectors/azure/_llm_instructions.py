@@ -45,7 +45,8 @@ _LOCATION_LIST_INSTRUCTIONS: dict[str, object] = {
         "region of a region for a recovery plan."
     ),
     "output_shape": (
-        "{value: [{name, display_name, region_type, geography, paired_regions}], "
+        "{value: [{name, display_name, region_type, geography, geography_group, "
+        "paired_regions}], "
         "truncated, omission, omission_kind, pages_read}. Azure has more than 50 "
         "regions, so value comes back as a stored-result link: read the rows with "
         "result_query. region_type is Physical or Logical. The names are text from "
@@ -54,7 +55,7 @@ _LOCATION_LIST_INSTRUCTIONS: dict[str, object] = {
     "next_step": (
         "Use the name field, not display_name, as the region in other Azure "
         "operations. To narrow the list, query the stored result, for example by "
-        "geography (Europe, US, Asia Pacific) or by region_type Physical."
+        "geography (Europe, Germany, United States) or by region_type Physical."
     ),
 }
 

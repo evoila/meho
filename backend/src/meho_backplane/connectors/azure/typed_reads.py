@@ -67,9 +67,10 @@ def _location_row(item: object) -> dict[str, Any] | None:
         "name": item.get("name"),
         "display_name": item.get("displayName"),
         "region_type": meta.get("regionType"),
-        # Azure's geographyGroup holds the group (Europe, US, Asia Pacific). Its
-        # geography field holds the country and is not what callers filter by.
-        "geography": meta.get("geographyGroup"),
+        # geography is the Azure geography (Europe, Germany, United States).
+        # geographyGroup is the wider group (Europe, US) and can change.
+        "geography": meta.get("geography"),
+        "geography_group": meta.get("geographyGroup"),
         "paired_regions": paired_names,
     }
 

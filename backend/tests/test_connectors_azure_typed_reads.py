@@ -288,7 +288,8 @@ async def test_location_list_returns_a_result_handle_that_result_query_reads(
             "name": names[0],
             "display_name": names[0].title(),
             "region_type": "Physical",
-            "geography": "Example Group",
+            "geography": "Example Geography",
+            "geography_group": "Example Group",
             "paired_regions": [names[-1]],
         }
     ]
@@ -318,7 +319,8 @@ async def test_location_list_keeps_a_short_list_inline_and_skips_odd_rows(
             "name": "exampleregion",
             "display_name": "Exampleregion",
             "region_type": "Physical",
-            "geography": "Example Group",
+            "geography": "Example Geography",
+            "geography_group": "Example Group",
             "paired_regions": [],
         },
         {
@@ -326,30 +328,33 @@ async def test_location_list_keeps_a_short_list_inline_and_skips_odd_rows(
             "display_name": None,
             "region_type": None,
             "geography": None,
+            "geography_group": None,
             "paired_regions": [],
         },
     ]
 
 
-def test_location_row_reads_the_geography_group_not_the_country() -> None:
-    # Older API versions return only geographyGroup; 2022-12-01 adds geography
-    # (the country). The row must hold the group in both cases.
-    only_group = {"name": "exampleregion", "metadata": {"geographyGroup": "Europe"}}
-    both = {
-        "name": "exampleregion",
-        "metadata": {"geography": "Netherlands", "geographyGroup": "Europe"},
+def test_location_row_keeps_geography_and_group_apart() -> None:
+    # Shaped like Azure's answer for Germany West Central in api-version
+    # 2022-12-01: geography is the Azure geography, geographyGroup the group.
+    real_shape = {
+        "name": "germanywestcentral",
+        "metadata": {"geography": "Germany", "geographyGroup": "Europe"},
     }
+    only_group = {"name": "exampleregion", "metadata": {"geographyGroup": "Europe"}}
 
-    assert _location_row(only_group) == {
-        "name": "exampleregion",
+    assert _location_row(real_shape) == {
+        "name": "germanywestcentral",
         "display_name": None,
         "region_type": None,
-        "geography": "Europe",
+        "geography": "Germany",
+        "geography_group": "Europe",
         "paired_regions": [],
     }
-    row = _location_row(both)
+    row = _location_row(only_group)
     assert row is not None
-    assert row["geography"] == "Europe"
+    assert row["geography"] is None
+    assert row["geography_group"] == "Europe"
 
 
 @pytest.mark.asyncio

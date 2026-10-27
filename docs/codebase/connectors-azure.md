@@ -414,7 +414,8 @@ Azure `Location` becomes one row:
 | `name` | `name` (the region name used in requests, for example `westeurope`) |
 | `display_name` | `displayName` |
 | `region_type` | `metadata.regionType` (`Physical` or `Logical`) |
-| `geography` | `metadata.geographyGroup` (the group, for example `Europe` or `US`). Azure's `metadata.geography` holds the country and is not read. |
+| `geography` | `metadata.geography` (the Azure geography, for example `Europe`, `Germany` or `United States`) |
+| `geography_group` | `metadata.geographyGroup` (the wider group, for example `Europe` or `US`; Azure may move a region to another group) |
 | `paired_regions` | the `name` of every entry in `metadata.pairedRegion` (an empty list when there is none) |
 
 An item that is not an object is left out. The result has the `PagedRows`

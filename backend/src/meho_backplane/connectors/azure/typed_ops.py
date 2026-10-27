@@ -141,8 +141,14 @@ _LOCATION_ROW: Final[dict[str, Any]] = {
         "geography": {
             "type": _TEXT_OR_NULL,
             "description": (
-                "The geography group the region belongs to, for example Europe, US or "
-                "Asia Pacific. Azure calls it geographyGroup."
+                "The Azure geography of the region, for example Europe, Germany or United States."
+            ),
+        },
+        "geography_group": {
+            "type": _TEXT_OR_NULL,
+            "description": (
+                "The wider group the region belongs to, for example Europe, US or "
+                "Asia Pacific. Azure calls it geographyGroup and may change it."
             ),
         },
         "paired_regions": {

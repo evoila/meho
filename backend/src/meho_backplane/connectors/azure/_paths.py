@@ -21,11 +21,24 @@ from __future__ import annotations
 from typing import Final
 
 __all__ = [
+    "COMPUTE_API_VERSION",
+    "COMPUTE_SKUS_API_VERSION",
+    "COMPUTE_SKUS_PATH",
+    "DISKS_API_VERSION",
+    "DISKS_PATH",
+    "IMAGES_PATH",
     "LOCATIONS_PATH",
     "RESOURCE_GRAPH_API_VERSION",
     "RESOURCE_GRAPH_PATH",
+    "RESOURCE_GROUP_DISKS_PATH",
+    "RESOURCE_GROUP_IMAGES_PATH",
+    "RESOURCE_GROUP_SCALE_SETS_PATH",
+    "RESOURCE_GROUP_VIRTUAL_MACHINES_PATH",
+    "SCALE_SETS_PATH",
     "SUBSCRIPTIONS_API_VERSION",
     "SUBSCRIPTION_PATH",
+    "VIRTUAL_MACHINES_PATH",
+    "VIRTUAL_MACHINE_PATH",
     "locations_path",
     "subscription_path",
 ]
@@ -128,22 +141,6 @@ COMPUTE_SKUS_PATH: Final[str] = "/subscriptions/{subscription_id}/providers/Micr
 #: The API version of the size list. The Resource SKUs call has its own API
 #: version, older than the one of the VM reads.
 COMPUTE_SKUS_API_VERSION: Final[str] = "2021-07-01"
-
-__all__ += [
-    "COMPUTE_API_VERSION",
-    "COMPUTE_SKUS_API_VERSION",
-    "COMPUTE_SKUS_PATH",
-    "DISKS_API_VERSION",
-    "DISKS_PATH",
-    "IMAGES_PATH",
-    "RESOURCE_GROUP_DISKS_PATH",
-    "RESOURCE_GROUP_IMAGES_PATH",
-    "RESOURCE_GROUP_SCALE_SETS_PATH",
-    "RESOURCE_GROUP_VIRTUAL_MACHINES_PATH",
-    "SCALE_SETS_PATH",
-    "VIRTUAL_MACHINES_PATH",
-    "VIRTUAL_MACHINE_PATH",
-]
 
 # ---- cost (Task #5088) ----
 

@@ -3,6 +3,8 @@
 
 """The ``migration.inventory.csv`` operation and the package registrar.
 
+The registrar also registers ``migration.assess.vm`` (:mod:`.assess_vm_op`).
+
 Natural key ``(product="migration", version="1.x", impl_id="migration-assess")``,
 so the wire ``connector_id`` is ``migration-assess-1.x``. No connector class
 backs it (the ``audit-integrity-1.x`` mould): the handler is a module-level
@@ -17,6 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
+from meho_backplane.connectors.migration.assess_vm_op import register_assess_vm_operation
 from meho_backplane.connectors.migration.azure_migrate_csv import (
     MAX_SERVERS_PER_FILE,
     CsvExport,
@@ -178,3 +181,4 @@ async def register_migration_operations(
         llm_instructions=_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )
+    await register_assess_vm_operation(embedding_service=embedding_service)

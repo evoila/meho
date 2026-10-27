@@ -14,6 +14,10 @@ The first part, in this package today:
   merges them (`inventory_load.py`).
 - **The Azure Migrate CSV mapping** (`azure_migrate_csv.py`) and the
   read `migration.inventory.csv` (`ops.py`).
+- **VM sizing and the monthly cost estimate** `migration.assess.vm`:
+  the handler (`assess_vm.py`), the figures of one server
+  (`assess_vm_figures.py`), the size match (`vm_sizing.py`), the price
+  rows (`azure_prices.py`) and its registration (`assess_vm_op.py`).
 
 Like `connectors/audit/`, the package has no connector class. Its
 operations are registered under the natural key
@@ -164,12 +168,88 @@ The mapping (`inventory_to_csv`):
 - Line ends are CRLF (RFC 4180); `LINE_END` in `azure_migrate_csv.py`.
   The file has no byte order mark.
 
+### `migration.assess.vm`
+
+Group `assessment`, `safe`, `requires_approval: false`. A multi-step
+operation (`register_composite_operation`, which defaults to `dangerous`
+with approval, so both are set on purpose). It changes nothing.
+
+In: `inventory_handles` (1 to 20), `azure_target` (the Azure target
+name), `region` (for example `westeurope`), `currency` (default `EUR`),
+`pricing` (any of `pay_as_you_go`, `reserved_1_year`, `reserved_3_years`;
+default all three), `hybrid_benefit` (default off), `comfort_factor`
+(default 1.3), `size_families` (optional allow-list, compared loosely:
+`DSv5` matches `standardDSv5Family`).
+
+Steps:
+
+1. Load the inventories with `load_inventories`. Of the records of one
+   machine (same BIOS UUID), the first with cores and configured memory is
+   sized; the others become items flagged `duplicate_of:<source_id>`.
+   Records that are not servers are listed in `omissions`.
+2. Run the Azure connector's reads as child calls on `azure_target`
+   (connector `azure-arm-2026.10`), each audited under this operation:
+   `azure.vm.size.list` (`location`), then `azure.price.list` for the
+   region's VM prices (`price_type` `Consumption`, and `Reservation` only
+   when a reserved option is asked for) and for `Standard SSD Managed
+   Disks` and `Premium SSD Managed Disks`. A child result that came back
+   as a handle is read back with `fetch_rows`. A child read that fails, or
+   a stored result that was cut short (`stored_rows < total_rows`), stops
+   the operation with a clear message: a cut list could hide the cheapest
+   size.
+3. Size each server twice:
+   - **Allocated**, always: vCPUs at least the cores, memory at least the
+     configured memory.
+   - **Measured**, only when utilization covers at least 7 days and at
+     least 80% of the samples of a source that reads every 2 hours: p95
+     CPU and memory times the comfort factor. Otherwise `size.measured`
+     is unknown with the reason, the item has the flag
+     `right_sized_unknown` and `unknowns` has a `right_sized` entry.
+
+   The match keeps sizes with enough data-disk slots (every disk but the
+   first is a data disk), the VM generation of the boot type (UEFI needs
+   `V2`, BIOS needs `V1`), no `Location` restriction (a `Zone`
+   restriction only blocks some zones, so it does not count), and the
+   allowed families. The cheapest by its pay-as-you-go price wins (the
+   Windows price for Windows without Hybrid Benefit, else the Linux
+   price). No fitting size: `size.allocated` is unknown and the item is
+   flagged `not_ready`.
+4. Price each sizing:
+   - Compute: the pay-as-you-go row times 730 hours. Spot, Low Priority,
+     Cloud Services and Dedicated Host rows are left out. A reservation
+     row holds the price of the whole term, so it is divided by 12 or 36
+     months. Reservations cover compute only, so a Windows server without
+     Hybrid Benefit adds the license: (Windows minus Linux pay-as-you-go
+     price) times 730.
+   - Disks: each disk goes to the smallest tier at least as big (sizes in
+     GB are read as GiB), Premium SSD when the size supports Premium
+     storage, else Standard SSD, LRS, the `<tier> LRS Disk` monthly row.
+     Transactions and snapshots are not counted.
+
+Out: the `AssessmentResult` shape plus `totals`. Per server the figures
+are `size.<basis>` (value: vCPUs; `inputs` has the size, its family,
+memory, the needs and `why`), `compute.<basis>.<pricing>`,
+`disk.<n>.<basis>`, `disks.<basis>` and `monthly.<basis>.<pricing>`,
+where `<basis>` is `allocated` or `measured`. Each price figure lists its
+price rows in `inputs` (meter id, meter and product name, price, unit,
+price type, effective date). `totals` has per pricing option
+`allocated` (unknown when any server has no price),
+`allocated_priced_servers` and `measured_priced_servers` (sums over the
+servers that have a price, with the counts). `assumptions` names the
+region, currency, price date (the day the prices were read), 730 hours,
+the license and reservation choice, the comfort factor, and the rules
+above in `other`. The calculation version is `migration-assess-vm-1`.
+
 ## Dependencies
 
 - `pydantic` v2 models (`model_validator`, discriminated union on `kind`).
-- `connectors/result_handle_store.py` (`fetch_record`, `decode_document`).
+- `connectors/result_handle_store.py` (`fetch_record`, `decode_document`,
+  `fetch_rows`).
 - `operations/typed_register.py` (`register_typed_operation`,
-  `register_typed_op_registrar`).
+  `register_composite_operation`, `register_typed_op_registrar`).
+- `operations/composite.py` (`DispatchChild`, the child-call seam).
+- The Azure connector's reads `azure.vm.size.list` and `azure.price.list`
+  (`connectors/azure/`), run as child calls.
 - Python's `csv` module.
 
 ## Tests
@@ -183,11 +263,28 @@ real JSONFlux reducer and read back through the loader. The golden file
 output; the test also checks its header against Microsoft's template
 header, column for column.
 
+`backend/tests/test_migration_assess_vm.py` covers `migration.assess.vm`
+with faked Azure reads in their documented item shape: a 4-core, 16 GB
+Windows VM (allocated and measured sizes, reservation with the Windows
+license, Premium disks), a UEFI Linux VM that gets a generation 2 size,
+a VM bigger than any size, a restricted size that is skipped, missing and
+too short utilization, Hybrid Benefit, the family allow-list, the same
+machine read twice, a failed child read, and a child result stored behind
+a handle.
+
 ## Known issues
 
 - Only handles are accepted. An inventory small enough to come back inline
   has no handle yet; the inventory reads of the later work decide how they
   store their result.
+- `migration.assess.vm` is written against the documented item fields of
+  `azure.vm.size.list` and `azure.price.list`. Those reads ship in their
+  own tasks; until they are registered, the child calls fail with a clear
+  message.
+- A region has about 9,000 to 10,000 pay-as-you-go VM price rows, close to
+  the stored-result row limit (`result_handle_max_spill_rows`, 10,000). If
+  a list is cut, the operation stops instead of picking from part of it.
+- Sizing does not yet use disk speed (IOPS, throughput) or network use.
 - Duplicate servers are matched by exact BIOS UUID only. Some guest
   systems report the BIOS UUID with the first three groups byte-swapped;
   the source adapters must normalise it before it reaches `identity_hints`.
@@ -197,6 +294,11 @@ header, column for column.
 - Microsoft: Build a business case or assess servers using an imported
   CSV file,
   <https://learn.microsoft.com/en-us/azure/migrate/tutorial-discover-import>.
+- Microsoft: Azure Retail Prices REST API,
+  <https://learn.microsoft.com/en-us/rest/api/cost-management/retail-prices/azure-retail-prices>.
+- Microsoft: Select a disk type for Azure IaaS VMs (disk tier sizes),
+  <https://learn.microsoft.com/en-us/azure/virtual-machines/disks-types>.
+- `docs/codebase/connectors-azure.md` — the Azure connector.
 - `docs/codebase/jsonflux.md` — stored results and handles.
 - `docs/codebase/audit_query.md` — the same package pattern
   (`audit-integrity-1.x`).

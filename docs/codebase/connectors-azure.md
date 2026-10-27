@@ -646,6 +646,10 @@ answer is `null` (or an empty list or object).
 Azure's Resource SKUs answer holds every kind of compute SKU (disks,
 availability sets, ...); only the rows whose resource type is
 `virtualMachines` are kept. Only the `location` filter works on this call.
+The rows have no region field of their own, so MEHO also checks the region:
+a row whose `locations`, or a restriction whose `values`, names only other
+regions is left out, the same way Microsoft's own SKU library (skewer)
+reads the answer.
 The numbers come from the SKU's capabilities (`vCPUs`, `vCPUsAvailable`,
 `MemoryGB`, `MaxDataDiskCount`, `PremiumIO`, `HyperVGenerations`, `ACUs`,
 `CpuArchitectureType`). Azure sends them as text; MEHO turns them into

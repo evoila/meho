@@ -1018,6 +1018,39 @@ async def test_vm_size_list_keeps_only_vm_sizes_with_their_numbers(
 
 
 @pytest.mark.asyncio
+async def test_vm_size_list_leaves_out_rows_and_restrictions_of_other_regions(
+    connector: AzureConnector,
+) -> None:
+    """Only rows and restrictions for the asked region stay, as in Microsoft's SKU library."""
+    del connector
+    other_region_restriction = {**LOCATION_RESTRICTION, "values": ["othereurope"]}
+    without_values = {"type": "Location", "reasonCode": "NotAvailableForSubscription"}
+    here = size_answer(
+        "Standard_Here", restrictions=(ZONE_RESTRICTION, other_region_restriction, without_values)
+    )
+    elsewhere = size_answer("Standard_Elsewhere")
+    elsewhere["locations"] = ["othereurope"]
+    other_case = size_answer("Standard_OtherCase")
+    other_case["locations"] = ["WestEurope"]
+    unnamed = size_answer("Standard_Unnamed")
+    del unnamed["locations"]
+    with respx.mock() as mock:
+        mock.post(token_url()).respond(200, json=token_answer(login_token()))
+        mock.get(f"{COMPUTE_URL}/skus").respond(
+            200, json=_skus(here, elsewhere, other_case, unnamed)
+        )
+        result = await _call("azure.vm.size.list", {"location": "westeurope"})
+
+    assert result.status == "ok", result.error
+    rows = {row["name"]: row for row in result.result["value"]}
+    assert sorted(rows) == ["Standard_Here", "Standard_OtherCase", "Standard_Unnamed"]
+    assert rows["Standard_Here"]["restrictions"] == [
+        {"type": "Zone", "reason_code": "NotAvailableForSubscription", "zones": ["2"]},
+        {"type": "Location", "reason_code": "NotAvailableForSubscription", "zones": []},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_vm_size_list_over_50_sizes_goes_to_a_stored_result_with_the_location(
     connector: AzureConnector, store: MemoryResultStore
 ) -> None:

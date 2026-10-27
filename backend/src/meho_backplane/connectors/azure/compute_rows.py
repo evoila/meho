@@ -371,6 +371,17 @@ def _zones_in(location_info: object, location: str) -> list[str]:
     return []
 
 
+def _names_region(regions: object, location: str) -> bool:
+    """True when a list of regions is missing or empty, or names *location*.
+
+    Azure's filter already asks for one region. This check makes sure a row
+    or a restriction for another region never slips in, the way Microsoft's
+    own SKU library reads the answer.
+    """
+    names = [name.lower() for name in _texts(regions)]
+    return not names or location in names
+
+
 def _restriction(value: object) -> dict[str, Any]:
     """One restriction of a size for this subscription: type, reason code and zones."""
     entry = _object(value)
@@ -382,13 +393,23 @@ def _restriction(value: object) -> dict[str, Any]:
 
 
 def size_row(item: object, location: str) -> dict[str, Any] | None:
-    """One row of ``azure.vm.size.list``, or ``None`` for a SKU that is not a VM size."""
+    """One row of ``azure.vm.size.list``.
+
+    ``None`` for a SKU that is not a VM size or that is for another region.
+    """
     if not isinstance(item, dict):
         return None
     kind = _text(item.get("resourceType"))
     if kind is None or kind.lower() != _VM_SKU_TYPE:
         return None
+    if not _names_region(item.get("locations"), location):
+        return None
     caps = _capabilities(item.get("capabilities"))
+    restrictions = [
+        entry
+        for entry in _items(item.get("restrictions"))
+        if _names_region(_object(entry).get("values"), location)
+    ]
     return {
         "name": _text(item.get("name")),
         "family": _text(item.get("family")),
@@ -401,5 +422,5 @@ def size_row(item: object, location: str) -> dict[str, Any] | None:
         "acus": _count(caps.get("ACUs")),
         "cpu_architecture": _text(caps.get("CpuArchitectureType")),
         "zones": _zones_in(item.get("locationInfo"), location),
-        "restrictions": [_restriction(entry) for entry in _items(item.get("restrictions"))],
+        "restrictions": [_restriction(entry) for entry in restrictions],
     }

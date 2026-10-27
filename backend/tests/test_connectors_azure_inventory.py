@@ -326,6 +326,9 @@ async def test_resource_list_of_one_type_in_one_group(azure: AzureConnector) -> 
         {"type": "Microsoft.Compute/virtualMachines' or name eq 'x"},
         {"type": "virtualMachines"},
         {"resource_group": "rg/../other"},
+        {"resource_group": ".."},
+        {"resource_group": "."},
+        {"resource_group": "rg-example."},
     ],
 )
 @pytest.mark.asyncio

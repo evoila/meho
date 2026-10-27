@@ -84,8 +84,10 @@ __all__ = [
 #: a ``$filter`` text, so it may hold no quote and no space.
 RESOURCE_TYPE_PATTERN: Final[str] = r"^[A-Za-z][A-Za-z0-9.\-]*(/[A-Za-z0-9][A-Za-z0-9.\-]*)+$"
 
-#: A resource group name, as Azure's API description allows it.
-RESOURCE_GROUP_PATTERN: Final[str] = r"^[-\w._()]+$"
+#: A resource group name: letters, digits, ``_``, ``-``, ``.``, ``(`` and ``)``, and
+#: not ending with a period (Azure's rule). So ``.`` and ``..`` never reach the
+#: path, where they would change which list is read.
+RESOURCE_GROUP_PATTERN: Final[str] = r"^[-\w._()]*[-\w()]$"
 
 #: Longest resource ID MEHO accepts for a tag change.
 MAX_RESOURCE_ID_LENGTH: Final[int] = 2048

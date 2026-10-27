@@ -49,6 +49,7 @@ from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
     reset_handler_cache,
 )
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.settings import Settings, get_settings
 from tests._azure_fixtures import (
     ARM_BASE,
@@ -150,7 +151,7 @@ async def test_next_link_is_followed_over_three_pages(clock: _Clock) -> None:
     assert [row["name"] for row in paged.rows] == ["a", "b", "c", "d", "e"]
     assert paged.pages == 3
     assert paged.truncated is False
-    assert paged.omissions == []
+    assert paged.omission is None
     first, second, third = (call.request.url for call in arm.calls)
     assert first.params["api-version"] == "2021-04-01" and first.params["$top"] == "5"
     assert second.params["$skiptoken"] == "page2"
@@ -169,13 +170,19 @@ async def test_the_page_limit_says_what_it_left_out(clock: _Clock) -> None:
 
     assert arm.call_count == 2
     assert paged.truncated is True
-    (omission,) = paged.omissions
+    omission = paged.omission
+    assert omission is not None
     assert omission["kind"] == "page_limit"
     assert omission["limit"] == 2
     assert omission["pages_read"] == 2
     assert omission["rows_returned"] == 2
     assert "Narrow the request" in omission["message"]
-    assert paged.as_dict()["truncated"] is True
+    shape = paged.as_dict()
+    assert shape["truncated"] is True
+    assert shape["omission_kind"] == "page_limit"
+    assert shape["omission"] == omission["message"]
+    assert shape["pages_read"] == 2
+    assert [row["name"] for row in shape["value"]] == ["r0", "r1"]
 
 
 @pytest.mark.asyncio
@@ -192,7 +199,7 @@ async def test_the_row_limit_cuts_and_says_so(clock: _Clock) -> None:
 
     assert [row["name"] for row in paged.rows] == ["a", "b", "c", "d"]
     assert paged.truncated is True
-    assert paged.omissions[0]["kind"] == "row_limit"
+    assert paged.omission is not None and paged.omission["kind"] == "row_limit"
 
 
 def test_the_default_row_limit_is_the_stored_result_cap() -> None:
@@ -212,12 +219,67 @@ async def test_the_time_limit_stops_paging(clock: _Clock) -> None:
         paged = await _list()
 
     assert arm.call_count == 2
-    assert paged.omissions[0]["kind"] == "time_limit"
+    assert paged.omission is not None and paged.omission["kind"] == "time_limit"
+
+
+@pytest.fixture
+def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.mark.usefixtures("_settings_env")
+@pytest.mark.asyncio
+async def test_a_long_list_goes_behind_a_stored_result_with_its_omission() -> None:
+    """The real result reduction recognises the rows and keeps the rest inline."""
+    paged = _paging.PagedRows(rows=[{"name": f"r{n}"} for n in range(51)], pages=2)
+    paged.truncated = True
+    paged.omission = {"kind": "page_limit", "message": "MEHO stopped at its limit of 2 pages."}
+
+    summary, handle = await JsonFluxReducer().reduce(
+        paged.as_dict(), None, {"op_id": "azure.resource.list"}
+    )
+
+    assert handle is not None
+    assert summary["row_count"] == 51
+    assert summary["truncated"] is True
+    assert summary["omission_kind"] == "page_limit"
+    assert summary["omission"] == "MEHO stopped at its limit of 2 pages."
+    assert summary["pages_read"] == 2
+
+
+@pytest.mark.usefixtures("_settings_env")
+@pytest.mark.asyncio
+async def test_a_short_complete_list_passes_through_whole() -> None:
+    paged = _paging.PagedRows(rows=[{"name": "a"}], pages=1)
+
+    result, handle = await JsonFluxReducer().reduce(
+        paged.as_dict(), None, {"op_id": "azure.resource.list"}
+    )
+
+    assert handle is None
+    assert result == {
+        "value": [{"name": "a"}],
+        "truncated": False,
+        "omission": None,
+        "omission_kind": None,
+        "pages_read": 1,
+    }
 
 
 @pytest.mark.parametrize(
     "bad_link",
-    [_next(2, host="attacker.example.net"), _next(2, subscription=SUBSCRIPTION_B)],
+    [
+        _next(2, host="attacker.example.net"),
+        _next(2, subscription=SUBSCRIPTION_B),
+        f"/subscriptions/{SUBSCRIPTION_B}/resources?api-version=2021-04-01&$skiptoken=page2",
+        f"/subscriptions/{SUBSCRIPTION_A}/resources?api-version=2021-04-01&$skiptoken=page2",
+        f"//attacker.example.net/subscriptions/{SUBSCRIPTION_A}/resources",
+    ],
 )
 @pytest.mark.asyncio
 async def test_a_next_link_outside_the_target_is_refused_before_a_token_is_sent(
@@ -232,9 +294,11 @@ async def test_a_next_link_outside_the_target_is_refused_before_a_token_is_sent(
         )
         with pytest.raises(AzureUrlRefusedError):
             await _list()
+        requests_made = mock.calls.call_count
 
     assert not other.called
     assert not elsewhere.called
+    assert requests_made == 2  # the login and the first page only
 
 
 @pytest.mark.asyncio
@@ -272,6 +336,54 @@ async def test_a_resource_graph_query_is_tried_again_after_a_5xx(clock: _Clock) 
         )
 
     assert graph.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_cut_resource_graph_result_without_a_token_is_named(clock: _Clock) -> None:
+    answer = {
+        "data": [{"id": "1"}, {"id": "2"}],
+        "count": 2,
+        "totalRecords": 7,
+        "resultTruncated": "true",
+    }
+    with respx.mock() as mock:
+        mock.post(token_url()).respond(200, json=token_answer(login_token()))
+        graph = mock.post(url__startswith=GRAPH_URL).respond(200, json=answer)
+        paged = await query_resource_graph(
+            _connector(), AzureTargetStub(), {"query": "Resources | take 2"}, operator=operator()
+        )
+
+    assert graph.call_count == 1
+    assert [row["id"] for row in paged.rows] == ["1", "2"]
+    assert paged.truncated is True
+    assert paged.omission is not None
+    assert paged.omission["kind"] == "result_truncated"
+    assert paged.omission["total_records"] == 7
+    assert paged.omission["rows_returned"] == 2
+    assert "limit, sample or take" in paged.omission["message"]
+    assert paged.as_dict()["omission_kind"] == "result_truncated"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"data": [{"id": "1"}], "resultTruncated": "false"},
+        {"data": [{"id": "1"}], "count": 1, "totalRecords": 1, "resultTruncated": "true"},
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_complete_resource_graph_result_is_not_called_cut(
+    clock: _Clock, answer: dict[str, Any]
+) -> None:
+    with respx.mock() as mock:
+        mock.post(token_url()).respond(200, json=token_answer(login_token()))
+        mock.post(url__startswith=GRAPH_URL).respond(200, json=answer)
+        paged = await query_resource_graph(
+            _connector(), AzureTargetStub(), {"query": "Resources"}, operator=operator()
+        )
+
+    assert paged.truncated is False
+    assert paged.omission is None
 
 
 # ----------------------------------------------------------------------
@@ -407,6 +519,48 @@ async def test_waiting_stops_when_the_time_is_up_and_returns_the_reference(
 
     assert outcome["done"] is False
     assert clock.sleeps == [20.0, 20.0]
+    assert outcome["operation"] == reference.as_dict()
+
+
+@pytest.mark.asyncio
+async def test_the_full_retry_after_is_honoured_between_polls(clock: _Clock) -> None:
+    reference = OperationReference(OPERATION_URL, "azure-asyncoperation", None, "t0")
+    with respx.mock() as mock:
+        mock.post(token_url()).respond(200, json=token_answer(login_token()))
+        poll = mock.get(OPERATION_URL).mock(
+            side_effect=[
+                httpx.Response(200, json={"status": "InProgress"}, headers={"Retry-After": "120"}),
+                httpx.Response(200, json={"status": "Succeeded"}),
+            ]
+        )
+        outcome = await wait_for_operation(
+            _connector(), AzureTargetStub(), reference, operator=operator()
+        )
+
+    assert poll.call_count == 2
+    assert clock.sleeps == [120.0]
+    assert outcome["done"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_longer_than_the_time_left_returns_pending_without_polling_early(
+    clock: _Clock,
+) -> None:
+    reference = OperationReference(OPERATION_URL, "azure-asyncoperation", None, "t0")
+    with respx.mock() as mock:
+        mock.post(token_url()).respond(200, json=token_answer(login_token()))
+        poll = mock.get(OPERATION_URL).respond(
+            200, json={"status": "InProgress"}, headers={"Retry-After": "120"}
+        )
+        outcome = await wait_for_operation(
+            _connector(), AzureTargetStub(), reference, operator=operator(), max_seconds=100
+        )
+
+    assert poll.call_count == 1
+    assert clock.sleeps == []
+    assert outcome["done"] is False
+    assert outcome["status"] == "InProgress"
+    assert outcome["retry_after_seconds"] == 120.0
     assert outcome["operation"] == reference.as_dict()
 
 

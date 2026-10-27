@@ -354,6 +354,48 @@ def test_a_later_read_may_allow_its_own_host() -> None:
     assert allowed.host == "exampleaccount.blob.core.windows.net"
 
 
+@pytest.mark.parametrize(
+    "location",
+    [
+        f"https://management.azure.com/subscriptions/{SUBSCRIPTION_B}/resourcegroups",
+        f"/subscriptions/{SUBSCRIPTION_B}/resourcegroups",
+        f"https://attacker.example.net{GROUPS_PATH}",
+        f"{GROUPS_URL}/",
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_redirect_is_never_followed(clock: _Clock, location: str) -> None:
+    """Even a redirect on the same host could carry the token to another subscription."""
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post(token_url()).respond(200, json=token_answer(login_token()))
+        mock.get(GROUPS_URL, params__eq={"api-version": "2021-04-01"}).respond(
+            302, headers={"Location": location}
+        )
+        elsewhere = mock.get(url__startswith=f"{ARM_BASE}/subscriptions/{SUBSCRIPTION_B}").respond(
+            200, json={"value": []}
+        )
+        other = mock.get(url__startswith="https://attacker.example.net").respond(200)
+        slash = mock.get(f"{GROUPS_URL}/").respond(200, json={"value": []})
+        with pytest.raises(AzureUrlRefusedError) as caught:
+            await send(
+                _connector(),
+                AzureTargetStub(),
+                "GET",
+                GROUPS_PATH,
+                operator=operator(),
+                params={"api-version": "2021-04-01"},
+            )
+        requests_made = mock.calls.call_count
+
+    assert "302" in str(caught.value) and location not in str(caught.value)
+    assert not elsewhere.called and not other.called and not slash.called
+    assert requests_made == 2  # the login and the one GET
+
+
+def test_the_azure_client_follows_no_redirect() -> None:
+    assert AzureConnector._client_class is _http.NoRedirectClient
+
+
 @pytest.mark.asyncio
 async def test_a_refused_url_sends_nothing_and_makes_no_login() -> None:
     with respx.mock(assert_all_called=False) as mock:

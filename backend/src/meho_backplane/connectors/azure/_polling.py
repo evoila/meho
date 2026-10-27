@@ -55,7 +55,6 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_POLL_SECONDS",
     "END_STATES",
-    "MAX_POLL_WAIT_SECONDS",
     "OperationReference",
     "OperationState",
     "operation_reference",
@@ -68,11 +67,8 @@ PollKind = Literal["azure-asyncoperation", "location"]
 #: The states after which an operation does not change any more.
 END_STATES: Final[frozenset[str]] = frozenset({"Succeeded", "Failed", "Canceled"})
 
-#: Wait between polls when Azure sends no ``Retry-After``.
+#: Wait between polls when Azure sends no ``Retry-After``, or a zero one.
 DEFAULT_POLL_SECONDS: Final[float] = 10.0
-
-#: Longest wait between two polls, whatever ``Retry-After`` says.
-MAX_POLL_WAIT_SECONDS: Final[float] = 60.0
 
 #: How long :func:`wait_for_operation` polls by default before it returns.
 DEFAULT_WAIT_SECONDS: Final[float] = 300.0
@@ -242,17 +238,18 @@ async def wait_for_operation(
 ) -> dict[str, Any]:
     """Poll until the operation ends or *max_seconds* pass.
 
-    Returns the last state with the reference. When the time is up first,
-    ``done`` is ``False``; the caller can poll later with
-    ``azure.operation.status`` and the returned ``operation``.
+    The wait between two polls is the full ``Retry-After`` Azure asked for
+    (never less), or :data:`DEFAULT_POLL_SECONDS` when Azure sent none.
+    When that wait does not fit in the time left, no early poll is made:
+    the pending state is returned with the reference. ``done`` is ``False``
+    then, and the caller can poll later with ``azure.operation.status``.
     """
     started = _monotonic()
     while True:
         state = await read_operation_state(connector, target, reference, operator=operator)
         if state.done:
             return state.as_dict(reference)
-        wait = state.retry_after_seconds
-        wait = DEFAULT_POLL_SECONDS if wait is None else min(wait, MAX_POLL_WAIT_SECONDS)
+        wait = state.retry_after_seconds or DEFAULT_POLL_SECONDS
         if _monotonic() - started + wait > max_seconds:
             return state.as_dict(reference)
         await _sleep(wait)

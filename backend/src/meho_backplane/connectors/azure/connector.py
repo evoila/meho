@@ -53,7 +53,7 @@ from meho_backplane.connectors._shared.vcf_auth import (
 )
 from meho_backplane.connectors.adapters.http import HttpConnector, json_payload_or_empty
 from meho_backplane.connectors.azure._errors import AzureApiError, AzureNotFoundError
-from meho_backplane.connectors.azure._http import send
+from meho_backplane.connectors.azure._http import NoRedirectClient, send
 from meho_backplane.connectors.azure._paths import SUBSCRIPTIONS_API_VERSION, subscription_path
 from meho_backplane.connectors.azure.session import (
     AzureCredentials,
@@ -131,6 +131,9 @@ class AzureConnector(HttpConnector):
     impl_id = "azure-arm"
     supported_version_range: str | None = None
     priority = 1
+    #: No redirect is followed: every subscription shares one host, so even a
+    #: redirect on the same host could carry the token elsewhere.
+    _client_class = NoRedirectClient
 
     def __init__(self, *, credentials_loader: AzureCredentialsLoader | None = None) -> None:
         super().__init__()

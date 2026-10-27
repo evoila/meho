@@ -287,15 +287,25 @@ poll URL), `check_azure_url` checks it:
   host).
 
 Any other URL fails with `AzureUrlRefusedError` before the login and before
-any request. The error never repeats the URL. The hand-written paths are not
-checked this way: they are constants, and the target check already allows
-only the cloud's Resource Manager host.
+any request. A relative link (a path without a host) fails too, because it
+could point at another subscription on the same host. The error never
+repeats the URL. The hand-written paths are not checked this way: they are
+constants, and the target check already allows only the cloud's Resource
+Manager host.
+
+**No redirects.** The Azure connector builds its HTTP client with
+`NoRedirectClient` (`_http.py`), which follows no redirect at all. The shared
+client follows a redirect on the same host, but on Azure every subscription
+shares one host, so such a redirect could carry the token to another
+subscription. Azure Resource Manager never redirects a call. A 3xx answer
+fails with `AzureUrlRefusedError`, and nothing is sent to the new address.
 
 ## Paging
 
 `list_all_pages` (`_paging.py`) GETs a hand-written path and follows
 `nextLink` (a full URL that already holds the `api-version` and the page
-token). `query_resource_graph` posts a Resource Graph query to
+token). Every `nextLink` goes through the URL check above before it is
+followed. `query_resource_graph` posts a Resource Graph query to
 `POST /providers/Microsoft.ResourceGraph/resources?api-version=2024-04-01`
 and sends the next page as the same query with `options.$skipToken`. Resource
 Graph returns at most 1,000 rows per page.
@@ -308,17 +318,34 @@ Limits per list (`PageLimits`):
 | `max_seconds` | 120 (`MAX_SECONDS`) |
 | `max_rows` | 10,000 (`MAX_ROWS`, the most rows one stored result holds) |
 
-The result (`PagedRows.as_dict()`) is `{rows, truncated, omissions}`. When a
-limit stops the list, `truncated` is `true` and `omissions` has one entry:
+The result (`PagedRows.as_dict()`) is:
 
 ```json
-{"kind": "page_limit", "limit": 50, "pages_read": 50, "rows_returned": 5000,
- "message": "MEHO stopped at its limit of 50 pages. Azure has more rows ..."}
+{"value": [...], "truncated": true, "omission_kind": "page_limit",
+ "omission": "MEHO stopped at its limit of 50 pages. Azure has more rows ...",
+ "pages_read": 50}
 ```
 
-`kind` is `page_limit`, `time_limit` or `row_limit`. The message says how to
-narrow the request. Nothing is cut silently. A list with more than 50 rows
-still becomes a link to the stored result in the dispatcher.
+The rows are under `value`, like Azure's own answers, so the dispatcher's
+result reduction recognises them: a list with more than 50 rows becomes a
+link to the stored result, and `truncated`, `omission`, `omission_kind` and
+`pages_read` stay inline next to it because they are plain values. A
+complete list has `truncated: false` and `null` for both omission fields.
+`test_connectors_azure_paging_polling.py` proves this with the real reducer.
+
+`omission_kind` is one of:
+
+| Kind | Meaning |
+|---|---|
+| `page_limit`, `time_limit`, `row_limit` | MEHO stopped at its own limit; the message says how to narrow the request |
+| `result_truncated` | Resource Graph cut the result itself and gave no `$skipToken` (`resultTruncated` is `"true"`); the message says why and what to change |
+
+Resource Graph gives no token when the query uses `limit`, `sample` or
+`take`, or when every output column is `dynamic` or `null`. When the answer
+also says how many rows match (`totalRecords`) and MEHO read all of them,
+nothing is missing and the result is not called cut. Inside `PagedRows`, the
+`omission` field holds the details (`kind`, `pages_read`, `rows_returned`,
+`message`, plus `limit` or `total_records`). Nothing is cut silently.
 
 ## Long-running operations
 
@@ -343,9 +370,11 @@ path has "operation" in it, such as `operations`, `operationStatuses` or
   the body as the result. A 400 or 409 answer means the operation failed.
 
 `wait_for_operation` polls until the end or until `max_seconds` (default
-300) pass. It waits `Retry-After` between polls (10 seconds when missing, at
-most 60). It returns the state with the reference. When the time is up
-first, `done` is `false`, and the caller can poll later.
+300) pass. Between two polls it waits the full `Retry-After` Azure asked
+for, never less (10 seconds when Azure sent none or zero). A shorter wait
+would poll early and could make Azure throttle. When the next wait does not
+fit in the time left, it does not poll early: it returns the pending state
+with the reference and `done: false`, and the caller can poll later.
 
 ### azure.operation.status
 
@@ -397,6 +426,8 @@ as MEHO's system identity, which cannot read the secret, so it reports
   share it.
 - Paging, the polling helper and `azure.operation.status` are proven with
   mocked HTTP only. The live proof on a lab subscription is still open.
+- `resultTruncated` from Resource Graph is read as the string `"true"` (what
+  the API sends) or a real `true`.
 - The check of the hand-written paths against Azure's pinned API description
   files arrives with those files; `_paths.py` is ready for it.
 - The cache lives in one MEHO process. Each process logs in on its own.
@@ -411,6 +442,8 @@ as MEHO's system identity, which cannot read the secret, so it reports
   <https://learn.microsoft.com/en-us/entra/identity-platform/configurable-token-lifetimes>
 - Throttling of Resource Manager requests:
   <https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/request-limits-and-throttling>
+- Resource Graph paging, `$skipToken` and `resultTruncated`:
+  <https://learn.microsoft.com/en-us/azure/governance/resource-graph/concepts/work-with-data>
 - Throttled Resource Graph requests:
   <https://learn.microsoft.com/en-us/azure/governance/resource-graph/concepts/guidance-for-throttled-requests>
 - Resource Graph query (API version 2024-04-01, `$skipToken`):

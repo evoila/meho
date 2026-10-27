@@ -26,7 +26,9 @@
 
 Before a token goes to a URL that came from Azure (a next page or a poll
 URL), :func:`check_azure_url` checks it. Any other URL is refused, and no
-request is sent.
+request is sent. The Azure client follows no redirects at all
+(:class:`NoRedirectClient`): a 3xx answer fails the call, so a redirect on
+the same host can never carry the token to another subscription.
 
 ``docs/codebase/connectors-azure.md`` describes the numbers and why they were
 chosen.
@@ -52,6 +54,9 @@ from meho_backplane.connectors.adapters.http import (
     SsrfBlockedError,
     _read_capped_json_response,
 )
+from meho_backplane.connectors.adapters.http import (
+    _SameOriginRedirectClient as _SharedClient,
+)
 from meho_backplane.connectors.azure._errors import AzureUrlRefusedError, error_for_response
 from meho_backplane.connectors.azure.session import AzureTargetLike, resolve_target_config
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
@@ -66,6 +71,7 @@ __all__ = [
     "MAX_WAIT_SECONDS",
     "RESOURCE_GRAPH_CALLS_PER_WINDOW",
     "RESOURCE_GRAPH_WINDOW_SECONDS",
+    "NoRedirectClient",
     "check_azure_url",
     "retry_after_seconds",
     "send",
@@ -108,6 +114,28 @@ _monotonic = time.monotonic
 _sleep = asyncio.sleep
 
 Login = tuple[str, str]
+
+
+class NoRedirectClient(_SharedClient):
+    """The shared pooled client, but it follows no redirect at all.
+
+    The shared client follows a redirect on the same origin. On Azure the
+    origin is one host for every subscription, so such a redirect could carry
+    the token to another subscription. Azure Resource Manager never redirects
+    a call, so the answer is returned as it is and :func:`send` fails on it.
+    """
+
+    async def send(
+        self,
+        request: httpx.Request,
+        *,
+        stream: bool = False,
+        auth: Any = httpx.USE_CLIENT_DEFAULT,
+        follow_redirects: Any = httpx.USE_CLIENT_DEFAULT,
+    ) -> httpx.Response:
+        return await httpx.AsyncClient.send(
+            self, request, stream=stream, auth=auth, follow_redirects=False
+        )
 
 
 # ----------------------------------------------------------------------
@@ -287,21 +315,24 @@ async def send(
     """Send one Azure call inside one retry budget and return the answer.
 
     *url* is either a path on the target's Resource Manager host (one of the
-    hand-written paths) or a full URL that came from Azure, which is checked
-    with :func:`check_azure_url` first. *repeatable* says whether the call
+    hand-written paths, it starts with ``/``) or a URL that came from Azure,
+    which is checked with :func:`check_azure_url` first. A caller that
+    follows a link from Azure checks it itself too, because a link can look
+    like a path. *repeatable* says whether the call
     may be sent again after a 5xx or a lost connection; it defaults to
     ``True`` for GET, HEAD and OPTIONS only. A read-only POST (a Resource
     Graph query) passes ``True``. *resource_graph* paces the call to
     Resource Graph's limit.
 
-    Returns the answer for any status below 400. Raises an error from
-    :mod:`._errors` for an error answer, ``ConnectorAuthError`` when Azure
-    still answers 401 after a new login, or the ``httpx`` error of a lost
-    connection or a timeout.
+    Returns the answer for any status below 300. Raises
+    :class:`AzureUrlRefusedError` for a redirect (MEHO follows none), an
+    error from :mod:`._errors` for an error answer, ``ConnectorAuthError``
+    when Azure still answers 401 after a new login, or the ``httpx`` error
+    of a lost connection or a timeout.
     """
     method = method.upper()
     may_repeat = method in _REPEATABLE_METHODS if repeatable is None else repeatable
-    if "://" in url:
+    if not url.startswith("/"):
         check_azure_url(target, url, extra_hosts=extra_hosts)
     budget = _Budget()
     logged_in_again = False
@@ -318,8 +349,10 @@ async def send(
             await _wait(budget, delay)
             continue
         status = response.status_code
-        if status < 400:
+        if status < 300:
             return response
+        if status < 400:
+            raise _redirect_refused(target, status)
         if status == 401:
             if logged_in_again or budget.attempts >= MAX_ATTEMPTS:
                 raise _still_unauthorized(target, logged_in_again)
@@ -361,6 +394,15 @@ def _status_delay(
     else:
         return None
     return delay if budget.allows(delay) else None
+
+
+def _redirect_refused(target: AzureTargetLike, status: int) -> AzureUrlRefusedError:
+    """The error for a 3xx answer. MEHO follows no redirect of an Azure call."""
+    return AzureUrlRefusedError(
+        f"Azure target {target.name!r}: Azure answered {status} with a redirect. MEHO "
+        "does not follow redirects of Azure calls, so no token went to the new address. "
+        "Check the target's host and run azure.about."
+    )
 
 
 def _still_unauthorized(target: AzureTargetLike, logged_in_again: bool) -> ConnectorAuthError:

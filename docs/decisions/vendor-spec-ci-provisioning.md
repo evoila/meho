@@ -750,3 +750,23 @@ opened (5 tests, none skipped).
   [`docs/codebase/devops.md`](../codebase/devops.md).
 - Precedent ADRs: [`shipped-spec-provenance.md`](shipped-spec-provenance.md)
   (signoff-of-record pattern), [`jsonflux-license.md`](jsonflux-license.md).
+
+### Extension: azure / azure-arm-2026.10 (#5081)
+
+The same secret-gated checkout also fetches the shelf's
+`docs/azure-arm-2026.10/` directory (~11 MB: 38 Swagger 2.0 files plus
+`LICENSE` and `MANIFEST.md`) for the Azure spec path check
+(`backend/tests/test_connectors_azure_spec_reconcile.py`), under the same
+ephemeral-use conditions recorded above (sparse read-only checkout,
+workspace destroyed at job end, never committed, never in artifacts or
+logs, secret withheld from fork PRs and the Dependabot store). No
+vendor-license attestation is needed: the files come from Microsoft's
+**public, MIT-licensed**
+[`Azure/azure-rest-api-specs`](https://github.com/Azure/azure-rest-api-specs)
+repo (pinned at `2455f14a`, retrieved 2026-10-27), and the upstream
+`LICENSE` is kept next to them. The provenance note of record is the
+shelf's `azure-arm-2026.10/MANIFEST.md`, per the OSS-licensed-spec form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics. **Sequencing:** the files land through a pull request
+in the shelf repo, which must merge before this repo's widened verify step
+can pass.

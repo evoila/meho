@@ -46,6 +46,34 @@ def subscription_url(subscription_id: str = SUBSCRIPTION_A) -> str:
     return f"{ARM_BASE}/subscriptions/{subscription_id}"
 
 
+def locations_url(subscription_id: str = SUBSCRIPTION_A) -> str:
+    """The Resource Manager URL of the regions of one subscription, without the query."""
+    return f"{ARM_BASE}/subscriptions/{subscription_id}/locations"
+
+
+def location_answer(name: str, paired: tuple[str, ...] = ()) -> dict[str, Any]:
+    """One ``Location`` as Azure returns it. The ids are made up."""
+    return {
+        "id": f"/subscriptions/{SUBSCRIPTION_A}/locations/{name}",
+        "name": name,
+        "type": "Region",
+        "displayName": name.title(),
+        "regionalDisplayName": f"(Example) {name.title()}",
+        "metadata": {
+            "regionType": "Physical",
+            "regionCategory": "Recommended",
+            "geography": "Example Geography",
+            "geographyGroup": "Example",
+            "longitude": "1.0",
+            "latitude": "2.0",
+            "pairedRegion": [
+                {"name": other, "id": f"/subscriptions/{SUBSCRIPTION_A}/locations/{other}"}
+                for other in paired
+            ],
+        },
+    }
+
+
 def fake_jwt(claims: dict[str, Any]) -> str:
     """Build a token shaped like a JWT. The signature part is not real."""
 

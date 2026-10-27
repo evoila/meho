@@ -1780,7 +1780,7 @@ token-decode + live decouple verification, and a rollback note — lives in
 
 | Verb | Path | Access | Purpose |
 |---|---|---|---|
-| `GET` | `/api/v1/approvals` | operator **or** approver | List, filtered by `status` (default: `pending`). |
+| `GET` | `/api/v1/approvals` | operator **or** approver | List, newest first, filtered by `status` (default: `pending`; `all` = every state, #5129). Optional `limit` (1..500, no limit when omitted) and `offset`. |
 | `GET` | `/api/v1/approvals/{id}` | operator **or** approver | **Inspect one request** (T5). 404 on cross-tenant. |
 | `GET` | `/api/v1/approvals/{id}/result` | **request owner** (any role) | **Read the approved dispatch's result** (#3209). Principal-scoped: only `principal_sub` reads it; any other principal gets 403 `not_request_owner`. Writes an `approval.result` audit row. |
 | `POST` | `/api/v1/approvals/{id}/approve` | **human** operator **or** approver | Approve. Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and break-glass is off (G11.7-T1); 403 `human_principal_required` for a machine `principal_kind` (#289). |
@@ -1815,6 +1815,10 @@ dispatcher re-checks `required_role` at `tools/call`.
 verbs that hit the REST surface via the generated typed client. `list`
 has a `RUN` column and `show` / `approve` print how the run of an approved
 request ended (#3543, see "Approved, but the run failed" above).
+`list` shows only pending requests unless `--status` is set; `--status all`
+shows every state. An empty list names the state it filtered on and points
+to `--status all` (#5129). `--limit` / `--offset` go to the server as
+`limit` / `offset`.
 
 ### Operator console (`backend/src/meho_backplane/ui/routes/approvals/`)
 

@@ -588,7 +588,8 @@ async def list_approvals(
     status: str = Query(
         default="pending",
         description=(
-            "Filter by status. One of: pending, approved, rejected, expired. Defaults to 'pending'."
+            "Filter by status. One of: pending, approved, rejected, expired, all. "
+            "'all' returns requests in every state. Defaults to 'pending'."
         ),
     ),
     work_ref: str | None = Query(
@@ -599,39 +600,57 @@ async def list_approvals(
             "(work_ref I2-T1 #1659). Omit for no work_ref filter."
         ),
     ),
+    limit: int | None = Query(
+        default=None,
+        ge=1,
+        le=500,
+        description="Return at most this many requests (1..500). Omit for no limit.",
+    ),
+    offset: int = Query(
+        default=0,
+        ge=0,
+        description="Skip this many requests first (newest first). Defaults to 0.",
+    ),
     operator: Operator = _require_approvals_access,
 ) -> list[ApprovalRequestView]:
     """List approval requests for the operator's tenant.
 
     Defaults to listing only ``pending`` requests. Supports filtering
     by status via ``?status=approved`` / ``?status=rejected`` /
-    ``?status=expired`` and by change ticket via
+    ``?status=expired``, ``?status=all`` for every state (the same
+    sentinel ``meho_approvals_list`` accepts), and by change ticket via
     ``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first
-    (``created_at DESC``).
+    (``created_at DESC``). ``limit`` / ``offset`` page through the
+    result; no ``limit`` returns every match.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id="approval.list",
         audit_op_class="read",
     )
-    # Validate status value against the closed enum.
-    try:
-        status_filter = ApprovalRequestStatus(status)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"unknown status {status!r}; choose from: pending, approved, rejected, expired",
-        ) from exc
+    # Validate status value against the closed enum; "all" means no filter.
+    status_filter: ApprovalRequestStatus | None = None
+    if status != "all":
+        try:
+            status_filter = ApprovalRequestStatus(status)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"unknown status {status!r}; "
+                    "choose from: pending, approved, rejected, expired, all"
+                ),
+            ) from exc
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        stmt = (
-            select(ApprovalRequest)
-            .where(ApprovalRequest.tenant_id == operator.tenant_id)
-            .where(ApprovalRequest.status == status_filter.value)
-        )
+        stmt = select(ApprovalRequest).where(ApprovalRequest.tenant_id == operator.tenant_id)
+        if status_filter is not None:
+            stmt = stmt.where(ApprovalRequest.status == status_filter.value)
         if work_ref is not None:
             stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
-        stmt = stmt.order_by(ApprovalRequest.created_at.desc())
+        stmt = stmt.order_by(ApprovalRequest.created_at.desc()).offset(offset)
+        if limit is not None:
+            stmt = stmt.limit(limit)
         result = await session.execute(stmt)
         rows = list(result.scalars().all())
 

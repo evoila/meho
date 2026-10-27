@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -275,15 +276,12 @@ func TestListOmitsStatusWhenUnset(t *testing.T) {
 			if got := r.URL.Query().Get("status"); got != "" {
 				t.Errorf("unset StatusFilter should omit query param; got status=%q", got)
 			}
-			// Confirm we don't accidentally send limit/offset either —
-			// the generated client's params struct doesn't expose them,
-			// so they should never reach the wire even though the CLI
-			// flags accept them.
+			// Unset --limit / --offset (0) stay off the wire too.
 			if got := r.URL.Query().Get("limit"); got != "" {
-				t.Errorf("limit should not reach wire (generator omits it); got limit=%q", got)
+				t.Errorf("unset Limit should omit query param; got limit=%q", got)
 			}
 			if got := r.URL.Query().Get("offset"); got != "" {
-				t.Errorf("offset should not reach wire (generator omits it); got offset=%q", got)
+				t.Errorf("unset Offset should omit query param; got offset=%q", got)
 			}
 			writeJSON(t, w, http.StatusOK, []api.ApprovalRequestView{})
 		},
@@ -291,11 +289,60 @@ func TestListOmitsStatusWhenUnset(t *testing.T) {
 	defer srv.Close()
 	client := newTestClient(t, srv)
 
-	// Even when --limit and --offset are set, they're a no-op at the
-	// typed-client layer (the backend doesn't accept them and the
-	// generator agrees).
-	if _, err := fetchList(context.Background(), client, listOpts{Limit: 10, Offset: 5}); err != nil {
+	if _, err := fetchList(context.Background(), client, listOpts{}); err != nil {
 		t.Fatalf("fetchList: %v", err)
+	}
+}
+
+// TestListSendsStatusAllAndPaging confirms `--status all --limit 10
+// --offset 5` reaches the wire as status=all&limit=10&offset=5 (#5129).
+func TestListSendsStatusAllAndPaging(t *testing.T) {
+	var seen url.Values
+	srv := mockBackplane(t, map[string]mockHandler{
+		"GET /api/v1/approvals": func(w http.ResponseWriter, r *http.Request) {
+			seen = r.URL.Query()
+			writeJSON(t, w, http.StatusOK, []api.ApprovalRequestView{
+				newApprovalView(t, "approved", ""),
+			})
+		},
+	})
+	defer srv.Close()
+
+	stderr, err := runListWithMock(t, srv, listOpts{StatusFilter: "all", Limit: 10, Offset: 5})
+	if err != nil {
+		t.Fatalf("runList: %v (stderr: %s)", err, stderr.String())
+	}
+	for key, want := range map[string]string{"status": "all", "limit": "10", "offset": "5"} {
+		if got := seen.Get(key); got != want {
+			t.Errorf("expected %s=%s on the wire, got %q", key, want, got)
+		}
+	}
+}
+
+// TestListRejectsUnknownStatus — a value outside the five accepted
+// ones fails before any request, and the error names `all`.
+func TestListRejectsUnknownStatus(t *testing.T) {
+	cmd := &cobra.Command{Use: "list"}
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	cmd.SetContext(context.Background())
+	err := runList(cmd, listOpts{StatusFilter: "done", JSONOut: true})
+	if err == nil {
+		t.Fatal("expected an error for --status done")
+	}
+	if !strings.Contains(stderr.String(), "pending, approved, rejected, expired, all") {
+		t.Errorf("error should list every accepted value; got:\n%s", stderr.String())
+	}
+}
+
+// TestListStatusHelpNamesDefaultAndAll pins the --status help text:
+// the server default is pending, and `all` is offered (#5129).
+func TestListStatusHelpNamesDefaultAndAll(t *testing.T) {
+	usage := newListCmd().Flags().Lookup("status").Usage
+	for _, want := range []string{"all", "(default: pending)"} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("--status help missing %q: %q", want, usage)
+		}
 	}
 }
 
@@ -618,12 +665,21 @@ func TestPrintDetailRendersOptionalFields(t *testing.T) {
 	}
 }
 
-// TestPrintListTableEmpty — zero items renders the empty-tenant line.
+// TestPrintListTableEmpty — an empty list names the state filter that
+// produced it and how to see more; only --status all says "none at all".
 func TestPrintListTableEmpty(t *testing.T) {
-	var buf bytes.Buffer
-	printListTable(&buf, nil)
-	if !strings.Contains(buf.String(), "no approval requests in this tenant") {
-		t.Errorf("empty list: missing empty-line; got:\n%s", buf.String())
+	cases := map[string]string{
+		"":         "no pending approval requests (use --status all to see every request)",
+		"pending":  "no pending approval requests (use --status all to see every request)",
+		"approved": "no approved approval requests (use --status all to see every request)",
+		"all":      "no approval requests in this tenant",
+	}
+	for status, want := range cases {
+		var buf bytes.Buffer
+		printListTable(&buf, nil, status)
+		if got := strings.TrimSpace(buf.String()); got != want {
+			t.Errorf("status %q: got %q, want %q", status, got, want)
+		}
 	}
 }
 
@@ -632,7 +688,7 @@ func TestPrintListTableEmpty(t *testing.T) {
 func TestPrintListTableHappyPath(t *testing.T) {
 	items := []api.ApprovalRequestView{newApprovalView(t, "pending", "")}
 	var buf bytes.Buffer
-	printListTable(&buf, items)
+	printListTable(&buf, items, "")
 	out := buf.String()
 	for _, want := range []string{
 		"ID", "STATUS", "CONNECTOR", "OP", "PRINCIPAL", "CREATED",
@@ -702,14 +758,14 @@ func TestPrintListTableRendersDisplayName(t *testing.T) {
 	principalName := "Bob Requester"
 	named.PrincipalName = &principalName
 	var buf bytes.Buffer
-	printListTable(&buf, []api.ApprovalRequestView{named})
+	printListTable(&buf, []api.ApprovalRequestView{named}, "")
 	if out := buf.String(); !strings.Contains(out, "Bob Requester") {
 		t.Errorf("printListTable missing resolved name in:\n%s", out)
 	}
 
 	anon := newApprovalView(t, "pending", "")
 	var buf2 bytes.Buffer
-	printListTable(&buf2, []api.ApprovalRequestView{anon})
+	printListTable(&buf2, []api.ApprovalRequestView{anon}, "")
 	if out := buf2.String(); !strings.Contains(out, "user-abc") {
 		t.Errorf("printListTable fail-open to sub missing in:\n%s", out)
 	}
@@ -1086,7 +1142,7 @@ func TestPrintListTableRendersRunState(t *testing.T) {
 	ok.ResultState = &executed
 	items := []api.ApprovalRequestView{ok, failedRunView(t), newApprovalView(t, "pending", "")}
 	var buf bytes.Buffer
-	printListTable(&buf, items)
+	printListTable(&buf, items, "")
 	lines := strings.Split(buf.String(), "\n")
 	if !strings.Contains(lines[0], "RUN") {
 		t.Fatalf("header missing RUN column: %q", lines[0])

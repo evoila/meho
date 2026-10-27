@@ -21,6 +21,12 @@ from __future__ import annotations
 from typing import Final
 
 __all__ = [
+    "AUTOMATION_ACCOUNTS_PATH",
+    "AUTOMATION_API_VERSION",
+    "AUTOMATION_JOBS_PATH",
+    "AUTOMATION_JOB_SCHEDULES_PATH",
+    "AUTOMATION_RUNBOOKS_PATH",
+    "AUTOMATION_SCHEDULES_PATH",
     "LOCATIONS_PATH",
     "RESOURCE_GRAPH_API_VERSION",
     "RESOURCE_GRAPH_PATH",
@@ -52,6 +58,39 @@ RESOURCE_GRAPH_API_VERSION: Final[str] = "2024-04-01"
 # ---- arc (Task #5084) ----
 
 # ---- automation (Task #5092) ----
+#
+# Azure Automation (Microsoft.Automation). MEHO reads only these lists: the
+# Automation accounts, and per account its runbooks, jobs, schedules and job
+# schedules (the links between a schedule and its runbooks). Paths that
+# return runbook code, job output or streams, credentials or variables are
+# never added here, because they can hold secrets; a test fails when one is.
+
+#: The API version of the Azure Automation reads (Microsoft.Automation).
+AUTOMATION_API_VERSION: Final[str] = "2024-10-23"
+
+_AUTOMATION_ACCOUNT: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.Automation/automationAccounts/{account}"
+)
+
+#: ``GET``: every Automation account of the subscription (AutomationAccount_List).
+AUTOMATION_ACCOUNTS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Automation/automationAccounts"
+)
+
+#: ``GET``: the runbooks of one account (Runbook_ListByAutomationAccount).
+AUTOMATION_RUNBOOKS_PATH: Final[str] = f"{_AUTOMATION_ACCOUNT}/runbooks"
+
+#: ``GET``: the jobs of one account, narrowed with ``$filter``
+#: (Job_ListByAutomationAccount).
+AUTOMATION_JOBS_PATH: Final[str] = f"{_AUTOMATION_ACCOUNT}/jobs"
+
+#: ``GET``: the schedules of one account (Schedule_ListByAutomationAccount).
+AUTOMATION_SCHEDULES_PATH: Final[str] = f"{_AUTOMATION_ACCOUNT}/schedules"
+
+#: ``GET``: the job schedules of one account, which link a schedule to a
+#: runbook (JobSchedule_ListByAutomationAccount).
+AUTOMATION_JOB_SCHEDULES_PATH: Final[str] = f"{_AUTOMATION_ACCOUNT}/jobSchedules"
 
 # ---- avs (Task #5091) ----
 

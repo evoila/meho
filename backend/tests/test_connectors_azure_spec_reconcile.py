@@ -67,6 +67,11 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     "SUBSCRIPTION_PATH": (("GET",), "SUBSCRIPTIONS_API_VERSION"),
     "LOCATIONS_PATH": (("GET",), "SUBSCRIPTIONS_API_VERSION"),
     "RESOURCE_GRAPH_PATH": (("POST",), "RESOURCE_GRAPH_API_VERSION"),
+    "AUTOMATION_ACCOUNTS_PATH": (("GET",), "AUTOMATION_API_VERSION"),
+    "AUTOMATION_RUNBOOKS_PATH": (("GET",), "AUTOMATION_API_VERSION"),
+    "AUTOMATION_JOBS_PATH": (("GET",), "AUTOMATION_API_VERSION"),
+    "AUTOMATION_SCHEDULES_PATH": (("GET",), "AUTOMATION_API_VERSION"),
+    "AUTOMATION_JOB_SCHEDULES_PATH": (("GET",), "AUTOMATION_API_VERSION"),
 }
 
 _PARAMETER = re.compile(r"\{[^}]*\}")
@@ -142,6 +147,15 @@ def test_the_checked_paths_are_pinned() -> None:
     """The list of checked paths, so a change to it is always on purpose."""
     assert sorted(_declared_op_ids()) == [
         "GET:/subscriptions/{}/locations@2022-12-01",
+        "GET:/subscriptions/{}/providers/microsoft.automation/automationaccounts@2024-10-23",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.automation/"
+        + "automationaccounts/{}/jobs@2024-10-23",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.automation/"
+        + "automationaccounts/{}/jobschedules@2024-10-23",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.automation/"
+        + "automationaccounts/{}/runbooks@2024-10-23",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.automation/"
+        + "automationaccounts/{}/schedules@2024-10-23",
         "GET:/subscriptions/{}@2022-12-01",
         "POST:/providers/microsoft.resourcegraph/resources@2024-04-01",
     ]

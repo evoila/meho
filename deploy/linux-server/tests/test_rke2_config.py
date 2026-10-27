@@ -5,7 +5,8 @@
 
 They cover the default settings, custom pod and service ranges, and the join
 options. The join token is read from its file and is never printed, logged
-or passed as an argument.
+or passed as an argument. RKE2's CIS profile is in every case; test_cis.py
+covers its pod security file and its host steps.
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ DEFAULT_CONFIG = textwrap.dedent("""\
     ingress-controller: traefik
     cluster-cidr: "10.42.0.0/16"
     service-cidr: "10.43.0.0/16"
+    profile: cis
+    pod-security-admission-config-file: "/etc/rancher/rke2/meho-pod-security.yaml"
     """)
 
 

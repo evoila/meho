@@ -1,4 +1,4 @@
-# Form-2 install script: `deploy/linux-server/install.sh` (#4733, #4635, #4735)
+# Form-2 install script: `deploy/linux-server/install.sh` (#4733, #4635, #4636, #4735)
 
 ## Overview
 
@@ -16,15 +16,18 @@ The script runs the six steps of the design:
 2. **Prepare the machine.** It creates `/var/lib/meho` and `/etc/meho`
    (both mode 0700). Then it turns on the MEHO host firewall and turns
    firewalld or ufw off (see [The host firewall](#the-host-firewall)).
-   Then it writes RKE2's settings, copies the join token when the join
-   options are given, copies the MEHO image archive and the storage
+   Then it writes RKE2's settings, with RKE2's CIS profile and its pod
+   security file (see [RKE2's CIS profile](#rke2s-cis-profile)), copies the
+   join token when the join options are given, copies the MEHO image archive and the storage
    manifest to the folders where RKE2 reads them, and writes the setting
    that makes RKE2's Traefik redirect port 80 to 443. It also
    installs the host command `meho-host`
    ([linux-server-meho-host.md](linux-server-meho-host.md)).
 3. **Install and start RKE2.** It runs RKE2's own installer in offline
-   mode, starts `rke2-server`, and waits until the node is Ready, until
-   `local-path` is the default storage class, and until the storage
+   mode. Then it runs the host steps of RKE2's CIS profile: the `etcd` user
+   and group, and RKE2's kernel settings, copied to `/etc/sysctl.d` and
+   loaded. Then it starts `rke2-server`, and waits until the node is Ready,
+   until `local-path` is the default storage class, and until the storage
    provisioner runs.
 4. **Install the MEHO core.** It writes the answers of this place to
    `/etc/meho/values-place.yaml` and runs the download's Helm with the
@@ -38,7 +41,9 @@ The script runs the six steps of the design:
    first-start list (not in this version yet).
 
 `--from-disk --hostname <fqdn>` runs only the steps that need the host name:
-RKE2's settings, the start of RKE2, and steps 4 to 6. It is for a machine
+RKE2's settings, the start of RKE2, and steps 4 to 6. Before the start it
+also runs the host steps of the CIS profile, which change nothing where a
+full install ran before. It is for a machine
 where RKE2's own state was removed on purpose, but its files, the chart and
 the image archives are still on the disk. The appliance's first start uses
 it (form-1 design, section 2).
@@ -52,8 +57,6 @@ The download itself, `meho-linux-<version>-amd64.tar`, is built by
 
 Later Tasks add their steps to `main()` in `install.sh`:
 
-- #4636 adds the CIS host steps between installing and starting RKE2, and
-  `profile: cis` with the storage exception in RKE2's settings.
 - #4042 adds the first-start list to step 6, read with
   `meho status --first-start`.
 - #4736 makes a second run an update, which reads `install.json` and
@@ -69,6 +72,7 @@ Later Tasks add their steps to `main()` in `install.sh`:
 | `lib/checks.sh` | Step 1: one function per check. |
 | `lib/firewall.sh` | The host firewall: the checks of step 1 (`nft`, the admin network), the files and the start in step 2, `firewall_state` and `firewall_port_list`. |
 | `lib/prepare.sh` | Step 2: folders, `config.yaml`, join token, image archive, storage manifest, the Traefik redirect. |
+| `lib/cis.sh` | RKE2's CIS profile: the pod security file that `config.yaml` names, the host steps of step 3 (the `etcd` user and group, the kernel settings), and `cis_state`. |
 | `lib/rke2.sh` | Step 3: RKE2's installer, the start, and the wait with one time limit. |
 | `lib/core.sh` | Steps 4 to 6: the versions of the download, the place values, the Helm call, the two one-time files, the `meho` command, the install record, the result lines. |
 | `values-single-node.yaml` | The Helm values for one node. The download ships it as `chart/values-single-node.yaml`. |
@@ -126,7 +130,8 @@ service.
 | `/etc/meho/firewall.nft` | 0600 | the MEHO host firewall: the table `inet meho` |
 | `/etc/systemd/system/meho-firewall.service` | 0644 | the boot unit that loads `firewall.nft` |
 | `/etc/systemd/system/rke2-server.service.d/meho-firewall.conf` | 0644 | RKE2 starts only while the table `inet meho` is loaded |
-| `/etc/rancher/rke2/config.yaml` | 0600 | `write-kubeconfig-mode: "0600"`, `tls-san`, `ingress-controller: traefik`, `cluster-cidr`, `service-cidr`; with the join options also `server` and `token-file` |
+| `/etc/rancher/rke2/meho-pod-security.yaml` | 0600 | the pod security file of RKE2's CIS profile, with one more exempt namespace (see [The pod security file](#the-pod-security-file)) |
+| `/etc/rancher/rke2/config.yaml` | 0600 | `write-kubeconfig-mode: "0600"`, `tls-san`, `ingress-controller: traefik`, `cluster-cidr`, `service-cidr`, `profile: cis`, `pod-security-admission-config-file`; with the join options also `server` and `token-file` |
 | `/etc/meho/join-token` | 0600 | a copy of `--join-token-file`, only with the join options |
 | `/var/lib/rancher/rke2/agent/images/meho-images.linux-amd64.tar.zst` | 0600 | the MEHO image archive |
 | `/var/lib/rancher/rke2/server/manifests/local-path-storage.yaml` | 0600 | the storage manifest |
@@ -143,6 +148,11 @@ script copies only the MEHO archive.
 ### Step 3: start and wait
 
 `install_rke2` runs `INSTALL_RKE2_ARTIFACT_PATH=<download>/rke2 sh <download>/rke2/install.sh`.
+
+`prepare_cis_host` then makes the `etcd` user and group and loads RKE2's
+kernel settings (see [The host steps](#the-host-steps)). RKE2 checks both
+when it starts with the CIS profile and stops when one is missing, so they
+must be in place before the start.
 
 `start_rke2` runs `systemctl enable --now --no-block rke2-server.service`.
 The unit sets `TimeoutStartSec=0`, so a start that waits for the service
@@ -252,8 +262,10 @@ folder of `install.sh` holds the core files: `VERSION`,
 `chart/values-single-node.yaml`, `bin/helm`, `bin/meho` and the chart file
 that `VERSION` names. The RKE2 files and the image archive are not needed:
 RKE2's installer already ran, and RKE2 imports the archives in its images
-folder at every start. Step 2 writes only RKE2's settings. Step 3 starts
-RKE2 and waits. Steps 4 to 6 run as above, and `install.json` records
+folder at every start. Step 2 writes only RKE2's settings and the pod
+security file. Step 3 runs the host steps of the CIS profile, starts RKE2
+and waits. RKE2's kernel settings file is still in RKE2's share folder,
+because RKE2's own files stay on the disk. Steps 4 to 6 run as above, and `install.json` records
 `"from_disk": true`. The DNS check does not run, so `--public-address` is
 refused as wrong usage. The firewall is not touched (form-2 design,
 section 5).
@@ -471,6 +483,148 @@ permanent. The chart turns this into the Traefik arguments
 and `permanent=true` (checked with `helm template` against
 `rke2-traefik` 41.2.003).
 
+## RKE2's CIS profile
+
+ADR 0009 (closed by default) asks for RKE2's CIS profile from the first
+version. The profile is RKE2's built-in setting for the CIS Kubernetes
+Benchmark, a common hardening standard. `config.yaml` sets `profile: cis`.
+The facts below come from the source of RKE2 v1.37.1+rke2r1, the version
+the download pins.
+
+With `profile: cis`, RKE2:
+
+- stops at its start when the host is not ready: the kernel must have the
+  four values of RKE2's kernel settings file, and the `etcd` user and group
+  must exist (`pkg/cli/cmds/profile_linux.go`). It also sets
+  `protect-kernel-defaults` for the kubelet;
+- runs etcd as the `etcd` user and writes its static pod files with mode
+  0600 (`pkg/executor/staticpod/staticpod.go`);
+- applies the "restricted" Pod Security Standard in every namespace,
+  except the exempt namespaces of its pod security file (below);
+- creates network policies in the namespaces `kube-system`, `kube-public`
+  and `default` (below).
+
+### The host steps
+
+`prepare_cis_host` runs in step 3, after RKE2's installer and before RKE2
+starts. Both steps change nothing when they ran before, because a second
+run of `install.sh` is the update (#4736).
+
+1. **The `etcd` user and group.** RKE2 looks them up in `/etc/passwd` and
+   `/etc/group` only (hardening guide), so the step reads these two files,
+   not `getent`. When both are missing, it runs the hardening guide's
+   command, `useradd -r -c "etcd user" -s /sbin/nologin -M -U etcd`. When
+   only the group exists, `useradd` gets `-g etcd` instead of `-U`. When
+   only the user exists, `groupadd -r etcd` adds the group.
+2. **The kernel settings.** RKE2 ships them as `rke2-cis-sysctl.conf`.
+   RKE2's installer puts it in RKE2's share folder:
+   `/usr/local/share/rke2/` for the tarball, `/opt/rke2/share/rke2/` for the
+   tarball when `/usr/local` is read-only or a mount point, and
+   `/usr/share/rke2/` for the RPM. `install.sh` always installs the tarball
+   (`INSTALL_RKE2_ARTIFACT_PATH`), on Ubuntu and RHEL alike, but the step
+   looks in all three places. It copies the file to
+   `/etc/sysctl.d/60-rke2-cis.conf` (mode 0644), where `systemd-sysctl`
+   loads it at every start of the machine. It copies only when the content
+   differs, so a changed copy is replaced by RKE2's file. Then it reads
+   every value of the file from `/proc/sys`. Only when one differs, it runs
+   `systemctl restart systemd-sysctl.service`, as the hardening guide does,
+   and reads the values again. A value that is still wrong means a file
+   that `systemd-sysctl` reads later sets it again, for example
+   `/etc/sysctl.conf`. The step then stops with one `[FAIL]` line that names
+   the key, so RKE2 does not fail later with a less clear message. The
+   values always come from RKE2's file; `install.sh` holds none of them.
+
+### The pod security file
+
+RKE2 writes its own pod security file, `/etc/rancher/rke2/rke2-pss.yaml`,
+at every start, but only when its settings name no other file
+(`pkg/rke2/rke2_linux.go`). With the CIS profile, that file enforces, audits
+and warns at the "restricted" level, and exempts three namespaces:
+`kube-system`, `compliance-operator-system` and `tigera-operator`
+(`pkg/rke2/psa.go`).
+
+`write_pod_security_config` writes
+`/etc/rancher/rke2/meho-pod-security.yaml` (mode 0600), and `config.yaml`
+names it with `pod-security-admission-config-file`. It is RKE2's own file
+with one more exempt namespace: `local-path-storage`. RKE2 mounts the file
+into the API server, because its path is an argument of the API server.
+`write_rke2_config` writes it before `config.yaml`, so the settings never
+name a missing file, also with `--from-disk`.
+
+Why the storage namespace needs the exception: the local-path provisioner
+starts a helper pod in its own namespace for each volume. The helper pod
+mounts a folder of the host (`/var/lib/meho/volumes`), which even the
+"baseline" level refuses. The provisioner itself also lacks fields that
+"restricted" asks for, such as `runAsNonRoot` and a seccomp profile. No
+MEHO namespace is exempt, and RKE2's own three
+stay as they are. `kube-system` is exempt by RKE2's default, so RKE2's
+Traefik, Canal and CoreDNS run as before.
+
+Why a file and not a namespace label: the RKE2 docs name
+`pod-security-admission-config-file` as the way to change the default. The
+exemption then lives in a root-only file on the host. A namespace label
+(`pod-security.kubernetes.io/enforce: privileged`) would also work, but
+anyone who may edit namespaces could change it, and it would be a sixth
+change to the upstream storage manifest. One difference: an exempt
+namespace is not checked at all, so the audit log and the warnings skip it
+too (Kubernetes docs, "Exemptions"). With a label, the restricted level
+would still write audit notes for the namespace.
+
+### Network policies and Traefik
+
+With the profile, RKE2 creates these network policies (`pkg/rke2/np.go`,
+`pkg/controllers/cisnetworkpolicy`). All of them limit only incoming
+traffic.
+
+| Namespace | Policy | What it lets in |
+| --- | --- | --- |
+| `kube-system`, `kube-public`, `default` | `default-network-policy` | traffic from pods of the same namespace |
+| `kube-system`, `kube-public`, `default` | `rke2-flannel-host-networking` | traffic from the flannel address of each node (the first address of its pod range) |
+| `kube-system` | `default-network-dns-policy` | TCP and UDP 53 to CoreDNS, from every address |
+| `kube-system` | `default-network-traefik-policy` | the ports named `web` and `websecure` of the pods labelled `app.kubernetes.io/name: rke2-traefik`, from every address |
+| `kube-system` | `default-network-ingress-policy`, `default-network-ingress-webhook-policy` | the same for ingress-nginx, which form 2 does not run |
+| `kube-system` | `default-network-snapshot-validation-webhook-policy`, `default-network-metrics-server-policy` | `https` to the snapshot webhook and the metrics server |
+
+RKE2's Traefik gets the console traffic on ports 80 and 443 through a host
+port. The CNI `portmap` plugin turns that into a destination NAT to the
+Traefik pod, so Calico checks the policies against the pod's ports. In
+`rke2-traefik` 41.2.003 (checked with `helm template`), the Traefik pod has
+the label `app.kubernetes.io/name: rke2-traefik` and the ports `web`
+(container port 8000, host port 80) and `websecure` (container port 8443,
+host port 443). So `default-network-traefik-policy` lets traffic from
+every address in to both ports, and the console loads. MEHO adds no
+network policy for Traefik.
+
+The policies limit only traffic into `kube-system`. Traffic from Traefik
+to the MEHO namespace is outgoing traffic of `kube-system`, which no RKE2
+policy limits. The chart's own policies let the namespace `kube-system`
+reach MEHO (`networkPolicy.ingressControllerNamespace: kube-system` in
+`values-single-node.yaml`). No RKE2 policy is in `meho` or
+`local-path-storage`.
+
+### For later Tasks
+
+`cis_state` (read-only) prints `on`, or `off: <reason>`, and returns 0 or
+1, like `firewall_state`. On means: `config.yaml` sets `profile: cis`, the
+pod security file exists, the `etcd` user and group are in `/etc/passwd`
+and `/etc/group`, `/etc/sysctl.d/60-rke2-cis.conf` exists, and the kernel
+has its values. `meho-host check` (#4638) can call it. `meho-host` sources
+nothing today, so #4638 decides how the function reaches the machine, as
+for `firewall_state`.
+
+### A newer RKE2
+
+`tests/fixtures/rke2-pod-security-cis.yaml` is RKE2's pod security file of
+`pkg/rke2/psa.go`, and `tests/fixtures/rke2-cis-sysctl.conf` is
+`bundle/share/rke2/rke2-cis-sysctl.conf`. A CI step compares both with the
+source of the RKE2 version in `packaging/common.sh`. It also checks that
+this version still has `default-network-traefik-policy` for the ports
+`web` and `websecure`, from every address. When RKE2 moves to a new
+version and the step fails, copy RKE2's new files to the fixtures, update
+their `sha256` in `tests/test_cis.py`, and write the new pod security file
+in `render_pod_security_config` with `local-path-storage` added. Check the
+labels and port names of the new `rke2-traefik` chart by hand.
+
 ## The storage manifest
 
 `storage/local-path-storage.yaml` is the upstream v0.0.37 manifest with
@@ -522,7 +676,11 @@ machine for each test:
   and logs its arguments, so a test changes one answer and reads the calls.
   The kubectl stub answers `get secret` with the decoded values the real
   kubectl would print for the script's templates, and a test greps every
-  output and record for them.
+  output and record for them. The RKE2 installer stub puts RKE2's kernel
+  settings file in RKE2's share folder, the `systemctl` stub loads the
+  files of `/etc/sysctl.d` into the fake `/proc/sys` on
+  `restart systemd-sysctl.service`, and the `useradd` and `groupadd` stubs
+  add their lines to the fake `/etc/passwd` and `/etc/group`.
 
 `tests/test_firewall.py` covers the admin network check, the three
 firewall files, the order of step 2, firewalld and ufw, the port list and
@@ -539,6 +697,14 @@ machine's own firewall stays as it is. It needs `nft`, user namespaces and
 a kernel with `nft_ct` and `nft_fib_inet`, and it is skipped without them.
 The CI job installs `nftables` and sets `MEHO_REQUIRE_NFT_CHECK=1`, which
 turns that skip into a failure.
+
+`tests/test_cis.py` covers RKE2's CIS profile: the two lines in
+`config.yaml`, the pod security file against RKE2's own file (only
+`local-path-storage` added, no MEHO namespace), the order of the host steps
+(after the installer, before the start of RKE2), each place of RKE2's
+kernel settings file, values that come from RKE2's file, a later file that
+sets a value again, the existing `etcd` user or group, a second run that
+changes nothing, `--from-disk`, and every answer of `cis_state`.
 
 `tests/test_core_install.py` also renders the chart with
 `values-single-node.yaml` and the place values the script wrote. It skips
@@ -557,7 +723,9 @@ CI: `.github/workflows/linux-server-test.yml` runs on every pull request
 that changes `deploy/linux-server/` or the chart. It installs shellcheck
 v0.11.0 and Helm v3.16.4 (both pinned with a checksum) and nftables, runs
 shellcheck on every `*.sh` file and every file with a shell shebang there,
-checks the fixture against upstream, and runs the unit tests with
+checks the local-path fixture against upstream, checks the two RKE2
+fixtures and the Traefik policy against the source of the pinned RKE2
+version (see [A newer RKE2](#a-newer-rke2)), and runs the unit tests with
 `MEHO_REQUIRE_HELM=1` and `MEHO_REQUIRE_NFT_CHECK=1`. Scripts that later
 Tasks add in this folder are checked by the same job.
 
@@ -596,9 +764,19 @@ Tasks add in this folder are checked by the same job.
   reason, and `check-download.sh` checks every digest; see
   [linux-server-download.md](linux-server-download.md). A `docker save`
   archive would get new digests, and RKE2 would not find the images offline.
-- **No CIS profile yet.** Without a profile, RKE2 applies the `privileged`
-  pod security level, so the local-path helper pods run. #4636 adds the
-  profile and the exception for the `local-path-storage` namespace.
+- **The CIS profile is not proven on a real machine yet.** The tests here
+  prove the files and the order of the steps, not RKE2 itself. The week-4
+  install (#4741) checks that every pod is Ready under the profile, that no
+  MEHO namespace needs an exception, and that the console loads through
+  Traefik. An offline check of the chart, rendered with
+  `values-single-node.yaml`, found no pod of the `meho` namespace that
+  breaks the "restricted" rules, but only the API server's own check
+  proves it.
+- **A later sysctl file can undo a kernel setting.** The install stops when
+  a file that `systemd-sysctl` reads after `60-rke2-cis.conf` sets one of
+  RKE2's values again. If someone adds such a line after the install, RKE2
+  does not start at the next start of the machine, and `cis_state` says
+  `off` with the key.
 - **IPv4 only.** The DNS check reads A records, and the ranges are IPv4.
   The admin network is IPv4 too, so SSH over IPv6 gets no answer.
 - **SSH on port 22 only.** The rules open SSH on port 22. A session on
@@ -665,6 +843,30 @@ Firewall:
   https://docs.datadoghq.com/security/default_rules/xccdf-org-ssgproject-content-rule-nftables-ensure-default-deny-policy
 - Linux `force_mld_version` (default 0: MLD version 2, with a fallback to
   version 1): https://docs.kernel.org/networking/ip-sysctl.html
+
+RKE2's CIS profile (RKE2 v1.37.1+rke2r1):
+
+- RKE2 hardening guide (the `etcd` user, the kernel settings file and its
+  places, `systemctl restart systemd-sysctl`, what the profile does):
+  https://docs.rke2.io/security/hardening_guide
+- RKE2 pod security standards (`/etc/rancher/rke2/rke2-pss.yaml`,
+  `pod-security-admission-config-file`):
+  https://docs.rke2.io/security/pod_security_standards
+- RKE2 source at the pinned tag: `pkg/rke2/psa.go` (the default pod
+  security file), `pkg/rke2/rke2_linux.go` (RKE2 writes its file only when
+  none is named), `pkg/cli/cmds/profile_linux.go` (the checks at the
+  start), `pkg/rke2/np.go` and `pkg/controllers/cisnetworkpolicy/` (the
+  network policies), `pkg/executor/staticpod/staticpod.go` (etcd as the
+  `etcd` user; the API server gets the file as an argument), `install.sh`
+  (`INSTALL_RKE2_TAR_PREFIX`, `/opt/rke2`), and
+  `bundle/share/rke2/rke2-cis-sysctl.conf`:
+  https://github.com/rancher/rke2/tree/v1.37.1%2Brke2r1
+- Kubernetes pod security admission, exemptions (an exempt namespace is
+  not checked, audited or warned about):
+  https://kubernetes.io/docs/concepts/security/pod-security-admission/#exemptions
+- `rke2-traefik` 41.2.003 (the label `app.kubernetes.io/name: rke2-traefik`,
+  the ports `web` and `websecure`):
+  https://rke2-charts.rancher.io/assets/rke2-traefik/rke2-traefik-41.2.003.tgz
 
 Install:
 

@@ -27,7 +27,10 @@ job, and 2 for wrong usage.
 Later Tasks add to this file: the hardening lines of `check` (#4638), the
 commands `certificate`, `keyholder` and `unseal` (#4738), and
 `admin-network` and `uninstall` (#4739). `meho doctor` runs `check --json`
-when it runs on the server (#4740).
+when it runs on the server (#4740). For the hardening lines, two read-only
+functions of the install already say `on` or `off: <reason>`:
+`firewall_state` in `lib/firewall.sh` and `cis_state` in `lib/cis.sh`
+([linux-server-install.md](linux-server-install.md)).
 
 ## Key files
 

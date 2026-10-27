@@ -459,6 +459,24 @@ async def test_a_401_on_a_cost_read_names_the_billing_settings() -> None:
     assert login_token() not in str(error)
 
 
+@pytest.mark.asyncio
+async def test_a_refused_login_during_a_cost_read_keeps_its_own_error() -> None:
+    """A wrong secret is not a billing setting: Microsoft's answer stays."""
+    refusal = {"error": "invalid_client", "error_codes": [7000215]}
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post(token_url()).respond(401, json=refusal)
+        query = mock.post(QUERY_URL).respond(200, json=_cost_answer(_GROUPED_COLUMNS, []))
+        with pytest.raises(ConnectorAuthError) as caught:
+            await _connector().cost_query(operator(), AzureTargetStub(), {})
+
+    error = caught.value
+    assert error.stage == "establish"
+    assert "AADSTS7000215" in str(error)
+    assert error.remediation is not None and "client_secret" in error.remediation
+    assert "view charges" not in str(error)
+    assert not query.called
+
+
 @pytest.mark.parametrize(
     ("status", "code", "kind", "setting"),
     [

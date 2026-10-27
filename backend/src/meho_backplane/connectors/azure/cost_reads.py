@@ -441,10 +441,17 @@ def _with_cost_hint(exc: AzureApiError, target_name: str) -> AzureApiError | Non
 
 @contextmanager
 def cost_errors(target: AzureTargetLike) -> Iterator[None]:
-    """Name the setting to switch on when Azure hides cost data from the login."""
+    """Name the setting to switch on when Azure hides cost data from the login.
+
+    Only Azure's own 401 to the cost call is rewritten. A login that
+    Microsoft Entra ID refused (``stage="establish"``) keeps its own error,
+    because there the secret is the problem, not a billing setting.
+    """
     try:
         yield
     except ConnectorAuthError as exc:
+        if exc.stage == "establish":
+            raise
         raise ConnectorAuthError(
             f"Azure target {target.name!r}: Azure refused the cost data with HTTP 401, also "
             f"after a new login. {_COST_401_HINT}",

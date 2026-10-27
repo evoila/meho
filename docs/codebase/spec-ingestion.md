@@ -2749,8 +2749,13 @@ All three delegate to `ReviewService.delete_connector`
   * a **hosted agent** whose `toolset.connectors` list names the
     connector, and an active or paused **schedule** that starts such
     an agent;
-  * an **approval request** that waits, or that is approved but has not
-    run yet (`resumed_at IS NULL`);
+  * an **approval request** that waits, or that is approved and can
+    still run: nobody started it (`resumed_at IS NULL`), it has no stored
+    result (`resume_result IS NULL`), and it was approved within the
+    approval time limit (`approval_default_ttl_seconds`). Old approved
+    rows from before `resumed_at` existed, and rows whose agent stopped
+    waiting, keep `resumed_at` empty for ever; the time limit stops them
+    from blocking the delete for ever;
   * an **operation run** that is queued (`pending`) or `running`.
 
   Which tenants count: for a tenant copy, that tenant. For the

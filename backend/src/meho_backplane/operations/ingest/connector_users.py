@@ -11,7 +11,8 @@ one of its operations:
   call whose ``op_id`` is one of the connector's operations;
 * a **hosted agent** whose ``toolset.connectors`` list names the connector;
 * a **schedule** (active or paused) that starts one of those hosted agents;
-* an **approval request** that waits, or is approved but not run yet;
+* an **approval request** that waits, or is approved and can still run
+  (see :func:`_approval_users`);
 * an **operation run** that is queued or running.
 
 The caller decides which tenants count. The delete in
@@ -23,6 +24,7 @@ its own transaction, after it took the exclusive connector-usage lock
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -41,6 +43,7 @@ from meho_backplane.db.models import (
     Sensor,
 )
 from meho_backplane.operations.ingest.exceptions import ConnectorUser
+from meho_backplane.settings import get_settings
 
 __all__ = ["TenantFilter", "find_connector_users"]
 
@@ -196,6 +199,20 @@ async def _agent_and_schedule_users(
 async def _approval_users(
     session: AsyncSession, connector_id: str, tenants: TenantFilter
 ) -> list[ConnectorUser]:
+    """Approval requests that wait, or are approved and can still run.
+
+    An approved request counts only while all three hold: nobody started
+    it (``resumed_at`` is empty), it has no stored result
+    (``resume_result`` is empty), and it was approved within the approval
+    queue's default time limit (``approval_default_ttl_seconds``). Rows
+    approved before ``resumed_at`` existed, and rows whose agent stopped
+    waiting, keep ``resumed_at`` empty for ever. ``approved`` is a final
+    status, so without the time limit such a row would block the delete
+    for ever.
+    """
+    approved_after = datetime.now(UTC) - timedelta(
+        seconds=get_settings().approval_default_ttl_seconds
+    )
     rows = await session.execute(
         select(ApprovalRequest.id, ApprovalRequest.op_id, ApprovalRequest.tenant_id)
         .where(
@@ -206,6 +223,8 @@ async def _approval_users(
                 and_(
                     ApprovalRequest.status == ApprovalRequestStatus.APPROVED.value,
                     ApprovalRequest.resumed_at.is_(None),
+                    ApprovalRequest.resume_result.is_(None),
+                    ApprovalRequest.decided_at > approved_after,
                 ),
             ),
         )

@@ -174,8 +174,10 @@ async def test_other_failures_raise_microsoft_login_error_without_retry(status: 
             await _fetch()
 
     assert route.call_count == 1
-    assert f"HTTP {status}" in str(caught.value)
-    assert "login.microsoftonline.com" in str(caught.value)
+    assert str(caught.value) == (
+        f"The Microsoft login service at login.microsoftonline.com answered HTTP {status} "
+        "for target 'azure-sub-a'. Try again later."
+    )
     assert SECRET_A not in str(caught.value)
 
 

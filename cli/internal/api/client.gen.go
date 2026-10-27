@@ -2357,6 +2357,7 @@ type BodyOperationsCallUiOperationsCallPost struct {
 	ConnectorId string  `json:"connector_id"`
 	OpId        string  `json:"op_id"`
 	Params      *string `json:"params,omitempty"`
+	PreviewHash *string `json:"preview_hash,omitempty"`
 	Target      *string `json:"target,omitempty"`
 	WorkRef     *string `json:"work_ref,omitempty"`
 }

@@ -471,3 +471,188 @@ as MEHO's system identity, which cannot read the secret, so it reports
   <https://learn.microsoft.com/en-us/azure/azure-government/compare-azure-government-global-azure>
 - Related pages: `connectors-keycloak.md` (the same client credentials request),
   `connectors-shared-vault-creds.md`, `error-message-shape.md`.
+
+## cost
+
+Five read operations in the group `cost`. All are `safe` and need no
+approval. The cost query and the forecast are POST calls that only read.
+
+Modules: `cost.py` (group text, guidance for the AI, the operation table and
+the `CostOps` mixin that `AzureConnector` inherits), `cost_schemas.py`
+(parameter and response schemas), `cost_reads.py` (query, forecast and the
+shared helpers), `cost_lists.py` (budgets and Advisor) and `cost_prices.py`
+(the public price list).
+
+| Operation | Call | API version |
+|---|---|---|
+| `azure.cost.query` | `POST /{scope}/providers/Microsoft.CostManagement/query` | `2026-06-01` |
+| `azure.cost.forecast` | `POST /{scope}/providers/Microsoft.CostManagement/forecast` | `2026-06-01` |
+| `azure.cost.budget.list` | `GET /{scope}/providers/Microsoft.Consumption/budgets` | `2026-06-01` |
+| `azure.advisor.recommendation.list` | `GET /subscriptions/{id}/providers/Microsoft.Advisor/recommendations` | `2026-10-01` |
+| `azure.price.list` | `GET https://prices.azure.com/api/retail/prices` (public, no login) | `2023-01-01-preview` |
+
+`{scope}` is the target's subscription, or one of its resource groups when
+the call names `resource_group`. A resource group name is checked (1 to 90
+letters, digits, `_ - . ( )`, not ending with a period) before it goes into
+a path.
+
+### Parameters that matter
+
+- `azure.cost.query`:
+  - `type`: `actual` (the default, cost as billed) or `amortized`
+    (reservation and savings plan purchases spread over their term).
+  - `period`: `month_to_date` (the default) or `last_month`, or your own
+    days with `from` and `to` (`YYYY-MM-DD`). MEHO always sends dates to
+    Azure (`timeframe: Custom`, days in UTC), so the result shows exactly
+    which days it covers.
+  - `granularity`: `total` (the default; Azure's `None`) or `daily`.
+  - `group_by`: up to two of `resource_group`, `service`, `resource_type`,
+    `location`, `meter`, or `tag:<key>` for a tag key.
+- `azure.cost.forecast`: `type` and `resource_group`. Always this calendar
+  month (UTC), per day, with the cost so far included
+  (`includeActualCost: true`).
+- `azure.cost.budget.list`: `resource_group`. The subscription's list can also
+  hold budgets of its resource groups; each budget says which (`resource_group`).
+- `azure.advisor.recommendation.list`: `category` (Azure filters it with
+  `$filter`) and `impact` (MEHO filters it).
+- `azure.price.list`: at least one of `service_name`, `region`, `sku` (the
+  size name Azure uses, for example `Standard_D4s_v5`), `price_type`,
+  `product_name`, `meter_name`, and `currency` (default `EUR`). From API
+  version `2023-01-01-preview` on, values must match exactly, in upper and
+  lower case; MEHO writes `region` in lower case, as the price list does.
+
+### Results
+
+Each list keeps its metadata in objects next to the rows, and each operation
+names them in its `result_objects` hint. So when a list has more than 50 rows
+(or 4 KB) and goes to a stored result, these objects stay inline next to the
+link:
+
+| Operation | Rows | Kept next to a stored result |
+|---|---|---|
+| `azure.cost.query` | `items` | `totals`, `period`, `scope`, `query`, `omissions` |
+| `azure.cost.forecast` | `items` | `totals`, `period`, `scope`, `query`, `omissions` |
+| `azure.cost.budget.list` | `budgets` | `scope`, `omissions`, and `count` |
+| `azure.advisor.recommendation.list` | `items` | `filters`, `scope`, `omissions`, and `count` |
+| `azure.price.list` | `items` | `lookup`, `omissions` |
+
+- **Cost rows** have `cost`, `currency`, `date` (only per day) and one key
+  per group (`resource_group`, `service`, `resource_type`, `location`,
+  `meter`, `tag_key`, `tag_value`). Azure names its cost column `PreTaxCost`
+  or `Cost`, depending on the agreement type. MEHO reads both, and
+  `query.cost_column` says which one Azure sent. When the rows have a cost
+  but no such column, the call fails: MEHO does not guess.
+- **`totals.cost`** is the sum of the rows, rounded to 2 decimals. It is
+  `null` when the rows have more than one currency. It is not called
+  `total`, because the result reduction writes its own `total` (the number
+  of rows) next to a stored result.
+- **Forecast rows** have `status`: `Actual` (cost already used) or
+  `Forecast` (Azure's estimate). `totals.month_total` is `actual_cost` plus
+  `forecast_cost`.
+- **Budgets** have `name`, `resource_group` (read from the budget's id; `null`
+  for a budget of the whole subscription), `category`, `amount`, `time_grain`,
+  `period: {start, end}`, `current_spend`, `forecast_spend`, `percent_used`
+  and `currency`. `percent_used` is `current_spend / amount * 100`, rounded to
+  2 decimals, and `null` when the amount is 0. The budgets' notification
+  settings are left out, because they hold people's mail addresses.
+- **Advisor items** have `category`, `impact`, `problem`, `solution`,
+  `resource_id`, `status`, `savings_amount`, `annual_savings_amount` and
+  `savings_currency` (from Azure's `extendedProperties`). MEHO leaves out
+  dismissed, postponed and completed recommendations, as the portal does,
+  and `filters.inactive_left_out` says how many. `count` is the number of
+  items.
+- **Prices** have the service, product, SKU, size name, meter id and name,
+  region, unit, retail price, unit price, price type, reservation term,
+  effective start date and currency. `lookup` has `looked_up_at`, the
+  currency, the filter MEHO sent, and `reference_only`: prices in other
+  currencies than USD are converted reference values, not quotes.
+- The Azure sensor recipes read two of these fields by path, so they are
+  contracts: `budgets[*].percent_used` and Advisor's `count`.
+
+Text from Azure (resource group and budget names, Advisor's problem and
+solution, price names) is data. The guidance for the AI says so.
+
+### The public price list never gets a token
+
+The Retail Prices API is not Azure Resource Manager. `cost_prices.py` does
+not use `send` (which adds the target's token). It opens its own short-lived
+HTTP client with no `Authorization` header, follows no redirect, and caps the
+answer size like every connector call. It does not read the target's secret
+at all. MEHO builds the `$filter` text itself from the parameters and doubles
+a single quote inside a value. From Azure's `NextPageLink` it reads only the
+`$skip` number, after checking that the link points at the price list over
+https, and it asks for the next page with its own query. A link to anything
+else fails the call. Each page is recorded in the trace like other vendor
+calls. A test proves that the request to the price list carries no
+`Authorization` header, also after an Azure Resource Manager call put a token
+in the cache.
+
+### Errors that name a billing setting
+
+Cost data can be hidden from a login that has the right role. When Azure
+answers a cost query, forecast or budget read like this, MEHO's error names
+what the customer must switch on:
+
+| Azure answer | MEHO's error names |
+|---|---|
+| 401, also after a new login | "Account owners can view charges" (Enterprise Agreement) and the billing profile's "Azure charges" policy (Microsoft Customer Agreement), and the Cost Management Reader role |
+| `AccountCostDisabled` | "Account owners can view charges" (AO view charges) |
+| `DepartmentCostDisabled` | "Department admins can view charges" (DA view charges) |
+| `IndirectCostDisabled` | the partner must publish its prices |
+| `FailedDependency` (forecast) | about one week of cost data is needed, and only one currency |
+
+The 401 error stays a `connector_auth_failed` error. The other errors keep
+their kind (for example `AzureForbiddenError`) and Azure's code; only the
+message and the remediation are MEHO's.
+
+### Proven live
+
+Nothing yet: the lab login does not exist. The operations are built from
+Microsoft's documented answers and tested with mocked HTTP and the real
+result reduction (`backend/tests/test_connectors_azure_cost.py`). The lab
+proof must still show:
+
+- which cost column (`PreTaxCost` or `Cost`) the lab's agreement type sends
+  (`query.cost_column`);
+- whether Advisor's list includes dismissed or postponed recommendations
+  (MEHO leaves them out either way);
+- whether today's cost comes as an `Actual` or a `Forecast` row of the
+  forecast (MEHO asks without the incomplete cost of today,
+  `includeFreshPartialCost: false`);
+- which HTTP status Azure uses for the cost-visibility errors.
+
+### Known limits
+
+- Azure's cost data arrives 8 to 24 hours late (up to 72 hours for
+  pay-as-you-go), so today's cost is not complete. The costs of a month that
+  has no invoice yet are estimates.
+- Cost Management answers a 429 with its own wait headers
+  (`x-ms-ratelimit-microsoft.costmanagement-*-retry-after`). The shared
+  retry budget reads only `Retry-After`, so it waits its short default
+  back-off instead.
+- The price list is not retried. A 429 fails at once and says how long Azure
+  asked to wait.
+- All five operations read one subscription, the target's.
+
+### References
+
+- Query - Usage (API version 2026-06-01):
+  <https://learn.microsoft.com/en-us/rest/api/cost-management/query/usage>
+- Forecast - Usage (API version 2026-06-01):
+  <https://learn.microsoft.com/en-us/rest/api/cost-management/forecast/usage>
+- Budgets - List (Microsoft.Consumption):
+  <https://learn.microsoft.com/en-us/rest/api/consumption/budgets/list>
+- Recommendations - List (Advisor, API version 2026-10-01):
+  <https://learn.microsoft.com/en-us/rest/api/advisor/recommendations/list>
+- Advisor savings in `extendedProperties`:
+  <https://learn.microsoft.com/en-us/azure/advisor/resource-graph-samples>
+- Azure Retail Prices API:
+  <https://learn.microsoft.com/en-us/rest/api/cost-management/retail-prices/azure-retail-prices>
+- Cost Management error codes:
+  <https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/cost-management-error-codes>
+- How fresh cost data is, and rounding:
+  <https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/understand-cost-mgt-data>
+- Access to cost data (AO view charges, Azure charges):
+  <https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/assign-access-acm-data>
+- The evidenced exclusion of the price list from the spec path check:
+  `docs/decisions/spec-reconcile-guards-standard.md`.

@@ -1896,6 +1896,8 @@ async def refuse_resume_if_release_changed(
       request can never run later, on this release or another. A lost
       claim means another resumer already took the request; the usual
       ``already_resumed`` result is returned.
+    * The stored run input (the credential-write custody row) is deleted,
+      the same as on every other way a request ends.
     * One audit row records the refusal (``result_status``
       ``release_changed_while_waiting``, both releases). A failed audit
       write is logged; the run is refused either way.
@@ -1911,6 +1913,7 @@ async def refuse_resume_if_release_changed(
     running = cast(str, running_release_id())
     if not await claim_resume(request.id):
         return result_already_resumed(request.op_id, request.id, 0.0)
+    await _discard_refused_handoff(request)
     refusal = result_release_changed_while_waiting(
         request.op_id,
         approval_request_id=request.id,
@@ -1930,6 +1933,15 @@ async def refuse_resume_if_release_changed(
     )
     await persist_resume_result(request.id, refusal)
     return refusal
+
+
+async def _discard_refused_handoff(request: ApprovalRequest) -> None:
+    """Delete the stored run input of a refused request (#5030)."""
+    from meho_backplane.db.engine import get_sessionmaker
+
+    async with get_sessionmaker()() as session:
+        await discard_handoff(session, request.id, request.tenant_id)
+        await session.commit()
 
 
 async def _audit_release_refusal(

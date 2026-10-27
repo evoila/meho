@@ -38,6 +38,7 @@ from meho_backplane.operations.approval_expiry import (
     expire_approvals_from_older_release,
     sweep_expired_approvals,
 )
+from meho_backplane.operations.approval_handoff import ApprovalExecutionPayload
 from meho_backplane.operations.approval_queue import (
     EXPIRED_REASON_MESSAGES,
     ApprovalExpiredReason,
@@ -130,6 +131,15 @@ async def _audit_rows(request_id: uuid.UUID, path: str) -> list[AuditLog]:
     async with get_sessionmaker()() as session:
         rows = (await session.execute(select(AuditLog).where(AuditLog.path == path))).scalars()
         return [r for r in rows if r.payload.get("approval_request_id") == str(request_id)]
+
+
+async def _stored_input_count(request_id: uuid.UUID) -> int:
+    """How many stored run-input rows the request still has."""
+    async with get_sessionmaker()() as session:
+        query = select(ApprovalExecutionPayload).where(
+            ApprovalExecutionPayload.request_id == request_id
+        )
+        return len((await session.execute(query)).scalars().all())
 
 
 def _spy_dispatch(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
@@ -293,6 +303,8 @@ async def test_approved_request_from_older_release_is_refused(
     _run_release(monkeypatch, _OLD_SHA)
     request_id = await _park(tenant, approved=True)
     calls = _spy_dispatch(monkeypatch)
+    assert (await _row(request_id)).execution_handle is not None
+    assert await _stored_input_count(request_id) == 1
 
     _run_release(monkeypatch, _NEW_SHA)
     row = await _row(request_id)
@@ -316,6 +328,8 @@ async def test_approved_request_from_older_release_is_refused(
     assert stored.resumed_at is not None
     assert stored.resume_result is not None
     assert stored.resume_result["extras"]["error_code"] == "release_changed_while_waiting"
+    # The stored run input is deleted, as on every other way a request ends.
+    assert await _stored_input_count(request_id) == 0
     again = await resume_dispatch_after_approval(
         operator=_operator(tenant, "op-approver"), request=stored
     )
@@ -365,6 +379,7 @@ async def test_agent_resume_of_older_release_request_is_refused(
     tenant = await _seed_tenant()
     _run_release(monkeypatch, _OLD_SHA)
     request_id = await _park(tenant, approved=True)
+    assert await _stored_input_count(request_id) == 1
 
     async def _no_call(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         raise AssertionError("the vendor must get no call")
@@ -391,6 +406,7 @@ async def test_agent_resume_of_older_release_request_is_refused(
     assert envelope["status"] == "denied"
     assert envelope["extras"]["error_code"] == "release_changed_while_waiting"
     assert len(await _audit_rows(request_id, "approval.resume")) == 1
+    assert await _stored_input_count(request_id) == 0
 
 
 # ---------------------------------------------------------------------------

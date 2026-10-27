@@ -518,6 +518,20 @@ async def test_an_unknown_cost_error_passes_through_unchanged() -> None:
     assert caught.value.azure_error_code == "BadRequest"
 
 
+@pytest.mark.asyncio
+async def test_failed_dependency_on_a_query_gets_no_forecast_text() -> None:
+    with respx.mock() as mock:
+        _login(mock)
+        mock.post(QUERY_URL).respond(
+            424, json={"error": {"code": "FailedDependency", "message": "Not available."}}
+        )
+        with pytest.raises(AzureRequestError) as caught:
+            await _connector().cost_query(operator(), AzureTargetStub(), {})
+
+    assert caught.value.azure_error_code == "FailedDependency"
+    assert "forecast" not in str(caught.value)
+
+
 # ----------------------------------------------------------------------
 # azure.cost.forecast
 # ----------------------------------------------------------------------

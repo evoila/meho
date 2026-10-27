@@ -108,7 +108,7 @@ _COLUMN_KEYS: Final[Mapping[str, str]] = {
 
 #: What a customer must change when Azure answers a cost read with one of
 #: these error codes.
-_COST_HINTS: Final[Mapping[str, str]] = {
+_ACCESS_HINTS: Final[Mapping[str, str]] = {
     "AccountCostDisabled": (
         "The Enterprise Agreement hides costs from account owners and subscription "
         "users. An enterprise administrator must switch on 'Account owners can view "
@@ -125,6 +125,10 @@ _COST_HINTS: Final[Mapping[str, str]] = {
         "The partner that sells this Enterprise Agreement has not published its prices, "
         "so Azure shows no costs. Ask the partner to switch on cost visibility."
     ),
+}
+
+#: The forecast's own error code, and what it means.
+_FORECAST_HINTS: Final[Mapping[str, str]] = {
     "FailedDependency": (
         "Azure cannot forecast this scope: it needs about one week of cost data, and it "
         "cannot forecast costs in more than one currency. Wait, or ask for one resource "
@@ -424,9 +428,11 @@ def _forecast_totals(items: list[dict[str, Any]]) -> dict[str, Any]:
 # ----------------------------------------------------------------------
 
 
-def _with_cost_hint(exc: AzureApiError, target_name: str) -> AzureApiError | None:
-    """The same error with MEHO's fix, when Azure's error code is a known cost case."""
-    hint = _COST_HINTS.get(exc.azure_error_code or "")
+def _with_cost_hint(
+    exc: AzureApiError, target_name: str, hints: Mapping[str, str]
+) -> AzureApiError | None:
+    """The same error with MEHO's fix, when Azure's error code is in *hints*."""
+    hint = hints.get(exc.azure_error_code or "")
     if hint is None or isinstance(exc, AzureThrottledError):
         return None
     return type(exc)(
@@ -440,13 +446,15 @@ def _with_cost_hint(exc: AzureApiError, target_name: str) -> AzureApiError | Non
 
 
 @contextmanager
-def cost_errors(target: AzureTargetLike) -> Iterator[None]:
+def cost_errors(target: AzureTargetLike, *, forecast: bool = False) -> Iterator[None]:
     """Name the setting to switch on when Azure hides cost data from the login.
 
     Only Azure's own 401 to the cost call is rewritten. A login that
     Microsoft Entra ID refused (``stage="establish"``) keeps its own error,
     because there the secret is the problem, not a billing setting.
+    *forecast* adds the forecast's own error code.
     """
+    hints = {**_ACCESS_HINTS, **_FORECAST_HINTS} if forecast else _ACCESS_HINTS
     try:
         yield
     except ConnectorAuthError as exc:
@@ -464,7 +472,7 @@ def cost_errors(target: AzureTargetLike) -> Iterator[None]:
             stage=exc.stage,
         ) from exc
     except AzureApiError as exc:
-        hinted = _with_cost_hint(exc, target.name)
+        hinted = _with_cost_hint(exc, target.name, hints)
         if hinted is None:
             raise
         raise hinted from exc
@@ -551,7 +559,7 @@ async def cost_forecast_impl(
         "includeActualCost": True,
         "includeFreshPartialCost": False,
     }
-    with cost_errors(target):
+    with cost_errors(target, forecast=True):
         paged, cost_column = await _post_all_pages(
             connector, target, COST_FORECAST_PATH.format(scope=scope), body, operator=operator
         )

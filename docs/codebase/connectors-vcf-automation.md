@@ -677,8 +677,9 @@ for ingested breadth on connectors that *do* publish a convertible spec.
   ships no swagger artifact at all. The ingest parser is
   OpenAPI-3.x-only by decision (#2090, reaffirming #1532) and rejects
   native 2.0 with a structured `UnsupportedSpecError` naming the
-  conversion on-ramp — convert with `swagger2openapi` /
-  `converter.swagger.io` first, then ingest the 3.x output (see the
+  conversion on-ramp — pass the file to `meho connector ingest` as
+  `file://` (the CLI converts it on your machine), or convert it with a
+  local `swagger2openapi` run first (see the
   ["Product ships only Swagger
   2.0"](../cross-repo/connector-ingestion.md#product-ships-only-swagger-20)
   runbook section, which uses VCFA as the worked example). This is

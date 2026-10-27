@@ -157,14 +157,13 @@ VMware ships no OpenAPI-3.x appliance spec for the VCFA
 tenant/consumption plane; the only machine-readable surface is the
 8 Swagger 2.0 fragments vendored under
 [`vmware/vra-sdk-go` `swagger/`](https://github.com/vmware/vra-sdk-go/tree/v0.6.5/swagger)
-(`vra-project.json`, `vra-iaas.json`, …). Each fragment converts and
-dry-runs individually:
+(`vra-project.json`, `vra-iaas.json`, …). Pass each fragment as
+`file://`; the CLI converts it and dry-runs it on its own:
 
 ```bash
-npx swagger2openapi vra-iaas.json -o vra-iaas-openapi3.yaml
 meho connector ingest \
   --product vcfa --version 9.0 --impl vcfa-rest \
-  --spec file:///abs/path/vra-iaas-openapi3.yaml \
+  --spec file:///abs/path/vra-iaas.json \
   --dry-run
 ```
 

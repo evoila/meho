@@ -392,11 +392,13 @@ async def _run_lifespan_startup() -> None:
        build failures surface at startup rather than first request.
     4. Connector + MCP module auto-discovery so import-time
        ``register_*`` calls run before the first request arrives.
-    5. Typed-op registrars run **after** connector discovery (the
-       registrars are appended during the import pass).
-    6. MCP audience guard after the eager-init steps, so a failure there
+    5. MCP audience guard after the eager-init steps, so a failure there
        carries the MCP-audience message, not a stale earlier one; the
        Vault tenant-scope advisory (operability-only) follows it.
+    6. Typed-op registrars run **last** (#5019). They write the shared
+       operation rows that pods of other releases may be serving, in one
+       transaction. Every step that can stop the start runs before them,
+       so a failed start leaves the rows as they were.
     """
     configure_logging()
     register_probe("keycloak", keycloak_readiness_probe)
@@ -461,11 +463,6 @@ async def _run_lifespan_startup() -> None:
     # instead of the build-time-only 503. Fail-closed when no key is set
     # — the factory raises LlmClientUnavailable only when invoked.
     _wire_ingest_llm_client()
-    # Typed-op registration (G0.6-T-Refactor-Vault #390). See the
-    # docstring for the contract; runs registrars connectors appended
-    # to during the import pass above so descriptor rows are populated
-    # before the first dispatch.
-    await run_typed_op_registrars()
     # Real JSONFlux reducer install (G0.6.1-T3 #753). Swaps the
     # dispatcher's module-level :class:`PassThroughReducer` default for
     # the production :class:`JsonFluxReducer`, so every connector's
@@ -496,6 +493,14 @@ async def _run_lifespan_startup() -> None:
     ensure_static_dist_dir()
     # Embedding model preload (G0.4-T2 #259); loud-but-non-fatal.
     await _preload_embedding_model()
+    # Typed-op registration (G0.6-T-Refactor-Vault #390). See the
+    # docstring for the contract; runs registrars connectors appended
+    # to during the import pass above so descriptor rows are populated
+    # before the first dispatch. It is the LAST start-up step on purpose
+    # (#5019): it writes the shared operation rows in one transaction, and
+    # no check after it may fail, so a start that fails changes no row.
+    # Add new start-up checks above this line.
+    await run_typed_op_registrars()
 
 
 @dataclass

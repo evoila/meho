@@ -395,6 +395,17 @@ def test_happy_path_returns_full_federation_response(
     assert approvals["effective_posture"] == "four_eyes_enforced"
     assert approvals["delegated_decision_posture"] == "production_own_hand_only"
 
+    # #5019: the release that wrote the operation rows. This TestClient
+    # never ran the lifespan, so no start has written them yet.
+    from meho_backplane.version import build_git_sha
+
+    assert body.pop("operation_catalog") == {
+        "state": "not_recorded",
+        "this_release": build_git_sha(),
+        "written_by_release": None,
+        "written_at": None,
+    }
+
     head = ScriptDirectory.from_config(alembic_config()).get_current_head()
     assert body == {
         # #2746: OperatorIdentity now carries tenant_id + tenant_role, so the

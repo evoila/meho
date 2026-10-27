@@ -163,7 +163,7 @@ register_typed_op_registrar(register_vault_typed_operations)
 Two phases:
 
 - **Synchronous (import time)** — `register_connector_v2(...)` lands the registry entry; `register_typed_op_registrar(...)` appends an `async def register_xxx_typed_operations` callable to a module-level list on `meho_backplane.operations.typed_register`.
-- **Asynchronous (lifespan startup)** — the FastAPI `lifespan` hook calls [`_eager_import_connectors()`](../../backend/src/meho_backplane/connectors/registry.py) (so every subpackage self-registers) and then [`run_typed_op_registrars()`](../../backend/src/meho_backplane/operations/typed_register.py) (which iterates the registrar list sequentially). Each registrar invokes [`register_typed_operation(...)`](../../backend/src/meho_backplane/operations/typed_register.py) for every op it ships — once per `(product, version, impl_id, op_id)` natural key.
+- **Asynchronous (lifespan startup)** — the FastAPI `lifespan` hook calls [`_eager_import_connectors()`](../../backend/src/meho_backplane/connectors/registry.py) (so every subpackage self-registers) and then [`run_typed_op_registrars()`](../../backend/src/meho_backplane/operations/typed_register.py) (which iterates the registrar list sequentially, as the last start-up step, inside one database transaction that commits only when every registrar and the sweeps after them passed — a failed start changes no row, #5019). Each registrar invokes [`register_typed_operation(...)`](../../backend/src/meho_backplane/operations/typed_register.py) for every op it ships — once per `(product, version, impl_id, op_id)` natural key.
 
 The two-phase shape lets every `__init__.py` stay sync while the typed-op upserts await on the DB and the embedding pipeline.
 

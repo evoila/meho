@@ -53,7 +53,10 @@ every connector has registered its typed/composite rows. It runs on both
 the real registrar pass and the amortized snapshot-replay test path,
 because the verdict is a function of live descriptor state. A violation
 propagates as a lifespan crash — the same crash-loud posture the registrar
-runner already takes for a registration bug.
+runner already takes for a registration bug. The sweep reads through the
+registration's own transaction, so it sees the rows written but not yet
+committed; a violation rolls that transaction back and no row changes
+(#5019).
 
 ## Why keyed on the resolved `source_kind`
 

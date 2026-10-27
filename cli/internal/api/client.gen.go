@@ -5791,6 +5791,11 @@ type HTTPValidationError struct {
 // OPERATOR-gated, so unlike “/ready“ no metrics token is needed.
 // “None“ / empty defaults keep older response decoders working; the
 // handler always fills them.
+//
+// “operation_catalog“ (#5019) names the release that wrote the shared
+// operation rows and says whether it is this pod's release
+// (:class:`OperationCatalogStatus`). The “None“ default keeps older
+// response decoders working; the handler always fills it.
 type HealthResponse struct {
 	// Approvals The approval settings in force (#4830).
 	//
@@ -5833,6 +5838,26 @@ type HealthResponse struct {
 	GrantedScopes       *[]string        `json:"granted_scopes,omitempty"`
 	McpProtocolVersion  *string          `json:"mcp_protocol_version,omitempty"`
 	McpSessionIdCapture string           `json:"mcp_session_id_capture"`
+
+	// OperationCatalog Which release wrote the shared operation rows (#5019).
+	//
+	// The operation rows hold, for each built-in operation, which code
+	// runs, the parameter rules, the risk level and the approval flag.
+	// Every start writes them, and all pods share them. ``state`` is:
+	//
+	// * ``same_release`` -- this pod's release wrote them.
+	// * ``other_release`` -- another release wrote them, so this pod
+	//   serves settings that were not made for its code. Usually a sign
+	//   that two releases run at the same time; see
+	//   ``docs/acceptance/rollback.md`` for what to do.
+	// * ``not_recorded`` -- no start since this check shipped has written
+	//   them yet.
+	// * ``unknown`` -- the database could not be read (the ``db`` field
+	//   says more).
+	//
+	// ``this_release`` and ``written_by_release`` are commit hashes, the
+	// ``git_sha`` value of ``GET /version``.
+	OperationCatalog *OperationCatalogStatus `json:"operation_catalog,omitempty"`
 
 	// Operator Operator identity surface exposed to the CLI and MCP ``meho_status``.
 	//
@@ -6792,6 +6817,31 @@ type OperationCallVerifyResponse struct {
 	Actual  map[string]interface{} `json:"actual"`
 	Matched bool                   `json:"matched"`
 	Type    string                 `json:"type"`
+}
+
+// OperationCatalogStatus Which release wrote the shared operation rows (#5019).
+//
+// The operation rows hold, for each built-in operation, which code
+// runs, the parameter rules, the risk level and the approval flag.
+// Every start writes them, and all pods share them. “state“ is:
+//
+//   - “same_release“ -- this pod's release wrote them.
+//   - “other_release“ -- another release wrote them, so this pod
+//     serves settings that were not made for its code. Usually a sign
+//     that two releases run at the same time; see
+//     “docs/acceptance/rollback.md“ for what to do.
+//   - “not_recorded“ -- no start since this check shipped has written
+//     them yet.
+//   - “unknown“ -- the database could not be read (the “db“ field
+//     says more).
+//
+// “this_release“ and “written_by_release“ are commit hashes, the
+// “git_sha“ value of “GET /version“.
+type OperationCatalogStatus struct {
+	State            string     `json:"state"`
+	ThisRelease      string     `json:"this_release"`
+	WrittenAt        *time.Time `json:"written_at"`
+	WrittenByRelease *string    `json:"written_by_release"`
 }
 
 // OperationDescriptor Full :class:`~meho_backplane.db.models.EndpointDescriptor` read shape.

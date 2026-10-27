@@ -405,6 +405,12 @@ column `audit_log.sandbox_mode` (database default `false`) are additive,
 so an older build still starts and writes audit rows against the newer
 schema; its rows carry the mark `false`.
 
+Migration `0118` adds `operation_catalog_state`: one row that names the
+release whose start last wrote the built-in operation rows. The start
+writes it in the same transaction as the operation rows (#5019). An older
+build never reads it, so it changes nothing after a rollback; the next
+start of a build that knows the table writes it again.
+
 Before #1607 the probe demanded strict `current == head` equality, which
 poisoned the deploy lifecycle twice over (live 2026-06-08, v0.12.0): the
 moment the pre-upgrade Job committed `0037`, the *still-running* prior pods

@@ -111,8 +111,10 @@ from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations import dispatch
 from meho_backplane.operations.addon_pairing import AddonPairingService
 from meho_backplane.operations.addon_pairing_contract import is_contract_compatible
+from meho_backplane.operations.catalog_release import catalog_release_status
 from meho_backplane.sandbox_mode import sandbox_mode_label
 from meho_backplane.settings import get_settings
+from meho_backplane.version import build_git_sha
 
 __all__ = ["build_health_response", "router"]
 
@@ -294,6 +296,35 @@ class FeatureStatus(BaseModel):
     missing_env: list[str] = []
 
 
+class OperationCatalogStatus(BaseModel):
+    """Which release wrote the shared operation rows (#5019).
+
+    The operation rows hold, for each built-in operation, which code
+    runs, the parameter rules, the risk level and the approval flag.
+    Every start writes them, and all pods share them. ``state`` is:
+
+    * ``same_release`` -- this pod's release wrote them.
+    * ``other_release`` -- another release wrote them, so this pod
+      serves settings that were not made for its code. Usually a sign
+      that two releases run at the same time; see
+      ``docs/acceptance/rollback.md`` for what to do.
+    * ``not_recorded`` -- no start since this check shipped has written
+      them yet.
+    * ``unknown`` -- the database could not be read (the ``db`` field
+      says more).
+
+    ``this_release`` and ``written_by_release`` are commit hashes, the
+    ``git_sha`` value of ``GET /version``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    state: str
+    this_release: str
+    written_by_release: str | None = None
+    written_at: datetime | None = None
+
+
 class SensorRunnerStatus(BaseModel):
     """Liveness of this process's sensor evaluation loop (#2763).
 
@@ -445,6 +476,11 @@ class HealthResponse(BaseModel):
     OPERATOR-gated, so unlike ``/ready`` no metrics token is needed.
     ``None`` / empty defaults keep older response decoders working; the
     handler always fills them.
+
+    ``operation_catalog`` (#5019) names the release that wrote the shared
+    operation rows and says whether it is this pod's release
+    (:class:`OperationCatalogStatus`). The ``None`` default keeps older
+    response decoders working; the handler always fills it.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -462,6 +498,7 @@ class HealthResponse(BaseModel):
     readiness: ReadinessStatus | None = None
     approvals: ApprovalsStatus | None = None
     features: list[FeatureStatus] = []
+    operation_catalog: OperationCatalogStatus | None = None
 
 
 class LivenessResponse(BaseModel):
@@ -865,6 +902,28 @@ async def build_health_response(operator: Operator) -> HealthResponse:
         readiness=await _readiness_status(),
         approvals=approvals,
         features=features,
+        operation_catalog=await _operation_catalog_status(),
+    )
+
+
+async def _operation_catalog_status() -> OperationCatalogStatus:
+    """Compare the release that wrote the operation rows with this pod's (#5019).
+
+    A database error gives ``unknown`` instead of failing the whole health
+    answer; the ``db`` field reports the database problem itself.
+    """
+    try:
+        status = await catalog_release_status()
+    except Exception as exc:
+        structlog.get_logger(__name__).warning(
+            "operation_catalog_status_unreadable", error_class=type(exc).__name__
+        )
+        return OperationCatalogStatus(state="unknown", this_release=build_git_sha())
+    return OperationCatalogStatus(
+        state=status.state,
+        this_release=status.this_release,
+        written_by_release=status.written_by_release,
+        written_at=status.written_at,
     )
 
 

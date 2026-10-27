@@ -79,6 +79,7 @@ from typing import Final, NamedTuple
 
 import structlog
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
@@ -202,11 +203,39 @@ def reset_composite_dispatch_surface_registry() -> None:
     _REGISTRY.clear()
 
 
+async def _ingested_sub_ops(
+    session: AsyncSession,
+    product: str,
+    version: str,
+    impl_id: str,
+    sub_op_ids: tuple[str, ...],
+) -> list[str]:
+    """Return the sub-ops in *sub_op_ids* that resolve to a built-in ingested row."""
+    offenders: list[str] = []
+    for sub_op_id in sub_op_ids:
+        result = await session.execute(
+            select(EndpointDescriptor.id)
+            .where(
+                EndpointDescriptor.tenant_id.is_(None),
+                EndpointDescriptor.product == product,
+                EndpointDescriptor.version == version,
+                EndpointDescriptor.impl_id == impl_id,
+                EndpointDescriptor.op_id == sub_op_id,
+                EndpointDescriptor.source_kind == "ingested",
+            )
+            .limit(1)
+        )
+        if result.first() is not None:
+            offenders.append(sub_op_id)
+    return offenders
+
+
 async def assert_no_ingested_dispatch_dependency(
     *,
     op_id: str,
     connector_id: str,
     sub_op_ids: tuple[str, ...],
+    session: AsyncSession | None = None,
 ) -> None:
     """Assert none of *op_id*'s declared sub-ops resolve to an ingested row.
 
@@ -230,6 +259,10 @@ async def assert_no_ingested_dispatch_dependency(
     sub_op_ids:
         The declared sub-op ids the op dispatches into (the same tuple a
         connector hands its dispatch-surface registration).
+    session:
+        Read through this session when given, so the check sees rows the
+        start-up registration transaction wrote but has not committed yet
+        (#5019). Without it, the check opens its own session.
 
     Raises
     ------
@@ -242,24 +275,13 @@ async def assert_no_ingested_dispatch_dependency(
         return
 
     product, version, impl_id = parse_connector_id(connector_id)
-    offenders: list[str] = []
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        for sub_op_id in raw_sub_ops:
-            result = await session.execute(
-                select(EndpointDescriptor.id)
-                .where(
-                    EndpointDescriptor.tenant_id.is_(None),
-                    EndpointDescriptor.product == product,
-                    EndpointDescriptor.version == version,
-                    EndpointDescriptor.impl_id == impl_id,
-                    EndpointDescriptor.op_id == sub_op_id,
-                    EndpointDescriptor.source_kind == "ingested",
-                )
-                .limit(1)
+    if session is not None:
+        offenders = await _ingested_sub_ops(session, product, version, impl_id, raw_sub_ops)
+    else:
+        async with get_sessionmaker()() as owned_session:
+            offenders = await _ingested_sub_ops(
+                owned_session, product, version, impl_id, raw_sub_ops
             )
-            if result.first() is not None:
-                offenders.append(sub_op_id)
 
     if offenders:
         raise IngestedDispatchDependencyError(
@@ -273,7 +295,9 @@ async def assert_no_ingested_dispatch_dependency(
         )
 
 
-async def assert_registered_composites_have_no_ingested_dispatch() -> None:
+async def assert_registered_composites_have_no_ingested_dispatch(
+    session: AsyncSession | None = None,
+) -> None:
     """Sweep every registered composite dispatch surface for ingested-dispatch violations.
 
     The platform-wide entry point, invoked at the tail of
@@ -284,6 +308,9 @@ async def assert_registered_composites_have_no_ingested_dispatch() -> None:
     :func:`assert_no_ingested_dispatch_dependency` to each. Connector-agnostic:
     a connector is covered the moment it registers a surface, with no
     per-connector wiring here.
+
+    *session* is the start-up registration transaction (#5019): the sweep
+    reads the rows that transaction wrote before it commits.
 
     Raises
     ------
@@ -296,4 +323,5 @@ async def assert_registered_composites_have_no_ingested_dispatch() -> None:
             op_id=composite_op_id,
             connector_id=surface.connector_id,
             sub_op_ids=surface.sub_op_ids,
+            session=session,
         )

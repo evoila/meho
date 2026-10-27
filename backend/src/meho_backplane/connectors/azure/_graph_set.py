@@ -104,7 +104,9 @@ async def read_over_set(
     subscription_set = await resolve_subscription_set(
         connector, operator, target, op_id=op_id, names=names
     )
-    read = _GraphRead(connector, operator, target, query, page_size, limits or PageLimits())
+    read = _GraphRead(
+        connector, operator, target, query, page_size, limits or PageLimits(), _monotonic()
+    )
     for ids, members in _batches(subscription_set.members):
         reason = await read.read_batch(ids)
         if reason is None:
@@ -144,13 +146,14 @@ class _GraphRead:
     query: str
     page_size: int | None
     limits: PageLimits
+    #: When the read started, from :data:`_monotonic` (the clock tests replace).
+    started: float
     rows: list[Any] = field(default_factory=list)
     pages: int = 0
     omissions: list[dict[str, Any]] = field(default_factory=list)
     stopped: str | None = None
     outside_rows: int = 0
     first_error: Exception | None = None
-    started: float = field(default_factory=lambda: _monotonic())
 
     async def read_batch(self, ids: list[str]) -> str | None:
         """Read every page of one batch. Returns why it is not complete, or ``None``."""

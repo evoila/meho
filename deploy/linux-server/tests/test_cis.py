@@ -116,11 +116,12 @@ class CisTestCase(InstallTestCase):
         return self.host_text(kernel_path(key)).strip()
 
     def call_index(self, prefix: str) -> int:
+        """The index of the first call that starts with the prefix."""
         calls = self.machine.calls().splitlines()
-        for index, line in enumerate(calls):
-            if line.startswith(prefix):
-                return index
-        self.fail(f"no call starts with {prefix!r}:\n" + "\n".join(calls))
+        found = [index for index, line in enumerate(calls) if line.startswith(prefix)]
+        if not found:
+            self.fail(f"no call starts with {prefix!r}:\n" + "\n".join(calls))
+        return found[0]
 
     def new_machine(self) -> FakeMachine:
         machine = FakeMachine()

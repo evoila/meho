@@ -29,7 +29,8 @@
 #      machine-id; the SSH host keys; SSH closed for every address
 #      (meho-host admin-network none); the logs; fstrim
 # What stays: server/manifests/, agent/images/, /etc/rancher/rke2/config.yaml
-# and the appliance pieces under /opt/meho/appliance. The preset file that
+# and the appliance pieces: /opt/meho/appliance and the two enabled units of
+# first start and the console banner. The preset file that
 # keeps RKE2 off at the first boot is written. (/etc/rancher/rke2/meho-pss.yaml
 # stays too once the install writes it, #4636.)
 #
@@ -76,6 +77,17 @@ readonly RKE2_KEEP=(server/manifests agent/images)
 readonly APPLIANCE_DIR=/opt/meho/appliance
 readonly APPLIANCE_INSTALL=$APPLIANCE_DIR/download/install.sh
 readonly CLOUD_INIT_OFF=/etc/cloud/cloud-init.disabled
+readonly FIRSTSTART_FILES=(
+    "$APPLIANCE_DIR/firststart/firststart.sh"
+    "$APPLIANCE_DIR/firststart/banner.sh"
+    /etc/systemd/system/meho-firststart.service
+    /etc/systemd/system/meho-banner.service
+)
+# systemctl enable makes these links; without them nothing runs at the first boot.
+readonly FIRSTSTART_LINKS=(
+    /etc/systemd/system/multi-user.target.wants/meho-firststart.service
+    /etc/systemd/system/multi-user.target.wants/meho-banner.service
+)
 readonly BUILD_NETPLAN=/etc/netplan/60-meho-build.yaml
 readonly SUDOERS_CLOUD_INIT=/etc/sudoers.d/90-cloud-init-users
 readonly MACHINE_ID=/etc/machine-id
@@ -297,8 +309,11 @@ check_clean() {
     done
     # /etc/rancher/rke2/meho-pss.yaml must stay too, once the install writes
     # it (#4636); add it here then.
-    for item in "$RKE2_CONFIG" "$RKE2_PRESET" "$APPLIANCE_INSTALL" "$CLOUD_INIT_OFF"; do
+    for item in "$RKE2_CONFIG" "$RKE2_PRESET" "$APPLIANCE_INSTALL" "$CLOUD_INIT_OFF" "${FIRSTSTART_FILES[@]}"; do
         [[ -f ${HOST_ROOT}${item} ]] || left "$item is missing; it must stay"
+    done
+    for item in "${FIRSTSTART_LINKS[@]}"; do
+        [[ -L ${HOST_ROOT}${item} ]] || left "$item is missing, so first start would not run at the first boot"
     done
     found=$(find "${HOST_ROOT}/etc/ssh" -maxdepth 1 -name 'ssh_host_*' 2>/dev/null | head -n 1)
     [[ -z $found ]] || left "SSH host keys under /etc/ssh"

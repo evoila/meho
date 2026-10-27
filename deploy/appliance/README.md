@@ -3,7 +3,8 @@
 Builds `meho-appliance-<version>.ova`, install form 1 of MEHO: a Linux
 machine where the form-2 install already ran, cleaned and exported. The
 design is the internal design note `form-1-appliance.md`, section 1.
-The code walkthrough is `docs/codebase/appliance-build.md`.
+The code walkthrough is `docs/codebase/appliance-build.md`, and for the
+first start `docs/codebase/appliance-firststart.md`.
 
 | File | What |
 | --- | --- |
@@ -11,7 +12,8 @@ The code walkthrough is `docs/codebase/appliance-build.md`.
 | `clean.sh` | Runs on the build VM: removes everything that must differ between appliances, checks itself, powers off. |
 | `rewrite-ovf.sh` | Puts our product section and the OVF transports into the exported `.ovf`. |
 | `product-section.xml` | The wizard fields of the import in vCenter. |
-| `tests/` | Unit tests of `clean.sh` and `rewrite-ovf.sh`. No vCenter. |
+| `firststart/` | Runs once at the appliance's first boot: reads the wizard fields, sets up the machine, installs the core from the disk. Also the console banner. |
+| `tests/` | Unit tests of `clean.sh`, `rewrite-ovf.sh` and first start. No vCenter. |
 
 `.github/workflows/appliance-build.yml` runs the build on the lab runner.
 
@@ -57,5 +59,5 @@ docker run --rm -v "$PWD/deploy/appliance:/work/deploy/appliance:ro" -w /work py
 ```
 
 ```bash
-shellcheck deploy/appliance/*.sh
+shellcheck deploy/appliance/*.sh deploy/appliance/firststart/*.sh
 ```

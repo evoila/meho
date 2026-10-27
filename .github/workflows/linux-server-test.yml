@@ -4,7 +4,8 @@
 # Tests of the form-2 scripts in deploy/linux-server/: the install script
 # (#4733), its host firewall (#4635), and the scripts that build and check
 # the download (#4734). Also of the appliance build scripts in
-# deploy/appliance/ (#4811): the clean script and the OVF rewrite.
+# deploy/appliance/ (#4811): the clean script and the OVF rewrite; and of
+# the appliance's first start (#4812).
 #
 # shellcheck checks every shell script there: the *.sh files and any file
 # that starts with a shell shebang, so a script without an extension (for

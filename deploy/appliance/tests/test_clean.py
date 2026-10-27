@@ -51,6 +51,10 @@ KEPT = (
     "/etc/cloud/cloud-init.disabled",
     "/opt/meho/appliance/download/install.sh",
     "/opt/meho/appliance/download/VERSION",
+    "/opt/meho/appliance/firststart/firststart.sh",
+    "/opt/meho/appliance/firststart/banner.sh",
+    "/etc/systemd/system/meho-firststart.service",
+    "/etc/systemd/system/meho-banner.service",
 )
 
 
@@ -331,6 +335,9 @@ class CheckTests(CleanTestCase):
             "/etc/rancher/rke2/config.yaml": "/etc/rancher/rke2/config.yaml is missing; it must stay",
             "/opt/meho/appliance/download/install.sh": "/opt/meho/appliance/download/install.sh is missing; it must stay",
             "/etc/cloud/cloud-init.disabled": "/etc/cloud/cloud-init.disabled is missing; it must stay",
+            "/opt/meho/appliance/firststart/firststart.sh": "/opt/meho/appliance/firststart/firststart.sh is missing; it must stay",
+            "/etc/systemd/system/meho-banner.service": "/etc/systemd/system/meho-banner.service is missing; it must stay",
+            "/etc/systemd/system/multi-user.target.wants/meho-firststart.service": "/etc/systemd/system/multi-user.target.wants/meho-firststart.service is missing, so first start would not run at the first boot",
         }
         for path, line in must_stay.items():
             with self.subTest(path=path):

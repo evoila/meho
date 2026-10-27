@@ -75,8 +75,6 @@ from meho_backplane.connectors.schemas import (
 
 __all__ = ["AzureConnector"]
 
-_log = structlog.get_logger(__name__)
-
 #: Ask for a new token this many seconds before the old one runs out. Azure
 #: tokens live 60 to 90 minutes; Microsoft's own SDK renews five minutes early.
 _RENEW_BEFORE_EXPIRY_SECONDS: Final[float] = 300.0
@@ -210,7 +208,11 @@ class AzureConnector(
             )
             lifetime = max(1.0, token.expires_in - _RENEW_BEFORE_EXPIRY_SECONDS)
             self._tokens[key] = _CachedToken(token=token, renew_at=_monotonic() + lifetime)
-            _log.info(
+            # The logger is looked up per call, not kept in the module: the
+            # production logging setup caches a module logger on first use,
+            # and a later structlog.testing.capture_logs (the test that no
+            # token reaches a log line) could then not see this line.
+            structlog.get_logger(__name__).info(
                 "azure_login_done",
                 target=target.name,
                 cloud=config.cloud.name,

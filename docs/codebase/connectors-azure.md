@@ -663,7 +663,10 @@ what the customer must switch on:
 
 The 401 error stays a `connector_auth_failed` error. The other errors keep
 their kind (for example `AzureForbiddenError`) and Azure's code; only the
-message and the remediation are MEHO's.
+message and the remediation are MEHO's. A login that Microsoft Entra ID
+refuses (for example a wrong or expired client secret) keeps its own error:
+there the secret is the problem, not a billing setting. The
+`FailedDependency` text is added only to the forecast.
 
 ### Proven live
 

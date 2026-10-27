@@ -67,6 +67,16 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     "SUBSCRIPTION_PATH": (("GET",), "SUBSCRIPTIONS_API_VERSION"),
     "LOCATIONS_PATH": (("GET",), "SUBSCRIPTIONS_API_VERSION"),
     "RESOURCE_GRAPH_PATH": (("POST",), "RESOURCE_GRAPH_API_VERSION"),
+    "VIRTUAL_NETWORKS_PATH": (("GET",), "NETWORK_API_VERSION"),
+    "VIRTUAL_NETWORK_PATH": (("GET",), "NETWORK_API_VERSION"),
+    "NETWORK_SECURITY_GROUPS_PATH": (("GET",), "NETWORK_API_VERSION"),
+    "NETWORK_SECURITY_GROUP_PATH": (("GET",), "NETWORK_API_VERSION"),
+    "LOAD_BALANCERS_PATH": (("GET",), "NETWORK_API_VERSION"),
+    "PUBLIC_IP_ADDRESSES_PATH": (("GET",), "NETWORK_API_VERSION"),
+    "VIRTUAL_NETWORK_GATEWAYS_PATH": (("GET",), "NETWORK_API_VERSION"),
+    "EXPRESS_ROUTE_CIRCUITS_PATH": (("GET",), "NETWORK_API_VERSION"),
+    "ROUTE_TABLES_PATH": (("GET",), "NETWORK_API_VERSION"),
+    "PRIVATE_DNS_ZONES_PATH": (("GET",), "PRIVATE_DNS_API_VERSION"),
 }
 
 _PARAMETER = re.compile(r"\{[^}]*\}")
@@ -142,6 +152,16 @@ def test_the_checked_paths_are_pinned() -> None:
     """The list of checked paths, so a change to it is always on purpose."""
     assert sorted(_declared_op_ids()) == [
         "GET:/subscriptions/{}/locations@2022-12-01",
+        "GET:/subscriptions/{}/providers/microsoft.network/expressroutecircuits@2026-01-01",
+        "GET:/subscriptions/{}/providers/microsoft.network/loadbalancers@2026-01-01",
+        "GET:/subscriptions/{}/providers/microsoft.network/networksecuritygroups@2026-01-01",
+        "GET:/subscriptions/{}/providers/microsoft.network/privatednszones@2024-06-01",
+        "GET:/subscriptions/{}/providers/microsoft.network/publicipaddresses@2026-01-01",
+        "GET:/subscriptions/{}/providers/microsoft.network/routetables@2026-01-01",
+        "GET:/subscriptions/{}/providers/microsoft.network/virtualnetworks@2026-01-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.network/networksecuritygroups/{}@2026-01-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.network/virtualnetworkgateways@2026-01-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.network/virtualnetworks/{}@2026-01-01",
         "GET:/subscriptions/{}@2022-12-01",
         "POST:/providers/microsoft.resourcegraph/resources@2024-04-01",
     ]

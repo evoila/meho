@@ -28,6 +28,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.azure import _inventory_schemas as schemas
 from meho_backplane.connectors.azure import inventory_graph as graph
 from meho_backplane.connectors.azure import inventory_reads as reads
@@ -581,9 +582,5 @@ class InventoryOps:
         """
         if seed_target is None or getattr(seed_target, "product", None) != "azure":
             return []
-        from meho_backplane.connectors._shared.system_operator import (
-            synthesise_system_operator,
-        )
-
         caller = operator if operator is not None else synthesise_system_operator()
         return await reads.list_subscription_candidates(self._azure(), seed_target, caller)

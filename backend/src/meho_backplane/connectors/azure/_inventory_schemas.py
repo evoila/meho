@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from meho_backplane.connectors.azure._model import TEXT_OR_NULL
 from meho_backplane.connectors.azure._subscription_set import (
     SUBSCRIPTIONS_BLOCK_SCHEMA,
     SUBSCRIPTIONS_PARAMETER,
@@ -24,7 +25,6 @@ from meho_backplane.connectors.azure.inventory_reads import (
 
 __all__ = [
     "GRAPH_QUERY_PARAMS",
-    "NO_PARAMS",
     "RESOURCE_LIST_PARAMS",
     "SET_PARAMS",
     "SET_RESULT_OBJECTS",
@@ -34,14 +34,6 @@ __all__ = [
     "set_response",
 ]
 
-_TEXT_OR_NULL: Final[list[str]] = ["string", "null"]
-
-NO_PARAMS: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {},
-    "additionalProperties": False,
-    "examples": [{}],
-}
 
 SET_PARAMS: Final[dict[str, Any]] = {
     "type": "object",
@@ -180,8 +172,8 @@ def list_response(fields: dict[str, str], description: str) -> dict[str, Any]:
         "properties": {
             "value": _rows(fields, description),
             "truncated": {"type": "boolean", "description": "True when MEHO stopped early."},
-            "omission": {"type": _TEXT_OR_NULL, "description": "What was left out, and why."},
-            "omission_kind": {"type": _TEXT_OR_NULL, "description": "The limit that stopped it."},
+            "omission": {"type": TEXT_OR_NULL, "description": "What was left out, and why."},
+            "omission_kind": {"type": TEXT_OR_NULL, "description": "The limit that stopped it."},
             "pages_read": {"type": "integer", "description": "Pages read from Azure."},
         },
         "required": ["value", "truncated", "pages_read"],

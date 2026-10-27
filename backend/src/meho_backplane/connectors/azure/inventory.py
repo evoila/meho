@@ -31,7 +31,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.azure import _inventory_schemas as schemas
 from meho_backplane.connectors.azure import inventory_graph as graph
 from meho_backplane.connectors.azure import inventory_reads as reads
-from meho_backplane.connectors.azure._model import AzureTypedOp
+from meho_backplane.connectors.azure._model import NO_PARAMS, AzureTypedOp
 from meho_backplane.connectors.azure.session import AzureTargetLike
 from meho_backplane.connectors.schemas import CandidateHint
 
@@ -123,7 +123,7 @@ _SUBSCRIPTION_LIST = _read(
     "List the Azure subscriptions the target's login can see, with ID, name and state.",
     "Reads GET /subscriptions with the target's login and follows every page. Shows the "
     "subscription records only, not what is inside them. Read-only.",
-    params=schemas.NO_PARAMS,
+    params=NO_PARAMS,
     response=schemas.list_response(
         {
             "subscriptionId": "The subscription ID.",
@@ -157,7 +157,7 @@ _RESOURCE_GROUP_LIST = _read(
     "List the resource groups of the target's Azure subscription.",
     "Reads GET /subscriptions/{subscriptionId}/resourcegroups and follows every page. "
     "Returns each group's name, location, tags and provisioning state. Read-only.",
-    params=schemas.NO_PARAMS,
+    params=NO_PARAMS,
     response=schemas.list_response(
         {
             "id": "The resource group ID.",
@@ -224,7 +224,7 @@ _TAG_LIST = _read(
     "List the tag names of the target's Azure subscription with their values and counts.",
     "Reads GET /subscriptions/{subscriptionId}/tagNames and follows every page. Azure may "
     "answer from a cache when there are many tags. Read-only.",
-    params=schemas.NO_PARAMS,
+    params=NO_PARAMS,
     response=schemas.list_response(
         {
             "tagName": "The tag name.",
@@ -256,7 +256,7 @@ _LOCK_LIST = _read(
     "List the management locks of the target's Azure subscription, its groups and resources.",
     "Reads GET /subscriptions/{subscriptionId}/providers/Microsoft.Authorization/locks and "
     "follows every page. A lock is CanNotDelete or ReadOnly. Read-only.",
-    params=schemas.NO_PARAMS,
+    params=NO_PARAMS,
     response=schemas.list_response(
         {
             "id": "The lock ID; it shows the scope the lock sits on.",

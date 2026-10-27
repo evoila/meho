@@ -11,6 +11,7 @@ from meho_backplane.operations.ingest.safety_floors import register_ingest_safet
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 
 __all__ = [
+    "is_vmware_host_maintenance_exit",
     "is_vmware_library_item_delete",
     "is_vmware_tagging_removal",
     "is_vmware_vm_relocate",
@@ -53,6 +54,13 @@ _LIBRARY_ITEM_PATH_RE = re.compile(r"/content/library/item/\{[^/{}]+\}")
 _VM_PATH_RE = re.compile(r"/vcenter/vm/\{[^/{}]+\}")
 _VM_RELOCATE_QUERIES = frozenset({"action=relocate", "action=relocate&vmw-task=true"})
 _VIM_RELOCATE_PATH_RE = re.compile(r"/VirtualMachine/\{[^/{}]+\}/RelocateVM_Task")
+
+# Ending maintenance mode on a host (#4967). The older-API method
+# ``HostSystem.ExitMaintenanceMode_Task`` is ``dangerous`` with approval, like
+# the typed ``vmware.composite.host.maintenance.exit`` and the mirror
+# ``host.evacuate``: after it, DRS may move VMs onto the host and vSAN copies
+# data back. Without this rule a person's generic call ran at once.
+_VIM_EXIT_MAINTENANCE_PATH_RE = re.compile(r"/HostSystem/\{[^/{}]+\}/ExitMaintenanceMode_Task")
 
 
 def _canonical(path: str) -> tuple[str, str]:
@@ -112,11 +120,23 @@ def is_vmware_vm_relocate(method: str, path: str) -> bool:
     return not query and _VIM_RELOCATE_PATH_RE.fullmatch(canonical_path) is not None
 
 
+def is_vmware_host_maintenance_exit(method: str, path: str) -> bool:
+    """Return whether ``(method, path)`` is ``POST /HostSystem/{moId}/ExitMaintenanceMode_Task``.
+
+    Matches with or without the ``/api`` mount in the path, with any
+    spelling of the path parameter.
+    """
+    if method.upper() != "POST":
+        return False
+    canonical_path, query = _canonical(path)
+    return not query and _VIM_EXIT_MAINTENANCE_PATH_RE.fullmatch(canonical_path) is not None
+
+
 def _requires_vmware_safety_floor(method: str, path: str) -> bool:
-    """Identify VMware VM write families that require approval."""
+    """Identify VMware VM and host write families that require approval."""
     if method not in _WRITE_METHODS:
         return False
-    if is_vmware_vm_relocate(method, path):
+    if is_vmware_vm_relocate(method, path) or is_vmware_host_maintenance_exit(method, path):
         return True
     canonical_path, _query = _canonical(path)
     if canonical_path == "/vcenter/vm/{vm}/hardware":
@@ -137,7 +157,8 @@ def vmware_rest_safety_floor(
 ) -> EndpointDescriptorProto:
     """Promote VM, tagging-removal, and library-item-delete writes for the VMware catalogs.
 
-    The VM writes include the moves that copy disks (:func:`is_vmware_vm_relocate`).
+    The VM writes include the moves that copy disks (:func:`is_vmware_vm_relocate`)
+    and the host maintenance-mode exit (:func:`is_vmware_host_maintenance_exit`).
     """
     if version not in _FLOORED_VERSIONS:
         return proto

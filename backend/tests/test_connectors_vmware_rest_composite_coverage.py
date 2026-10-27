@@ -55,6 +55,8 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.vm.disk.attach",
         "vmware.composite.vm.clone_from_template",
         "vmware.composite.host.evacuate",
+        # ``.exit`` is not a classifier suffix -> ``other`` (#4967).
+        "vmware.composite.host.maintenance.exit",
         "vmware.composite.host.detach_from_vds",
         "vmware.composite.network.portgroup.security.set",
         # vlan.set ends in ``.set`` (not a write suffix) -> the classifier's

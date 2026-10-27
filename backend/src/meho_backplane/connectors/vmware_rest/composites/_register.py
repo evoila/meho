@@ -209,6 +209,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     guest_customization_spec_create_composite,
     host_detach_from_vds_composite,
     host_evacuate_composite,
+    host_maintenance_exit_composite,
     network_portgroup_create_composite,
     network_portgroup_security_set_composite,
     network_portgroup_vlan_set_composite,
@@ -290,6 +291,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     HOST_DISK_MARK_FLASH_RESPONSE_SCHEMA,
     HOST_EVACUATE_PARAMETER_SCHEMA,
     HOST_EVACUATE_RESPONSE_SCHEMA,
+    HOST_MAINTENANCE_EXIT_PARAMETER_SCHEMA,
+    HOST_MAINTENANCE_EXIT_RESPONSE_SCHEMA,
     HOST_SERVICE_CONTROL_PARAMETER_SCHEMA,
     HOST_SERVICE_CONTROL_RESPONSE_SCHEMA,
     HOST_STANDARD_PORTGROUP_DELETE_PARAMETER_SCHEMA,
@@ -1057,6 +1060,24 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.evacuate"],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.host.maintenance.exit",
+        handler=host_maintenance_exit_composite,
+        summary="Take a host out of maintenance mode, after a second person approves.",
+        description=(
+            "Reads the host first: a host that is not connected is refused, and a host that "
+            "is not in maintenance mode answers unchanged with nothing sent. Then sends the "
+            "exit request and waits for its task. Returns the host's maintenance state, "
+            "connection state and vSphere HA state afterwards."
+        ),
+        parameter_schema=HOST_MAINTENANCE_EXIT_PARAMETER_SCHEMA,
+        response_schema=HOST_MAINTENANCE_EXIT_RESPONSE_SCHEMA,
+        group_key="host",
+        tags=["composite", "write", "host", "maintenance", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.maintenance.exit"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.host.detach_from_vds",

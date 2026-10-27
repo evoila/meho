@@ -122,6 +122,8 @@ __all__ = [
     "HOST_DISK_MARK_FLASH_RESPONSE_SCHEMA",
     "HOST_EVACUATE_PARAMETER_SCHEMA",
     "HOST_EVACUATE_RESPONSE_SCHEMA",
+    "HOST_MAINTENANCE_EXIT_PARAMETER_SCHEMA",
+    "HOST_MAINTENANCE_EXIT_RESPONSE_SCHEMA",
     "HOST_MOID_PATTERN",
     "HOST_SERVICE_CONTROL_PARAMETER_SCHEMA",
     "HOST_SERVICE_CONTROL_RESPONSE_SCHEMA",
@@ -1826,6 +1828,25 @@ HOST_EVACUATE_PARAMETER_SCHEMA: dict[str, Any] = {
 }
 
 
+#: ``vmware.composite.host.maintenance.exit`` parameter schema (#4967).
+#:
+#: One input: the host. The handler reads the host first and sends the
+#: exit only when the host is connected and in maintenance mode.
+HOST_MAINTENANCE_EXIT_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "host": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Host moid to take out of maintenance mode.",
+        },
+    },
+    "required": ["host"],
+    "additionalProperties": False,
+    "examples": [{"host": "host-21"}],
+}
+
+
 #: ``vmware.composite.host.detach_from_vds`` parameter schema.
 #:
 #: Per-VM NIC migration off the DVS, then DVS host-detach. Refuses to
@@ -3188,6 +3209,68 @@ HOST_EVACUATE_RESPONSE_SCHEMA: dict[str, Any] = {
         "maintenance_entered",
         "moved_by",
     ],
+}
+
+HOST_MAINTENANCE_EXIT_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
+        "status": {
+            "type": "string",
+            "enum": ["exited", "unchanged", "not_connected", "timeout"],
+            "description": (
+                "``exited``: the host left maintenance mode. ``unchanged``: "
+                "the host was not in maintenance mode; nothing was sent. "
+                "``not_connected``: the host is not connected to vCenter; "
+                "nothing was sent. ``timeout``: MEHO stopped waiting while "
+                "the exit task still runs; the call did not fail."
+            ),
+        },
+        "host": {
+            "type": "string",
+            "description": "Host moid the operator targeted.",
+        },
+        "name": {
+            "type": ["string", "null"],
+            "description": "The host's display name, as vCenter reports it.",
+        },
+        "connection_state": {
+            "type": ["string", "null"],
+            "description": (
+                "The host's connection state after the call (``connected`` / "
+                "``notResponding`` / ``disconnected``); on ``unchanged`` and "
+                "``not_connected`` the state read before the call."
+            ),
+        },
+        "in_maintenance_mode": {
+            "type": ["boolean", "null"],
+            "description": (
+                "Whether the host is in maintenance mode after the call "
+                "(false on ``exited``); on ``timeout`` the state while the "
+                "task still runs."
+            ),
+        },
+        "ha_state": {
+            "type": ["string", "null"],
+            "description": (
+                "The vSphere HA state of the host (``master``, "
+                "``connectedToMaster``, ``election``, ...). Null on a host "
+                "outside an HA cluster."
+            ),
+        },
+        "maintenance_task": {
+            "type": ["string", "null"],
+            "description": (
+                "The vCenter task id of the exit request; on ``timeout`` the "
+                "task still runs under this id. Null when nothing was sent."
+            ),
+        },
+        "guidance": {
+            "type": "string",
+            "description": "What to do next, on every status except ``exited``.",
+        },
+    },
+    "required": ["status", "host"],
 }
 
 

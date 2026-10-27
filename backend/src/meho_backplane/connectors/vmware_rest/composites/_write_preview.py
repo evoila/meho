@@ -33,6 +33,11 @@ resolved VM + host group sets).
 ``vm.power.bulk``         ``{action, filter, resolved, total_resolved}``
 ``host.evacuate``         ``{host, tolerate_partial_failure, vsan_mode,
                           resolved, total_resolved}``
+``host.maintenance.exit`` live-read: the host (name, connection state,
+                          maintenance state, HA state), the VMs on it
+                          (``resolved``, ``total_resolved``) and
+                          ``what_happens_next``; a failed read is listed
+                          under ``unavailable``, never blocks the park
 ``host.detach_from_vds``  ``{host, dvs, fallback_network, resolved,
                           total_resolved}``
 ``cluster.patch``         ``{cluster, resolved, total_resolved}``
@@ -219,6 +224,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     _list_child_resource_pool_ids,
     _read_cdrom,
     _read_ethernet_nic,
+    _read_host_maintenance_state,
     _read_sub_op,
     _read_vm_info,
     _read_vm_snapshots_best_effort,
@@ -340,6 +346,57 @@ async def _host_evacuate_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "vsan_mode": str(ctx.params.get("vsan_mode") or _VSAN_MODE_DEFAULT),
         **_capped_resolution(rows, _vm_identity),
     }
+
+
+#: What the approver should expect after the host leaves maintenance mode.
+_MAINTENANCE_EXIT_WHAT_HAPPENS_NEXT = (
+    "After the host leaves maintenance mode, vSAN copies back the data that changed "
+    "while the host was away, and DRS may move running VMs onto the host."
+)
+
+
+async def _host_maintenance_exit_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``host.maintenance.exit`` -- the host's state and the VMs on it (#4967).
+
+    Two read-only calls: the host's name, connection state, maintenance
+    state and HA state (vim ``RetrievePropertiesEx``, the same read the
+    handler does first) and the VMs registered on the host with their
+    power state (``GET:/vcenter/vm``). The exit task never fires here. A
+    failed read does not block the approval: the preview keeps what it
+    has and lists what is missing under ``unavailable`` (the fault class
+    only, never the fault text).
+    """
+    host = ctx.params.get("host")
+    if not isinstance(host, str) or ctx.connector_instance is None:
+        return None
+    preview: dict[str, Any] = {"host": host}
+    unavailable: list[str] = []
+    try:
+        state = await _read_host_maintenance_state(
+            connector=ctx.connector_instance,  # type: ignore[arg-type]
+            target=ctx.target,
+            operator=ctx.operator,
+            host_moid=host,
+        )
+    except Exception as exc:
+        unavailable.append(f"the host state: the host read failed ({type(exc).__name__})")
+    else:
+        preview.update(state.as_fields())
+    try:
+        rows = await _resolve_vm_list(
+            connector=ctx.connector_instance,  # type: ignore[arg-type]
+            target=ctx.target,
+            operator=ctx.operator,
+            filter_dict={"hosts": [host]},
+        )
+    except Exception as exc:
+        unavailable.append(f"the VMs on the host: the VM listing failed ({type(exc).__name__})")
+    else:
+        preview.update(_capped_resolution(rows, _vm_identity))
+    preview["what_happens_next"] = _MAINTENANCE_EXIT_WHAT_HAPPENS_NEXT
+    if unavailable:
+        preview["unavailable"] = unavailable
+    return preview
 
 
 async def _host_detach_from_vds_preview(ctx: PreviewContext) -> dict[str, Any] | None:
@@ -1745,6 +1802,7 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.vm.nic.repoint": _vm_nic_repoint_preview,
     "vmware.composite.vm.device.cdrom": _vm_device_cdrom_preview,
     "vmware.composite.host.evacuate": _host_evacuate_preview,
+    "vmware.composite.host.maintenance.exit": _host_maintenance_exit_preview,
     "vmware.composite.host.detach_from_vds": _host_detach_from_vds_preview,
     "vmware.composite.cluster.patch": _cluster_patch_preview,
     "vmware.composite.cluster.drs_rule.create": _cluster_drs_rule_create_preview,
@@ -1790,7 +1848,7 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 51 write-composite park-time preview builders. Import-time.
+    """Wire the 52 write-composite park-time preview builders. Import-time.
 
     The read composites register no builder here. The one read that can
     wait for approval, the ``caution`` ``vm.guest.file.read``, registers

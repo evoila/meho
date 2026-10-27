@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
@@ -324,7 +324,10 @@ class _RecordingVmwareConnector:
         if path.endswith("/RetrievePropertiesEx"):
             spec_type = json["specSet"][0]["propSet"][0]["type"]
             if spec_type in self.vmomi_responses:
-                return self.vmomi_responses[spec_type]
+                response = self.vmomi_responses[spec_type]
+                # An iterator answers one read after the other (a host whose
+                # state changes between the read before and after a write).
+                return next(response) if isinstance(response, Iterator) else response
             if spec_type == "Task":
                 task_moid = json["specSet"][0]["objectSet"][0]["obj"]["value"]
                 return _vmomi_retrieve_result("Task", task_moid, "info", {"state": "success"})
@@ -1192,6 +1195,190 @@ async def test_vm_create_full_queue_approve_resume_execute(
     assert result2.result["status"] == "created"
     assert result2.result["vm_id"] == "vm-789"
     assert recorder.calls == [("GET", "/vcenter/folder"), ("POST", "/vcenter/vm")]
+
+
+# ===========================================================================
+# One approval is enough: the raised generic exit does not park again (#4967)
+# ===========================================================================
+
+
+def _host_runtime_in_maintenance(host_moid: str, in_maintenance: bool) -> dict[str, Any]:
+    """A ``HostSystem`` runtime read: connected, in maintenance mode or not."""
+    return {
+        "objects": [
+            {
+                "obj": {"type": "HostSystem", "value": host_moid},
+                "propSet": [
+                    {"name": "name", "val": "esx-01"},
+                    {"name": "runtime.connectionState", "val": "connected"},
+                    {"name": "runtime.inMaintenanceMode", "val": in_maintenance},
+                ],
+            }
+        ]
+    }
+
+
+async def _insert_generic_exit_descriptor() -> None:
+    """Seed the generic exit the way the VMware floor stores it: dangerous, with approval."""
+    op_id = "POST:/HostSystem/{moId}/ExitMaintenanceMode_Task"
+    async with get_sessionmaker()() as s:
+        s.add(
+            EndpointDescriptor(
+                id=uuid.uuid4(),
+                tenant_id=None,
+                product="vmware",
+                version="9.0",
+                impl_id="vmware-rest",
+                op_id=op_id,
+                source_kind="ingested",
+                method="POST",
+                path=op_id.split(":", 1)[1],
+                handler_ref=None,
+                summary="Exit maintenance mode.",
+                description=None,
+                tags=[],
+                parameter_schema={"type": "object", "properties": {}},
+                response_schema=None,
+                llm_instructions=None,
+                safety_level="dangerous",
+                requires_approval=True,
+                is_enabled=True,
+                embedding=[0.1] * 384,
+                custom_description=None,
+                custom_notes=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await s.commit()
+
+
+def _maintenance_exit_recorder() -> _RecordingVmwareConnector:
+    recorder = _RecordingVmwareConnector()
+    # Three host reads: the park-time preview, the handler's read before the
+    # exit, and its read after the task ended.
+    recorder.vmomi_responses["HostSystem"] = iter(
+        [
+            _host_runtime_in_maintenance("host-1", True),
+            _host_runtime_in_maintenance("host-1", True),
+            _host_runtime_in_maintenance("host-1", False),
+        ]
+    )
+    recorder.vmomi_responses["/HostSystem/host-1/ExitMaintenanceMode_Task"] = _vmomi_task_moref(
+        "t-exit-1"
+    )
+    return recorder
+
+
+def _cluster_patch_recorder() -> _RecordingVmwareConnector:
+    recorder = _RecordingVmwareConnector()
+    recorder.responses.update(
+        {
+            "/vcenter/host": {"value": [{"host": "host-1"}]},
+            "/esx/settings/hosts/host-1/software?action=apply&vmw-task=true": {
+                "value": "task-apply-1"
+            },
+            "/cis/tasks/task-apply-1": {"value": {"status": "SUCCEEDED"}},
+        }
+    )
+    recorder.vmomi_responses.update(
+        {
+            "/HostSystem/host-1/EnterMaintenanceMode_Task": _vmomi_task_moref("t-enter-1"),
+            "/HostSystem/host-1/ExitMaintenanceMode_Task": _vmomi_task_moref("t-exit-1"),
+        }
+    )
+    return recorder
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("op_id", "params", "make_recorder", "expected_status"),
+    [
+        (
+            "vmware.composite.host.maintenance.exit",
+            {"host": "host-1"},
+            _maintenance_exit_recorder,
+            "exited",
+        ),
+        (
+            "vmware.composite.cluster.patch",
+            {"cluster": "domain-c1"},
+            _cluster_patch_recorder,
+            "completed",
+        ),
+    ],
+    ids=["host.maintenance.exit", "cluster.patch"],
+)
+async def test_exit_sub_step_does_not_wait_for_a_second_approval(
+    op_id: str,
+    params: dict[str, Any],
+    make_recorder: Callable[[], _RecordingVmwareConnector],
+    expected_status: str,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """One approval finishes the call, even though the generic exit row needs approval.
+
+    The VMware floor stores ``POST:/HostSystem/{moId}/ExitMaintenanceMode_Task``
+    as ``dangerous`` with ``requires_approval=True`` (#4967). The composites
+    send that vim call as a governed sub-step with the shared sub-op posture
+    (``requires_approval=False``), so the approved resume runs it at once:
+    the exit reaches the wire, and no second approval row is written.
+    """
+    recorder = make_recorder()
+    await _bootstrap(recorder, stub_embedding_service)
+    await _insert_generic_exit_descriptor()
+
+    target_id = uuid.uuid4()
+    async with get_sessionmaker()() as s:
+        s.add(
+            TargetORM(
+                id=target_id,
+                tenant_id=_TENANT_ID,
+                name="prod-vcenter",
+                product="vmware",
+                host="vcenter.prod.invalid",
+                aliases=[],
+            )
+        )
+        await s.commit()
+    requester = _make_operator(sub="ops-human", principal_kind=PrincipalKind.USER)
+    target = _FakeVmwareTarget(target_id=target_id)
+
+    # Step 1: a person's call waits for approval; nothing is sent.
+    result1 = await dispatch(
+        operator=requester, connector_id=_CONNECTOR_ID, op_id=op_id, target=target, params=params
+    )
+    assert result1.status == "awaiting_approval", result1.error
+    assert [p for p, _ in recorder.vmomi_calls if "MaintenanceMode_Task" in p] == []
+    approval_request_id = UUID(result1.extras["approval_request_id"])
+
+    # Step 2: a second person approves.
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    async with get_sessionmaker()() as s:
+        row = await approve_request(s, approval_request_id, operator=reviewer, params=params)
+        await s.commit()
+    assert row.status == ApprovalRequestStatus.APPROVED.value
+
+    # Step 3: the approved resume finishes the call; the exit is on the wire.
+    result2 = await dispatch(
+        operator=reviewer,
+        connector_id=_CONNECTOR_ID,
+        op_id=op_id,
+        target=target,
+        params=params,
+        _approved=True,
+    )
+    assert result2.status == "ok", result2.error
+    assert result2.result["status"] == expected_status
+    assert [p for p, _ in recorder.vmomi_calls if p.endswith("/ExitMaintenanceMode_Task")] == [
+        "/HostSystem/host-1/ExitMaintenanceMode_Task"
+    ]
+    async with get_sessionmaker()() as s:
+        approval_rows = (
+            await s.execute(select(func.count()).select_from(ApprovalRequest))
+        ).scalar()
+    assert approval_rows == 1, "the exit sub-step must not wait for a second approval"
 
 
 # ===========================================================================

@@ -958,6 +958,11 @@ _EXPECTED_2970_VIM_MANIFESTS: dict[str, set[str]] = {
         "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
         "POST:/HostSystem/{moId}/EnterMaintenanceMode_Task",
     },
+    # host.maintenance.exit (#4967): the host runtime reads + the exit.
+    "_VIM_SUB_OPS_HOST_MAINTENANCE_EXIT": {
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/HostSystem/{moId}/ExitMaintenanceMode_Task",
+    },
     "_VIM_SUB_OPS_CLUSTER_PATCH": {
         "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
         "POST:/HostSystem/{moId}/EnterMaintenanceMode_Task",

@@ -484,8 +484,9 @@ Files: `security.py` (group text, guidance for the AI, operation table, and
 the `SecurityOps` methods `AzureConnector` inherits), `security_schemas.py`
 (parameter and response schemas), `security_parse.py` (how Azure's answers
 become rows, and the parameter checks) and `security_reads.py` (the calls).
-`_model.py` holds `AzureTypedOp`, so a family module and `typed_ops.py` never
-import each other in a circle.
+The shared pieces (`AzureTypedOp`, `NO_PARAMS`, `TEXT_OR_NULL`) are in
+`_model.py`, so a family module and `typed_ops.py` never import each other in
+a circle.
 
 ### Operations
 

@@ -13,13 +13,14 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from meho_backplane.connectors.azure._model import TEXT_OR_NULL
+
 __all__ = [
     "ACTIVITY_LIST_PARAMS",
     "ACTIVITY_LIST_RESPONSE",
     "ALERT_LIST_PARAMS",
     "ALERT_LIST_RESPONSE",
     "CONTROL_LIST_RESPONSE",
-    "NO_PARAMS",
     "PLAN_LIST_RESPONSE",
     "POLICY_ASSIGNMENT_LIST_RESPONSE",
     "POLICY_SUMMARY_RESPONSE",
@@ -30,22 +31,14 @@ __all__ = [
     "SCORE_LIST_RESPONSE",
 ]
 
-_TEXT_OR_NULL: Final[list[str]] = ["string", "null"]
 _INT_OR_NULL: Final[list[str]] = ["integer", "null"]
 _NUMBER_OR_NULL: Final[list[str]] = ["number", "null"]
 
 _EXAMPLE_SUBSCRIPTION: Final[str] = "00000000-0000-0000-0000-000000000000"
 
-NO_PARAMS: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {},
-    "additionalProperties": False,
-    "examples": [{}],
-}
-
 
 def _text(description: str) -> dict[str, Any]:
-    return {"type": _TEXT_OR_NULL, "description": description}
+    return {"type": TEXT_OR_NULL, "description": description}
 
 
 def _count(description: str) -> dict[str, Any]:

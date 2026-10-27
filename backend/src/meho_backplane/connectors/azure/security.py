@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.azure import security_reads
 from meho_backplane.connectors.azure import security_schemas as schemas
-from meho_backplane.connectors.azure._model import AzureTypedOp
+from meho_backplane.connectors.azure._model import NO_PARAMS, AzureTypedOp
 from meho_backplane.connectors.azure.session import AzureTargetLike
 
 if TYPE_CHECKING:
@@ -309,7 +309,7 @@ OPS: tuple[AzureTypedOp, ...] = (
         "score: its name, the score, the most it can be, and the percentage. Needs "
         "Reader or Security Reader. Read-only.",
         (*_DEFENDER_TAGS, "secure-score"),
-        schemas.NO_PARAMS,
+        NO_PARAMS,
         schemas.SCORE_LIST_RESPONSE,
         _SCORE_LIST_GUIDANCE,
     ),
@@ -321,7 +321,7 @@ OPS: tuple[AzureTypedOp, ...] = (
         "$expand=definition. Returns each control: name, score, most score, healthy and "
         "unhealthy resource counts, and the names of its recommendations. Read-only.",
         (*_DEFENDER_TAGS, "secure-score", "control"),
-        schemas.NO_PARAMS,
+        NO_PARAMS,
         schemas.CONTROL_LIST_RESPONSE,
         _CONTROL_LIST_GUIDANCE,
     ),
@@ -357,7 +357,7 @@ OPS: tuple[AzureTypedOp, ...] = (
         "Reads GET /{scope}/providers/Microsoft.Security/pricings for the subscription. "
         "Returns each plan's name, tier (Free or Standard) and sub-plan. Read-only.",
         (*_DEFENDER_TAGS, "plan", "pricing"),
-        schemas.NO_PARAMS,
+        NO_PARAMS,
         schemas.PLAN_LIST_RESPONSE,
         _PLAN_LIST_GUIDANCE,
     ),
@@ -369,7 +369,7 @@ OPS: tuple[AzureTypedOp, ...] = (
         "which only reads. Returns the non-compliant resource and policy counts of the "
         "subscription and the counts per policy assignment. Read-only.",
         (*_POLICY_TAGS, "summary"),
-        schemas.NO_PARAMS,
+        NO_PARAMS,
         schemas.POLICY_SUMMARY_RESPONSE,
         _POLICY_SUMMARY_GUIDANCE,
     ),
@@ -381,7 +381,7 @@ OPS: tuple[AzureTypedOp, ...] = (
         "assignment's name, display name, scope, policy or initiative id and enforcement "
         "mode, also those inherited from management groups. Read-only.",
         (*_POLICY_TAGS, "assignment"),
-        schemas.NO_PARAMS,
+        NO_PARAMS,
         schemas.POLICY_ASSIGNMENT_LIST_RESPONSE,
         _POLICY_ASSIGNMENT_LIST_GUIDANCE,
     ),

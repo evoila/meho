@@ -181,6 +181,8 @@ async def expire_approvals_from_older_release() -> int:
     """
     release_id = running_release_id()
     if release_id is None:
+        # Make it visible that approvals are not tied to a release here.
+        _log.warning("approval_release_binding_off", reason="GIT_SHA is not set or is unknown")
         return 0
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:

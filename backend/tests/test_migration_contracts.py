@@ -159,6 +159,7 @@ def _windows_vm() -> dict[str, Any]:
             "window_start": "2026-09-20T08:00:00Z",
             "window_end": _TIME,
             "samples": 8640,
+            "sample_interval_minutes": 5,
             "source": "vcenter-perf",
             "cpu_percent": _stat(22.0, 61.3, 97.0),
             "memory_percent": _stat(48.0, 70.0, 88.5),

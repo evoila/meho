@@ -91,7 +91,7 @@ _MEASURED_ASSUMPTIONS: Final[tuple[str, ...]] = (
     "percentile",
     "min_window_days",
     "min_sample_coverage",
-    "expected_sample_interval_minutes",
+    "sample_coverage",
 )
 _DISK_ASSUMPTIONS: Final[tuple[str, ...]] = (
     "region",
@@ -159,6 +159,7 @@ class _Builder:
         reason: str,
         *,
         basis: Basis | None,
+        inputs: dict[str, str | float | int | bool | None] | None = None,
         assumptions: tuple[str, ...] = (),
         unit: str | None = None,
     ) -> None:
@@ -166,6 +167,7 @@ class _Builder:
             value=None,
             unit=unit or self.unit,
             basis=basis,
+            inputs=inputs or {},
             assumptions=list(assumptions),
             calculation_version=CALCULATION_VERSION,
             unknown_reason=reason,
@@ -202,7 +204,11 @@ def _size(b: _Builder, basis: Basis, need: Need, os_family: ServerOs | None) -> 
         lambda size: context.compute.hourly(size.name, meter_os),
         context.families,
     )
+    # The measurements a measured need was made from come first, so the
+    # figure shows the p95 values, the window, the samples and the source
+    # next to the need they gave.
     counts: dict[str, str | float | int | bool | None] = {
+        **need.evidence,
         "need_vcpus": need.vcpus,
         "need_memory_gb": round(need.memory_gb, 2),
         "need_data_disks": need.data_disks,
@@ -216,7 +222,14 @@ def _size(b: _Builder, basis: Basis, need: Need, os_family: ServerOs | None) -> 
         reason = f"no size in {context.region} offers {_need_text(need)}"
         if search.restricted_skipped:
             reason += f" ({search.restricted_skipped} fitting sizes are restricted)"
-        b.unknown(f"size.{basis}", reason, basis=basis, assumptions=assumptions, unit="vCPUs")
+        b.unknown(
+            f"size.{basis}",
+            reason,
+            basis=basis,
+            inputs=counts,
+            assumptions=assumptions,
+            unit="vCPUs",
+        )
         return None
     size = search.size
     why = (

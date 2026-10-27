@@ -55,7 +55,8 @@ Record kinds:
   (name, version, family, architecture), `boot_type` (`bios` or `uefi`),
   `secure_boot`, `power_state`, `nics`, `utilization` (CPU, memory and
   network as average, p95 and maximum, with the window, the number of
-  samples and the source) or `null`, `collected_at`, `missing`.
+  samples, the minutes between two samples and the source) or `null`,
+  `collected_at`, `missing`.
 - `ApplicationRecord` (`kind="application"`): name, version, vendor,
   category, and `runs_on` (server `source_id` values).
 - `KubernetesWorkloadRecord` (`kind="kubernetes_workload"`): cluster,
@@ -192,17 +193,22 @@ Steps:
    `azure.vm.size.list` (`location`), then `azure.price.list` for the
    region's VM prices (`price_type` `Consumption`, and `Reservation` only
    when a reserved option is asked for) and for `Standard SSD Managed
-   Disks` and `Premium SSD Managed Disks`. A child result that came back
-   as a handle is read back with `fetch_rows`. A child read that fails, or
-   a stored result that was cut short (`stored_rows < total_rows`), stops
-   the operation with a clear message: a cut list could hide the cheapest
-   size.
+   Disks` and `Premium SSD Managed Disks`. The rows are read under `items`
+   or `value` (the Azure paging helper's key). A child result that came
+   back as a handle is read back with `fetch_rows`. A child read that
+   fails, one whose answer says `truncated` (Azure stopped paging at a
+   limit, so the rows look complete but are not), or a stored result that
+   was cut short (`stored_rows < total_rows`), stops the operation with a
+   clear message: a cut list could hide the cheapest size.
 3. Size each server twice:
    - **Allocated**, always: vCPUs at least the cores, memory at least the
      configured memory.
    - **Measured**, only when utilization covers at least 7 days and at
-     least 80% of the samples of a source that reads every 2 hours: p95
-     CPU and memory times the comfort factor. Otherwise `size.measured`
+     least 80% of the samples the source would take over the window at
+     its own interval (`utilization.sample_interval_minutes`; 30 days at
+     one sample every 5 minutes means 8640 samples): p95 CPU and memory
+     times the comfort factor. A source that does not give its interval
+     gives no coverage, so no measured size. Otherwise `size.measured`
      is unknown with the reason, the item has the flag
      `right_sized_unknown` and `unknowns` has a `right_sized` entry.
 
@@ -230,7 +236,10 @@ Steps:
 
 Out: the `AssessmentResult` shape plus `totals`. Per server the figures
 are `size.<basis>` (value: vCPUs; `inputs` has the size, its family,
-memory, the needs and `why`), `compute.<basis>.<pricing>`,
+memory, the needs and `why`; `size.measured` also has the p95 CPU and
+memory values, the comfort factor, the window, the samples, the sample
+interval, the expected samples, the coverage and the measurement
+source, so the need can be checked), `compute.<basis>.<pricing>`,
 `disk.<n>.<basis>`, `disks.<basis>` and `monthly.<basis>.<pricing>`,
 where `<basis>` is `allocated` or `measured`. Each price figure lists its
 price rows in `inputs` (meter id, meter and product name, price, unit,
@@ -241,6 +250,15 @@ servers that have a price, with the counts). `assumptions` names the
 region, currency, price date (the day the prices were read), 730 hours,
 the license and reservation choice, the comfort factor, and the rules
 above in `other`. The calculation version is `migration-assess-vm-1`.
+
+The result is one document: `items` beside `totals`, `assumptions`,
+`inputs`, `unknowns` and `omissions`. The operation registers
+`llm_instructions.result_document = {"keep_whole": true}`, so a result
+over the inline size limit is stored **whole** as a document record (see
+`result-spill.md`), not as `items` rows with the rest dropped. Read it
+with `result_query` and a `path`: `/totals`, `/assumptions`, `/inputs`
+whole; `/items`, `/unknowns` and `/omissions` in pages with `offset` and
+`limit`.
 
 ## Dependencies
 
@@ -270,9 +288,12 @@ with faked Azure reads in their documented item shape: a 4-core, 16 GB
 Windows VM (allocated and measured sizes, reservation with the Windows
 license, Premium disks), a UEFI Linux VM that gets a generation 2 size,
 a VM bigger than any size, a restricted size that is skipped, missing and
-too short utilization, Hybrid Benefit, the family allow-list, the same
-machine read twice, a failed child read, and a child result stored behind
-a handle.
+too short utilization, sparse 5-minute measurements against the same
+count from a 2-hour source, a source without a sample interval, Hybrid
+Benefit, the family allow-list, the same machine read twice, a failed
+child read, a child result stored behind a handle, a child list Azure
+cut short (plain and behind a handle), and a large result reduced the way
+the dispatcher does it and read back part by part.
 
 ## Known issues
 
@@ -286,6 +307,9 @@ a handle.
 - A region has about 9,000 to 10,000 pay-as-you-go VM price rows, close to
   the stored-result row limit (`result_handle_max_spill_rows`, 10,000). If
   a list is cut, the operation stops instead of picking from part of it.
+- A whole assessment is one stored record, so it must fit the record
+  cap (`result_handle_max_record_bytes`, 16 MiB). Over that, the result
+  is not stored and the handle says so.
 - Sizing does not yet use disk speed (IOPS, throughput) or network use.
 - Duplicate servers are matched by exact BIOS UUID only. Some guest
   systems report the BIOS UUID with the first three groups byte-swapped;

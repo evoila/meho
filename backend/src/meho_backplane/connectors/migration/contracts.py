@@ -211,6 +211,14 @@ class Utilization(_Shape):
     window_start: datetime = Field(description="Start of the measurement window.")
     window_end: datetime = Field(description="End of the measurement window.")
     samples: int = Field(ge=1, description="Number of samples in the window.")
+    sample_interval_minutes: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Minutes between two samples of the source. Null when the source does not "
+            "say; then nobody can check how much of the window the samples cover."
+        ),
+    )
     source: str = Field(description="Where the numbers come from, for example 'vcenter-perf'.")
     cpu_percent: Stat | None = Field(default=None, description="CPU use in percent.")
     memory_percent: Stat | None = Field(default=None, description="Memory use in percent.")

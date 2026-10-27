@@ -11,9 +11,12 @@ Two ways to size, both with the same match:
   and memory use, times the comfort factor (headroom), of what the machine
   has today. "Enough" means a window of at least
   :data:`MIN_WINDOW_DAYS` days and at least :data:`MIN_SAMPLE_COVERAGE` of
-  the samples a source that reads every
-  :data:`EXPECTED_SAMPLE_INTERVAL_MINUTES` minutes would have. Otherwise the
-  measured size is unknown, with the reason.
+  the samples the source would have taken at its own sample interval
+  (``utilization.sample_interval_minutes``). A source that does not say its
+  interval gives no coverage, so no measured size. Otherwise the measured
+  size is unknown, with the reason. The measured need carries the values it
+  was made from (the p95 values, the window, the samples, the source), so
+  the figure can show them.
 
 The match then keeps the sizes of the region that have enough vCPUs and
 memory, enough data-disk slots, the VM generation the boot type needs, no
@@ -27,14 +30,13 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Final
 
 from meho_backplane.connectors.migration.azure_prices import PriceRow
 from meho_backplane.connectors.migration.contracts import ServerRecord
 
 __all__ = [
-    "EXPECTED_SAMPLE_INTERVAL_MINUTES",
     "MIN_SAMPLE_COVERAGE",
     "MIN_WINDOW_DAYS",
     "Need",
@@ -49,12 +51,11 @@ __all__ = [
 
 MIN_WINDOW_DAYS: Final[int] = 7
 MIN_SAMPLE_COVERAGE: Final[float] = 0.8
-#: The coarsest sample interval MEHO counts on (vCenter keeps 2-hour values
-#: for the past month). A window must hold at least 80% of the samples such
-#: a source would have.
-EXPECTED_SAMPLE_INTERVAL_MINUTES: Final[int] = 120
 
 _MB_PER_GB: Final[float] = 1024.0
+_MINUTES_PER_DAY: Final[int] = 24 * 60
+
+Evidence = Mapping[str, str | float | int | bool | None]
 
 
 @dataclass(frozen=True)
@@ -73,12 +74,17 @@ class VmSize:
 
 @dataclass(frozen=True)
 class Need:
-    """What a size must offer. ``None`` means not checked (the value is unknown)."""
+    """What a size must offer. ``None`` means not checked (the value is unknown).
+
+    ``evidence`` holds the measurements a measured need was made from, for
+    the figure's ``inputs``. An allocated need has none.
+    """
 
     vcpus: int
     memory_gb: float
     data_disks: int | None
     generation: str | None
+    evidence: Evidence = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -187,13 +193,19 @@ def measured_need(server: ServerRecord, allocated: Need, comfort_factor: float) 
     if use is None:
         return "no utilization was measured"
     window_minutes = (use.window_end - use.window_start).total_seconds() / 60
-    if window_minutes < MIN_WINDOW_DAYS * 24 * 60:
+    if window_minutes < MIN_WINDOW_DAYS * _MINUTES_PER_DAY:
         return f"the measurement window is shorter than {MIN_WINDOW_DAYS} days"
-    expected = window_minutes / EXPECTED_SAMPLE_INTERVAL_MINUTES
-    if use.samples < MIN_SAMPLE_COVERAGE * expected:
+    if use.sample_interval_minutes is None:
+        return (
+            "the source does not say how often it sampled, so the coverage of the window is unknown"
+        )
+    expected = window_minutes / use.sample_interval_minutes
+    coverage = use.samples / expected
+    if coverage < MIN_SAMPLE_COVERAGE:
         return (
             f"{use.samples} samples cover less than {MIN_SAMPLE_COVERAGE:.0%} of the window "
-            f"(one sample every {EXPECTED_SAMPLE_INTERVAL_MINUTES} minutes expected)"
+            f"({coverage:.0%}: one sample every {use.sample_interval_minutes} minutes over "
+            f"{window_minutes / _MINUTES_PER_DAY:g} days means about {math.ceil(expected)} samples)"
         )
     cpu = use.cpu_percent.p95 if use.cpu_percent else None
     memory = use.memory_percent.p95 if use.memory_percent else None
@@ -204,6 +216,19 @@ def measured_need(server: ServerRecord, allocated: Need, comfort_factor: float) 
         memory_gb=allocated.memory_gb * memory / 100 * comfort_factor,
         data_disks=allocated.data_disks,
         generation=allocated.generation,
+        evidence={
+            "cpu_p95_percent": cpu,
+            "memory_p95_percent": memory,
+            "comfort_factor": comfort_factor,
+            "window_start": use.window_start.isoformat(),
+            "window_end": use.window_end.isoformat(),
+            "window_days": round(window_minutes / _MINUTES_PER_DAY, 2),
+            "samples": use.samples,
+            "sample_interval_minutes": use.sample_interval_minutes,
+            "expected_samples": math.ceil(expected),
+            "sample_coverage": round(coverage, 2),
+            "measurement_source": use.source,
+        },
     )
 
 

@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+import meho_backplane.operations.result_query as rq
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.migration import assess_vm, inventory_load
 from meho_backplane.connectors.migration.assess_vm import (
@@ -26,6 +27,7 @@ from meho_backplane.connectors.migration.assess_vm import (
     migration_assess_vm,
 )
 from meho_backplane.connectors.migration.assess_vm_op import (
+    _LLM_INSTRUCTIONS,
     MIGRATION_ASSESS_VM_OP_ID,
     MIGRATION_ASSESS_VM_PARAMETER_SCHEMA,
     MIGRATION_ASSESS_VM_RESPONSE_SCHEMA,
@@ -37,6 +39,7 @@ from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.delete_names import write_word_in_op_id
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.operations.result_query import ResultQuerySpec, run_result_query
 from meho_backplane.settings import get_settings
 
 _SUB = "operator:fixture"
@@ -73,6 +76,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> ResultHandleStore:
     shared = ResultHandleStore(_MemoryValkey())  # type: ignore[arg-type]
     monkeypatch.setattr(inventory_load, "get_result_handle_store", lambda: shared)
     monkeypatch.setattr(assess_vm, "get_result_handle_store", lambda: shared)
+    monkeypatch.setattr(rq, "get_result_handle_store", lambda: shared)
     return shared
 
 
@@ -254,11 +258,21 @@ def _disk_rows(product: str) -> list[dict[str, Any]]:
 
 
 class _FakeAzure:
-    """Answers the child calls like the Azure connector's reads."""
+    """Answers the child calls like the Azure connector's reads.
 
-    def __init__(self, *, fail: str | None = None) -> None:
+    The answer has the paging helper's shape: the rows under *rows_key*,
+    ``truncated``, ``omission``, ``omission_kind`` and ``pages_read``. The
+    read named in *fail* answers with an error; the one named in
+    *truncated* says its list was cut by the row limit.
+    """
+
+    def __init__(
+        self, *, fail: str | None = None, truncated: str | None = None, rows_key: str = "items"
+    ) -> None:
         self.calls: list[tuple[str, dict[str, Any], Any]] = []
         self.fail = fail
+        self.truncated = truncated
+        self.rows_key = rows_key
 
     def items(self, op_id: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         if op_id == "azure.vm.size.list":
@@ -276,9 +290,15 @@ class _FakeAzure:
             return OperationResult(
                 status="error", op_id=op_id, error="azure answered 403", duration_ms=1.0
             )
-        return OperationResult(
-            status="ok", op_id=op_id, result={"items": self.items(op_id, params)}, duration_ms=1.0
-        )
+        cut = op_id == self.truncated
+        result = {
+            self.rows_key: self.items(op_id, params),
+            "truncated": cut,
+            "omission": "The list has more rows than one result holds (10000)." if cut else None,
+            "omission_kind": "result_truncated" if cut else None,
+            "pages_read": 1,
+        }
+        return OperationResult(status="ok", op_id=op_id, result=result, duration_ms=1.0)
 
 
 # --- inventories ------------------------------------------------------------------
@@ -340,6 +360,8 @@ def _server(
     else:
         missing["utilization.network_in_mb_per_s"] = "not_measured"
         missing["utilization.network_out_mb_per_s"] = "not_measured"
+        if utilization["sample_interval_minutes"] is None:
+            missing["utilization.sample_interval_minutes"] = "not_reported_by_source"
     if family is None:
         missing["os.family"] = "not_reported_by_source"
     if boot is None:
@@ -364,11 +386,14 @@ def _server(
     }
 
 
-def _utilization(cpu: float, memory: float, *, start: str, samples: int) -> dict[str, Any]:
+def _utilization(
+    cpu: float, memory: float, *, start: str, samples: int, interval: int | None = 120
+) -> dict[str, Any]:
     return {
         "window_start": start,
         "window_end": _TIME,
         "samples": samples,
+        "sample_interval_minutes": interval,
         "source": "vcenter-perf",
         "cpu_percent": _stat(cpu),
         "memory_percent": _stat(memory),
@@ -383,7 +408,8 @@ WINDOWS = _server(
     family="windows",
     boot="uefi",
     disks=[_disk("Hard disk 1", 100), _disk("Hard disk 2", 250), _disk("Hard disk 3", 50.75)],
-    utilization=_utilization(30.0, 35.0, start="2026-09-20T08:00:00Z", samples=8640),
+    # 30 days, one sample every 5 minutes: 8640 samples, full coverage.
+    utilization=_utilization(30.0, 35.0, start="2026-09-20T08:00:00Z", samples=8640, interval=5),
 )
 LINUX_UEFI = _server(
     "vc:lnx-uefi",
@@ -522,7 +548,24 @@ async def test_windows_vm_four_cores_sixteen_gb(store: ResultHandleStore) -> Non
     assert measured["basis"] == "measured"
     assert measured["inputs"]["size"] == "Standard_D2_v6"
     assert measured["inputs"]["need_vcpus"] == 2
-    assert "comfort_factor" in measured["assumptions"]
+    assert measured["inputs"]["need_memory_gb"] == 7.28
+    assert {"comfort_factor", "sample_coverage", "min_window_days"} <= set(measured["assumptions"])
+    # The figure shows the measurements it was made from.
+    evidence = {
+        "cpu_p95_percent": 30.0,
+        "memory_p95_percent": 35.0,
+        "comfort_factor": 1.3,
+        "window_start": "2026-09-20T08:00:00+00:00",
+        "window_end": "2026-10-20T08:00:00+00:00",
+        "window_days": 30,
+        "samples": 8640,
+        "sample_interval_minutes": 5,
+        "expected_samples": 8640,
+        "sample_coverage": 1.0,
+        "measurement_source": "vcenter-perf",
+    }
+    assert {key: measured["inputs"][key] for key in evidence} == evidence
+    assert not (set(evidence) & set(size["inputs"]))
     # Standard_D2_v6 has no Premium storage, so the disks are Standard SSD.
     assert figures["disk.0.measured"]["inputs"]["disk_type"] == "standard_ssd"
     assert _value(item, "disks.measured") == round(8.45 + 16.9 + 4.22, 2)
@@ -571,20 +614,54 @@ async def test_missing_utilization_makes_right_sizing_unknown(store: ResultHandl
 
 
 @pytest.mark.parametrize(
-    ("start", "samples", "reason"),
+    ("start", "samples", "interval", "reason"),
     [
-        ("2026-10-15T08:00:00Z", 1440, "shorter than 7 days"),
-        ("2026-09-20T08:00:00Z", 100, "cover less than 80%"),
+        ("2026-10-15T08:00:00Z", 1440, 5, "shorter than 7 days"),
+        ("2026-09-20T08:00:00Z", 100, 120, "cover less than 80%"),
+        # 300 samples would be 83% of a 2-hour source, but a 5-minute source
+        # takes 8640 samples in 30 days: 300 cover less than 4%.
+        ("2026-09-20T08:00:00Z", 300, 5, "cover less than 80% of the window (3%"),
+        ("2026-09-20T08:00:00Z", 8640, None, "does not say how often it sampled"),
     ],
 )
 async def test_too_few_measurements_make_right_sizing_unknown(
-    store: ResultHandleStore, start: str, samples: int, reason: str
+    store: ResultHandleStore, start: str, samples: int, interval: int | None, reason: str
 ) -> None:
-    server = {**WINDOWS, "utilization": _utilization(30.0, 35.0, start=start, samples=samples)}
+    utilization = _utilization(30.0, 35.0, start=start, samples=samples, interval=interval)
+    server = _server(
+        "vc:win-01",
+        "app-win-01",
+        cores=4,
+        memory_mb=16384,
+        family="windows",
+        boot="uefi",
+        disks=[_disk("Hard disk 1", 100)],
+        utilization=utilization,
+    )
     result = await _assess(store, [server], pricing=["pay_as_you_go"])
-    measured = _item(result, "vc:win-01")["figures"]["size.measured"]
+    item = _item(result, "vc:win-01")
+    measured = item["figures"]["size.measured"]
     assert measured["value"] is None
     assert reason in measured["unknown_reason"]
+    assert "right_sized_unknown" in item["flags"]
+
+
+async def test_coverage_uses_the_source_sample_interval(store: ResultHandleStore) -> None:
+    """The same 300 samples over 30 days are enough for a 2-hour source, not for a 5-minute one."""
+    sized: dict[int, Any] = {}
+    for interval in (120, 5):
+        utilization = _utilization(
+            30.0, 35.0, start="2026-09-20T08:00:00Z", samples=300, interval=interval
+        )
+        result = await _assess(
+            store, [{**WINDOWS, "utilization": utilization}], pricing=["pay_as_you_go"]
+        )
+        sized[interval] = _item(result, "vc:win-01")["figures"]["size.measured"]
+    assert sized[120]["value"] == 2
+    assert sized[120]["inputs"]["expected_samples"] == 360
+    assert sized[120]["inputs"]["sample_coverage"] == 0.83
+    assert sized[5]["value"] is None
+    assert "8640 samples" in sized[5]["unknown_reason"]
 
 
 async def test_vm_bigger_than_any_size_is_not_ready(store: ResultHandleStore) -> None:
@@ -739,11 +816,28 @@ async def test_a_failed_child_read_stops_with_a_clear_message(store: ResultHandl
         await _assess(store, [LINUX_BIOS], _FakeAzure(fail="azure.vm.size.list"))
 
 
+async def test_rows_under_value_are_read_like_items(store: ResultHandleStore) -> None:
+    """The Azure paging helper keeps the rows under ``value``, as Azure's own answers do."""
+    result = await _assess(
+        store, [LINUX_BIOS], _FakeAzure(rows_key="value"), pricing=["pay_as_you_go"]
+    )
+    assert _value(_item(result, "vc:lnx-bios"), "compute.allocated.pay_as_you_go") == round(
+        0.096 * 730, 2
+    )
+
+
 class _HandleAzure(_FakeAzure):
     """Returns every child result behind a handle, as large real results come back."""
 
-    def __init__(self, store: ResultHandleStore, tenant: UUID, max_spill_rows: int | None) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        store: ResultHandleStore,
+        tenant: UUID,
+        max_spill_rows: int | None,
+        *,
+        truncated: str | None = None,
+    ) -> None:
+        super().__init__(truncated=truncated)
         self.store = store
         self.tenant = tenant
         self.max_spill_rows = max_spill_rows
@@ -769,7 +863,7 @@ class _HandleAzure(_FakeAzure):
 
 
 async def _assess_with_handles(
-    store: ResultHandleStore, max_spill_rows: int | None = None
+    store: ResultHandleStore, max_spill_rows: int | None = None, *, truncated: str | None = None
 ) -> dict[str, Any]:
     tenant = uuid4()
     handle = await _store(store, tenant, [WINDOWS])
@@ -777,7 +871,7 @@ async def _assess_with_handles(
         _operator(tenant),
         None,
         {"inventory_handles": [handle], "azure_target": "azure-example", "region": _REGION},
-        _HandleAzure(store, tenant, max_spill_rows),
+        _HandleAzure(store, tenant, max_spill_rows, truncated=truncated),
     )
 
 
@@ -796,9 +890,64 @@ async def test_child_result_stored_only_in_part_stops_the_operation(
         await _assess_with_handles(store, max_spill_rows=1)
 
 
+@pytest.mark.parametrize("behind_handle", [False, True], ids=["inline", "behind-a-handle"])
+async def test_a_child_read_cut_short_by_azure_stops_the_operation(
+    store: ResultHandleStore, behind_handle: bool
+) -> None:
+    """Azure can stop paging before the end; the stored rows then look complete but are not."""
+    with pytest.raises(
+        AssessmentReadError,
+        match=r"azure.price.list did not read the whole list.*more rows than one result holds",
+    ):
+        if behind_handle:
+            await _assess_with_handles(store, truncated="azure.price.list")
+        else:
+            await _assess(store, [WINDOWS], _FakeAzure(truncated="azure.price.list"))
+
+
+async def test_a_large_assessment_is_stored_whole_and_read_back(store: ResultHandleStore) -> None:
+    """Reduced like the dispatcher does it, the result keeps every part, not only ``items``."""
+    result = await _assess(store, [WINDOWS, LINUX_UEFI, HUGE])
+    tenant = uuid4()
+    context = {
+        "tenant_id": str(tenant),
+        "operator_sub": _SUB,
+        "op_id": MIGRATION_ASSESS_VM_OP_ID,
+        "result_document": _LLM_INSTRUCTIONS["result_document"],
+    }
+    summary, handle = await JsonFluxReducer(byte_threshold=256, store=store).reduce(
+        result, None, context
+    )
+    assert handle is not None
+    assert summary["result_record"] == "document"
+    assert summary["calculation_version"] == "migration-assess-vm-1"
+
+    operator = _operator(tenant)
+
+    async def read(path: str, **paging: int) -> dict[str, Any]:
+        return await run_result_query(
+            operator, handle.handle_id, ResultQuerySpec(path=path), **paging
+        )
+
+    for key in ("totals", "assumptions", "inputs"):
+        assert (await read(f"/{key}"))["value"] == result[key]
+    assert (await read("/totals/pay_as_you_go/allocated/unknown_reason"))["value"] == (
+        "1 of 3 servers have no price"
+    )
+    unknowns = await read("/unknowns", offset=0, limit=50)
+    assert unknowns["rows"] == result["unknowns"]
+    assert unknowns["total_rows"] == len(result["unknowns"]) >= 2
+    assert (await read("/omissions"))["rows"] == result["omissions"] == []
+    page = await read("/items", offset=1, limit=1)
+    assert page["rows"] == [result["items"][1]]
+    assert page["total_rows"] == 3
+
+
 def test_operation_contract() -> None:
     assert write_word_in_op_id(MIGRATION_ASSESS_VM_OP_ID) is None
     for example in MIGRATION_ASSESS_VM_PARAMETER_SCHEMA["examples"]:
         assert validate_params(MIGRATION_ASSESS_VM_PARAMETER_SCHEMA, example) == []
     assert "totals" in MIGRATION_ASSESS_VM_RESPONSE_SCHEMA["properties"]
     assert "Figure" in MIGRATION_ASSESS_VM_RESPONSE_SCHEMA["$defs"]
+    # The result is one document; the reducer must keep it whole.
+    assert _LLM_INSTRUCTIONS["result_document"] == {"keep_whole": True}

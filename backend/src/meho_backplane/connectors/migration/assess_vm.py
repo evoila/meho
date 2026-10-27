@@ -13,8 +13,9 @@ operation):
    reservation prices when a reserved option is asked for, and the Standard
    SSD and Premium SSD managed disk prices.
 
-It changes nothing. A child read that fails stops the operation with a clear
-message; a missing value inside the data becomes "unknown" with the reason.
+It changes nothing. A child read that fails, or that did not read its whole
+list, stops the operation with a clear message; a missing value inside the
+data becomes "unknown" with the reason.
 """
 
 from __future__ import annotations
@@ -54,7 +55,6 @@ from meho_backplane.connectors.migration.contracts import (
 )
 from meho_backplane.connectors.migration.inventory_load import LoadedInventory, load_inventories
 from meho_backplane.connectors.migration.vm_sizing import (
-    EXPECTED_SAMPLE_INTERVAL_MINUTES,
     MIN_SAMPLE_COVERAGE,
     MIN_WINDOW_DAYS,
     allocated_need,
@@ -95,6 +95,35 @@ class AssessmentReadError(RuntimeError):
     """A child read failed or returned something this operation cannot use."""
 
 
+def _check_complete(op_id: str, payload: Any) -> None:
+    """Refuse a child result the Azure read marked ``truncated``.
+
+    The Azure paging helper stops at a page, row or time limit and says so
+    with ``truncated`` and an ``omission`` message. The flag rides inline
+    both on a plain result and on the summary of a stored one. A list read
+    only in part could hide the cheapest size.
+    """
+    if not isinstance(payload, Mapping) or payload.get("truncated") is not True:
+        return
+    detail = str(payload.get("omission") or "the read stopped before the end of the list")
+    raise AssessmentReadError(
+        f"{op_id} did not read the whole list, so a cheapest size could be missed: "
+        f"{detail[:_MAX_ERROR_CHARS]}"
+    )
+
+
+def _inline_rows(op_id: str, payload: Any) -> list[Any]:
+    """The rows of a plain child result: a bare list, or a list under ``items`` or ``value``."""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, Mapping):
+        for key in ("items", "value"):
+            rows = payload.get(key)
+            if isinstance(rows, list):
+                return rows
+    raise AssessmentReadError(f"{op_id} returned no list of items")
+
+
 async def _child_items(
     operator: Operator,
     dispatch_child: DispatchChild,
@@ -103,19 +132,16 @@ async def _child_items(
     op_id: str,
     params: dict[str, Any],
 ) -> list[Any]:
-    """Run one Azure read and return its ``items``, read back from the stored result if needed."""
+    """Run one Azure read and return its rows, read back from the stored result if needed."""
     result: OperationResult = await dispatch_child(
         connector_id=AZURE_CONNECTOR_ID, op_id=op_id, params=params, target=target
     )
     if result.status != "ok":
         detail = (result.error or result.status)[:_MAX_ERROR_CHARS]
         raise AssessmentReadError(f"{op_id} did not succeed ({result.status}): {detail}")
+    _check_complete(op_id, result.result)
     if result.handle is None:
-        payload = result.result
-        items = payload.get("items") if isinstance(payload, Mapping) else payload
-        if not isinstance(items, list):
-            raise AssessmentReadError(f"{op_id} returned no list of items")
-        return items
+        return _inline_rows(op_id, result.result)
     try:
         stored = await get_result_handle_store().fetch_rows(
             tenant_id=operator.tenant_id,
@@ -178,7 +204,11 @@ def _assumptions(
             "percentile": "p95",
             "min_window_days": MIN_WINDOW_DAYS,
             "min_sample_coverage": MIN_SAMPLE_COVERAGE,
-            "expected_sample_interval_minutes": EXPECTED_SAMPLE_INTERVAL_MINUTES,
+            "sample_coverage": (
+                "samples divided by the samples the source would take over the window "
+                "at its own sample interval; a source without a sample interval gives "
+                "no right-sized size"
+            ),
             "os_family_other": (
                 "servers with OS family 'other' use the Linux price; their own license "
                 "is not counted"

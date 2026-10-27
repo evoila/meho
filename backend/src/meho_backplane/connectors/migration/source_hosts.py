@@ -24,6 +24,12 @@ version), then ``linux.file.read`` on files under ``/proc``, ``/sys`` and
 
 Windows Server (``winsrv-ssh-2022.x``): ``winsrv.system.os-info``,
 ``winsrv.system.hardware`` and ``winsrv.storage.disk.list``.
+
+Both adapters see the host from inside its operating system. Snapshots and
+the hypervisor's disk settings (shared, raw mapping, independent, thin) are
+not visible there, so they are ``not_supported``; for a VM, read it through
+its hypervisor's adapter to get them. A placeholder BIOS UUID (all zero or
+all ``f``) is dropped, so two hosts with the same placeholder stay separate.
 """
 
 from __future__ import annotations
@@ -42,6 +48,7 @@ from meho_backplane.connectors.migration.adapter_kit import (
     rows_of,
     store_inventory,
     target_name,
+    usable_bios_uuid,
 )
 from meho_backplane.connectors.migration.contracts import (
     Disk,
@@ -100,7 +107,6 @@ _HYPERVISORS: Final[tuple[tuple[str, str], ...]] = (
 
 #: Block devices that are not disks of their own.
 _NOT_A_DISK: Final[re.Pattern[str]] = re.compile(r"^(loop|ram|sr|fd|dm-|md|zram|nbd)")
-_UUID: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
 
 _HOST_REASONS: Final[dict[str, MissingReason]] = {
     "utilization": "not_measured",
@@ -204,9 +210,9 @@ def build_linux_record(
     cpus = content("cpus", "cores")
     memory = content("meminfo", "memory_configured_mb")
     partitions = content("partitions", "disks")
-    uuid = (content("product_uuid", "identity_hints.bios_uuid") or "").lower()
-    if uuid and not _UUID.match(uuid):
-        uuid = ""
+    uuid_text = content("product_uuid", "identity_hints.bios_uuid")
+    uuid = usable_bios_uuid(uuid_text) or ""
+    if uuid_text and not uuid:
         reasons["identity_hints.bios_uuid"] = "not_reported_by_source"
     machine_id = content("machine_id")
     hypervisor = hypervisor_of(content("sys_vendor"), content("product_name"))
@@ -312,9 +318,7 @@ def build_windows_record(
             "hypervisor",
         ):
             reasons[field] = cast("MissingReason", hardware)
-    uuid = str(hw.get("ProductUuid") or "").lower()
-    if not _UUID.match(uuid) or uuid.strip("f-0") == "":
-        uuid = ""
+    uuid = usable_bios_uuid(hw.get("ProductUuid")) or ""
     firmware = str(hw.get("FirmwareType") or "").lower()
     hypervisor = hypervisor_of(hw.get("Manufacturer"), hw.get("Model"))
     disk_list: list[Disk] | None = None

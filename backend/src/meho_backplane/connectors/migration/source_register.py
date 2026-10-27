@@ -65,7 +65,11 @@ INVENTORY_ANSWER_SCHEMA: Final[dict[str, Any]] = {
         "left_out_items": {**_COUNTS, "description": "Whole items left out, per kind."},
         "counts_match": {
             "type": "boolean",
-            "description": "True when records plus left-out items equal every source total.",
+            "description": (
+                "True only when the source's own total was read in full for every "
+                "record kind and records plus left-out items equal it. False when a "
+                "total could not be read, or when the counts differ."
+            ),
         },
         "omission_count": {"type": "integer", "description": "Number of omissions."},
         "omissions": {
@@ -100,6 +104,18 @@ _RESULT_SCALARS: Final[list[str]] = [
     "counts_match",
     "omission_count",
 ]
+
+#: The record kinds of the counts dicts, so the reducer keeps the three count
+#: dicts inline and with the rows when a long ``omissions`` list makes the
+#: answer larger than the inline limit (they are objects, not scalars).
+_COUNT_KINDS: Final[list[str]] = ["server", "application", "kubernetes_workload"]
+_RESULT_OBJECTS: Final[dict[str, Any]] = {
+    "objects": {
+        "record_counts": list(_COUNT_KINDS),
+        "source_totals": list(_COUNT_KINDS),
+        "left_out_items": list(_COUNT_KINDS),
+    }
+}
 
 _NEXT_STEP: Final[str] = (
     "Pass inventory_handle to migration.inventory.csv for an Azure Migrate "
@@ -225,10 +241,12 @@ def _llm_instructions(adapter: SourceAdapter) -> dict[str, Any]:
             "'collected_at', 'record_counts': {kind: n}, 'source_totals': {kind: n}, "
             "'left_out_items': {kind: n}, 'counts_match': <bool>, 'omission_count', "
             "'omissions': [{what, reason, detail}]}. Unknown values in the records "
-            "are null with a reason, never 0."
+            "are null with a reason, never 0. counts_match is false when a source "
+            "total could not be read in full."
         ),
         "next_step": _NEXT_STEP,
         "result_scalars": {"keys": list(_RESULT_SCALARS)},
+        "result_objects": _RESULT_OBJECTS,
     }
 
 

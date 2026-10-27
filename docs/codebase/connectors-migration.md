@@ -205,9 +205,28 @@ How every adapter works (`adapter_kit.py`):
    `collected_at`, `record_counts`, `source_totals`, `left_out_items`,
    `counts_match`, `omission_count`, `omissions`. So every adapter answer
    has a handle `migration.inventory.csv` can read, and `result_query`
-   reads the records (path `/records`).
-5. `counts_match` is true when, for each kind the source counts, records
-   plus left-out items equal the source's own total.
+   reads the records (path `/records`). When the `omissions` list makes
+   the answer larger than the inline limit (4 KB), the reducer stores the
+   omissions as rows. The three count dicts are then kept by a
+   `result_objects` hint: inline (every kind listed, a kind without a
+   value is null) and whole with the rows, so `result_query` with path
+   `/source_totals` reads them back.
+5. `counts_match` is true only when the source's own total was read in
+   full for every kind the source counts, and records plus left-out items
+   equal it. A total that was not read, or was read only in part (an
+   offline Proxmox node, a denied or failed workload list), gives `false`
+   and no entry in `source_totals`: the inventory was not checked, which
+   is not the same as a match.
+6. A BIOS UUID is an identity hint only when it can name one machine.
+   `usable_bios_uuid` drops a placeholder (all zero or all `f`, which
+   firmware without a serial reports) and anything that is not a UUID.
+   Two machines with the same placeholder stay two records.
+7. Every adapter fills the disk flags the readiness check reads where the
+   platform defines them. Hyper-V and Proxmox never leave a disk out of a
+   snapshot, so `independent` is `false` on every disk there. The host
+   adapters see a machine from inside its OS, where snapshots and the
+   hypervisor's disk settings are not visible (`not_supported`); for a VM,
+   read it through its hypervisor's adapter to get them.
 
 Per source:
 
@@ -220,7 +239,9 @@ Per source:
   UEFI. Configured memory is the startup memory; assigned memory is what
   the VM has now (it differs with dynamic memory; unknown when off). Disk
   size is the VHDX size, used space is the file size on the host, a shared
-  disk is `SupportPersistentReservations`. Checkpoints count as snapshots.
+  disk is `SupportPersistentReservations`, a pass-through physical disk is
+  a raw mapping. Checkpoints count as snapshots; a checkpoint always takes
+  every virtual hard disk, so no disk is `independent`.
   Hyper-V allows two VMs with the same name, and the per-VM reads find a VM
   by name, so for a repeated name those reads are skipped (`not_supported`).
 - **Proxmox VE.** Only `proxmox.api.get`: `nodes`, `nodes/{node}/qemu`,
@@ -228,8 +249,10 @@ Per source:
   agent on, `agent/get-osinfo`. Cores are cores times sockets. `ovmf` is
   UEFI; Secure Boot is on when the EFI disk has `pre-enrolled-keys=1`.
   The SMBIOS `uuid` and the network cards' MAC addresses are identity
-  hints. Templates are counted and left out. `source_id` is
-  `proxmox:<target>:<vmid>`.
+  hints. A snapshot always takes every disk, so no disk is `independent`.
+  Templates are counted and left out. A node that is not online, or whose
+  VM list fails, makes the VM total unknown (`counts_match` false).
+  `source_id` is `proxmox:<target>:<vmid>`.
 - **Linux host.** `linux.about` and `linux.file.read` of
   `/sys/devices/system/cpu/online` (cores), `/proc/meminfo` (`MemTotal`,
   a little less than the installed memory), `/proc/partitions` (whole
@@ -244,11 +267,16 @@ Per source:
   `system_uuid` as BIOS UUID and the node capacity), `k8s.workload.list`
   for each kind, all namespaces, page by page (at most 40 pages of 500),
   `k8s.persistentvolumeclaim.list` (claim sizes), and per workload
-  `k8s.pod.list` with its `pod_selector`. A workload's `nodes` holds the
-  `source_id` of its nodes' records, so workloads link to nodes. CPU and
+  `k8s.pod.list` with its `pod_selector`, page by page. A workload's
+  `nodes` holds the `source_id` of its nodes' records, so workloads link
+  to nodes. When a later page of a list fails, the rows of the earlier
+  pages are kept and an omission names the rest ("... after the first
+  500"); for a workload list the kind's total is then unknown. CPU and
   memory are sums over the containers per replica, given only when every
   container sets the value. A node that is a VM has the VM's BIOS UUID, so
-  the merge lists it as a duplicate of the VM record.
+  the merge lists it as a duplicate of the VM record. One UUID reported by
+  two nodes of the cluster cannot name one machine, so both nodes get none
+  and an omission says so.
 
 ## Dependencies
 
@@ -263,8 +291,11 @@ Per source:
 `backend/tests/test_migration_source_adapters.py` runs each adapter with a
 fake `dispatch_child` and made-up child answers, stores the inventory in an
 in-memory result store, and reads it back through the loader. It covers
-failed and denied child reads, the counts check, a VM name used twice, a
-shortened child answer, and a Kubernetes node that matches a Hyper-V VM.
+failed and denied child reads, the counts check (also when a total could
+not be read in full), a VM name used twice, a shortened child answer, a
+Kubernetes node that matches a Hyper-V VM, placeholder and shared BIOS
+UUIDs, a failed second page, pod paging, and the count dicts read back
+from the handle of a long answer.
 `backend/tests/test_migration_source_reads.py` covers the reads added for
 the adapters (`hyperv.vms.guest.list`, `winsrv.system.hardware`,
 `k8s.workload.list`, and the new `k8s.node.list` fields).

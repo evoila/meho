@@ -6,7 +6,8 @@
 Every read goes through ``proxmox.api.get`` on the Proxmox connector
 (``proxmox-api-8.x``), the connector's allow-listed read:
 
-1. ``nodes`` -- the nodes. A node that is not online is an omission.
+1. ``nodes`` -- the nodes. A node that is not online is an omission, and
+   the source's own VM count is then unknown, so the counts cannot match.
 2. ``nodes/{node}/qemu`` per node -- the VMs. Their sum is the source's own
    count. Templates are counted and left out (they are not running servers).
 3. Per VM: ``nodes/{node}/qemu/{vmid}/config`` (cores, sockets, memory,
@@ -16,6 +17,9 @@ Every read goes through ``proxmox.api.get`` on the Proxmox connector
 4. For a running VM with the guest agent turned on:
    ``nodes/{node}/qemu/{vmid}/agent/get-osinfo`` for the OS name and
    version. Without it only the OS family from the VM's OS type is known.
+
+A Proxmox snapshot always takes every disk of the VM; there is no setting
+that leaves one disk out. So no disk is ``independent``.
 
 ``source_id`` is ``proxmox:<target>:<vmid>``; a VM id is unique in a
 Proxmox cluster and does not change when the VM moves to another node.
@@ -35,6 +39,7 @@ from meho_backplane.connectors.migration.adapter_kit import (
     record_with_reasons,
     store_inventory,
     target_name,
+    usable_bios_uuid,
 )
 from meho_backplane.connectors.migration.contracts import (
     Disk,
@@ -133,12 +138,12 @@ def _disks(config: dict[str, Any]) -> tuple[list[Disk], dict[str, MissingReason]
         prefix = f"disks.{len(disks)}"
         for field in ("read_ops_per_s", "write_ops_per_s", "read_mb_per_s", "write_mb_per_s"):
             reasons[f"{prefix}.{field}"] = "not_measured"
-        reasons[f"{prefix}.independent"] = "not_supported"
         disks.append(
             Disk(
                 label=key,
                 size_gb=size_gb(keys.get("size")),
                 raw_mapping=(volume or "").startswith("/dev/"),
+                independent=False,
             )
         )
     return disks, reasons
@@ -210,7 +215,7 @@ def build_vm_record(
                 "boot_type": "uefi" if config.get("bios") == "ovmf" else "bios",
                 "secure_boot": _secure_boot(config),
                 "identity_hints": IdentityHints(
-                    bios_uuid=smbios.get("uuid"),
+                    bios_uuid=usable_bios_uuid(smbios.get("uuid")),
                     mac_addresses=[n.mac_address for n in nics if n.mac_address],
                 ),
             }
@@ -296,11 +301,13 @@ async def proxmox_migration_inventory(
                 "collection_failed",
                 detail="node is not online",
             )
+            builder.total_incomplete("server")
             continue
         try:
             vms = await _get(dispatch_child, f"nodes/{name}/qemu")
         except ChildReadError as exc:
             builder.omit(f"VMs on node {name}", exc.reason)
+            builder.total_incomplete("server")
             continue
         for vm in vms if isinstance(vms, list) else []:
             if not isinstance(vm, dict) or vm.get("vmid") is None:

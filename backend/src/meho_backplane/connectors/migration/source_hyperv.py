@@ -22,6 +22,11 @@ omission; the VM stays in the inventory.
 Hyper-V lets two VMs share a name, and the per-VM reads find a VM by name.
 For a name that is not unique the per-VM reads are skipped and the fields
 are unknown (``not_supported``), so one VM never gets another VM's values.
+
+A checkpoint always takes every virtual hard disk of the VM; Hyper-V has no
+setting that leaves one disk out. So no disk is ``independent``. A
+pass-through physical disk is a raw mapping; with one attached, Hyper-V
+refuses to take a checkpoint at all.
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ from meho_backplane.connectors.migration.adapter_kit import (
     rows_of,
     store_inventory,
     target_name,
+    usable_bios_uuid,
 )
 from meho_backplane.connectors.migration.contracts import (
     Disk,
@@ -77,11 +83,6 @@ def os_family(name: str | None) -> Literal["windows", "linux", "other"] | None:
     if any(word in lowered for word in linux_words):
         return "linux"
     return "other"
-
-
-def _bios_uuid(raw: Any) -> str | None:
-    text = str(raw).strip().strip("{}") if raw else ""
-    return text or None
 
 
 class _VmReads:
@@ -135,27 +136,27 @@ def _disk(index: int, drive: dict[str, Any], vhd: Any) -> tuple[Disk, dict[str, 
     prefix = f"disks.{index}"
     for field in ("read_ops_per_s", "write_ops_per_s", "read_mb_per_s", "write_mb_per_s"):
         reasons[f"{prefix}.{field}"] = "not_measured"
-    reasons[f"{prefix}.independent"] = "not_supported"
-    shared = drive.get("SupportPersistentReservations")
+    shared = _bool(drive.get("SupportPersistentReservations"))
     if not path:
         # A pass-through physical disk: Hyper-V does not report its size here.
         reasons[prefix] = "not_reported_by_source"
         label = f"physical disk {drive.get('DiskNumber')}"
-        return Disk(label=label, raw_mapping=True, shared=_bool(shared)), reasons
+        return Disk(label=label, raw_mapping=True, shared=shared, independent=False), reasons
     label = str(path).replace("\\", "/").rsplit("/", 1)[-1] or str(path)
     if not isinstance(vhd, dict):
         reasons[prefix] = (
             cast("MissingReason", vhd) if isinstance(vhd, str) else "collection_failed"
         )
-        return Disk(label=label, raw_mapping=False, shared=_bool(shared)), reasons
+        return Disk(label=label, raw_mapping=False, shared=shared, independent=False), reasons
     vhd_type = str(vhd.get("VhdType") or "").lower()
     disk = Disk(
         label=label,
         size_gb=bytes_to_gb(vhd.get("Size")),
         used_gb=bytes_to_gb(vhd.get("FileSize")),
         thin=vhd_type in {"dynamic", "differencing"} if vhd_type else None,
-        shared=_bool(shared),
+        shared=shared,
         raw_mapping=False,
+        independent=False,
     )
     return disk, reasons
 
@@ -217,7 +218,7 @@ def build_vm_record(
         "source_id": f"hyperv:{str(vm['Id']).lower()}",
         "collected_at": collected_at,
         "identity_hints": IdentityHints(
-            bios_uuid=_bios_uuid(guest.get("BIOSGUID")) if guest else None
+            bios_uuid=usable_bios_uuid(guest.get("BIOSGUID")) if guest else None
         ),
         "name": vm.get("Name") or None,
         "server_type": "virtual",

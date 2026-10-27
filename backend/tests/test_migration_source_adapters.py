@@ -48,10 +48,17 @@ from meho_backplane.connectors.migration.source_proxmox import (
     proxmox_migration_inventory,
     size_gb,
 )
+from meho_backplane.connectors.migration.source_register import (
+    SOURCE_ADAPTERS,
+    _llm_instructions,
+)
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.schemas import OperationResult
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.reducer import full_result_capture_var
 from meho_backplane.settings import get_settings
+
+_PLACEHOLDER_UUID = "00000000-0000-0000-0000-000000000000"
 
 _SUB = "operator:fixture"
 
@@ -176,6 +183,75 @@ async def test_read_child_names_why_a_child_did_not_answer() -> None:
     assert raised.value.reason == "collection_failed"
 
 
+def test_usable_bios_uuid_drops_placeholders() -> None:
+    usable = adapter_kit.usable_bios_uuid
+    assert (
+        usable("{1B2C3D4E-5F60-4718-8293-A4B5C6D7E8F9}") == "1b2c3d4e-5f60-4718-8293-a4b5c6d7e8f9"
+    )
+    assert usable(_PLACEHOLDER_UUID) is None
+    assert usable("FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF") is None
+    assert usable("not a uuid") is None
+    assert usable(None) is None
+
+
+async def test_counts_and_left_out_items_survive_a_long_omission_list(
+    store: ResultHandleStore,
+) -> None:
+    """The count dicts stay in the answer and in the handle when the answer spills.
+
+    A source with many failed items has an ``omissions`` list larger than
+    the inline limit. The reducer then stores the omissions as rows. The
+    ``result_objects`` hint keeps ``record_counts``, ``source_totals`` and
+    ``left_out_items`` inline and with the rows; without it they are lost.
+    """
+    children = _hyperv_children()
+    rows = [
+        {"Name": f"vm-{i:03}", "Id": str(uuid4()), "State": "Off", "Generation": 2}
+        for i in range(120)
+    ]
+    children.answers[_k("hyperv.vms.list")] = {"rows": rows, "total": len(rows)}
+    operator = _operator(uuid4())
+    answer = await hyperv_migration_inventory(
+        operator=operator, target=_Target("hv-1"), params={}, dispatch_child=children
+    )
+    assert len(json.dumps(answer)) > 4096 and answer["omission_count"] == 120
+    hyperv = next(a for a in SOURCE_ADAPTERS if a.product == "hyperv")
+    hints = _llm_instructions(hyperv)
+    context = {
+        "op_id": hyperv.op_id,
+        "operator_sub": operator.sub,
+        "tenant_id": str(operator.tenant_id),
+        "result_scalars": hints["result_scalars"],
+        "result_objects": hints["result_objects"],
+    }
+    reducer = JsonFluxReducer(sample_size=5, store=store, max_spill_rows=10000)
+
+    reduced, handle = await reducer.reduce(answer, None, context)
+
+    assert handle is not None and reduced["source_key"] == "omissions"
+    assert reduced["inventory_handle"] == answer["inventory_handle"]
+    assert reduced["counts_match"] is True
+    assert reduced["record_counts"] == {"server": 120, "application": 0, "kubernetes_workload": 0}
+    # The inline copy lists every kind; a kind without a value is null there.
+    assert reduced["source_totals"] == {
+        "server": 120,
+        "application": None,
+        "kubernetes_workload": None,
+    }
+    assert reduced["left_out_items"] == {
+        "server": None,
+        "application": None,
+        "kubernetes_workload": None,
+    }
+    stored = await store.fetch_document(
+        tenant_id=operator.tenant_id, operator_sub=operator.sub, handle_id=handle.handle_id
+    )
+    assert stored is not None
+    assert stored.document["record_counts"] == answer["record_counts"]
+    assert stored.document["source_totals"] == {"server": 120}
+    assert stored.document["left_out_items"] == {}
+
+
 def test_unit_parsers() -> None:
     assert parse_quantity("250m") == pytest.approx(0.25)
     assert parse_quantity("512Mi") == 512 * 1024**2
@@ -294,6 +370,8 @@ async def test_hyperv_inventory(store: ResultHandleStore) -> None:
     assert win.disks is not None
     assert (win.disks[0].size_gb, win.disks[0].used_gb, win.disks[0].thin) == (127, 40, True)
     assert win.disks[1].shared is True and win.missing["disks.1"] == "collection_failed"
+    # A checkpoint always takes every virtual hard disk, so no disk is independent.
+    assert [d.independent for d in win.disks] == [False, False]
 
     lnx = records[f"hyperv:{_LNX_ID}"]
     assert isinstance(lnx, ServerRecord)
@@ -301,6 +379,7 @@ async def test_hyperv_inventory(store: ResultHandleStore) -> None:
     assert lnx.memory_assigned_mb is None and lnx.missing["memory_assigned_mb"] == "powered_off"
     assert lnx.os is None and lnx.missing["os"] == "powered_off"
     assert lnx.disks is not None and lnx.disks[0].raw_mapping is True
+    assert lnx.disks[0].independent is False
 
     dup = records[f"hyperv:{_DUP_IDS[0]}"]
     assert isinstance(dup, ServerRecord)
@@ -321,6 +400,29 @@ async def test_hyperv_inventory_without_guest_data(store: ResultHandleStore) -> 
     win = next(r for r in envelope.records if r.source_id == f"hyperv:{_WIN_ID}")
     assert isinstance(win, ServerRecord)
     assert win.os is None and win.identity_hints.bios_uuid is None
+
+
+async def test_hyperv_vms_with_a_placeholder_bios_uuid_stay_separate(
+    store: ResultHandleStore,
+) -> None:
+    children = _hyperv_children()
+    children.answers[_k("hyperv.vms.guest.list")] = {
+        "rows": [
+            {"Id": _WIN_ID, "BIOSGUID": "{" + _PLACEHOLDER_UUID.upper() + "}", "OSName": "W"},
+            {"Id": _LNX_ID, "BIOSGUID": _PLACEHOLDER_UUID, "OSName": "L"},
+        ],
+        "total": 2,
+    }
+    _answer, envelope = await _run(hyperv_migration_inventory, children, "hv-node-1", store)
+
+    records = {r.source_id: r for r in envelope.records}
+    for vm_id in (_WIN_ID, _LNX_ID):
+        record = records[f"hyperv:{vm_id}"]
+        assert isinstance(record, ServerRecord)
+        assert record.identity_hints.bios_uuid is None
+        assert record.missing["identity_hints.bios_uuid"] == "not_reported_by_source"
+    _records, duplicates = merge_inventories([envelope])
+    assert duplicates == []
 
 
 # --- Proxmox ---------------------------------------------------------------------
@@ -386,9 +488,10 @@ def _proxmox_children() -> FakeChildren:
 async def test_proxmox_inventory(store: ResultHandleStore) -> None:
     answer, envelope = await _run(proxmox_migration_inventory, _proxmox_children(), "pve-a", store)
 
-    assert answer["source_totals"] == {"server": 3}
+    # One node is offline, so the source's own VM count is unknown.
+    assert answer["source_totals"] == {}
     assert answer["left_out_items"] == {"server": 1}
-    assert answer["counts_match"] is True
+    assert answer["counts_match"] is False
     whats = {o.what: o.reason for o in envelope.omissions}
     assert whats["VM template 9000"] == "not_supported"
     assert whats["VMs on node pve2"] == "collection_failed"
@@ -405,6 +508,8 @@ async def test_proxmox_inventory(store: ResultHandleStore) -> None:
     )
     assert web.disks is not None and [d.label for d in web.disks] == ["scsi0", "scsi1"]
     assert (web.disks[0].size_gb, web.disks[1].raw_mapping) == (32, True)
+    # A Proxmox snapshot always takes every disk, so no disk is independent.
+    assert [d.independent for d in web.disks] == [False, False]
     assert web.snapshot_count == 1
     assert web.identity_hints.bios_uuid == "5c6d7e8f-9a0b-4c1d-8e2f-3a4b5c6d7e8f"
     assert web.identity_hints.mac_addresses == ["bc:24:11:aa:bb:cc"]
@@ -416,6 +521,38 @@ async def test_proxmox_inventory(store: ResultHandleStore) -> None:
     assert batch.os is not None and batch.os.family == "windows" and batch.os.name is None
     assert batch.missing["os.name"] == "powered_off"
     assert batch.snapshot_count is None and batch.missing["snapshot_count"] == "collection_failed"
+
+
+async def test_proxmox_counts_match_only_when_every_node_was_read(
+    store: ResultHandleStore,
+) -> None:
+    children = _proxmox_children()
+    get = "proxmox.api.get"
+    children.answers[_k(get, path="nodes")] = {
+        "data": [{"node": "pve1", "status": "online"}, {"node": "pve2", "status": "online"}]
+    }
+    children.answers[_k(get, path="nodes/pve2/qemu")] = {"data": []}
+    answer, _envelope = await _run(proxmox_migration_inventory, children, "pve-a", store)
+    assert answer["source_totals"] == {"server": 3} and answer["counts_match"] is True
+
+    # The VM list of one node is denied: the total is not the source's own.
+    children.answers[_k(get, path="nodes/pve2/qemu")] = "denied"
+    answer, envelope = await _run(proxmox_migration_inventory, children, "pve-a", store)
+    assert answer["source_totals"] == {} and answer["counts_match"] is False
+    assert {o.what: o.reason for o in envelope.omissions}["VMs on node pve2"] == "no_permission"
+
+
+async def test_proxmox_vm_with_a_placeholder_smbios_uuid(store: ResultHandleStore) -> None:
+    children = _proxmox_children()
+    config = children.answers[_k("proxmox.api.get", path="nodes/pve1/qemu/100/config")]
+    assert isinstance(config, dict)
+    config["data"]["smbios1"] = f"uuid={_PLACEHOLDER_UUID}"
+    _answer, envelope = await _run(proxmox_migration_inventory, children, "pve-a", store)
+
+    web = next(r for r in envelope.records if r.source_id == "proxmox:pve-a:100")
+    assert isinstance(web, ServerRecord)
+    assert web.identity_hints.bios_uuid is None
+    assert web.missing["identity_hints.bios_uuid"] == "not_reported_by_source"
 
 
 # --- Linux and Windows hosts --------------------------------------------------------
@@ -540,6 +677,39 @@ async def test_windows_host_when_the_hardware_read_fails(store: ResultHandleStor
     assert isinstance(record, ServerRecord)
     assert record.source_id == "winsrv:sql-01"
     assert record.cores is None and record.missing["cores"] == "collection_failed"
+
+
+async def test_hosts_with_a_placeholder_uuid_stay_separate(store: ResultHandleStore) -> None:
+    """Two hosts whose firmware reports a placeholder UUID are two machines."""
+    linux = _linux_children()
+    linux.answers[_k("linux.file.read", path="/sys/class/dmi/id/product_uuid")] = _file(
+        _PLACEHOLDER_UUID.upper() + "\n"
+    )
+    _answer, linux_envelope = await _run(linux_migration_inventory, linux, "files-01", store)
+    (linux_record,) = linux_envelope.records
+    assert isinstance(linux_record, ServerRecord)
+    assert linux_record.identity_hints.bios_uuid is None
+    assert linux_record.missing["identity_hints.bios_uuid"] == "not_reported_by_source"
+    assert linux_record.source_id == "linux:0f1e2d3c4b5a69788796a5b4c3d2e1f0"
+
+    envelopes = [linux_envelope]
+    for host in ("sql-01", "sql-02"):
+        windows = _windows_children()
+        hardware = windows.answers[_k("winsrv.system.hardware")]
+        assert isinstance(hardware, dict)
+        hardware["ProductUuid"] = "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"
+        os_info = windows.answers[_k("winsrv.system.os-info")]
+        assert isinstance(os_info, dict)
+        os_info["Hostname"] = hardware["Hostname"] = host.upper()
+        _answer, envelope = await _run(winsrv_migration_inventory, windows, host, store)
+        (record,) = envelope.records
+        assert isinstance(record, ServerRecord)
+        assert record.identity_hints.bios_uuid is None
+        assert record.source_id == f"winsrv:{host}"
+        envelopes.append(envelope)
+
+    records, duplicates = merge_inventories(envelopes)
+    assert len(records) == 3 and duplicates == []
 
 
 # --- Kubernetes ----------------------------------------------------------------------
@@ -726,9 +896,121 @@ async def test_k8s_inventory_when_a_kind_cannot_be_listed(store: ResultHandleSto
     )
     answer, _envelope = await _run(k8s_migration_inventory, children, "prod-cluster", store)
 
-    assert "kubernetes_workload" not in answer["source_totals"]
+    assert answer["source_totals"] == {"server": 2}
+    assert answer["counts_match"] is False
     assert answer["omissions"][0] == {
         "what": "all DaemonSet workloads",
         "reason": "no_permission",
         "detail": "k8s.workload.list",
     }
+
+
+async def test_k8s_counts_do_not_match_when_nothing_could_be_listed(
+    store: ResultHandleStore,
+) -> None:
+    """An inventory with no source total at all is not a checked inventory."""
+    children = FakeChildren({_k("k8s.node.list"): "denied"})
+    answer, envelope = await _run(k8s_migration_inventory, children, "prod-cluster", store)
+
+    assert envelope.records == []
+    assert answer["source_totals"] == {} and answer["counts_match"] is False
+    assert [o.what for o in envelope.omissions] == [
+        "cluster nodes",
+        "all Deployment workloads",
+        "all StatefulSet workloads",
+        "all DaemonSet workloads",
+        "persistent volume claim sizes",
+    ]
+
+
+async def test_k8s_second_page_failure_keeps_the_first_page(store: ResultHandleStore) -> None:
+    children = _k8s_children()
+    children.answers[
+        _k(
+            "k8s.workload.list",
+            kind="Deployment",
+            all_namespaces=True,
+            limit=500,
+            continue_token="page-2",
+        )
+    ] = "error"
+    answer, envelope = await _run(k8s_migration_inventory, children, "prod-cluster", store)
+
+    ids = {r.source_id for r in envelope.records}
+    assert "k8s:prod-cluster:shop:Deployment:web" in ids  # from the first page
+    assert "k8s:prod-cluster:shop:Deployment:api" not in ids  # was on the failed page
+    assert answer["record_counts"]["kubernetes_workload"] == 2
+    assert "kubernetes_workload" not in answer["source_totals"]
+    assert answer["counts_match"] is False
+    assert answer["omissions"][0] == {
+        "what": "Deployment workloads after the first 500",
+        "reason": "collection_failed",
+        "detail": "k8s.workload.list",
+    }
+
+
+async def test_k8s_pod_placement_follows_the_pages(store: ResultHandleStore) -> None:
+    children = _k8s_children()
+    pods = "k8s.pod.list"
+    children.answers[_k(pods, namespace="shop", label_selector="app=web", limit=500)] = {
+        "rows": [{"node": "worker-1"}],
+        "next_continue": "more",
+    }
+    children.answers[
+        _k(pods, namespace="shop", label_selector="app=web", limit=500, continue_token="more")
+    ] = {"rows": [{"node": "worker-3"}]}
+    children.answers[_k(pods, namespace="shop", label_selector="app=api", limit=500)] = {
+        "rows": [{"node": "worker-2"}],
+        "next_continue": "more",
+    }
+    children.answers[
+        _k(pods, namespace="shop", label_selector="app=api", limit=500, continue_token="more")
+    ] = "error"
+    _answer, envelope = await _run(k8s_migration_inventory, children, "prod-cluster", store)
+
+    records = {r.source_id: r for r in envelope.records}
+    web = records["k8s:prod-cluster:shop:Deployment:web"]
+    assert isinstance(web, KubernetesWorkloadRecord)
+    # worker-3 appears only on the second page of pods.
+    assert web.nodes == ["k8s:prod-cluster:node:worker-1", "k8s:prod-cluster:node:worker-3"]
+    api = records["k8s:prod-cluster:shop:Deployment:api"]
+    assert isinstance(api, KubernetesWorkloadRecord)
+    # The first page of pods is kept when the second one fails, and the omission says so.
+    assert api.nodes == ["k8s:prod-cluster:node:worker-2"] and "nodes" not in api.missing
+    omissions = {o.what: o for o in envelope.omissions}
+    assert omissions["pods of Deployment shop/api"].reason == "collection_failed"
+    assert omissions["pods of Deployment shop/api"].detail == (
+        "pods after the first 500 were not read"
+    )
+
+
+async def test_k8s_nodes_with_placeholder_or_shared_uuids_stay_separate(
+    store: ResultHandleStore,
+) -> None:
+    children = _k8s_children()
+    shared = "5c6d7e8f-9a0b-4c1d-8e2f-3a4b5c6d7e8f"
+    nodes = children.answers[_k("k8s.node.list")]
+    assert isinstance(nodes, dict)
+    nodes["rows"] = [
+        {"name": "zero-1", "status": "Ready", "os": "linux", "system_uuid": _PLACEHOLDER_UUID},
+        {"name": "zero-2", "status": "Ready", "os": "linux", "system_uuid": _PLACEHOLDER_UUID},
+        {"name": "twin-1", "status": "Ready", "os": "linux", "system_uuid": shared},
+        {"name": "twin-2", "status": "Ready", "os": "linux", "system_uuid": shared.upper()},
+        {"name": "worker-1", "status": "Ready", "os": "linux", "system_uuid": _NODE_UUID},
+    ]
+    nodes["total"] = 5
+    answer, envelope = await _run(k8s_migration_inventory, children, "prod-cluster", store)
+
+    assert answer["record_counts"]["server"] == 5 and answer["counts_match"] is True
+    records = {r.source_id: r for r in envelope.records if isinstance(r, ServerRecord)}
+    assert len(records) == 5
+    for name in ("zero-1", "zero-2", "twin-1", "twin-2"):
+        node = records[f"k8s:prod-cluster:node:{name}"]
+        assert node.identity_hints.bios_uuid is None
+        assert node.missing["identity_hints.bios_uuid"] == "not_reported_by_source"
+    assert records["k8s:prod-cluster:node:worker-1"].identity_hints.bios_uuid == _NODE_UUID
+    assert envelope.omissions[0].what == "BIOS UUID of nodes twin-1, twin-2"
+    assert envelope.omissions[0].reason == "not_reported_by_source"
+
+    _records, duplicates = merge_inventories([envelope])
+    assert duplicates == []

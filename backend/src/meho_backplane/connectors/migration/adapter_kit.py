@@ -14,6 +14,11 @@ stores it. This module holds what all adapters share:
   sensor runner reads it.
 * :class:`InventoryBuilder` collects records and omissions and builds the
   envelope. A failure for one item becomes an omission; the read goes on.
+  It also keeps the source's own totals, and says whether the counts
+  could be checked at all: a total that was not read, or was read only in
+  part, never counts as a match.
+* :func:`usable_bios_uuid` cleans a BIOS UUID and drops placeholders
+  (all zero, all ``f``), which are not the identity of one machine.
 * :func:`record_with_reasons` fills ``missing`` for every null field that
   has no reason yet, so each adapter names only its special cases.
 * :func:`store_inventory` stores the envelope whole and returns the short
@@ -30,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
@@ -70,6 +76,7 @@ __all__ = [
     "rows_of",
     "store_inventory",
     "target_name",
+    "usable_bios_uuid",
 ]
 
 #: Child reads one adapter runs at the same time.
@@ -80,6 +87,7 @@ INVENTORY_TTL_SECONDS: Final[int] = 3600
 
 _GIB: Final[int] = 1024**3
 _MIB: Final[int] = 1024**2
+_UUID: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
 
 
 class ChildReadError(Exception):
@@ -158,6 +166,19 @@ def target_name(target: Any) -> str:
     return str(name) if name else str(target)
 
 
+def usable_bios_uuid(raw: Any) -> str | None:
+    """The BIOS UUID in lower case, or ``None`` when it cannot identify one machine.
+
+    Firmware without a serial reports a placeholder: all zero or all ``f``.
+    Two machines with the same placeholder are not the same machine, so a
+    placeholder is unknown, like a value that is not a UUID at all.
+    """
+    text = str(raw).strip().strip("{}").lower() if raw else ""
+    if not _UUID.match(text) or text.strip("0f-") == "":
+        return None
+    return text
+
+
 def record_with_reasons[R: _Record](
     model: type[R],
     fields: dict[str, Any],
@@ -181,13 +202,19 @@ def record_with_reasons[R: _Record](
 class InventoryBuilder:
     """Collects the records and omissions of one adapter run."""
 
-    def __init__(self, *, connector_id: str, target: str) -> None:
+    def __init__(
+        self, *, connector_id: str, target: str, kinds: tuple[RecordKind, ...] = ("server",)
+    ) -> None:
         self.connector_id = connector_id
         self.target = target
+        #: The record kinds this source counts. The counts match only when the
+        #: source's own total was read in full for every one of them.
+        self.kinds = kinds
         self.records: list[Any] = []
         self.omissions: list[Omission] = []
         self.source_totals: dict[RecordKind, int] = {}
         self.omitted_items: dict[RecordKind, int] = {}
+        self.incomplete_totals: set[RecordKind] = set()
 
     def add(self, record: Any) -> None:
         """Add one record."""
@@ -210,6 +237,18 @@ class InventoryBuilder:
         if item_kind is not None:
             self.omitted_items[item_kind] = self.omitted_items.get(item_kind, 0) + 1
 
+    def total_incomplete(self, kind: RecordKind) -> None:
+        """Say that part of the source's list of *kind* was not read.
+
+        The total for that kind is then not the source's own total, so it is
+        left out of the envelope and the counts cannot match.
+        """
+        self.incomplete_totals.add(kind)
+
+    def complete_totals(self) -> dict[RecordKind, int]:
+        """The source's own totals that were read in full."""
+        return {k: n for k, n in self.source_totals.items() if k not in self.incomplete_totals}
+
     def envelope(self) -> InventoryEnvelope:
         """The inventory envelope. Raises when a record breaks the shape's rules."""
         counts = {"server": 0, "application": 0, "kubernetes_workload": 0}
@@ -224,14 +263,21 @@ class InventoryBuilder:
             ),
             records=self.records,
             omissions=self.omissions,
-            counts=InventoryCounts(**counts, source_totals=self.source_totals),
+            counts=InventoryCounts(**counts, source_totals=self.complete_totals()),
         )
 
     def counts_match(self, envelope: InventoryEnvelope) -> bool:
-        """``True`` when records plus left-out items equal each total the source reports."""
-        for kind, total in self.source_totals.items():
-            found = getattr(envelope.counts, kind) + self.omitted_items.get(kind, 0)
-            if found != total:
+        """``True`` only when every total was read in full and the counts equal it.
+
+        For each kind in :attr:`kinds`, records plus left-out items must
+        equal the source's own total. A total that was not read, or was
+        read only in part, gives ``False``: the inventory was not checked.
+        """
+        totals = envelope.counts.source_totals
+        for kind in self.kinds:
+            if kind not in totals:
+                return False
+            if getattr(envelope.counts, kind) + self.omitted_items.get(kind, 0) != totals[kind]:
                 return False
         return True
 

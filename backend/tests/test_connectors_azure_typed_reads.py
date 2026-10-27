@@ -22,6 +22,7 @@ import respx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import meho_backplane.operations.result_query as result_query_module
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors.azure import (
     AZURE_CONNECTOR_ID,
@@ -33,14 +34,17 @@ from meho_backplane.connectors.azure import (
     AzureConnector,
     register_azure_typed_operations,
 )
+from meho_backplane.connectors.azure.typed_reads import _location_row
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
-from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.jsonflux.query.contract import ResultQuerySpec
+from meho_backplane.operations import dispatch, reset_dispatcher_caches, set_default_reducer
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
     reset_handler_cache,
 )
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import search_operations
 from meho_backplane.settings import get_settings
 from tests._azure_fixtures import (
@@ -51,6 +55,8 @@ from tests._azure_fixtures import (
     TENANT_A,
     AzureTargetStub,
     CountingLoader,
+    location_answer,
+    locations_url,
     login_token,
     operator,
     subscription_answer,
@@ -58,6 +64,7 @@ from tests._azure_fixtures import (
     token_answer,
     token_url,
 )
+from tests._result_store_helpers import MemoryResultStore
 
 
 @pytest.fixture(autouse=True)
@@ -225,6 +232,131 @@ async def test_a_refused_login_fails_clearly_and_the_secret_is_read_again(
     assert loader.calls == 2
 
 
+def _region_names(count: int) -> list[str]:
+    return [f"exampleregion{n:02d}" for n in range(count)]
+
+
+@pytest.mark.asyncio
+async def test_location_list_returns_a_result_handle_that_result_query_reads(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """60 regions are more than 50 rows, so the rows go behind a stored-result link."""
+    await _registered_connector(CountingLoader())
+    store = MemoryResultStore()
+    set_default_reducer(JsonFluxReducer(store=store))
+    names = _region_names(60)
+    first_page = {
+        "value": [location_answer(name, paired=(names[-1],)) for name in names[:40]],
+        "nextLink": f"{locations_url()}?api-version=2022-12-01&$skiptoken=page2",
+    }
+    second_page = {"value": [location_answer(name) for name in names[40:]]}
+    caller = operator()
+
+    with respx.mock() as mock:
+        mock.post(token_url()).respond(200, json=token_answer(login_token()))
+        arm = mock.get(locations_url()).mock(
+            side_effect=[
+                httpx.Response(200, json=first_page),
+                httpx.Response(200, json=second_page),
+            ]
+        )
+        result = await dispatch(
+            operator=caller,
+            connector_id=AZURE_CONNECTOR_ID,
+            op_id="azure.location.list",
+            target=AzureTargetStub(),
+            params={},
+        )
+
+    assert result.status == "ok", result.error
+    assert arm.call_count == 2
+    assert arm.calls[0].request.url.params["api-version"] == "2022-12-01"
+    assert arm.calls[1].request.url.params["$skiptoken"] == "page2"
+    assert result.handle is not None
+    assert result.result["row_count"] == 60
+    assert result.result["truncated"] is False
+    assert result.result["pages_read"] == 2
+    assert login_token() not in json.dumps(result.model_dump(mode="json"))
+
+    monkeypatch.setattr(result_query_module, "get_result_handle_store", lambda: store)
+    query = ResultQuerySpec.model_validate(
+        {"filter": [{"field": "name", "op": "=", "value": names[0]}]}
+    )
+    answer = await result_query_module.run_result_query(caller, result.handle.handle_id, query)
+    assert answer["rows"] == [
+        {
+            "name": names[0],
+            "display_name": names[0].title(),
+            "region_type": "Physical",
+            "geography": "Example Geography",
+            "geography_group": "Example Group",
+            "paired_regions": [names[-1]],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_location_list_keeps_a_short_list_inline_and_skips_odd_rows(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await _registered_connector(CountingLoader())
+    page = {"value": [location_answer("exampleregion"), "not-a-location", {"name": "bare"}]}
+
+    with respx.mock() as mock:
+        mock.post(token_url()).respond(200, json=token_answer(login_token()))
+        mock.get(locations_url()).respond(200, json=page)
+        result = await dispatch(
+            operator=operator(),
+            connector_id=AZURE_CONNECTOR_ID,
+            op_id="azure.location.list",
+            target=AzureTargetStub(),
+            params={},
+        )
+
+    assert result.status == "ok", result.error
+    assert result.result["value"] == [
+        {
+            "name": "exampleregion",
+            "display_name": "Exampleregion",
+            "region_type": "Physical",
+            "geography": "Example Geography",
+            "geography_group": "Example Group",
+            "paired_regions": [],
+        },
+        {
+            "name": "bare",
+            "display_name": None,
+            "region_type": None,
+            "geography": None,
+            "geography_group": None,
+            "paired_regions": [],
+        },
+    ]
+
+
+def test_location_row_keeps_geography_and_group_apart() -> None:
+    # Shaped like Azure's answer for Germany West Central in api-version
+    # 2022-12-01: geography is the Azure geography, geographyGroup the group.
+    real_shape = {
+        "name": "germanywestcentral",
+        "metadata": {"geography": "Germany", "geographyGroup": "Europe"},
+    }
+    only_group = {"name": "exampleregion", "metadata": {"geographyGroup": "Europe"}}
+
+    assert _location_row(real_shape) == {
+        "name": "germanywestcentral",
+        "display_name": None,
+        "region_type": None,
+        "geography": "Germany",
+        "geography_group": "Europe",
+        "paired_regions": [],
+    }
+    row = _location_row(only_group)
+    assert row is not None
+    assert row["geography"] is None
+    assert row["geography_group"] == "Europe"
+
+
 @pytest.mark.asyncio
 async def test_fingerprint_describes_the_subscription() -> None:
     connector = AzureConnector(credentials_loader=CountingLoader())
@@ -290,7 +422,7 @@ async def test_the_operation_is_stored_as_typed_and_enabled(
         .all()
     )
     by_op = {row.op_id: row for row in rows}
-    assert set(by_op) == {"azure.about", "azure.operation.status"}
+    assert {"azure.about", "azure.location.list", "azure.operation.status"} <= set(by_op)
     for row in rows:
         assert row.source_kind == "typed"
         assert row.is_enabled is True
@@ -298,7 +430,9 @@ async def test_the_operation_is_stored_as_typed_and_enabled(
         assert row.requires_approval is False
     about_ref = by_op["azure.about"].handler_ref
     status_ref = by_op["azure.operation.status"].handler_ref
+    location_ref = by_op["azure.location.list"].handler_ref
     assert about_ref is not None and about_ref.endswith("AzureConnector.about")
+    assert location_ref is not None and location_ref.endswith("AzureConnector.location_list")
     assert status_ref is not None and status_ref.endswith("AzureConnector.operation_status")
 
 
@@ -320,9 +454,10 @@ async def test_the_account_group_is_enabled_with_its_text(
         .scalars()
         .all()
     )
-    assert {group.group_key for group in groups} == {"account"}
+    by_key = {group.group_key: group for group in groups}
+    assert "account" in by_key
     assert all(group.review_status == "enabled" for group in groups)
-    assert groups[0].when_to_use == AZURE_TYPED_WHEN_TO_USE_BY_GROUP["account"]
+    assert by_key["account"].when_to_use == AZURE_TYPED_WHEN_TO_USE_BY_GROUP["account"]
 
 
 @pytest.mark.asyncio
@@ -340,7 +475,11 @@ async def test_search_operations_finds_azure_about(
 
 
 def test_every_operation_is_a_safe_read_with_guidance() -> None:
-    assert [op.op_id for op in AZURE_TYPED_OPS] == ["azure.about", "azure.operation.status"]
+    assert [op.op_id for op in AZURE_TYPED_OPS if op.group_key == "account"] == [
+        "azure.about",
+        "azure.location.list",
+        "azure.operation.status",
+    ]
     for op in AZURE_TYPED_OPS:
         assert op.safety_level == "safe" and op.requires_approval is False
         assert "read-only" in op.tags

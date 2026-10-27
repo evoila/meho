@@ -462,6 +462,7 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "bind9-ssh",
         "fleet-lcm",
         "fleet-rest",
+        "fortigate-rest",
         "gcloud-rest",
         "harbor-rest",
         "hcx-rest",

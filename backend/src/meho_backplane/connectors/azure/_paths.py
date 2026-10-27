@@ -55,6 +55,38 @@ RESOURCE_GRAPH_API_VERSION: Final[str] = "2024-04-01"
 
 # ---- avs (Task #5091) ----
 
+#: The API version of the Azure VMware Solution reads (Microsoft.AVS).
+AVS_API_VERSION: Final[str] = "2026-03-01"
+
+#: ``GET .../providers/Microsoft.AVS/privateClouds``: every Azure VMware
+#: Solution private cloud of the subscription (Private Clouds - List In
+#: Subscription).
+AVS_PRIVATE_CLOUDS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.AVS/privateClouds"
+)
+
+#: ``GET .../privateClouds/{privateCloudName}/clusters``: the clusters of one
+#: private cloud, without the management cluster (Clusters - List).
+AVS_CLUSTERS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.AVS/privateClouds/{private_cloud}/clusters"
+)
+
+#: ``GET .../clusters/{clusterName}/hosts``: the hosts of one cluster of a
+#: private cloud (Hosts - List).
+AVS_HOSTS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.AVS/privateClouds/{private_cloud}/clusters/{cluster}/hosts"
+)
+
+#: ``POST .../providers/Microsoft.AVS/locations/{location}/checkQuotaAvailability``:
+#: the host quota of the subscription in one region (Locations - Check Quota
+#: Availability). A read, even though it is a POST.
+AVS_QUOTA_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.AVS/locations/{location}"
+    "/checkQuotaAvailability"
+)
+
 # ---- compute (Task #5083) ----
 
 # ---- cost (Task #5088) ----

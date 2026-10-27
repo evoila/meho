@@ -67,6 +67,11 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     "SUBSCRIPTION_PATH": (("GET",), "SUBSCRIPTIONS_API_VERSION"),
     "LOCATIONS_PATH": (("GET",), "SUBSCRIPTIONS_API_VERSION"),
     "RESOURCE_GRAPH_PATH": (("POST",), "RESOURCE_GRAPH_API_VERSION"),
+    # avs (Task #5091)
+    "AVS_PRIVATE_CLOUDS_PATH": (("GET",), "AVS_API_VERSION"),
+    "AVS_CLUSTERS_PATH": (("GET",), "AVS_API_VERSION"),
+    "AVS_HOSTS_PATH": (("GET",), "AVS_API_VERSION"),
+    "AVS_QUOTA_PATH": (("POST",), "AVS_API_VERSION"),
 }
 
 _PARAMETER = re.compile(r"\{[^}]*\}")
@@ -142,8 +147,12 @@ def test_the_checked_paths_are_pinned() -> None:
     """The list of checked paths, so a change to it is always on purpose."""
     assert sorted(_declared_op_ids()) == [
         "GET:/subscriptions/{}/locations@2022-12-01",
+        "GET:/subscriptions/{}/providers/microsoft.avs/privateclouds@2026-03-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.avs/privateclouds/{}/clusters/{}/hosts@2026-03-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.avs/privateclouds/{}/clusters@2026-03-01",
         "GET:/subscriptions/{}@2022-12-01",
         "POST:/providers/microsoft.resourcegraph/resources@2024-04-01",
+        "POST:/subscriptions/{}/providers/microsoft.avs/locations/{}/checkquotaavailability@2026-03-01",
     ]
 
 

@@ -542,3 +542,112 @@ as MEHO's system identity, which cannot read the secret, so it reports
   <https://learn.microsoft.com/en-us/azure/azure-government/compare-azure-government-global-azure>
 - Related pages: `connectors-keycloak.md` (the same client credentials request),
   `connectors-shared-vault-creds.md`, `error-message-shape.md`.
+
+## avs
+
+The `avs` family reads Azure VMware Solution: VMware vSphere, vSAN and NSX
+on dedicated Azure hosts. A customer's environment there is a private cloud
+with a management cluster and maybe more clusters; a cluster starts at three
+hosts. All four operations are in group `avs`, are `safe` and need no
+approval: they only read, and nothing changes in Azure.
+
+| Operation | Reads | Parameters |
+|---|---|---|
+| `azure.avs.privatecloud.list` | every private cloud of the subscription: host type (SKU), state, management cluster size and host names, network block and extra blocks, internet access, availability (single zone or stretched over two zones), managed identity type, VMware Cloud Foundation license kind | none |
+| `azure.avs.cluster.list` | the clusters of one private cloud: host type (SKU), size, host names, state | `resource_group`, `private_cloud` |
+| `azure.avs.host.list` | the hosts of one cluster: name, name and ID in vCenter (`display_name`, `mo_ref_id`), kind, state, maintenance, fault domain, host type (SKU), zones | `resource_group`, `private_cloud`, `cluster` |
+| `azure.avs.quota.show` | the host quota of the subscription in one region: whether quota is on, and the hosts left per host type | `location` (a region name such as `westeurope`) |
+
+**Group key.** The Task named the group `vmware-solution`. Each family module
+has one group key named after the family, so the group is `avs`.
+
+**API version.** Every call uses `2026-03-01` (`AVS_API_VERSION`). Every path
+is a `*_PATH` constant in the `avs` section of `_paths.py`, and the spec path
+check (see above) finds each of them, with its API version, in the pinned
+`Microsoft.AVS` spec file. `checkQuotaAvailability` is a POST that only
+reads: it has no body and is sent as a repeatable call, so it is tried again
+after a 5xx like a GET.
+
+**Files.** `avs.py` holds the group text, the guidance for the AI, the
+operation table (`OPS`) and the mixin `AvsOps`, whose thin methods
+`AzureConnector` inherits. `avs_reads.py` holds the bodies, the row builders
+and the name checks; `avs_schemas.py` holds the schemas and the name rules.
+
+**Names in a URL path.** `resource_group`, `private_cloud`, `cluster` and
+`location` go into the URL path, so they are checked twice: by the parameter
+schema (the dispatcher answers `invalid_params`) and again in the body. A
+resource group has 1 to 90 letters, digits, `_`, `-`, `.`, `(` or `)` and
+does not end with `.`. A private cloud or cluster name has 1 to 80 letters,
+digits, `_`, `-` and `.` (the characters Azure's API description allows) and
+is not only dots. A region name has letters and digits only. So a `/`, a `?`
+or a name such as `..` is refused before any request and can never move the
+call to another path or another subscription. A checked name is then
+percent-encoded: a special character such as `(` is written as `%28`.
+
+**Result shapes.**
+
+- A list has its rows under `value`, plus `truncated`, `omission`,
+  `omission_kind` and `pages_read` from the paging helper. The cluster and
+  host lists also repeat the names they were asked for (`resource_group`,
+  `private_cloud`, `cluster`). More than 50 rows (or more than 4 KB) come
+  back as a link to the stored result. All these extra fields are plain
+  values, so the result reduction keeps them next to the link without a
+  `result_objects` hint; the tests prove it with the real reduction.
+- Azure leaves the management cluster out of the cluster list (Microsoft's
+  own CLI says the same). Its size and host names are in the private cloud
+  row (`management_cluster_size`, `management_cluster_hosts`). The total host
+  count of a private cloud is the management cluster size plus the sizes of
+  the other clusters.
+- Azure reports no vSphere, vSAN or NSX version for a private cloud. The
+  version information in the row is `vcf_license_kind`: the VMware Cloud
+  Foundation license the customer brought, for example `vcf5` (VCF 5.0), or
+  null when none is attached. Azure VMware Solution needs such a license for
+  new deployments.
+- `azure.avs.quota.show` answers `{location, quota_enabled, hosts_remaining}`.
+  `hosts_remaining` maps each host type to the hosts left, for example
+  `{"AV36P": 3}`; an entry whose count is not a whole number is left out.
+  Quota comes from a support request to Microsoft; the guidance tells the AI
+  so.
+
+**Provider not registered.** When the `Microsoft.AVS` provider is not
+registered on the subscription, Azure answers `MissingSubscriptionRegistration`.
+The caller gets `connector_error` with `exception_class`
+`AzureProviderNotRegisteredError` and a hint to ask an administrator to
+register it. MEHO never registers a provider, because that is a change to the
+subscription.
+
+**Secrets.** MEHO never calls the private cloud's `listAdminCredentials`
+action (it returns the vCenter and NSX passwords), nor `getVcfLicense` or a
+license's `getProperties` (they return license keys). A test fails when a
+path to one of them is added to `_paths.py`. The private cloud's other secret
+fields (`vcenterPassword`, `nsxtPassword`, an identity source's `password`
+and the license key) are write-only in Azure's API description, so Azure's
+answers to these reads do not hold them. Every row is also built from a fixed
+list of fields, so even an answer that held them would not pass them on: a
+test proves that they reach neither the result nor the stored rows. Names are
+text from Azure; the guidance tells the AI to treat them as data.
+
+**Tests.** `backend/tests/test_connectors_azure_avs.py` runs every operation
+through the real dispatcher with mocked HTTP. Its Azure answers have the
+shape of the examples next to the pinned API description, with made-up
+values, and fill every field of every row. It covers the row shapes, a list
+of 60 rows per list operation through the real result reduction and
+`result_query`, a stopped list with its omission, the quota POST and its
+retry after a 5xx, the provider-not-registered message, refused names,
+`not_found`, and the secrets above.
+
+**Proven live:** nothing yet. The lab login does not exist yet. The lab has
+no private cloud (one needs at least three dedicated hosts), so the live
+proof is an empty list or the clear "provider not registered" message from
+`azure.avs.privatecloud.list`, and an answer or the same message from
+`azure.avs.quota.show` for the lab region.
+
+**References.**
+
+- Azure VMware Solution REST API: <https://learn.microsoft.com/en-us/rest/api/avs/>
+- Clusters of a private cloud, without the management cluster (`az vmware cluster`):
+  <https://learn.microsoft.com/en-us/cli/azure/vmware/cluster>
+- Host quota and the three-host minimum:
+  <https://learn.microsoft.com/en-us/azure/azure-vmware/request-host-quota-azure-vmware-solution>
+- Naming rules of private clouds and resource groups:
+  <https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/resource-name-rules>

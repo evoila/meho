@@ -799,7 +799,8 @@ front maps the exception to `404 node_untracked`; the MCP front
 returns the typed `{kind, status: "node_untracked", name,
 nodes: []}` envelope, which also carries `direction`,
 `relation_class` and `evidence` like every other closure answer
-(#3760). The CLI's `formatNotFound` renders the
+(#3760), and a `detail` text (#4112) that says the answer is not
+"safe to delete" and how to add the missing data. The CLI's `formatNotFound` renders the
 operator-actionable "register / refresh the target or annotate
 the relationship" prompt. `find_path` keeps its G9.1 silent-on-miss
 contract by default — `None` is the recoverable "no route" answer.

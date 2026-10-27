@@ -200,38 +200,23 @@ register_mcp_tool(
         name="meho_broadcast_recent",
         surface=ToolSurface.WORKING,
         description=(
-            "Read the agent announcements in the operator's tenant: what "
-            "other agents said they are starting, doing, or have finished. "
-            "WHEN TO CALL: as a first reflex at the start of a working "
-            "session — before your first `call_operation` — so you don't "
-            "collide with in-flight work; re-read it before picking up a "
-            "new target. This is proactive coordination, not only a "
-            "reaction to an explicit 'what is happening' request. "
-            "MEHO stores every announcement before it is sent out, and "
-            "this tool reads that store in the order the announcements "
-            "were saved. Operation events are not included; use "
-            "`query_audit` for what was run. "
-            "Returns {events, next_cursor, watch_checkpoint, gap}, events "
-            "oldest first; dedupe by each event's 'event_id'. Default "
-            "window is the last 30 minutes; pass an ISO-8601 time "
-            "('2026-05-25T10:00:00Z') as 'cursor' to start earlier. "
-            "'next_cursor' continues this same read (pass it back as "
-            "'cursor'); it is null when you have read everything up to "
-            "the moment of the first call. 'watch_checkpoint' is where "
-            "`meho_broadcast_watch` should start so you miss nothing that "
-            "comes after this read; it is set even when no event matched "
-            "your filter. 'gap' is null, or says that older announcements "
-            "were removed by archive retention, so the answer is not "
-            "complete. Both cursors only work in your own tenant. The "
-            "'filter' object narrows by exact-match principal (JWT 'sub') "
-            "/ target (an announcement's 'target' or any of its 'targets') "
-            "/ work_ref (change ticket), plus 'active_only' (drop expired "
-            "claims). 'op_class' and 'actor_sub' match operation events "
-            "only, so with them no announcement matches. 'limit' caps the "
-            "rows read per page at 1..1000 (default 100); filtering runs "
-            "after the read, so a page can hold fewer events. 'since' is "
-            "a deprecated alias for 'cursor' and is mutually exclusive "
-            "with it."
+            "Read the agent announcements in your tenant: what other "
+            "agents said they are starting, doing or have finished. "
+            "WHEN TO CALL: at the start of every working session, before "
+            "your first `call_operation`, so you do not collide with work "
+            "in progress; read it again before you start on a new target. "
+            "Operation events are not included; use `query_audit` for what "
+            "was run. "
+            "Returns {events, next_cursor, watch_checkpoint, gap}, oldest "
+            "first. Default window: the last 30 minutes; pass an ISO-8601 "
+            "time as 'cursor' to start earlier. Pass 'next_cursor' back as "
+            "'cursor' to continue; it is null when you have read "
+            "everything. Start `meho_broadcast_watch` at "
+            "'watch_checkpoint' to miss nothing after this read. 'gap' not "
+            "null means older announcements were removed, so the answer is "
+            "not complete. 'filter' narrows by 'principal', 'target', "
+            "'work_ref' and 'active_only'. Filtering runs after the read, "
+            "so a page can hold fewer events than 'limit'."
         ),
         inputSchema={
             "type": "object",
@@ -253,13 +238,7 @@ register_mcp_tool(
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 64,
-                    "description": (
-                        "DEPRECATED alias for `cursor` (v0.8.0 wire "
-                        "shape). Accepted for backward compatibility; "
-                        "new callers SHOULD use `cursor`. Mutually "
-                        "exclusive with `cursor`; passing both rejects "
-                        "with -32602."
-                    ),
+                    "description": "Deprecated alias for `cursor`. Do not send both.",
                     "deprecated": True,
                 },
                 "filter": {
@@ -644,75 +623,30 @@ register_mcp_tool(
         name="meho_broadcast_announce",
         surface=ToolSurface.WORKING,
         description=(
-            "Publish an agent-authored announcement to the operator's "
-            "tenant broadcast stream (Initiative #1090, Task #1092). "
-            "Use this to surface intent ('about to investigate cluster "
-            "X latency'), progress updates ('halfway through the "
-            "vCenter migration'), or completion summaries ('finished -- "
-            "rolled back to snapshot S'). Call this proactively — before "
-            "executing any operation that mutates infrastructure (check "
-            "the hit's `safety_level` / `requires_approval` from "
-            "`search_operations`), announce your intent so peers see the "
-            "claim before you act, and again on completion — not only "
-            "when the operator asks you to broadcast. The announcement "
-            "lands on "
-            "the same meho:feed:{tenant_id} stream that audit-driven "
-            "events use, distinguished by kind='agent_announcement' "
-            "(audit-driven events carry kind='operation' per "
-            "docs/codebase/api-shape-conventions.md §6); other "
-            "operators read it back via meho_broadcast_recent. "
-            "ONLY A TRUSTED AGENT CAN PUBLISH: a call from inside a "
-            "MEHO-hosted agent run, or a call with the token of a "
-            "registered agent principal (`meho agent-principal "
-            "register`). Any other caller, such as a person's own login, "
-            "gets -32602 with error.data.code='agent_identity_required' "
-            "and a remediation. People can still read the feed. "
-            "EACH ANNOUNCEMENT IS ONE STEP OF A CLAIM: 'phase'='start' "
-            "(the default) opens a claim and the server returns a new "
-            "'claim_id'; 'update' and 'completion' continue it and need "
-            "that 'claim_id' plus an 'idempotency_key' (a retry with the "
-            "same key returns the first result with replayed=true). Only "
-            "the claim's owner may update or complete it, and a completed "
-            "claim takes no more steps. A claim is advisory: it never "
-            "locks a target or blocks anyone. The server sets the owner, "
-            "actor, run_id and (in a hosted run) work_ref; do not send "
-            "them. "
-            "'activity' is mandatory (1..500 chars), 'target' and "
-            "'scope' are optional free-form attribution. "
-            "Optional STRUCTURED INTENT CLAIMS turn an "
-            "announcement into coordination data other agents can trust: "
-            "'targets' (up to 10 target names the work touches -- "
-            "supersedes 'target' for multi-target claims), "
-            "'planned_op_class' (the op class you are about to run, e.g. "
-            "'write' / 'credential_read'), 'ttl_minutes' (1..1440, "
-            f"default {TTL_DEFAULT_MINUTES}; the "
-            "claim's lifetime -- readers derive expires_at = ts + ttl "
-            "and can filter to active claims), and 'work_ref' (an opaque "
-            "change-ticket reference such as 'gh:evoila/meho#123'; set by "
-            "the server inside a hosted run). These typed fields are "
-            "server-validated and served UNWRAPPED (they cannot carry an "
-            "injection); the free-text 'activity' / 'scope' / 'target' / "
-            "'targets' / 'work_ref' stay quarantined behind the "
-            "untrusted-content envelope on read. "
-            "MEHO first stores the announcement; that is the record "
-            "meho_broadcast_recent and meho_broadcast_watch read. If "
-            "storing fails you get JSON-RPC -32603 and nothing was "
-            "stored. If storing works but the live wake-up for watchers "
-            "fails, the call still succeeds with delivery_pending=true: "
-            "readers see the announcement anyway; retry with the same "
-            "'idempotency_key' to finish the wake-up (no second copy is "
-            "stored). Tenant scoping is structural -- the input schema "
-            "has no tenant_id argument. Returns {event_id, "
-            "watch_checkpoint, delivery_pending, claim_id, phase, "
-            "owner_sub, admission, ttl_minutes, replayed} plus any other "
-            "claim fields echoed back. 'event_id' is the announcement's "
-            "UUID (it matches 'event_id' on recent/watch reads); "
-            "'watch_checkpoint' is a meho_broadcast_watch cursor just "
-            "after this announcement. Announces are "
-            "rate-limited per principal (default 10 per minute); "
-            "exceeding the limit returns a -32000 error naming the "
-            "window and a retry-after -- announce meaningful "
-            "transitions, not a tight loop."
+            "Post a short note to your tenant's broadcast feed so other "
+            "operators and agents see what you are doing. Call it on your "
+            "own, not only when asked: before any operation that changes "
+            "infrastructure (check `safety_level` / `requires_approval` "
+            "from `search_operations`), and again when you finish. Others "
+            "read it with `meho_broadcast_recent`.\n\n"
+            "WHO CAN POST: only an agent: a MEHO-hosted agent run, or the "
+            "token of a registered agent principal. Any other caller gets "
+            "-32602 with error.data.code='agent_identity_required'.\n\n"
+            "CLAIM STEPS: 'phase'='start' (the default) opens a claim and "
+            "returns a 'claim_id'. 'update' and 'completion' need that "
+            "'claim_id' and an 'idempotency_key'. Only the claim's owner can "
+            "continue it; a completed claim takes no more steps. A claim "
+            "never locks anything. The server sets owner, actor and run_id; "
+            "do not send them.\n\n"
+            "'activity' is required. 'targets', 'planned_op_class' and "
+            "'ttl_minutes' tell others what you will touch and for how long.\n\n"
+            "Returns 'event_id', 'claim_id', 'phase', 'watch_checkpoint' (a "
+            "`meho_broadcast_watch` cursor just after this note) and "
+            "'delivery_pending'. If 'delivery_pending' is true the note is "
+            "stored but live watchers were not woken; retry with the same "
+            "'idempotency_key' (nothing is stored twice). -32603 means "
+            "nothing was stored. Limit: 10 posts per minute by default (-32000 "
+            "with a retry-after when over); post real changes, not a loop."
         ),
         inputSchema={
             "type": "object",
@@ -721,24 +655,13 @@ register_mcp_tool(
                     "type": "string",
                     "minLength": 1,
                     "maxLength": ACTIVITY_MAX_CHARS,
-                    "description": (
-                        "Free-text description of the planned, "
-                        "in-progress, or completed activity. UNTRUSTED "
-                        "agent-authored content; consumers MUST escape "
-                        "on render (HTML, Slack, downstream LLM)."
-                    ),
+                    "description": "What you plan, are doing, or finished.",
                 },
                 "target": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": TARGET_MAX_CHARS,
-                    "description": (
-                        "Optional single target_name attribution -- the "
-                        "managed target the activity scopes to "
-                        "(e.g. 'prod-vc-1', 'kube-prod'). Omit when "
-                        "the activity is target-less. Use 'targets' for "
-                        "a multi-target claim. UNTRUSTED prose."
-                    ),
+                    "description": "Optional name of the one target the work touches.",
                 },
                 "targets": {
                     "type": "array",
@@ -749,47 +672,27 @@ register_mcp_tool(
                     },
                     "maxItems": MAX_TARGETS,
                     "description": (
-                        "Optional list of target_names the claim touches "
-                        f"(each 1..{TARGET_MAX_CHARS} chars, at most "
-                        f"{MAX_TARGETS}). Supersedes 'target' for "
-                        "multi-target work; recent/watch's target filter "
-                        "matches an event when the query equals 'target' "
-                        "OR appears in 'targets'. UNTRUSTED prose "
-                        "(each element wrapped on read)."
+                        "Optional names of all targets the work touches. Use "
+                        "instead of 'target' for more than one."
                     ),
                 },
                 "scope": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 256,
-                    "description": (
-                        "Optional free-form scope hint (e.g. "
-                        "'investigating cluster X latency'). UNTRUSTED "
-                        "agent-authored content; same render rules as "
-                        "'activity'."
-                    ),
+                    "description": "Optional short scope note.",
                 },
                 "planned_op_class": {
                     "type": "string",
                     "enum": list(PLANNED_OP_CLASS_VALUES),
-                    "description": (
-                        "Optional declared intent: the op class the "
-                        "agent is about to run (the classify_op "
-                        "taxonomy). TRUSTED structured metadata, served "
-                        "unwrapped so peers can reason about crossfire."
-                    ),
+                    "description": "Optional: the class of operation you are about to run.",
                 },
                 "ttl_minutes": {
                     "type": "integer",
                     "minimum": TTL_MIN_MINUTES,
                     "maximum": TTL_MAX_MINUTES,
                     "description": (
-                        "Optional claim lifetime in minutes "
-                        f"({TTL_MIN_MINUTES}..{TTL_MAX_MINUTES}, default "
-                        f"{TTL_DEFAULT_MINUTES}). Readers "
-                        "derive expires_at = ts + ttl and can drop "
-                        "elapsed claims via recent/watch 'active_only'. "
-                        "TRUSTED int, served unwrapped."
+                        f"Optional claim lifetime in minutes (default {TTL_DEFAULT_MINUTES})."
                     ),
                 },
                 "work_ref": {
@@ -797,33 +700,22 @@ register_mcp_tool(
                     "minLength": 1,
                     "maxLength": WORK_REF_MAX_CHARS,
                     "description": (
-                        "Optional opaque change-ticket reference "
-                        "(e.g. 'gh:evoila/meho#123'), same convention as "
-                        "AgentRun.work_ref. Exact-match filterable on "
-                        "recent/watch. Inside a hosted run the server "
-                        "sets it from the run; a different value is "
-                        "refused. UNTRUSTED prose (wrapped on read) "
-                        "but filtered pre-wrap."
+                        "Optional change-ticket reference, e.g. 'gh:org/repo#123'. "
+                        "Set by the server inside a hosted run."
                     ),
                 },
                 "run_id": {
                     "type": "string",
                     "format": "uuid",
-                    "description": (
-                        "DEPRECATED. The server sets the run id from the "
-                        "checked agent run. A value that is not that run "
-                        "is refused with error.data.code="
-                        "'server_stamped_field'. Do not send it."
-                    ),
+                    "description": "Deprecated. Set by the server. Do not send it.",
                     "deprecated": True,
                 },
                 "claim_id": {
                     "type": "string",
                     "format": "uuid",
                     "description": (
-                        "The claim this step continues. Required for "
-                        "'update' and 'completion' (use the claim_id the "
-                        "'start' returned); not allowed on 'start'."
+                        "The claim to continue. Required for 'update' and "
+                        "'completion'; not allowed on 'start'."
                     ),
                 },
                 "idempotency_key": {
@@ -831,13 +723,8 @@ register_mcp_tool(
                     "minLength": 1,
                     "maxLength": IDEMPOTENCY_KEY_MAX_CHARS,
                     "description": (
-                        "Your retry key for this step. Required for "
-                        "'update' and 'completion', optional for 'start'. "
-                        "Sending the same key again returns the first "
-                        "result (replayed=true) and stores nothing new. If "
-                        "the first try was stored but its live wake-up "
-                        "failed (delivery_pending=true), the retry "
-                        "finishes the wake-up."
+                        "Retry key. Required for 'update' and 'completion'. The "
+                        "same key again returns the first result (replayed=true)."
                     ),
                 },
                 "phase": {
@@ -845,11 +732,7 @@ register_mcp_tool(
                     "enum": ["start", "update", "completion"],
                     "default": "start",
                     "description": (
-                        "Claim step. 'start' (the default) opens a new "
-                        "claim; 'update' reports progress on it; "
-                        "'completion' closes it. The Prometheus counter "
-                        "broadcast_agent_announcements_total partitions "
-                        "by this label."
+                        "'start' opens a claim, 'update' reports progress, 'completion' closes it."
                     ),
                 },
             },
@@ -980,29 +863,18 @@ register_mcp_tool(
         name="meho_broadcast_watch",
         surface=ToolSurface.WORKING,
         description=(
-            "Wait for new agent announcements in the operator's tenant "
-            "after 'cursor' (a watch checkpoint). Get the first checkpoint "
-            "from `meho_broadcast_recent`'s 'watch_checkpoint' (or from "
-            "the 'watch_checkpoint' of your own announce), then pass each "
-            "answer's 'next_cursor' to the next call. Returns {events, "
-            "next_cursor, gap}. MEHO reads its stored announcements after "
-            "the checkpoint first; if there are none it waits up to "
-            "'timeout_ms' (default 10000, cap 30000) for a new one and "
-            "reads again. 'next_cursor' always moves past everything "
-            "read, also when your filter hid every event, so you never "
-            "get the same event twice when you pass it back. If the live "
-            "wake-up is down, MEHO checks every 5 seconds instead, so "
-            "nothing is lost, only later. 'gap' is null, or says that "
-            "announcements after your checkpoint were removed by archive "
-            "retention ('retention_trimmed', with 'missed_events'), or "
-            "that the checkpoint is ahead of the archive "
-            "('checkpoint_ahead'; watching restarts at the current end). "
-            "Dedupe by 'event_id'. Same 'filter' as "
+            "Wait for new agent announcements in your tenant after "
+            "'cursor'. Get the first cursor from `meho_broadcast_recent`'s "
+            "'watch_checkpoint' (or from your own announce), then pass each "
+            "answer's 'next_cursor' to the next call; you never get the "
+            "same event twice. Returns {events, next_cursor, gap}. If there "
+            "is nothing new it waits up to 'timeout_ms' (default 10000, max "
+            "30000). 'gap' is null, or says that events were lost to "
+            "retention ('retention_trimmed', with 'missed_events') or that "
+            "the cursor was ahead of the archive ('checkpoint_ahead'; "
+            "watching restarts at the end). Same 'filter' as "
             "`meho_broadcast_recent`. Operation events are not included. "
-            "'since_cursor' is a deprecated alias for 'cursor' and is "
-            "mutually exclusive with it. A checkpoint only works in the "
-            "tenant that issued it. This is a single bounded long-poll, "
-            "not a background subscription."
+            "One bounded wait per call, not a subscription."
         ),
         inputSchema={
             "type": "object",
@@ -1011,26 +883,13 @@ register_mcp_tool(
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 64,
-                    "description": (
-                        "Watch checkpoint. Required (either as `cursor` "
-                        "or via the deprecated `since_cursor` alias). "
-                        "Get the first one from `meho_broadcast_recent`'s "
-                        "`watch_checkpoint`; then pass each answer's "
-                        "`next_cursor`. Returns announcements stored "
-                        "after this point."
-                    ),
+                    "description": "Watch checkpoint. Required.",
                 },
                 "since_cursor": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 64,
-                    "description": (
-                        "DEPRECATED alias for `cursor` (v0.8.0 wire "
-                        "shape). Accepted for backward compatibility; "
-                        "new callers SHOULD use `cursor`. Mutually "
-                        "exclusive with `cursor`; passing both rejects "
-                        "with -32602."
-                    ),
+                    "description": "Deprecated alias for `cursor`. Do not send both.",
                     "deprecated": True,
                 },
                 "filter": {
@@ -1105,12 +964,7 @@ register_mcp_tool(
                     "minimum": _WATCH_MIN_TIMEOUT_MS,
                     "maximum": _WATCH_MAX_TIMEOUT_MS,
                     "default": _WATCH_DEFAULT_TIMEOUT_MS,
-                    "description": (
-                        "How long to wait for a new announcement, in "
-                        f"milliseconds. Cap at {_WATCH_MAX_TIMEOUT_MS} "
-                        "(long-poll, not infinite-block) to bound chassis "
-                        "worker tie-up."
-                    ),
+                    "description": "How long to wait for a new announcement, in milliseconds.",
                 },
             },
             # Either `cursor` (canonical) OR `since_cursor` (deprecated

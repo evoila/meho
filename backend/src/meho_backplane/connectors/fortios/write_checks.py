@@ -219,8 +219,10 @@ async def check_before_write(
 
     ``expected_before`` is the object as the approver saw it in the preview,
     or ``None`` for a create (the object must not exist yet).
-    ``expected_references`` is the list of users the approver saw; ``None``
-    skips that check (a create has no users).
+    ``expected_references`` is the list of users the approver saw. A create
+    has no users, so it skips that check and makes no usage call. A change or
+    delete must carry the list: ``None`` means the approver did not see it, so
+    the change is refused (``references_unknown``).
     """
     controls, version_text = await fortimanager_controls(connector, operator, target)
     version = require_covered(version_text)
@@ -245,7 +247,13 @@ async def check_before_write(
             code="object_changed",
         )
     references: tuple[str, ...] = ()
-    if expected_references is not None:
+    if expected_before is not None:
+        if expected_references is None:
+            raise FortiOSWriteRefusedError(
+                f"the preview did not show which entries use {obj.api_path}, so the change "
+                "was not sent. Preview the change again",
+                code="references_unknown",
+            )
         references = await read_references(connector, operator, target, obj)
         if references != tuple(sorted(expected_references)):
             raise FortiOSWriteRefusedError(

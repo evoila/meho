@@ -142,9 +142,12 @@ change operation exists yet; the later FortiGate work calls these.
      in FortiManager". MEHO never falls back to a direct change;
    - the live object is not `expected_before` (`object_changed`); for a
      create, `expected_before` is `null` and the object must not exist;
-   - the entries that use the object are not `expected_references`
-     (`references_changed`), or MEHO cannot read them (`references_unknown`).
-     The list comes from `monitor/system/object/usage`.
+   - for a change or delete, the entries that use the object are not
+     `expected_references` (`references_changed`), MEHO cannot read them, or
+     the change carries no list because the preview could not read it
+     (`references_unknown`). The list comes from
+     `monitor/system/object/usage`. A create has no users, so it skips this
+     check and makes no usage call.
 2. `send_write` sends the change once, never retried. A lost answer (a
    timeout, a dropped connection, a failover) gives `unknown`, and MEHO does
    not send it again.

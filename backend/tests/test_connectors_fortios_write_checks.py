@@ -161,6 +161,38 @@ async def test_an_unreadable_list_of_users_is_refused() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_change_without_the_list_of_users_is_refused() -> None:
+    fake = fx.FakeFortiGate(_answers())
+    with pytest.raises(FortiOSWriteRefusedError, match="Preview the change again") as info:
+        await _before(fake, refs=None)
+    assert info.value.code == "references_unknown"
+    assert all(c.method == "GET" for c in fake.calls)
+    assert not any(c.url.path.endswith("object/usage") for c in fake.calls)
+
+
+@pytest.mark.asyncio
+async def test_a_create_makes_no_usage_call() -> None:
+    answers = _answers()
+    del answers[_OBJECT_PATH]
+    fake = fx.FakeFortiGate(answers)
+
+    async def call(connector: FortiOSConnector, target: Any) -> Any:
+        return await check_before_write(
+            connector,
+            make_operator(),
+            target,
+            obj=_OBJ,
+            expected_before=None,
+            expected_references=[],
+        )
+
+    before = await _run(fake, call)
+    assert before.live is None
+    assert before.references == ()
+    assert not any(c.url.path.endswith("object/usage") for c in fake.calls)
+
+
+@pytest.mark.asyncio
 async def test_fortimanager_control_is_refused_with_change_it_in_fortimanager() -> None:
     fake = fx.FakeFortiGate(
         _answers(**{"monitor/system/central-management/status": fx.FMG_CONTROLS})

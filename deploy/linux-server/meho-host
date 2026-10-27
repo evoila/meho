@@ -721,7 +721,7 @@ rules_with_admin_network() {
 
 command_admin_network() {
     (($# == 1)) || usage_error "admin-network takes one value: an IPv4 range such as 10.0.50.0/24, one address, or none."
-    local wanted=$1 range="" rules client new_file output
+    local wanted=$1 range="" rules client new_file expected output
     if [[ $wanted != none ]]; then
         is_ipv4_range "$wanted" ||
             usage_error "admin-network: '$wanted' is not an IPv4 range such as 10.0.50.0/24, one address, or none."
@@ -749,6 +749,17 @@ command_admin_network() {
     # file nft refuses changes nothing.
     new_file=$(mktemp "${rules}.XXXXXX")
     rules_with_admin_network "$rules" "$range" >"$new_file"
+    # The rewrite finds the set by the lines install.sh writes. After a hand
+    # edit it can leave the set unchanged or empty, and nft accepts both. So
+    # the new set must be exactly the one asked for.
+    expected=$'    set admin_network {\n        type ipv4_addr\n        flags interval\n'
+    [[ -z $range ]] || expected+="        elements = { $range }"$'\n'
+    expected+='    }'
+    if [[ $(awk '/^    set admin_network \{/ { s = 1 } s { print } s && /^    \}/ { exit }' "$new_file") != "$expected" ]]; then
+        rm -f "$new_file"
+        fail "the set admin_network in $MEHO_FIREWALL_FILE is not in the form install.sh writes, so meho-host cannot change it. Nothing was changed." \
+            "change the set by hand, then run: systemctl reload $MEHO_FIREWALL_UNIT"
+    fi
     if ! output=$(nft -c -f "$new_file" 2>&1); then
         rm -f "$new_file"
         printf '%s\n' "$output" >&2

@@ -662,6 +662,34 @@ class AdminNetworkTests(HostTestCase):
         self.assertNotIn("nft -f ", self.host.calls())
         self.assertEqual(["firewall.nft"], os.listdir(self.host.host_path("/etc/meho")))
 
+    def test_a_set_not_in_the_form_of_install_sh_is_red_and_nothing_changes(self) -> None:
+        fixture = RULES_FIXTURE.read_text()
+        edits = {
+            "a tab before flags interval": (
+                "10.0.60.0/24",
+                fixture.replace("        flags interval\n", "\tflags interval\n"),
+            ),
+            "the note line above the set removed": (
+                "none",
+                fixture.replace("    # Given with --admin-network at the install.\n", ""),
+            ),
+        }
+        for name, (value, rules) in edits.items():
+            with self.subTest(edit=name):
+                self.host.host_file(RULES, rules)
+
+                result = self.host.run("admin-network", value)
+
+                self.assertEqual(1, result.returncode)
+                self.assertIn(
+                    "[FAIL] the set admin_network in /etc/meho/firewall.nft is not in the form "
+                    "install.sh writes, so meho-host cannot change it. Nothing was changed.",
+                    result.stderr,
+                )
+                self.assertEqual(rules, self.rules())
+                self.assertNotIn("\nnft ", "\n" + self.host.calls())
+                self.assertEqual(["firewall.nft"], os.listdir(self.host.host_path("/etc/meho")))
+
     def test_a_file_without_the_set_is_red(self) -> None:
         self.host.host_file(RULES, "table inet meho {\n}\n")
 

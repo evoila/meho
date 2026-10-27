@@ -291,9 +291,10 @@ which `install.sh` step 1 requires), RKE2's own `kubectl` at
   `check --json` only as root.
 - **`admin-network` finds the set by its exact lines.** It looks for
   `    set admin_network {` and `        flags interval` as `install.sh`
-  writes them. A customer who reformats the set by hand gets a `[FAIL]`
-  line, or an unchanged set, and `nft -c -f` cannot tell. The rewrite is
-  meant for the file as `install.sh` wrote it.
+  writes them, and checks that the new set is exactly the one asked for.
+  A set that is not in the form `install.sh` writes gives a `[FAIL]` line,
+  and nothing changes. The rewrite is meant for the file as `install.sh`
+  wrote it.
 - **`uninstall` leaves the OS packages that RKE2's installer added** (out
   of scope in #4739).
 

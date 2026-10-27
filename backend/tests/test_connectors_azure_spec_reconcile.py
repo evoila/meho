@@ -155,25 +155,25 @@ def test_the_checked_paths_are_pinned() -> None:
         "GET:/subscriptions/{}/locations@2022-12-01",
         "GET:/subscriptions/{}/providers/microsoft.migrate/assessmentprojects@2024-01-15",
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.migrate/"
-        "assessmentprojects/{}/groups/{}/assessments/{}/assessedmachines@2024-01-15",
+        + "assessmentprojects/{}/groups/{}/assessments/{}/assessedmachines@2024-01-15",
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.migrate/"
-        "assessmentprojects/{}/groups/{}/assessments/{}@2024-01-15",
+        + "assessmentprojects/{}/groups/{}/assessments/{}@2024-01-15",
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.migrate/"
-        "assessmentprojects/{}/groups/{}/assessments@2024-01-15",
+        + "assessmentprojects/{}/groups/{}/assessments@2024-01-15",
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.migrate/"
-        "assessmentprojects/{}/groups@2024-01-15",
+        + "assessmentprojects/{}/groups@2024-01-15",
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.migrate/"
-        "assessmentprojects/{}/machines@2024-01-15",
+        + "assessmentprojects/{}/machines@2024-01-15",
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
-        "hypervsites@2023-06-06",
+        + "hypervsites@2023-06-06",
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
-        "importsites@2023-06-06",
+        + "importsites@2023-06-06",
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
-        "mastersites@2023-06-06",
+        + "mastersites@2023-06-06",
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
-        "serversites@2023-06-06",
+        + "serversites@2023-06-06",
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
-        "vmwaresites@2023-06-06",
+        + "vmwaresites@2023-06-06",
         "GET:/subscriptions/{}@2022-12-01",
         "POST:/providers/microsoft.resourcegraph/resources@2024-04-01",
     ]

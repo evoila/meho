@@ -190,11 +190,11 @@ func renderNonOKToStderr(cmd *cobra.Command, r *dispatch.CallResult) error {
 			output.Unexpected("read dispatch parked awaiting approval; no value available"), false)
 	}
 	vaultConn.PrintGeneric(cmd.ErrOrStderr(), opKVRead, r)
-	// error / denied / rate_limited → exit 1 via the shared sentinel; any
-	// other status is one this CLI does not know (likely a newer
-	// backplane) → exit 4.
+	// error / denied / rate_limited / not_found → exit 1 via the shared
+	// sentinel; any other status is one this CLI does not know (likely a
+	// newer backplane) → exit 4.
 	switch r.Status {
-	case "error", "denied", dispatch.StatusRateLimited:
+	case "error", "denied", dispatch.StatusRateLimited, dispatch.StatusNotFound:
 		return dispatch.ErrOpError
 	default:
 		return output.RenderError(cmd.ErrOrStderr(), dispatch.UnknownStatusError(r.Status), false)

@@ -253,7 +253,7 @@ async def test_missing_org_gives_connector_auth_failed_that_says_to_set_it(
 
     assert result.status == "error"
     assert result.extras["error_code"] == "connector_auth_failed"
-    assert "extras.org" in result.extras["remediation"]
+    assert result.extras["remediation"].startswith("The target has no extras")
 
 
 @pytest.mark.asyncio

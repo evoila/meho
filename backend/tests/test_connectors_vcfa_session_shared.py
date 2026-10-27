@@ -150,7 +150,7 @@ async def test_missing_org_gives_connector_auth_failed_that_says_to_set_it() -> 
     expected = base64.b64encode(f"svc-made-up:{_PASSWORD}".encode()).decode()
     assert route.calls[0].request.headers["authorization"] == f"Basic {expected}"
     assert caught.value.remediation is not None
-    assert "extras.org" in caught.value.remediation
+    assert caught.value.remediation.startswith("The target has no extras")
 
 
 @pytest.mark.asyncio

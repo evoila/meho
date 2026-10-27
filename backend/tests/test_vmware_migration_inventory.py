@@ -233,12 +233,28 @@ _COUNTERS = [
 ]
 
 
+class _Fault:
+    """A property vCenter could not read: it lands in ``missingSet`` with this fault."""
+
+    def __init__(self, type_name: str) -> None:
+        self.type_name = type_name
+
+
 def _objects(mo_type: str, rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
     return {
         "objects": [
             {
                 "obj": _moref(mo_type, moid),
-                "propSet": [{"name": name, "val": value} for name, value in props.items()],
+                "propSet": [
+                    {"name": name, "val": value}
+                    for name, value in props.items()
+                    if not isinstance(value, _Fault)
+                ],
+                "missingSet": [
+                    {"path": name, "fault": {"_typeName": value.type_name}}
+                    for name, value in props.items()
+                    if isinstance(value, _Fault)
+                ],
             }
             for moid, props in rows.items()
         ]
@@ -250,8 +266,14 @@ class _FakeVcenter:
 
     version = "9.0"
 
-    def __init__(self, *, failing: frozenset[str] = frozenset({"vm-105"})) -> None:
+    def __init__(
+        self,
+        *,
+        failing: frozenset[str] = frozenset({"vm-105"}),
+        vms: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
         self.failing = failing
+        self.vms = vms if vms is not None else _VMS
         self.scopes: list[tuple[str, str]] = []
         self.perf_queries: list[dict[str, Any]] = []
 
@@ -277,14 +299,15 @@ class _FakeVcenter:
         objs = spec["objectSet"]
         if objs[0].get("selectSet"):
             self.scopes.append((objs[0]["obj"]["type"], objs[0]["obj"]["value"]))
-            rows = {m: {p: v[p] for p in paths if p in v} for m, v in _VMS.items()}
+            rows = {m: {p: v[p] for p in paths if p in v} for m, v in self.vms.items()}
             return _objects("VirtualMachine", rows)
         moids = [o["obj"]["value"] for o in objs]
         if mo_type == "VirtualMachine":
             if self.failing & set(moids):
                 raise httpx.ConnectError("vCenter did not answer")
             return _objects(
-                "VirtualMachine", {m: {p: _VMS[m][p] for p in paths if p in _VMS[m]} for m in moids}
+                "VirtualMachine",
+                {m: {p: self.vms[m][p] for p in paths if p in self.vms[m]} for m in moids},
             )
         if mo_type == "HostSystem":
             hosts = {
@@ -498,6 +521,27 @@ async def test_repeated_instance_uuid_gets_a_vm_id_and_is_flagged(
             "match": "instance_uuid",
         }
     ]
+
+
+async def test_a_refused_secure_boot_read_is_unknown_not_off() -> None:
+    vms = {moid: dict(props) for moid, props in _VMS.items()}
+    vms["vm-101"]["config.bootOptions.efiSecureBootEnabled"] = _Fault("NoPermission")
+
+    record = _by_name(await _run(vcenter=_FakeVcenter(vms=vms)))["app-win-01"]
+
+    assert record["boot_type"] == "uefi"
+    assert record["secure_boot"] is None
+    assert record["missing"]["secure_boot"] == "no_permission"
+
+
+async def test_an_efi_vm_without_the_secure_boot_flag_has_it_off() -> None:
+    vms = {moid: dict(props) for moid, props in _VMS.items()}
+    del vms["vm-101"]["config.bootOptions.efiSecureBootEnabled"]
+
+    record = _by_name(await _run(vcenter=_FakeVcenter(vms=vms)))["app-win-01"]
+
+    assert (record["boot_type"], record["secure_boot"]) == ("uefi", False)
+    assert "secure_boot" not in record["missing"]
 
 
 async def test_a_failed_batch_is_read_again_one_vm_at_a_time() -> None:

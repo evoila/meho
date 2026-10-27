@@ -68,6 +68,7 @@ DETAIL_PROPERTIES: Final[tuple[str, ...]] = (
     "snapshot",
 )
 
+_SECURE_BOOT_PROPERTY: Final = "config.bootOptions.efiSecureBootEnabled"
 _GIB: Final = 1024**3
 _KIB_PER_GIB: Final = 1024**2
 _MAX_SNAPSHOT_DEPTH: Final = 64
@@ -338,9 +339,12 @@ def _boot(vm: VmProps) -> tuple[Literal["bios", "uefi"] | None, bool | None]:
         boot_type = "uefi"
     elif firmware == "bios":
         boot_type = "bios"
-    secure = vm.get("config.bootOptions.efiSecureBootEnabled")
+    secure = vm.get(_SECURE_BOOT_PROPERTY)
     if isinstance(secure, bool):
         return boot_type, secure
+    if vm.faults.get(_SECURE_BOOT_PROPERTY):
+        # vCenter refused or failed the read: the setting is unknown, not off.
+        return boot_type, None
     # BIOS has no secure boot; on EFI vim leaves an unset (false) flag out.
     return boot_type, False if boot_type is not None else None
 
@@ -413,7 +417,10 @@ def server_record(
         ),
         "snapshot_count": (snapshots, vm.reason(("snapshot",), "collection_failed")),
         "boot_type": (boot_type, vm.reason(("config.firmware",), "not_reported_by_source")),
-        "secure_boot": (secure_boot, "not_reported_by_source"),
+        "secure_boot": (
+            secure_boot,
+            vm.reason((_SECURE_BOOT_PROPERTY,), "not_reported_by_source"),
+        ),
         "power_state": (power_state, vm.reason(("runtime.powerState",), "not_reported_by_source")),
         "utilization": (utilization, utilization_reason or "not_measured"),
     }

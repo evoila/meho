@@ -220,7 +220,7 @@ The record, from the VM's properties:
 | `disks` | each `VirtualDisk`: size; thin (flat disk flag, sparse disks are thin); shared (`sharingMultiWriter`); raw mapping (RDM backing); independent (`diskMode`). Used space and disk speeds are unknown with a reason |
 | `snapshot_count` | the nodes of `snapshot.rootSnapshotList`; 0 when the VM has none |
 | `os` | `guest.guestFullName`, else `config.guestFullName`; family from `guest.guestFamily`, else from `config.guestId`; `x64` or `arm64` from the guest id |
-| `boot_type`, `secure_boot` | `config.firmware` (`efi` is `uefi`), `config.bootOptions.efiSecureBootEnabled` |
+| `boot_type`, `secure_boot` | `config.firmware` (`efi` is `uefi`), `config.bootOptions.efiSecureBootEnabled`. An EFI VM without the flag has secure boot off; a flag vCenter could not read is unknown, with the reason |
 | `power_state`, `nics` | `runtime.powerState`; NIC devices with their guest IP addresses and network |
 | `source_attributes` | `vm_id`, `instance_uuid`, `esxi_host`, `cluster` |
 

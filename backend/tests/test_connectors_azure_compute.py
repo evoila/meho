@@ -512,6 +512,31 @@ async def test_vm_list_without_vms_makes_one_call(connector: AzureConnector) -> 
 
 
 @pytest.mark.asyncio
+async def test_vm_list_fails_with_azures_error_when_the_status_read_fails(
+    connector: AzureConnector,
+) -> None:
+    del connector
+    vms = {"value": [vm_answer("vm-a")]}
+    refused = httpx.Response(
+        403, json={"error": {"code": "AuthorizationFailed", "message": "No access."}}
+    )
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("statusOnly") == "true":
+            return refused
+        return httpx.Response(200, json=vms)
+
+    with respx.mock() as mock:
+        mock.post(token_url()).respond(200, json=token_answer(login_token()))
+        arm = mock.get(VMS_URL).mock(side_effect=answer)
+        result = await _call("azure.vm.list", {})
+
+    assert result.status == "error"
+    assert result.extras["exception_class"] == "AzureForbiddenError"
+    assert arm.call_count == 2
+
+
+@pytest.mark.asyncio
 async def test_vm_list_over_50_rows_keeps_the_power_state_block_with_the_stored_result(
     connector: AzureConnector, store: MemoryResultStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:

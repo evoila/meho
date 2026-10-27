@@ -600,7 +600,9 @@ complete the power states are:
 ```
 
 `truncated`, `omission` and `omission_kind` describe read 2 the same way the
-paging fields describe read 1. The guidance of `azure.vm.list` carries a
+paging fields describe read 1. When read 2 fails (for example Azure refuses
+it, or keeps throttling past MEHO's retry budget), the whole operation fails
+with Azure's error, like any read; ask again later. The guidance of `azure.vm.list` carries a
 `result_objects` hint for this object, so it stays inline next to the
 stored-result link when there are more than 50 VMs; without the hint the
 result reduction would drop it. The paging fields of every list stay inline

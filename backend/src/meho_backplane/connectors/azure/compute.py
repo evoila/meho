@@ -117,7 +117,7 @@ _SIZE_PARAMS: Final[dict[str, Any]] = {
             "pattern": LOCATION_PATTERN,
             "description": (
                 "The region name as Azure uses it in requests, for example westeurope "
-                "(not the display name West Europe)."
+                "(not the display name West Europe). azure.location.list lists the names."
             ),
         },
     },
@@ -132,9 +132,9 @@ _SIZE_PARAMS: Final[dict[str, Any]] = {
 
 _VM_LIST_GUIDANCE: Final[dict[str, object]] = {
     "when_to_call": (
-        "Call to see which VMs run in this Azure subscription, or in one resource "
-        "group, with their size, OS type and power state. Use it to find the resource "
-        "group and name of a VM for azure.vm.show, or to see which VMs are deallocated."
+        "Call to list the VMs of this Azure subscription, or of one resource group, "
+        "with their size, OS type and power state. Use it to find the resource group "
+        "and name of a VM for azure.vm.show, or to see which VMs are deallocated."
     ),
     "output_shape": (
         "{value: [{name, id, resource_group, location, zones, size, os_type, "

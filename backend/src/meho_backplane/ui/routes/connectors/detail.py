@@ -90,6 +90,7 @@ from meho_backplane.db.models import (
 from meho_backplane.db.models import (
     Target as TargetORM,
 )
+from meho_backplane.operations._lookup import enabled_for_tenant_clause
 from meho_backplane.targets.resolver import resolve_target
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
@@ -238,9 +239,10 @@ async def _load_ops_matrix(
     * Only ``review_status='enabled'`` groups are included -- staged /
       disabled groups stay hidden from the operator the same way they
       stay hidden from the agent.
-    * Within each group, only ``is_enabled=True`` descriptors are
-      surfaced -- a descriptor whose ingestion review left it disabled
-      should not appear in the operations matrix.
+    * Within each group, only descriptors that are on for this tenant
+      are surfaced (the tenant's own setting first, then the install
+      default, #5029) -- a descriptor whose ingestion review left it
+      disabled should not appear in the operations matrix.
 
     Returns groups sorted by ``group_key``; operations within a group
     sorted by ``op_id``. Both orders are stable across page renders
@@ -267,7 +269,7 @@ async def _load_ops_matrix(
         select(EndpointDescriptor)
         .where(
             EndpointDescriptor.group_id.in_(group_ids),
-            EndpointDescriptor.is_enabled.is_(True),
+            enabled_for_tenant_clause(tenant_id=tenant_id),
             (EndpointDescriptor.tenant_id.is_(None)) | (EndpointDescriptor.tenant_id == tenant_id),
         )
         .order_by(EndpointDescriptor.group_id, EndpointDescriptor.op_id)

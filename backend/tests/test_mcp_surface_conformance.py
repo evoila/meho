@@ -52,7 +52,7 @@ from pathlib import Path
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
-from meho_backplane.api.v1 import service_grants, service_read_scopes
+from meho_backplane.api.v1 import connector_tenant_settings, service_grants, service_read_scopes
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.main import app
 from meho_backplane.mcp import registry as mcp_registry
@@ -131,6 +131,20 @@ _SERVICE_READ_SCOPES_CLI_VERBS: dict[tuple[str, str], str] = {
     ),
     ("DELETE", _SERVICE_READ_SCOPES_PREFIX + "/{principal_sub}"): (
         "meho service-principals read-scope clear"
+    ),
+}
+
+_TENANT_SETTINGS_PREFIX = "/api/v1/connectors/{connector_id}/tenant-settings"
+
+#: The per-tenant operation on/off routes (#5029) and their ``meho`` verbs,
+#: same contract as the grants table above.
+_TENANT_SETTINGS_CLI_VERBS: dict[tuple[str, str], str] = {
+    ("GET", _TENANT_SETTINGS_PREFIX): "meho connector tenant-setting show",
+    ("PUT", _TENANT_SETTINGS_PREFIX + "/operations/{op_id:path}"): (
+        "meho connector tenant-setting set"
+    ),
+    ("PUT", _TENANT_SETTINGS_PREFIX + "/groups/{group_key}"): (
+        "meho connector tenant-setting set-group"
     ),
 }
 
@@ -328,6 +342,20 @@ def test_service_read_scopes_rest_plane_has_cli_parity() -> None:
     assert routes == set(_SERVICE_READ_SCOPES_CLI_VERBS)
     cli_reference = _CLI_REFERENCE.read_text(encoding="utf-8")
     for verb in _SERVICE_READ_SCOPES_CLI_VERBS.values():
+        assert f"#### `{verb}`" in cli_reference, f"{verb} is missing from the CLI reference"
+
+
+def test_connector_tenant_settings_rest_plane_has_cli_parity() -> None:
+    """Every per-tenant operation on/off REST route has its `meho` CLI verb (#5029)."""
+    routes = {
+        (method, route.path)
+        for route in connector_tenant_settings.router.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods or ()
+    }
+    assert routes == set(_TENANT_SETTINGS_CLI_VERBS)
+    cli_reference = _CLI_REFERENCE.read_text(encoding="utf-8")
+    for verb in _TENANT_SETTINGS_CLI_VERBS.values():
         assert f"#### `{verb}`" in cli_reference, f"{verb} is missing from the CLI reference"
 
 

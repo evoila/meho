@@ -258,6 +258,8 @@ cli/
     │   │   ├── disable.go        # `meho connector disable <id>` (constructor only; logic in enable.go).
     │   │   ├── delete.go         # `meho connector delete <id>` (DELETE /api/v1/connectors/{id}, #4889) — removes the connector's operations and groups from the operator's own tenant; the built-in copy stays. Constructor only; logic in enable.go. The verb the list `next_step` and the `connector_legacy_tenant_copy` message name.
     │   │   ├── delete_test.go    # `delete` wiring, 204 --json envelope, 404 render.
+    │   │   ├── tenant_setting.go # `meho connector tenant-setting show|set|set-group` (#5029) — GET /{id}/tenant-settings, PUT /{id}/tenant-settings/operations/{op} and /groups/{key} with `--on|--off|--default`; turns built-in ops on or off for one tenant only. `--tenant-id` acts on another tenant (platform_admin). `review` prints the tenant setting in its `ten` column.
+    │   │   ├── tenant_setting_test.go # wire body (`enabled` true/false/null), `?tenant_id`, both values in the render.
     │   │   ├── connector_test.go # pure-function + typed-client mocked HTTP contract tests.
     │   │   └── prefer_test.go    # `--prefer` on review / enable-reads + the 409 connector_scope_ambiguous CLI error (#3799).
     │   ├── operation/         # G0.6-T13 #481 — `meho operation …` meta-tool surface.

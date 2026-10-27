@@ -16,6 +16,11 @@ form ``"<impl_id>-<version>"`` and resolves it into the
 * :func:`visible_scope_clause` -- the one tenant-scope predicate that
   dispatch, preview, ``list_operation_groups`` and ``search_operations``
   share, so they always agree on which rows a tenant can use.
+* :func:`enabled_for_tenant_clause` -- the one "is this operation on for
+  this tenant" predicate the same callers share: the tenant's own setting
+  for a built-in operation first, then the install default (#5029).
+* :func:`group_visible_for_tenant_clause` -- which operation groups
+  ``list_operation_groups`` and a group-scoped ``search_operations`` show.
 * :func:`descriptor_exists_any_state` -- ``is_enabled``-agnostic
   presence probe. Used only to classify a non-dispatchable sub-op as
   *present-but-disabled* versus *truly absent*; never used to dispatch.
@@ -38,19 +43,22 @@ import re
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, SQLColumnExpression, and_, select
+import sqlalchemy as sa
+from sqlalchemy import ColumnElement, SQLColumnExpression, and_, or_, select
 from sqlalchemy.orm import aliased
 
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor, OperationGroup
+from meho_backplane.db.models import EndpointDescriptor, OperationGroup, TenantOperationSetting
 
 __all__ = [
     "connector_class_registered",
     "connector_exists",
     "count_known_ops",
     "descriptor_exists_any_state",
+    "enabled_for_tenant_clause",
     "find_connectors_with_op",
+    "group_visible_for_tenant_clause",
     "lookup_descriptor",
     "parse_connector_id",
     "visible_scope_clause",
@@ -159,6 +167,90 @@ def visible_scope_clause(
     )
 
 
+def enabled_for_tenant_clause(*, tenant_id: UUID | None) -> ColumnElement[bool]:
+    """Return the predicate "this ``endpoint_descriptor`` row is on for *tenant_id*".
+
+    A built-in row (``tenant_id IS NULL``) is shared by every tenant, so its
+    ``is_enabled`` flag is only the install default. A tenant may turn a
+    built-in operation on or off for itself with a
+    :class:`~meho_backplane.db.models.TenantOperationSetting` row (#5029).
+    For a built-in row the tenant's setting wins; without a setting the
+    install default applies. A tenant's own row (a connector it imported
+    for itself) uses its own ``is_enabled`` flag, as before.
+
+    ``tenant_id=None`` is the operator-less chassis path: only the install
+    default counts.
+
+    The setting is looked up by the row's own natural key columns, so the
+    predicate works in any query over :class:`EndpointDescriptor`, also one
+    that spans many connectors, and inside a correlated ``EXISTS``.
+    """
+    if tenant_id is None:
+        return EndpointDescriptor.is_enabled.is_(True)
+    tenant_setting = (
+        select(TenantOperationSetting.enabled)
+        .where(
+            TenantOperationSetting.tenant_id == tenant_id,
+            TenantOperationSetting.product == EndpointDescriptor.product,
+            TenantOperationSetting.version == EndpointDescriptor.version,
+            TenantOperationSetting.impl_id == EndpointDescriptor.impl_id,
+            TenantOperationSetting.op_id == EndpointDescriptor.op_id,
+        )
+        .scalar_subquery()
+    )
+    builtin_enabled = sa.func.coalesce(
+        tenant_setting, EndpointDescriptor.is_enabled, type_=sa.Boolean
+    )
+    return or_(
+        and_(EndpointDescriptor.tenant_id.is_not(None), EndpointDescriptor.is_enabled.is_(True)),
+        and_(EndpointDescriptor.tenant_id.is_(None), builtin_enabled.is_(True)),
+    )
+
+
+def group_visible_for_tenant_clause(*, tenant_id: UUID | None) -> ColumnElement[bool]:
+    """Return the predicate "this ``operation_group`` row is shown to *tenant_id*".
+
+    A group shows when it is fully enabled (``review_status='enabled'``) or
+    when at least one of its operations is on for the tenant
+    (:func:`enabled_for_tenant_clause`).
+
+    A fully enabled group is hidden when the tenant turned operations in it
+    off for itself and none of its operations is still on for the tenant
+    (#5029). Without that, turning a whole group off would leave an empty
+    group in the list.
+    """
+    has_enabled_op = (
+        select(EndpointDescriptor.id)
+        .where(
+            EndpointDescriptor.group_id == OperationGroup.id,
+            enabled_for_tenant_clause(tenant_id=tenant_id),
+        )
+        .exists()
+    )
+    if tenant_id is None:
+        return (OperationGroup.review_status == "enabled") | has_enabled_op
+    tenant_turned_op_off = (
+        select(EndpointDescriptor.id)
+        .join(
+            TenantOperationSetting,
+            and_(
+                TenantOperationSetting.tenant_id == tenant_id,
+                TenantOperationSetting.product == EndpointDescriptor.product,
+                TenantOperationSetting.version == EndpointDescriptor.version,
+                TenantOperationSetting.impl_id == EndpointDescriptor.impl_id,
+                TenantOperationSetting.op_id == EndpointDescriptor.op_id,
+                TenantOperationSetting.enabled.is_(False),
+            ),
+        )
+        .where(
+            EndpointDescriptor.group_id == OperationGroup.id,
+            EndpointDescriptor.tenant_id.is_(None),
+        )
+        .exists()
+    )
+    return ((OperationGroup.review_status == "enabled") & ~tenant_turned_op_off) | has_enabled_op
+
+
 async def lookup_descriptor(
     *,
     tenant_id: UUID,
@@ -174,6 +266,9 @@ async def lookup_descriptor(
     or absent op there resolves to ``None``. There is no fallback to the
     built-in row (#3870). Otherwise the built-in row is used. Because
     only one bucket is ever visible, one SELECT finds at most one row.
+
+    "Enabled" is :func:`enabled_for_tenant_clause`: for a built-in row the
+    tenant's own on/off setting wins over the install default (#5029).
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -190,7 +285,7 @@ async def lookup_descriptor(
                 EndpointDescriptor.version == version,
                 EndpointDescriptor.impl_id == impl_id,
                 EndpointDescriptor.op_id == op_id,
-                EndpointDescriptor.is_enabled.is_(True),
+                enabled_for_tenant_clause(tenant_id=tenant_id),
             )
         )
         return result.scalar_one_or_none()
@@ -284,7 +379,7 @@ async def count_known_ops(
                 EndpointDescriptor.product == product,
                 EndpointDescriptor.version == version,
                 EndpointDescriptor.impl_id == impl_id,
-                EndpointDescriptor.is_enabled.is_(True),
+                enabled_for_tenant_clause(tenant_id=tenant_id),
             )
         )
         return len(result.all())
@@ -337,7 +432,7 @@ async def find_connectors_with_op(
                     impl_id=EndpointDescriptor.impl_id,
                 ),
                 EndpointDescriptor.op_id == op_id,
-                EndpointDescriptor.is_enabled.is_(True),
+                enabled_for_tenant_clause(tenant_id=tenant_id),
             )
             .distinct()
         )

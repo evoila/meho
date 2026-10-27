@@ -5004,6 +5004,242 @@
         }
       }
     },
+    "/api/v1/connectors/{connector_id}/tenant-settings": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "List Tenant Settings Endpoint",
+        "description": "List the operations the tenant turned on or off for itself, with the install default.",
+        "operationId": "list_tenant_settings_endpoint_api_v1_connectors__connector_id__tenant_settings_get",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "description": "Act on this tenant instead of your own. Needs platform_admin when it is not your tenant.",
+              "title": "Tenant Id"
+            },
+            "description": "Act on this tenant instead of your own. Needs platform_admin when it is not your tenant."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantOperationSettingsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connectors/{connector_id}/tenant-settings/operations/{op_id}": {
+      "put": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Set Tenant Operation Setting Endpoint",
+        "description": "Turn one built-in operation on or off for the tenant, or back to the install default.\n\nThe ``op_id`` path parameter uses the ``:path`` converter so an op id\nwith slashes (``GET:/api/vcenter/cluster``) round-trips.",
+        "operationId": "set_tenant_operation_setting_endpoint_api_v1_connectors__connector_id__tenant_settings_operations__op_id__put",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "op_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Op Id"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "description": "Act on this tenant instead of your own. Needs platform_admin when it is not your tenant.",
+              "title": "Tenant Id"
+            },
+            "description": "Act on this tenant instead of your own. Needs platform_admin when it is not your tenant."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantSettingBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantOperationSettingItem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connectors/{connector_id}/tenant-settings/groups/{group_key}": {
+      "put": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Set Tenant Group Setting Endpoint",
+        "description": "Turn every built-in operation in one group on or off for the tenant, or back to default.",
+        "operationId": "set_tenant_group_setting_endpoint_api_v1_connectors__connector_id__tenant_settings_groups__group_key__put",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "group_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Group Key"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "description": "Act on this tenant instead of your own. Needs platform_admin when it is not your tenant.",
+              "title": "Tenant Id"
+            },
+            "description": "Act on this tenant instead of your own. Needs platform_admin when it is not your tenant."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantSettingBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantGroupSettingResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/kb": {
       "get": {
         "tags": [
@@ -27143,6 +27379,11 @@
             "type": "boolean",
             "title": "Needs Reingest",
             "default": false
+          },
+          "tenant_enabled": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Tenant Enabled"
           }
         },
         "type": "object",
@@ -36381,6 +36622,39 @@
         "title": "TenantFlightRecorderPolicyUpdate",
         "description": "``PATCH /api/v1/tenants/flight-recorder-policy`` body.\n\nAll three fields are optional-partial: only fields the client actually\nsends are applied (``model_dump(exclude_unset=True)`` in the handler keys\noff ``model_fields_set``, so a JSON ``null`` is distinguished from an\nabsent key). ``extra='forbid'`` rejects unknown keys with a 422.\n\n* ``flight_recorder_enabled`` (F1) -- Boolean, ``NOT NULL`` at the DB\n  layer. Absent = leave unchanged; ``true`` / ``false`` flips the\n  per-tenant capture default. An explicit ``null`` is rejected (the column\n  has no inherit state) -- the validator fires only when the key is\n  present, so an absent field never trips it.\n* ``flight_recorder_agent_readable`` (F5) -- **tri-state**. Absent = leave\n  unchanged; ``true`` / ``false`` force the agent-read override on / off;\n  ``null`` clears it back to inherit (follow the capture default). This is\n  the JSON-``null``-vs-absent distinction the tri-state needs.\n* ``flight_recorder_retention_days`` (F4) -- nullable, bounded ``1..365``\n  (the reaper window; matches ``Settings.flight_recorder_retention_days_default``'s\n  ``ge=1, le=365``). Absent = leave unchanged; an int sets the per-tenant\n  window; ``null`` clears it back to the global default. The bound applies\n  only to the int arm -- a ``null`` clear is always legal."
       },
+      "TenantGroupSettingResponse": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "group_key": {
+            "type": "string",
+            "title": "Group Key"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TenantOperationSettingItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connector_id",
+          "tenant_id",
+          "group_key",
+          "items"
+        ],
+        "title": "TenantGroupSettingResponse",
+        "description": "The group's operations after a group write."
+      },
       "TenantMailRecipientPolicy": {
         "properties": {
           "tenant_id": {
@@ -36415,6 +36689,70 @@
         "title": "TenantMailRecipientPolicyUpdate",
         "description": "``PATCH /api/v1/tenants/mail-recipient-policy`` body (#3499).\n\nThe single field is optional-partial (``model_dump(exclude_unset=True)`` in\nthe handler keys off ``model_fields_set``, so a JSON ``null`` is\ndistinguished from an absent key). ``extra='forbid'`` rejects unknown keys\nwith a 422.\n\n* absent = leave the column unchanged.\n* ``null`` = clear back to **inherit** (the instance floor alone governs the\n  tenant's ``mail.send``).\n* ``\"\"`` = **deny** (an empty tenant allowlist refuses every dispatched\n  send) -- the shared-instance containment lever.\n* a comma-separated address/domain string = the tenant's own recipient\n  space. Validated with the same grammar as the instance floor\n  (:func:`~meho_backplane.connectors.mail.allowlist.parse_recipient_allowlist`),\n  so a malformed entry (whitespace, ``foo@``, bare ``@``, ...) is a 422 at\n  write time rather than a silent inert allowlist at dispatch time."
       },
+      "TenantOperationSettingItem": {
+        "properties": {
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "group_key": {
+            "type": "string",
+            "nullable": true,
+            "title": "Group Key"
+          },
+          "default_enabled": {
+            "type": "boolean",
+            "title": "Default Enabled"
+          },
+          "tenant_enabled": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Tenant Enabled"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "op_id",
+          "group_key",
+          "default_enabled",
+          "tenant_enabled",
+          "enabled"
+        ],
+        "title": "TenantOperationSettingItem",
+        "description": "One built-in operation with its install default and the tenant's own setting."
+      },
+      "TenantOperationSettingsResponse": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TenantOperationSettingItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connector_id",
+          "tenant_id",
+          "items"
+        ],
+        "title": "TenantOperationSettingsResponse",
+        "description": "The tenant settings of one connector, for one tenant."
+      },
       "TenantRole": {
         "type": "string",
         "enum": [
@@ -36424,6 +36762,22 @@
         ],
         "title": "TenantRole",
         "description": "Per-tenant role granted to the operator by the JWT issuer.\n\nThe set is intentionally small in v0.2: a closed three-value enum\nlets the RBAC primitive (Task #234, ``require_role``) make\nexhaustive comparisons without leaking arbitrary string handling\ninto route code. A richer policy engine \u2014 topology-aware\npermissions, ABAC, approval workflows \u2014 is a separate v0.2.next\nGoal; widening this enum is the only ratcheting mechanism in the\ninterim.\n\nValues are the literal strings the Keycloak protocol-mapper recipe\n(Task #235) emits, so a JWT carrying ``\"tenant_admin\"`` materialises\ncleanly as :attr:`TENANT_ADMIN`. ``StrEnum`` (PEP 663, stdlib in\n3.11+) gives the members ``str`` semantics for free, so\n``f\"role={role}\"`` renders as ``\"role=tenant_admin\"`` rather than\n``\"role=TenantRole.TENANT_ADMIN\"``."
+      },
+      "TenantSettingBody": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Enabled"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "title": "TenantSettingBody",
+        "description": "Body of the tenant-setting writes.\n\n``enabled`` is required: ``true`` turns the operation on for the tenant,\n``false`` turns it off, ``null`` removes the setting so the tenant uses\nthe install default again."
       },
       "ThresholdCompare": {
         "properties": {

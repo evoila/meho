@@ -103,6 +103,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newEnableReadsCmd())
 	cmd.AddCommand(newDisableCmd())
 	cmd.AddCommand(newDeleteCmd())
+	cmd.AddCommand(newTenantSettingCmd())
 	return cmd
 }
 

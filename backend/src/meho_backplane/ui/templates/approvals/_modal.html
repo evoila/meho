@@ -197,6 +197,10 @@
               <time datetime="{{ decision_ts }}" class="font-mono text-xs">{{ decision_ts }}</time>
             </p>
           {% endif %}
+          {#- Why the request expired (#5030), with the advice to ask again. -#}
+          {% if request.expired_message %}
+            <p class="text-sm" data-testid="approval-expired-reason" data-expired-reason="{{ request.expired_reason }}">{{ request.expired_message }}</p>
+          {% endif %}
           {#- What happened when the approved request ran (#3543), read off
               the stored result. The result body stays on the owner-only
               /result read. -#}
@@ -327,6 +331,13 @@
         <div class="flex items-baseline justify-between gap-4">
           <dt class="shrink-0 text-base-content/55">Requested at</dt>
           <dd><time datetime="{{ request.created_at }}" class="font-mono text-xs">{{ request.created_at }}</time></dd>
+        </div>
+      {% endif %}
+      {#- The MEHO release the request was made under (#5030). -#}
+      {% if request.release_id %}
+        <div class="flex items-baseline justify-between gap-4">
+          <dt class="shrink-0 text-base-content/55">MEHO release</dt>
+          <dd class="font-mono text-xs [overflow-wrap:anywhere] text-right">{{ request.release_id }}</dd>
         </div>
       {% endif %}
     </dl>

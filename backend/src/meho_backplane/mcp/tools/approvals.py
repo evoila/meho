@@ -52,7 +52,9 @@ from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mc
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.approval_outcome import resume_outcome
 from meho_backplane.operations.approval_queue import (
+    EXPIRED_REASON_MESSAGES,
     ApprovalNotFoundError,
+    approval_expired_reason,
     approval_result_state,
     get_request,
     list_pending,
@@ -127,6 +129,7 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
     """
     result_state = approval_result_state(row)
     outcome = resume_outcome(row)
+    expired_reason = approval_expired_reason(row)
     return {
         "id": str(row.id),
         "tenant_id": str(row.tenant_id),
@@ -149,6 +152,10 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
             if outcome is not None
             else None
         ),
+        # #5030: why an expired request expired, and the advice to ask again.
+        "expired_reason": expired_reason.value if expired_reason else None,
+        "expired_message": EXPIRED_REASON_MESSAGES[expired_reason] if expired_reason else None,
+        "release_id": row.release_id,
         "reviewed_by": row.reviewed_by,
         "decided_at": row.decided_at.isoformat() if row.decided_at else None,
         "expires_at": row.expires_at.isoformat() if row.expires_at else None,

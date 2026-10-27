@@ -45,6 +45,12 @@ const (
 	AggregateFuncSUM   AggregateFunc = "SUM"
 )
 
+// Defines values for ApprovalExpiredReason.
+const (
+	ApprovalExpiredReasonDeadlinePassed ApprovalExpiredReason = "deadline_passed"
+	ApprovalExpiredReasonReleaseChanged ApprovalExpiredReason = "release_changed"
+)
+
 // Defines values for ApprovalRequestStatus.
 const (
 	ApprovalRequestStatusApproved ApprovalRequestStatus = "approved"
@@ -1440,6 +1446,18 @@ type Aggregate struct {
 // AggregateFunc Aggregate function (fixed allow-list).
 type AggregateFunc string
 
+// ApprovalExpiredReason Why an “expired“ request expired (#5030).
+//
+// Read off the row, never stored, like :class:`ApprovalResultState`.
+//
+//   - :attr:`DEADLINE_PASSED` -- the request waited past “expires_at“
+//     without a decision.
+//   - :attr:`RELEASE_CHANGED` -- MEHO started with a different release
+//     while the request waited (:func:`expire_older_release_requests`).
+//     Only this path expires a request before its deadline, so an
+//     “expired“ row with “decided_at < expires_at“ is this case.
+type ApprovalExpiredReason string
+
 // ApprovalRequestStatus Closed lifecycle status of an :class:`ApprovalRequest`.
 //
 // Initiative #803 (G11.2 Agent permission model), Task #817 (T4). The
@@ -1478,7 +1496,20 @@ type ApprovalRequestView struct {
 	// ``Instructed-by:`` / ``Instruction:`` / ``Refs:`` trailer block. The
 	// approver is still ``reviewed_by``; ``instructed_by`` is the other human
 	// whose written instruction they acted on.
-	Delegation     *DelegationView        `json:"delegation,omitempty"`
+	Delegation     *DelegationView `json:"delegation,omitempty"`
+	ExpiredMessage *string         `json:"expired_message"`
+
+	// ExpiredReason Why an ``expired`` request expired (#5030).
+	//
+	// Read off the row, never stored, like :class:`ApprovalResultState`.
+	//
+	// * :attr:`DEADLINE_PASSED` -- the request waited past ``expires_at``
+	//   without a decision.
+	// * :attr:`RELEASE_CHANGED` -- MEHO started with a different release
+	//   while the request waited (:func:`expire_older_release_requests`).
+	//   Only this path expires a request before its deadline, so an
+	//   ``expired`` row with ``decided_at < expires_at`` is this case.
+	ExpiredReason  *ApprovalExpiredReason `json:"expired_reason,omitempty"`
 	ExpiresAt      *string                `json:"expires_at"`
 	Id             openapi_types.UUID     `json:"id"`
 	OpId           string                 `json:"op_id"`
@@ -1488,6 +1519,7 @@ type ApprovalRequestView struct {
 	PrincipalName  *string                `json:"principal_name"`
 	PrincipalSub   string                 `json:"principal_sub"`
 	ProposedEffect map[string]interface{} `json:"proposed_effect"`
+	ReleaseId      *string                `json:"release_id"`
 
 	// ResultState Whether an approved request has run yet (#3486).
 	//

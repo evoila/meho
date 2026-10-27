@@ -414,6 +414,7 @@ async def _resume_approved_or_already_resumed(
         claim_resume,
         get_request,
         persist_resume_result,
+        refuse_resume_if_release_changed,
         rehydrate_resume_target,
     )
 
@@ -429,6 +430,17 @@ async def _resume_approved_or_already_resumed(
             tenant_id=operator.tenant_id,
             request_id=approval_request_id,
         )
+
+    # #5030: an approval covers one exact MEHO release. A request made under
+    # another release is refused here and never runs.
+    release_refusal = await refuse_resume_if_release_changed(operator, request)
+    if release_refusal is not None:
+        if release_refusal.status == "already_resumed":
+            return _build_already_resumed_envelope(
+                original_envelope=awaiting_envelope,
+                approval_request_id=approval_request_id,
+            )
+        return release_refusal.model_dump(mode="json")
 
     # A composite re-entry dispatches against the target the row saved by id,
     # the same check the operator surface runs, not the name the agent used

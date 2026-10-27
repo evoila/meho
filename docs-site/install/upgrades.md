@@ -20,6 +20,13 @@ helm upgrade meho oci://ghcr.io/evoila/meho-chart \
    `kubectl logs`.
 2. Only after migrations succeed does the new Deployment roll.
 
+An upgrade ends the approval requests that still wait. A person approves
+one exact release of MEHO, so when the new version starts, every request
+that waits from the older version expires with the reason "MEHO was
+updated; ask again". An approved request that has not run yet is refused
+and does not run. The requester asks again under the new version. Tell
+the people who wait for an approval before you upgrade.
+
 Keep the image tag pinned and immutable (`v<x.y.z>` or
 `sha-<git-sha>`) — `:latest` is never published, and `:main` is a
 moving dev alias, not a deploy target.

@@ -67,13 +67,16 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Tenant
 from meho_backplane.metrics import note_loop_tick
 from meho_backplane.operations.approval_queue import (
+    expire_older_release_requests,
     expire_stale_requests,
     expiry_operator,
     record_approval_step_event,
 )
 from meho_backplane.settings import get_settings
+from meho_backplane.version import running_release_id
 
 __all__ = [
+    "expire_approvals_from_older_release",
     "start_approval_expiry_sweeper",
     "stop_approval_expiry_sweeper",
     "sweep_expired_approvals",
@@ -159,6 +162,57 @@ async def sweep_expired_approvals(*, now: datetime | None = None) -> int:
         )
     else:
         _log.debug("approval_expiry_tick_clean")
+    return expired_total
+
+
+async def expire_approvals_from_older_release() -> int:
+    """End every waiting approval made under another release; return the count (#5030).
+
+    Run once at start-up. A person approves one exact release of MEHO, so
+    when MEHO starts with a different release, every ``pending`` request
+    from an older release (or saved before MEHO recorded the release)
+    expires with the reason ``release_changed``; the requester asks again.
+    Each tenant is handled in its own transaction, the same way as the TTL
+    sweep, and an ``approval.expired`` step event is recorded after commit.
+
+    Does nothing when the running build has no release identity (a local
+    development run). Runs whether or not ``APPROVAL_EXPIRY_ENABLED`` is
+    set: it is part of the approval rule, not the TTL clean-up.
+    """
+    release_id = running_release_id()
+    if release_id is None:
+        return 0
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_ids = list((await session.execute(select(Tenant.id))).scalars().all())
+
+    expired_total = 0
+    for tenant_id in tenant_ids:
+        async with sessionmaker() as session:
+            try:
+                expired = await expire_older_release_requests(
+                    session, operator=expiry_operator(tenant_id), release_id=release_id
+                )
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                _log.exception("approval_release_expiry_tenant_failed", tenant_id=str(tenant_id))
+                continue
+        for request in expired:
+            await record_approval_step_event(
+                tenant_id=tenant_id,
+                request=request,
+                decision="expired",
+                audit_id=request._audit_id,  # type: ignore[attr-defined]
+            )
+        expired_total += len(expired)
+
+    if expired_total:
+        _log.info(
+            "approval_release_expiry_done",
+            expired_total=expired_total,
+            running_release=release_id,
+        )
     return expired_total
 
 

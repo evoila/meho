@@ -183,6 +183,7 @@ from meho_backplane.metrics_access import verify_metrics_access
 from meho_backplane.middleware import BroadcastDetailMiddleware, RequestContextMiddleware
 from meho_backplane.operations import run_typed_op_registrars, set_default_reducer
 from meho_backplane.operations.approval_expiry import (
+    expire_approvals_from_older_release,
     start_approval_expiry_sweeper,
     stop_approval_expiry_sweeper,
 )
@@ -338,6 +339,20 @@ def _advise_vault_tenant_scope_unenforced() -> None:
             enable_via="VAULT_KV_TENANT_SCOPE_PREFIX",
             doc="docs/codebase/connectors-vault-tenant-scope.md",
         )
+
+
+async def _expire_approvals_from_older_release() -> None:
+    """End waiting approvals from an older release at start-up (#5030).
+
+    Fail-open: a failure here is logged and the start goes on. An approved
+    request from an older release is still refused before it runs
+    (:func:`~meho_backplane.operations.approval_queue.refuse_resume_if_release_changed`),
+    so nothing from an older release can run either way.
+    """
+    try:
+        await expire_approvals_from_older_release()
+    except Exception:
+        structlog.get_logger().exception("approval_release_expiry_failed")
 
 
 async def _run_lifespan_shutdown() -> None:
@@ -496,6 +511,9 @@ async def _run_lifespan_startup() -> None:
     ensure_static_dist_dir()
     # Embedding model preload (G0.4-T2 #259); loud-but-non-fatal.
     await _preload_embedding_model()
+    # #5030: an approval covers one exact release. End every waiting
+    # approval made under another release before MEHO serves a request.
+    await _expire_approvals_from_older_release()
 
 
 @dataclass

@@ -202,6 +202,7 @@ def _seed_request(
     expires_at: datetime | None = None,
     resumed_at: datetime | None = None,
     resume_result: dict[str, object] | None = None,
+    release_id: str | None = None,
 ) -> uuid.UUID:
     """Insert one ``approval_request`` row; return its id."""
     rid = request_id or uuid.uuid4()
@@ -238,6 +239,7 @@ def _seed_request(
                     expires_at=stored_expires_at,
                     resumed_at=resumed_at,
                     resume_result=resume_result,
+                    release_id=release_id,
                 ),
             )
         return rid
@@ -1717,6 +1719,38 @@ def test_detail_modal_decided_row_is_read_only() -> None:
     # No decision forms on a closed request.
     assert f'hx-post="/ui/approvals/{rid}/approve"' not in body
     assert f'hx-post="/ui/approvals/{rid}/reject"' not in body
+
+
+def test_detail_modal_shows_release_changed_reason_and_release() -> None:
+    """A request ended by an update says so and tells the requester to ask again (#5030).
+
+    Only the start-up expiry ends a request before its deadline, so an
+    expired row with ``decided_at < expires_at`` reads as "MEHO was updated".
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="release.op",
+        status_value=ApprovalRequestStatus.EXPIRED.value,
+        decided_at=datetime(2026, 6, 16, 8, 0, tzinfo=UTC),
+        expires_at=datetime(2026, 6, 20, 8, 0, tzinfo=UTC),
+        release_id="feedfacefeedfacefeedfacefeedfacefeedface",
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub="op-99")
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-expired-reason="release_changed"' in body
+    assert "MEHO was updated while the request waited" in body
+    assert "Ask again." in body
+    assert "MEHO release" in body
+    assert "feedfacefeedfacefeedfacefeedfacefeedface" in body
 
 
 def test_detail_modal_expired_row_shows_expiry_timestamp() -> None:

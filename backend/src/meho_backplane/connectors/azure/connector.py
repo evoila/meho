@@ -119,6 +119,7 @@ def _may_use_cache(operator: Operator) -> bool:
 
 
 class AzureConnector(
+    # Family mixin classes first, one per line in alphabetical order; the HTTP base last.
     SecurityOps,
     HttpConnector,
 ):

@@ -212,7 +212,9 @@ Steps:
    restriction only blocks some zones, so it does not count), and the
    allowed families. The cheapest by its pay-as-you-go price wins (the
    Windows price for Windows without Hybrid Benefit, else the Linux
-   price). No fitting size: `size.allocated` is unknown and the item is
+   price). A server with OS family `other` uses the Linux price; its
+   figures keep `os_family: other` with `priced_as: linux`, and the item
+   is flagged `os_family_other_priced_as_linux`. No fitting size: `size.allocated` is unknown and the item is
    flagged `not_ready`.
 4. Price each sizing:
    - Compute: the pay-as-you-go row times 730 hours. Spot, Low Priority,

@@ -61,6 +61,7 @@ HOURS_PER_MONTH: Final[float] = 730.0
 
 PricingOption = Literal["pay_as_you_go", "reserved_1_year", "reserved_3_years"]
 Basis = Literal["allocated", "measured"]
+ServerOs = Literal["windows", "linux", "other"]
 
 PRICING_OPTIONS: Final[tuple[PricingOption, ...]] = (
     "pay_as_you_go",
@@ -171,17 +172,15 @@ class _Builder:
         )
 
 
-def _os_family(server: ServerRecord) -> OsFamily | None:
-    family = server.os.family if server.os else None
-    if family == "windows":
-        return "windows"
-    if family in ("linux", "other"):
-        return "linux"
-    return None
+def _os_family(server: ServerRecord) -> ServerOs | None:
+    return server.os.family if server.os else None
 
 
-def _meter_os(context: SizingContext, os_family: OsFamily | None) -> OsFamily:
-    """The meter a size is ranked and priced by: Linux for Linux and with Hybrid Benefit."""
+def _meter_os(context: SizingContext, os_family: ServerOs | None) -> OsFamily:
+    """The meter a size is ranked and priced by: Windows only for Windows without Hybrid Benefit.
+
+    Linux, "other" and Windows with Hybrid Benefit use the Linux meter.
+    """
     return "windows" if os_family == "windows" and not context.hybrid_benefit else "linux"
 
 
@@ -194,7 +193,7 @@ def _need_text(need: Need) -> str:
     return ", ".join(parts)
 
 
-def _size(b: _Builder, basis: Basis, need: Need, os_family: OsFamily | None) -> VmSize | None:
+def _size(b: _Builder, basis: Basis, need: Need, os_family: ServerOs | None) -> VmSize | None:
     context = b.context
     meter_os = _meter_os(context, os_family)
     search = pick_size(
@@ -245,7 +244,7 @@ def _size(b: _Builder, basis: Basis, need: Need, os_family: OsFamily | None) -> 
 
 
 def _compute(
-    b: _Builder, basis: Basis, option: PricingOption, size: VmSize, os_family: OsFamily | None
+    b: _Builder, basis: Basis, option: PricingOption, size: VmSize, os_family: ServerOs | None
 ) -> float | None:
     key = f"compute.{basis}.{option}"
     context = b.context
@@ -256,13 +255,15 @@ def _compute(
             basis=basis,
         )
         return None
-    hourly = context.compute.hourly(size.name, _meter_os(context, os_family))
+    meter_os = _meter_os(context, os_family)
+    hourly = context.compute.hourly(size.name, meter_os)
     if hourly is None:
         b.unknown(key, f"no pay-as-you-go price for {size.name}", basis=basis)
         return None
     inputs: dict[str, str | float | int | bool | None] = {
         "size": size.name,
         "os_family": os_family,
+        "priced_as": meter_os,
         "hybrid_benefit": context.hybrid_benefit,
         "pricing": option,
     }
@@ -389,7 +390,7 @@ def _disks(b: _Builder, basis: Basis, size: VmSize) -> float | None:
     return total
 
 
-def _price_sizing(b: _Builder, basis: Basis, size: VmSize, os_family: OsFamily | None) -> None:
+def _price_sizing(b: _Builder, basis: Basis, size: VmSize, os_family: ServerOs | None) -> None:
     disks = _disks(b, basis, size)
     for option in b.context.options:
         compute = _compute(b, basis, option, size, os_family)
@@ -422,6 +423,8 @@ def assess_server(
         b.unknowns.append(
             Unknown(source_id=sid, what="compute price", reason="the OS family is unknown")
         )
+    elif os_family == "other":
+        b.flags.append("os_family_other_priced_as_linux")
     if server.boot_type is None:
         b.flags.append("boot_type_unknown_generation_not_checked")
     if server.disks is None:

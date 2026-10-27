@@ -179,6 +179,10 @@ def _assumptions(
             "min_window_days": MIN_WINDOW_DAYS,
             "min_sample_coverage": MIN_SAMPLE_COVERAGE,
             "expected_sample_interval_minutes": EXPECTED_SAMPLE_INTERVAL_MINUTES,
+            "os_family_other": (
+                "servers with OS family 'other' use the Linux price; their own license "
+                "is not counted"
+            ),
             "os_disk": "the first disk is the OS disk; the others are data disks",
             "disk_type": (
                 "Premium SSD when the VM size supports Premium storage, else Standard SSD; "

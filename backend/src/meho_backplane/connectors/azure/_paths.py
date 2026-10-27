@@ -21,11 +21,23 @@ from __future__ import annotations
 from typing import Final
 
 __all__ = [
+    "EXPRESS_ROUTE_CIRCUITS_PATH",
+    "LOAD_BALANCERS_PATH",
     "LOCATIONS_PATH",
+    "NETWORK_API_VERSION",
+    "NETWORK_SECURITY_GROUPS_PATH",
+    "NETWORK_SECURITY_GROUP_PATH",
+    "PRIVATE_DNS_API_VERSION",
+    "PRIVATE_DNS_ZONES_PATH",
+    "PUBLIC_IP_ADDRESSES_PATH",
     "RESOURCE_GRAPH_API_VERSION",
     "RESOURCE_GRAPH_PATH",
+    "ROUTE_TABLES_PATH",
     "SUBSCRIPTIONS_API_VERSION",
     "SUBSCRIPTION_PATH",
+    "VIRTUAL_NETWORKS_PATH",
+    "VIRTUAL_NETWORK_GATEWAYS_PATH",
+    "VIRTUAL_NETWORK_PATH",
     "locations_path",
     "subscription_path",
 ]
@@ -66,21 +78,6 @@ RESOURCE_GRAPH_API_VERSION: Final[str] = "2024-04-01"
 # ---- monitor (Task #5090) ----
 
 # ---- network (Task #5085) ----
-
-__all__ += [
-    "EXPRESS_ROUTE_CIRCUITS_PATH",
-    "LOAD_BALANCERS_PATH",
-    "NETWORK_API_VERSION",
-    "NETWORK_SECURITY_GROUPS_PATH",
-    "NETWORK_SECURITY_GROUP_PATH",
-    "PRIVATE_DNS_API_VERSION",
-    "PRIVATE_DNS_ZONES_PATH",
-    "PUBLIC_IP_ADDRESSES_PATH",
-    "ROUTE_TABLES_PATH",
-    "VIRTUAL_NETWORKS_PATH",
-    "VIRTUAL_NETWORK_GATEWAYS_PATH",
-    "VIRTUAL_NETWORK_PATH",
-]
 
 #: The API version of the Microsoft.Network reads: virtual networks, network
 #: security groups, load balancers, public IP addresses, gateways, ExpressRoute

@@ -675,6 +675,29 @@ async def test_unknown_os_family_and_disks_stay_unknown(store: ResultHandleStore
     assert "disks_unknown_data_disk_limit_not_checked" in item["flags"]
 
 
+async def test_other_os_family_is_priced_as_linux_and_says_so(store: ResultHandleStore) -> None:
+    other = _server(
+        "vc:other",
+        "bsd-01",
+        cores=2,
+        memory_mb=8192,
+        family="other",
+        boot="bios",
+        disks=[_disk("Hard disk 1", 40)],
+    )
+    result = await _assess(store, [other], pricing=["pay_as_you_go"])
+    item = _item(result, "vc:other")
+    compute = item["figures"]["compute.allocated.pay_as_you_go"]
+    assert compute["inputs"]["os_family"] == "other"
+    assert compute["inputs"]["priced_as"] == "linux"
+    assert compute["inputs"]["meter_id"] == "meter-Standard_D2s_v5-linux"
+    assert "os_family_other_priced_as_linux" in item["flags"]
+    assert "Linux price" in result["assumptions"]["other"]["os_family_other"]
+    linux = _item(await _assess(store, [LINUX_BIOS], pricing=["pay_as_you_go"]), "vc:lnx-bios")
+    assert "os_family_other_priced_as_linux" not in linux["flags"]
+    assert linux["figures"]["compute.allocated.pay_as_you_go"]["inputs"]["os_family"] == "linux"
+
+
 async def test_same_machine_twice_is_sized_once(store: ResultHandleStore) -> None:
     uuid = "4203c3d4-2222-4000-8000-0000000000b2"
     vcenter = {**LINUX_BIOS, "identity_hints": {"bios_uuid": uuid}}
@@ -716,35 +739,61 @@ async def test_a_failed_child_read_stops_with_a_clear_message(store: ResultHandl
         await _assess(store, [LINUX_BIOS], _FakeAzure(fail="azure.vm.size.list"))
 
 
-async def test_child_result_stored_behind_a_handle_is_read_back(store: ResultHandleStore) -> None:
-    class _HandleAzure(_FakeAzure):
-        async def __call__(
-            self, *, connector_id: str, op_id: str, params: dict[str, Any], target: Any = None
-        ) -> OperationResult:
-            plain = await super().__call__(
-                connector_id=connector_id, op_id=op_id, params=params, target=target
-            )
-            reduced, handle = await JsonFluxReducer(byte_threshold=256, store=store).reduce(
-                plain.result,
-                None,
-                context={"tenant_id": str(self.tenant), "operator_sub": _SUB, "op_id": op_id},
-            )
-            assert handle is not None
-            return OperationResult(
-                status="ok", op_id=op_id, result=reduced, handle=handle, duration_ms=1.0
-            )
+class _HandleAzure(_FakeAzure):
+    """Returns every child result behind a handle, as large real results come back."""
 
+    def __init__(self, store: ResultHandleStore, tenant: UUID, max_spill_rows: int | None) -> None:
+        super().__init__()
+        self.store = store
+        self.tenant = tenant
+        self.max_spill_rows = max_spill_rows
+
+    async def __call__(
+        self, *, connector_id: str, op_id: str, params: dict[str, Any], target: Any = None
+    ) -> OperationResult:
+        plain = await super().__call__(
+            connector_id=connector_id, op_id=op_id, params=params, target=target
+        )
+        reducer = JsonFluxReducer(
+            byte_threshold=256, store=self.store, max_spill_rows=self.max_spill_rows
+        )
+        reduced, handle = await reducer.reduce(
+            plain.result,
+            None,
+            context={"tenant_id": str(self.tenant), "operator_sub": _SUB, "op_id": op_id},
+        )
+        assert handle is not None
+        return OperationResult(
+            status="ok", op_id=op_id, result=reduced, handle=handle, duration_ms=1.0
+        )
+
+
+async def _assess_with_handles(
+    store: ResultHandleStore, max_spill_rows: int | None = None
+) -> dict[str, Any]:
     tenant = uuid4()
-    azure = _HandleAzure()
-    azure.tenant = tenant  # type: ignore[attr-defined]
     handle = await _store(store, tenant, [WINDOWS])
-    result = await migration_assess_vm(
+    return await migration_assess_vm(
         _operator(tenant),
         None,
         {"inventory_handles": [handle], "azure_target": "azure-example", "region": _REGION},
-        azure,
+        _HandleAzure(store, tenant, max_spill_rows),
     )
+
+
+async def test_child_result_stored_behind_a_handle_is_read_back(store: ResultHandleStore) -> None:
+    result = await _assess_with_handles(store)
     assert _value(_item(result, "vc:win-01"), "compute.allocated.pay_as_you_go") == 274.48
+
+
+async def test_child_result_stored_only_in_part_stops_the_operation(
+    store: ResultHandleStore,
+) -> None:
+    # The store keeps only one row of each child list, so a cheaper size could be missing.
+    with pytest.raises(
+        AssessmentReadError, match=r"azure.vm.size.list returned \d+ rows but only 1 were stored"
+    ):
+        await _assess_with_handles(store, max_spill_rows=1)
 
 
 def test_operation_contract() -> None:

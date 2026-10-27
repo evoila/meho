@@ -550,8 +550,9 @@ they only read, and nothing changes in Azure.
 
 **API versions.** `Microsoft.Network` reads use `2026-01-01`
 (`NETWORK_API_VERSION`), private DNS zones `2024-06-01`
-(`PRIVATE_DNS_API_VERSION`). Both are pinned on the spec shelf, and every
-path is a `*_PATH` constant in the `network` section of `_paths.py`.
+(`PRIVATE_DNS_API_VERSION`). Every path is a `*_PATH` constant in the
+`network` section of `_paths.py`, and the spec path check (see above)
+finds each of them, with its API version, in the pinned spec files.
 
 **Files.** `network.py` holds the group text, the guidance for the AI, the
 operation table (`OPS`) and the mixin `NetworkOps`, whose thin methods

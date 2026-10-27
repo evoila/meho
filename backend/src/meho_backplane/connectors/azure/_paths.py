@@ -11,7 +11,9 @@ customer system. Later reads add their paths here, and each new ``*_PATH``
 constant gets one line in that check.
 
 Azure pins an API version per call (the ``api-version`` query parameter). The
-versions are kept next to their paths, one per family of operations.
+versions are kept next to their paths, one per family of operations. Each
+family keeps its paths in its own section below, so families built at the
+same time do not edit the same lines.
 """
 
 from __future__ import annotations
@@ -45,25 +47,23 @@ RESOURCE_GRAPH_PATH: Final[str] = "/providers/Microsoft.ResourceGraph/resources"
 #: The API version of Resource Graph queries (Microsoft.ResourceGraph).
 RESOURCE_GRAPH_API_VERSION: Final[str] = "2024-04-01"
 
+# ---- aks (Task #5087) ----
 
-def subscription_path(subscription_id: str) -> str:
-    """Return the path of one subscription.
+# ---- arc (Task #5084) ----
 
-    *subscription_id* must already be checked as a GUID (see
-    :func:`~meho_backplane.connectors.azure.session.resolve_target_config`), so
-    it cannot change the path.
-    """
-    return SUBSCRIPTION_PATH.format(subscription_id=subscription_id)
+# ---- automation (Task #5092) ----
 
+# ---- avs (Task #5091) ----
 
-def locations_path(subscription_id: str) -> str:
-    """Return the path of the regions of one subscription.
+# ---- compute (Task #5083) ----
 
-    *subscription_id* must already be checked as a GUID, like in
-    :func:`subscription_path`.
-    """
-    return LOCATIONS_PATH.format(subscription_id=subscription_id)
+# ---- cost (Task #5088) ----
 
+# ---- inventory (Task #5082) ----
+
+# ---- migrate (Task #5093) ----
+
+# ---- monitor (Task #5090) ----
 
 # ---- network (Task #5085) ----
 
@@ -153,3 +153,26 @@ PRIVATE_DNS_API_VERSION: Final[str] = "2024-06-01"
 PRIVATE_DNS_ZONES_PATH: Final[str] = (
     "/subscriptions/{subscription_id}/providers/Microsoft.Network/privateDnsZones"
 )
+
+# ---- security (Task #5089) ----
+
+# ---- storage (Task #5086) ----
+
+
+def subscription_path(subscription_id: str) -> str:
+    """Return the path of one subscription.
+
+    *subscription_id* must already be checked as a GUID (see
+    :func:`~meho_backplane.connectors.azure.session.resolve_target_config`), so
+    it cannot change the path.
+    """
+    return SUBSCRIPTION_PATH.format(subscription_id=subscription_id)
+
+
+def locations_path(subscription_id: str) -> str:
+    """Return the path of the regions of one subscription.
+
+    *subscription_id* must already be checked as a GUID, like in
+    :func:`subscription_path`.
+    """
+    return LOCATIONS_PATH.format(subscription_id=subscription_id)

@@ -13,12 +13,13 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from meho_backplane.connectors.azure._model import TEXT_OR_NULL
+
 __all__ = [
     "EXPRESS_ROUTE_LIST_RESPONSE",
     "GATEWAY_LIST_PARAMS",
     "GATEWAY_LIST_RESPONSE",
     "LOAD_BALANCER_LIST_RESPONSE",
-    "NO_PARAMS",
     "NSG_LIST_RESPONSE",
     "NSG_SHOW_PARAMS",
     "NSG_SHOW_RESPONSE",
@@ -57,7 +58,7 @@ _EXAMPLE_GROUP: Final[str] = "rg-network-example"
 
 
 def _text(description: str) -> dict[str, Any]:
-    return {"type": ["string", "null"], "description": description}
+    return {"type": TEXT_OR_NULL, "description": description}
 
 
 def _texts(description: str) -> dict[str, Any]:
@@ -129,13 +130,6 @@ def _paged_list(row: dict[str, Any], what: str) -> dict[str, Any]:
 # ----------------------------------------------------------------------
 # Parameters
 # ----------------------------------------------------------------------
-
-NO_PARAMS: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {},
-    "additionalProperties": False,
-    "examples": [{}],
-}
 
 _RESOURCE_GROUP_PARAM: Final[dict[str, Any]] = {
     "type": "string",

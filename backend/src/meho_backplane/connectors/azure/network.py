@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors.azure._model import AzureTypedOp
+from meho_backplane.connectors.azure._model import NO_PARAMS, AzureTypedOp
 from meho_backplane.connectors.azure.network_reads import (
     network_expressroute_list_impl,
     network_gateway_list_impl,
@@ -39,7 +39,6 @@ from meho_backplane.connectors.azure.network_schemas import (
     GATEWAY_LIST_PARAMS,
     GATEWAY_LIST_RESPONSE,
     LOAD_BALANCER_LIST_RESPONSE,
-    NO_PARAMS,
     NSG_LIST_RESPONSE,
     NSG_SHOW_PARAMS,
     NSG_SHOW_RESPONSE,

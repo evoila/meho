@@ -10633,6 +10633,176 @@
         }
       }
     },
+    "/api/v1/service-principals/read-scopes/{principal_sub}": {
+      "put": {
+        "tags": [
+          "service-principal-read-scopes"
+        ],
+        "summary": "Set Read Scope",
+        "description": "Set (replace) the read scope of one service principal.\n\nOnly a person may set it: a machine principal gets 403\n``human_principal_required`` before this runs. Returns 422 when\n``principal_sub`` carries a wildcard. Audited via the audit middleware,\nwith the stored entries on the audit row.",
+        "operationId": "set_read_scope_api_v1_service_principals_read_scopes__principal_sub__put",
+        "parameters": [
+          {
+            "name": "principal_sub",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "description": "JWT sub of the service principal.",
+              "title": "Principal Sub"
+            },
+            "description": "JWT sub of the service principal."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServiceReadScopeSet"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceReadScopeRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "service-principal-read-scopes"
+        ],
+        "summary": "Show Read Scope",
+        "description": "Return the read scope of one service principal; 404 when none is set.",
+        "operationId": "show_read_scope_api_v1_service_principals_read_scopes__principal_sub__get",
+        "parameters": [
+          {
+            "name": "principal_sub",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "description": "JWT sub of the service principal.",
+              "title": "Principal Sub"
+            },
+            "description": "JWT sub of the service principal."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceReadScopeRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "service-principal-read-scopes"
+        ],
+        "summary": "Clear Read Scope",
+        "description": "Clear the read scope of one service principal; it then reads every target again.\n\nOnly a person may clear it. Returns 204; 404 when no scope is set.\nAudited via the audit middleware.",
+        "operationId": "clear_read_scope_api_v1_service_principals_read_scopes__principal_sub__delete",
+        "parameters": [
+          {
+            "name": "principal_sub",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "description": "JWT sub of the service principal.",
+              "title": "Principal Sub"
+            },
+            "description": "JWT sub of the service principal."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/addons/pairings": {
       "post": {
         "tags": [
@@ -32231,6 +32401,43 @@
         "title": "ReadDocsRequest",
         "description": "POST body for ``/api/v1/read_docs``, the same fields as the MCP tool.\n\n``collection`` is typed optional so a missing value gets the docs\nsurfaces' own 422 naming the mandatory scope. ``product`` / ``version``\nare needed only on a collection whose scope gates send hard filters: the\nhandle is bound to the filters of the hit's search. So a caller passes\nthem only for a hit from a single-collection search that used them, and\nleaves them out for a hit from a cross-collection search, which ignores\nthem. ``extra=\"forbid\"`` rejects unknown fields."
       },
+      "ReadScopeEntry": {
+        "properties": {
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Target Id",
+            "description": "Allow reads on exactly this target."
+          },
+          "target_product": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Target Product",
+            "description": "Selector: allow reads on every target whose product equals this value."
+          },
+          "target_name_pattern": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Target Name Pattern",
+            "description": "Selector: allow reads on every target whose name matches this fnmatch glob."
+          },
+          "no_target": {
+            "type": "boolean",
+            "title": "No Target",
+            "description": "Allow safe calls that have no target. Not set: such calls are refused.",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ReadScopeEntry",
+        "description": "One entry of a read scope. Exactly one shape per entry.\n\n* ``target_id`` -- exactly that target.\n* ``target_product`` and/or ``target_name_pattern`` -- a selector:\n  ``product`` exact, ``name`` an ``fnmatch`` glob. It is checked at\n  call time, so a target registered after the scope was set can match.\n* ``no_target: true`` -- allow ``safe`` calls that have no target."
+      },
       "ReadinessCheck": {
         "properties": {
           "name": {
@@ -34854,6 +35061,65 @@
         ],
         "title": "ServiceGrantRead",
         "description": "Row shape every accessor returns.\n\n``from_attributes=True`` allows direct construction from an ORM row.\nExposes ``revoked_at`` / ``revoked_by_sub`` / ``revoked_reason`` so\ncallers can tell a live grant from a revoked one in the history, and why\nit was revoked.\n\n``orphaned`` / ``orphan_remediation`` are filled in by the service when\nit reads the grant (see\n:func:`~meho_backplane.operations.service_grants.classify_orphaned_grants`);\nbuilding the shape straight from an ORM row leaves them at the\nnot-orphaned default."
+      },
+      "ServiceReadScopeRead": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "principal_sub": {
+            "type": "string",
+            "title": "Principal Sub"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/ReadScopeEntry"
+            },
+            "type": "array",
+            "title": "Entries"
+          },
+          "set_by_sub": {
+            "type": "string",
+            "title": "Set By Sub"
+          },
+          "set_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Set At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "principal_sub",
+          "entries",
+          "set_by_sub",
+          "set_at"
+        ],
+        "title": "ServiceReadScopeRead",
+        "description": "The stored read scope of one service principal."
+      },
+      "ServiceReadScopeSet": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/ReadScopeEntry"
+            },
+            "type": "array",
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Entries"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "title": "ServiceReadScopeSet",
+        "description": "Body for ``PUT /api/v1/service-principals/read-scopes/{principal_sub}``.\n\nReplaces the whole scope. At least one entry: a scope with no entry\nwould refuse every read, which is a job for revoking the principal."
       },
       "ShowTemplateResponse": {
         "properties": {

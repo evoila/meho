@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
 
 __all__ = [
+    "READ_SCOPE_DENIED_CODE",
     "UPSTREAM_SAID",
     "VAULT_SAID",
     "result_already_resumed",
@@ -581,6 +582,12 @@ def result_handler_unreachable(
     )
 
 
+#: Stable error code for a service-principal read refused by its read
+#: scope (#4992). The policy gate starts the deny reason with this code
+#: and a colon; :func:`result_denied` then reports it as ``error_code``.
+READ_SCOPE_DENIED_CODE: Final[str] = "read_scope_denied"
+
+
 def result_denied(op_id: str, reason: str, duration_ms: float) -> OperationResult:
     """Policy gate denied the call.
 
@@ -589,19 +596,24 @@ def result_denied(op_id: str, reason: str, duration_ms: float) -> OperationResul
     because the op is ``dangerous`` and no explicit grant overrides it,
     or because an explicit ``deny`` row was found, or because the
     principal's role ceiling forced the verdict to ``deny`` (for an
-    agent principal), or because a human/service principal hit a
-    ``requires_approval`` op (which is hard-denied for non-agents).
+    agent principal), or because a service principal's read scope does
+    not cover the call's target (#4992).
 
     The ``reason`` string is agent-readable: it names the verdict
     source and any ceilings that were applied so an agent can diagnose
-    the refusal without human intervention.
+    the refusal without human intervention. ``error_code`` is ``denied``,
+    or :data:`READ_SCOPE_DENIED_CODE` when the reason starts with that
+    code (the gate's stable marker for a read-scope refusal).
     """
+    error_code = "denied"
+    if reason.startswith(f"{READ_SCOPE_DENIED_CODE}:"):
+        error_code = READ_SCOPE_DENIED_CODE
     return OperationResult(
         status="denied",
         op_id=op_id,
         error=f"denied: {reason}",
         duration_ms=duration_ms,
-        extras={"error_code": "denied", "reason": reason},
+        extras={"error_code": error_code, "reason": reason},
     )
 
 

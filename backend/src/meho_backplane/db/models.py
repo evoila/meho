@@ -5796,6 +5796,49 @@ class SandboxDeleteGrant(_StandingGrantColumns, Base):
     __table_args__ = _standing_grant_table_args("sandbox_delete_grant")
 
 
+class ServicePrincipalReadScope(Base):
+    """The targets a service principal may read (#4992).
+
+    A service principal runs every ``safe`` operation at once on every
+    target of its tenant. A person can narrow that with a **read scope**:
+    one row per ``(tenant, principal_sub)`` holding a list of entries. Each
+    entry is one target id, one target selector (``target_product`` and/or
+    ``target_name_pattern``, the same shapes a standing grant uses, so a
+    target registered later can match), or ``no_target`` (allow calls that
+    have no target). A ``safe`` call on a target outside the scope is
+    refused (``read_scope_denied``,
+    :func:`meho_backplane.operations.service_read_scopes.read_scope_denial`).
+    A principal without a row is not limited.
+
+    ``entries`` is a JSON list; the shape of one entry is
+    :class:`~meho_backplane.operations.service_read_scope_schemas.ReadScopeEntry`.
+    The scope is read as a whole on every service-principal read, so the
+    entries live in one row instead of one row each. Setting the scope
+    replaces the whole row; clearing deletes it. Only a person writes it
+    (``api/v1/service_read_scopes.py``). Changes keep today's rules
+    (grants or approval); the scope limits only calls that run at once.
+    """
+
+    __tablename__ = "service_principal_read_scope"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), ForeignKey("tenant.id"), nullable=False)
+    # JWT ``sub`` of the service principal. Soft reference, no FK -- same
+    # discipline as ServicePrincipalGrant.principal_sub.
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    entries: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False
+    )
+    set_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "tenant_id", "principal_sub", name="uq_service_principal_read_scope_principal"
+        ),
+    )
+
+
 class SandboxModeState(Base):
     """The stored sandbox mode: exactly one row, fixed for the database (#4622).
 

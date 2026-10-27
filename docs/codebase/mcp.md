@@ -526,6 +526,34 @@ built-in op hidden by the tenant's own connector row is not named
 either. The extra lookups run only on this error path
 (`operations/_op_miss.py`). Tests: `tests/test_operations_op_miss.py`.
 
+### Close ids for an unknown connector (#4136)
+
+Every unknown-connector error names up to 5 close connector ids, so a
+model that guessed a near-miss id (`vmware-rest`, `linux-ssh-1.0`) can
+fix its call at once. It does not have to read the whole
+`meho_connector_list` first.
+
+- **Which ids.** `close_connector_ids` in `operations/_lookup.py`. An id
+  is close when it starts with the given text, or has a close spelling
+  (`difflib`, ratio 0.6 or more). Case is ignored. The closest come first.
+- **Who sees what.** Only built-in connectors and the caller's own
+  tenant, the same rule as `connector_exists`. A connector of another
+  tenant is never named.
+- **Where.** The message says "Did you mean: vmware-rest-9.0,
+  vmware-rest-8.0?". With no close id it says "Call `meho_connector_list`
+  to see the ids." The ids are also in `data.did_you_mean` (the `-32602`
+  of `list_operation_groups`, `search_operations` and `list_targets`) and
+  in `extras.did_you_mean` (the `unknown_connector` result of
+  `call_operation` and `preview_operation`).
+- **`list_targets`.** When the `connector_id` filter finds no target and
+  no connector the caller can see has that product
+  (`connector_product_known`), the answer is the same unknown-connector
+  `-32602`, not an empty list. A known product with no targets still
+  returns an empty list.
+
+The lookups run only on the error path. Tests:
+`tests/test_unknown_connector_did_you_mean.py`.
+
 ### `search_operations` exact-op mode, and slim hits (#3668)
 
 A ranked hit tells the caller *which* operation to use. It does not

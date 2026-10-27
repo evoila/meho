@@ -90,6 +90,7 @@ __all__ = [
     "result_vault_credentials_read_error",
     "result_write_capability_denied",
     "status_code_for_result",
+    "unknown_connector_message",
     "wrap_ok_result",
 ]
 
@@ -208,26 +209,50 @@ def result_unknown_op(
     )
 
 
-def result_unknown_connector(connector_id: str, op_id: str, duration_ms: float) -> OperationResult:
+def unknown_connector_message(connector_id: str, did_you_mean: list[str]) -> str:
+    """Return the text of every unknown-connector error (#4136).
+
+    Names the close ids from
+    :func:`~meho_backplane.operations._lookup.close_connector_ids` when
+    there are any, so the caller can fix the call at once. With none, it
+    points at ``meho_connector_list``.
+    """
+    text = (
+        f"unknown connector_id {connector_id!r}. Expected <impl_id>-<version> "
+        "(e.g. 'vmware-rest-9.0', 'vault-1.x')."
+    )
+    if did_you_mean:
+        return f"{text} Did you mean: {', '.join(did_you_mean)}?"
+    return f"{text} Call `meho_connector_list` to see the ids."
+
+
+def result_unknown_connector(
+    connector_id: str,
+    op_id: str,
+    duration_ms: float,
+    *,
+    did_you_mean: list[str] | None = None,
+) -> OperationResult:
     """The *connector_id* matches no connector the caller can see (#4031).
 
     Same meaning as the ``unknown_connector`` answer of
     ``list_operation_groups`` / ``search_operations``: no operation rows
     and no registered connector class for the parsed id. Before #4031 this
     case surfaced as ``unknown_op`` with ``known_op_count: 0``, which
-    hid that the connector id itself was wrong.
+    hid that the connector id itself was wrong. *did_you_mean* is the
+    list of close ids (#4136), also in ``extras.did_you_mean``.
     """
+    found = did_you_mean or []
     return OperationResult(
         status="error",
         op_id=op_id,
-        error=(
-            f"unknown_connector: unknown connector_id {connector_id!r}. Expected "
-            "<impl_id>-<version> (e.g. 'vmware-rest-9.0', 'vault-1.x'). The id is "
-            "mistyped or the connector is not registered on this deploy. Use "
-            "meho_connector_list to see the connector ids."
-        ),
+        error=f"unknown_connector: {unknown_connector_message(connector_id, found)}",
         duration_ms=duration_ms,
-        extras={"error_code": "unknown_connector", "connector_id": connector_id},
+        extras={
+            "error_code": "unknown_connector",
+            "connector_id": connector_id,
+            "did_you_mean": found,
+        },
     )
 
 

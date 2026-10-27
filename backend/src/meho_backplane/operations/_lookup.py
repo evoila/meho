@@ -27,6 +27,9 @@ form ``"<impl_id>-<version>"`` and resolves it into the
   see that have the same ``op_id`` enabled. Named in the ``unknown_op``
   error so a caller who picked the wrong connector version learns where
   the op lives (#4031).
+* :func:`close_connector_ids` / :func:`connector_product_known` -- the
+  "did you mean" ids and the product check behind every
+  unknown-connector error (#4136).
 
 The split lets the dispatcher's :func:`dispatch` body keep step 2's
 descriptor resolution one helper call instead of three.
@@ -34,6 +37,7 @@ descriptor resolution one helper call instead of three.
 
 from __future__ import annotations
 
+import difflib
 import re
 from typing import Any
 from uuid import UUID
@@ -46,8 +50,10 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 
 __all__ = [
+    "close_connector_ids",
     "connector_class_registered",
     "connector_exists",
+    "connector_product_known",
     "count_known_ops",
     "descriptor_exists_any_state",
     "find_connectors_with_op",
@@ -343,12 +349,92 @@ async def find_connectors_with_op(
         )
         triples = {(row.product, row.version, row.impl_id) for row in result}
     triples.discard(exclude)
-    connector_ids: set[str] = set()
-    for product, version, impl_id in triples:
-        connector_id = f"{impl_id}-{version}" if impl_id and version else product
-        if parse_connector_id(connector_id) == (product, version, impl_id):
-            connector_ids.add(connector_id)
-    return sorted(connector_ids)[:_CONNECTORS_WITH_OP_CAP]
+    rendered = {_render_connector_id(*triple) for triple in triples}
+    return sorted(cid for cid in rendered if cid is not None)[:_CONNECTORS_WITH_OP_CAP]
+
+
+def _render_connector_id(product: str, version: str, impl_id: str) -> str | None:
+    """Render a row's triple as a connector id, or ``None`` if it does not parse back.
+
+    ``<impl_id>-<version>``, or ``<product>`` for a v1-style row with no
+    version. Only an id that :func:`parse_connector_id` maps back to the
+    same triple is returned, so every rendered id can be passed to
+    dispatch as is.
+    """
+    connector_id = f"{impl_id}-{version}" if impl_id and version else product
+    if parse_connector_id(connector_id) == (product, version, impl_id):
+        return connector_id
+    return None
+
+
+async def _visible_connector_triples(tenant_id: UUID) -> set[tuple[str, str, str]]:
+    """Return the *(product, version, impl_id)* of every connector the caller can see.
+
+    Same tenant rule as :func:`connector_exists`: built-in rows plus the
+    caller's own tenant rows, from ``endpoint_descriptor`` and
+    ``operation_group``. A connector of another tenant is never returned.
+    """
+    sessionmaker = get_sessionmaker()
+    triples: set[tuple[str, str, str]] = set()
+    async with sessionmaker() as session:
+        for model in (EndpointDescriptor, OperationGroup):
+            result = await session.execute(
+                select(model.product, model.version, model.impl_id)
+                .where((model.tenant_id.is_(None)) | (model.tenant_id == tenant_id))
+                .distinct()
+            )
+            triples.update((row.product, row.version, row.impl_id) for row in result)
+    return triples
+
+
+#: Most ids one "did you mean" answer names (#4136).
+_DID_YOU_MEAN_CAP: int = 5
+
+#: Lowest :class:`difflib.SequenceMatcher` ratio that counts as a close spelling.
+_DID_YOU_MEAN_CUTOFF: float = 0.6
+
+
+async def close_connector_ids(*, tenant_id: UUID, connector_id: str) -> list[str]:
+    """Return up to 5 caller-visible connector ids close to *connector_id* (#4136).
+
+    Runs only on the unknown-connector error path. A close id is one that
+    starts with the given text (``vmware-rest`` -> ``vmware-rest-9.0``) or
+    has a close spelling (``linux-ssh-1.0`` -> ``linux-ssh-1.x``). The
+    match ignores case. Closest ids come first.
+
+    Only ids the caller can see are named: built-in connectors and the
+    caller's own tenant, the same rule as :func:`connector_exists`.
+    """
+    needle = connector_id.strip().lower()
+    if not needle:
+        return []
+    rendered = {_render_connector_id(*t) for t in await _visible_connector_triples(tenant_id)}
+    known = {cid.lower(): cid for cid in rendered if cid is not None}
+    candidates = {key for key in known if key.startswith(needle)}
+    candidates.update(
+        difflib.get_close_matches(
+            needle, list(known), n=_DID_YOU_MEAN_CAP, cutoff=_DID_YOU_MEAN_CUTOFF
+        )
+    )
+    ranked = sorted(
+        candidates,
+        key=lambda key: (-difflib.SequenceMatcher(None, needle, key).ratio(), key),
+    )
+    return [known[key] for key in ranked[:_DID_YOU_MEAN_CAP]]
+
+
+async def connector_product_known(*, tenant_id: UUID, product: str) -> bool:
+    """Return whether any connector the caller can see has *product*.
+
+    ``list_targets`` uses this when its ``connector_id`` filter finds no
+    target (#4136): a product no connector has means the id is wrong, not
+    that the tenant has no targets of that kind. A connector class that
+    is registered but not yet ingested also counts.
+    """
+    if any(reg_product == product for reg_product, _version, _impl_id in all_connectors_v2()):
+        return True
+    triples = await _visible_connector_triples(tenant_id)
+    return any(row_product == product for row_product, _version, _impl_id in triples)
 
 
 async def connector_exists(

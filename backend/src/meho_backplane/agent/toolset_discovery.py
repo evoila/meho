@@ -82,13 +82,14 @@ from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
 
 # Imported for their registration side effect: each module runs the
 # ``register_mcp_tool`` call for one of the bridged tools, so :func:`get_tool`
-# can resolve its (definition, handler) pair below.
-from meho_backplane.mcp.tools import connector_admin as _connector_admin_tools  # noqa: F401
+# can resolve its (definition, handler) pair below. ``connector_admin`` also
+# gives the not-yet-reduced connector rows (#4121).
 from meho_backplane.mcp.tools import knowledge as _knowledge_tools  # noqa: F401
 from meho_backplane.mcp.tools import memory as _memory_tools  # noqa: F401
 from meho_backplane.mcp.tools import operations as _operations_tools  # noqa: F401
 from meho_backplane.mcp.tools import result_query as _result_query_tools  # noqa: F401
 from meho_backplane.mcp.tools import topology as _topology_tools  # noqa: F401
+from meho_backplane.mcp.tools.connector_admin import list_connector_rows
 
 __all__ = [
     "CONNECTOR_LIST",
@@ -160,10 +161,12 @@ _CONNECTOR_LIST_DESCRIPTION = (
     "List the connectors your tenant can use (tenant-ingested plus built-in). "
     "Call this FIRST when you do not yet know which `connector_id` to pass to "
     "`list_operation_groups`, `search_operations`, or `call_operation`. Each "
-    "row carries the `connector_id`, its review status, and "
-    "`enabled_operation_count` (operations you can actually call). Optional "
-    "`status` filter: `enabled`, `staged`, `disabled`, or `all` (default). "
-    "Read-only."
+    "row has the `connector_id`, `product`, `version`, its review `status`, "
+    "`dispatchable` (true when you can call its operations), and `scope`. "
+    'Pass `product` to list one product only, and `detail: "full"` for '
+    "counts such as `enabled_operation_count`. A long list comes back as a "
+    "`handle`; read its rows with `result_query`. Optional `status` filter: "
+    "`enabled`, `staged`, `disabled`, or `all` (default). Read-only."
 )
 
 
@@ -250,18 +253,24 @@ async def _hosted_status(operator: Operator, arguments: dict[str, Any]) -> dict[
     return {k: v for k, v in health.items() if k not in _MCP_SESSION_STATUS_FIELDS}
 
 
-def _bridge(name: str, *, description: str | None = None) -> MetaToolSpec:
+def _bridge(
+    name: str,
+    *,
+    description: str | None = None,
+    handler: _MetaToolHandler | None = None,
+) -> MetaToolSpec:
     """Build one :class:`MetaToolSpec` from the registered MCP tool *name*.
 
     The schema is the MCP **wire** schema (``to_wire()``), deep-copied, for
     the same reason the broadcast bridge uses it (#2644): it strips the
     top-level combinators the Anthropic Messages API rejects. The role floor
-    is the MCP tool's own ``required_role``.
+    is the MCP tool's own ``required_role``. *handler* replaces the MCP
+    handler; the MCP gates still run in front of it.
     """
-    definition, handler = _mcp_tool(name)
+    definition, mcp_handler = _mcp_tool(name)
     return MetaToolSpec(
         name=name,
-        handler=_governed_handler(definition, handler),
+        handler=_governed_handler(definition, handler or mcp_handler),
         description=description if description is not None else definition.description,
         parameter_schema=copy.deepcopy(definition.to_wire()["inputSchema"]),
         required_role=definition.required_role,
@@ -283,7 +292,13 @@ def build_discovery_meta_tools() -> tuple[MetaToolSpec, ...]:
     )
     return (
         status,
-        _bridge(CONNECTOR_LIST, description=_CONNECTOR_LIST_DESCRIPTION),
+        # The rows come back not yet reduced: the toolset first drops the
+        # connectors outside the allow-list, then reduces (#4121).
+        _bridge(
+            CONNECTOR_LIST,
+            description=_CONNECTOR_LIST_DESCRIPTION,
+            handler=list_connector_rows,
+        ),
         _bridge(_LIST_TARGETS),
         _bridge(_PREVIEW_OPERATION),
         _bridge(_RESULT_QUERY),

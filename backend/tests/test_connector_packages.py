@@ -21,7 +21,6 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
-from structlog.testing import capture_logs
 
 from meho_backplane.connectors import packages
 from meho_backplane.connectors.packages import (
@@ -69,6 +68,23 @@ _ACME_INIT = (
     "    return None\n"
     "register_typed_op_registrar(register_acme_widget_operations)\n"
 )
+
+
+class _LogRecorder:
+    """Stands in for the module logger, so the test does not depend on structlog set-up."""
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+
+    def info(self, event: str, **fields: object) -> None:
+        self.events.append({"event": event, **fields})
+
+
+@pytest.fixture
+def logs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    recorder = _LogRecorder()
+    monkeypatch.setattr(packages, "_log", recorder)
+    return recorder.events
 
 
 @pytest.fixture
@@ -161,16 +177,16 @@ def test_pycache_in_a_built_in_folder_is_ignored(site: Path) -> None:
     assert f"{_PKG}.connectors.builtin_one" in sys.modules
 
 
-def test_no_allowlist_file_imports_built_in_folders_only(site: Path) -> None:
-    with capture_logs() as logs:
-        _import_connector_subpackages(_connectors_pkg())
+def test_no_allowlist_file_imports_built_in_folders_only(
+    site: Path, logs: list[dict[str, object]]
+) -> None:
+    _import_connector_subpackages(_connectors_pkg())
 
     assert sys.modules[f"{_PKG}.connectors.builtin_one"].LOADED is True
     allowed = [e for e in logs if e["event"] == "connector_packages_allowed"]
     assert allowed == [
         {
             "event": "connector_packages_allowed",
-            "log_level": "info",
             "packages": [],
             "source_checkout": False,
         }
@@ -178,12 +194,11 @@ def test_no_allowlist_file_imports_built_in_folders_only(site: Path) -> None:
 
 
 def test_listed_package_is_imported_and_registers_its_operations(
-    site: Path, tmp_path: Path
+    site: Path, tmp_path: Path, logs: list[dict[str, object]]
 ) -> None:
     _add_listed_package(site, tmp_path)
 
-    with capture_logs() as logs:
-        _import_connector_subpackages(_connectors_pkg())
+    _import_connector_subpackages(_connectors_pkg())
 
     assert f"{_PKG}.connectors.acme_widget" in sys.modules
     assert f"{_PKG}.connectors.builtin_one" in sys.modules
@@ -280,7 +295,7 @@ def test_missing_allowlist_file_means_no_extra_packages(tmp_path: Path) -> None:
 
 
 def test_source_checkout_counts_every_folder_in_it_as_built_in(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logs: list[dict[str, object]]
 ) -> None:
     checkout = tmp_path / "checkout"
     connectors_dir = checkout / "src" / _PKG / "connectors"
@@ -296,8 +311,7 @@ def test_source_checkout_counts_every_folder_in_it_as_built_in(
     monkeypatch.syspath_prepend(str(site))
     monkeypatch.setattr(packages, "BUILTIN_DISTRIBUTION", "fake-meho-editable")
 
-    with capture_logs() as logs:
-        check_connector_folders(connectors_dir, ["local_dev"], tmp_path / "absent.json")
+    check_connector_folders(connectors_dir, ["local_dev"], tmp_path / "absent.json")
 
     assert (
         next(e for e in logs if e["event"] == "connector_packages_allowed")["source_checkout"]

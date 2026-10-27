@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import hashlib
 
-from sqlalchemy import text
+from sqlalchemy import TextClause, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 __all__ = [
@@ -52,18 +52,22 @@ CONNECTOR_USAGE_LOCK_KEY: int = (
 )
 
 
-async def _lock(session: AsyncSession, function: str) -> None:
+_SHARED_LOCK = text("SELECT pg_advisory_xact_lock_shared(:k)")
+_EXCLUSIVE_LOCK = text("SELECT pg_advisory_xact_lock(:k)")
+
+
+async def _lock(session: AsyncSession, statement: TextClause) -> None:
     conn = await session.connection()
     if conn.dialect.name != "postgresql":
         return
-    await session.execute(text(f"SELECT {function}(:k)"), {"k": CONNECTOR_USAGE_LOCK_KEY})
+    await session.execute(statement, {"k": CONNECTOR_USAGE_LOCK_KEY})
 
 
 async def lock_connector_usage_shared(session: AsyncSession) -> None:
     """Take the shared lock in *session*'s transaction (a writer of a new user)."""
-    await _lock(session, "pg_advisory_xact_lock_shared")
+    await _lock(session, _SHARED_LOCK)
 
 
 async def lock_connector_usage_exclusive(session: AsyncSession) -> None:
     """Take the exclusive lock in *session*'s transaction (a connector delete)."""
-    await _lock(session, "pg_advisory_xact_lock")
+    await _lock(session, _EXCLUSIVE_LOCK)

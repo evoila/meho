@@ -10,7 +10,8 @@ Two shapes live here:
   kinds (server, application, Kubernetes workload). Every record has a
   stable ``source_id``. Units are fixed by the field name (``_mb``, ``_gb``,
   ``_mb_per_s``, ``_millicores``). A field that is unknown is ``None`` and
-  says why in ``missing``; it is never ``0``.
+  says why in ``missing``, nested fields and list items included; it is
+  never ``0``.
 * The **assessment result**: every number (a :class:`Figure`) carries its
   inputs, the assumptions it used and the calculation version.
 
@@ -23,6 +24,7 @@ operations' response schemas.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from datetime import date, datetime
 from typing import Annotated, Any, Final, Literal
 
@@ -56,6 +58,7 @@ __all__ = [
     "WorkloadVolume",
     "assessment_result_json_schema",
     "inventory_json_schema",
+    "missing_reason",
 ]
 
 #: The inventory shape version this code reads and writes. A reader refuses
@@ -81,6 +84,31 @@ class _Shape(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _null_paths(value: Any, prefix: str = "") -> Iterator[str]:
+    """Dotted path of every null field under *value*, nested models and list items included.
+
+    A list item gets its index as a path part: ``disks.0.used_gb``.
+    """
+    if isinstance(value, BaseModel):
+        for name in type(value).model_fields:
+            yield from _null_paths(getattr(value, name), f"{prefix}.{name}" if prefix else name)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _null_paths(item, f"{prefix}.{index}")
+    elif value is None:
+        yield prefix
+
+
+def missing_reason(missing: Mapping[str, str], path: str) -> str | None:
+    """The reason for the null field at dotted *path*: its own entry, or the nearest parent's."""
+    parts = path.split(".")
+    for end in range(len(parts), 0, -1):
+        reason = missing.get(".".join(parts[:end]))
+        if reason:
+            return reason
+    return None
+
+
 class _Record(_Shape):
     """Shared rule of every record: an unknown field says why it is unknown."""
 
@@ -96,18 +124,17 @@ class _Record(_Shape):
     missing: dict[str, MissingReason] = Field(
         default_factory=dict,
         description=(
-            "Field name to the reason it is unknown. Every top-level field that is "
-            "null must be listed. Nested fields may be listed too, for example "
-            "'os.version'."
+            "Dotted field path to the reason it is unknown. Every field that is null "
+            "must be covered, nested fields and list items too: 'cores', 'os.version', "
+            "'disks.0.used_gb', 'utilization.cpu_percent.average'. A parent path "
+            "('disks.0', 'disks') covers every unknown field below it."
         ),
     )
 
     @model_validator(mode="after")
     def _null_fields_have_a_reason(self) -> _Record:
         unexplained = [
-            name
-            for name in type(self).model_fields
-            if getattr(self, name) is None and name not in self.missing
+            path for path in _null_paths(self) if missing_reason(self.missing, path) is None
         ]
         if unexplained:
             raise ValueError(
@@ -196,7 +223,9 @@ class ServerRecord(_Record):
 
     kind: Literal["server"] = "server"
     identity_hints: IdentityHints = Field(default_factory=IdentityHints)
-    name: str = Field(min_length=1, description="Server name as the source shows it.")
+    name: str | None = Field(
+        default=None, min_length=1, description="Server name as the source shows it."
+    )
     server_type: Literal["virtual", "physical"] | None = None
     hypervisor: str | None = Field(default=None, description="For example 'VMware' or 'Hyper-V'.")
     cores: int | None = Field(default=None, ge=1, description="Processor cores allocated.")

@@ -43,7 +43,8 @@ The model checks that `counts` match the records and that no
 Record kinds:
 
 - `ServerRecord` (`kind="server"`): `source_id`, `identity_hints`
-  (BIOS UUID, MAC addresses, host name, all lower case), `name`,
+  (BIOS UUID, MAC addresses, host name, all lower case), `name` (or
+  `null` with a reason),
   `server_type`, `hypervisor`, `cores`, `memory_configured_mb`,
   `memory_assigned_mb`, `disks` (size, used space, thin, shared, raw
   mapping, independent, and read/write speeds), `snapshot_count`, `os`
@@ -61,11 +62,14 @@ Rules every record follows:
 
 - **Units are in the field name**: `_mb`, `_gb`, `_mb_per_s`,
   `_millicores`, `_percent`.
-- **Unknown is `null`, never `0`.** Every top-level field that is `null`
-  must be named in `missing` with a reason (`not_reported_by_source`,
+- **Unknown is `null`, never `0`.** Every field that is `null` must be
+  covered in `missing` with a reason (`not_reported_by_source`,
   `no_permission`, `powered_off`, `not_measured`, `collection_failed`,
-  `not_supported`). The model refuses a record that breaks this rule.
-  Nested fields (for example `os.version`) may be listed too.
+  `not_supported`). This includes nested fields and list items: the key
+  is the dotted path, for example `os.version`, `disks.0.used_gb` or
+  `utilization.cpu_percent.average`. A parent path (`disks.0`, `disks`)
+  covers every unknown field below it. The model refuses a record that
+  breaks this rule.
 - Unknown fields are refused (`extra="forbid"`), so a typo in a producer
   fails at once.
 
@@ -114,10 +118,18 @@ handle_ids)`:
 
 Group `inventory`, `safe`, `requires_approval: false`. It is a typed
 operation, not a multi-step one: it runs no other operation, it only reads
-stored results. In: `inventory_handles` (1 to 20). Out: `csv` (the file
-text), `row_count`, `columns`, `left_out`, `renamed`, `skipped_records`,
-`notes`, `sources`. A large result comes back as a handle; read the file
-with `result_query` and the path `/csv`.
+stored results. In: `inventory_handles` (1 to 20). Out: `csv_lines` (the
+file, one item per line without the line end, header first), `row_count`,
+`columns`, `left_out`, `renamed`, `skipped_records`, `notes`, `sources`.
+Join `csv_lines` with CRLF to get the file.
+
+The file is a list of lines on purpose. A large result comes back as a
+handle, and `result_query` returns an array in pages (`offset` and
+`limit`, up to 500 items a page) but a string only whole, under one output
+limit (256 KiB by default). A file of 10,000 servers is over that limit as
+one string. Read the lines in pages with `result_query`, the path
+`/csv_lines` and `offset` / `limit`; each page holds rows of
+`{"value": <line>}`.
 
 The mapping (`inventory_to_csv`):
 
@@ -130,21 +142,25 @@ The mapping (`inventory_to_csv`):
 - Only servers go into the file. Other kinds are counted in
   `skipped_records`.
 - Left out, with the reason: a server without name, cores, memory or OS
-  name (`missing_required_field`, with the reasons from `missing`); a
+  name (`missing_required_field`, with the reasons from `missing`; a name
+  or OS name that is empty after cleaning counts as missing); a
   server already in the file through another source, found by BIOS UUID
   (`same_machine_as`); servers past 20,000 (`over_file_limit`). Required
   values are checked first, so when one record of a machine lacks a value,
   a complete record of the same machine from another source goes in.
 - Names must be unique, because Azure Migrate updates a server imported
-  again with the same name. A repeated name (case does not count) gets its
-  `source_id` added, and `renamed` says so.
+  again with the same name. A name that another server has, or that an
+  earlier server already got (`sample` renamed to `sample (x:1)` takes the
+  name of a server called `sample (x:1)`), gets its `source_id` added, then
+  a counter while it is still taken. Case does not count. `renamed` says so.
 - Values are only rounded: the inventory units already match the template.
   Utilization columns take the p95 value. Unknown values stay empty.
 - Text from source systems: line breaks become spaces, and a cell that
   starts with `=`, `+`, `-` or `@` gets a leading `'`, so a spreadsheet
   does not read it as a formula. A changed name is listed in `renamed`
   with `cleaned_text`.
-- Line ends are CRLF (RFC 4180). The file has no byte order mark.
+- Line ends are CRLF (RFC 4180); `LINE_END` in `azure_migrate_csv.py`.
+  The file has no byte order mark.
 
 ## Dependencies
 

@@ -16,14 +16,16 @@ Rules:
 * Only server records go into the file. Applications and Kubernetes
   workloads are counted in ``skipped_records``.
 * A server without a required value (name, cores, memory, OS name) is left
-  out and listed with the reasons from its ``missing`` map.
+  out and listed with the reasons from its ``missing`` map. The two text
+  values count as missing when they are empty after cleaning.
 * A server whose BIOS UUID belongs to a record already in the file (one
   machine read through two sources) is left out and names that record.
   Required values are checked first, so a complete second record still
   goes in when the first one lacks a value.
 * Server names must be unique, because Azure Migrate updates a server
-  that is imported again with the same name. A repeated name gets its
-  ``source_id`` added, and ``renamed`` says so.
+  that is imported again with the same name. A name that another server
+  has, or that an earlier server already got, gets its ``source_id``
+  added, then a counter while it is still taken. ``renamed`` says so.
 * At most 20,000 servers fit in one file and in one Azure Migrate project.
   Servers past that are left out with ``over_file_limit``.
 * Units in the inventory already match the template (MB, GB, MB per
@@ -33,6 +35,10 @@ Rules:
 * Text comes from source systems. Line breaks become spaces, and a cell
   that starts with ``=``, ``+``, ``-`` or ``@`` gets a leading ``'`` so a
   spreadsheet does not read it as a formula.
+* The file comes back as ``csv_lines``, one item per line, so a stored
+  result pages it: ``result_query`` returns an array in bounded pages but
+  a string only whole, and a file of 10,000 servers is over the read
+  limit. The caller joins the lines with CRLF.
 """
 
 from __future__ import annotations
@@ -49,11 +55,13 @@ from meho_backplane.connectors.migration.contracts import (
     InventoryRecord,
     ServerRecord,
     Stat,
+    missing_reason,
 )
 from meho_backplane.connectors.migration.inventory_load import Duplicate
 
 __all__ = [
     "BASE_COLUMNS",
+    "LINE_END",
     "MAX_DISKS",
     "MAX_SERVERS_PER_FILE",
     "MIN_DISK_GROUPS",
@@ -67,6 +75,9 @@ __all__ = [
 MAX_SERVERS_PER_FILE: Final[int] = 20_000
 MAX_DISKS: Final[int] = 20
 MIN_DISK_GROUPS: Final[int] = 2
+
+#: Line end of the file (RFC 4180). Join ``csv_lines`` with it.
+LINE_END: Final[str] = "\r\n"
 
 #: Microsoft's template columns before the per-disk groups, in its order.
 BASE_COLUMNS: Final[tuple[str, ...]] = (
@@ -116,7 +127,7 @@ class LeftOutServer(BaseModel):
     """A server record that is not in the file, and why."""
 
     source_id: str = Field(description="The record's source_id.")
-    name: str = Field(description="The record's name.")
+    name: str | None = Field(description="The record's name, when it has one.")
     reason: LeftOutReason = Field(description="Why it is not in the file.")
     missing: dict[str, str] = Field(
         default_factory=dict,
@@ -142,7 +153,13 @@ class RenamedServer(BaseModel):
 class CsvExport(BaseModel):
     """The CSV file and what was changed or left out."""
 
-    csv: str = Field(description="The file text, with a header row, in Azure Migrate's format.")
+    csv_lines: list[str] = Field(
+        description=(
+            "The file in Azure Migrate's format, one item per line without the line end: "
+            "the header row first, then one line per server. Join the items with CRLF to "
+            "get the file. A stored result pages this list with result_query."
+        )
+    )
     row_count: int = Field(description="Servers in the file (header not counted).")
     columns: list[str] = Field(description="The header row.")
     left_out: list[LeftOutServer] = Field(description="Servers not in the file.")
@@ -187,19 +204,22 @@ def _text(value: str | None) -> str:
 
 
 def _required_missing(server: ServerRecord) -> dict[str, str]:
-    checks = {
+    """The required values the server lacks, with the reason for each.
+
+    Text values count after cleaning, so a name of only spaces is missing.
+    A value without a reason in ``missing`` gets ``not_reported_by_source``.
+    """
+    checks: dict[str, str | int | None] = {
+        "name": _text(server.name),
         "cores": server.cores,
         "memory_configured_mb": server.memory_configured_mb,
-        "os.name": server.os.name if server.os is not None else None,
+        "os.name": _text(server.os.name) if server.os is not None else None,
     }
-    missing: dict[str, str] = {}
-    for field_name, value in checks.items():
-        if value is None:
-            reason = server.missing.get(field_name) or server.missing.get(
-                field_name.split(".", 1)[0], "not_reported_by_source"
-            )
-            missing[field_name] = reason
-    return missing
+    return {
+        field_name: missing_reason(server.missing, field_name) or "not_reported_by_source"
+        for field_name, value in checks.items()
+        if value is None or value == ""
+    }
 
 
 def _storage_in_use(server: ServerRecord) -> str:
@@ -295,28 +315,48 @@ def _select(
 
 
 def _unique_names(servers: list[ServerRecord]) -> tuple[list[str], list[RenamedServer]]:
+    """One file name per kept server, unique without regard to case.
+
+    A name that another server has, or that an earlier server already got
+    (``sample`` renamed to ``sample (x:1)`` takes the name of a server called
+    ``sample (x:1)``), gets the source id added. While the result is still
+    taken, a counter follows. The order of *servers* decides who keeps a name.
+    """
     cleaned = [_text(server.name) for server in servers]
     counts = Counter(name.casefold() for name in cleaned)
+    taken: set[str] = set()
     names: list[str] = []
     renamed: list[RenamedServer] = []
     for server, name in zip(servers, cleaned, strict=True):
         reasons: list[Literal["repeated_name", "cleaned_text"]] = []
         if name != server.name:
             reasons.append("cleaned_text")
-        if counts[name.casefold()] > 1:
-            name = f"{name} ({_text(server.source_id)})"
+        final = name
+        if counts[name.casefold()] > 1 or final.casefold() in taken:
+            final = f"{name} ({_text(server.source_id)})"
             reasons.append("repeated_name")
-        names.append(name)
+        counter = 2
+        while final.casefold() in taken:
+            final = f"{name} ({_text(server.source_id)}) ({counter})"
+            counter += 1
+        taken.add(final.casefold())
+        names.append(final)
         if reasons:
             renamed.append(
                 RenamedServer(
                     source_id=server.source_id,
-                    original_name=server.name,
-                    csv_name=name,
+                    original_name=server.name or name,
+                    csv_name=final,
                     reasons=reasons,
                 )
             )
     return names, renamed
+
+
+def _csv_line(fields: list[str]) -> str:
+    buffer = io.StringIO()
+    csv.writer(buffer, lineterminator="").writerow(fields)
+    return buffer.getvalue()
 
 
 def inventory_to_csv(
@@ -343,13 +383,12 @@ def inventory_to_csv(
         for server in kept
         if len(server.disks or ()) > MAX_DISKS
     ]
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(columns)
-    for server, name in zip(kept, names, strict=True):
-        writer.writerow(_row(server, name, disk_groups))
+    lines = [_csv_line(columns)]
+    lines += [
+        _csv_line(_row(server, name, disk_groups)) for server, name in zip(kept, names, strict=True)
+    ]
     return CsvExport(
-        csv=buffer.getvalue(),
+        csv_lines=lines,
         row_count=len(kept),
         columns=columns,
         left_out=left_out,

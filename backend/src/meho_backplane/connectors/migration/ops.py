@@ -116,15 +116,17 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
         ),
     },
     "output_shape": (
-        "{'csv': <file text>, 'row_count', 'columns', 'left_out': [{source_id, name, "
-        "reason, missing, same_as}], 'renamed': [{source_id, original_name, csv_name, "
-        "reasons}], 'skipped_records': {kind: count}, 'notes', 'sources'}. At most "
+        "{'csv_lines': [<header line>, <one line per server>, ...], 'row_count', "
+        "'columns', 'left_out': [{source_id, name, reason, missing, same_as}], "
+        "'renamed': [{source_id, original_name, csv_name, reasons}], "
+        "'skipped_records': {kind: count}, 'notes', 'sources'}. At most "
         f"{MAX_SERVERS_PER_FILE} servers per file."
     ),
     "next_step": (
         "Show the left-out and renamed servers to the user before the file is "
-        "imported. When the result came back as a handle, read the file with "
-        "result_query and path '/csv'."
+        "imported. Join csv_lines with CRLF to get the file. When the result came "
+        "back as a handle, read the lines in pages with result_query, path "
+        "'/csv_lines' and offset/limit; each page returns rows of {'value': <line>}."
     ),
 }
 

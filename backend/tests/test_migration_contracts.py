@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import csv
 import io
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -22,6 +23,7 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 
+import meho_backplane.operations.result_query as rq
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.migration import azure_migrate_csv
 from meho_backplane.connectors.migration import ops as migration_ops
@@ -42,6 +44,11 @@ from meho_backplane.connectors.migration.inventory_load import (
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.delete_names import write_word_in_op_id
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.operations.result_query import (
+    ResultQueryOutputTooLargeError,
+    ResultQuerySpec,
+    run_result_query,
+)
 from meho_backplane.settings import get_settings
 
 GOLDEN_CSV = Path(__file__).parent / "data" / "migration_azure_migrate_golden.csv"
@@ -178,7 +185,16 @@ def _linux_vm() -> dict[str, Any]:
         "cores": 2,
         "memory_configured_mb": 8192,
         "memory_assigned_mb": 8192,
-        "disks": [{"label": "Hard disk 1", "size_gb": 40, "thin": False}],
+        "disks": [
+            {
+                "label": "Hard disk 1",
+                "size_gb": 40,
+                "thin": False,
+                "shared": False,
+                "raw_mapping": False,
+                "independent": False,
+            }
+        ],
         "snapshot_count": 0,
         "os": {"name": "Ubuntu Linux", "version": "22.04", "family": "linux"},
         "boot_type": "bios",
@@ -187,7 +203,16 @@ def _linux_vm() -> dict[str, Any]:
         "nics": [{"mac_address": "00:50:56:aa:00:02", "ip_addresses": ["192.0.2.12"]}],
         "utilization": None,
         "collected_at": _TIME,
-        "missing": {"utilization": "not_measured", "os.architecture": "not_reported_by_source"},
+        "missing": {
+            "utilization": "not_measured",
+            "os.architecture": "not_reported_by_source",
+            "nics.0.network": "not_reported_by_source",
+            "disks.0.used_gb": "not_reported_by_source",
+            "disks.0.read_ops_per_s": "not_measured",
+            "disks.0.write_ops_per_s": "not_measured",
+            "disks.0.read_mb_per_s": "not_measured",
+            "disks.0.write_mb_per_s": "not_measured",
+        },
     }
 
 
@@ -219,6 +244,9 @@ def _linux_guest_view() -> dict[str, Any]:
             "snapshot_count": "not_supported",
             "secure_boot": "no_permission",
             "utilization": "not_measured",
+            "os.architecture": "not_reported_by_source",
+            "nics.0.network": "not_reported_by_source",
+            "disks.0": "not_supported",
         },
     }
 
@@ -261,7 +289,7 @@ def _k8s_workload() -> dict[str, Any]:
         ],
         "nodes": ["worker-1", "worker-2"],
         "collected_at": _TIME,
-        "missing": {"volumes.0.size_gb": "not_supported"},
+        "missing": {"volumes.0": "not_supported"},
     }
 
 
@@ -335,6 +363,45 @@ def test_zero_cores_or_memory_is_refused() -> None:
         zero[field] = 0
         with pytest.raises(ValidationError, match="greater than or equal to 1"):
             ServerRecord.model_validate(zero)
+
+
+def test_nested_null_fields_need_a_reason() -> None:
+    cases: dict[str, Callable[[dict[str, Any]], object]] = {
+        "os.version": lambda r: r["os"].update(version=None),
+        "disks.0.used_gb": lambda r: r["disks"][0].update(used_gb=None),
+        "nics.0.network": lambda r: r["missing"].pop("nics.0.network"),
+        "utilization.cpu_percent.average": lambda r: r["utilization"]["cpu_percent"].update(
+            average=None
+        ),
+        "identity_hints.bios_uuid": lambda r: r["identity_hints"].update(bios_uuid=None),
+    }
+    for path, make_null in cases.items():
+        record = _windows_vm()
+        make_null(record)
+        with pytest.raises(ValidationError, match=rf"\['{path}'\] are null"):
+            ServerRecord.model_validate(record)
+        # The exact path explains it; so does a parent path.
+        for reason_path in (path, path.rsplit(".", 1)[0]):
+            explained = _windows_vm()
+            make_null(explained)
+            explained["missing"][reason_path] = "not_reported_by_source"
+            ServerRecord.model_validate(explained)
+
+    workload = _k8s_workload()
+    del workload["missing"]["volumes.0"]
+    with pytest.raises(
+        ValidationError, match=r"\['volumes.0.size_gb', 'volumes.0.storage_class'\]"
+    ):
+        KubernetesWorkloadRecord.model_validate(workload)
+
+
+def test_server_name_may_be_unknown_with_a_reason() -> None:
+    unnamed = _linux_vm()
+    unnamed["name"] = None
+    with pytest.raises(ValidationError, match=r"\['name'\] are null"):
+        ServerRecord.model_validate(unnamed)
+    unnamed["missing"]["name"] = "no_permission"
+    assert ServerRecord.model_validate(unnamed).name is None
 
 
 def test_kubernetes_workload_validates() -> None:
@@ -554,11 +621,16 @@ def _golden_export() -> azure_migrate_csv.CsvExport:
     return inventory_to_csv(records, duplicates)
 
 
+def _file_text(export: azure_migrate_csv.CsvExport) -> str:
+    return azure_migrate_csv.LINE_END.join([*export.csv_lines, ""])
+
+
 def test_golden_csv() -> None:
     export = _golden_export()
     # The file uses CRLF line ends (RFC 4180); the golden copy is kept with LF.
-    assert export.csv.count("\r\n") == export.row_count + 1
-    assert export.csv.replace("\r\n", "\n") == GOLDEN_CSV.read_text(encoding="utf-8")
+    assert len(export.csv_lines) == export.row_count + 1
+    assert not any("\n" in line or "\r" in line for line in export.csv_lines)
+    assert _file_text(export).replace("\r\n", "\n") == GOLDEN_CSV.read_text(encoding="utf-8")
     assert export.row_count == 2
     assert export.skipped_records == {"application": 1, "kubernetes_workload": 1}
     assert [(s.source_id, s.reason, s.same_as) for s in export.left_out] == [
@@ -589,7 +661,37 @@ def test_csv_leaves_out_servers_without_required_values() -> None:
         {"cores": "no_permission"},
         {"os.name": "powered_off"},
     ]
-    assert export.csv.splitlines()[0].startswith("*Server name,")
+    assert export.csv_lines == [",".join(export.columns)]
+
+
+def test_csv_leaves_out_servers_with_an_empty_or_unknown_name_or_os_name() -> None:
+    blank_name = _linux_vm()
+    blank_name["name"] = " \n "
+    unknown_name = _windows_vm()
+    unknown_name["source_id"] = "vmware:x:unnamed"
+    unknown_name["identity_hints"]["bios_uuid"] = None
+    unknown_name["missing"]["identity_hints.bios_uuid"] = "not_reported_by_source"
+    unknown_name["name"] = None
+    unknown_name["missing"]["name"] = "no_permission"
+    blank_os = _windows_vm()
+    blank_os["source_id"] = "vmware:x:blank-os"
+    blank_os["identity_hints"]["bios_uuid"] = None
+    blank_os["missing"]["identity_hints.bios_uuid"] = "not_reported_by_source"
+    blank_os["os"]["name"] = "  "
+    export = inventory_to_csv(
+        [
+            ServerRecord.model_validate(r)
+            for r in (blank_name, unknown_name, blank_os, _windows_vm())
+        ]
+    )
+
+    assert export.row_count == 1
+    assert export.csv_lines[1].startswith("app-win-01,192.0.2.11,4,16384,Windows Server 2019,")
+    assert [(s.source_id, s.name, s.missing) for s in export.left_out] == [
+        (blank_name["source_id"], " \n ", {"name": "not_reported_by_source"}),
+        ("vmware:x:unnamed", None, {"name": "no_permission"}),
+        ("vmware:x:blank-os", "app-win-01", {"os.name": "not_reported_by_source"}),
+    ]
 
 
 def test_csv_keeps_a_machine_whose_first_record_lacks_a_required_value() -> None:
@@ -606,7 +708,7 @@ def test_csv_keeps_a_machine_whose_first_record_lacks_a_required_value() -> None
 
     # The Linux machine has one row, built from the complete guest OS record.
     assert export.row_count == 2
-    rows = list(csv.DictReader(io.StringIO(export.csv)))
+    rows = list(csv.DictReader(io.StringIO(_file_text(export))))
     assert [row["*Server name"] for row in rows] == ["app-win-01", "db-lnx-01"]
     assert (rows[1]["*Memory (In MB)"], rows[1]["*OS name"]) == ("7976", "Ubuntu Linux")
     assert [(s.source_id, s.reason, s.same_as) for s in export.left_out] == [
@@ -621,10 +723,11 @@ def test_csv_makes_repeated_names_unique_and_cleans_text() -> None:
     tricky = _windows_vm()
     tricky["source_id"] = "vmware:x:tricky"
     tricky["identity_hints"]["bios_uuid"] = None
+    tricky["missing"]["identity_hints.bios_uuid"] = "not_reported_by_source"
     tricky["name"] = "=cmd|'/c calc'!A1\nnext"
     export = inventory_to_csv([ServerRecord.model_validate(r) for r in (first, second, tricky)])
 
-    names = [row[0] for row in csv.reader(io.StringIO(export.csv))][1:]
+    names = [row[0] for row in csv.reader(io.StringIO(_file_text(export)))][1:]
     assert names == [
         f"db-lnx-01 ({first['source_id']})",
         f"DB-LNX-01 ({second['source_id']})",
@@ -635,6 +738,49 @@ def test_csv_makes_repeated_names_unique_and_cleans_text() -> None:
         ["repeated_name"],
         ["cleaned_text"],
     ]
+
+
+def _named(name: str, source_id: str) -> ServerRecord:
+    record = _windows_vm()
+    record["source_id"] = source_id
+    record["identity_hints"]["bios_uuid"] = None
+    record["missing"]["identity_hints.bios_uuid"] = "not_reported_by_source"
+    record["name"] = name
+    return ServerRecord.model_validate(record)
+
+
+def test_csv_names_stay_unique_when_a_renamed_name_is_already_taken() -> None:
+    servers = [
+        _named("sample", "x:1"),
+        _named("sample", "x:2"),
+        _named("sample (x:1)", "x:3"),
+        _named("Sample (X:1) (x:3)", "x:4"),
+        _named("other", "y:A"),
+        _named("other", "y:a"),
+    ]
+
+    export = inventory_to_csv(servers)
+
+    names = [line.split(",", 1)[0] for line in export.csv_lines[1:]]
+    assert names == [
+        "sample (x:1)",
+        "sample (x:2)",
+        "sample (x:1) (x:3)",
+        "Sample (X:1) (x:3) (x:4)",
+        "other (y:A)",
+        "other (y:a) (2)",
+    ]
+    assert len({name.casefold() for name in names}) == len(names)
+    assert [(r.source_id, r.reasons) for r in export.renamed] == [
+        ("x:1", ["repeated_name"]),
+        ("x:2", ["repeated_name"]),
+        ("x:3", ["repeated_name"]),
+        ("x:4", ["repeated_name"]),
+        ("y:A", ["repeated_name"]),
+        ("y:a", ["repeated_name"]),
+    ]
+    # The same input gives the same names.
+    assert inventory_to_csv(servers).csv_lines == export.csv_lines
 
 
 def test_csv_stops_at_the_file_limit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -663,7 +809,8 @@ async def test_inventory_csv_operation(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     assert result["row_count"] == 2
-    assert result["csv"].startswith("*Server name,IP addresses,*Cores,")
+    assert result["csv_lines"][0].startswith("*Server name,IP addresses,*Cores,")
+    assert len(result["csv_lines"]) == 3
     assert result["sources"] == [
         {
             "handle_id": handle,
@@ -673,6 +820,94 @@ async def test_inventory_csv_operation(monkeypatch: pytest.MonkeyPatch) -> None:
         }
     ]
     assert set(migration_ops.MIGRATION_INVENTORY_CSV_RESPONSE_SCHEMA["properties"]) >= set(result)
+
+
+def _small_server(number: int) -> dict[str, Any]:
+    return {
+        "kind": "server",
+        "source_id": f"vmware:big:{number:05d}",
+        "identity_hints": {
+            "bios_uuid": f"4203ffff-0000-4000-8000-{number:012d}",
+            "host_name": f"srv-{number:05d}",
+        },
+        "name": f"srv-{number:05d}",
+        "server_type": "virtual",
+        "hypervisor": "VMware",
+        "cores": 2 + number % 6,
+        "memory_configured_mb": 4096 * (1 + number % 4),
+        "memory_assigned_mb": 4096 * (1 + number % 4),
+        "disks": [],
+        "snapshot_count": 0,
+        "os": {
+            "name": "Ubuntu Linux",
+            "version": "22.04",
+            "family": "linux",
+            "architecture": "x64",
+        },
+        "boot_type": "bios",
+        "secure_boot": False,
+        "power_state": "on",
+        "nics": [
+            {
+                "mac_address": None,
+                "ip_addresses": [f"10.{number // 256 % 256}.{number % 256}.7"],
+                "network": "vm-net",
+            }
+        ],
+        "utilization": None,
+        "collected_at": _TIME,
+        "missing": {"utilization": "not_measured", "nics.0.mac_address": "not_reported_by_source"},
+    }
+
+
+async def test_large_csv_is_read_back_in_pages_through_result_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 10,000-server file is over the read limit as one string; as lines it pages."""
+    store = ResultHandleStore(_MemoryValkey())  # type: ignore[arg-type]
+    monkeypatch.setattr(rq, "get_result_handle_store", lambda: store)
+    tenant = uuid4()
+    export = inventory_to_csv(
+        [ServerRecord.model_validate(_small_server(n)) for n in range(10_000)]
+    )
+    assert export.row_count == 10_000
+    assert len(_file_text(export)) > get_settings().result_query_max_output_bytes
+
+    # Stored the way a dispatch stores it: default thresholds, real reducer.
+    _reduced, handle = await JsonFluxReducer(store=store).reduce(
+        export.model_dump(mode="json"),
+        None,
+        context={
+            "tenant_id": str(tenant),
+            "operator_sub": _OPERATOR_SUB,
+            "op_id": migration_ops.MIGRATION_INVENTORY_CSV_OP_ID,
+        },
+    )
+    assert handle is not None
+    assert handle.fetch_more is not None
+    assert handle.fetch_more.drill_in.available
+    # The whole document does not fit in one read; the lines page.
+    with pytest.raises(ResultQueryOutputTooLargeError):
+        await run_result_query(_operator(tenant), handle.handle_id, ResultQuerySpec(path=""))
+
+    lines: list[str] = []
+    pages = 0
+    while True:
+        page = await run_result_query(
+            _operator(tenant),
+            handle.handle_id,
+            ResultQuerySpec(path="/csv_lines"),
+            offset=len(lines),
+        )
+        pages += 1
+        lines += [row["value"] for row in page["rows"]]
+        if len(lines) >= page["total_rows"]:
+            break
+
+    assert page["total_rows"] == 10_001
+    assert pages == 201
+    assert lines == export.csv_lines
+    assert _file_text(export).startswith("*Server name,")
 
 
 def test_operation_id_has_no_write_word() -> None:

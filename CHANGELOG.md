@@ -108,19 +108,6 @@ connector-related release-notes line.
   file also has the input, forward and output chains of the MEHO
   appliance. On a form-2 machine their policy is accept and they have no
   drop rule, so they change nothing. The appliance build sets them to drop.
-- The form-2 install now runs the built-in Kubernetes (RKE2) with RKE2's
-  CIS profile on (#4636, ADR 0009: closed by default). The profile is
-  RKE2's built-in setting for the CIS Kubernetes Benchmark, a common
-  hardening standard. Before RKE2 starts, the script creates the `etcd`
-  user and group, copies RKE2's own kernel settings file to
-  `/etc/sysctl.d/60-rke2-cis.conf` and loads it. RKE2's settings get
-  `profile: cis` and a pod security file. The "restricted" pod security
-  rule then applies in every namespace, the MEHO namespace too. RKE2's own
-  exempt namespaces stay, and only one is added: `local-path-storage`,
-  because the storage helper must use folders of the host for the volumes.
-  RKE2's own network policies for the profile already let the console
-  traffic in to Traefik, so the console still loads. A second run of the
-  script changes nothing.
 
 ## [0.37.0] - 2026-10-24
 

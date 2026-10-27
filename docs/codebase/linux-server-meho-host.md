@@ -227,6 +227,11 @@ with `status` one of `ok`, `warn` and `fail`. `hint` is empty on an ok line.
    machine is never without a firewall (ADR 0009). The last line names the
    command that removes them, for when the customer's own firewall is
    ready.
+6. The host steps of RKE2's CIS profile stay too (#4636): the kernel
+   settings file `/etc/sysctl.d/60-rke2-cis.conf` and the `etcd` user and
+   group. RKE2's script removes `/etc/rancher/rke2`, so the pod security
+   file `meho-pss.yaml` goes with it. A later install uses the two that
+   stay as they are.
 
 ## Testing
 

@@ -14,12 +14,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.azure._polling import OperationReference, read_operation_state
 from meho_backplane.connectors.azure.session import AzureTargetLike
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.azure.connector import AzureConnector
 
-__all__ = ["azure_about_impl"]
+__all__ = ["azure_about_impl", "azure_operation_status_impl"]
 
 
 async def azure_about_impl(
@@ -46,3 +47,20 @@ async def azure_about_impl(
         "app_id": login.app_id,
         "object_id": login.object_id,
     }
+
+
+async def azure_operation_status_impl(
+    connector: AzureConnector,
+    operator: Operator,
+    target: AzureTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``azure.operation.status``: poll a long-running operation once.
+
+    Takes the ``operation`` reference an Azure write returned and reads the
+    operation's state with one GET on its poll URL, after the same URL check
+    as every poll. Never sends the write again.
+    """
+    reference = OperationReference.from_dict(params.get("operation"))
+    state = await read_operation_state(connector, target, reference, operator=operator)
+    return state.as_dict(reference)

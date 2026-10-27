@@ -52,6 +52,8 @@ AZURE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "and state), its tenant and cloud, and the app ID and object ID of the login "
         "MEHO uses. Use it first for a new target, after a secret change, or when "
         "another Azure read fails with an access or login error. "
+        "azure.location.list lists the Azure regions the subscription can use, with "
+        "their geography and paired regions; use it to check a region name. "
         "azure.operation.status reads the state of a long-running Azure operation "
         "once, from the operation reference an Azure write returned; use it after a "
         "lost answer or a restart instead of sending the write again. Read-only."
@@ -104,6 +106,71 @@ _ABOUT_RESPONSE: Final[dict[str, Any]] = {
 }
 
 _READ_TAGS: Final[tuple[str, ...]] = ("read-only", "azure")
+
+_LOCATION_ROW: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": _TEXT_OR_NULL,
+            "description": "The region name Azure uses in requests, for example westeurope.",
+        },
+        "display_name": {
+            "type": _TEXT_OR_NULL,
+            "description": "The region name for people, for example West Europe.",
+        },
+        "region_type": {
+            "type": _TEXT_OR_NULL,
+            "description": "Physical (a real data center region) or Logical.",
+        },
+        "geography": {
+            "type": _TEXT_OR_NULL,
+            "description": (
+                "The Azure geography of the region, for example Europe, Germany or United States."
+            ),
+        },
+        "geography_group": {
+            "type": _TEXT_OR_NULL,
+            "description": (
+                "The wider group the region belongs to, for example Europe, US or "
+                "Asia Pacific. Azure calls it geographyGroup and may change it."
+            ),
+        },
+        "paired_regions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "The names of the regions paired with this one, often one.",
+        },
+    },
+    "required": ["name", "paired_regions"],
+}
+
+_LOCATION_LIST_RESPONSE: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "value": {
+            "type": "array",
+            "items": _LOCATION_ROW,
+            "description": "One row per region. A long list comes back as a stored-result link.",
+        },
+        "truncated": {
+            "type": "boolean",
+            "description": "True when MEHO stopped reading pages at one of its limits.",
+        },
+        "omission": {
+            "type": _TEXT_OR_NULL,
+            "description": "What was left out and how to narrow the request, when truncated.",
+        },
+        "omission_kind": {
+            "type": _TEXT_OR_NULL,
+            "description": "Which limit stopped the list: row_limit, page_limit or time_limit.",
+        },
+        "pages_read": {
+            "type": "integer",
+            "description": "How many pages MEHO read from Azure.",
+        },
+    },
+    "required": ["value", "truncated", "pages_read"],
+}
 
 _EXAMPLE_POLL_URL: Final[str] = (
     "https://management.azure.com/subscriptions/00000000-0000-0000-0000-000000000000"
@@ -223,6 +290,24 @@ AZURE_TYPED_OPS: tuple[AzureTypedOp, ...] = (
         safety_level="safe",
         requires_approval=False,
         llm_instructions=AZURE_READ_LLM_INSTRUCTIONS["azure.about"],
+    ),
+    AzureTypedOp(
+        op_id="azure.location.list",
+        handler_attr="location_list",
+        summary="List the Azure regions this subscription can use.",
+        description=(
+            "Reads GET /subscriptions/{subscriptionId}/locations on Azure Resource "
+            "Manager. Returns one row per region: name, display name, region type, "
+            "geography and paired regions. Azure has more than 50 regions, so the "
+            "rows come back as a stored-result link. Read-only."
+        ),
+        parameter_schema=_NO_PARAMS,
+        response_schema=_LOCATION_LIST_RESPONSE,
+        group_key=_GROUP_ACCOUNT,
+        tags=(*_READ_TAGS, "location", "region", "geography"),
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=AZURE_READ_LLM_INSTRUCTIONS["azure.location.list"],
     ),
     AzureTypedOp(
         op_id="azure.operation.status",

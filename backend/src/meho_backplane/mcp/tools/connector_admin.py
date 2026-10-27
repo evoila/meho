@@ -488,8 +488,8 @@ register_mcp_tool(
             "operations yet: 'staged' = at least one group still waits "
             "for review; 'enabled' = reviewed and ready to use; "
             "'disabled' = every group is turned off. With no `status`, "
-            "it lists every connector. Pass `status` only when the user "
-            "asks for connectors in one review state. Read-only; "
+            "it lists every connector. Do not pass `status` unless the "
+            "user asks for connectors in one review state. Read-only; "
             "visible to operator and tenant_admin roles."
         ),
         inputSchema={

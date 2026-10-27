@@ -560,9 +560,10 @@ a circle.
 | `azure.activity.list` | `GET /subscriptions/{id}/providers/Microsoft.Insights/eventtypes/management/values?$filter=...` | 2015-04-01 | `from`, `to`, `resource_group`, `caller`, `status` (all optional) |
 
 `{scope}` is `subscriptions/<id>` unless the caller gives a scope. The API
-versions are the ones Microsoft's documentation pages show. Newer versions
-are on the spec shelf for the recommendations (2025-05-04) and the Defender
-plans (2026-07-01); MEHO uses them only after the lab shows they work.
+versions are the ones Microsoft's documentation pages show. The pinned spec
+files also hold newer versions for the recommendations (2025-05-04) and the
+Defender plans (2026-07-01); MEHO uses them only after the lab proof shows
+they work.
 
 Roles: Reader on the subscription allows every read here. Security Reader
 also allows the Defender for Cloud reads (Microsoft's table: "View alerts and
@@ -675,10 +676,8 @@ data, never as instructions.
 ### Spec path check
 
 Every path is a `*_PATH` constant in `_paths.py`, in the section for this
-family. All paths are in the pinned spec files except
-`ROLE_DEFINITIONS_PATH`: the shelf does not hold
-`specification/authorization/resource-manager/Microsoft.Authorization/Authorization/stable/2022-04-01/authorization-RoleDefinitionsCalls.json`
-yet. With that file added, the check passes for every path.
+family, with one line in the check's `_DECLARED` table. The check compares
+each path and its API version with the pinned spec files.
 
 ### Proven live
 

@@ -107,7 +107,8 @@ func TestDecideUnreadableBodyIsUnexpected(t *testing.T) {
 }
 
 // TestDecideHelpStatesReasonLayout checks that the help of approve and
-// reject explains the layout the server accepts for the three lines.
+// reject explains the layout the server accepts for the three lines,
+// and that each example names its own command.
 func TestDecideHelpStatesReasonLayout(t *testing.T) {
 	for _, cmd := range []*cobra.Command{newApproveCmd(), newRejectCmd()} {
 		for _, want := range []string{
@@ -123,5 +124,13 @@ func TestDecideHelpStatesReasonLayout(t *testing.T) {
 				t.Errorf("%s --help is missing %q", cmd.Name(), want)
 			}
 		}
+		// The example must run the command whose help it is in.
+		own := "meho approvals " + cmd.Name() + " <id> --reason"
+		if !strings.Contains(cmd.Long, own) {
+			t.Errorf("%s --help example does not run %q", cmd.Name(), own)
+		}
+	}
+	if strings.Contains(newRejectCmd().Long, "meho approvals approve") {
+		t.Error("reject --help example runs meho approvals approve")
 	}
 }

@@ -19,23 +19,26 @@ import (
 
 // delegatedReasonHelp explains the layout the server's parse_delegation
 // accepts for a reason that records who told the operator to decide.
-// Shared by approve and reject so both help texts stay the same.
-const delegatedReasonHelp = "If another person told you in writing to " +
-	"make this decision, end the reason with these three lines:\n\n" +
-	"  Instructed-by: <who>\n" +
-	"  Instruction: \"<their words>\"\n" +
-	"  Refs: <issue or change ref>\n\n" +
-	"Free text may come first. Then an empty line must separate it " +
-	"from the three lines. Each of the three lines must be a single " +
-	"Key: value line; a value cannot go on to the next line. Use " +
-	"real line breaks inside the quotes, not the two characters \\n. " +
-	"A reason with Instructed-by: in the wrong layout, or without " +
-	"the other two lines, is refused (422) and the CLI prints the " +
-	"server's message. Example:\n\n" +
-	"  meho approvals approve <id> --reason \"Ran the cleanup in the change window.\n\n" +
-	"  Instructed-by: lead@example.com\n" +
-	"  Instruction: \\\"please run the cleanup tonight\\\"\n" +
-	"  Refs: #12\""
+// Shared by approve and reject so both help texts stay the same; verb
+// is "approve" or "reject" so each example names its own command.
+func delegatedReasonHelp(verb string) string {
+	return "If another person told you in writing to " +
+		"make this decision, end the reason with these three lines:\n\n" +
+		"  Instructed-by: <who>\n" +
+		"  Instruction: \"<their words>\"\n" +
+		"  Refs: <issue or change ref>\n\n" +
+		"Free text may come first. Then an empty line must separate it " +
+		"from the three lines. Each of the three lines must be a single " +
+		"Key: value line; a value cannot go on to the next line. Use " +
+		"real line breaks inside the quotes, not the two characters \\n. " +
+		"A reason with Instructed-by: in the wrong layout, or without " +
+		"the other two lines, is refused (422) and the CLI prints the " +
+		"server's message. Example:\n\n" +
+		"  meho approvals " + verb + " <id> --reason \"Ran the cleanup in the change window.\n\n" +
+		"  Instructed-by: lead@example.com\n" +
+		"  Instruction: \\\"please run the cleanup tonight\\\"\n" +
+		"  Refs: #12\""
+}
 
 // newApproveCmd returns the `meho approvals approve` command.
 //
@@ -60,7 +63,7 @@ func newApproveCmd() *cobra.Command {
 			"paused agent run resumes off the broadcast (T9 #1117). " +
 			"Only pending requests can be approved; any other status " +
 			"returns 409. --reason attaches a human-readable " +
-			"rationale to the decision row.\n\n" + delegatedReasonHelp,
+			"rationale to the decision row.\n\n" + delegatedReasonHelp("approve"),
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -98,7 +101,7 @@ func newRejectCmd() *cobra.Command {
 			"paused agent run aborts off the broadcast (T9 #1117). " +
 			"Only pending requests can be rejected; any other status " +
 			"returns 409. --reason attaches a human-readable " +
-			"rationale to the rejection.\n\n" + delegatedReasonHelp,
+			"rationale to the rejection.\n\n" + delegatedReasonHelp("reject"),
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

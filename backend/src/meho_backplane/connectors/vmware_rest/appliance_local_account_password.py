@@ -53,6 +53,7 @@ __all__ = [
     "DEFAULT_PASSWORD_KEY",
     "PASSWORD_SET_OP_ID",
     "LocalAccountPasswordSecretError",
+    "LocalAccountRefusedError",
     "change_error",
     "password_set_preview",
     "read_new_password",
@@ -79,6 +80,20 @@ class LocalAccountPasswordSecretError(Exception):
 
     The message names the path and the key, never a value.
     """
+
+
+class LocalAccountRefusedError(ConnectorUpstreamError):
+    """vCenter refused a local-account call; the error names the SSO group the account needs.
+
+    ``remediation`` holds the SSO group hint. The dispatcher copies it into
+    the result in full, also when it cuts the message short.
+    """
+
+    def __init__(
+        self, message: str, *, http_status: int, upstream_message: str | None, remediation: str
+    ) -> None:
+        super().__init__(message, http_status=http_status, upstream_message=upstream_message)
+        self.remediation = remediation
 
 
 @dataclass(slots=True)
@@ -238,8 +253,9 @@ def change_error(
     * 401: :func:`sanitized_status_error`, so the dispatcher still logs in
       again and retries once.
     * Any other status: :class:`~meho_backplane.connectors.base.ConnectorUpstreamError`
-      with the status and :func:`safe_vendor_text`. A 403 also names the SSO
-      group the service account needs.
+      with the status and :func:`safe_vendor_text`. A 403 is a
+      :class:`LocalAccountRefusedError` that also names the SSO group the
+      service account needs.
 
     The caller raises the result after its ``except`` block, so the new error
     does not keep the original one (its response and its request) as context.
@@ -254,13 +270,17 @@ def change_error(
         return sanitized_status_error(exc, secrets=secrets)
     error_type, messages = safe_vendor_text(exc.response, secrets)
     detail = "; ".join(part for part in (error_type, *messages) if part) or None
-    hint = _PERMISSION_HINT if status == 403 else ""
-    return ConnectorUpstreamError(
-        f"{op_id}: vCenter answered HTTP {status} when MEHO tried to {action} for "
-        f"{username!r}.{hint}",
-        http_status=status,
-        upstream_message=detail,
+    message = (
+        f"{op_id}: vCenter answered HTTP {status} when MEHO tried to {action} for {username!r}."
     )
+    if status == 403:
+        return LocalAccountRefusedError(
+            f"{message}{_PERMISSION_HINT}",
+            http_status=status,
+            upstream_message=detail,
+            remediation=_PERMISSION_HINT.strip(),
+        )
+    return ConnectorUpstreamError(message, http_status=status, upstream_message=detail)
 
 
 async def password_set_preview(ctx: PreviewContext) -> dict[str, Any] | None:

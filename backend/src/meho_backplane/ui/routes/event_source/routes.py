@@ -16,6 +16,8 @@ role; writes gate to ``tenant_admin`` via
 from __future__ import annotations
 
 import json
+from enum import StrEnum
+from typing import Final
 
 import structlog
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
@@ -81,6 +83,7 @@ def _form_context(
     csrf_token: str,
     values: dict[str, str],
     error: str | None = None,
+    errors: dict[str, str] | None = None,
 ) -> dict[str, object]:
     return {
         "page_title": "Event Sources",
@@ -89,6 +92,7 @@ def _form_context(
         "csrf_token": csrf_token,
         "values": values,
         "error": error,
+        "errors": errors or {},
         "kind_options": _KIND_OPTIONS,
         "auth_options": _AUTH_OPTIONS,
         "status_options": _STATUS_OPTIONS,
@@ -96,13 +100,24 @@ def _form_context(
 
 
 def _form_error(
-    request: Request, *, mode: str, token: str, values: dict[str, str], error: str
+    request: Request,
+    *,
+    mode: str,
+    token: str,
+    values: dict[str, str],
+    error: str,
+    errors: dict[str, str] | None = None,
 ) -> HTMLResponse:
-    """Re-render the form with an inline error and refresh the CSRF cookie."""
+    """Re-render the form with an inline error and refresh the CSRF cookie.
+
+    *error* is the page-level banner (kept for failures no single field
+    owns -- a Vault write, a 5xx). *errors* maps a form field name to the
+    message rendered beside that field.
+    """
     response = get_templates().TemplateResponse(
         request,
         "event_source/form.html",
-        _form_context(mode=mode, csrf_token=token, values=values, error=error),
+        _form_context(mode=mode, csrf_token=token, values=values, error=error, errors=errors),
     )
     _set_csrf_cookie(response, token)
     return response
@@ -117,6 +132,72 @@ def _parse_extras(raw: str) -> dict[str, object]:
     if not isinstance(parsed, dict):
         raise ValueError("extras must be a JSON object")
     return parsed
+
+
+#: Fields whose 409 the API layer cannot tell apart. ``create_event_source``
+#: raises one ``IntegrityError``-backed 409 covering the per-tenant ``name``
+#: and the global ``slug`` unique constraints, so a conflict is attributed to
+#: both rather than guessing which one collided.
+_CONFLICT_FIELDS: Final[tuple[str, ...]] = ("name", "slug")
+
+#: Banner shown alongside per-field messages so the page-level alert
+#: still says *something* failed without repeating each field error.
+_CORRECT_FIELDS_BANNER: Final[str] = (
+    "Could not save the event source — please correct the highlighted fields."
+)
+
+#: Form field name -> the enum that validates it. ``status`` is the form's
+#: field name; the handler binds it as ``status_value`` to dodge the builtin.
+_ENUM_FIELDS: Final[tuple[tuple[str, type[StrEnum]], ...]] = (
+    ("kind", EventSourceKind),
+    ("auth_strategy", EventSourceAuthStrategy),
+    ("status", EventSourceStatus),
+)
+
+
+def _field_errors_from_validation(exc: ValidationError) -> dict[str, str]:
+    """Map a Pydantic ``ValidationError`` onto ``{field: message}``.
+
+    Each entry's ``loc`` names the field that rejected the value, which is
+    exactly the attribution the form needs; flattening the exception to
+    ``str(exc)`` throws it away. First error per field wins -- the form
+    shows one message per control.
+    """
+    errors: dict[str, str] = {}
+    for err in exc.errors():
+        loc = err.get("loc") or ()
+        field = str(loc[0]) if loc else "__root__"
+        errors.setdefault(field, str(err.get("msg", "invalid value")))
+    return errors
+
+
+def _coerce_choices(
+    *, kind: str, auth_strategy: str, status_value: str, extras: str
+) -> tuple[dict[str, object], dict[str, str]]:
+    """Coerce the closed-enum and JSON fields, attributing each failure.
+
+    Returns ``(coerced, errors)``. Done ahead of the wire model because
+    all four of these raise bare ``ValueError`` from inside the
+    constructor call, where the field that caused it is no longer
+    recoverable.
+    """
+    raw = {"kind": kind, "auth_strategy": auth_strategy, "status": status_value}
+    coerced: dict[str, object] = {}
+    errors: dict[str, str] = {}
+
+    for field, enum_cls in _ENUM_FIELDS:
+        try:
+            coerced[field] = enum_cls(raw[field])
+        except ValueError:
+            allowed = ", ".join(m.value for m in enum_cls)
+            errors[field] = f"{raw[field]!r} is not one of: {allowed}"
+
+    try:
+        coerced["extras"] = _parse_extras(extras)
+    except ValueError as exc:
+        errors["extras"] = f"not a JSON object — {exc}"
+
+    return coerced, errors
 
 
 def _detail(exc: HTTPException) -> str:
@@ -194,26 +275,45 @@ async def _create(
         "status": status_value,
         "extras": extras,
     }
-    try:
-        body = EventSourceCreate(
-            name=name,
-            slug=slug,
-            kind=EventSourceKind(kind),
-            auth_strategy=EventSourceAuthStrategy(auth_strategy),
-            status=EventSourceStatus(status_value),
-            extras=_parse_extras(extras),
-            secret=SecretStr(secret) if secret else None,
-        )
-    except (ValidationError, ValueError) as exc:
+    coerced, field_errors = _coerce_choices(
+        kind=kind, auth_strategy=auth_strategy, status_value=status_value, extras=extras
+    )
+    if not field_errors:
+        try:
+            body = EventSourceCreate(
+                name=name,
+                slug=slug,
+                secret=SecretStr(secret) if secret else None,
+                **coerced,  # type: ignore[arg-type]
+            )
+        except ValidationError as exc:
+            field_errors = _field_errors_from_validation(exc)
+    if field_errors:
         await session.rollback()
-        return _form_error(request, mode="create", token=token, values=submitted, error=str(exc))
+        return _form_error(
+            request,
+            mode="create",
+            token=token,
+            values=submitted,
+            error=_CORRECT_FIELDS_BANNER,
+            errors=field_errors,
+        )
     try:
         await create_event_source(body=body, operator=operator, session=session)
         await session.commit()
     except HTTPException as exc:
         await session.rollback()
+        detail = _detail(exc)
+        # A 409 is the name/slug uniqueness pair; anything else (Vault
+        # write, 5xx) belongs to no single field and stays banner-only.
+        conflict = dict.fromkeys(_CONFLICT_FIELDS, detail) if exc.status_code == 409 else {}
         return _form_error(
-            request, mode="create", token=token, values=submitted, error=_detail(exc)
+            request,
+            mode="create",
+            token=token,
+            values=submitted,
+            error=detail,
+            errors=conflict,
         )
     _log.info("ui_event_source_create", tenant_id=str(operator.tenant_id), slug=slug)
     return RedirectResponse("/ui/event-sources", status_code=303)
@@ -266,17 +366,27 @@ async def _edit(
         "status": status_value,
         "extras": extras,
     }
-    try:
-        body = EventSourceUpdate(
-            kind=EventSourceKind(kind),
-            auth_strategy=EventSourceAuthStrategy(auth_strategy),
-            status=EventSourceStatus(status_value),
-            extras=_parse_extras(extras),
-            secret=SecretStr(secret) if secret else None,
-        )
-    except (ValidationError, ValueError) as exc:
+    coerced, field_errors = _coerce_choices(
+        kind=kind, auth_strategy=auth_strategy, status_value=status_value, extras=extras
+    )
+    if not field_errors:
+        try:
+            body = EventSourceUpdate(
+                secret=SecretStr(secret) if secret else None,
+                **coerced,  # type: ignore[arg-type]
+            )
+        except ValidationError as exc:
+            field_errors = _field_errors_from_validation(exc)
+    if field_errors:
         await session.rollback()
-        return _form_error(request, mode="edit", token=token, values=submitted, error=str(exc))
+        return _form_error(
+            request,
+            mode="edit",
+            token=token,
+            values=submitted,
+            error=_CORRECT_FIELDS_BANNER,
+            errors=field_errors,
+        )
     try:
         await update_event_source(slug=slug, body=body, operator=operator, session=session)
         await session.commit()

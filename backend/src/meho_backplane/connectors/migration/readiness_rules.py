@@ -37,6 +37,7 @@ __all__ = [
     "OS_DISK_LIMIT_GB",
     "OTHER_SYSTEMS_PATTERN",
     "RULES",
+    "SIXTY_FOUR_BIT_ARCHITECTURES",
     "SOURCES",
     "THIRTY_TWO_BIT_ARCHITECTURES",
     "WINDOWS_CLIENT_PATTERN",
@@ -170,6 +171,12 @@ _RULE_LIST: Final[tuple[Rule, ...]] = (
         "migration",
     ),
     Rule(
+        "os.architecture_unknown",
+        "unknown",
+        "It is not known whether the operating system is 32-bit or 64-bit: {detail}.",
+        "migration",
+    ),
+    Rule(
         "os.unknown",
         "unknown",
         "The operating system is not known well enough to check: {detail}.",
@@ -224,8 +231,8 @@ _RULE_LIST: Final[tuple[Rule, ...]] = (
     Rule(
         "limits.os_disk",
         "not_ready",
-        "The OS disk ({size_gb} GB) is bigger than the {limit_gb} GB a generation "
-        "{generation} VM allows.",
+        "Every disk is bigger than the {limit_gb} GB a generation {generation} VM allows "
+        "for its OS disk: {disks}.",
         "migration",
     ),
     Rule(
@@ -312,12 +319,14 @@ class WindowsServer:
     support_end: date | None  # None: support ended long ago
     source: str
     uefi_supported: bool = True
+    #: 2008 R2 and later come only as 64-bit systems.
+    only_64_bit: bool = True
 
 
 WINDOWS_SERVER: Final[dict[str, WindowsServer]] = {
-    "2003": WindowsServer(None, "assessment", uefi_supported=False),
-    "2003 r2": WindowsServer(None, "assessment", uefi_supported=False),
-    "2008": WindowsServer(None, "migration", uefi_supported=False),
+    "2003": WindowsServer(None, "assessment", uefi_supported=False, only_64_bit=False),
+    "2003 r2": WindowsServer(None, "assessment", uefi_supported=False, only_64_bit=False),
+    "2008": WindowsServer(None, "migration", uefi_supported=False, only_64_bit=False),
     "2008 r2": WindowsServer(date(2020, 1, 14), "lifecycle_2008_r2", uefi_supported=False),
     "2012": WindowsServer(date(2023, 10, 10), "lifecycle_2012"),
     "2012 r2": WindowsServer(date(2023, 10, 10), "lifecycle_2012_r2"),
@@ -383,4 +392,7 @@ OLD_WINDOWS_PATTERN: Final[str] = r"\bwindows (?:xp|vista|nt|2000|95|98|3\.1|me)
 OTHER_SYSTEMS_PATTERN: Final[str] = r"\b(?:freebsd|solaris|macos|mac os|netware|openbsd|aix)\b"
 THIRTY_TWO_BIT_ARCHITECTURES: Final[frozenset[str]] = frozenset(
     {"x86", "i386", "i586", "i686", "32-bit"}
+)
+SIXTY_FOUR_BIT_ARCHITECTURES: Final[frozenset[str]] = frozenset(
+    {"x64", "x86_64", "amd64", "arm64", "aarch64", "64-bit"}
 )

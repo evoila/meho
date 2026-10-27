@@ -155,7 +155,10 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
 }
 
 _ASSUMPTIONS: Final[dict[str, str]] = {
-    "os_disk": "The first disk of a server is its OS disk.",
+    "os_disk": (
+        "The inventory does not say which disk is the OS disk. The OS disk limit is "
+        "checked only when every disk or no disk is over it; otherwise the server is unknown."
+    ),
     "disk_units": "Disk sizes in GB are compared with Microsoft's limits; 1 TB = 1,024 GB.",
     "memory": "Configured memory is checked, not assigned memory.",
 }

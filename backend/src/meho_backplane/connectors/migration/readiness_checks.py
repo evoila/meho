@@ -35,6 +35,7 @@ from meho_backplane.connectors.migration.readiness_rules import (
     OS_DISK_LIMIT_GB,
     OTHER_SYSTEMS_PATTERN,
     RULES,
+    SIXTY_FOUR_BIT_ARCHITECTURES,
     SOURCES,
     THIRTY_TWO_BIT_ARCHITECTURES,
     WINDOWS_CLIENT_PATTERN,
@@ -78,15 +79,22 @@ def _finding(
 
 def _os_text(record: ServerRecord) -> tuple[str, str]:
     """The OS name and version as one lower-case string, and a clean label."""
+    raw = _os_raw(record)
+    return raw.replace("(64-bit)", " ").replace("(32-bit)", " 32-bit "), _clean(raw)
+
+
+def _os_raw(record: ServerRecord) -> str:
     os = record.os
-    raw = " ".join(part for part in (os.name, os.version) if part) if os is not None else ""
-    return raw.lower().replace("(64-bit)", " ").replace("(32-bit)", " 32-bit "), _clean(raw)
+    return " ".join(part for part in (os.name, os.version) if part).lower() if os else ""
+
+
+_WINDOWS_RELEASE: Final[str] = r"windows server (\d{4}(?: r2)?)\b"
 
 
 def _windows_findings(
     text: str, label: str, as_of: date, inputs: dict[str, Any]
 ) -> list[ReadinessFinding]:
-    release = first_match(r"windows server (\d{4}(?: r2)?)\b", text)
+    release = first_match(_WINDOWS_RELEASE, text)
     if release is None or release not in WINDOWS_SERVER:
         if re.search(WINDOWS_CLIENT_PATTERN, text):
             return [_finding("os.windows_client", inputs, os=label)]
@@ -145,17 +153,43 @@ def _os_findings(record: ServerRecord, as_of: date) -> list[ReadinessFinding]:
         findings = [_finding("os.other", inputs, os=label)]
     else:
         findings = [_finding("os.unknown", inputs, detail=f"'{label}' is not a known system")]
+    architecture_finding = _architecture_finding(record, text)
+    return findings + ([architecture_finding] if architecture_finding else [])
+
+
+def _architecture_finding(record: ServerRecord, text: str) -> ReadinessFinding | None:
+    """32-bit is a condition. Nothing says 32-bit or 64-bit: unknown, never ready.
+
+    The architecture comes from the ``architecture`` field, from "(64-bit)" or
+    "(32-bit)" in the OS name (vCenter), or from a Windows Server release that
+    comes only as 64-bit.
+    """
+    os = record.os
     architecture = (os.architecture or "").strip().lower() if os is not None else ""
-    if architecture in THIRTY_TWO_BIT_ARCHITECTURES or "32-bit" in text:
-        findings.append(_finding("os.32_bit", {"architecture": architecture or None}))
-    return findings
+    raw = _os_raw(record)
+    inputs: dict[str, Any] = {"architecture": _clean(architecture) or None}
+    if architecture in THIRTY_TWO_BIT_ARCHITECTURES or "32-bit" in raw:
+        return _finding("os.32_bit", inputs)
+    if architecture in SIXTY_FOUR_BIT_ARCHITECTURES or "64-bit" in raw:
+        return None
+    if architecture:
+        detail = f"'{_clean(architecture)}' is not a known architecture"
+        return _finding("os.architecture_unknown", inputs, detail=detail)
+    release = first_match(_WINDOWS_RELEASE, text)
+    if release in WINDOWS_SERVER and WINDOWS_SERVER[release].only_64_bit:
+        return None
+    if not text:
+        # No OS at all: the OS finding already says it is not reported.
+        return None
+    detail = "the source did not report the architecture, and the system name does not say"
+    return _finding("os.architecture_unknown", inputs, detail=detail)
 
 
 # --- boot type --------------------------------------------------------------
 
 
 def _old_windows_without_uefi(text: str) -> bool:
-    release = first_match(r"windows server (\d{4}(?: r2)?)\b", text)
+    release = first_match(_WINDOWS_RELEASE, text)
     return release in WINDOWS_SERVER and not WINDOWS_SERVER[release].uefi_supported
 
 
@@ -189,11 +223,16 @@ def _compute_findings(record: ServerRecord) -> list[ReadinessFinding]:
         findings.append(_finding("limits.cores", inputs, **inputs))
     if record.memory_configured_mb is None:
         unknown.append("memory")
-    else:
+    elif record.memory_configured_mb > LARGEST_VM_MEMORY_GB * 1024:
         memory_gb = round(record.memory_configured_mb / 1024, 1)
-        if memory_gb > LARGEST_VM_MEMORY_GB:
-            inputs = {"memory_gb": memory_gb, "limit": LARGEST_VM_MEMORY_GB}
-            findings.append(_finding("limits.memory", inputs, **inputs))
+        inputs = {
+            "memory_mb": record.memory_configured_mb,
+            "memory_gb": memory_gb,
+            "limit": LARGEST_VM_MEMORY_GB,
+        }
+        findings.append(
+            _finding("limits.memory", inputs, memory_gb=memory_gb, limit=LARGEST_VM_MEMORY_GB)
+        )
     if unknown:
         detail = " and ".join(unknown) + " not reported"
         findings.append(_finding("limits.unknown", {"missing": ", ".join(unknown)}, detail=detail))
@@ -204,59 +243,98 @@ def _labels(disks: list[Disk]) -> str:
     return ", ".join(f"'{_clean(disk.label)}'" for disk in disks)
 
 
-def _os_disk_finding(record: ServerRecord, os_disk: Disk) -> ReadinessFinding | None:
-    size = os_disk.size_gb
-    inputs: dict[str, Any] = {"os_disk_gb": size, "boot_type": record.boot_type}
-    if size is None:
-        return _finding("limits.unknown", inputs, detail="the OS disk size is not reported")
-    if size > OS_DISK_LIMIT_GB[2]:
-        return _finding(
-            "limits.os_disk", inputs, size_gb=size, limit_gb=OS_DISK_LIMIT_GB[2], generation=2
+def _labels_with_sizes(disks: list[Disk]) -> str:
+    """Labels and sizes for a reason and its inputs: ``'data-1' (40,000 GB)``."""
+    return ", ".join(
+        f"'{_clean(disk.label)}' ({disk.size_gb:,.10g} GB)"
+        for disk in disks
+        if disk.size_gb is not None
+    )
+
+
+def _os_disk_findings(record: ServerRecord, disks: list[Disk]) -> list[ReadinessFinding]:
+    """The OS disk limit of the VM generation.
+
+    The inventory does not say which disk is the OS disk. So the check decides
+    only when the order of the disks cannot change the answer: no disk is over
+    the limit (ready), or every disk is (not ready). Otherwise it is unknown.
+    """
+    generation = {"bios": 1, "uefi": 2}.get(record.boot_type or "")
+    # Boot type not known: the stricter generation 1 limit finds every disk that may be over.
+    limit = OS_DISK_LIMIT_GB[generation or 1]
+    over = [disk for disk in disks if disk.size_gb is not None and disk.size_gb > limit]
+    if not over:
+        return []
+    inputs: dict[str, Any] = {
+        "disks": _labels_with_sizes(over),
+        "limit_gb": limit,
+        "boot_type": record.boot_type,
+    }
+    if len(over) < len(disks):
+        detail = (
+            f"disk(s) {_labels_with_sizes(over)} are over the {limit:,} GB OS disk limit of a "
+            f"generation {generation or 1} VM, and the inventory does not say which disk is "
+            "the OS disk"
         )
-    if size > OS_DISK_LIMIT_GB[1]:
-        if record.boot_type is None:
-            detail = "the OS disk is over 2,048 GB and the boot type is not known"
-            return _finding("limits.unknown", inputs, detail=detail)
-        if record.boot_type == "bios":
-            return _finding(
-                "limits.os_disk", inputs, size_gb=size, limit_gb=OS_DISK_LIMIT_GB[1], generation=1
+        return [_finding("limits.unknown", inputs, detail=detail)]
+    if generation is None:
+        if all(disk.size_gb is not None and disk.size_gb > OS_DISK_LIMIT_GB[2] for disk in over):
+            generation, limit = 2, OS_DISK_LIMIT_GB[2]
+        else:
+            detail = (
+                f"every disk ({_labels_with_sizes(over)}) is over {limit:,} GB, and the boot "
+                "type is not known"
             )
-    return None
-
-
-def _data_disk_findings(data_disks: list[Disk]) -> list[ReadinessFinding]:
-    findings: list[ReadinessFinding] = []
-    unknown = [disk for disk in data_disks if disk.size_gb is None]
-    too_big = [d for d in data_disks if d.size_gb is not None and d.size_gb > DATA_DISK_MAX_GB]
-    big = [
-        d
-        for d in data_disks
-        if d.size_gb is not None and DATA_DISK_MIGRATION_LIMIT_GB < d.size_gb <= DATA_DISK_MAX_GB
+            return [_finding("limits.unknown", inputs, detail=detail)]
+    inputs["limit_gb"] = limit
+    return [
+        _finding(
+            "limits.os_disk",
+            inputs,
+            disks=_labels_with_sizes(over),
+            limit_gb=f"{limit:,}",
+            generation=generation,
+        )
     ]
+
+
+def _data_disk_findings(disks: list[Disk]) -> list[ReadinessFinding]:
+    """Size and count limits of the data disks: every disk but the OS disk.
+
+    With several disks, any of them may be a data disk, so the size limits
+    are checked on every disk. A server with one disk has no data disk.
+    """
+    findings: list[ReadinessFinding] = []
+    candidates = disks if len(disks) > 1 else []
+    sized = [(d, d.size_gb) for d in candidates if d.size_gb is not None]
+    too_big = [d for d, size in sized if size > DATA_DISK_MAX_GB]
+    big = [d for d, size in sized if DATA_DISK_MIGRATION_LIMIT_GB < size <= DATA_DISK_MAX_GB]
     if too_big:
+        inputs: dict[str, Any] = {
+            "disks": _labels_with_sizes(too_big),
+            "limit_gb": DATA_DISK_MAX_GB,
+        }
         findings.append(
             _finding(
                 "limits.data_disk_size",
-                {"disks": _labels(too_big)},
-                disks=_labels(too_big),
-                limit_gb=DATA_DISK_MAX_GB,
+                inputs,
+                disks=inputs["disks"],
+                limit_gb=f"{DATA_DISK_MAX_GB:,}",
             )
         )
     if big:
+        inputs = {"disks": _labels_with_sizes(big), "limit_gb": DATA_DISK_MIGRATION_LIMIT_GB}
         findings.append(
             _finding(
                 "limits.data_disk_migration",
-                {"disks": _labels(big)},
-                disks=_labels(big),
-                limit_gb=DATA_DISK_MIGRATION_LIMIT_GB,
+                inputs,
+                disks=inputs["disks"],
+                limit_gb=f"{DATA_DISK_MIGRATION_LIMIT_GB:,}",
             )
         )
-    if len(data_disks) > DATA_DISK_COUNT_LIMIT:
-        inputs: dict[str, Any] = {"count": len(data_disks), "limit": DATA_DISK_COUNT_LIMIT}
+    if len(disks) - 1 > DATA_DISK_COUNT_LIMIT:
+        inputs = {"count": len(disks) - 1, "limit": DATA_DISK_COUNT_LIMIT}
         findings.append(_finding("limits.disk_count", inputs, **inputs))
-    if unknown:
-        detail = f"the size of disk(s) {_labels(unknown)} is not reported"
-        findings.append(_finding("limits.unknown", {"disks": _labels(unknown)}, detail=detail))
     return findings
 
 
@@ -264,10 +342,13 @@ def _disk_limit_findings(record: ServerRecord) -> list[ReadinessFinding]:
     if not record.disks:
         detail = "no disks are reported" if record.disks == [] else "the disks are not reported"
         return [_finding("limits.unknown", {"disks": None}, detail=detail)]
-    os_disk, *data_disks = record.disks
-    findings = _data_disk_findings(data_disks)
-    os_finding = _os_disk_finding(record, os_disk)
-    return ([os_finding] if os_finding else []) + findings
+    disks = record.disks
+    findings = [*_os_disk_findings(record, disks), *_data_disk_findings(disks)]
+    unknown = [disk for disk in disks if disk.size_gb is None]
+    if unknown:
+        detail = f"the size of disk(s) {_labels(unknown)} is not reported"
+        findings.append(_finding("limits.unknown", {"disks": _labels(unknown)}, detail=detail))
+    return findings
 
 
 # --- features ---------------------------------------------------------------

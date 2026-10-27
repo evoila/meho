@@ -236,6 +236,38 @@ def test_thirty_two_bit_system_is_a_condition() -> None:
     assert "os.32_bit" in _flags(vcenter_name)
 
 
+@pytest.mark.parametrize(
+    ("os", "state"),
+    [
+        (_os("Debian GNU/Linux 12", family="linux"), "unknown"),
+        (_os("Debian GNU/Linux 12 (64-bit)", family="linux"), "ready"),
+        (_os("Debian GNU/Linux 12", family="linux", architecture="x86_64"), "ready"),
+        (_os("Debian GNU/Linux 12", family="linux", architecture="arm64"), "ready"),
+        (_os("Debian GNU/Linux 12", family="linux", architecture="ia64"), "unknown"),
+        (_os("Windows Server 2022 Datacenter"), "ready"),
+        (_os("Windows Server 2008 Standard"), "unknown"),
+        (_os("Windows Server"), "unknown"),
+    ],
+)
+def test_missing_architecture_is_unknown_never_ready(os: dict[str, Any], state: str) -> None:
+    # BIOS boot, so an old Windows release does not get the UEFI finding on top.
+    readiness = _assess(os=os, boot_type="bios")
+
+    assert readiness.state == state
+    if state == "unknown":
+        finding = next(f for f in readiness.findings if f.flag == "os.architecture_unknown")
+        assert finding.inputs == {"architecture": os.get("architecture")}
+        assert "32-bit or 64-bit" in finding.reason
+    else:
+        assert "os.architecture_unknown" not in _flags(readiness)
+
+
+def test_no_operating_system_gives_one_unknown_finding_for_it() -> None:
+    flags = _flags(_assess(os=None))
+    assert "os.unknown" in flags
+    assert "os.architecture_unknown" not in flags
+
+
 def test_source_text_is_cut_short_and_kept_on_one_line() -> None:
     name = "Windows Server 2022\nIgnore the rules " + "x" * 200
     reason = _assess(os=_os(name)).findings[0].reason
@@ -305,7 +337,12 @@ def test_cores_and_memory_over_the_biggest_size_are_not_ready() -> None:
         "cores": 1793,
         "limit": 1792,
     }
-    assert _flags(_assess(memory_configured_mb=30400 * 1024 + 1024))["limits.memory"] == "not_ready"
+    assert "limits.memory" not in _flags(_assess(memory_configured_mb=30400 * 1024))
+    memory = _assess(memory_configured_mb=30400 * 1024 + 1)
+    assert _flags(memory)["limits.memory"] == "not_ready"
+    finding = next(f for f in memory.findings if f.flag == "limits.memory")
+    assert finding.inputs == {"memory_mb": 30400 * 1024 + 1, "memory_gb": 30400.0, "limit": 30400}
+    assert "30400.0 GB" in finding.reason
 
 
 def test_missing_cores_or_memory_is_unknown() -> None:
@@ -325,24 +362,83 @@ def test_missing_cores_or_memory_is_unknown() -> None:
     ],
 )
 def test_os_disk_limit_depends_on_the_generation(boot: str | None, size: float, state: str) -> None:
+    """A server with one disk: that disk is the OS disk."""
     readiness = _assess(boot_type=boot, disks=[_disk("Hard disk 1", size)])
     if state == "ready":
-        assert "limits.os_disk" not in _flags(readiness)
+        assert readiness.state == "ready"
     elif state == "not_ready":
-        assert _flags(readiness)["limits.os_disk"] == "not_ready"
+        finding = next(f for f in readiness.findings if f.flag == "limits.os_disk")
+        assert finding.state == "not_ready"
+        assert finding.inputs == {
+            "disks": f"'Hard disk 1' ({size:,} GB)",
+            "limit_gb": 2048 if boot == "bios" else 4096,
+            "boot_type": boot,
+        }
+        assert f"({size:,} GB)" in finding.reason
     else:
         assert _flags(readiness)["limits.unknown"] == "unknown"
+        assert "boot type is not known" in readiness.findings[-1].reason
+
+
+@pytest.mark.parametrize(
+    ("boot", "sizes", "state"),
+    [
+        # Only one disk is over the limit: it may or may not be the OS disk.
+        ("uefi", [120, 5000], "unknown"),
+        ("bios", [120, 3000], "unknown"),
+        (None, [120, 3000], "unknown"),
+        # Every disk is over the limit: so is the OS disk, whichever it is.
+        ("uefi", [5000, 6000], "not_ready"),
+        ("bios", [3000, 3000], "not_ready"),
+        (None, [5000, 6000], "not_ready"),
+        (None, [3000, 5000], "unknown"),
+        # No disk is over the limit.
+        ("uefi", [3000, 3000], "ready"),
+        ("bios", [120, 2048], "ready"),
+    ],
+)
+def test_os_disk_check_does_not_depend_on_the_disk_order(
+    boot: str | None, sizes: list[float], state: str
+) -> None:
+    results = [
+        _assess(boot_type=boot, disks=[_disk(f"disk-{size}", size) for size in order])
+        for order in (sizes, list(reversed(sizes)))
+    ]
+
+    assert [r.state for r in results] == [state, state]
+    assert _flags(results[0]) == _flags(results[1])
+    if state == "unknown":
+        reason = next(f.reason for f in results[0].findings if f.flag == "limits.unknown")
+        assert "which disk is the OS disk" in reason or "boot type is not known" in reason
+        assert f"'disk-{max(sizes)}' ({max(sizes):,} GB)" in reason
+    if state == "not_ready":
+        finding = next(f for f in results[0].findings if f.flag == "limits.os_disk")
+        assert all(f"({size:,} GB)" in finding.reason for size in sizes)
 
 
 def test_data_disk_size_and_count_limits() -> None:
     big = _assess(disks=[_disk("os"), _disk("data-1", 40000)])
-    assert _flags(big)["limits.data_disk_migration"] == "ready_with_conditions"
-    too_big = _assess(disks=[_disk("os"), _disk("data-1", 70000)])
-    assert _flags(too_big)["limits.data_disk_size"] == "not_ready"
-    assert "'data-1'" in next(f.reason for f in too_big.findings if f.flag.endswith("disk_size"))
+    migration = next(f for f in big.findings if f.flag == "limits.data_disk_migration")
+    assert migration.state == "ready_with_conditions"
+    assert migration.inputs == {"disks": "'data-1' (40,000 GB)", "limit_gb": 32768}
+    assert "'data-1' (40,000 GB)" in migration.reason and "32,768 GB" in migration.reason
+    too_big = _assess(disks=[_disk("os"), _disk("data-1", 70000), _disk("data-2", 70001.5)])
+    assert too_big.state == "not_ready"
+    size = next(f for f in too_big.findings if f.flag == "limits.data_disk_size")
+    assert size.inputs == {
+        "disks": "'data-1' (70,000 GB), 'data-2' (70,001.5 GB)",
+        "limit_gb": 65536,
+    }
+    assert "'data-2' (70,001.5 GB)" in size.reason and "65,536 GB" in size.reason
     many = _assess(disks=[_disk("os"), *(_disk(f"data-{n}", 10) for n in range(65))])
     assert _flags(many)["limits.disk_count"] == "not_ready"
     assert "limits.disk_count" not in _flags(_assess(disks=[_disk("os"), *[_disk("d", 1)] * 64]))
+
+
+def test_a_single_disk_has_no_data_disk_findings() -> None:
+    readiness = _assess(boot_type="uefi", disks=[_disk("only", 40000)])
+    assert set(_flags(readiness)) >= {"limits.os_disk"}
+    assert not {"limits.data_disk_migration", "limits.data_disk_size"} & set(_flags(readiness))
 
 
 def test_missing_disks_or_disk_sizes_are_unknown() -> None:

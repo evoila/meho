@@ -164,8 +164,12 @@ The rules (`RULES` in `readiness_rules.py`; each names its source in
   distributions are a condition. A version that is needed but missing
   ("Ubuntu Linux (64-bit)" from vCenter) is unknown. FreeBSD, Solaris and
   similar systems are a condition. No OS or "Other" is unknown. A 32-bit
-  system is a condition. The support dates are compared with the day the
-  check runs (`support_dates_as_of` in the assumptions).
+  system is a condition. The architecture comes from the `architecture`
+  field, from "(64-bit)" or "(32-bit)" in the OS name, or from a Windows
+  Server release that comes only as 64-bit (2008 R2 and later). When none
+  of these says it, the server is unknown (`os.architecture_unknown`). The
+  support dates are compared with the day the check runs
+  (`support_dates_as_of` in the assumptions).
 - **Boot.** BIOS gives a generation 1 VM, UEFI a generation 2 VM. UEFI with
   Windows Server 2003, 2008 or 2008 R2 is not ready. Secure boot on is a
   condition (Trusted launch after the move). UEFI with secure boot not
@@ -173,11 +177,16 @@ The rules (`RULES` in `readiness_rules.py`; each names its source in
   not reported gives no finding, because only UEFI servers can use secure
   boot. No boot type is unknown.
 - **Limits.** More than 1,792 cores or 30,400 GB of memory (the biggest
-  Azure VM size) is not ready. The first disk is taken as the OS disk: over
-  2,048 GB on BIOS or over 4,096 GB is not ready. A data disk over 32,768 GB
-  is a condition (Azure Migrate copies up to that size), over 65,536 GB is
-  not ready (the biggest managed disk). More than 64 data disks is not
-  ready. Missing cores, memory, disks or disk sizes are unknown.
+  Azure VM size) is not ready. Memory is compared in MB, so one MB over the
+  limit is not ready. The OS disk may be at most 2,048 GB on BIOS or 4,096 GB
+  on UEFI. The inventory does not say which disk is the OS disk, so the
+  check does not depend on the disk order: no disk over the limit is ready,
+  every disk over it is not ready, and some disks over it is unknown. A disk
+  over 32,768 GB is a condition (Azure Migrate copies data disks up to that
+  size), over 65,536 GB is not ready (the biggest managed disk); a server
+  with one disk has no data disk. More than 64 data disks is not ready.
+  Missing cores, memory, disks or disk sizes are unknown. Disk findings name
+  each disk with its size and the limit, in the reason and in `inputs`.
 - **Features.** Shared disks, raw device mappings, independent disks and
   snapshots are conditions: remove or merge them before the move. A
   feature a source did not report (`null`) makes the server unknown, so
@@ -187,7 +196,6 @@ The rules (`RULES` in `readiness_rules.py`; each names its source in
 Unknown findings are also listed in `unknowns`. Source text (OS names, disk
 labels) goes into reasons on one line and cut to 80 characters.
 
-The architecture is optional: a server without one gets no 32-bit check.
 Region availability of the very large sizes is not checked.
 
 Tests: `backend/tests/test_migration_readiness.py` changes one fact of a

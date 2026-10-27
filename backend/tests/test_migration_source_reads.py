@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import jsonschema
 from kubernetes_asyncio.client import (
     V1Container,
     V1DaemonSet,
@@ -249,3 +250,8 @@ def test_node_row_carries_identity_and_capacity() -> None:
     assert row["system_uuid"] == "1B2C3D4E-5F60-4718-8293-A4B5C6D7E8F9"
     assert (row["cpu_capacity"], row["memory_capacity"]) == ("4", "16393216Ki")
     assert (row["os_image"], row["architecture"]) == ("Ubuntu 22.04.4 LTS", "amd64")
+    ops = {op.op_id: op for op in KUBERNETES_OPS}
+    # A real node row must pass the node-list schema it is returned under.
+    jsonschema.validate({"rows": [row], "total": 1}, ops["k8s.node.list"].response_schema)
+    namespace_row = ops["k8s.namespace.list"].response_schema["properties"]["rows"]["items"]
+    assert "system_uuid" not in namespace_row["properties"]

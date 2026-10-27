@@ -403,7 +403,6 @@ _K8S_NAMESPACE_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
                     "status": {"type": ["string", "null"]},
                     "age_seconds": {"type": ["integer", "null"]},
                     "labels": {"type": "object"},
-                    **NODE_IDENTITY_PROPERTIES,
                 },
                 "required": ["name", "status", "age_seconds", "labels"],
                 "additionalProperties": False,
@@ -481,6 +480,7 @@ _K8S_NODE_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
                     },
                     "age_seconds": {"type": ["integer", "null"]},
                     "labels": {"type": "object"},
+                    **NODE_IDENTITY_PROPERTIES,
                 },
                 "required": [
                     "name",

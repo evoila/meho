@@ -1818,7 +1818,9 @@ request ended (#3543, see "Approved, but the run failed" above).
 `list` shows only pending requests unless `--status` is set; `--status all`
 shows every state. An empty list names the state it filtered on and points
 to `--status all` (#5129). `--limit` / `--offset` go to the server as
-`limit` / `offset`.
+`limit` / `offset`. When `--offset` skips every match, the empty message
+says the page is empty and points to a smaller `--offset`, so it does not
+claim the tenant has no requests.
 
 ### Operator console (`backend/src/meho_backplane/ui/routes/approvals/`)
 

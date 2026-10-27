@@ -138,7 +138,7 @@ func runList(cmd *cobra.Command, opts listOpts) error {
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), items)
 	}
-	printListTable(cmd.OutOrStdout(), items, opts.StatusFilter)
+	printListTable(cmd.OutOrStdout(), items, opts.StatusFilter, opts.Offset)
 	return nil
 }
 
@@ -196,11 +196,12 @@ func fetchList(
 // Columns: ID, STATUS, RUN, CONNECTOR, OP, PRINCIPAL, CREATED. RUN (#3543)
 // says whether an approved request ran and how it ended, so a run that
 // failed after the approval does not look like a plain "approved".
-// statusFilter is the --status value; an empty list names it, so an
-// empty default (pending-only) list is not read as "no requests at all".
-func printListTable(w io.Writer, items []api.ApprovalRequestView, statusFilter string) {
+// statusFilter and offset are the --status and --offset values; an empty
+// list names them, so an empty default (pending-only) list or an empty
+// page past the end is not read as "no requests at all".
+func printListTable(w io.Writer, items []api.ApprovalRequestView, statusFilter string, offset int) {
 	if len(items) == 0 {
-		fmt.Fprintln(w, emptyListMessage(statusFilter))
+		fmt.Fprintln(w, emptyListMessage(statusFilter, offset))
 		return
 	}
 	fmt.Fprintf(w, "%-36s %-9s %-11s %-24s %-32s %-20s %s\n",
@@ -219,17 +220,28 @@ func printListTable(w io.Writer, items []api.ApprovalRequestView, statusFilter s
 	fmt.Fprintf(w, "\nShowing %d.\n", len(items))
 }
 
-// emptyListMessage says which state filter gave the empty list and how
-// to see more. The server lists only pending requests when --status is
-// not set.
-func emptyListMessage(statusFilter string) string {
+// emptyListMessage says which state filter and offset gave the empty
+// list and how to see more. The server lists only pending requests when
+// --status is not set. With an offset, the page is empty because the
+// offset skipped every match, so the hint is a smaller --offset.
+func emptyListMessage(statusFilter string, offset int) string {
+	state := statusFilter + " "
 	switch statusFilter {
 	case "all":
-		return "no approval requests in this tenant"
+		state = ""
 	case "":
-		statusFilter = "pending"
+		state = "pending "
 	}
-	return fmt.Sprintf("no %s approval requests (use --status all to see every request)", statusFilter)
+	if offset > 0 {
+		return fmt.Sprintf(
+			"no %sapproval requests after skipping %d (this page is empty; use a smaller --offset)",
+			state, offset,
+		)
+	}
+	if statusFilter == "all" {
+		return "no approval requests in this tenant"
+	}
+	return fmt.Sprintf("no %sapproval requests (use --status all to see every request)", state)
 }
 
 // truncate cuts s to maxLen runes, appending an ellipsis on truncation.

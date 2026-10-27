@@ -497,7 +497,14 @@ def test_every_operation_has_a_closed_schema_and_guidance() -> None:
 def test_every_operation_has_its_own_method_and_a_group_text() -> None:
     handler_attrs = [op.handler_attr for op in AZURE_TYPED_OPS]
     assert len(handler_attrs) == len(set(handler_attrs))
+    modules_by_group: dict[str, set[str]] = {}
     for op in AZURE_TYPED_OPS:
-        assert inspect.iscoroutinefunction(getattr(AzureConnector, op.handler_attr, None)), op.op_id
+        handler = getattr(AzureConnector, op.handler_attr, None)
+        assert inspect.iscoroutinefunction(handler), op.op_id
         assert AZURE_TYPED_WHEN_TO_USE_BY_GROUP.get(op.group_key, "").strip(), op.op_id
+        modules_by_group.setdefault(op.group_key, set()).add(handler.__module__)
     assert set(AZURE_TYPED_WHEN_TO_USE_BY_GROUP) == {op.group_key for op in AZURE_TYPED_OPS}
+    # The group texts of all families are merged into one dict, so two families
+    # with the same group key would silently keep only one text.
+    shared = {group: modules for group, modules in modules_by_group.items() if len(modules) > 1}
+    assert not shared, f"one group key used by several family modules: {shared}"

@@ -10,30 +10,39 @@ with one server record per VM, so the migration operations
 
 Steps, all reads:
 
-1. ``RetrieveServiceContent`` -- the root folder, the performance manager
-   and the vCenter instance UUID (the first part of every ``source_id``).
+1. ``RetrieveServiceContent`` -- the root folder, the view manager, the
+   performance manager and the vCenter instance UUID (the first part of
+   every ``source_id``).
 2. One paged ``RetrievePropertiesEx`` from the scope (the whole vCenter, one
    cluster or one VM folder) down to every VM: name and template flag. The
-   number of VMs found is vCenter's own count, ``source_totals.server``.
-3. Templates are left out and listed as omissions.
-4. The other VMs in batches of :data:`BATCH_SIZE`: one ``RetrievePropertiesEx``
+   walk goes through the hosts, or through a VM folder, its vApps and the
+   vApps inside them.
+3. vCenter's own count of the VMs in scope, read another way: a recursive
+   ``ContainerView`` of ``VirtualMachine`` on the same root, which does not
+   use the walk of step 2. That count is ``source_totals.server``.
+4. Templates are left out and listed as omissions.
+5. The other VMs in batches of :data:`BATCH_SIZE`: one ``RetrievePropertiesEx``
    for the record's properties, then their utilization. A batch that fails is
    read again one VM at a time; a VM that still fails becomes an omission,
    not a failed run.
-5. The ESXi host and cluster names, read once for all hosts (best effort).
-6. Duplicate detection (same BIOS UUID or instance UUID) and the count check:
-   vCenter's count against records plus omissions.
+6. The ESXi host and cluster names, read once for all hosts (best effort).
+7. Duplicate detection (same BIOS UUID or instance UUID) and the count check:
+   vCenter's count of step 3 against records plus omissions. A VM the walk
+   missed shows as a difference.
 
 Like the other read multi-step operations of this connector (see
 ``_read.py``), the vCenter reads run on the connector's own session. The VCF
 Operations reads are other connectors' operations, so they run as child
 operations through ``dispatch_child``: each has its own policy check and
-audit row on the VCF Operations target.
+audit row on the VCF Operations target. Those two child operations are
+declared with :func:`register_migration_inventory_dispatch_surface`, so the
+start-up check of ``composite_invariant`` covers them.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
@@ -60,7 +69,12 @@ from meho_backplane.connectors.vmware_rest.composites._migration_inventory_map i
     extract_objects,
     server_record,
 )
+from meho_backplane.connectors.vmware_rest.composites._migration_inventory_schemas import (
+    MIGRATION_INVENTORY_OP_ID,
+)
 from meho_backplane.connectors.vmware_rest.composites._migration_inventory_usage import (
+    VROPS_CHILD_OP_IDS,
+    VROPS_CONNECTOR_ID,
     UsageResult,
     VcenterPerf,
     VmIdentity,
@@ -73,6 +87,7 @@ from meho_backplane.connectors.vmware_rest.vim_body import (
     vim_moref,
 )
 from meho_backplane.connectors.vmware_rest.vim_retrieve import retrieve_all_pages
+from meho_backplane.operations.composite_invariant import register_composite_dispatch_surface
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -81,7 +96,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BATCH_SIZE",
+    "count_body",
     "migration_inventory_composite",
+    "register_migration_inventory_dispatch_surface",
     "scope_body",
 ]
 
@@ -91,6 +108,7 @@ _log = structlog.get_logger(__name__)
 BATCH_SIZE: Final = 20
 
 _SERVICE_CONTENT_PATH: Final = "/ServiceInstance/ServiceInstance/RetrieveServiceContent"
+_CONTAINER_VIEW_TYPE: Final = "ContainerView"
 _VM_TYPE: Final = "VirtualMachine"
 #: structlog keys the target resolver binds for the audit row. The VCF
 #: Operations lookup must not change them for this operation's own row.
@@ -123,18 +141,28 @@ def _traversal(name: str, mo_type: str, path: str, follow: Sequence[str]) -> dic
 
 #: From a folder, a datacenter or a cluster down to its VMs. VMs are reached
 #: through the hosts (every registered VM, templates too, sits on a host) or,
-#: in a VM folder, through the folder tree and its vApps.
+#: in a VM folder, through the folder tree and its vApps. A vApp is a resource
+#: pool: ``pool_vms`` reads its VMs and ``pool_children`` follows the vApps
+#: (and pools) inside it, as deep as they go.
 _TRAVERSAL: Final[tuple[dict[str, Any], ...]] = (
     _traversal(
         "folder_children",
         "Folder",
         "childEntity",
-        ("folder_children", "datacenter_hosts", "compute_hosts", "host_vms", "vapp_vms"),
+        (
+            "folder_children",
+            "datacenter_hosts",
+            "compute_hosts",
+            "host_vms",
+            "pool_vms",
+            "pool_children",
+        ),
     ),
     _traversal("datacenter_hosts", "Datacenter", "hostFolder", ("folder_children",)),
     _traversal("compute_hosts", "ComputeResource", "host", ("host_vms",)),
     _traversal("host_vms", "HostSystem", "vm", ()),
-    _traversal("vapp_vms", "VirtualApp", "vm", ()),
+    _traversal("pool_vms", "ResourcePool", "vm", ()),
+    _traversal("pool_children", "ResourcePool", "resourcePool", ("pool_vms", "pool_children")),
 )
 
 
@@ -161,16 +189,46 @@ def scope_body(root_type: str, root_moid: str, path_set: Sequence[str]) -> dict[
     }
 
 
+def count_body(view_moid: str) -> dict[str, Any]:
+    """``RetrievePropertiesEx`` body that names every VM of a ``ContainerView``."""
+    return {
+        "specSet": [
+            {
+                VIM_TYPE_NAME_KEY: "PropertyFilterSpec",
+                "propSet": [
+                    {VIM_TYPE_NAME_KEY: "PropertySpec", "type": _VM_TYPE, "pathSet": ["name"]}
+                ],
+                "objectSet": [
+                    {
+                        VIM_TYPE_NAME_KEY: "ObjectSpec",
+                        "obj": vim_moref(_CONTAINER_VIEW_TYPE, view_moid),
+                        "skip": True,
+                        "selectSet": [_traversal("view", _CONTAINER_VIEW_TYPE, "view", ())],
+                    }
+                ],
+            }
+        ],
+        "options": {VIM_TYPE_NAME_KEY: "RetrieveOptions"},
+    }
+
+
 def _moref(value: Any) -> str | None:
     if isinstance(value, dict) and isinstance(value.get("value"), str) and value["value"]:
         return str(value["value"])
     return None
 
 
+@dataclass(frozen=True)
+class _ServiceContent:
+    root_folder: str
+    view_manager: str
+    perf_manager: str
+    vcenter_uuid: str | None
+
+
 async def _service_content(
     connector: VmwareRestConnector, target: Any, operator: Operator
-) -> tuple[str, str, str | None]:
-    """``(root_folder, perf_manager, vcenter_instance_uuid)``."""
+) -> _ServiceContent:
     raw = await connector._post_vmomi_json(
         target, _SERVICE_CONTENT_PATH, operator=operator, json={}
     )
@@ -180,11 +238,63 @@ async def _service_content(
         raise RuntimeError("vCenter's ServiceContent has no rootFolder")
     about = as_dict(content.get("about"))
     uuid = about.get("instanceUuid")
-    return (
-        root,
-        _moref(content.get("perfManager")) or "PerfMgr",
-        uuid.lower() if isinstance(uuid, str) and uuid else None,
+    return _ServiceContent(
+        root_folder=root,
+        view_manager=_moref(content.get("viewManager")) or "ViewManager",
+        perf_manager=_moref(content.get("perfManager")) or "PerfMgr",
+        vcenter_uuid=uuid.lower() if isinstance(uuid, str) and uuid else None,
     )
+
+
+async def _count_in_scope(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    view_manager: str,
+    root_type: str,
+    root_moid: str,
+) -> int | str:
+    """vCenter's own count of the VMs below the root, or the error name when it failed.
+
+    A recursive ``ContainerView`` of ``VirtualMachine`` is vCenter's own walk
+    of the scope; it shares nothing with :data:`_TRAVERSAL`, so a VM that
+    walk misses shows up as a difference in the count check.
+    """
+    view: str | None = None
+    try:
+        created = await connector._post_vmomi_json(
+            target,
+            f"/ViewManager/{view_manager}/CreateContainerView",
+            operator=operator,
+            json={
+                "container": vim_moref(root_type, root_moid),
+                "type": [_VM_TYPE],
+                "recursive": True,
+            },
+        )
+        view = _moref(unwrap_vim_value(created))
+        if view is None:
+            raise RuntimeError("CreateContainerView returned no view")
+        found = await retrieve_all_pages(connector, target, operator, count_body(view))
+        return len(extract_objects(found))
+    except _READ_ERRORS as exc:
+        _log.info("migration_inventory_count_failed", error=type(exc).__name__)
+        return type(exc).__name__
+    finally:
+        if view is not None:
+            await _destroy_view(connector, target, operator, view)
+
+
+async def _destroy_view(
+    connector: VmwareRestConnector, target: Any, operator: Operator, view: str
+) -> None:
+    try:
+        await connector._post_vmomi_json(
+            target, f"/{_CONTAINER_VIEW_TYPE}/{view}/DestroyView", operator=operator, json={}
+        )
+    except _READ_ERRORS as exc:
+        # vCenter drops the view with the session; a failed destroy is not a problem of the run.
+        _log.info("migration_inventory_view_not_destroyed", error=type(exc).__name__)
 
 
 def _scope(params: dict[str, Any], root_folder: str) -> tuple[str, str]:
@@ -446,15 +556,32 @@ async def _read_all_details(
     return details
 
 
+def _count_problem(source_count: int | str) -> list[Omission]:
+    if isinstance(source_count, int):
+        return []
+    return [
+        Omission(
+            what="vCenter's own VM count (ContainerView)",
+            reason="collection_failed",
+            detail=(
+                f"the count read failed ({source_count}); the count check uses the number "
+                "of VMs the listing found, so it cannot show a VM the listing missed"
+            ),
+        )
+    ]
+
+
 def _envelope(
     connector: VmwareRestConnector,
     target: Any,
     listing: dict[str, VmProps],
+    source_count: int | str,
     collector: _Collector,
 ) -> InventoryEnvelope:
     """The inventory, with the count check: vCenter's count against records plus omissions."""
     vm_omissions = len(collector.omissions)
-    difference = len(listing) - len(collector.records) - vm_omissions
+    source_total = source_count if isinstance(source_count, int) else len(listing)
+    difference = source_total - len(collector.records) - vm_omissions
     return InventoryEnvelope(
         schema_version="1",
         source=InventorySource(
@@ -463,16 +590,20 @@ def _envelope(
             collected_at=datetime.now(UTC),
         ),
         records=list(collector.records),
-        omissions=[*collector.omissions, *_source_problems(collector)],
+        omissions=[
+            *collector.omissions,
+            *_count_problem(source_count),
+            *_source_problems(collector),
+        ],
         counts=InventoryCounts(
             server=len(collector.records),
             application=0,
             kubernetes_workload=0,
-            source_totals={"server": len(listing)},
+            source_totals={"server": source_total},
             reconciliation=[
                 CountCheck(
                     kind="server",
-                    source_total=len(listing),
+                    source_total=source_total,
                     records=len(collector.records),
                     omitted=vm_omissions,
                     difference=difference,
@@ -500,17 +631,21 @@ async def migration_inventory_composite(
     days = int(params.get("utilization_days", 30))
     vrops_name = params.get("vcf_operations_target")
     vrops_target = await _resolve_vrops_target(operator, vrops_name) if vrops_name else None
-    root_folder, perf_manager, vcenter_uuid = await _service_content(connector, target, operator)
-    root_type, root_moid = _scope(params, root_folder)
+    content = await _service_content(connector, target, operator)
+    root_type, root_moid = _scope(params, content.root_folder)
     listing = extract_objects(
         await retrieve_all_pages(
             connector, target, operator, scope_body(root_type, root_moid, LIST_PROPERTIES)
         )
     )
+    source_count = await _count_in_scope(
+        connector, target, operator, content.view_manager, root_type, root_moid
+    )
+    vcenter_uuid = content.vcenter_uuid
     collector = _Collector(
         vcenter_id=vcenter_uuid or f"target-{getattr(target, 'name', 'unknown')}",
         perf=VcenterPerf(
-            connector, target, operator, perf_manager=perf_manager, days=days, now=now
+            connector, target, operator, perf_manager=content.perf_manager, days=days, now=now
         ),
         vrops=(
             VropsUsage(dispatch_child, vrops_target, operator=operator, vcenter_uuid=vcenter_uuid)
@@ -527,16 +662,31 @@ async def migration_inventory_composite(
         collected_at = datetime.now(UTC)
         for vm in batch_vms:
             collector.add(vm, usage, placement, collected_at)
-    envelope = _envelope(connector, target, listing, collector)
+    envelope = _envelope(connector, target, listing, source_count, collector)
     _log.info(
         "migration_inventory_read",
         target=getattr(target, "name", None),
         vms=len(listing),
+        source_count=source_count,
         records=len(collector.records),
         omissions=len(envelope.omissions),
         duplicates=len(envelope.duplicates),
     )
     return envelope.model_dump(mode="json")
+
+
+def register_migration_inventory_dispatch_surface() -> None:
+    """Declare the two VCF Operations child operations for the start-up check.
+
+    Called by the vCenter composite registrars. The check in
+    ``composite_invariant`` then fails the start closed if either child
+    operation ever resolves to an ingested catalog row.
+    """
+    register_composite_dispatch_surface(
+        composite_op_id=MIGRATION_INVENTORY_OP_ID,
+        connector_id=VROPS_CONNECTOR_ID,
+        sub_op_ids=VROPS_CHILD_OP_IDS,
+    )
 
 
 def _connector_version(connector: VmwareRestConnector) -> str:

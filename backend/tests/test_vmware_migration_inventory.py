@@ -14,10 +14,16 @@ A fake vCenter answers the VI-JSON reads with made-up VMs:
 * ``broken-01`` -- every read of it fails, so it is listed as an omission.
 
 vCenter counts five VMs; three records plus two omissions match that count.
+The fake answers the scoped listing by walking a small inventory tree the
+way the property collector does (:data:`_TREE`), so the traversal spec is
+really exercised: the hosts of a cluster, a VM folder, a vApp and the vApp
+inside it. The count check's ``ContainerView`` counts the VMs of the tree
+another way.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -33,6 +39,7 @@ from meho_backplane.connectors.migration.azure_migrate_csv import inventory_to_c
 from meho_backplane.connectors.migration.contracts import (
     CountCheck,
     InventoryEnvelope,
+    ServerRecord,
 )
 from meho_backplane.connectors.migration.inventory_load import load_inventories
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
@@ -42,8 +49,10 @@ from meho_backplane.connectors.vmware_rest.composites import (
 )
 from meho_backplane.connectors.vmware_rest.composites._migration_inventory import (
     migration_inventory_composite,
+    register_migration_inventory_dispatch_surface,
 )
 from meho_backplane.connectors.vmware_rest.composites._migration_inventory_map import (
+    guest_bios_uuid,
     nearest_rank_stat,
 )
 from meho_backplane.connectors.vmware_rest.composites._migration_inventory_schemas import (
@@ -58,7 +67,9 @@ from meho_backplane.connectors.vmware_rest.composites._register import (
     COMPOSITES_NOT_ON_8_0,
 )
 from meho_backplane.delete_names import write_word_in_op_id
+from meho_backplane.operations import composite_invariant
 from meho_backplane.operations._validate import validate_params
+from meho_backplane.operations.composite_invariant import CompositeDispatchSurface
 from meho_backplane.operations.dispatcher import _result_document_from_descriptor
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.settings import get_settings
@@ -68,6 +79,10 @@ _WIN_INSTANCE = "50010000-0000-4000-8000-0000000000a1"
 _LIN_INSTANCE = "50010000-0000-4000-8000-0000000000b1"
 _COPY_INSTANCE = "50010000-0000-4000-8000-0000000000c1"
 _LIN_BIOS = "42010000-0000-4000-8000-0000000000b0"
+_WIN_BIOS = "4201AAAA-0000-4000-8000-0000000000A0"
+#: What the Windows guest reports for ``_WIN_BIOS`` on hardware version 13 and
+#: later: the first three groups with their bytes reversed.
+_WIN_BIOS_IN_GUEST = "aaaa0142-0000-0040-8000-0000000000a0"
 _GIB = 1024**3
 
 
@@ -145,8 +160,9 @@ _VMS: dict[str, dict[str, Any]] = {
     "vm-101": {
         "name": "app-win-01",
         "config.template": False,
-        "config.uuid": "4201AAAA-0000-4000-8000-0000000000A0",
+        "config.uuid": _WIN_BIOS,
         "config.instanceUuid": _WIN_INSTANCE,
+        "config.version": "vmx-19",
         "config.guestFullName": "Microsoft Windows Server 2022 (64-bit)",
         "config.guestId": "windows2019srvNext_64Guest",
         "config.firmware": "efi",
@@ -195,6 +211,7 @@ _VMS: dict[str, dict[str, Any]] = {
         "config.template": False,
         "config.uuid": _LIN_BIOS,
         "config.instanceUuid": _LIN_INSTANCE,
+        "config.version": "vmx-11",
         "config.guestFullName": "Ubuntu Linux (64-bit)",
         "config.guestId": "ubuntu64Guest",
         "config.firmware": "bios",
@@ -215,6 +232,7 @@ _VMS: dict[str, dict[str, Any]] = {
         "config.template": False,
         "config.uuid": _LIN_BIOS,
         "config.instanceUuid": _COPY_INSTANCE,
+        "config.version": "vmx-11",
         "config.guestFullName": "Ubuntu Linux (64-bit)",
         "config.guestId": "ubuntu64Guest",
         "config.firmware": "bios",
@@ -269,8 +287,49 @@ def _objects(mo_type: str, rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+#: The fixture's inventory, as vCenter's property collector walks it:
+#: ``moid: (type, {property: [child moids]})``. The root folder holds one
+#: datacenter; its host folder has a cluster (host-10) and a standalone host
+#: (host-11); its VM folder has two VMs and a vApp with a vApp inside it. A VM
+#: that is not placed here sits on host-11 and in the VM folder.
+_TREE: dict[str, tuple[str, dict[str, list[str]]]] = {
+    "group-d1": ("Folder", {"childEntity": ["datacenter-2"]}),
+    "datacenter-2": ("Datacenter", {"hostFolder": ["group-h4"], "vmFolder": ["group-v3"]}),
+    "group-h4": ("Folder", {"childEntity": ["domain-c7", "domain-s9"]}),
+    "domain-c7": ("ClusterComputeResource", {"host": ["host-10"]}),
+    "domain-s9": ("ComputeResource", {"host": ["host-11"]}),
+    "host-10": ("HostSystem", {"vm": ["vm-101", "vm-104"]}),
+    "host-11": ("HostSystem", {"vm": ["vm-102", "vm-103", "vm-105"]}),
+    "group-v3": ("Folder", {"childEntity": ["vm-101", "vm-104", "resgroup-v20"]}),
+    "resgroup-v20": ("VirtualApp", {"vm": ["vm-102"], "resourcePool": ["resgroup-v21"]}),
+    "resgroup-v21": ("VirtualApp", {"vm": ["vm-103", "vm-105"]}),
+}
+#: A traversal spec for the base type also applies to its subtype.
+_BASE_TYPES = {"VirtualApp": "ResourcePool", "ClusterComputeResource": "ComputeResource"}
+
+
+def _tree_with(vm_moids: Iterable[str]) -> dict[str, tuple[str, dict[str, list[str]]]]:
+    """:data:`_TREE` with every VM of *vm_moids* in it, unplaced VMs in that order."""
+    moids = list(vm_moids)
+    tree = {
+        moid: (mo_type, {path: list(children) for path, children in links.items()})
+        for moid, (mo_type, links) in _TREE.items()
+    }
+    placed = {child for _, links in _TREE.values() for child in links.get("vm", [])}
+    for moid in moids:
+        if moid not in placed:
+            tree["host-11"][1]["vm"].append(moid)
+            tree["group-v3"][1]["childEntity"].append(moid)
+    for _, links in tree.values():
+        for path, children in links.items():
+            links[path] = [c for c in children if c in tree or c in moids]
+    for moid in moids:
+        tree[moid] = ("VirtualMachine", {})
+    return tree
+
+
 class _FakeVcenter:
-    """Answers the VI-JSON calls the operation makes, from :data:`_VMS`."""
+    """Answers the VI-JSON calls the operation makes, from :data:`_VMS` and :data:`_TREE`."""
 
     version = "9.0"
 
@@ -279,10 +338,17 @@ class _FakeVcenter:
         *,
         failing: frozenset[str] = frozenset({"vm-105"}),
         vms: dict[str, dict[str, Any]] | None = None,
+        view_count: int | None = None,
+        view_fails: bool = False,
     ) -> None:
         self.failing = failing
         self.vms = vms if vms is not None else _VMS
+        self.tree = _tree_with(self.vms)
+        self.view_count = view_count
+        self.view_fails = view_fails
         self.scopes: list[tuple[str, str]] = []
+        self.views: list[tuple[str, str]] = []
+        self.destroyed: list[str] = []
         self.perf_queries: list[dict[str, Any]] = []
 
     async def _post_vmomi_json(
@@ -292,22 +358,75 @@ class _FakeVcenter:
         if path.endswith("RetrieveServiceContent"):
             return {
                 "rootFolder": _moref("Folder", "group-d1"),
+                "viewManager": _moref("ViewManager", "ViewManager"),
                 "perfManager": _moref("PerformanceManager", "PerfMgr"),
                 "about": {"instanceUuid": _VC_UUID.upper()},
             }
+        if path == "/ViewManager/ViewManager/CreateContainerView":
+            if self.view_fails:
+                raise httpx.ConnectError("no view today")
+            assert json["recursive"] is True and json["type"] == ["VirtualMachine"]
+            container = json["container"]
+            self.views.append((container["type"], container["value"]))
+            return _moref("ContainerView", f"session[abc]view-{len(self.views)}")
+        if path.endswith("/DestroyView"):
+            self.destroyed.append(path.split("/")[2])
+            return {}
         if path.endswith("QueryPerf"):
             self.perf_queries.append(json)
             return self._perf(json)
         return self._retrieve(json)
+
+    def _walk(self, object_spec: dict[str, Any]) -> list[str]:
+        """The VMs the property collector reaches from *object_spec*, in tree order."""
+        specs = {spec["name"]: spec for spec in object_spec["selectSet"]}
+        found: list[str] = []
+        seen: set[str] = set()
+
+        def visit(moid: str, select: list[str], skip: bool) -> None:
+            if moid in seen:
+                return
+            seen.add(moid)
+            mo_type, links = self.tree[moid]
+            if mo_type == "VirtualMachine" and not skip:
+                found.append(moid)
+            for name in select:
+                spec = specs[name]
+                if spec["type"] not in (mo_type, _BASE_TYPES.get(mo_type)):
+                    continue
+                for child in links.get(spec["path"], []):
+                    visit(child, [s["name"] for s in spec.get("selectSet", [])], spec["skip"])
+
+        visit(object_spec["obj"]["value"], list(specs), object_spec["skip"])
+        return found
+
+    def _all_vms_below(self, moid: str) -> list[str]:
+        """What a recursive ``ContainerView`` of VirtualMachine on *moid* counts."""
+        mo_type, links = self.tree[moid]
+        if mo_type == "VirtualMachine":
+            return [moid]
+        return list(
+            dict.fromkeys(
+                vm for children in links.values() for c in children for vm in self._all_vms_below(c)
+            )
+        )
 
     def _retrieve(self, body: dict[str, Any]) -> dict[str, Any]:
         spec = body["specSet"][0]
         mo_type = spec["propSet"][0]["type"]
         paths = spec["propSet"][0]["pathSet"]
         objs = spec["objectSet"]
+        if objs[0]["obj"]["type"] == "ContainerView":
+            container = self.views[-1][1]
+            count = self.view_count if self.view_count is not None else None
+            moids = self._all_vms_below(container)
+            if count is not None:
+                moids = [f"vm-{900 + i}" for i in range(count)]
+            return _objects("VirtualMachine", {m: {"name": m} for m in moids})
         if objs[0].get("selectSet"):
             self.scopes.append((objs[0]["obj"]["type"], objs[0]["obj"]["value"]))
-            rows = {m: {p: v[p] for p in paths if p in v} for m, v in self.vms.items()}
+            moids = self._walk(objs[0])
+            rows = {m: {p: self.vms[m][p] for p in paths if p in self.vms[m]} for m in moids}
             return _objects("VirtualMachine", rows)
         moids = [o["obj"]["value"] for o in objs]
         if mo_type == "VirtualMachine":
@@ -397,6 +516,8 @@ async def test_counts_match_vcenter_and_templates_and_failures_are_listed() -> N
 
     envelope = InventoryEnvelope.model_validate(result)
     assert vcenter.scopes == [("Folder", "group-d1")]
+    assert vcenter.views == [("Folder", "group-d1")]
+    assert vcenter.destroyed == ["session[abc]view-1"]
     assert envelope.counts.source_totals == {"server": 5}
     assert envelope.counts.server == 3
     check = envelope.counts.reconciliation[0]
@@ -415,7 +536,7 @@ async def test_windows_vm_matches_vcenter_values() -> None:
 
     assert record["source_id"] == f"vmware:{_VC_UUID}:{_WIN_INSTANCE}"
     assert record["identity_hints"] == {
-        "bios_uuid": "4201aaaa-0000-4000-8000-0000000000a0",
+        "bios_uuid": _WIN_BIOS_IN_GUEST,
         "mac_addresses": ["00:50:56:aa:00:01"],
         "host_name": "app-win-01.example.test",
     }
@@ -452,6 +573,7 @@ async def test_windows_vm_matches_vcenter_values() -> None:
     assert record["source_attributes"] == {
         "vm_id": "vm-101",
         "instance_uuid": _WIN_INSTANCE,
+        "hardware_version": "vmx-19",
         "esxi_host": "esx-01.example.test",
         "cluster": "cl-prod",
     }
@@ -596,6 +718,131 @@ async def test_linked_duplicates_name_one_machine_and_the_csv_counts_it_once() -
     ]
 
 
+@pytest.mark.parametrize(
+    ("config_uuid", "hardware_version", "expected"),
+    [
+        (_WIN_BIOS, "vmx-13", _WIN_BIOS_IN_GUEST),
+        (_WIN_BIOS, "vmx-21", _WIN_BIOS_IN_GUEST),
+        (_WIN_BIOS, "vmx-12", _WIN_BIOS.lower()),
+        (_WIN_BIOS, None, _WIN_BIOS.lower()),
+        ("not a uuid", "vmx-19", "not a uuid"),
+        (None, "vmx-19", None),
+    ],
+)
+def test_bios_uuid_takes_the_guest_form_from_hardware_version_13(
+    config_uuid: str | None, hardware_version: str | None, expected: str | None
+) -> None:
+    assert guest_bios_uuid(config_uuid, hardware_version) == expected
+
+
+def _guest_record_of_windows_vm() -> dict[str, Any]:
+    """The Windows VM read inside its guest OS: the UUID as the guest shows it."""
+    return ServerRecord(
+        source_id="windows:app-win-01:machine-0a1b2c3d",
+        collected_at=datetime(2026, 10, 20, 9, tzinfo=UTC),
+        identity_hints={"bios_uuid": _WIN_BIOS_IN_GUEST.upper(), "host_name": "app-win-01"},
+        name="app-win-01",
+        cores=4,
+        memory_configured_mb=16384,
+        os={"name": "Microsoft Windows Server 2022", "family": "windows"},
+        missing={
+            "server_type": "not_reported_by_source",
+            "hypervisor": "not_reported_by_source",
+            "memory_assigned_mb": "not_supported",
+            "disks": "no_permission",
+            "snapshot_count": "not_supported",
+            "os.version": "not_reported_by_source",
+            "os.architecture": "not_reported_by_source",
+            "boot_type": "not_reported_by_source",
+            "secure_boot": "not_reported_by_source",
+            "power_state": "not_reported_by_source",
+            "nics": "no_permission",
+            "utilization": "not_measured",
+        },
+    ).model_dump(mode="json")
+
+
+async def _store_and_load(
+    inventories: list[dict[str, Any]],
+) -> tuple[Any, Any]:
+    store = ResultHandleStore(_MemoryValkey())  # type: ignore[arg-type]
+    operator = _operator()
+    handles = []
+    for inventory in inventories:
+        _reduced, handle = await JsonFluxReducer(byte_threshold=256, store=store).reduce(
+            inventory, None, context=_reduce_context(operator)
+        )
+        assert handle is not None
+        handles.append(str(handle.handle_id))
+    loaded = await load_inventories(operator, handles, store=store)
+    return loaded, inventory_to_csv(loaded.records, loaded.duplicates)
+
+
+async def test_a_vcenter_record_and_its_guest_record_count_once_in_the_csv() -> None:
+    vcenter_inventory = await _run(vcenter=_FakeVcenter(vms={"vm-101": dict(_VMS["vm-101"])}))
+    guest = _guest_record_of_windows_vm()
+    guest_inventory = {
+        **vcenter_inventory,
+        "source": {**vcenter_inventory["source"], "connector_id": "linux-host", "target": "w1"},
+        "records": [guest],
+        "omissions": [],
+        "counts": {"server": 1, "application": 0, "kubernetes_workload": 0},
+        "duplicates": [],
+    }
+    vcenter_id = f"vmware:{_VC_UUID}:{_WIN_INSTANCE}"
+
+    loaded, export = await _store_and_load([vcenter_inventory, guest_inventory])
+
+    assert [(d.source_id, d.same_as, d.match) for d in loaded.duplicates] == [
+        (guest["source_id"], vcenter_id, "bios_uuid")
+    ]
+    assert export.row_count == 1
+    assert [(row.source_id, row.reason, row.same_as) for row in export.left_out] == [
+        (guest["source_id"], "same_machine_as", vcenter_id)
+    ]
+
+
+@pytest.mark.parametrize("order", [("vm-102", "vm-106", "vm-107"), ("vm-102", "vm-107", "vm-106")])
+async def test_linked_duplicates_are_found_in_either_record_order(order: tuple[str, ...]) -> None:
+    """A and B share nothing; C shares A's BIOS UUID and B's instance UUID.
+
+    All three are one machine, whether C comes before or after B.
+    """
+    other_bios = "42010000-0000-4000-8000-0000000000cc"
+    other_instance = "50010000-0000-4000-8000-0000000000c2"
+    machines = {
+        "vm-102": dict(_VMS["vm-102"]),
+        "vm-106": {
+            **_VMS["vm-103"],
+            "name": "db-lin-01-b",
+            "config.uuid": other_bios,
+            "config.instanceUuid": other_instance,
+        },
+        "vm-107": {
+            **_VMS["vm-103"],
+            "name": "db-lin-01-c",
+            "config.uuid": _LIN_BIOS,
+            "config.instanceUuid": other_instance,
+        },
+    }
+    vms = {moid: machines[moid] for moid in order}
+    first = f"vmware:{_VC_UUID}:{_LIN_INSTANCE}"
+
+    result = await _run(vcenter=_FakeVcenter(vms=vms, failing=frozenset()))
+
+    assert result["counts"]["reconciliation"][0]["matches"] is True
+    assert {(d["source_id"], d["same_as"]) for d in result["duplicates"]} == {
+        (f"vmware:{_VC_UUID}:{other_instance}", first),
+        (f"vmware:{_VC_UUID}:{order[2]}", first),
+    }
+    loaded, export = await _store_and_load([result])
+    assert {(d.source_id, d.same_as) for d in loaded.duplicates} == {
+        (d["source_id"], d["same_as"]) for d in result["duplicates"]
+    }
+    assert export.row_count == 1
+    assert [row.same_as for row in export.left_out] == [first, first]
+
+
 async def test_a_refused_secure_boot_read_is_unknown_not_off() -> None:
     vms = {moid: dict(props) for moid, props in _VMS.items()}
     vms["vm-101"]["config.bootOptions.efiSecureBootEnabled"] = _Fault("NoPermission")
@@ -628,8 +875,68 @@ async def test_a_failed_batch_is_read_again_one_vm_at_a_time() -> None:
 
 async def test_scope_narrows_to_a_cluster() -> None:
     vcenter = _FakeVcenter()
-    await _run({"cluster": "domain-c7"}, vcenter)
+    result = await _run({"cluster": "domain-c7"}, vcenter)
+
     assert vcenter.scopes == [("ClusterComputeResource", "domain-c7")]
+    assert vcenter.views == [("ClusterComputeResource", "domain-c7")]
+    assert [r["name"] for r in result["records"]] == ["app-win-01"]
+    assert [o["what"] for o in result["omissions"]] == ["VM 'tmpl-base' (vm-104)"]
+    assert result["counts"]["reconciliation"][0] == {
+        "kind": "server",
+        "source_total": 2,
+        "records": 1,
+        "omitted": 1,
+        "difference": 0,
+        "matches": True,
+    }
+
+
+async def test_a_vm_folder_scope_includes_the_vms_of_nested_vapps() -> None:
+    """vm-103 and vm-105 sit in a vApp inside a vApp of the folder."""
+    vcenter = _FakeVcenter()
+    result = await _run({"folder": "group-v3"}, vcenter)
+
+    assert vcenter.scopes == [("Folder", "group-v3")]
+    assert sorted(r["name"] for r in result["records"]) == [
+        "app-win-01",
+        "db-lin-01",
+        "db-lin-01-copy",
+    ]
+    assert sorted(o["what"] for o in result["omissions"]) == [
+        "VM 'broken-01' (vm-105)",
+        "VM 'tmpl-base' (vm-104)",
+    ]
+    assert result["counts"]["source_totals"] == {"server": 5}
+    assert result["counts"]["reconciliation"][0]["matches"] is True
+
+
+async def test_count_check_names_a_vm_the_listing_missed() -> None:
+    """vCenter's own count is read another way, so a missed VM shows as a difference."""
+    result = await _run(vcenter=_FakeVcenter(view_count=6))
+
+    assert result["counts"]["source_totals"] == {"server": 6}
+    assert result["counts"]["reconciliation"][0] == {
+        "kind": "server",
+        "source_total": 6,
+        "records": 3,
+        "omitted": 2,
+        "difference": 1,
+        "matches": False,
+    }
+
+
+async def test_a_failed_count_read_falls_back_to_the_listing_and_says_so() -> None:
+    vcenter = _FakeVcenter(view_fails=True)
+    result = await _run(vcenter=vcenter)
+
+    assert vcenter.destroyed == []
+    assert result["counts"]["source_totals"] == {"server": 5}
+    assert result["counts"]["reconciliation"][0]["matches"] is True
+    problems = [o for o in result["omissions"] if o["kind"] is None]
+    assert [(o["what"], o["reason"]) for o in problems] == [
+        ("vCenter's own VM count (ContainerView)", "collection_failed")
+    ]
+    assert "ConnectError" in problems[0]["detail"]
 
 
 async def test_vcenter_performance_failure_leaves_utilization_unknown() -> None:
@@ -836,3 +1143,29 @@ def test_registered_safe_read_on_both_vcenter_catalogs() -> None:
         assert validate_params(spec.parameter_schema, example) == []
     both = {"cluster": "domain-c7", "folder": "group-v3"}
     assert validate_params(spec.parameter_schema, both) != []
+
+
+@pytest.fixture
+def _dispatch_surface_registry() -> Any:
+    before = composite_invariant.registered_composite_dispatch_surfaces()
+    composite_invariant.reset_composite_dispatch_surface_registry()
+    yield
+    composite_invariant.reset_composite_dispatch_surface_registry()
+    for op_id, surface in before.items():
+        composite_invariant.register_composite_dispatch_surface(
+            composite_op_id=op_id,
+            connector_id=surface.connector_id,
+            sub_op_ids=surface.sub_op_ids,
+        )
+
+
+@pytest.mark.usefixtures("_dispatch_surface_registry")
+def test_the_vcf_operations_child_operations_are_declared_for_the_start_up_check() -> None:
+    register_migration_inventory_dispatch_surface()
+
+    assert composite_invariant.registered_composite_dispatch_surfaces() == {
+        "vmware.migration.inventory": CompositeDispatchSurface(
+            connector_id="vrops-rest-9.0",
+            sub_op_ids=("vrops.resource.query", "vrops.resource.stats"),
+        )
+    }

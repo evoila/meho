@@ -155,6 +155,7 @@ from meho_backplane.connectors.vmware_rest.composites._license import (
 )
 from meho_backplane.connectors.vmware_rest.composites._migration_inventory import (
     migration_inventory_composite,
+    register_migration_inventory_dispatch_surface,
 )
 from meho_backplane.connectors.vmware_rest.composites._migration_inventory_schemas import (
     MIGRATION_GROUP_WHEN_TO_USE,
@@ -2164,6 +2165,7 @@ async def register_vmware_composite_operations(
     singleton.
     """
     await _register_specs(_COMPOSITES, version=_VERSION, embedding_service=embedding_service)
+    register_migration_inventory_dispatch_surface()
 
     # #3349: publish each write composite's governed child-op set into the
     # discovery registry the GET /api/v1/operations/governed-subops surface
@@ -2191,6 +2193,7 @@ async def register_vmware_composite_operations_8_0(
     """
     specs = tuple(spec for spec in _COMPOSITES if spec.op_id not in COMPOSITES_NOT_ON_8_0)
     await _register_specs(specs, version=_VERSION_8_0, embedding_service=embedding_service)
+    register_migration_inventory_dispatch_surface()
 
 
 async def _register_specs(

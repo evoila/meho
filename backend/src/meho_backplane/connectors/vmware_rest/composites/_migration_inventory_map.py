@@ -9,10 +9,18 @@ with a reason in ``missing`` (the inventory rule: unknown is never zero).
 
 Text from vCenter (VM names, guest host names, OS names) is untrusted data.
 It is copied into string fields only and never used to build a request.
+
+The BIOS UUID is stored in the form the guest OS reports, so a vCenter record
+and a record read inside the guest name the same machine. From virtual
+hardware version 13 on, the VM's firmware reports SMBIOS 2.7, and the guest
+(``dmidecode``, Windows WMI) shows the first three groups of the UUID with
+their bytes reversed against vCenter's ``config.uuid`` (vendor article
+53609). :func:`guest_bios_uuid` applies that rule.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -36,6 +44,7 @@ __all__ = [
     "VmProps",
     "as_dict",
     "extract_objects",
+    "guest_bios_uuid",
     "nearest_rank_stat",
     "server_record",
 ]
@@ -50,6 +59,7 @@ DETAIL_PROPERTIES: Final[tuple[str, ...]] = (
     "config.template",
     "config.uuid",
     "config.instanceUuid",
+    "config.version",
     "config.guestFullName",
     "config.guestId",
     "config.firmware",
@@ -67,6 +77,11 @@ DETAIL_PROPERTIES: Final[tuple[str, ...]] = (
 )
 
 _SECURE_BOOT_PROPERTY: Final = "config.bootOptions.efiSecureBootEnabled"
+#: First virtual hardware version whose firmware reports SMBIOS 2.7, where the
+#: guest reads the first three UUID groups in reversed byte order.
+_UUID_SWAP_HARDWARE_VERSION: Final = 13
+_HARDWARE_VERSION: Final = re.compile(r"^vmx-(\d+)$")
+_UUID: Final = re.compile(r"^([0-9a-f]{8})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{4}-[0-9a-f]{12})$")
 _GIB: Final = 1024**3
 _KIB_PER_GIB: Final = 1024**2
 _MAX_SNAPSHOT_DEPTH: Final = 64
@@ -347,6 +362,28 @@ def _boot(vm: VmProps) -> tuple[Literal["bios", "uefi"] | None, bool | None]:
     return boot_type, False if boot_type is not None else None
 
 
+def _reverse_bytes(group: str) -> str:
+    return "".join(group[i : i + 2] for i in range(len(group) - 2, -1, -2))
+
+
+def guest_bios_uuid(config_uuid: str | None, hardware_version: str | None) -> str | None:
+    """vCenter's ``config.uuid`` in the form the guest OS reports it.
+
+    From hardware version 13 (``vmx-13``) on, the first three groups come
+    back with their bytes reversed; below it, and when the version or the
+    UUID cannot be read as such, the value stays as vCenter gives it.
+    """
+    uuid = _str(config_uuid)
+    if uuid is None:
+        return None
+    uuid = uuid.lower()
+    version = _HARDWARE_VERSION.match(hardware_version or "")
+    parts = _UUID.match(uuid)
+    if version is None or parts is None or int(version.group(1)) < _UUID_SWAP_HARDWARE_VERSION:
+        return uuid
+    return "-".join((*(_reverse_bytes(parts.group(i)) for i in (1, 2, 3)), parts.group(4)))
+
+
 def _hardware(vm: VmProps, missing: dict[str, MissingReason]) -> dict[str, Any]:
     """Disks, NICs and MAC addresses from ``config.hardware.device``."""
     devices = _devices(vm)
@@ -393,9 +430,11 @@ def server_record(
         else (None if vm.faults.get("snapshot") else 0)
     )
     host_name = _str(vm.get("guest.hostName"))
+    hardware_version = _str(vm.get("config.version"))
     attributes = {"vm_id": vm.moid}
     for key, value in (
         ("instance_uuid", _str(vm.get("config.instanceUuid"))),
+        ("hardware_version", hardware_version),
         ("esxi_host", esxi_host),
         ("cluster", cluster),
     ):
@@ -430,7 +469,7 @@ def server_record(
             if getattr(utilization, name) is None:
                 missing[f"utilization.{name}"] = "not_measured"
     hints = IdentityHints(
-        bios_uuid=_str(vm.get("config.uuid")),
+        bios_uuid=guest_bios_uuid(vm.get("config.uuid"), hardware_version),
         mac_addresses=hardware["macs"],
         host_name=host_name,
     )

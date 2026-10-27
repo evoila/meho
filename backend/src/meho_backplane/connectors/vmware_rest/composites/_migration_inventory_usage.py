@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "VCENTER_SOURCE",
+    "VROPS_CHILD_OP_IDS",
     "VROPS_CONNECTOR_ID",
     "VROPS_SOURCE",
     "UsageResult",
@@ -72,6 +73,10 @@ _log = structlog.get_logger(__name__)
 VCENTER_SOURCE: Final = "vcenter-performance"
 VROPS_SOURCE: Final = "vcf-operations-latest"
 VROPS_CONNECTOR_ID: Final = "vrops-rest-9.0"
+_VROPS_RESOURCE_QUERY: Final = "vrops.resource.query"
+_VROPS_RESOURCE_STATS: Final = "vrops.resource.stats"
+#: The child operations this source runs, declared for the start-up check.
+VROPS_CHILD_OP_IDS: Final[tuple[str, ...]] = (_VROPS_RESOURCE_QUERY, _VROPS_RESOURCE_STATS)
 
 _RETRIEVE_PROPERTIES_PATH: Final = "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
 _PERF_COUNTER_PROPERTY: Final = "perfCounter"
@@ -386,7 +391,7 @@ class VropsUsage:
         if vm.name is None:
             return None, "not_measured"
         found = await self._call(
-            "vrops.resource.query",
+            _VROPS_RESOURCE_QUERY,
             {"adapterKind": ["VMWARE"], "resourceKind": ["VirtualMachine"], "name": [vm.name]},
             collection="resourceList",
         )
@@ -396,7 +401,7 @@ class VropsUsage:
         if resource_id is None:
             return None, "not_measured"
         stats = await self._call(
-            "vrops.resource.stats",
+            _VROPS_RESOURCE_STATS,
             {"resourceId": [resource_id], "statKey": list(_VROPS_STATS)},
             collection="values",
         )

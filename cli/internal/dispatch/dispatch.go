@@ -115,8 +115,9 @@ type SearchResponse struct {
 }
 
 // ErrOpError is the sentinel returned when the dispatcher reported a
-// structured failure (status == "error", "denied" or "rate_limited"). main translates
-// a non-nil RunE error into a non-zero exit; SilenceErrors=true on
+// structured failure (status == "error", "denied", "rate_limited" or
+// "not_found"). main translates a non-nil RunE error into a non-zero
+// exit; SilenceErrors=true on
 // each command keeps cobra from double-printing the error string.
 var ErrOpError = errors.New("operation status not ok")
 

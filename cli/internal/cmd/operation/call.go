@@ -62,7 +62,7 @@ type CallResult struct {
 // for the structured-failure case — dispatcher errors come back in
 // the `error` / `extras` envelope, not as transport failures):
 //   - 0   operation invoked + status == "ok"
-//   - 1   operation invoked but status == "error", "denied" or "rate_limited"
+//   - 1   operation invoked but status == "error", "denied", "rate_limited" or "not_found"
 //   - 2   auth_expired
 //   - 3   unreachable
 //   - 4   unexpected response shape (incl. unknown / missing status)

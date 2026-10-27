@@ -447,6 +447,7 @@ def test_json_schemas_export() -> None:
         "records",
         "omissions",
         "counts",
+        "duplicates",
     }
     assert {"ServerRecord", "ApplicationRecord", "KubernetesWorkloadRecord"} <= set(
         inventory["$defs"]

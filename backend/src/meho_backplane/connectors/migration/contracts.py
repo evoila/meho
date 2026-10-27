@@ -37,8 +37,10 @@ __all__ = [
     "AssessmentItem",
     "AssessmentResult",
     "Assumptions",
+    "CountCheck",
     "Disk",
     "Figure",
+    "IdentityDuplicate",
     "IdentityHints",
     "InventoryCounts",
     "InventoryEnvelope",
@@ -241,6 +243,13 @@ class ServerRecord(_Record):
     power_state: Literal["on", "off", "suspended"] | None = None
     nics: list[Nic] | None = None
     utilization: Utilization | None = None
+    source_attributes: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "More facts the source reports, with fixed keys per source. VMware: "
+            "'vm_id', 'instance_uuid', 'esxi_host', 'cluster'."
+        ),
+    )
 
 
 class ApplicationRecord(_Record):
@@ -303,6 +312,41 @@ class Omission(_Shape):
     what: str = Field(min_length=1, description="What was not collected.")
     reason: MissingReason
     detail: str | None = Field(default=None, description="More detail, if any.")
+    kind: RecordKind | None = Field(
+        default=None,
+        description=(
+            "Set when this omission stands for one item of the source that has no "
+            "record (one VM left out). Such omissions count in the reconciliation."
+        ),
+    )
+    source_id: str | None = Field(default=None, description="Id of the left-out item.")
+
+
+class IdentityDuplicate(_Shape):
+    """Two records that look like the same machine. Both stay in ``records``."""
+
+    source_id: str = Field(min_length=1, description="The later record.")
+    same_as: str = Field(min_length=1, description="The earlier record it matches.")
+    match: Literal["bios_uuid", "instance_uuid"] = Field(description="The value they share.")
+
+
+class CountCheck(_Shape):
+    """Does the source's own total equal records plus omissions, for one kind?"""
+
+    kind: RecordKind
+    source_total: int = Field(ge=0, description="The total the source itself reports.")
+    records: int = Field(ge=0, description="Records of this kind in the inventory.")
+    omitted: int = Field(ge=0, description="Omissions of this kind (each one item).")
+    difference: int = Field(description="source_total minus records minus omitted.")
+    matches: bool = Field(description="True when the difference is 0.")
+
+    @model_validator(mode="after")
+    def _arithmetic(self) -> CountCheck:
+        if self.difference != self.source_total - self.records - self.omitted:
+            raise ValueError("difference must be source_total - records - omitted")
+        if self.matches != (self.difference == 0):
+            raise ValueError("matches must be true exactly when difference is 0")
+        return self
 
 
 class InventoryCounts(_Shape):
@@ -315,6 +359,10 @@ class InventoryCounts(_Shape):
         default_factory=dict,
         description="The source's own total per kind, where it reports one.",
     )
+    reconciliation: list[CountCheck] = Field(
+        default_factory=list,
+        description="Per kind: source total against records plus omissions.",
+    )
 
 
 class InventoryEnvelope(_Shape):
@@ -325,6 +373,10 @@ class InventoryEnvelope(_Shape):
     records: list[InventoryRecord]
     omissions: list[Omission] = Field(default_factory=list)
     counts: InventoryCounts
+    duplicates: list[IdentityDuplicate] = Field(
+        default_factory=list,
+        description="Records that look like a machine already in the list. Not counted twice.",
+    )
 
     @model_validator(mode="after")
     def _counts_match_and_ids_are_unique(self) -> InventoryEnvelope:
@@ -342,7 +394,32 @@ class InventoryEnvelope(_Shape):
             seen.add(record.source_id)
         if repeated:
             raise ValueError(f"source_id values repeat: {sorted(repeated)}")
+        self._check_duplicates(seen)
+        self._check_reconciliation(actual)
         return self
+
+    def _check_duplicates(self, source_ids: set[str]) -> None:
+        unknown = sorted(
+            {
+                ref
+                for duplicate in self.duplicates
+                for ref in (duplicate.source_id, duplicate.same_as)
+                if ref not in source_ids
+            }
+        )
+        if unknown:
+            raise ValueError(f"duplicates name records that are not in the inventory: {unknown}")
+
+    def _check_reconciliation(self, actual: dict[str, int]) -> None:
+        for check in self.counts.reconciliation:
+            omitted = sum(1 for omission in self.omissions if omission.kind == check.kind)
+            if self.counts.source_totals.get(check.kind, check.source_total) != check.source_total:
+                raise ValueError(f"reconciliation of {check.kind!r} names another source total")
+            if check.records != actual[check.kind] or check.omitted != omitted:
+                raise ValueError(
+                    f"reconciliation of {check.kind!r} does not match the records "
+                    f"({actual[check.kind]}) and omissions ({omitted})"
+                )
 
 
 # --- assessment result ------------------------------------------------------

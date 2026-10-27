@@ -1557,3 +1557,64 @@ func TestPostCallPreviewHashNilWhenOmitted(t *testing.T) {
 		t.Fatalf("omitted --preview-hash should leave body.PreviewHash=nil; got %+v", f.lastCallBody.PreviewHash)
 	}
 }
+
+// TestRunCallNotFoundExitsOne — status=not_found is a known result
+// (#3591, #4986): the operation ran and the connector confirmed the
+// object does not exist. `operation call` prints the envelope, names
+// the ids from extras.resource_ids in plain words, exits 1 via
+// errOpError (not exit 4), and never says the CLI needs an upgrade.
+func TestRunCallNotFoundExitsOne(t *testing.T) {
+	for _, jsonOut := range []bool{false, true} {
+		errText := "not_found: VirtualMachine vm-123 does not exist"
+		cr, _ := json.Marshal(CallResult{
+			Status: "not_found", OpID: "vmware.object.collect", Error: &errText,
+			Extras: json.RawMessage(`{"error_code":"not_found","resource_ids":["vm-123"],"resource_id":"vm-123"}`),
+		})
+		f := &fakeOperationsClient{
+			callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+				{HTTPResponse: makeHTTPResp(200), Body: cr},
+			},
+		}
+		withFakeClient(t, f)
+
+		cmd := newCallCmd()
+		var out, errBuf bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errBuf)
+		args := []string{"vmware-rest-9.0", "vmware.object.collect", "--backplane", "https://x"}
+		if jsonOut {
+			args = append(args, "--json")
+		}
+		cmd.SetArgs(args)
+		err := cmd.Execute()
+		if !errors.Is(err, errOpError) {
+			t.Fatalf("json=%t: not_found must exit 1 via errOpError; got %v", jsonOut, err)
+		}
+		var ec output.ExitCoder
+		if errors.As(err, &ec) {
+			t.Fatalf("json=%t: not_found must not carry exit code %d", jsonOut, ec.ExitCode())
+		}
+		if errBuf.Len() != 0 {
+			t.Errorf("json=%t: stderr must stay empty; got %q", jsonOut, errBuf.String())
+		}
+		if jsonOut {
+			var decoded map[string]any
+			if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+				t.Fatalf("decode --json output: %v; got %q", err, out.String())
+			}
+			if decoded["status"] != "not_found" {
+				t.Errorf("--json status: got %v want not_found", decoded["status"])
+			}
+			continue
+		}
+		for _, want := range []string{
+			"status=not_found",
+			"meho: connector error: not_found: VirtualMachine vm-123 does not exist",
+			"not found: vm-123\n",
+		} {
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("stdout missing %q; got %q", want, out.String())
+			}
+		}
+	}
+}

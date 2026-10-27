@@ -1732,7 +1732,13 @@ Load-bearing details:
   on each, and merges the results. One connector raising is recorded
   in `skipped` with the exception summary and does not abort the
   sweep. `seed_target` (optional) is resolved tenant-scoped before
-  being forwarded. The verb never creates `targets` rows
+  being forwarded. The caller is forwarded too
+  (`list_candidates(seed, operator=operator)`), so a connector that must
+  read the seed's secret reads it under the caller's identity, like the
+  probe. A candidate may carry `secret_ref` and `extras` (the Azure
+  connector sets both), and `meho targets discover <product>
+  --import-yaml` prints the candidates as a file for `meho targets
+  import`. The verb never creates `targets` rows
   (auto-registration is v0.2.next per #363).
 - **Tenant scoping.** No route accepts a `tenant_id` from the path,
   query string, or body. The query verbs filter on

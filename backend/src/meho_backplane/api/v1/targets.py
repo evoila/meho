@@ -1110,7 +1110,7 @@ async def discover_targets(
     for cls, label in impls.items():
         connector = get_or_create_connector_instance(cls)
         try:
-            candidates = await connector.list_candidates(seed)
+            candidates = await connector.list_candidates(seed, operator=operator)
         except Exception as exc:
             # One bad connector must not abort the whole sweep — record
             # the failure and continue with the remaining connectors.

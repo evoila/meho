@@ -18,10 +18,19 @@ from __future__ import annotations
 from typing import Final
 
 __all__ = [
+    "LOCKS_API_VERSION",
+    "LOCKS_PATH",
+    "RESOURCES_API_VERSION",
+    "RESOURCES_PATH",
     "RESOURCE_GRAPH_API_VERSION",
     "RESOURCE_GRAPH_PATH",
+    "RESOURCE_GROUPS_PATH",
+    "RESOURCE_GROUP_RESOURCES_PATH",
     "SUBSCRIPTIONS_API_VERSION",
+    "SUBSCRIPTIONS_PATH",
     "SUBSCRIPTION_PATH",
+    "TAGS_AT_SCOPE_PATH",
+    "TAG_NAMES_PATH",
     "subscription_path",
 ]
 
@@ -47,3 +56,42 @@ def subscription_path(subscription_id: str) -> str:
     it cannot change the path.
     """
     return SUBSCRIPTION_PATH.format(subscription_id=subscription_id)
+
+
+# ---- inventory (Task #5082) ----
+
+#: ``GET /subscriptions``: every subscription the login can see (Subscriptions -
+#: List). Sent with :data:`SUBSCRIPTIONS_API_VERSION`.
+SUBSCRIPTIONS_PATH: Final[str] = "/subscriptions"
+
+#: ``GET /subscriptions/{subscriptionId}/resourcegroups`` (Resource Groups - List).
+RESOURCE_GROUPS_PATH: Final[str] = "/subscriptions/{subscription_id}/resourcegroups"
+
+#: ``GET /subscriptions/{subscriptionId}/resources`` (Resources - List).
+RESOURCES_PATH: Final[str] = "/subscriptions/{subscription_id}/resources"
+
+#: ``GET /subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/resources``
+#: (Resources - List By Resource Group).
+RESOURCE_GROUP_RESOURCES_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}/resources"
+)
+
+#: ``GET /subscriptions/{subscriptionId}/tagNames``: tag names, their values and
+#: counts (Tags - List).
+TAG_NAMES_PATH: Final[str] = "/subscriptions/{subscription_id}/tagNames"
+
+#: ``GET`` and ``PATCH /{scope}/providers/Microsoft.Resources/tags/default``: the
+#: tags of one resource (Tags - Get At Scope, Tags - Update At Scope). *scope* is
+#: a resource ID without its first ``/``.
+TAGS_AT_SCOPE_PATH: Final[str] = "/{scope}/providers/Microsoft.Resources/tags/default"
+
+#: The API version of the resource, resource group and tag calls
+#: (Microsoft.Resources).
+RESOURCES_API_VERSION: Final[str] = "2021-04-01"
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.Authorization/locks``
+#: (Management Locks - List At Subscription Level).
+LOCKS_PATH: Final[str] = "/subscriptions/{subscription_id}/providers/Microsoft.Authorization/locks"
+
+#: The API version of the lock reads (Microsoft.Authorization).
+LOCKS_API_VERSION: Final[str] = "2020-05-01"

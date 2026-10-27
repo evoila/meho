@@ -289,13 +289,17 @@ async def test_the_operation_is_stored_as_typed_and_enabled(
         .scalars()
         .all()
     )
-    assert {row.op_id for row in rows} == {"azure.about"}
-    (row,) = rows
-    assert row.source_kind == "typed"
-    assert row.is_enabled is True
-    assert row.safety_level == "safe"
-    assert row.requires_approval is False
-    assert row.handler_ref is not None and row.handler_ref.endswith("AzureConnector.about")
+    by_op = {row.op_id: row for row in rows}
+    assert set(by_op) == {"azure.about", "azure.operation.status"}
+    for row in rows:
+        assert row.source_kind == "typed"
+        assert row.is_enabled is True
+        assert row.safety_level == "safe"
+        assert row.requires_approval is False
+    about_ref = by_op["azure.about"].handler_ref
+    status_ref = by_op["azure.operation.status"].handler_ref
+    assert about_ref is not None and about_ref.endswith("AzureConnector.about")
+    assert status_ref is not None and status_ref.endswith("AzureConnector.operation_status")
 
 
 @pytest.mark.asyncio
@@ -336,7 +340,7 @@ async def test_search_operations_finds_azure_about(
 
 
 def test_every_operation_is_a_safe_read_with_guidance() -> None:
-    assert [op.op_id for op in AZURE_TYPED_OPS] == ["azure.about"]
+    assert [op.op_id for op in AZURE_TYPED_OPS] == ["azure.about", "azure.operation.status"]
     for op in AZURE_TYPED_OPS:
         assert op.safety_level == "safe" and op.requires_approval is False
         assert "read-only" in op.tags

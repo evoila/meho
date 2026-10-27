@@ -68,7 +68,10 @@ AZURE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "Start here for an Azure target. azure.about reads the subscription (ID, name "
         "and state), its tenant and cloud, and the app ID and object ID of the login "
         "MEHO uses. Use it first for a new target, after a secret change, or when "
-        "another Azure read fails with an access or login error. Read-only."
+        "another Azure read fails with an access or login error. "
+        "azure.operation.status reads the state of a long-running Azure operation "
+        "once, from the operation reference an Azure write returned; use it after a "
+        "lost answer or a restart instead of sending the write again. Read-only."
     ),
 }
 
@@ -118,6 +121,105 @@ _ABOUT_RESPONSE: Final[dict[str, Any]] = {
 
 _READ_TAGS: Final[tuple[str, ...]] = ("read-only", "azure")
 
+_EXAMPLE_POLL_URL: Final[str] = (
+    "https://management.azure.com/subscriptions/00000000-0000-0000-0000-000000000000"
+    "/providers/Microsoft.Compute/locations/westeurope/operations/"
+    "11111111-0000-0000-0000-000000000000?api-version=2024-07-01"
+)
+
+_OPERATION_REFERENCE_SCHEMA: Final[dict[str, Any]] = {
+    "type": "object",
+    "description": "The operation reference an Azure write returned (its 'operation' field).",
+    "properties": {
+        "poll_url": {
+            "type": "string",
+            "maxLength": 4096,
+            "description": "The URL Azure named for polling, as MEHO returned it.",
+        },
+        "poll_kind": {
+            "type": "string",
+            "enum": ["azure-asyncoperation", "location"],
+            "description": "Which Azure header the URL came from.",
+        },
+        "resource_id": {
+            "type": _TEXT_OR_NULL,
+            "description": "The Azure resource ID the operation changes, when known.",
+        },
+        "started_at": {
+            "type": _TEXT_OR_NULL,
+            "description": "When MEHO started the operation (ISO 8601).",
+        },
+        "retry_after_seconds": {
+            "type": ["number", "null"],
+            "description": "The Retry-After of the answer that started the operation.",
+        },
+    },
+    "required": ["poll_url", "poll_kind"],
+}
+
+_OPERATION_STATUS_PARAMS: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {"operation": _OPERATION_REFERENCE_SCHEMA},
+    "required": ["operation"],
+    "additionalProperties": False,
+    "examples": [
+        {
+            "operation": {
+                "poll_url": _EXAMPLE_POLL_URL,
+                "poll_kind": "azure-asyncoperation",
+                "resource_id": None,
+                "started_at": "2026-10-27T09:00:00+00:00",
+                "retry_after_seconds": 30,
+            }
+        }
+    ],
+}
+
+_OPERATION_STATUS_RESPONSE: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "description": "Succeeded, Failed, Canceled, or a running state such as InProgress.",
+        },
+        "done": {
+            "type": "boolean",
+            "description": "True when the status is Succeeded, Failed or Canceled.",
+        },
+        "error": {
+            "type": ["object", "null"],
+            "description": "Azure's error code and message when the operation failed.",
+            "properties": {
+                "code": {"type": _TEXT_OR_NULL, "description": "Azure's error code."},
+                "message": {"type": _TEXT_OR_NULL, "description": "Azure's error text."},
+            },
+        },
+        "result": {
+            "type": ["object", "null"],
+            "description": "What Azure returned when the operation succeeded, if anything.",
+        },
+        "retry_after_seconds": {
+            "type": ["number", "null"],
+            "description": "How long Azure asks to wait before the next poll.",
+        },
+        "operation": {
+            "type": "object",
+            "description": "The operation reference, to poll again later.",
+            "properties": {
+                "poll_url": {"type": "string", "description": "The poll URL."},
+                "poll_kind": {"type": "string", "description": "The kind of poll URL."},
+                "resource_id": {"type": _TEXT_OR_NULL, "description": "The resource ID."},
+                "started_at": {"type": _TEXT_OR_NULL, "description": "The start time."},
+                "retry_after_seconds": {
+                    "type": ["number", "null"],
+                    "description": "The Retry-After of the answer that started the operation.",
+                },
+            },
+        },
+    },
+    "required": ["status", "done", "operation"],
+}
+
 
 #: Every Azure typed operation. Reads are ``safe`` and need no approval.
 AZURE_TYPED_OPS: tuple[AzureTypedOp, ...] = (
@@ -137,6 +239,23 @@ AZURE_TYPED_OPS: tuple[AzureTypedOp, ...] = (
         safety_level="safe",
         requires_approval=False,
         llm_instructions=AZURE_READ_LLM_INSTRUCTIONS["azure.about"],
+    ),
+    AzureTypedOp(
+        op_id="azure.operation.status",
+        handler_attr="operation_status",
+        summary="Read the state of a long-running Azure operation once, without sending it again.",
+        description=(
+            "Polls the URL of an operation reference once (GET) and returns the state: "
+            "Succeeded, Failed, Canceled or still running. The URL must be on the "
+            "target's Resource Manager host and in its subscription. Read-only."
+        ),
+        parameter_schema=_OPERATION_STATUS_PARAMS,
+        response_schema=_OPERATION_STATUS_RESPONSE,
+        group_key=_GROUP_ACCOUNT,
+        tags=(*_READ_TAGS, "operation", "long-running", "status"),
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=AZURE_READ_LLM_INSTRUCTIONS["azure.operation.status"],
     ),
 )
 

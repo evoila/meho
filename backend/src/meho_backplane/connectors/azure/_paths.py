@@ -17,13 +17,26 @@ from __future__ import annotations
 
 from typing import Final
 
-__all__ = ["SUBSCRIPTIONS_API_VERSION", "SUBSCRIPTION_PATH", "subscription_path"]
+__all__ = [
+    "RESOURCE_GRAPH_API_VERSION",
+    "RESOURCE_GRAPH_PATH",
+    "SUBSCRIPTIONS_API_VERSION",
+    "SUBSCRIPTION_PATH",
+    "subscription_path",
+]
 
 #: ``GET /subscriptions/{subscriptionId}``: one subscription (Subscriptions - Get).
 SUBSCRIPTION_PATH: Final[str] = "/subscriptions/{subscription_id}"
 
 #: The API version of the subscription reads (Microsoft.Resources).
 SUBSCRIPTIONS_API_VERSION: Final[str] = "2022-12-01"
+
+#: ``POST /providers/Microsoft.ResourceGraph/resources``: one Resource Graph
+#: query (Resources - Resources). A read, even though it is a POST.
+RESOURCE_GRAPH_PATH: Final[str] = "/providers/Microsoft.ResourceGraph/resources"
+
+#: The API version of Resource Graph queries (Microsoft.ResourceGraph).
+RESOURCE_GRAPH_API_VERSION: Final[str] = "2024-04-01"
 
 
 def subscription_path(subscription_id: str) -> str:

@@ -5,9 +5,10 @@ subscription. The connector logs in to Microsoft Entra ID with a login (a
 service principal) from Vault, keeps the access token in its own cache, and
 calls Azure Resource Manager (Azure's management API) with it.
 
-Today the connector has one operation, `azure.about`. Later reads (inventory,
-compute, network, storage, cost and more) build on the login and the cache
-described here.
+Today the connector has two operations, `azure.about` and
+`azure.operation.status`. Later reads (inventory, compute, network, storage,
+cost and more) build on the login, the cache, the retry budget, the paging
+helper and the polling helper described here.
 
 Package: `backend/src/meho_backplane/connectors/azure/`. Shared login code:
 `backend/src/meho_backplane/connectors/_shared/microsoft_login.py`.
@@ -20,7 +21,7 @@ Package: `backend/src/meho_backplane/connectors/azure/`. Shared login code:
 | Connector ID | `azure-arm-2026.10` (implementation `azure-arm`, version `2026.10`) |
 | Registration | the versioned row plus the wildcard row `("azure", "", "")` |
 | Kind | typed operations only; nothing is ingested from a spec |
-| Operations | `azure.about` (group `account`, `safe`) |
+| Operations | `azure.about` and `azure.operation.status` (group `account`, `safe`) |
 
 Azure has no product version, so the version is a date, like
 `hetzner-rest-2026.04`. The wildcard row lets every `azure` target find the
@@ -48,6 +49,15 @@ groups, risk levels and guidance for the AI.
   group texts and the start-up registrar.
 - `_paths.py`: every Resource Manager path and API version the connector
   calls, so a CI check can compare them with Azure's API description files.
+- `send`, `check_azure_url`, `retry_after_seconds` (`_http.py`): every Azure
+  call, with one retry budget, the wait after a 429, the limit per login and
+  the URL check.
+- `AzureApiError` and its kinds, `AzureNotFoundError`, `AzureUrlRefusedError`
+  (`_errors.py`): Azure's error answers as errors the dispatcher knows.
+- `list_all_pages`, `query_resource_graph`, `PageLimits`, `PagedRows`
+  (`_paging.py`): reading every page of a list, with limits.
+- `OperationReference`, `operation_reference`, `read_operation_state`,
+  `wait_for_operation` (`_polling.py`): following long-running operations.
 
 ## Target shape
 
@@ -172,20 +182,222 @@ and for a system call that read fails on purpose.
 
 ## Recovery
 
-Both hooks are called by the dispatcher (`operations/dispatcher.py`).
-
-- **Azure answers 401** (the token is no longer accepted): the dispatcher
-  calls `invalidate_session(target)`, which drops the target's tokens, and
-  tries the call once more. The retry logs in again with the cached secret.
+- **Azure answers 401** (the token is no longer accepted): `send` calls
+  `invalidate_session(target)`, which drops the target's tokens, and tries
+  once more inside the same retry budget. The retry logs in again with the
+  cached secret. When Azure answers 401 again, the call fails with
+  `ConnectorAuthError` (stage `after_relogin`), and the dispatcher returns
+  `connector_auth_failed`. No `HTTPStatusError` 401 leaves the connector, so
+  the dispatcher's own retry after a 401 does not run on top.
 - **Microsoft refuses the login**: the dispatcher gets `ConnectorAuthError`,
   calls `invalidate_credentials(target)`, which drops the target's secret and
   tokens, and returns `connector_auth_failed` with the hint. It does not retry.
   After the operator fixes the secret, the next call reads it again. No
   restart is needed.
 
-Other failures keep the shared behaviour: the HTTP base retries a failed GET
-on a lost connection or a 5xx, a 403 becomes the "missing permission" error,
-and other statuses become `connector_error`.
+## Retries, throttling and the limit per login
+
+Every Azure call goes through `send` in `_http.py`. It is the only retry
+loop of an Azure call. The connector does not use the retry of the shared
+HTTP base (`_request_json`), and it handles a 401 itself. So the HTTP base,
+the connector and the dispatcher never multiply their tries.
+
+**One retry budget per call.** The numbers are constants in `_http.py`, and
+`test_connectors_azure_http.py` pins them:
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `MAX_ATTEMPTS` | 4 | most tries of one call, the first one included; a 401 retry counts |
+| `MAX_WAIT_SECONDS` | 60 | most seconds of waiting between the tries, all waits together |
+| `BACKOFF_SECONDS` | 0.5, 1, 2 | wait after a 5xx or a lost connection without `Retry-After` |
+| `THROTTLE_BACKOFF_SECONDS` | 2, 4, 8 | wait after a 429 without `Retry-After` |
+
+What `send` does per answer:
+
+| Answer | Read (GET, or a read-only POST such as Resource Graph) | Write (POST, PUT, PATCH, DELETE) |
+|---|---|---|
+| below 400 | returns it | returns it |
+| 401 | drops the token, logs in again, tries once more | the same: Azure did not run the call |
+| 429 | waits `Retry-After` (or the back-off) and tries again | the same: Azure did not run the call |
+| 5xx | waits and tries again | fails at once: Azure may have run it |
+| lost connection (`ConnectError`, `ConnectTimeout`, `ReadError`) | waits and tries again | fails at once |
+| timeout | fails at once | fails at once |
+
+`Retry-After` is read as seconds or as an HTTP date. Resource Graph sends
+`x-ms-user-quota-resets-after` (`hh:mm:ss`); it is read when `Retry-After`
+is missing. When the next wait does not fit in the budget (not enough tries
+or seconds left), the call fails at once. After a 429 it fails with
+`AzureThrottledError`, which says that Azure is throttling and when to try
+again.
+
+**Limit per Azure login.** Azure counts calls per login (Azure tenant ID plus
+client ID) and subscription. Several targets may share one login, so the
+limit is kept per login, not per target:
+
+- at most `MAX_CALLS_IN_FLIGHT_PER_LOGIN` (8) calls of one login run at the
+  same time;
+- Resource Graph queries (`resource_graph=True`) are paced to
+  `RESOURCE_GRAPH_CALLS_PER_WINDOW` (15) per `RESOURCE_GRAPH_WINDOW_SECONDS`
+  (5), Resource Graph's own limit per login.
+
+The limit holds per MEHO process (and per event loop). Two MEHO processes
+each have their own limit, so together they can send twice as many calls.
+Azure's own limits stay the real limit; the 429 handling above covers the
+rest.
+
+Azure's numbers (Microsoft docs): Resource Manager reads 250 per bucket,
+refilled at 25 per second; writes 200, refilled at 10 per second; per region,
+login and subscription. Providers add their own limits (for example Network
+10,000 GETs per 5 minutes, Storage 100 list calls per 5 minutes).
+
+## Errors
+
+`_errors.py` turns Azure's error answer (`{"error": {"code", "message"}}`)
+into an error the dispatcher already knows
+(`docs/codebase/error-message-shape.md`):
+
+| Azure answer | Error | What the caller gets |
+|---|---|---|
+| 401 twice (after a new login) | `ConnectorAuthError` | `connector_auth_failed` |
+| 403 | `AzureForbiddenError` | `connector_error` with a hint about the missing role |
+| 404 | `AzureNotFoundError` | `not_found` |
+| 409 | `AzureConflictError` | `connector_error`: the resource is busy |
+| code `MissingSubscriptionRegistration` (any status) | `AzureProviderNotRegisteredError` | `connector_error`: ask an administrator to register the provider; MEHO never registers it, because that is a write |
+| 429, budget used up | `AzureThrottledError` | `connector_error` with when to try again |
+| 5xx | `AzureServerError` | `connector_error` |
+| other 4xx | `AzureRequestError` | `connector_error` |
+
+For `connector_error` the extras carry `exception_class` (the kind above),
+`http_status`, `upstream_message` (Azure's code and message) and
+`remediation` (what to do). Azure's message is untrusted data. `clean_azure_text`
+filters secrets out of it with MEHO's default redaction policy and then cuts
+it to 2,048 characters, in that order: cutting first could split a token at
+the boundary into a fragment the filter no longer recognises. When the filter
+itself fails, the text is withheld. The cleaned text goes only into
+`upstream_message`, which the dispatcher filters and cuts once more. The same
+function cleans the error message of a failed long-running operation. MEHO's
+own text names Azure's error code only when it looks like a code.
+
+## URL check
+
+Before MEHO sends a token to a URL that came from Azure (a `nextLink` or a
+poll URL), `check_azure_url` checks it:
+
+- scheme `https`, port 443, no user name or password, at most 4,096
+  characters;
+- host equal to the target's Resource Manager host, and then the path must
+  start with `/subscriptions/<the target's subscription>`, with no `.` or `..`
+  part (also not percent-encoded);
+- or a host a later read adds with `extra_hosts` (for example a storage data
+  host).
+
+Any other URL fails with `AzureUrlRefusedError` before the login and before
+any request. A relative link (a path without a host) fails too, because it
+could point at another subscription on the same host. The error never
+repeats the URL. The hand-written paths are not checked this way: they are
+constants, and the target check already allows only the cloud's Resource
+Manager host.
+
+**No redirects.** The Azure connector builds its HTTP client with
+`NoRedirectClient` (`_http.py`), which follows no redirect at all. The shared
+client follows a redirect on the same host, but on Azure every subscription
+shares one host, so such a redirect could carry the token to another
+subscription. Azure Resource Manager never redirects a call. A 3xx answer
+fails with `AzureUrlRefusedError`, and nothing is sent to the new address.
+
+## Paging
+
+`list_all_pages` (`_paging.py`) GETs a hand-written path and follows
+`nextLink` (a full URL that already holds the `api-version` and the page
+token). Every `nextLink` goes through the URL check above before it is
+followed. `query_resource_graph` posts a Resource Graph query to
+`POST /providers/Microsoft.ResourceGraph/resources?api-version=2024-04-01`
+and sends the next page as the same query with `options.$skipToken`. Resource
+Graph returns at most 1,000 rows per page.
+
+Limits per list (`PageLimits`):
+
+| Limit | Default |
+|---|---|
+| `max_pages` | 50 (`MAX_PAGES`) |
+| `max_seconds` | 120 (`MAX_SECONDS`) |
+| `max_rows` | 10,000 (`MAX_ROWS`, the most rows one stored result holds) |
+
+The result (`PagedRows.as_dict()`) is:
+
+```json
+{"value": [...], "truncated": true, "omission_kind": "page_limit",
+ "omission": "MEHO stopped at its limit of 50 pages. Azure has more rows ...",
+ "pages_read": 50}
+```
+
+The rows are under `value`, like Azure's own answers, so the dispatcher's
+result reduction recognises them: a list with more than 50 rows becomes a
+link to the stored result, and `truncated`, `omission`, `omission_kind` and
+`pages_read` stay inline next to it because they are plain values. A
+complete list has `truncated: false` and `null` for both omission fields.
+`test_connectors_azure_paging_polling.py` proves this with the real reducer.
+
+`omission_kind` is one of:
+
+| Kind | Meaning |
+|---|---|
+| `page_limit`, `time_limit`, `row_limit` | MEHO stopped at its own limit; the message says how to narrow the request |
+| `result_truncated` | Resource Graph cut the result itself and gave no `$skipToken` (`resultTruncated` is `"true"`); the message says why and what to change |
+
+Resource Graph gives no token when the query uses `limit`, `sample` or
+`take`, or when every output column is `dynamic` or `null`. When the answer
+also says how many rows match (`totalRecords`) and MEHO read all of them,
+nothing is missing and the result is not called cut. Inside `PagedRows`, the
+`omission` field holds the details (`kind`, `pages_read`, `rows_returned`,
+`message`, plus `limit` or `total_records`). Nothing is cut silently.
+
+## Long-running operations
+
+A long-running Azure call answers 201 or 202. `operation_reference`
+(`_polling.py`) reads the poll URL: `Azure-AsyncOperation` when present, else
+`Location`. It checks the URL (the URL check above, plus: one part of the
+path has "operation" in it, such as `operations`, `operationStatuses` or
+`operationResults`) and returns an `OperationReference`:
+
+```json
+{"poll_url": "...", "poll_kind": "azure-asyncoperation", "resource_id": "...",
+ "started_at": "2026-10-27T09:00:00+00:00", "retry_after_seconds": 30}
+```
+
+`retry_after_seconds` is the `Retry-After` of the answer that started the
+operation: how long Azure asked to wait before the first poll. It is `null`
+when Azure sent none.
+
+`read_operation_state` polls once:
+
+- `azure-asyncoperation`: the answer is `{"status": ...}`. `Succeeded`,
+  `Failed` and `Canceled` are the end states; every other value (`InProgress`,
+  `Running`, `Accepted`, ...) means it still runs. `error` holds Azure's code
+  and message; `properties` is the result of a success.
+- `location`: 202 means it still runs. 200 or 204 means it succeeded, with
+  the body as the result. A 400 or 409 answer means the operation failed.
+
+`wait_for_operation` polls until the end or until `max_seconds` (default
+300) pass. Before the first poll it waits the reference's
+`retry_after_seconds`, or polls at once when Azure sent none. Between two
+polls it waits the full `Retry-After` Azure asked for, never less (10 seconds
+when Azure sent none or zero). A shorter wait would poll early and could make
+Azure throttle. When a wait does not fit in the time left, it does not poll
+early: it returns the pending state with the reference and `done: false`, and
+the caller can poll later. This holds for the first wait too: a first answer
+that asks for 120 seconds with 100 seconds left returns at once, without a
+poll.
+
+### azure.operation.status
+
+`azure.operation.status` (group `account`, `safe`) takes the `operation`
+reference an Azure write returned and polls it once, with the same checks.
+It never sends the write again. It polls at once: the caller decides when to
+ask, so the reference's `retry_after_seconds` is not waited here. This is how
+a caller learns the outcome of a write after a lost answer or a MEHO restart:
+the reference holds everything needed, and no state in MEHO's memory is used.
+The answer is `{status, done, error, result, retry_after_seconds, operation}`.
 
 ## azure.about, fingerprint and probe
 
@@ -212,7 +424,7 @@ as MEHO's system identity, which cannot read the secret, so it reports
 ## Dependencies
 
 - `connectors/adapters/http.py`: pooled `httpx` client, blocking of private
-  addresses, trace recording, retry of failed GET requests.
+  addresses, the response size cap and trace recording. Its retry is not used.
 - `connectors/_shared/vault_creds.py`: the operator-context secret read.
 - `connectors/_shared/vcf_auth.py`: `ConnectorAuthError` (the refused-login
   error the dispatcher knows) and the `auth_model` check.
@@ -222,9 +434,14 @@ as MEHO's system identity, which cannot read the secret, so it reports
 ## Known issues
 
 - Only the public cloud (`AzureCloud`) is proven on a live tenant.
-- No 429 handling yet: a "too many requests" answer from Azure or from the
-  login service becomes a plain error. One retry budget, waiting for
-  `Retry-After`, paging and long-running operations come next.
+- A 429 or 5xx from the login service is not retried: the login request is
+  made once and fails with `MicrosoftLoginError`.
+- The limit per login holds per MEHO process. Several MEHO processes do not
+  share it.
+- Paging, the polling helper and `azure.operation.status` are proven with
+  mocked HTTP only. The live proof on a lab subscription is still open.
+- `resultTruncated` from Resource Graph is read as the string `"true"` (what
+  the API sends) or a real `true`.
 - The check of the hand-written paths against Azure's pinned API description
   files arrives with those files; `_paths.py` is ready for it.
 - The cache lives in one MEHO process. Each process logs in on its own.
@@ -237,6 +454,17 @@ as MEHO's system identity, which cannot read the secret, so it reports
   <https://learn.microsoft.com/en-us/entra/identity-platform/access-token-claims-reference>
 - Token lifetimes:
   <https://learn.microsoft.com/en-us/entra/identity-platform/configurable-token-lifetimes>
+- Throttling of Resource Manager requests:
+  <https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/request-limits-and-throttling>
+- Resource Graph paging, `$skipToken` and `resultTruncated`:
+  <https://learn.microsoft.com/en-us/azure/governance/resource-graph/concepts/work-with-data>
+- Throttled Resource Graph requests:
+  <https://learn.microsoft.com/en-us/azure/governance/resource-graph/concepts/guidance-for-throttled-requests>
+- Resource Graph query (API version 2024-04-01, `$skipToken`):
+  <https://learn.microsoft.com/en-us/rest/api/azureresourcegraph/resourcegraph/resources/resources>
+- Status of asynchronous operations:
+  <https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/async-operations>
+- Paging with `nextLink`: <https://learn.microsoft.com/en-us/rest/api/azure/>
 - Subscriptions - Get (API version 2022-12-01):
   <https://learn.microsoft.com/en-us/rest/api/resources/subscriptions/get>
 - Azure Government endpoints:

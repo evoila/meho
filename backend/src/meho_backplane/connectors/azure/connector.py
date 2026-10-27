@@ -4,8 +4,10 @@
 """AzureConnector: typed reads of Azure Resource Manager, one subscription per target.
 
 The connector sits on the shared HTTP base, so every call keeps MEHO's pooled
-client, its blocking of private addresses, its trace recording and its retry
-of failed GET requests.
+client, its blocking of private addresses and its trace recording. Its calls
+go through :func:`meho_backplane.connectors.azure._http.send`, which owns the
+one retry budget per call, the wait when Azure throttles and the limit per
+Azure login. The retry of the HTTP base is not used.
 
 The target's secret holds a Microsoft Entra ID login (tenant ID, client ID and
 client secret). MEHO trades it for an access token
@@ -14,8 +16,9 @@ as ``Authorization: Bearer``. Secrets and tokens are cached here, one lock per
 cache key, so many calls at the same moment start one login. A call without a
 person's token never gets a cached secret or token.
 
-The dispatcher calls :meth:`AzureConnector.invalidate_session` after Azure
-answers 401 (then it retries once) and
+After Azure answers 401, :func:`~meho_backplane.connectors.azure._http.send`
+calls :meth:`AzureConnector.invalidate_session` and tries once more, inside
+the same retry budget. The dispatcher calls
 :meth:`AzureConnector.invalidate_credentials` after Microsoft refused the
 login. ``docs/codebase/connectors-azure.md`` describes the whole flow.
 """
@@ -48,7 +51,9 @@ from meho_backplane.connectors._shared.vcf_auth import (
     ConnectorAuthError,
     is_acceptable_auth_model,
 )
-from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.adapters.http import HttpConnector, json_payload_or_empty
+from meho_backplane.connectors.azure._errors import AzureApiError, AzureNotFoundError
+from meho_backplane.connectors.azure._http import NoRedirectClient, send
 from meho_backplane.connectors.azure._paths import SUBSCRIPTIONS_API_VERSION, subscription_path
 from meho_backplane.connectors.azure.session import (
     AzureCredentials,
@@ -88,6 +93,8 @@ _UNREACHABLE_ERRORS: Final[tuple[type[BaseException], ...]] = (
     AzureTargetConfigError,
     MicrosoftLoginError,
     ConnectorAuthError,
+    AzureApiError,
+    AzureNotFoundError,
 )
 
 #: A clock for the cache. Tests replace it to move time forward.
@@ -124,6 +131,9 @@ class AzureConnector(HttpConnector):
     impl_id = "azure-arm"
     supported_version_range: str | None = None
     priority = 1
+    #: No redirect is followed: every subscription shares one host, so even a
+    #: redirect on the same host could carry the token elsewhere.
+    _client_class = NoRedirectClient
 
     def __init__(self, *, credentials_loader: AzureCredentialsLoader | None = None) -> None:
         super().__init__()
@@ -141,6 +151,23 @@ class AzureConnector(HttpConnector):
 
     async def auth_headers(self, target: AzureTargetLike, operator: Operator) -> dict[str, str]:
         """Return ``{"Authorization": "Bearer <token>"}`` for a call to *target*."""
+        headers, _login = await self.authorize(target, operator)
+        return headers
+
+    async def _access_token(
+        self, target: AzureTargetLike, operator: Operator
+    ) -> MicrosoftAccessToken:
+        """Return a token for *target*, from the cache or from a new login."""
+        token, _login = await self._token_and_login(target, operator)
+        return token
+
+    async def authorize(
+        self, target: AzureTargetLike, operator: Operator
+    ) -> tuple[dict[str, str], tuple[str, str]]:
+        """Return the ``Authorization`` header and the login (Azure tenant ID, client ID).
+
+        The transport uses the login to apply the limit per Azure login.
+        """
         auth_model = getattr(target, "auth_model", None)
         if not is_acceptable_auth_model(auth_model):
             raise NotImplementedError(
@@ -148,31 +175,27 @@ class AzureConnector(HttpConnector):
                 f"{AuthModel.SHARED_SERVICE_ACCOUNT.value!r}; target {target.name!r} "
                 f"asked for auth_model={auth_model!r}"
             )
-        token = await self._access_token(target, operator)
-        return {"Authorization": f"Bearer {token.value}"}
+        token, login = await self._token_and_login(target, operator)
+        return {"Authorization": f"Bearer {token.value}"}, login
 
-    async def _access_token(
+    async def _token_and_login(
         self, target: AzureTargetLike, operator: Operator
-    ) -> MicrosoftAccessToken:
-        """Return a token for *target*, from the cache or from a new login."""
+    ) -> tuple[MicrosoftAccessToken, tuple[str, str]]:
+        """Return a token for *target* and the login it belongs to."""
         config = resolve_target_config(target)
         credentials = await self._credentials_for(target, operator)
         check_tenant_match(target, config, credentials)
+        login = (credentials.tenant_id, credentials.client_id)
         scope = config.cloud.arm_scope
-        key: _TokenKey = (
-            *target_cache_key(target),
-            credentials.tenant_id,
-            credentials.client_id,
-            scope,
-        )
+        key: _TokenKey = (*target_cache_key(target), *login, scope)
         use_cache = _may_use_cache(operator)
         cached = self._tokens.get(key)
         if use_cache and cached is not None and _monotonic() < cached.renew_at:
-            return cached.token
+            return cached.token, login
         async with self._token_locks.setdefault(key, asyncio.Lock()):
             cached = self._tokens.get(key)
             if use_cache and cached is not None and _monotonic() < cached.renew_at:
-                return cached.token
+                return cached.token, login
             token = await fetch_client_credentials_token(
                 credentials,
                 login_host=config.cloud.login_host,
@@ -190,7 +213,7 @@ class AzureConnector(HttpConnector):
                 client_id=credentials.client_id,
                 expires_in=token.expires_in,
             )
-            return token
+            return token, login
 
     async def _credentials_for(
         self, target: AzureTargetLike, operator: Operator
@@ -256,16 +279,13 @@ class AzureConnector(HttpConnector):
     ) -> dict[str, Any]:
         """GET *path* on the target's Resource Manager host and return the JSON body.
 
-        Goes through the HTTP base, so a 5xx or a lost connection is retried,
-        and a 401 reaches the dispatcher, which logs in again and retries once.
+        Goes through :func:`~meho_backplane.connectors.azure._http.send`: one
+        retry budget, a wait when Azure throttles, one new login after a 401.
         """
-        return await self._request_json(
-            target,
-            "GET",
-            path,
-            operator=operator,
-            params={"api-version": api_version},
+        response = await send(
+            self, target, "GET", path, operator=operator, params={"api-version": api_version}
         )
+        return json_payload_or_empty(response)
 
     async def read_subscription(
         self, target: AzureTargetLike, operator: Operator
@@ -386,3 +406,11 @@ class AzureConnector(HttpConnector):
         from meho_backplane.connectors.azure.typed_reads import azure_about_impl
 
         return await azure_about_impl(self, operator, target, params)
+
+    async def operation_status(
+        self, operator: Operator, target: AzureTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``azure.operation.status``: read the state of a long-running operation once."""
+        from meho_backplane.connectors.azure.typed_reads import azure_operation_status_impl
+
+        return await azure_operation_status_impl(self, operator, target, params)

@@ -318,6 +318,14 @@ the reducer keeps it **whole** as a document record under a handle:
   is not stored either (`reason=admission_limit_exceeded`).
 - Credential-class ops and reduces without an `op_id` pass through
   unchanged, as before.
+- An operation can ask for this path on purpose with
+  `llm_instructions.result_document = {"keep_whole": true}`. Use it when
+  the payload is one document whose lists are all needed, but one of
+  them sits under a key the collection detection reduces on (`items`,
+  `value`, `data`, ...). The migration assessment does this: `items`
+  beside `totals`, `assumptions`, `unknowns` and `omissions`. The
+  dispatcher forwards the hint like `result_scalars`; a hint of another
+  shape is logged and ignored.
 - A multi-step operation's failure envelope (an `issues[]` entry with
   `severity: "error"`, #3809) takes the same reducer path as a success
   payload (#4223). An oversized refusal — `folder.create`'s

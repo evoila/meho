@@ -2345,6 +2345,23 @@ def _result_digest_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, 
     return None
 
 
+def _result_document_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, Any] | None:
+    """Extract ``result_document`` from a descriptor's ``llm_instructions``.
+
+    An op whose payload is one document with several needed lists registers
+    ``{"keep_whole": True}``; the reducer then keeps the payload whole as a
+    document record instead of reducing one list and dropping the rest.
+    Mirrors :func:`_result_scalars_from_descriptor`: a plain dict or ``None``.
+    """
+    instructions = descriptor.llm_instructions
+    if not isinstance(instructions, dict):
+        return None
+    raw = instructions.get("result_document")
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
 async def _unavailable_delivery_result(
     *,
     op_id: str,
@@ -2554,6 +2571,11 @@ def _build_reducer_context(
     result_digest = _result_digest_from_descriptor(descriptor)
     if result_digest is not None:
         reducer_context["result_digest"] = result_digest
+    # Forward the op's keep-whole hint so the reducer stores the payload as
+    # one document and every list in it stays readable with a ``path``.
+    result_document = _result_document_from_descriptor(descriptor)
+    if result_document is not None:
+        reducer_context["result_document"] = result_document
     return reducer_context
 
 

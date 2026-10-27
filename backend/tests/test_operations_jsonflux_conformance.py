@@ -255,6 +255,7 @@ async def _dropped_scalar_siblings(descriptors: list[Any]) -> dict[str, list[str
     """
     from meho_backplane.operations.dispatcher import (
         _result_digest_from_descriptor,
+        _result_document_from_descriptor,
         _result_objects_from_descriptor,
         _result_scalars_from_descriptor,
     )
@@ -263,6 +264,10 @@ async def _dropped_scalar_siblings(descriptors: list[Any]) -> dict[str, list[str
     reducer = JsonFluxReducer()
     dropped: dict[str, list[str]] = {}
     for descriptor in descriptors:
+        if _result_document_from_descriptor(descriptor) is not None:
+            # The op keeps its payload whole as a document record, so no
+            # field of it is ever dropped; there is no list reduction to check.
+            continue
         built = _list_plus_scalars_payload(descriptor.response_schema)
         if built is None:
             continue

@@ -168,9 +168,14 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
     "next_step": (
         "Show the totals with their assumptions, then the servers flagged 'not_ready' "
         "or 'right_sized_unknown' and the unknowns. Prices in another currency than "
-        "USD are reference values, not quotes. A large result comes back as a handle; "
-        "read 'items' with result_query."
+        "USD are reference values, not quotes. A large result comes back whole as a "
+        "handle: read it with result_query and a path, for example '/totals', "
+        "'/assumptions' or '/unknowns', and page '/items' with offset and limit."
     ),
+    # The result is one document: 'items' beside 'totals', 'assumptions',
+    # 'inputs', 'unknowns' and 'omissions'. Without this hint the reducer
+    # would store 'items' as rows and drop the rest.
+    "result_document": {"keep_whole": True},
 }
 
 

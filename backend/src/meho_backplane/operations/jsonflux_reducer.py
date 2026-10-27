@@ -301,6 +301,16 @@ _RESULT_OBJECTS_CONTEXT_KEY = "result_objects"
 #: so a failure never requires a drill-in (the #3084 drivability lesson).
 _RESULT_DIGEST_CONTEXT_KEY = "result_digest"
 
+#: ``context`` key carrying the op's keep-whole hint. An op registers
+#: ``llm_instructions["result_document"] = {"keep_whole": True}`` when its
+#: payload is one document whose lists are all needed, under a key the
+#: collection detection would otherwise reduce on (the migration assessment:
+#: ``items`` beside ``totals``, ``assumptions``, ``unknowns`` and
+#: ``omissions``). The reducer then takes the document path (#3633): a small
+#: payload passes through, a large one is kept whole under a handle and read
+#: with ``result_query`` and a ``path``. Nothing beside the rows is lost.
+_RESULT_DOCUMENT_CONTEXT_KEY = "result_document"
+
 #: Summary keys the reducer itself owns. A hinted scalar key colliding with
 #: one of these is skipped (with a warning) — the reduction bookkeeping is
 #: load-bearing for every consumer and must never be shadowed by a vendor
@@ -470,6 +480,9 @@ class JsonFluxReducer:
         reduced-but-unspilled response is self-explanatory.
         """
         del schema  # schema is inferred from captured rows
+
+        if _keeps_whole(context):
+            return await self._reduce_document(payload, context)
 
         # Resolve the digest hint once (#3122) so both the collection detection
         # and the row-digest read the same validated spec — a single warning on
@@ -1579,6 +1592,27 @@ def _coerce_state_list(value: Any, context: dict[str, Any] | None, field: str) -
         received_type=type(value).__name__,
     )
     return frozenset()
+
+
+def _keeps_whole(context: dict[str, Any] | None) -> bool:
+    """True when the op asked for its payload whole with a ``result_document`` hint.
+
+    The hint is ``{"keep_whole": True}``. Any other shape logs once and is
+    ignored, like the other hints: a wrong hint never fails a read.
+    """
+    if not context:
+        return False
+    raw = context.get(_RESULT_DOCUMENT_CONTEXT_KEY)
+    if raw is None:
+        return False
+    if not isinstance(raw, dict) or raw.get("keep_whole") is not True:
+        _log.warning(
+            "jsonflux_result_document_invalid_shape",
+            op_id=context.get("op_id"),
+            received_type=type(raw).__name__,
+        )
+        return False
+    return True
 
 
 def _resolve_digest_hint(context: dict[str, Any] | None) -> _RowDigestSpec | None:

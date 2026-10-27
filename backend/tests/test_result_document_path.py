@@ -165,6 +165,43 @@ async def test_oversized_non_collection_root_gets_a_drillable_handle(
     assert stored.document == payload
 
 
+async def test_keep_whole_hint_stores_a_collection_payload_as_a_document(
+    result_reducer_cls: type[Any], store: ResultHandleStore
+) -> None:
+    """An op may ask for its whole payload, even when a list sits under an envelope key."""
+    payload = {
+        "items": [{"name": f"server-{i}", "why": "cheapest " * 20} for i in range(60)],
+        "totals": {"monthly": 2655.0},
+        "unknowns": [{"what": "size", "reason": "too big"}],
+        "version": "1",
+    }
+    reducer = result_reducer_cls(store=store)
+    context = {**_CONTEXT, "result_document": {"keep_whole": True}}
+
+    reduced, handle = await reducer.reduce(payload, None, context)
+
+    assert handle is not None
+    assert reduced["result_record"] == "document"
+    assert reduced["version"] == "1"
+    stored = await store.fetch_document(
+        tenant_id=_TENANT, operator_sub="op-a", handle_id=handle.handle_id
+    )
+    assert stored is not None
+    assert stored.document == payload
+
+    # Without the hint the same payload reduces on ``items`` and keeps rows.
+    _rows_reduced, rows_handle = await reducer.reduce(payload, None, dict(_CONTEXT))
+    assert rows_handle is not None
+    assert rows_handle.total_rows == 60
+
+    # A hint of the wrong shape is ignored, not an error.
+    _ignored, ignored_handle = await reducer.reduce(
+        payload, None, {**_CONTEXT, "result_document": {"keep_whole": "yes"}}
+    )
+    assert ignored_handle is not None
+    assert ignored_handle.total_rows == 60
+
+
 async def test_detail_summary_keeps_scalars_and_outlines_fields(
     result_reducer_cls: type[Any], store: ResultHandleStore
 ) -> None:

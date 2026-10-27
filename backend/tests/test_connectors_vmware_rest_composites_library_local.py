@@ -443,7 +443,7 @@ async def test_upload_fills_an_empty_item_left_by_a_failed_try(gate: _Gate) -> N
     "params",
     [
         {"source_url": "ftp://depot.example.test/a.iso"},
-        {"source_url": "https://user:secret@depot.example.test/a.iso"},
+        {"source_url": "https://user:secret@depot.example.test/a.iso"},  # trufflehog:ignore
         {"source_url": "https://depot.example.test/iso/"},
     ],
 )
@@ -559,5 +559,9 @@ def test_upload_schema_rejects_a_url_with_a_password() -> None:
     validator = Draft202012Validator(CONTENT_LIBRARY_ITEM_UPLOAD_PARAMETER_SCHEMA)
     for example in CONTENT_LIBRARY_ITEM_UPLOAD_PARAMETER_SCHEMA["examples"]:
         validator.validate(example)
-    bad = {"library_id": _LIB, "item_name": "x", "source_url": "https://u:p@host/a.iso"}
+    bad = {
+        "library_id": _LIB,
+        "item_name": "x",
+        "source_url": "https://u:p@host/a.iso",  # trufflehog:ignore
+    }
     assert not validator.is_valid(bad)

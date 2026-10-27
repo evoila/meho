@@ -1088,6 +1088,26 @@ largest legitimate tool payload (64 KiB body + envelope + JSON
 escaping) so the schema-level caps, not the transport, are the
 operative limit for well-formed calls.
 
+## Extra arguments on read tools with no arguments (#4137)
+
+Small models often send arguments to a tool that takes none, for
+example `meho_status` with `{"input": {}}` or `{"": ""}`. The schema
+(`properties: {}`, `additionalProperties: false`) used to refuse each
+call with `-32602`, and the model had to try again.
+
+`handle_tools_call` (`mcp/handlers.py`) now replaces the arguments with
+`{}` just before the `inputSchema` check when both are true:
+
+* the tool is a read tool (`op_class == "read"`), and
+* its `inputSchema` has no `properties`.
+
+Today this covers `meho_status`, `meho_automation_list`, and
+`meho_agents_list`. Tools that take arguments, and every write tool,
+still refuse an unknown argument with `-32602`: a wrong argument name
+there can mean a wrong answer. The tool schemas, the REST API, and the
+CLI are not changed. The audit row's `params_hash` is still computed
+over the arguments the client sent.
+
 ## Dependencies
 
 * `structlog` — every MCP log line goes through

@@ -477,6 +477,13 @@ async def handle_tools_call(
                     },
                 )
 
+        # A read tool that takes no arguments ignores any it is sent
+        # (#4137): small models often add junk keys, and a refused call
+        # only costs a retry. Tools with arguments and write tools keep
+        # the strict check. ``params_hash`` above still covers what was sent.
+        if defn.op_class == "read" and not defn.inputSchema.get("properties"):
+            arguments = {}
+
         # Validate arguments against the tool's inputSchema. ``cls`` is
         # pinned to :class:`jsonschema.Draft202012Validator` to make the
         # "JSON Schema 2020-12" contract called out in :class:`ToolDefinition`

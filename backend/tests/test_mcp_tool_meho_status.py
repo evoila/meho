@@ -10,8 +10,9 @@ Covers acceptance criteria 1-4 on issue #249:
 * ``tools/call`` with no arguments returns the operator identity + Vault
   + DB-migration bundle wire-identical to ``GET /api/v1/health`` (modulo
   the MCP ``content`` wrapper).
-* ``tools/call`` with an extra argument violates the
-  ``additionalProperties: false`` constraint and surfaces as
+* ``tools/call`` with extra arguments still answers normally (#4137):
+  a read tool with no arguments ignores the ones it is sent. Tools with
+  arguments and write tools still refuse an unknown argument with
   ``INVALID_PARAMS`` (-32602).
 
 AC #4 (sub-``read_only`` role rejection) is satisfied by the registry's
@@ -39,11 +40,13 @@ regardless of the probe outcome.
 from __future__ import annotations
 
 import json
+from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from meho_backplane.api.v1.health import HealthResponse
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.schemas import INVALID_PARAMS
@@ -152,26 +155,64 @@ def test_tools_call_meho_status_returns_health_response_shape(
     assert feature_names >= {"approval_custody", "approval_queue"}
 
 
-def test_tools_call_meho_status_rejects_extra_arguments(
+@pytest.mark.parametrize(
+    "extra_arguments",
+    [{"input": {}}, {"": ""}, {"connector_id": "x"}],
+)
+def test_tools_call_meho_status_ignores_extra_arguments(
     client_with_operator: tuple[TestClient, Operator],
+    extra_arguments: dict[str, object],
 ) -> None:
-    """AC #3: extra args fail the ``additionalProperties: false`` schema → -32602."""
+    """#4137: a read tool with no arguments ignores extra ones and answers normally."""
     client, _op = client_with_operator
 
+    plain = _call_meho_status(client)
+    with_extra = _call_tool(client, "meho_status", extra_arguments)
+
+    assert "error" not in with_extra, with_extra
+    assert with_extra["result"]["isError"] is False
+    payload = json.loads(with_extra["result"]["content"][0]["text"])
+    assert payload.keys() == plain.keys()
+    assert payload["operator"] == plain["operator"]
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        # A read tool that takes arguments: a wrong name can mean a wrong answer.
+        ("list_targets", {"no_such_argument": "x"}),
+        # A write tool keeps the strict check.
+        ("add_to_memory", {"scope": "personal", "no_such_argument": "x"}),
+    ],
+)
+def test_tools_call_unknown_argument_still_refused(
+    client_with_operator: tuple[TestClient, Operator],
+    tool: str,
+    arguments: dict[str, object],
+) -> None:
+    """#4137: only no-argument read tools drop extra arguments; the rest refuse them."""
+    client, _op = client_with_operator
+
+    body = _call_tool(client, tool, arguments)
+
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert "no_such_argument" in body["error"]["message"]
+
+
+def _call_tool(client: TestClient, name: str, arguments: dict[str, object]) -> dict[str, Any]:
     response = post_mcp(
         client,
         {
             "jsonrpc": "2.0",
             "id": 3,
             "method": "tools/call",
-            "params": {"name": "meho_status", "arguments": {"foo": "bar"}},
+            "params": {"name": name, "arguments": arguments},
         },
     )
-
     assert response.status_code == 200
-    body = response.json()
-    assert body["error"]["code"] == INVALID_PARAMS
-    assert "inputschema" in body["error"]["message"].lower()
+    body: dict[str, Any] = response.json()
+    return body
 
 
 def _call_meho_status(client: TestClient) -> dict[str, object]:

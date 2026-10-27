@@ -968,3 +968,42 @@ func TestFlatListVerbsHaveListSubcommand(t *testing.T) {
 		}
 	}
 }
+
+// TestOperationCallNotFoundExitsOne — a vendor verb goes through the
+// shared dispatch.Render: a status=not_found envelope (#3591, #4986)
+// prints the envelope and the missing id, exits 1 via errOpError, and
+// never says the CLI needs an upgrade.
+func TestOperationCallNotFoundExitsOne(t *testing.T) {
+	errMsg := "not_found: VirtualMachine vm-123 does not exist"
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/operations/call": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 200, CallResult{
+				Status: "not_found", OpID: "vmware.object.collect", Error: &errMsg,
+				Extras: json.RawMessage(`{"error_code":"not_found","resource_ids":["vm-123"]}`),
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	cmd := newOperationCallCmd()
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs([]string{"vmware.object.collect", "--target", "rdc-vcenter", "--backplane", srv.URL})
+	err := cmd.Execute()
+	if !errors.Is(err, errOpError) {
+		t.Fatalf("not_found must exit 1 via errOpError; got %v", err)
+	}
+	if errBuf.Len() != 0 {
+		t.Errorf("stderr must stay empty; got %q", errBuf.String())
+	}
+	for _, want := range []string{"status=not_found", "not found: vm-123\n", "does not exist"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("stdout missing %q; got %q", want, out.String())
+		}
+	}
+	if strings.Contains(out.String()+errBuf.String(), "upgrade") {
+		t.Errorf("not_found must not ask for a CLI upgrade; got %q", out.String()+errBuf.String())
+	}
+}

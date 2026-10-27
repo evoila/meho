@@ -611,8 +611,8 @@ the paging fields of `PagedRows.as_dict()` (`truncated`, `omission`,
   cluster has no managed identity and `servicePrincipalProfile.clientId`
   names an application: then the cluster logs in to Azure with a service
   principal and a secret. A managed identity cluster has `msi` in that
-  field, which does not count. Otherwise it is Azure's `identity.type` as it
-  is, or null.
+  field, which does not count. Otherwise it is null, also when Azure writes
+  the text `None`.
 - `addons` lists, sorted, Azure's own name of every `addonProfiles` entry
   with `enabled: true` (for example `omsagent`, `azurepolicy`,
   `azureKeyvaultSecretsProvider`, `ingressApplicationGateway`), plus MEHO's

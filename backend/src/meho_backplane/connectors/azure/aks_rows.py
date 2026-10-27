@@ -194,7 +194,7 @@ def _identity_type(item: Mapping[str, Any], properties: Mapping[str, Any]) -> st
     reports it in ``identity.type``. ``ServicePrincipal`` when the cluster
     has no managed identity and its ``servicePrincipalProfile`` names an
     application: then it logs in with a service principal and a secret.
-    Otherwise Azure's ``identity.type`` as it is (``None`` or missing).
+    Otherwise ``None`` (null), also when Azure writes the text ``None``.
     """
     kind = _text(_object(item.get("identity")).get("type"))
     if kind is not None and kind.lower() in _MANAGED_IDENTITY_TYPES:
@@ -202,7 +202,7 @@ def _identity_type(item: Mapping[str, Any], properties: Mapping[str, Any]) -> st
     client_id = _text(_object(properties.get("servicePrincipalProfile")).get("clientId"))
     if client_id is not None and client_id.lower() != _MANAGED_IDENTITY_CLIENT_ID:
         return "ServicePrincipal"
-    return kind
+    return None
 
 
 def _addons(properties: Mapping[str, Any]) -> list[str]:

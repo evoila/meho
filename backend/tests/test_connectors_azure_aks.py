@@ -939,7 +939,8 @@ async def test_search_operations_finds_the_aks_cluster_list(
             {"clientId": "aaaaaaaa-0000-0000-0000-00000000c009"},
             "ServicePrincipal",
         ),
-        ({"type": "None"}, {"clientId": "msi"}, "None"),
+        ({"type": "None"}, {"clientId": "msi"}, None),
+        ({"type": "None"}, None, None),
         (None, None, None),
     ],
 )

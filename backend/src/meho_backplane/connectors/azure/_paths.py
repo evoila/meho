@@ -21,6 +21,11 @@ from __future__ import annotations
 from typing import Final
 
 __all__ = [
+    "AVS_API_VERSION",
+    "AVS_CLUSTERS_PATH",
+    "AVS_HOSTS_PATH",
+    "AVS_PRIVATE_CLOUDS_PATH",
+    "AVS_QUOTA_PATH",
     "LOCATIONS_PATH",
     "RESOURCE_GRAPH_API_VERSION",
     "RESOURCE_GRAPH_PATH",

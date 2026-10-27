@@ -37637,6 +37637,10 @@
       "x-maturity": "ga"
     },
     {
+      "name": "service-principal-read-scopes",
+      "x-maturity": "ga"
+    },
+    {
       "name": "targets",
       "x-maturity": "ga"
     },

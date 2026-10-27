@@ -1225,6 +1225,7 @@ meho connector ingest [flags]
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
 - `--no-wait` — on an async 202 answer, exit 0 with the job handle (job_id + poll URL) instead of polling the job to completion; no effect when the backplane answers synchronously (HTTP 200)
 - `--product` — product name (e.g. vmware, kubernetes); manual mode (required with --version/--impl/--spec)
+- `--save-converted` — manual mode: when a --spec is a Swagger 2.0 file the CLI converts to OpenAPI 3, also write the converted file here so you can check it and keep it next to the original
 - `--spec` — spec URI; repeat for multi-spec merge under one connector_id; manual mode
 - `--spec-info-versions-compatible` — manual mode: declare that the spec's info.version is compatible with --version even when they differ (e.g. a vendor /api/v2 surface self-versioning as info.version=v2 ingested under --version 9.0). Each entry is a glob (2.x, 9.0.x) or a PEP 440 specifier set (>=2,<3); repeatable or comma-separated. Without it, a spec/label major mismatch is rejected; mutually exclusive with --catalog (the catalog row carries its own band)
 - `--tenant-id` — write scope for the ingested rows (works with both modes): omit for the built-in / global scope (tenant_id left unset — visible to every tenant); pass your own tenant UUID for a tenant-curated ingest (another tenant's UUID is rejected with HTTP 403 unless you hold platform_admin)

@@ -168,8 +168,8 @@ class UnsupportedSpecError(ValueError):
     message always names the offending shape so the operator can decide
     whether to file a v0.2.next request or pre-process the spec. For
     Swagger 2.0 specifically the message also names the conversion path
-    (convert to OpenAPI 3.x via ``swagger2openapi`` /
-    ``converter.swagger.io`` and re-ingest) so the operator can
+    (pass the file to ``meho connector ingest`` as ``file://`` so the CLI
+    converts it locally, or convert it with ``swagger2openapi``) so the operator can
     self-serve a 2.0-only vendor surface such as Harbor 2.x (#1532). For
     the ``docs:`` shorthand the message names ``$CLAUDE_RDC_DOCS`` as
     the CLI-side resolution path (#1535).

@@ -2795,16 +2795,36 @@ All three delegate to `ReviewService.delete_connector`
 * **Cross-document `$ref` rejected.** External files
   (`other.yaml#/...`) raise `UnsupportedSpecError`. Same v0.2.next
   note.
-* **Swagger 2.0 rejected with an actionable remedy.** A spec declaring
-  `swagger: "2.0"` (no `openapi` key) raises `UnsupportedSpecError`
-  whose message names the conversion path — convert to OpenAPI 3.x
-  (`swagger2openapi` / `converter.swagger.io`) and re-ingest the 3.x
-  output. The parser stays 3.x-only on purpose: the maintained 2.0→3.0
-  converters are Node/web-service tools (`swagger2openapi`/oas-kit,
-  `converter.swagger.io`), and an in-house converter is a large
-  correctness surface the review queue can't backstop, so the
-  documented decision (#1532, reaffirmed for the VCF Automation case
-  in #2090) is to reject-with-remedy rather than convert in-process.
+* **Swagger 2.0 is converted by the CLI, not the backplane (#5028).**
+  The backplane parser stays OpenAPI 3.x only (#1532, #2090). The CLI
+  converts instead, on the operator's machine:
+  - `meho connector ingest` reads a `file://` or `docs:` spec itself.
+    When the file says `swagger: "2.0"`, the CLI converts it to
+    OpenAPI 3.0 with the Go library `kin-openapi` (`openapi2conv`, MIT
+    licence, pinned in `cli/go.mod`), prints a short summary (paths,
+    operations, login schemes), and uploads only the converted JSON.
+    Code: `cli/internal/cmd/connector/swagger2.go`.
+  - The conversion fetches nothing. A `$ref` to another file or a URL
+    is refused with the name and place of the reference, like the
+    backplane's own cross-document `$ref` rule.
+  - `--save-converted <file>` also writes the converted copy, so the
+    operator can check it and keep it next to the original.
+  - What changes in the conversion: `in: body` becomes `requestBody`,
+    `in: formData` becomes a `multipart/form-data` or
+    `application/x-www-form-urlencoded` body (a `file` field becomes
+    `type: string, format: binary`), `definitions` become
+    `components.schemas`, `securityDefinitions` become
+    `components.securitySchemes`, and `host` + `basePath` + `schemes`
+    become `servers`. A `description` written next to a `$ref` is
+    dropped (OpenAPI 3.0 ignores it anyway). When the file declares no
+    `consumes`, the body media type is `*/*`; the parser's media-type
+    fallback still finds the schema.
+  - An `https://` spec is fetched by the backplane, which still rejects
+    Swagger 2.0 with `UnsupportedSpecError`. Its message names the CLI
+    path first (download the file, pass it as `file://`), then a local
+    `swagger2openapi` run as the fallback. It names no hosted
+    converter, because that would send the vendor's file to an outside
+    service.
   The product-agnostic convert-then-ingest runbook lives at
   [`connector-ingestion.md` § "Product ships only Swagger 2.0"](../cross-repo/connector-ingestion.md#product-ships-only-swagger-20)
   (VCF Automation's vra-sdk-go fragments are the worked example);

@@ -274,7 +274,8 @@ def _select(
     servers: list[ServerRecord], duplicates: Iterable[Duplicate]
 ) -> tuple[list[ServerRecord], list[LeftOutServer]]:
     # Every record of one machine maps to the same key: the first record's id.
-    machine_of = {d.source_id: d.same_as for d in duplicates}
+    # A repeated source_id is the same record; it maps to itself by default.
+    machine_of = {d.source_id: d.same_as for d in duplicates if d.match != "source_id"}
     kept: list[ServerRecord] = []
     left_out: list[LeftOutServer] = []
     in_file: dict[str, str] = {}

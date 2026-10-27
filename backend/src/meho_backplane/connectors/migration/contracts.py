@@ -152,7 +152,13 @@ class _Record(_Shape):
 class IdentityHints(_Shape):
     """Facts that find one machine seen through two sources (vCenter and its guest OS)."""
 
-    bios_uuid: str | None = Field(default=None, description="SMBIOS / BIOS UUID, lower case.")
+    bios_uuid: str | None = Field(
+        default=None,
+        description=(
+            "SMBIOS / BIOS UUID, lower case, in the form the guest OS reports it. A "
+            "vCenter record is converted to that form (see the migration docs)."
+        ),
+    )
     mac_addresses: list[str] = Field(
         default_factory=list, description="MAC addresses, lower case with ':'."
     )
@@ -250,7 +256,7 @@ class ServerRecord(_Record):
         default_factory=dict,
         description=(
             "More facts the source reports, with fixed keys per source. VMware: "
-            "'vm_id', 'instance_uuid', 'esxi_host', 'cluster'."
+            "'vm_id', 'instance_uuid', 'hardware_version', 'esxi_host', 'cluster'."
         ),
     )
 
@@ -335,57 +341,77 @@ class IdentityDuplicate(_Shape):
     same_as: str = Field(
         min_length=1, description="The first record of that machine. Never itself a duplicate."
     )
-    match: IdentityMatch = Field(description="The value they share.")
+    match: IdentityMatch = Field(
+        description="The kind of value this record shares with another record of the machine."
+    )
 
 
 class IdentityIndex:
     """Finds server records that look like a machine seen before.
 
-    A record matches when it shares a BIOS UUID or an instance UUID with an
-    earlier record. Every identity points to the first record of its
-    machine, and a matched record registers its other identity too, so a
-    chain (B shares A's BIOS UUID, C shares B's instance UUID) names A for
-    both B and C. The caller decides what a duplicate means for its output.
+    Two records are the same machine when they share a BIOS UUID or an
+    instance UUID, directly or through other records: when C shares A's BIOS
+    UUID and B's instance UUID, A, B and C are one machine, in whatever order
+    they arrive. :meth:`add` every record first, then :meth:`duplicates`
+    names, for every later record of a machine, its first record. The caller
+    decides what a duplicate means for its output.
     """
 
     def __init__(self) -> None:
-        self._first_by: dict[tuple[IdentityMatch, str], str] = {}
+        self._position: dict[str, int] = {}
+        self._parent: dict[str, str] = {}
+        self._holder: dict[tuple[IdentityMatch, str], str] = {}
+        self._linked_by: dict[str, IdentityMatch] = {}
 
-    def add(self, record: InventoryRecord) -> IdentityDuplicate | None:
-        """Register *record*; return the duplicate entry when it matches an earlier one."""
+    def add(self, record: InventoryRecord) -> None:
+        """Register *record*'s identities. A record given twice counts once."""
         if not isinstance(record, ServerRecord):
-            return None
-        identities: list[tuple[IdentityMatch, str]] = []
+            return
+        source_id = record.source_id
+        if source_id not in self._position:
+            self._position[source_id] = len(self._position)
+            self._parent[source_id] = source_id
         bios_uuid = record.identity_hints.bios_uuid
         if bios_uuid:
-            identities.append(("bios_uuid", bios_uuid.lower()))
+            self._link(source_id, ("bios_uuid", bios_uuid.lower()))
         instance_uuid = record.source_attributes.get("instance_uuid")
         if instance_uuid:
-            identities.append(("instance_uuid", instance_uuid.lower()))
-        found: IdentityDuplicate | None = None
-        machine = record.source_id
-        for match, value in identities:
-            first = self._first_by.get((match, value))
-            if first is not None and first != record.source_id:
-                machine = first
-                found = IdentityDuplicate(source_id=record.source_id, same_as=first, match=match)
-                break
-        # A repeated record still registers its identities: the first record
-        # may lack one, and a later record may report the same machine by it.
-        for key in identities:
-            self._first_by.setdefault(key, machine)
-        return found
+            self._link(source_id, ("instance_uuid", instance_uuid.lower()))
+
+    def _link(self, source_id: str, identity: tuple[IdentityMatch, str]) -> None:
+        holder = self._holder.setdefault(identity, source_id)
+        if holder == source_id:
+            return
+        first, later = sorted(
+            (self._first(source_id), self._first(holder)), key=self._position.__getitem__
+        )
+        if first != later:
+            self._parent[later] = first
+            self._linked_by[later] = identity[0]
+
+    def _first(self, source_id: str) -> str:
+        root = source_id
+        while self._parent[root] != root:
+            root = self._parent[root]
+        while self._parent[source_id] != root:
+            self._parent[source_id], source_id = root, self._parent[source_id]
+        return root
+
+    def duplicates(self) -> list[IdentityDuplicate]:
+        """Every later record of a machine with its first record, in record order."""
+        return [
+            IdentityDuplicate(source_id=source_id, same_as=first, match=self._linked_by[source_id])
+            for source_id in self._position
+            if (first := self._first(source_id)) != source_id
+        ]
 
 
 def find_identity_duplicates(records: Iterable[InventoryRecord]) -> list[IdentityDuplicate]:
     """The records that look like a machine already in *records*, in record order."""
     index = IdentityIndex()
-    found: list[IdentityDuplicate] = []
     for record in records:
-        duplicate = index.add(record)
-        if duplicate is not None:
-            found.append(duplicate)
-    return found
+        index.add(record)
+    return index.duplicates()
 
 
 class CountCheck(_Shape):

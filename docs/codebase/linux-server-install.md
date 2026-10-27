@@ -130,7 +130,7 @@ service.
 | `/etc/meho/firewall.nft` | 0600 | the MEHO host firewall: the table `inet meho` |
 | `/etc/systemd/system/meho-firewall.service` | 0644 | the boot unit that loads `firewall.nft` |
 | `/etc/systemd/system/rke2-server.service.d/meho-firewall.conf` | 0644 | RKE2 starts only while the table `inet meho` is loaded |
-| `/etc/rancher/rke2/meho-pod-security.yaml` | 0600 | the pod security file of RKE2's CIS profile, with one more exempt namespace (see [The pod security file](#the-pod-security-file)) |
+| `/etc/rancher/rke2/meho-pss.yaml` | 0600 | the pod security file of RKE2's CIS profile, with one more exempt namespace (see [The pod security file](#the-pod-security-file)) |
 | `/etc/rancher/rke2/config.yaml` | 0600 | `write-kubeconfig-mode: "0600"`, `tls-san`, `ingress-controller: traefik`, `cluster-cidr`, `service-cidr`, `profile: cis`, `pod-security-admission-config-file`; with the join options also `server` and `token-file` |
 | `/etc/meho/join-token` | 0600 | a copy of `--join-token-file`, only with the join options |
 | `/var/lib/rancher/rke2/agent/images/meho-images.linux-amd64.tar.zst` | 0600 | the MEHO image archive |
@@ -544,12 +544,14 @@ and warns at the "restricted" level, and exempts three namespaces:
 (`pkg/rke2/psa.go`).
 
 `write_pod_security_config` writes
-`/etc/rancher/rke2/meho-pod-security.yaml` (mode 0600), and `config.yaml`
+`/etc/rancher/rke2/meho-pss.yaml` (mode 0600), and `config.yaml`
 names it with `pod-security-admission-config-file`. It is RKE2's own file
 with one more exempt namespace: `local-path-storage`. RKE2 mounts the file
 into the API server, because its path is an argument of the API server.
 `write_rke2_config` writes it before `config.yaml`, so the settings never
-name a missing file, also with `--from-disk`.
+name a missing file, also with `--from-disk`. The name is the one of the
+form-2 design (section 2). The appliance's cleaning step keeps this file
+by that name (form-1 design), so the name must not change.
 
 Why the storage namespace needs the exception: the local-path provisioner
 starts a helper pod in its own namespace for each volume. The helper pod

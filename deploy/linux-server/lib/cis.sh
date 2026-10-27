@@ -17,7 +17,7 @@
 # This file is sourced, not run.
 
 readonly RKE2_CIS_PROFILE=cis
-readonly RKE2_POD_SECURITY_FILE=/etc/rancher/rke2/meho-pod-security.yaml
+readonly RKE2_POD_SECURITY_FILE=/etc/rancher/rke2/meho-pss.yaml
 # The places where RKE2's installer puts its kernel settings file: the
 # tarball under /usr/local, or under /opt/rke2 when /usr/local is read-only
 # or a mount point; the RPM under /usr. install.sh always installs the

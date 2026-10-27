@@ -41,7 +41,7 @@ from harness import (
 )
 
 CONFIG = "/etc/rancher/rke2/config.yaml"
-POD_SECURITY = "/etc/rancher/rke2/meho-pod-security.yaml"
+POD_SECURITY = "/etc/rancher/rke2/meho-pss.yaml"
 SYSCTL_FILE = "/etc/sysctl.d/60-rke2-cis.conf"
 
 RKE2_POD_SECURITY = (FIXTURES / "rke2-pod-security-cis.yaml").read_text()

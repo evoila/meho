@@ -30,7 +30,7 @@ DEFAULT_CONFIG = textwrap.dedent("""\
     cluster-cidr: "10.42.0.0/16"
     service-cidr: "10.43.0.0/16"
     profile: cis
-    pod-security-admission-config-file: "/etc/rancher/rke2/meho-pod-security.yaml"
+    pod-security-admission-config-file: "/etc/rancher/rke2/meho-pss.yaml"
     """)
 
 

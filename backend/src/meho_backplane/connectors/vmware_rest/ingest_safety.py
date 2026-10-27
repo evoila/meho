@@ -11,6 +11,8 @@ from meho_backplane.operations.ingest.safety_floors import register_ingest_safet
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 
 __all__ = [
+    "VMWARE_APPLIANCE_AND_ACCESS_WRITES",
+    "is_vmware_appliance_or_access_write",
     "is_vmware_host_maintenance_exit",
     "is_vmware_library_item_delete",
     "is_vmware_tagging_removal",
@@ -61,6 +63,37 @@ _VIM_RELOCATE_PATH_RE = re.compile(r"/VirtualMachine/\{[^/{}]+\}/RelocateVM_Task
 # ``host.evacuate``: after it, DRS may move VMs onto the host and vSAN copies
 # data back. Without this rule a person's generic call ran at once.
 _VIM_EXIT_MAINTENANCE_PATH_RE = re.compile(r"/HostSystem/\{[^/{}]+\}/ExitMaintenanceMode_Task")
+
+# Appliance, permission, session, certificate and host-image writes (#4973).
+# They restore or restart vCenter, change who may do what, act as or log out
+# another user, replace certificates, or apply a software image to hosts. As
+# generic writes they were ``caution`` without approval, so a person's call ran
+# at once. Each is ``dangerous`` with approval on both catalogs where the path
+# exists. Entries are ``(method, path?query)`` without the ``/api`` mount;
+# ``{}`` stands for any path parameter. The vSAN removals and the hybrid-link
+# delete of the same Task need no entry here: the parser's delete-name rule
+# (``meho_backplane/delete_names.py``) already makes them wait for approval.
+VMWARE_APPLIANCE_AND_ACCESS_WRITES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("POST", "/appliance/recovery/restore/job"),
+        ("POST", "/appliance/update/pending?action=rollback"),
+        ("POST", "/appliance/update/pending/{}?action=stage-and-install"),
+        ("POST", "/appliance/networking?action=change&vmw-task=true"),
+        ("POST", "/appliance/networking?action=reset"),
+        ("POST", "/AuthorizationManager/{}/SetEntityPermissions"),
+        ("POST", "/AuthorizationManager/{}/ResetEntityPermissions"),
+        ("POST", "/AuthorizationManager/{}/MergePermissions"),
+        ("POST", "/vcenter/authorization/permissions"),
+        ("PATCH", "/vcenter/authorization/permissions/{}"),
+        ("POST", "/SessionManager/{}/ImpersonateUser"),
+        ("POST", "/SessionManager/{}/TerminateSession"),
+        ("PUT", "/vcenter/certificate-management/vcenter/tls"),
+        ("POST", "/vcenter/certificate-management/vcenter/tls?action=replace-vmca-signed"),
+        ("POST", "/vcenter/certificate-management/vcenter/vmca-root"),
+        ("POST", "/esx/settings/inventory?action=apply&vmw-task=true"),
+    }
+)
+_PATH_PARAM_RE = re.compile(r"\{[^/{}]+\}")
 
 
 def _canonical(path: str) -> tuple[str, str]:
@@ -132,11 +165,27 @@ def is_vmware_host_maintenance_exit(method: str, path: str) -> bool:
     return not query and _VIM_EXIT_MAINTENANCE_PATH_RE.fullmatch(canonical_path) is not None
 
 
+def is_vmware_appliance_or_access_write(method: str, path: str) -> bool:
+    """Return whether ``(method, path)`` is in :data:`VMWARE_APPLIANCE_AND_ACCESS_WRITES`.
+
+    Matches with or without the ``/api`` mount in the path and with any
+    spelling of a path parameter. The query must match exactly, so
+    ``POST /appliance/update/pending/{version}?action=stage`` does not count.
+    """
+    canonical_path, query = _canonical(path)
+    key = _PATH_PARAM_RE.sub("{}", canonical_path) + (f"?{query}" if query else "")
+    return (method.upper(), key) in VMWARE_APPLIANCE_AND_ACCESS_WRITES
+
+
 def _requires_vmware_safety_floor(method: str, path: str) -> bool:
-    """Identify VMware VM and host write families that require approval."""
+    """Identify VMware VM, host, appliance and access writes that require approval."""
     if method not in _WRITE_METHODS:
         return False
-    if is_vmware_vm_relocate(method, path) or is_vmware_host_maintenance_exit(method, path):
+    if (
+        is_vmware_vm_relocate(method, path)
+        or is_vmware_host_maintenance_exit(method, path)
+        or is_vmware_appliance_or_access_write(method, path)
+    ):
         return True
     canonical_path, _query = _canonical(path)
     if canonical_path == "/vcenter/vm/{vm}/hardware":
@@ -159,6 +208,8 @@ def vmware_rest_safety_floor(
 
     The VM writes include the moves that copy disks (:func:`is_vmware_vm_relocate`)
     and the host maintenance-mode exit (:func:`is_vmware_host_maintenance_exit`).
+    The appliance, permission, session, certificate and host-image writes are
+    :func:`is_vmware_appliance_or_access_write`.
     """
     if version not in _FLOORED_VERSIONS:
         return proto

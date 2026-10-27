@@ -3904,6 +3904,77 @@ body and the reads against the vendor files) and
 `test_connectors_vmware_rest_composites_write_e2e.py` (park → approve →
 resume for both operations, one approval row).
 
+### Appliance, permission, certificate and vSAN removal calls wait for approval (#4973)
+
+These generic (ingested) vCenter calls now wait until a second person
+approves. Before, each was a `POST`, `PUT` or `PATCH` at `caution` without
+approval, so a person's call ran at once.
+
+**Raised by the VMware floor.** `ingest_safety.py`
+(`VMWARE_APPLIANCE_AND_ACCESS_WRITES`, checked by
+`is_vmware_appliance_or_access_write`) puts these in the `dangerous` risk
+level with `requires_approval: true` on the 8.0 and 9.0 catalogs, where the
+path exists:
+
+| What it does | Operation id | On 8.0 |
+|---|---|---|
+| Start an appliance restore | `POST:/appliance/recovery/restore/job` | yes |
+| Roll back an appliance update | `POST:/appliance/update/pending?action=rollback` | yes |
+| Stage and install an update in one step | `POST:/appliance/update/pending/{version}?action=stage-and-install` | yes |
+| Change the appliance hostname or IP address | `POST:/appliance/networking?action=change&vmw-task=true` | yes |
+| Reset and restart the appliance network | `POST:/appliance/networking?action=reset` | yes |
+| Set, replace or merge permissions | `POST:/AuthorizationManager/{moId}/SetEntityPermissions`, `.../ResetEntityPermissions`, `.../MergePermissions` | no |
+| Create or change a permission | `POST:/vcenter/authorization/permissions`, `PATCH:/vcenter/authorization/permissions/{permission}` | no |
+| Act as another user, end another user's session | `POST:/SessionManager/{moId}/ImpersonateUser`, `.../TerminateSession` | no |
+| Replace the vCenter TLS certificate | `PUT:/vcenter/certificate-management/vcenter/tls`, `POST:/vcenter/certificate-management/vcenter/tls?action=replace-vmca-signed` | yes |
+| Replace the VMCA root certificate | `POST:/vcenter/certificate-management/vcenter/vmca-root` | yes |
+| Apply a software image to hosts | `POST:/esx/settings/inventory?action=apply&vmw-task=true` | no |
+
+The rule matches with or without the `/api` mount and with any spelling of
+a path parameter. The query must match exactly: `?action=stage`,
+`?action=precheck`, the restore `?action=cancel`, the permission
+`?action=list` and the image `?action=check` keep their level.
+
+**Raised by the delete-name rule.** The vSAN removals and the hybrid-link
+delete sent as `POST` are deletes, so they go through the shared rule in
+`meho_backplane/delete_names.py`, not the floor:
+
+- A delete word (`Destroy`, `Delete`, `Remove`, `Unregister`) right after a
+  vSAN prefix (`Vsan`, `VsanCluster`, `VsanPerf`, `VsanVit`) counts, for
+  example `VsanClusterRemoveShare` or `VsanVitRemoveIscsiLUN`. Before, the
+  rule found the word only at the start of the method name.
+  `VsanVitGetIscsiLUNs` is still a read.
+- A path whose query has the whole part `action=delete` counts, for example
+  `POST:/hvc/links/{link}?action=delete` (in the 8.0 and 9.0 files).
+  `?action=delete-tags-and-policies` does not count.
+
+The parser makes such an op `dangerous` with `requires_approval: true` for
+every product, and the grant checks, the flight recorder and the
+stored-delete review read the same rule. So a standing grant can never
+cover these removals, their bodies are never recorded, and
+`meho connector review` lists old stored rows that are weaker. In the
+pinned vCenter files the rule also raises the other vSAN removals and
+deletes (`VsanVitRemoveIscsiInitiatorGroup`, `VsanDeleteObjects_Task`,
+`VsanPerfDeleteStatsObject`, `VsanDestroyDatastoreSource` and the like)
+and the guest file, directory and process deletes sent as
+`POST ...?action=delete`. All of them are real deletes.
+
+The level is `dangerous`, not `destructive`: a `destructive` op needs a
+preview that lists the affected objects, and these generic calls have no
+such preview yet.
+
+**Running installs.** Rows already in the database change only on the next
+ingest. To get the new levels, run the catalog ingest again for `vmware/9.0`
+and `vmware/8.0` (the same `--spec` ingest of `vcenter.yaml` and
+`vi-json.yaml` the install used before).
+
+Tests: `test_connectors_vmware_rest_appliance_access_approval.py` (a
+hand-made spec for 8.0 and 9.0, the reads that keep their level, no rule
+lowers a level, grants and the stored-delete review, a person's restore call
+waits for approval; the shelf-gated lane checks every rule against the
+pinned `vcenter.yaml` and `vi-json.yaml` files) and `test_delete_names.py`
+(the vSAN prefixes and the `action=delete` query).
+
 ### Alarms: list, acknowledge, reset to green (`#4383`, part 1)
 
 What an operator or agent can do now, through MEHO:

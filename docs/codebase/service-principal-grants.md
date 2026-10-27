@@ -257,7 +257,9 @@ delete-shaped ops:
   `POST:/vswitch/*`),
 - **by vendor action name** (#4632): an ingested op id whose last path part
   starts with `Destroy`, `Delete`, `Remove` or `Unregister`, for example
-  `POST:/VirtualMachine/{moId}/Destroy_Task`. VI-JSON (the JSON form of
+  `POST:/VirtualMachine/{moId}/Destroy_Task`. The word may also follow a
+  vSAN prefix (`VsanClusterRemoveShare`), and a query with the part
+  `action=delete` counts too (#4973). VI-JSON (the JSON form of
   vCenter's older object API) sends every method as a `POST`, so neither
   the HTTP method nor a pattern sees these deletes. The word list and the
   rule are the ingest parser's, in `meho_backplane/delete_names.py`; the

@@ -21,6 +21,12 @@ from __future__ import annotations
 from typing import Final
 
 __all__ = [
+    "AKS_API_VERSION",
+    "AKS_CLUSTERS_PATH",
+    "AKS_CLUSTER_PATH",
+    "AKS_KUBERNETES_VERSIONS_PATH",
+    "AKS_NODE_POOLS_PATH",
+    "AKS_UPGRADE_PROFILE_PATH",
     "LOCATIONS_PATH",
     "RESOURCE_GRAPH_API_VERSION",
     "RESOURCE_GRAPH_PATH",
@@ -48,6 +54,51 @@ RESOURCE_GRAPH_PATH: Final[str] = "/providers/Microsoft.ResourceGraph/resources"
 RESOURCE_GRAPH_API_VERSION: Final[str] = "2024-04-01"
 
 # ---- aks (Task #5087) ----
+#
+# Azure Kubernetes Service (AKS): clusters, node pools, upgrade options and
+# the Kubernetes versions per region. Reads only. MEHO never calls the
+# actions that return a kubeconfig (a cluster login): listClusterUserCredential,
+# listClusterAdminCredential, listClusterMonitoringUserCredential, and the
+# listCredential actions of access profiles and managed namespaces.
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.ContainerService/managedClusters``:
+#: every AKS cluster of the subscription (Managed Clusters - List).
+AKS_CLUSTERS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.ContainerService/managedClusters"
+)
+
+#: ``GET .../resourceGroups/{resourceGroupName}/providers/Microsoft.ContainerService``
+#: ``/managedClusters/{resourceName}``: one AKS cluster (Managed Clusters - Get).
+AKS_CLUSTER_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.ContainerService/managedClusters/{cluster}"
+)
+
+#: ``GET .../managedClusters/{resourceName}/upgradeProfiles/default``: the
+#: Kubernetes versions the cluster and its node pools can move to (Managed
+#: Clusters - Get Upgrade Profile).
+AKS_UPGRADE_PROFILE_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.ContainerService/managedClusters/{cluster}/upgradeProfiles/default"
+)
+
+#: ``GET .../managedClusters/{resourceName}/agentPools``: the node pools of one
+#: cluster; Azure calls them agent pools (Agent Pools - List).
+AKS_NODE_POOLS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.ContainerService/managedClusters/{cluster}/agentPools"
+)
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.ContainerService``
+#: ``/locations/{location}/kubernetesVersions``: the Kubernetes versions AKS
+#: offers in one region (Managed Clusters - List Kubernetes Versions).
+AKS_KUBERNETES_VERSIONS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.ContainerService"
+    "/locations/{location}/kubernetesVersions"
+)
+
+#: The API version of every AKS read (Microsoft.ContainerService).
+AKS_API_VERSION: Final[str] = "2026-08-01"
 
 # ---- arc (Task #5084) ----
 

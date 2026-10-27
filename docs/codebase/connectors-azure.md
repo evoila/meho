@@ -542,3 +542,193 @@ as MEHO's system identity, which cannot read the secret, so it reports
   <https://learn.microsoft.com/en-us/azure/azure-government/compare-azure-government-global-azure>
 - Related pages: `connectors-keycloak.md` (the same client credentials request),
   `connectors-shared-vault-creds.md`, `error-message-shape.md`.
+
+## aks
+
+The `aks` family reads Azure Kubernetes Service (AKS): clusters, their node
+pools, their upgrade options and the Kubernetes versions AKS offers per
+region. All four operations are in the group `aks`, all are `safe`, and none
+needs approval. Nothing changes in Azure. These reads show the Azure side of
+a cluster. MEHO's Kubernetes connector reads inside a cluster, through the
+cluster's own API, with a target of its own.
+
+Files: `aks.py` (group text, guidance for the AI, operation table, and the
+`AksOps` methods `AzureConnector` inherits), `aks_schemas.py` (parameter and
+response schemas), `aks_rows.py` (how Azure's answers become rows, and the
+parameter checks) and `aks_reads.py` (the calls).
+
+### Operations
+
+| Operation | Azure call | Parameters |
+|---|---|---|
+| `azure.aks.cluster.list` | `GET /subscriptions/{id}/providers/Microsoft.ContainerService/managedClusters` | none |
+| `azure.aks.cluster.show` | `GET .../resourceGroups/{rg}/providers/Microsoft.ContainerService/managedClusters/{name}`, then `GET .../managedClusters/{name}/upgradeProfiles/default` | `resource_group`, `name` |
+| `azure.aks.nodepool.list` | `GET .../managedClusters/{cluster}/agentPools` | `resource_group`, `cluster` |
+| `azure.aks.version.list` | `GET /subscriptions/{id}/providers/Microsoft.ContainerService/locations/{location}/kubernetesVersions` | `location` |
+
+Every call uses api-version `2026-08-01` (`AKS_API_VERSION`), the version of
+the pinned spec file. Reader on the subscription allows every read here.
+
+### No cluster credentials
+
+A kubeconfig is a login to the cluster, so it is a secret. MEHO never calls
+the Azure actions that return one: `listClusterUserCredential`,
+`listClusterAdminCredential`, `listClusterMonitoringUserCredential`, and the
+`listCredential` actions of access profiles and managed namespaces. No
+operation returns a kubeconfig, a token or a certificate.
+
+- `test_no_azure_path_ends_in_a_cluster_credential_action` fails when any
+  `*_PATH` constant in `_paths.py` ends in one of these actions.
+- `test_the_aks_paths_hold_no_credential_kubeconfig_or_command_path` fails
+  when an AKS path names a credential, an access profile, a kubeconfig or a
+  run command.
+- The rows copy only the fields named below. A cluster answer can also hold
+  the service principal's secret, the Windows admin password and the old
+  Microsoft Entra ID server app secret (Azure marks them as secrets and
+  does not return them in reads), SSH public keys, add-on settings, node
+  labels and taints. None of them is copied. A test feeds made-up values
+  for all of them through the real dispatcher and checks that none reaches
+  the result.
+
+### What each operation returns
+
+The list answers have the rows under `value`, their number in `count`, and
+the paging fields of `PagedRows.as_dict()` (`truncated`, `omission`,
+`omission_kind`, `pages_read`).
+
+- **Clusters**: `name`, `id`, `resource_group`, `location`,
+  `kubernetes_version` (asked for; may be only `major.minor`),
+  `current_kubernetes_version` (the version that runs), `provisioning_state`,
+  `power_state` (`Running` or `Stopped`), `sku_tier`, `support_plan`,
+  `node_resource_group`, `network_plugin`, `network_plugin_mode`,
+  `network_policy`, `network_dataplane`, `outbound_type`, `private_cluster`
+  (true only when `apiServerAccessProfile.enablePrivateCluster` is true),
+  `identity_type`, `auto_upgrade_channel`, `node_os_upgrade_channel`,
+  `node_pools` (the pool names), `node_count` (the sum of the pools' node
+  counts) and `addons`.
+- `identity_type` is `SystemAssigned` or `UserAssigned` when Azure reports
+  that managed identity in `identity.type`. It is `ServicePrincipal` when the
+  cluster has no managed identity and `servicePrincipalProfile.clientId`
+  names an application: then the cluster logs in to Azure with a service
+  principal and a secret. A managed identity cluster has `msi` in that
+  field, which does not count. Otherwise it is Azure's `identity.type` as it
+  is, or null.
+- `addons` lists, sorted, Azure's own name of every `addonProfiles` entry
+  with `enabled: true` (for example `omsagent`, `azurepolicy`,
+  `azureKeyvaultSecretsProvider`, `ingressApplicationGateway`), plus MEHO's
+  name for add-ons and managed features Azure keeps in other settings:
+
+  | Name | Azure setting |
+  |---|---|
+  | `app_routing` | `ingressProfile.webAppRouting.enabled` |
+  | `container_insights` | `azureMonitorProfile.containerInsights.enabled` |
+  | `istio` | `serviceMeshProfile.mode` is `Istio` |
+  | `keda` | `workloadAutoScalerProfile.keda.enabled` |
+  | `managed_prometheus` | `azureMonitorProfile.metrics.enabled` |
+  | `pod_identity` | `podIdentityProfile.enabled` (Microsoft's replacement is workload identity) |
+  | `workload_identity` | `securityProfile.workloadIdentity.enabled` |
+
+  Only a real `true` counts (a `1` does not). The add-on settings are never
+  copied.
+- **One cluster** (`azure.aks.cluster.show`): the cluster fields above, plus
+  `fqdn` and `private_fqdn` (the API server host names, for example to match
+  a Kubernetes target in MEHO), `pod_cidrs` and `service_cidrs` (from
+  `podCidrs` and `serviceCidrs`, or the single `podCidr` and `serviceCidr`),
+  and `upgrades`: `control_plane` and one entry per node pool (`name`,
+  `os_type`), each with `kubernetes_version`, `upgrades` (released versions)
+  and `preview_upgrades` (versions Azure marks `isPreview`). Both lists are
+  sorted by version number, oldest first. A missing cluster is `not_found`,
+  and then the upgrade profile is not read.
+- **Node pools**: `name`, `mode` (`System`, `User` or `Gateway`), `vm_size`,
+  `count`, `autoscaling`, `min_count`, `max_count`, `os_type`, `os_sku`,
+  `orchestrator_version`, `current_orchestrator_version`,
+  `node_image_version`, `power_state`, `provisioning_state`,
+  `availability_zones`, `max_pods`, `priority` (`Regular` or `Spot`) and
+  `pool_type`, plus `cluster` and `resource_group` next to the rows.
+- **Versions**: one row per Kubernetes minor version: `version`,
+  `is_default`, `is_preview`, `support_plans` (`KubernetesOfficial`, and
+  `AKSLongTermSupport` when long-term support is offered) and
+  `patch_versions`, plus `location` and `default_version`. Azure answers
+  with `values` (not `value`) and no next page, so this read is one GET
+  without paging fields. Rows and patch versions are sorted by version
+  number, so `1.29.10` comes after `1.29.9`. A cluster version that is in no
+  row's `patch_versions` is no longer offered in the region.
+
+### Parameter checks
+
+`resource_group` (letters and digits of any script, `_`, `-`, `.`, `(` and
+`)`, not only dots, at most 90 characters), the cluster `name` or `cluster`
+(Azure's own pattern: 1 to 63 letters, digits, `-` and `_`, starting and
+ending with a letter or a digit) and `location` (letters and digits only)
+go into a path. So no slash, `?`, `#`, `%`, space or `..` can reach a
+request.
+
+The patterns are in the parameter schemas, so the dispatcher refuses a bad
+value with `invalid_params` before the operation runs. The operation checks
+each value again with a full match: a `$` in a JSON Schema pattern lets a
+line break at the end through, and the check in the operation does not. A
+value it refuses fails with `AksParameterError` (the dispatcher returns
+`connector_error` with `remediation`). Both checks run before the login and
+before any request, and no message repeats the value.
+
+### Result handles
+
+A list over 50 rows or 4 KB becomes a link to the stored result. AKS allows
+up to 100 node pools per cluster, so the node pool list can pass 50 rows.
+The plain values next to the rows (`count`, the paging fields, `cluster`,
+`resource_group`, `location`, `default_version`) stay inline under the
+reducer's default rule. No list carries an object next to its rows, so no
+operation needs a `result_objects` hint. `test_connectors_azure_aks.py`
+proves this for all three lists with more than 50 rows, with the real
+reducer and `result_query`.
+
+`azure.aks.cluster.show` is one object, not a list. Up to 4 KB it comes back
+whole. A bigger answer (many node pools) is kept whole as a stored document:
+the inline summary holds the plain values and the outline of the fields,
+and `result_query` with `path` `/upgrades` reads the upgrade options. A test
+proves this too.
+
+### Untrusted text
+
+Cluster, pool and resource group names, versions and add-on names are text
+from Azure. They are copied as data and never used to build a request: the
+paths take only the caller's checked parameters. The guidance of every
+operation tells the AI to treat this text as data, never as instructions.
+
+### Spec path check
+
+The five paths are `*_PATH` constants in the `aks` section of `_paths.py`,
+each with one line in the check's `_DECLARED` table, and all five are in the
+pinned file
+`specification/containerservice/resource-manager/Microsoft.ContainerService/aks/stable/2026-08-01/managedClusters.json`.
+
+### Proven live
+
+Nothing yet: the lab login does not exist. Every operation is proven with
+mocked HTTP shaped like Microsoft's documented examples for api-version
+2026-08-01. The lab proof lists the lab cluster with its real version and
+node pools (compared with the portal), shows its upgrade options, checks
+that the version list of its region holds its version, and checks that no
+result holds a kubeconfig, a token or a certificate.
+
+### Known issues
+
+- `msi` in `servicePrincipalProfile.clientId` of a managed identity cluster
+  is what Azure returns in practice; Microsoft's documentation does not name
+  the value. The lab proof checks `identity_type` against the portal.
+- `kubernetes_version` holds what was asked for, which may be only
+  `major.minor`. Compare `current_kubernetes_version` with the version list.
+- The node pool list follows `nextLink` with the shared paging helper; AKS
+  usually answers in one page.
+
+### References
+
+- Managed Clusters - List: <https://learn.microsoft.com/en-us/rest/api/aks/managed-clusters/list>
+- Managed Clusters - Get: <https://learn.microsoft.com/en-us/rest/api/aks/managed-clusters/get>
+- Managed Clusters - Get Upgrade Profile: <https://learn.microsoft.com/en-us/rest/api/aks/managed-clusters/get-upgrade-profile>
+- Agent Pools - List: <https://learn.microsoft.com/en-us/rest/api/aks/agent-pools/list>
+- Managed Clusters - List Kubernetes Versions: <https://learn.microsoft.com/en-us/rest/api/aks/managed-clusters/list-kubernetes-versions>
+- AKS add-ons: <https://learn.microsoft.com/en-us/azure/aks/integrations>
+- Supported Kubernetes versions and long-term support: <https://learn.microsoft.com/en-us/azure/aks/supported-kubernetes-versions>
+- Managed identities in AKS: <https://learn.microsoft.com/en-us/azure/aks/managed-identity-overview>
+- Reader role: <https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles/general#reader>

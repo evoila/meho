@@ -20,7 +20,6 @@ from typing import Any, Final, Literal
 
 from meho_backplane.connectors.migration.contracts import (
     Disk,
-    IdentityDuplicate,
     IdentityHints,
     MissingReason,
     Nic,
@@ -37,7 +36,6 @@ __all__ = [
     "VmProps",
     "as_dict",
     "extract_objects",
-    "find_duplicates",
     "nearest_rank_stat",
     "server_record",
 ]
@@ -474,24 +472,3 @@ def nearest_rank_stat(values: Iterable[float]) -> Stat | None:
         p95=round(ordered[rank - 1], 2),
         maximum=round(ordered[-1], 2),
     )
-
-
-def find_duplicates(records: Iterable[ServerRecord]) -> list[IdentityDuplicate]:
-    """Records that share a BIOS UUID or an instance UUID with an earlier record."""
-    duplicates: list[IdentityDuplicate] = []
-    first_by: dict[tuple[str, str], str] = {}
-    for record in records:
-        keys: tuple[tuple[Literal["bios_uuid", "instance_uuid"], str | None], ...] = (
-            ("bios_uuid", record.identity_hints.bios_uuid),
-            ("instance_uuid", record.source_attributes.get("instance_uuid")),
-        )
-        for match, value in keys:
-            if not value:
-                continue
-            first = first_by.setdefault((match, value.lower()), record.source_id)
-            if first != record.source_id:
-                duplicates.append(
-                    IdentityDuplicate(source_id=record.source_id, same_as=first, match=match)
-                )
-                break
-    return duplicates

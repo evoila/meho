@@ -50,6 +50,7 @@ from meho_backplane.connectors.migration.contracts import (
     MissingReason,
     Omission,
     ServerRecord,
+    find_identity_duplicates,
 )
 from meho_backplane.connectors.vmware_rest.composites._migration_inventory_map import (
     DETAIL_PROPERTIES,
@@ -57,7 +58,6 @@ from meho_backplane.connectors.vmware_rest.composites._migration_inventory_map i
     VmProps,
     as_dict,
     extract_objects,
-    find_duplicates,
     server_record,
 )
 from meho_backplane.connectors.vmware_rest.composites._migration_inventory_usage import (
@@ -480,7 +480,7 @@ def _envelope(
                 )
             ],
         ),
-        duplicates=find_duplicates(collector.records),
+        duplicates=find_identity_duplicates(collector.records),
     )
 
 

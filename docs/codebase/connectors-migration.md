@@ -251,7 +251,11 @@ Utilization:
 Duplicates: a record whose BIOS UUID or instance UUID an earlier record
 already has (for example a VM registered again from copied files) is listed
 in `duplicates`. Both stay in `records`, because vCenter counts both. The
-CSV export leaves the later one out as `same_machine_as`.
+match comes from `IdentityIndex` in `contracts.py`, which the loader
+(`merge_inventories`) uses too, so the CSV export leaves every later record
+of the machine out as `same_machine_as`. `same_as` always names the first
+record of the machine: when B shares A's BIOS UUID and C shares B's instance
+UUID, both B and C name A.
 
 Tests: `backend/tests/test_vmware_migration_inventory.py` runs the operation
 against a fake vCenter with made-up VMs (Windows with three disks, Linux

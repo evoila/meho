@@ -24,7 +24,7 @@ operations' response schemas.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from datetime import date, datetime
 from typing import Annotated, Any, Final, Literal
 
@@ -42,6 +42,8 @@ __all__ = [
     "Figure",
     "IdentityDuplicate",
     "IdentityHints",
+    "IdentityIndex",
+    "IdentityMatch",
     "InventoryCounts",
     "InventoryEnvelope",
     "InventoryInput",
@@ -59,6 +61,7 @@ __all__ = [
     "Utilization",
     "WorkloadVolume",
     "assessment_result_json_schema",
+    "find_identity_duplicates",
     "inventory_json_schema",
     "missing_reason",
 ]
@@ -322,12 +325,67 @@ class Omission(_Shape):
     source_id: str | None = Field(default=None, description="Id of the left-out item.")
 
 
+IdentityMatch = Literal["bios_uuid", "instance_uuid"]
+
+
 class IdentityDuplicate(_Shape):
     """Two records that look like the same machine. Both stay in ``records``."""
 
     source_id: str = Field(min_length=1, description="The later record.")
-    same_as: str = Field(min_length=1, description="The earlier record it matches.")
-    match: Literal["bios_uuid", "instance_uuid"] = Field(description="The value they share.")
+    same_as: str = Field(
+        min_length=1, description="The first record of that machine. Never itself a duplicate."
+    )
+    match: IdentityMatch = Field(description="The value they share.")
+
+
+class IdentityIndex:
+    """Finds server records that look like a machine seen before.
+
+    A record matches when it shares a BIOS UUID or an instance UUID with an
+    earlier record. Every identity points to the first record of its
+    machine, and a matched record registers its other identity too, so a
+    chain (B shares A's BIOS UUID, C shares B's instance UUID) names A for
+    both B and C. The caller decides what a duplicate means for its output.
+    """
+
+    def __init__(self) -> None:
+        self._first_by: dict[tuple[IdentityMatch, str], str] = {}
+
+    def add(self, record: InventoryRecord) -> IdentityDuplicate | None:
+        """Register *record*; return the duplicate entry when it matches an earlier one."""
+        if not isinstance(record, ServerRecord):
+            return None
+        identities: list[tuple[IdentityMatch, str]] = []
+        bios_uuid = record.identity_hints.bios_uuid
+        if bios_uuid:
+            identities.append(("bios_uuid", bios_uuid.lower()))
+        instance_uuid = record.source_attributes.get("instance_uuid")
+        if instance_uuid:
+            identities.append(("instance_uuid", instance_uuid.lower()))
+        found: IdentityDuplicate | None = None
+        machine = record.source_id
+        for match, value in identities:
+            first = self._first_by.get((match, value))
+            if first is not None and first != record.source_id:
+                machine = first
+                found = IdentityDuplicate(source_id=record.source_id, same_as=first, match=match)
+                break
+        # A repeated record still registers its identities: the first record
+        # may lack one, and a later record may report the same machine by it.
+        for key in identities:
+            self._first_by.setdefault(key, machine)
+        return found
+
+
+def find_identity_duplicates(records: Iterable[InventoryRecord]) -> list[IdentityDuplicate]:
+    """The records that look like a machine already in *records*, in record order."""
+    index = IdentityIndex()
+    found: list[IdentityDuplicate] = []
+    for record in records:
+        duplicate = index.add(record)
+        if duplicate is not None:
+            found.append(duplicate)
+    return found
 
 
 class CountCheck(_Shape):

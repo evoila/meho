@@ -371,6 +371,14 @@ async def _run(params: dict[str, Any] | None = None, vcenter: _FakeVcenter | Non
     )
 
 
+def _reduce_context(operator: Operator) -> dict[str, Any]:
+    return {
+        "tenant_id": str(operator.tenant_id),
+        "operator_sub": operator.sub,
+        "op_id": "vmware.migration.inventory",
+    }
+
+
 def _by_name(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {record["name"]: record for record in result["records"]}
 
@@ -487,13 +495,7 @@ async def test_same_bios_uuid_is_flagged_and_not_counted_twice_in_the_csv() -> N
     store = ResultHandleStore(_MemoryValkey())  # type: ignore[arg-type]
     operator = _operator()
     _reduced, handle = await JsonFluxReducer(byte_threshold=256, store=store).reduce(
-        result,
-        None,
-        context={
-            "tenant_id": str(operator.tenant_id),
-            "operator_sub": operator.sub,
-            "op_id": "vmware.migration.inventory",
-        },
+        result, None, context=_reduce_context(operator)
     )
     assert handle is not None
     loaded = await load_inventories(operator, [str(handle.handle_id)], store=store)
@@ -504,15 +506,12 @@ async def test_same_bios_uuid_is_flagged_and_not_counted_twice_in_the_csv() -> N
     ]
 
 
-async def test_repeated_instance_uuid_gets_a_vm_id_and_is_flagged(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_repeated_instance_uuid_gets_a_vm_id_and_is_flagged() -> None:
     vms = {moid: dict(props) for moid, props in _VMS.items()}
     vms["vm-103"]["config.instanceUuid"] = _LIN_INSTANCE
     vms["vm-103"]["config.uuid"] = "42010000-0000-4000-8000-0000000000cc"
-    monkeypatch.setitem(globals(), "_VMS", vms)
 
-    result = await _run()
+    result = await _run(vcenter=_FakeVcenter(vms=vms))
 
     assert result["duplicates"] == [
         {
@@ -520,6 +519,45 @@ async def test_repeated_instance_uuid_gets_a_vm_id_and_is_flagged(
             "same_as": f"vmware:{_VC_UUID}:{_LIN_INSTANCE}",
             "match": "instance_uuid",
         }
+    ]
+
+
+async def test_linked_duplicates_name_one_machine_and_the_csv_counts_it_once() -> None:
+    """vm-103 shares vm-102's BIOS UUID; vm-106 shares vm-103's instance UUID."""
+    vms = {moid: dict(props) for moid, props in _VMS.items()}
+    vms["vm-106"] = {
+        **vms["vm-103"],
+        "name": "db-lin-01-again",
+        "config.uuid": "42010000-0000-4000-8000-0000000000cc",
+        "config.instanceUuid": _COPY_INSTANCE.upper(),
+    }
+    linux = f"vmware:{_VC_UUID}:{_LIN_INSTANCE}"
+
+    result = await _run(vcenter=_FakeVcenter(vms=vms))
+
+    assert result["counts"]["reconciliation"][0]["matches"] is True
+    assert result["duplicates"] == [
+        {
+            "source_id": f"vmware:{_VC_UUID}:{_COPY_INSTANCE}",
+            "same_as": linux,
+            "match": "bios_uuid",
+        },
+        {"source_id": f"vmware:{_VC_UUID}:vm-106", "same_as": linux, "match": "instance_uuid"},
+    ]
+
+    store = ResultHandleStore(_MemoryValkey())  # type: ignore[arg-type]
+    operator = _operator()
+    _reduced, handle = await JsonFluxReducer(byte_threshold=256, store=store).reduce(
+        result, None, context=_reduce_context(operator)
+    )
+    assert handle is not None
+    loaded = await load_inventories(operator, [str(handle.handle_id)], store=store)
+    assert [d.match for d in loaded.duplicates] == ["bios_uuid", "instance_uuid"]
+    export = inventory_to_csv(loaded.records, loaded.duplicates)
+    assert export.row_count == 2
+    assert [(row.name, row.reason, row.same_as) for row in export.left_out] == [
+        ("db-lin-01-copy", "same_machine_as", linux),
+        ("db-lin-01-again", "same_machine_as", linux),
     ]
 
 

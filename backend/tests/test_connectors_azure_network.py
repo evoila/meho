@@ -1222,6 +1222,23 @@ async def test_expressroute_list_shows_provider_bandwidth_and_state_without_keys
         assert secret not in rendered
 
 
+@pytest.mark.asyncio
+async def test_an_expressroute_list_error_keeps_azure_text_out(registered: AzureConnector) -> None:
+    """The keys-withheld tag also hides Azure's error text; the code and the hint stay."""
+    refusal = {"error": {"code": "AuthorizationFailed", "message": "made-up refusal text"}}
+    with respx.mock() as mock:
+        _login(mock)
+        mock.get(_url("/providers/Microsoft.Network/expressRouteCircuits")).respond(
+            403, json=refusal
+        )
+        result = await _call("azure.network.expressroute.list")
+
+    assert result.status == "error"
+    assert result.extras is not None and result.extras["http_status"] == 403
+    assert "role" in result.extras["remediation"]
+    assert "made-up refusal text" not in json.dumps(result.model_dump(mode="json"))
+
+
 async def _trace_spans(audit_id: Any) -> list[DispatchTraceSpan]:
     async with get_sessionmaker()() as s:
         trace = (

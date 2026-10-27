@@ -2737,6 +2737,107 @@ async def test_import_power_on_park_approve_resume_only_powers_on(
     assert await _approval_row_count() == 1
 
 
+#: The params of a ``vm.create`` that touches every write step of the happy
+#: path: create, NIC attach, power-on (``test_vm_create_happy_path_sub_op_sequence``).
+_VM_CREATE_UNATTENDED_PARAMS: dict[str, Any] = {
+    "folder_name": "prod",
+    "name": "vm-new",
+    "guest_os": "UBUNTU_64",
+    "nics": [{"network": "net-1"}],
+    "power_on_after_create": True,
+}
+
+#: The write steps that run for ``_VM_CREATE_UNATTENDED_PARAMS``; each needs
+#: its own standing grant (``enforce_subop_policy`` reads no parent grant).
+_VM_CREATE_WRITE_STEPS = (
+    "POST:/vcenter/vm",
+    "POST:/vcenter/vm/{vm}/hardware/ethernet",
+    "POST:/vcenter/vm/{vm}/power?action=start",
+)
+
+
+async def _service_vm_create_unattended(
+    stub_embedding_service: AsyncMock, *, grant_composite: bool
+) -> tuple[_RecordingVmwareConnector, Any]:
+    """Run ``vm.create`` as a service principal with grants on every write step.
+
+    *grant_composite* adds the grant on the composite op id itself — the
+    grant the dispatcher's top-level gate reads before the handler runs.
+    """
+    recorder = _RecordingVmwareConnector()
+    recorder.responses.update(
+        {
+            "/vcenter/folder": {"value": [{"folder": "group-v1"}]},
+            "/vcenter/vm": {"value": "vm-123"},
+        }
+    )
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    op_ids = list(_VM_CREATE_WRITE_STEPS)
+    if grant_composite:
+        op_ids.append("vmware.composite.vm.create")
+    for op_id in op_ids:
+        await _seed_service_grant(op_id=op_id, target_id=target_id)
+    svc = _make_operator(sub="svc-blueprint", principal_kind=PrincipalKind.SERVICE)
+    result = await dispatch(
+        operator=svc,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.create",
+        target=_FakeVmwareTarget(target_id=target_id),
+        params=_VM_CREATE_UNATTENDED_PARAMS,
+    )
+    return recorder, result
+
+
+@pytest.mark.asyncio
+async def test_vm_create_service_with_composite_and_step_grants_runs_unattended(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """Grants on ``vm.create`` and on each write step: the call runs with no approval (#5063).
+
+    The composite's own gate clears on the composite grant; each write step
+    clears on its own grant. No approval request is created.
+    """
+    recorder, result = await _service_vm_create_unattended(
+        stub_embedding_service, grant_composite=True
+    )
+
+    assert result.status == "ok", result.error
+    assert result.result["status"] == "created"
+    assert result.result["vm_id"] == "vm-123"
+    assert recorder.calls == [
+        ("GET", "/vcenter/folder"),
+        ("POST", "/vcenter/vm"),
+        ("POST", "/vcenter/vm/vm-123/hardware/ethernet"),
+        ("POST", "/vcenter/vm/vm-123/power?action=start"),
+    ]
+    assert await _approval_row_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_vm_create_service_with_step_grants_only_waits_for_approval(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """Step grants alone are not enough: without the composite grant the call waits (#5063).
+
+    The top-level gate checks the composite's own op id before the handler
+    runs and never reads the step grants, so the whole call parks and no
+    write reaches vCenter.
+    """
+    recorder, result = await _service_vm_create_unattended(
+        stub_embedding_service, grant_composite=False
+    )
+
+    assert result.status == "awaiting_approval", result.error
+    async with get_sessionmaker()() as s:
+        pending = (await s.scalars(select(ApprovalRequest))).one()
+    assert pending.op_id == "vmware.composite.vm.create"
+    assert pending.status == ApprovalRequestStatus.PENDING.value
+    assert all(verb == "GET" for verb, _ in recorder.calls), recorder.calls
+
+
 # ===========================================================================
 # cluster.drs_rule.create — park→approve→resume + fresh-boot (#2895)
 # ===========================================================================

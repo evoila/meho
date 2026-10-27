@@ -34,6 +34,7 @@ import structlog
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared import vcfa_session
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vro import (
     VRO_CONNECTOR_ID,
@@ -43,6 +44,7 @@ from meho_backplane.connectors.vro import (
     VroConnector,
     register_vro_typed_operations,
 )
+from meho_backplane.connectors.vro import connector as vro_connector_module
 from meho_backplane.connectors.vro.typed_reads import OUTCOME_BY_STATE
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
@@ -258,11 +260,15 @@ async def test_missing_org_gives_connector_auth_failed_that_says_to_set_it(
 
 @pytest.mark.asyncio
 async def test_no_token_in_result_log_line_audit_row_or_trace(
-    connector: VroConnector,
+    connector: VroConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     token = make_token({"exp": time.time() + 3600})
     target = _Target()
     with structlog.testing.capture_logs() as events:
+        # Loggers made inside capture_logs always reach it, even when an
+        # earlier test in the same worker cached the module loggers.
+        for module in (vcfa_session, vro_connector_module):
+            monkeypatch.setattr(module, "_log", structlog.get_logger(module.__name__))
         async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
             mock.post(_ORG_LOGIN).mock(return_value=_session_answer(token))
             mock.get(_RUN_PATH).respond(200, json={"id": _RUN, "state": "completed"})
@@ -277,6 +283,7 @@ async def test_no_token_in_result_log_line_audit_row_or_trace(
                 capture._active_capture_var.reset(scope_token)
 
     assert result.status == "ok", result.error
+    assert {"vcfa_session_established", "vro_login_ready"} <= {e["event"] for e in events}
     assert result.audit_id is not None
     async with get_sessionmaker()() as session:
         row = (

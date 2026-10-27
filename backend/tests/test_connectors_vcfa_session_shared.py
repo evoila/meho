@@ -24,6 +24,7 @@ import pytest
 import respx
 import structlog
 
+from meho_backplane.connectors._shared import vcfa_session
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError, SessionLoginError
 from meho_backplane.connectors._shared.vcfa_session import (
     DEFAULT_LIFETIME_SECONDS,
@@ -169,9 +170,14 @@ async def test_server_error_and_missing_token_header_are_session_login_errors() 
 
 
 @pytest.mark.asyncio
-async def test_no_token_or_password_in_log_lines_or_repr() -> None:
+async def test_no_token_or_password_in_log_lines_or_repr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     token = make_token({"exp": _NOW + 3600})
     with structlog.testing.capture_logs() as events:
+        # A logger made inside capture_logs always reaches it, even when an
+        # earlier test in the same worker cached the module logger.
+        monkeypatch.setattr(vcfa_session, "_log", structlog.get_logger(vcfa_session.__name__))
         async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
             mock.post("/cloudapi/1.0.0/sessions").respond(
                 200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": token}

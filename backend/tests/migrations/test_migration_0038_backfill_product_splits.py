@@ -67,6 +67,7 @@ from meho_backplane.operations._lookup import (
     parse_connector_id,
 )
 from meho_backplane.settings import get_settings
+from tests.migrations._live_probe import tenant_setting_table
 
 #: The six long->short splits the migration reconciles, as
 #: ``(registry_product, impl_id, dispatch_product)``. Mirrors
@@ -551,7 +552,8 @@ def test_dispatch_probes_resolve_reconciled_connector(
         finally:
             await dispose_engine()
 
-    exists_before, known_before = asyncio.run(_probe())
+    with tenant_setting_table(sync_url):
+        exists_before, known_before = asyncio.run(_probe())
     assert exists_before is False, "orphaned long rows must be invisible pre-migration"
     assert known_before == 0
 

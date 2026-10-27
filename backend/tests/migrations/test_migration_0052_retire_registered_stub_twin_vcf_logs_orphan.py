@@ -60,6 +60,7 @@ from meho_backplane.operations._lookup import (
     parse_connector_id,
 )
 from meho_backplane.settings import get_settings
+from tests.migrations._live_probe import tenant_setting_table
 
 #: This migration's own revision -- the forward-pass target (NOT ``head``).
 _THIS_REVISION: Final[str] = "0052"
@@ -579,7 +580,8 @@ def test_live_short_representation_dispatches_post_migration(
 
     command.upgrade(cfg, _THIS_REVISION)
 
-    exists_after, known_after = asyncio.run(_probe())
+    with tenant_setting_table(sync_url):
+        exists_after, known_after = asyncio.run(_probe())
     assert exists_after is True, "the live short representation must still resolve"
     assert known_after == 2, "both enabled ops on the short spelling must still count"
     assert _count_by_product(sync_url, "endpoint_descriptor", "vcf-logs") == 0, (

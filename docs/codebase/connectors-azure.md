@@ -608,9 +608,11 @@ service key, its authorization keys and the BGP keys of its peerings; none
 of them reaches a result. Because the flight recorder would otherwise keep
 Azure's raw answer in the trace, `azure.network.expressroute.list` carries
 the tag `keys-withheld`: its `keys` word is a secret word for the flight
-recorder, so the trace of this call keeps no body. A gateway's answer no
-longer holds the RADIUS secret (Microsoft removed it from the list answer),
-so `azure.network.gateway.list` needs no such tag. The description of a
+recorder, so the trace of this call keeps no body. The same tag makes the
+dispatcher keep Azure's error text out of this operation's error result
+(`operations/_vendor_text.py`); the error code, the HTTP status and the hint
+stay. A gateway's answer no longer holds the RADIUS secret (Microsoft removed
+it from the list answer), so `azure.network.gateway.list` needs no such tag. The description of a
 security rule is text from Azure; it is filtered with `clean_azure_text`
 like Azure's error text.
 

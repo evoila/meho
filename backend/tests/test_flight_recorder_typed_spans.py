@@ -458,6 +458,7 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
     {
         "argocd-api",
         "audit-integrity",
+        "azure-arm",
         "bind9-ssh",
         "fleet-lcm",
         "fleet-rest",

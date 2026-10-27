@@ -136,8 +136,9 @@ _BLOB_READ_GUIDANCE: Final[dict[str, Any]] = {
     "when_to_call": (
         "Call to read one small UTF-8 text file from a container, for example a "
         "checksum file, a manifest or a short log. Files over 1 MiB, files in the "
-        "Archive tier and binary files (images, archives, programs) are refused with a "
-        "clear message; nothing binary is ever returned as text."
+        "Archive tier, compressed files (a content encoding such as gzip) and binary "
+        "files (images, archives, programs) are refused with a clear message; nothing "
+        "binary is ever returned as text."
     ),
     "output_shape": (
         f"{{account: {{name, resource_group}}, container, name, size, content_type, "
@@ -230,8 +231,8 @@ OPS: tuple[AzureTypedOp, ...] = (
         "Read one small UTF-8 text file (at most 1 MiB) from a container.",
         "Reads Get Blob Properties, then Get Blob on the account's blob host with a "
         "storage token. Returns the text and the size, content type and MD5. Refuses "
-        "files over 1 MiB, archived files and binary files. Needs Storage Blob Data "
-        "Reader. Read-only.",
+        "files over 1 MiB, archived, compressed (for example gzip) and binary files. "
+        "Needs Storage Blob Data Reader. Read-only.",
         (*_READ_TAGS, "blob", "file", "content"),
         schemas.BLOB_READ_PARAMS,
         schemas.BLOB_READ_RESPONSE,

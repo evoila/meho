@@ -13,16 +13,20 @@ they work on a fresh install with nothing to ingest. The bodies live in
 :mod:`meho_backplane.connectors.azure._llm_instructions`. Thin methods on
 :class:`~meho_backplane.connectors.azure.connector.AzureConnector` expose them
 under the ``handler_attr`` names below.
+
+A family of operations (for example ``security``) keeps its operations, group
+text, guidance and bodies in its own module; the two tables here collect them.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from meho_backplane.connectors.azure import security
 from meho_backplane.connectors.azure._llm_instructions import AZURE_READ_LLM_INSTRUCTIONS
+from meho_backplane.connectors.azure._model import AzureTypedOp
 
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
@@ -39,28 +43,6 @@ _log = structlog.get_logger(__name__)
 _GROUP_ACCOUNT: Final[str] = "account"
 
 
-@dataclass(frozen=True)
-class AzureTypedOp:
-    """One Azure typed operation, as the registrar passes it on.
-
-    The fields match the keyword arguments of
-    :func:`~meho_backplane.operations.typed_register.register_typed_operation`.
-    ``handler_attr`` names the method on ``AzureConnector`` that runs it.
-    """
-
-    op_id: str
-    handler_attr: str
-    summary: str
-    description: str
-    parameter_schema: dict[str, Any]
-    response_schema: dict[str, Any] | None
-    group_key: str
-    tags: tuple[str, ...]
-    safety_level: Literal["safe", "caution", "dangerous", "destructive"]
-    requires_approval: bool
-    llm_instructions: dict[str, Any] | None
-
-
 #: The text of each group. The AI reads it through ``list_operation_groups``
 #: to choose where to search.
 AZURE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
@@ -73,6 +55,7 @@ AZURE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "once, from the operation reference an Azure write returned; use it after a "
         "lost answer or a restart instead of sending the write again. Read-only."
     ),
+    **security.WHEN_TO_USE,
 }
 
 _NO_PARAMS: Final[dict[str, Any]] = {
@@ -257,6 +240,7 @@ AZURE_TYPED_OPS: tuple[AzureTypedOp, ...] = (
         requires_approval=False,
         llm_instructions=AZURE_READ_LLM_INSTRUCTIONS["azure.operation.status"],
     ),
+    *security.OPS,
 )
 
 

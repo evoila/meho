@@ -34,6 +34,7 @@ from meho_backplane.connectors.azure import (
     AzureConnector,
     register_azure_typed_operations,
 )
+from meho_backplane.connectors.azure.typed_reads import _location_row
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
@@ -287,7 +288,7 @@ async def test_location_list_returns_a_result_handle_that_result_query_reads(
             "name": names[0],
             "display_name": names[0].title(),
             "region_type": "Physical",
-            "geography": "Example Geography",
+            "geography": "Example Group",
             "paired_regions": [names[-1]],
         }
     ]
@@ -317,7 +318,7 @@ async def test_location_list_keeps_a_short_list_inline_and_skips_odd_rows(
             "name": "exampleregion",
             "display_name": "Exampleregion",
             "region_type": "Physical",
-            "geography": "Example Geography",
+            "geography": "Example Group",
             "paired_regions": [],
         },
         {
@@ -328,6 +329,27 @@ async def test_location_list_keeps_a_short_list_inline_and_skips_odd_rows(
             "paired_regions": [],
         },
     ]
+
+
+def test_location_row_reads_the_geography_group_not_the_country() -> None:
+    # Older API versions return only geographyGroup; 2022-12-01 adds geography
+    # (the country). The row must hold the group in both cases.
+    only_group = {"name": "exampleregion", "metadata": {"geographyGroup": "Europe"}}
+    both = {
+        "name": "exampleregion",
+        "metadata": {"geography": "Netherlands", "geographyGroup": "Europe"},
+    }
+
+    assert _location_row(only_group) == {
+        "name": "exampleregion",
+        "display_name": None,
+        "region_type": None,
+        "geography": "Europe",
+        "paired_regions": [],
+    }
+    row = _location_row(both)
+    assert row is not None
+    assert row["geography"] == "Europe"
 
 
 @pytest.mark.asyncio

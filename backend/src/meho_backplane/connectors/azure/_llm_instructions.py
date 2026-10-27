@@ -54,7 +54,7 @@ _LOCATION_LIST_INSTRUCTIONS: dict[str, object] = {
     "next_step": (
         "Use the name field, not display_name, as the region in other Azure "
         "operations. To narrow the list, query the stored result, for example by "
-        "geography or by region_type Physical."
+        "geography (Europe, US, Asia Pacific) or by region_type Physical."
     ),
 }
 

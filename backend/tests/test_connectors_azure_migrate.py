@@ -29,10 +29,12 @@ from meho_backplane.connectors.azure import (
     AZURE_PRODUCT,
     AZURE_VERSION,
     AzureConnector,
+    _http,
     _paging,
     migrate_reads,
     register_azure_typed_operations,
 )
+from meho_backplane.connectors.azure._errors import AzureNotFoundError
 from meho_backplane.connectors.azure.migrate import OPS, WHEN_TO_USE, MigrateOps
 from meho_backplane.connectors.azure.migrate_reads import MAX_GROUPS
 from meho_backplane.connectors.azure.migrate_rows import (
@@ -572,6 +574,53 @@ async def test_a_site_kind_that_cannot_be_read_is_named_and_its_count_is_unknown
     assert "Example message." not in item["detail"]
 
 
+@pytest.mark.parametrize(
+    ("answer", "reason"),
+    [
+        (_error(404, "ResourceNotFound"), "not_found"),
+        (_error(409, "MissingSubscriptionRegistration"), "provider_not_registered"),
+        (
+            httpx.Response(
+                429,
+                headers={"Retry-After": "1"},
+                json={"error": {"code": "TooManyRequests", "message": "Example message."}},
+            ),
+            "throttled",
+        ),
+        (_error(500, "InternalServerError"), "read_failed"),
+        (httpx.ConnectError("Example message."), "read_failed"),
+    ],
+    ids=["404", "not-registered", "429", "500", "lost-connection"],
+)
+@pytest.mark.asyncio
+async def test_each_error_of_one_site_kind_gets_its_reason(
+    monkeypatch: pytest.MonkeyPatch, answer: httpx.Response | Exception, reason: str
+) -> None:
+    """Every omission reason the docs name, with MEHO's own text and never Azure's."""
+    monkeypatch.setattr(_http, "_sleep", AsyncMock())
+    with respx.mock() as mock:
+        _login(mock)
+        failing = _route(mock, f"{OFFAZURE_PATH}/vmwareSites")
+        if isinstance(answer, Exception):
+            failing.mock(side_effect=answer)
+        else:
+            failing.mock(return_value=answer)
+        for kind in ("hypervSites", "serverSites", "importSites", "masterSites"):
+            _route(mock, f"{OFFAZURE_PATH}/{kind}").mock(return_value=_ok([]))
+        result = await _connector().migrate_site_list(
+            operator(), AzureTargetStub(), {"resource_group": RG}
+        )
+
+    (item,) = result["omissions"]["items"]
+    assert item["what"] == "vmware sites"
+    assert item["reason"] == reason
+    assert "Example message." not in item["detail"]
+    assert result["kind_counts"]["vmware"] is None
+    assert result["kind_counts"]["hyperv"] == 0
+    if isinstance(answer, Exception):
+        assert item["detail"] == "Azure did not answer (ConnectError). Try again later."
+
+
 @pytest.mark.asyncio
 async def test_a_next_link_outside_the_subscription_is_refused_and_named() -> None:
     elsewhere = f"{ARM_BASE}/subscriptions/{SUBSCRIPTION_B}/resourceGroups/{RG}/providers/x?p=2"
@@ -763,7 +812,9 @@ async def test_a_group_that_does_not_exist_returns_the_error_as_it_is() -> None:
         _route(mock, f"{GROUPS_PATH}/missing/assessments").mock(
             return_value=_error(404, "ResourceNotFound")
         )
-        with pytest.raises(Exception, match="no such subscription, resource group or resource"):
+        with pytest.raises(
+            AzureNotFoundError, match="no such subscription, resource group or resource"
+        ):
             await _connector().migrate_assessment_list(
                 operator(), AzureTargetStub(), {**MIGRATE_PARAMS, "group": "missing"}
             )

@@ -132,7 +132,9 @@ the vendor gets no call:
 
 1. The one-resumer claim (`claim_resume`) is taken, so the request can
    never run later. If another resumer took it first, the usual
-   `already_resumed` result comes back.
+   `already_resumed` result comes back. The claim winner then deletes the
+   request's stored run input (`approval_handoff.discard`), the same as
+   every other way a request ends.
 2. One audit row records the refusal: `path = "approval.resume"`,
    `status_code = 409`, `result_status = "release_changed_while_waiting"`,
    both releases in the payload.
@@ -150,7 +152,8 @@ and the approval stays unused).
 **No release identity.** A build with no `GIT_SHA` (or `GIT_SHA=unknown`)
 has no release identity. Only local development runs like this; every
 published image sets `GIT_SHA`. Then MEHO stores no `release_id`, ends no
-request at start-up, and refuses no run. A request made in such a run has
+request at start-up, and refuses no run. The start-up check logs one
+`approval_release_binding_off` warning so this is visible. A request made in such a run has
 no `release_id`, so the first start of a real release ends it.
 
 **What the requester sees.** The read views (REST

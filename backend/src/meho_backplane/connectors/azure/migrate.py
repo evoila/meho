@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors.azure._model import AzureTypedOp
+from meho_backplane.connectors.azure._model import NO_PARAMS, AzureTypedOp
 from meho_backplane.connectors.azure.migrate_rows import SOURCES
 from meho_backplane.connectors.azure.migrate_schemas import (
     ASSESSED_MACHINE_LIST_RESPONSE,
@@ -263,7 +263,7 @@ OPS: tuple[AzureTypedOp, ...] = (
         "Reads GET /subscriptions/{subscriptionId}/providers/Microsoft.Migrate/assessmentProjects "
         "(API version 2024-01-15) and follows every page. Returns the name, resource group, "
         "region, status and Azure Migrate project of each. Read-only.",
-        params_schema(),
+        NO_PARAMS,
         PROJECT_LIST_RESPONSE,
         _PROJECT_LIST_GUIDANCE,
         "project",

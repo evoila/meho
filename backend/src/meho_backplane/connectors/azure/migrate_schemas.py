@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from meho_backplane.connectors.azure._model import TEXT_OR_NULL
 from meho_backplane.connectors.azure.migrate_rows import (
     MIGRATE_NAME_PATTERN,
     READINESS_VALUES,
@@ -34,7 +35,6 @@ __all__ = [
     "params_schema",
 ]
 
-_TEXT: Final[list[str]] = ["string", "null"]
 _NUMBER: Final[list[str]] = ["number", "null"]
 
 # ----------------------------------------------------------------------
@@ -136,9 +136,9 @@ _ORIGIN: Final[dict[str, Any]] = _fields(
         "Where the data came from: appliance (the Azure Migrate appliance found it), "
         "import (a CSV file) or unknown.",
     ),
-    site_kind=(_TEXT, "vmware, hyperv, server or import: the kind of site."),
-    site=(_TEXT, "The name of the discovery site."),
-    discovery_machine_id=(_TEXT, "The resource ID of the discovered machine in its site."),
+    site_kind=(TEXT_OR_NULL, "vmware, hyperv, server or import: the kind of site."),
+    site=(TEXT_OR_NULL, "The name of the discovery site."),
+    discovery_machine_id=(TEXT_OR_NULL, "The resource ID of the discovered machine in its site."),
 )
 
 
@@ -167,54 +167,54 @@ def _list_response(row: dict[str, Any], **blocks: dict[str, Any]) -> dict[str, A
     }
 
 
-_WHEN: Final[tuple[Any, str]] = (_TEXT, "A time (ISO 8601).")
+_WHEN: Final[tuple[Any, str]] = (TEXT_OR_NULL, "A time (ISO 8601).")
 
 _PROJECT_ROW: Final[dict[str, Any]] = _fields(
-    name=(_TEXT, "The assessment project name. Pass it as project."),
-    id=(_TEXT, "The resource ID of the assessment project."),
-    resource_group=(_TEXT, "Its resource group. Pass it as resource_group."),
-    location=(_TEXT, "The Azure region that keeps the project data."),
-    status=(_TEXT, "Active or Inactive."),
-    migrate_project=(_TEXT, "The Azure Migrate project name the portal shows."),
-    migrate_project_id=(_TEXT, "The resource ID of that Azure Migrate project."),
+    name=(TEXT_OR_NULL, "The assessment project name. Pass it as project."),
+    id=(TEXT_OR_NULL, "The resource ID of the assessment project."),
+    resource_group=(TEXT_OR_NULL, "Its resource group. Pass it as resource_group."),
+    location=(TEXT_OR_NULL, "The Azure region that keeps the project data."),
+    status=(TEXT_OR_NULL, "Active or Inactive."),
+    migrate_project=(TEXT_OR_NULL, "The Azure Migrate project name the portal shows."),
+    migrate_project_id=(TEXT_OR_NULL, "The resource ID of that Azure Migrate project."),
     created=_WHEN,
     updated=_WHEN,
 )
 
 _SITE_ROW: Final[dict[str, Any]] = _fields(
-    name=(_TEXT, "The site name."),
-    id=(_TEXT, "The resource ID of the site."),
+    name=(TEXT_OR_NULL, "The site name."),
+    id=(TEXT_OR_NULL, "The resource ID of the site."),
     kind=("string", "vmware, hyperv, server, import or master."),
-    source=(_TEXT, "appliance, import, or null for a master site."),
-    location=(_TEXT, "The Azure region of the site."),
-    provisioning_state=(_TEXT, "Azure's state of the site."),
-    appliance_name=(_TEXT, "The Azure Migrate appliance of an appliance site."),
-    agent_version=(_TEXT, "The version of the appliance agent."),
-    agent_last_heartbeat=(_TEXT, "When the appliance last reported (ISO 8601)."),
-    master_site=(_TEXT, "The master site this site belongs to."),
+    source=(TEXT_OR_NULL, "appliance, import, or null for a master site."),
+    location=(TEXT_OR_NULL, "The Azure region of the site."),
+    provisioning_state=(TEXT_OR_NULL, "Azure's state of the site."),
+    appliance_name=(TEXT_OR_NULL, "The Azure Migrate appliance of an appliance site."),
+    agent_version=(TEXT_OR_NULL, "The version of the appliance agent."),
+    agent_last_heartbeat=(TEXT_OR_NULL, "When the appliance last reported (ISO 8601)."),
+    master_site=(TEXT_OR_NULL, "The master site this site belongs to."),
 )
 
 _MACHINE_ROW: Final[dict[str, Any]] = _fields(
-    name=(_TEXT, "Azure's name of the machine (a GUID)."),
-    display_name=(_TEXT, "The machine name people see."),
-    id=(_TEXT, "The resource ID of the machine in the project."),
+    name=(TEXT_OR_NULL, "Azure's name of the machine (a GUID)."),
+    display_name=(TEXT_OR_NULL, "The machine name people see."),
+    id=(TEXT_OR_NULL, "The resource ID of the machine in the project."),
     **{key: (value["type"], value["description"]) for key, value in _ORIGIN.items()},
-    os_type=(_TEXT, "The operating system type."),
-    os_name=(_TEXT, "The operating system name."),
-    os_version=(_TEXT, "The operating system version."),
+    os_type=(TEXT_OR_NULL, "The operating system type."),
+    os_name=(TEXT_OR_NULL, "The operating system name."),
+    os_version=(TEXT_OR_NULL, "The operating system version."),
     cores=(_NUMBER, "CPU cores."),
     memory_mb=(_NUMBER, "Memory in MB."),
-    boot_type=(_TEXT, "BIOS, EFI or another value."),
+    boot_type=(TEXT_OR_NULL, "BIOS, EFI or another value."),
     groups=("array", "The names of the groups the machine is in."),
     created=_WHEN,
     updated=_WHEN,
 )
 
 _GROUP_ROW: Final[dict[str, Any]] = _fields(
-    name=(_TEXT, "The group name. Pass it as group."),
-    id=(_TEXT, "The resource ID of the group."),
-    status=(_TEXT, "Created, Updated, Running, Completed or Invalid."),
-    type=(_TEXT, "Default, or Import for a group of imported machines."),
+    name=(TEXT_OR_NULL, "The group name. Pass it as group."),
+    id=(TEXT_OR_NULL, "The resource ID of the group."),
+    status=(TEXT_OR_NULL, "Created, Updated, Running, Completed or Invalid."),
+    type=(TEXT_OR_NULL, "Default, or Import for a group of imported machines."),
     machine_count=(_NUMBER, "How many machines the group has."),
     assessments=("array", "The names of the assessments of the group."),
     assessment_types=("array", "The kinds of assessment the group supports."),
@@ -224,47 +224,53 @@ _GROUP_ROW: Final[dict[str, Any]] = _fields(
 )
 
 _ASSESSMENT_ROW: Final[dict[str, Any]] = _fields(
-    name=(_TEXT, "The assessment name. Pass it as assessment."),
-    group=(_TEXT, "The group the assessment belongs to."),
-    id=(_TEXT, "The resource ID of the assessment."),
-    type=(_TEXT, "The kind of assessment, for example MachineAssessment."),
-    status=(_TEXT, "Completed means the numbers are ready; OutOfSync or OutDated means old."),
-    stage=(_TEXT, "InProgress, UnderReview or Approved."),
-    sizing_criterion=(_TEXT, "PerformanceBased or AsOnPremises."),
-    region=(_TEXT, "The Azure region the assessment prices for."),
-    currency=(_TEXT, "The currency of every cost."),
+    name=(TEXT_OR_NULL, "The assessment name. Pass it as assessment."),
+    group=(TEXT_OR_NULL, "The group the assessment belongs to."),
+    id=(TEXT_OR_NULL, "The resource ID of the assessment."),
+    type=(TEXT_OR_NULL, "The kind of assessment, for example MachineAssessment."),
+    status=(
+        TEXT_OR_NULL,
+        "Completed means the numbers are ready; OutOfSync or OutDated means old.",
+    ),
+    stage=(TEXT_OR_NULL, "InProgress, UnderReview or Approved."),
+    sizing_criterion=(TEXT_OR_NULL, "PerformanceBased or AsOnPremises."),
+    region=(TEXT_OR_NULL, "The Azure region the assessment prices for."),
+    currency=(TEXT_OR_NULL, "The currency of every cost."),
     machine_count=(_NUMBER, "How many machines Azure assessed."),
     readiness_summary=("object", "Azure's count of machines per readiness."),
-    group_type=(_TEXT, "Default, or Import for a group of imported machines."),
+    group_type=(TEXT_OR_NULL, "Default, or Import for a group of imported machines."),
     monthly_compute_cost=(_NUMBER, "Monthly compute cost of all machines."),
     monthly_storage_cost=(_NUMBER, "Monthly storage cost of all machines."),
     monthly_bandwidth_cost=(_NUMBER, "Monthly bandwidth cost of all machines."),
-    reserved_instance=(_TEXT, "The reserved instance term the prices use, if any."),
-    hybrid_benefit=(_TEXT, "Whether the prices use Azure Hybrid Benefit."),
+    reserved_instance=(TEXT_OR_NULL, "The reserved instance term the prices use, if any."),
+    hybrid_benefit=(TEXT_OR_NULL, "Whether the prices use Azure Hybrid Benefit."),
     comfort_factor=(_NUMBER, "The comfort factor (scaling factor) on top of the usage."),
-    percentile=(_TEXT, "The percentile of usage used for performance sizing."),
-    time_range=(_TEXT, "The time range of usage used for performance sizing."),
+    percentile=(TEXT_OR_NULL, "The percentile of usage used for performance sizing."),
+    time_range=(TEXT_OR_NULL, "The time range of usage used for performance sizing."),
     confidence_rating_percent=(_NUMBER, "Azure's confidence in the result, in percent."),
-    prices_timestamp=(_TEXT, "The date of the prices Azure used."),
+    prices_timestamp=(TEXT_OR_NULL, "The date of the prices Azure used."),
     created=_WHEN,
     updated=_WHEN,
 )
 
 _ASSESSED_MACHINE_ROW: Final[dict[str, Any]] = _fields(
-    name=(_TEXT, "Azure's name of the assessed machine."),
-    display_name=(_TEXT, "The machine name people see."),
-    id=(_TEXT, "The resource ID of the assessed machine."),
+    name=(TEXT_OR_NULL, "Azure's name of the assessed machine."),
+    display_name=(TEXT_OR_NULL, "The machine name people see."),
+    id=(TEXT_OR_NULL, "The resource ID of the assessed machine."),
     **{key: (value["type"], value["description"]) for key, value in _ORIGIN.items()},
-    readiness=(_TEXT, "Suitable, ConditionallySuitable, NotSuitable, ReadinessUnknown, Unknown."),
-    readiness_explanation=(_TEXT, "Why the machine is not fully ready, if it is not."),
-    readiness_detail=(_TEXT, "More about the readiness, for example a missing input."),
-    recommended_size=(_TEXT, "The recommended Azure VM size."),
+    readiness=(
+        TEXT_OR_NULL,
+        "Suitable, ConditionallySuitable, NotSuitable, ReadinessUnknown, Unknown.",
+    ),
+    readiness_explanation=(TEXT_OR_NULL, "Why the machine is not fully ready, if it is not."),
+    readiness_detail=(TEXT_OR_NULL, "More about the readiness, for example a missing input."),
+    recommended_size=(TEXT_OR_NULL, "The recommended Azure VM size."),
     monthly_compute_cost=(_NUMBER, "Monthly compute cost of the recommended size."),
     monthly_storage_cost=(_NUMBER, "Monthly storage cost."),
     monthly_bandwidth_cost=(_NUMBER, "Monthly bandwidth cost."),
     cores=(_NUMBER, "CPU cores of the machine."),
     memory_mb=(_NUMBER, "Memory of the machine in MB."),
-    os_name=(_TEXT, "The operating system name."),
+    os_name=(TEXT_OR_NULL, "The operating system name."),
     cpu_utilization_percent=(_NUMBER, "CPU use in percent; null when Azure has none."),
     memory_utilization_percent=(_NUMBER, "Memory use in percent; null when Azure has none."),
     confidence_rating_percent=(_NUMBER, "Azure's confidence in the result, in percent."),

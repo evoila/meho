@@ -20,8 +20,10 @@ from pathlib import Path
 
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import TenantRole
+from meho_backplane.runner import wire
 from meho_backplane.runner.client import RunnerClient
 from meho_backplane.runner.loop import RunnerState, run_one_tick
 from meho_backplane.runner.spool import ResultSpool
@@ -118,3 +120,30 @@ async def test_fetch_failure_reuses_cached_assignment(
     assert state.assignment_version == "cached-v"
     assert len(posted) == 1
     assert '"status":"ok"' in posted[0].replace(" ", "")
+
+
+async def test_wire_version_refusal_runs_nothing_and_logs_both_versions(tmp_path: Path) -> None:
+    """Central refuses the runner's wire version: drop the cache, run nothing, log it (#5020)."""
+    calls: list[str] = []
+    refusal = wire.wire_version_mismatch_message(wire.SCHEMA_VERSION, "2")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(409, json={"detail": refusal})
+
+    # A cached assignment from before central changed version must not run.
+    state = RunnerState(
+        assignment=_assignment(9, version="cached-v"), assignment_version="cached-v"
+    )
+    with capture_logs() as logs:
+        await _run_tick(handler, ResultSpool(tmp_path, max_files=100), state)
+
+    assert calls == ["/api/v1/checks/assignment"]  # no result post: nothing ran
+    assert state.assignment is None
+    assert state.assignment_version is None
+    (event,) = [e for e in logs if e["event"] == "runner_wire_version_mismatch"]
+    assert event["log_level"] == "error"
+    assert event["runner_wire_version"] == wire.SCHEMA_VERSION
+    assert event["error"] == refusal
+    assert f"runner wire version {wire.SCHEMA_VERSION}" in event["error"]
+    assert "central MEHO needs 2" in event["error"]

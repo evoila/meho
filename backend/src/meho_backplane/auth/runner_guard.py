@@ -49,19 +49,22 @@ for a dead/revoked runner is #2501's dead-man switch.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Annotated
 
 import structlog
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.db.models import RunnerPrincipal
 from meho_backplane.middleware import verify_jwt_and_bind
+from meho_backplane.runner import wire
 
-__all__ = ["assert_runner_scope", "require_runner"]
+__all__ = ["assert_runner_scope", "require_runner", "runner_wire_version"]
 
 #: Detail token shared by every runner-authorization failure — the
 #: negative cage (:func:`~meho_backplane.middleware.verify_jwt_and_bind`),
@@ -70,6 +73,10 @@ __all__ = ["assert_runner_scope", "require_runner"]
 #: the on-call telemetry uniform; the structlog ``surface`` field
 #: distinguishes where the violation fired.
 _RUNNER_SCOPE_VIOLATION: str = "runner_scope_violation"
+
+#: A wire version is a short whole number. Anything else is refused before it
+#: is stored, so the runner list never shows a value a caller made up.
+_WIRE_VERSION_PATTERN: re.Pattern[str] = re.compile(r"[0-9]{1,6}")
 
 
 def require_runner() -> Callable[[Operator], Operator]:
@@ -118,11 +125,34 @@ def require_runner() -> Callable[[Operator], Operator]:
     return _checker
 
 
+def runner_wire_version(
+    header_value: Annotated[str | None, Header(alias=wire.WIRE_VERSION_HEADER)] = None,
+) -> str:
+    """Read the runner's wire version from the request header (FastAPI dependency).
+
+    A call without the header counts as
+    :data:`~meho_backplane.runner.wire.WIRE_VERSION_WHEN_MISSING`, so a
+    runner built before the header existed keeps working. A value that is
+    not a short whole number is refused with HTTP 400. This only reads the
+    value; :func:`assert_runner_scope` stores it and compares it with the
+    central version.
+    """
+    if header_value is None:
+        return wire.WIRE_VERSION_WHEN_MISSING
+    if _WIRE_VERSION_PATTERN.fullmatch(header_value) is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"runner_wire_version_invalid: {wire.WIRE_VERSION_HEADER} must be a number",
+        )
+    return header_value
+
+
 async def assert_runner_scope(
     operator: Operator,
     *,
     runner_name: str,
     session: AsyncSession,
+    wire_version: str,
 ) -> RunnerPrincipal:
     """Bind a runner token's ``runner_id`` to the runner *named* by the route.
 
@@ -149,6 +179,9 @@ async def assert_runner_scope(
     at least one authenticated request per poll window, so the idle work
     cycle *is* the heartbeat (the #1501 zombie-heartbeat lesson).
 
+    After the scope match the guard also checks the runner's wire version
+    (#5020, see :func:`_store_and_check_wire_version`).
+
     Fail-closed with **no existence oracle**: a name that resolves to no
     row *and* a name that resolves to a **different** runner both raise the
     same HTTP 403 ``runner_scope_violation``. A runner probing another
@@ -161,6 +194,8 @@ async def assert_runner_scope(
             :func:`require_runner`). ``operator.runner_id`` must be set;
             :func:`require_runner` guarantees this.
         runner_name: The runner name the route addresses (path/query param).
+        wire_version: The runner's wire version, as read by
+            :func:`runner_wire_version`.
         session: An open :class:`AsyncSession` the caller owns. On a
             successful match this guard stamps the heartbeat and
             ``commit()``s it on this session (see "Heartbeat side effect");
@@ -175,7 +210,8 @@ async def assert_runner_scope(
     Raises:
         HTTPException: 403 ``runner_scope_violation`` when no tenant-scoped
             runner named *runner_name* exists, or the row's id does not
-            match the token's ``runner_id``.
+            match the token's ``runner_id``; 409 when *wire_version* is not
+            the central wire version.
     """
     result = await session.execute(
         select(RunnerPrincipal).where(
@@ -195,6 +231,7 @@ async def assert_runner_scope(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=_RUNNER_SCOPE_VIOLATION,
         )
+    await _store_and_check_wire_version(session, row, wire_version=wire_version)
     # Heartbeat (#2501): stamp runner liveness on the central clock, keyed
     # by the token's ``runner_id`` claim (``row.id``), reading no request
     # field. Committed on the caller's own session (no nested session -- the
@@ -205,3 +242,33 @@ async def assert_runner_scope(
     row.last_seen_at = datetime.now(UTC)
     await session.commit()
     return row
+
+
+async def _store_and_check_wire_version(
+    session: AsyncSession, row: RunnerPrincipal, *, wire_version: str
+) -> None:
+    """Store the runner's wire version and refuse it when central needs another.
+
+    The version is stored on the row in every case, so the runner list shows
+    it. On a mismatch with the central
+    :data:`~meho_backplane.runner.wire.SCHEMA_VERSION` this commits only the
+    stored version and raises HTTP 409 with
+    :func:`~meho_backplane.runner.wire.wire_version_mismatch_message`. The
+    caller then does **not** stamp ``last_seen_at``: a runner that cannot do
+    its work must not look alive, so the dead-man switch still flips its
+    checks to unknown.
+    """
+    row.wire_version = wire_version
+    if wire_version == wire.SCHEMA_VERSION:
+        return
+    structlog.get_logger(__name__).warning(
+        wire.WIRE_VERSION_MISMATCH,
+        runner_name=row.name,
+        runner_wire_version=wire_version,
+        central_wire_version=wire.SCHEMA_VERSION,
+    )
+    await session.commit()
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=wire.wire_version_mismatch_message(wire_version, wire.SCHEMA_VERSION),
+    )

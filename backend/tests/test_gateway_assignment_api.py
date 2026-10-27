@@ -576,3 +576,162 @@ async def test_runner_scoping(client: TestClient) -> None:
     assert runner_put.status_code == 403
     assert unauth_get.status_code == 401
     assert unauth_post.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Wire version check (#5020)
+# ---------------------------------------------------------------------------
+
+
+async def _runner_a_row() -> RunnerPrincipal:
+    async with get_sessionmaker()() as session:
+        return (
+            await session.execute(select(RunnerPrincipal).where(RunnerPrincipal.id == _RUNNER_A_ID))
+        ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_same_or_missing_wire_version_is_served_and_stored(client: TestClient) -> None:
+    """A runner on the central version, and one that sends no version, work as before."""
+    await _seed_identities()
+    key = make_rsa_keypair("kid-A")
+
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        auth = {"Authorization": f"Bearer {_runner_token(key, runner_id=_RUNNER_A_ID)}"}
+        same = client.get(
+            "/api/v1/checks/assignment?runner=runner-a",
+            headers={**auth, wire.WIRE_VERSION_HEADER: wire.SCHEMA_VERSION},
+        )
+        missing = client.get("/api/v1/checks/assignment?runner=runner-a", headers=auth)
+        posted = client.post(
+            "/api/v1/checks/results", json=_result_batch("runner-a", "w-1"), headers=auth
+        )
+
+    assert same.status_code == 200
+    assert missing.status_code == 200
+    assert posted.status_code == 200
+    # A missing header counts as version 1, the version every older runner spoke.
+    assert (await _runner_a_row()).wire_version == wire.WIRE_VERSION_WHEN_MISSING == "1"
+
+
+@pytest.mark.asyncio
+async def test_other_wire_version_is_refused_with_both_versions(client: TestClient) -> None:
+    """A runner on another wire version gets a 409 naming both versions; nothing is served."""
+    await _seed_identities()
+    key = make_rsa_keypair("kid-A")
+    before = (await _runner_a_row()).last_seen_at
+
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        headers = {
+            "Authorization": f"Bearer {_runner_token(key, runner_id=_RUNNER_A_ID)}",
+            wire.WIRE_VERSION_HEADER: "2",
+        }
+        got = client.get("/api/v1/checks/assignment?runner=runner-a", headers=headers)
+        posted = client.post(
+            "/api/v1/checks/results", json=_result_batch("runner-a", "w-2"), headers=headers
+        )
+
+    for resp in (got, posted):
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == (
+            "runner_wire_version_mismatch: runner wire version 2, "
+            "central MEHO needs 1: update the central MEHO"
+        )
+    row = await _runner_a_row()
+    # The runner list shows the version the runner sent ...
+    assert row.wire_version == "2"
+    # ... but a runner that cannot do its work does not count as alive.
+    assert row.last_seen_at == before
+    async with get_sessionmaker()() as session:
+        assert (await session.execute(select(RunnerCheckResult))).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_central_route_compares_with_schema_version(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a ``SCHEMA_VERSION`` bump, an old runner (no header) is told to update."""
+    await _seed_identities()
+    key = make_rsa_keypair("kid-A")
+    monkeypatch.setattr(wire, "SCHEMA_VERSION", "2")
+
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        resp = client.get(
+            "/api/v1/checks/assignment?runner=runner-a",
+            headers={"Authorization": f"Bearer {_runner_token(key, runner_id=_RUNNER_A_ID)}"},
+        )
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == (
+        "runner_wire_version_mismatch: runner wire version 1, "
+        "central MEHO needs 2: update the runner"
+    )
+
+
+@pytest.mark.asyncio
+async def test_malformed_wire_version_is_rejected_and_not_stored(client: TestClient) -> None:
+    """A wire version that is not a short number is a 400 and never reaches the row."""
+    await _seed_identities()
+    key = make_rsa_keypair("kid-A")
+
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        resp = client.get(
+            "/api/v1/checks/assignment?runner=runner-a",
+            headers={
+                "Authorization": f"Bearer {_runner_token(key, runner_id=_RUNNER_A_ID)}",
+                wire.WIRE_VERSION_HEADER: "1; drop",
+            },
+        )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"].startswith("runner_wire_version_invalid")
+    assert (await _runner_a_row()).wire_version is None
+
+
+@pytest.mark.asyncio
+async def test_runner_client_gets_clear_refusal_from_central(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real runner client, on another wire version, gets central's refusal end to end."""
+    from meho_backplane.runner.client import RunnerClient, RunnerWireVersionMismatchError
+
+    await _seed_identities()
+    key = make_rsa_keypair("kid-A")
+    # The runner is built with version 2; central still needs 1.
+    monkeypatch.setattr(wire, "SCHEMA_VERSION", "2")
+    runner_client = RunnerClient(
+        central_url="http://central.test",
+        runner_id="runner-a",
+        token=_runner_token(key, runner_id=_RUNNER_A_ID),
+    )
+    monkeypatch.setattr(wire, "SCHEMA_VERSION", "1")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        mock_router.route(host="central.test").mock(
+            side_effect=lambda request: _forward(client, request)
+        )
+        async with runner_client:
+            with pytest.raises(RunnerWireVersionMismatchError) as exc_info:
+                await runner_client.fetch_assignment(known_version=None)
+
+    assert str(exc_info.value) == (
+        "runner_wire_version_mismatch: runner wire version 2, "
+        "central MEHO needs 1: update the central MEHO"
+    )
+
+
+def _forward(client: TestClient, request: Any) -> Any:
+    """Replay an outgoing runner request against the in-process central app."""
+    import httpx
+
+    resp = client.request(
+        request.method,
+        request.url.raw_path.decode(),
+        headers=dict(request.headers),
+        content=request.content,
+    )
+    return httpx.Response(resp.status_code, headers=resp.headers, content=resp.content)

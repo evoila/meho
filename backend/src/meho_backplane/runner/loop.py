@@ -17,7 +17,9 @@ Each tick, in order:
 1. drain the on-disk retry spool oldest-first,
 2. fetch the assignment (echoing the cached digest as ``known_version``;
    a ``304`` or a fetch failure keeps the cached assignment so the runner
-   keeps executing while the uplink is down),
+   keeps executing while the uplink is down; a wire version refusal drops
+   the cache and ends the tick, because the runner cannot read central's
+   work correctly),
 3. execute each work item locally,
 4. post the result batch; on failure, spool it.
 
@@ -38,7 +40,13 @@ import structlog
 
 from meho_backplane.connectors.registry import _eager_import_connectors
 from meho_backplane.logging import configure_logging
-from meho_backplane.runner.client import ASSIGNMENT_UNCHANGED, RunnerClient, RunnerClientError
+from meho_backplane.runner import wire
+from meho_backplane.runner.client import (
+    ASSIGNMENT_UNCHANGED,
+    RunnerClient,
+    RunnerClientError,
+    RunnerWireVersionMismatchError,
+)
 from meho_backplane.runner.executor import execute_work_item
 from meho_backplane.runner.settings import RunnerSettings, get_runner_settings
 from meho_backplane.runner.spool import ResultSpool
@@ -74,6 +82,18 @@ async def run_one_tick(
     await _drain_spool(client, spool)
     try:
         fetched = await client.fetch_assignment(state.assignment_version)
+    except RunnerWireVersionMismatchError as exc:
+        # Central speaks another wire version: run nothing until an operator
+        # updates one side. Dropping the cache keeps an old assignment from
+        # running while central refuses this runner.
+        _log.error(
+            "runner_wire_version_mismatch",
+            runner_wire_version=wire.SCHEMA_VERSION,
+            error=str(exc),
+        )
+        state.assignment = None
+        state.assignment_version = None
+        return
     except RunnerClientError as exc:
         # Uplink down: keep executing the last cached assignment.
         _log.warning("runner_assignment_fetch_failed", error=str(exc))

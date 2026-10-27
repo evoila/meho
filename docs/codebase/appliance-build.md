@@ -6,8 +6,7 @@ Install form 1 ships MEHO as a VMware appliance, `meho-appliance-<version>.ova`.
 The appliance is a Linux machine where the form-2 install
 ([linux-server-install.md](linux-server-install.md)) already ran, then
 cleaned of everything that must differ between appliances, and exported.
-The design is in meho-internal
-`docs/design/2026-10-10-install-forms/form-1-appliance.md`: section 1 (the
+The design is the internal design note `form-1-appliance.md`: section 1 (the
 steps), section 5 (the size: 4 processors, 16 GB, a 120 GB thin disk) and
 section 6 (hardware version 20).
 
@@ -92,23 +91,35 @@ the tests set it, as `install.sh` does.
    `meho-core-*` Secret that is still there, by name. When one is still
    there after that, the script stops before it removes anything from the
    machine, so the VM is still reachable to find out why.
-2. **MEHO's data.** Everything under `/var/lib/meho/`: the data volumes
-   (PostgreSQL, OpenBao with its init, Valkey), the two one-time files,
-   support bundles. The folder itself stays.
-3. **RKE2's own state.** `systemctl disable --now rke2-server`, so the
-   customer's first boot does not start RKE2 with the build's placeholder
-   name; first start turns it on again. Then `server/db`, `server/tls`,
-   `server/cred`, `server/token`, `server/agent-token` and
+2. **RKE2, its pods and its own state.** `systemctl disable --now rke2-server`,
+   so the customer's first boot does not start RKE2 with the build's
+   placeholder name; first start turns it on again. The service stops only
+   `rke2`, kubelet and containerd (`KillMode=process`); the pods keep
+   running. So `/usr/local/bin/rke2-killall.sh` (RKE2's tarball installer
+   puts it there) stops them and unmounts their volumes. Then `server/db`,
+   `server/tls`, `server/cred`, `server/token`, `server/agent-token` and
    `server/node-token`; everything under `agent/` except `agent/images/`;
    the node password `/etc/rancher/node/password`; the kubeconfig
-   `/etc/rancher/rke2/rke2.yaml`. **Kept:** `server/manifests/` (the
+   `/etc/rancher/rke2/rke2.yaml`; all of `/var/lib/kubelet` (the pods'
+   folders, with the on-disk `emptyDir` volumes of the core's Jobs), as
+   RKE2's own uninstall script does. **Kept:** `server/manifests/` (the
    storage manifest of the form-2 install), `agent/images/` (the image
    archives), `/etc/rancher/rke2/config.yaml` and
    `/etc/rancher/rke2/meho-pss.yaml`. RKE2 makes new certificate
    authorities, a new Secrets key and a new token at first start, and
    imports the archives again.
+3. **MEHO's data**, now that no pod writes to it. Everything under
+   `/var/lib/meho/`: the data volumes (PostgreSQL, OpenBao with its init,
+   Valkey), the two one-time files, support bundles. The folder itself
+   stays. Also the install's answers under `/etc/meho/`:
+   `values-place.yaml` holds the first tenant id, which `install.sh` reuses
+   when the file exists, and `install.json` holds the build VM's address.
+   First start runs `install.sh`, which writes both again with a new
+   tenant id.
 4. **The machine.** The build user's sessions end (`loginctl`, `pkill`);
-   `userdel -r` removes the user, its home and its key; cloud-init's sudo
+   `userdel -r` removes the user, its home and its key; the copy of the
+   key that cloud-init writes into `/root/.ssh/authorized_keys` (with a
+   "please log in as" command, because of `disable_root`), cloud-init's sudo
    rule and the build's network file `/etc/netplan/60-meho-build.yaml` go.
    `cloud-init clean --logs --machine-id` removes cloud-init's state and
    logs and writes `uninitialized` to `/etc/machine-id`. The SSH host keys
@@ -122,10 +133,12 @@ the tests set it, as `install.sh` does.
    per finding, then one `[FAIL]` line with the count; the VM is not
    powered off, so the console shows the list. It looks for: a
    `meho-core-*` Secret (when `server/db` is gone there can be none; when
-   it exists, kubectl must answer and list none); a file under
-   `/var/lib/meho/`; each RKE2 path of step 3; anything under `agent/` but
-   `images/`; the node password; the kubeconfig; the build's network file
-   and sudo rule; `rke2-server` enabled; an SSH host key; the build user
+   it exists, kubectl must answer and list none); a running
+   `containerd-shim` (a pod that still runs); a file under `/var/lib/meho/`;
+   each RKE2 path of step 2; anything under `agent/` but `images/`; the
+   node password; the kubeconfig; `/var/lib/kubelet`; the two files under
+   `/etc/meho/`; root's `authorized_keys`; the build's network file and
+   sudo rule; `rke2-server` enabled; an SSH host key; the build user
    and its home; a machine-id other than `uninitialized`. It also checks
    that what must stay is there: `agent/images/`, `server/manifests/`,
    `config.yaml`, `meho-pss.yaml`, `/opt/meho/appliance/download/install.sh`
@@ -186,8 +199,8 @@ test (#4816).
 
 ## Known issues
 
-- **Not run against vCenter yet.** The lab's test place
-  (claude-rdc-hetzner-dc#3578) is not set up, so steps 1, 2 and 5 are
+- **Not run against vCenter yet.** The lab's test place (an internal
+  ticket) is not set up, so steps 1, 2 and 5 are
   written from the `govc` reference and the lab's own cloud-image deploys,
   and wait for the first build by hand. The first run will measure the
   times and may need the waits changed.
@@ -199,9 +212,6 @@ test (#4816).
   `build.sh` is where their install lines go. Until #4812 lands, the
   appliance has no network configuration after the clean (the build's
   network file is removed) and no SSH host keys; first start writes both.
-- **`/var/lib/kubelet`** is not on the ticket's list and is left as it is.
-  The pods' Secret volumes there are tmpfs and do not survive the power
-  off; the first lab build should confirm nothing else of value is in it.
 - **The cloud image's `ubuntu` user** is not made (no `default` in the
   user-data). If a later cloud-init version changes that rule, the check
   finds no such user; add it to `check_clean` if the first build shows one.
@@ -215,7 +225,9 @@ build VM after the form-2 install: MEHO's data, RKE2's state, the SSH host
 keys, the build user (a fake `passwd` file that the `getent` and `userdel`
 stubs read and write), a machine-id, logs and the appliance pieces. The
 `kubectl` stub at RKE2's own path keeps the cluster's Secrets in one file
-with their `managed-by` label.
+with their `managed-by` label. The `rke2-killall.sh` stub stops the fake
+pods, which the `pgrep` stub reports until then; it fails when MEHO's data
+is already gone, so the pods must stop first.
 
 `test_clean.py` pins what goes and what stays, the order of the steps,
 that a Secret that survives the delete stops the script before anything
@@ -231,7 +243,7 @@ The tests need Linux bash 5; on macOS run them in Docker
 ## References
 
 - Task evoila/meho#4811, Initiative evoila/meho#3958.
-- Design: meho-internal `docs/design/2026-10-10-install-forms/form-1-appliance.md`,
+- Design: the internal design note `form-1-appliance.md`,
   sections 1, 2, 5 and 6, and "What form 1 needs from form 2", needs 2, 3
   and 10.
 - govc: `govc/USAGE.md` in vmware/govmomi at v0.56.2; the import options

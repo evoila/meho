@@ -25,6 +25,10 @@ GONE = (
     f"{RKE2}/agent/kubelet.kubeconfig",
     "/etc/rancher/node/password",
     "/etc/rancher/rke2/rke2.yaml",
+    "/var/lib/kubelet",
+    "/etc/meho/values-place.yaml",
+    "/etc/meho/install.json",
+    "/root/.ssh/authorized_keys",
     "/etc/ssh/ssh_host_ed25519_key",
     "/etc/ssh/ssh_host_ed25519_key.pub",
     "/etc/netplan/60-meho-build.yaml",
@@ -76,6 +80,7 @@ class CleanTests(CleanTestCase):
             f"-n meho delete secret -l {LABEL}",
             "-n meho delete secret meho-core-tls",
             "systemctl disable --now rke2-server",
+            "rke2-killall.sh",
             f"loginctl terminate-user {BUILD_USER}",
             f"userdel -r {BUILD_USER}",
             "cloud-init clean --logs --machine-id",
@@ -86,7 +91,8 @@ class CleanTests(CleanTestCase):
             "systemctl poweroff",
         ]
         positions = [
-            next(i for i, call in enumerate(calls) if call.endswith(line)) for line in expected
+            next(i for i, call in enumerate(calls) if call.rstrip().endswith(line))
+            for line in expected
         ]
         self.assertEqual(sorted(positions), positions, "\n".join(calls))
         self.assertEqual("systemctl poweroff", calls[-1])
@@ -196,6 +202,26 @@ class CheckTests(CleanTestCase):
                 "/etc/netplan/60-meho-build.yaml",
                 "/etc/netplan/60-meho-build.yaml is still there",
             ),
+            "the kubelet's pod folders": (
+                "/var/lib/kubelet/pods/uid-1/volumes/x",
+                "/var/lib/kubelet",
+                "/var/lib/kubelet is still there",
+            ),
+            "the install's answers": (
+                "/etc/meho/values-place.yaml",
+                "/etc/meho/values-place.yaml",
+                "/etc/meho/values-place.yaml is still there",
+            ),
+            "the install record": (
+                "/etc/meho/install.json",
+                "/etc/meho/install.json",
+                "/etc/meho/install.json is still there",
+            ),
+            "the build key in root's file": (
+                "/root/.ssh/authorized_keys",
+                "/root/.ssh/authorized_keys",
+                "/root/.ssh/authorized_keys is still there",
+            ),
             "the build user's home": (
                 f"/home/{BUILD_USER}/x",
                 f"/home/{BUILD_USER}",
@@ -237,6 +263,16 @@ class CheckTests(CleanTestCase):
 
         self.assert_fails_once(result)
         self.assertEqual(["[LEFT] rke2-server starts at boot"], self.left_lines(result))
+
+    def test_a_pod_that_still_runs_is_found(self) -> None:
+        self.vm.answer("pods_running", "1")
+
+        result = self.vm.run("--check")
+
+        self.assert_fails_once(result)
+        self.assertEqual(
+            ["[LEFT] a pod of RKE2 still runs (a containerd-shim process)"], self.left_lines(result)
+        )
 
     def test_a_core_secret_is_found_while_the_database_exists(self) -> None:
         self.vm.host_file(f"{RKE2}/server/db/etcd/db", "left\n")

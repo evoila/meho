@@ -14,14 +14,19 @@
 #      meho.evoila.com/managed-by=core-bootstrap) and any other
 #      <release>-core-* Secret; then nothing is removed before a check
 #      proves none is left
-#   2. everything under /var/lib/meho/: the data volumes, the OpenBao init
-#      in them, the two one-time files, support bundles
-#   3. RKE2's own state: rke2-server stops and no longer starts at boot;
-#      server/db, server/tls, server/cred and the token files; everything
-#      under agent/ except agent/images/; the node password; the kubeconfig
-#   4. the machine: the build user's sessions, the user, its key and its
-#      sudo rule; the build's network file; cloud-init's state, logs and
-#      the machine-id; the SSH host keys; SSH closed for every address
+#   2. RKE2 and its pods: rke2-server stops and no longer starts at boot,
+#      and rke2-killall.sh stops the pods, which outlive the service; then
+#      RKE2's own state: server/db, server/tls, server/cred and the token
+#      files; everything under agent/ except agent/images/; the node
+#      password; the kubeconfig; /var/lib/kubelet
+#   3. MEHO's data, once nothing writes to it: everything under
+#      /var/lib/meho/ (the data volumes, the OpenBao init in them, the two
+#      one-time files, support bundles), and the install's answers under
+#      /etc/meho/ (with the first tenant id)
+#   4. the machine: the build user's sessions, the user, its key (also the
+#      copy cloud-init puts in root's authorized_keys) and its sudo rule;
+#      the build's network file; cloud-init's state, logs and the
+#      machine-id; the SSH host keys; SSH closed for every address
 #      (meho-host admin-network none); the logs; fstrim
 # What stays: server/manifests/, agent/images/, /etc/rancher/rke2/config.yaml,
 # /etc/rancher/rke2/meho-pss.yaml and the appliance pieces under
@@ -51,12 +56,17 @@ readonly HELM_RELEASE=meho
 readonly HELM_NAMESPACE=meho
 readonly CORE_SECRET_LABEL=meho.evoila.com/managed-by=core-bootstrap
 readonly MEHO_STATE_DIR=/var/lib/meho
+readonly MEHO_PLACE_VALUES=/etc/meho/values-place.yaml
+readonly MEHO_INSTALL_RECORD=/etc/meho/install.json
 readonly RKE2_DIR=/var/lib/rancher/rke2
 readonly RKE2_KUBECTL=$RKE2_DIR/bin/kubectl
 readonly RKE2_KUBECONFIG=/etc/rancher/rke2/rke2.yaml
 readonly RKE2_NODE_PASSWORD=/etc/rancher/node/password
 readonly RKE2_CONFIG=/etc/rancher/rke2/config.yaml
 readonly RKE2_PSS_FILE=/etc/rancher/rke2/meho-pss.yaml
+# RKE2's tarball installer, which the form-2 install runs, puts it here.
+readonly RKE2_KILLALL=/usr/local/bin/rke2-killall.sh
+readonly KUBELET_DIR=/var/lib/kubelet
 readonly RKE2_SERVER_STATE=(server/db server/tls server/cred server/token server/agent-token server/node-token)
 readonly RKE2_KEEP=(server/manifests agent/images)
 readonly APPLIANCE_DIR=/opt/meho/appliance
@@ -65,6 +75,7 @@ readonly CLOUD_INIT_OFF=/etc/cloud/cloud-init.disabled
 readonly BUILD_NETPLAN=/etc/netplan/60-meho-build.yaml
 readonly SUDOERS_CLOUD_INIT=/etc/sudoers.d/90-cloud-init-users
 readonly MACHINE_ID=/etc/machine-id
+readonly ROOT_AUTHORIZED_KEYS=/root/.ssh/authorized_keys
 
 BUILD_USER=meho-build
 CHECK_ONLY=0
@@ -149,28 +160,36 @@ delete_core_secrets() {
     ok "the Secrets of the core are deleted"
 }
 
-delete_meho_data() {
-    find "${HOST_ROOT}${MEHO_STATE_DIR}" -mindepth 1 -delete
-    ok "$MEHO_STATE_DIR is empty"
-}
-
 remove_rke2_state() {
     local item
     systemctl disable --now rke2-server
+    # The unit stops only rke2, kubelet and containerd (KillMode=process), so
+    # the pods keep running. The killall script stops them and unmounts their
+    # volumes; their folders under /var/lib/kubelet go below.
+    "${HOST_ROOT}${RKE2_KILLALL}"
     for item in "${RKE2_SERVER_STATE[@]}"; do
         rm -rf "${HOST_ROOT}${RKE2_DIR}/${item:?}"
     done
     find "${HOST_ROOT}${RKE2_DIR}/agent" -mindepth 1 -maxdepth 1 ! -name images -exec rm -rf {} +
     rm -f "${HOST_ROOT}${RKE2_NODE_PASSWORD}" "${HOST_ROOT}${RKE2_KUBECONFIG}"
-    ok "RKE2 is stopped, does not start at boot, and its state is gone; its images and manifests stay"
+    rm -rf --one-file-system "${HOST_ROOT}${KUBELET_DIR}"
+    ok "RKE2 and its pods are stopped, RKE2 does not start at boot, and its state is gone; its images and manifests stay"
+}
+
+delete_meho_data() {
+    find "${HOST_ROOT}${MEHO_STATE_DIR}" -mindepth 1 -delete
+    # First start runs install.sh, which writes both again with a new tenant id.
+    rm -f "${HOST_ROOT}${MEHO_PLACE_VALUES}" "${HOST_ROOT}${MEHO_INSTALL_RECORD}"
+    ok "$MEHO_STATE_DIR is empty, and the install's answers under /etc/meho are gone"
 }
 
 remove_build_user() {
     loginctl terminate-user "$BUILD_USER" || true
     pkill -KILL -u "$BUILD_USER" || true
     userdel -r "$BUILD_USER"
-    rm -f "${HOST_ROOT}${SUDOERS_CLOUD_INIT}" "${HOST_ROOT}${BUILD_NETPLAN}"
-    ok "the build user $BUILD_USER, its key, its sudo rule and the build's network file are gone"
+    # cloud-init also writes the build key into root's file (disable_root).
+    rm -f "${HOST_ROOT}${ROOT_AUTHORIZED_KEYS}" "${HOST_ROOT}${SUDOERS_CLOUD_INIT}" "${HOST_ROOT}${BUILD_NETPLAN}"
+    ok "the build user $BUILD_USER, its keys, its sudo rule and the build's network file are gone"
 }
 
 clean_machine_identity() {
@@ -224,9 +243,20 @@ check_core_secrets() {
     fi
 }
 
+check_no_containers() {
+    local rc=0
+    pgrep -f containerd-shim >/dev/null || rc=$?
+    case $rc in
+        0) left "a pod of RKE2 still runs (a containerd-shim process)" ;;
+        1) ;;
+        *) left "pgrep cannot tell whether a pod of RKE2 still runs (exit code $rc)" ;;
+    esac
+}
+
 check_clean() {
     local item found
     check_core_secrets
+    check_no_containers
     found=$(find "${HOST_ROOT}${MEHO_STATE_DIR}" -mindepth 1 2>/dev/null | head -n 1)
     [[ -z $found ]] || left "files under $MEHO_STATE_DIR"
     for item in "${RKE2_SERVER_STATE[@]}"; do
@@ -234,7 +264,8 @@ check_clean() {
     done
     found=$(find "${HOST_ROOT}${RKE2_DIR}/agent" -mindepth 1 -maxdepth 1 ! -name images 2>/dev/null | head -n 1)
     [[ -z $found ]] || left "RKE2 state under $RKE2_DIR/agent/ other than images/"
-    check_none "$RKE2_NODE_PASSWORD" "$RKE2_KUBECONFIG" "$BUILD_NETPLAN" "$SUDOERS_CLOUD_INIT"
+    check_none "$RKE2_NODE_PASSWORD" "$RKE2_KUBECONFIG" "$KUBELET_DIR" "$MEHO_PLACE_VALUES" "$MEHO_INSTALL_RECORD" \
+        "$BUILD_NETPLAN" "$SUDOERS_CLOUD_INIT" "$ROOT_AUTHORIZED_KEYS"
     if [[ $(systemctl is-enabled rke2-server 2>/dev/null || true) == enabled ]]; then
         left "rke2-server starts at boot"
     fi
@@ -269,10 +300,10 @@ main() {
     fi
     step "Step 1: delete the Secrets of the core"
     delete_core_secrets
-    step "Step 2: delete MEHO's data"
-    delete_meho_data
-    step "Step 3: remove RKE2's own state"
+    step "Step 2: stop RKE2 and its pods, and remove RKE2's own state"
     remove_rke2_state
+    step "Step 3: delete MEHO's data"
+    delete_meho_data
     step "Step 4: remove the build user, the machine identity and the logs"
     remove_build_user
     clean_machine_identity

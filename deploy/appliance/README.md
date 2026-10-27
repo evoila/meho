@@ -2,8 +2,7 @@
 
 Builds `meho-appliance-<version>.ova`, install form 1 of MEHO: a Linux
 machine where the form-2 install already ran, cleaned and exported. The
-design is in meho-internal
-`docs/design/2026-10-10-install-forms/form-1-appliance.md`, section 1.
+design is the internal design note `form-1-appliance.md`, section 1.
 The code walkthrough is `docs/codebase/appliance-build.md`.
 
 | File | What |
@@ -18,7 +17,7 @@ The code walkthrough is `docs/codebase/appliance-build.md`.
 
 ## Run it by hand
 
-On a Linux machine that reaches the cluster3 vCenter and the build VM's
+On a Linux machine that reaches the lab's vCenter and the build VM's
 address, with `govc`, `ssh`, `scp`, `curl`, `tar` and `sha256sum`:
 
 ```bash

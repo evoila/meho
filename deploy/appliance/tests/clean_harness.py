@@ -11,7 +11,8 @@ machine that runs them:
 - PATH holds only stub commands and links to the few real tools the script
   needs. Each stub writes its arguments to calls.log. The kubectl stub at
   RKE2's own path keeps the Secrets of the cluster in one file, one line
-  each: the name and its managed-by label.
+  each: the name and its managed-by label. The rke2-killall.sh stub stops
+  the fake pods: pgrep finds a containerd-shim until it has run.
 """
 
 from __future__ import annotations
@@ -72,6 +73,7 @@ STUBS = {
         rm -rf "$MEHO_TEST_ROOT/var/lib/cloud"
         """),
     "meho-host": 'exit "$(cat "$MEHO_FAKE/meho_host_rc")"',
+    "pgrep": '[ "$(cat "$MEHO_FAKE/pods_running")" = 1 ]',
     "journalctl": "",
     "fstrim": "",
 }
@@ -98,6 +100,13 @@ KUBECTL_STUB = textwrap.dedent(
     """
 )
 
+# The pods must stop before MEHO's data goes, so the stub fails when the
+# data is already gone.
+KILLALL_STUB = textwrap.dedent("""\
+    [ -e "$MEHO_TEST_ROOT/var/lib/meho/unseal-key" ] || exit 1
+    printf '0\\n' > "$MEHO_FAKE/pods_running"
+    """)
+
 SECRETS = textwrap.dedent("""\
     meho-core-postgres-superuser core-bootstrap
     meho-core-first-login core-bootstrap
@@ -113,6 +122,9 @@ MACHINE_FILES = {
     "/var/lib/meho/unseal-key": "fake-unseal-key\n",
     "/var/lib/meho/volumes/pvc-1/postgres/PG_VERSION": "17\n",
     "/var/lib/meho/volumes/pvc-2/openbao/init.json": "fake-openbao-init\n",
+    "/etc/meho/values-place.yaml": 'coreKeycloak:\n  firstTenantId: "fake-tenant"\n',
+    "/etc/meho/install.json": '{"options": {"public_address": "192.0.2.10"}}\n',
+    "/var/lib/kubelet/pods/uid-1/volumes/kubernetes.io~empty-dir/tmp/scratch": "fake scratch\n",
     f"{RKE2}/server/db/etcd/member/snap/db": "fake-etcd\n",
     f"{RKE2}/server/tls/server-ca.key": "fake-server-ca-key\n",
     f"{RKE2}/server/cred/encryption-config.json": "fake-secrets-key\n",
@@ -141,6 +153,7 @@ MACHINE_FILES = {
     "/var/log/cloud-init.log": "cloud-init lines\n",
     "/var/log/pods/meho_core/0.log": "pod lines\n",
     "/root/.bash_history": "sudo ./install.sh\n",
+    "/root/.ssh/authorized_keys": 'command="echo login as meho-build" ssh-ed25519 fake build key\n',
     f"/home/{BUILD_USER}/.ssh/authorized_keys": "ssh-ed25519 fake build key\n",
     "/opt/meho/appliance/download/install.sh": "#!/usr/bin/env bash\n",
     "/opt/meho/appliance/download/VERSION": "MEHO_VERSION=0.36.0\n",
@@ -172,11 +185,13 @@ class FakeBuildVM:
         for name, body in STUBS.items():
             _write_script(self.stubs / name, body)
         _write_script(self.host_path(f"{RKE2}/bin/kubectl"), KUBECTL_STUB)
+        _write_script(self.host_path("/usr/local/bin/rke2-killall.sh"), KILLALL_STUB)
         for path, content in MACHINE_FILES.items():
             self.host_file(path, content)
         self.answer("secrets", SECRETS)
         self.answer("secrets_stick", "0")
         self.answer("rke2_enabled", "enabled\n")
+        self.answer("pods_running", "1")
         self.answer("loginctl_rc", "0")
         self.answer("meho_host_rc", "0")
         self.answer(

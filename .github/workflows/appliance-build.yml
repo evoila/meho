@@ -11,9 +11,9 @@
 # and the build log as workflow artifacts. Publishing is #4814. A run on
 # every release tag comes once the release test exists (#4816).
 #
-# Runner: the lab's self-hosted pool, which must reach the cluster3 vCenter
-# and the build VM's address. The lab's test place is
-# claude-rdc-hetzner-dc#3578. The vCenter login is in repository secrets
+# Runner: the lab's self-hosted pool, which must reach the lab's vCenter
+# and the build VM's address. The lab's test place is an internal ticket.
+# The vCenter login is in repository secrets
 # GOVC_URL, GOVC_USERNAME and GOVC_PASSWORD; where the build VM goes and
 # its network are repository variables (below). The build SSH key is made
 # new for every run and never stored.
@@ -108,6 +108,9 @@ jobs:
 
       - name: Build the OVA
         env:
+          # The pool does not clean HOME between jobs, so govc must not keep
+          # its vCenter session in ~/.govmomi/sessions.
+          GOVC_PERSIST_SESSION: "false"
           GOVC_URL: ${{ secrets.GOVC_URL }}
           GOVC_USERNAME: ${{ secrets.GOVC_USERNAME }}
           GOVC_PASSWORD: ${{ secrets.GOVC_PASSWORD }}

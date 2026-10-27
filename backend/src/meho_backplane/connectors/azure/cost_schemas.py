@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from meho_backplane.connectors.azure._model import TEXT_OR_NULL
 from meho_backplane.connectors.azure.cost_lists import ADVISOR_CATEGORIES, ADVISOR_IMPACTS
 from meho_backplane.connectors.azure.cost_prices import PRICE_CURRENCIES, PRICE_TYPES
 from meho_backplane.connectors.azure.cost_reads import COST_TYPES, GROUP_BY_DIMENSIONS
@@ -30,7 +31,6 @@ __all__ = [
     "PRICE_LIST_RESPONSE",
 ]
 
-_TEXT: Final[list[str]] = ["string", "null"]
 _NUMBER: Final[list[str]] = ["number", "null"]
 _DATE_PATTERN: Final[str] = r"^\d{4}-\d{2}-\d{2}$"
 
@@ -223,8 +223,8 @@ _OMISSIONS: Final[dict[str, Any]] = _object(
     "Whether a limit cut the list. Nothing is cut silently.",
     {
         "truncated": _field("boolean", "True when MEHO stopped before the end of the list."),
-        "kind": _field(_TEXT, "page_limit, time_limit or row_limit; null when complete."),
-        "message": _field(_TEXT, "What was left out and how to narrow the request."),
+        "kind": _field(TEXT_OR_NULL, "page_limit, time_limit or row_limit; null when complete."),
+        "message": _field(TEXT_OR_NULL, "What was left out and how to narrow the request."),
         "pages_read": _field("integer", "How many pages MEHO read."),
     },
 )
@@ -233,7 +233,7 @@ _SCOPE: Final[dict[str, Any]] = _object(
     "What was read.",
     {
         "subscription_id": _field("string", "The subscription of the target."),
-        "resource_group": _field(_TEXT, "The resource group, or null for the subscription."),
+        "resource_group": _field(TEXT_OR_NULL, "The resource group, or null for the subscription."),
     },
 )
 
@@ -251,15 +251,15 @@ _COST_ROW: Final[dict[str, Any]] = _object(
     "One row of cost. Group columns that Azure adds keep Azure's name.",
     {
         "cost": _field(_NUMBER, "The cost, in currency."),
-        "currency": _field(_TEXT, "The currency of cost, for example EUR."),
-        "date": _field(_TEXT, "The day, YYYY-MM-DD. Only with granularity daily."),
-        "resource_group": _field(_TEXT, "With group_by resource_group."),
-        "service": _field(_TEXT, "With group_by service, for example Virtual Machines."),
-        "resource_type": _field(_TEXT, "With group_by resource_type."),
-        "location": _field(_TEXT, "With group_by location."),
-        "meter": _field(_TEXT, "With group_by meter."),
-        "tag_key": _field(_TEXT, "With group_by tag:<key>, when Azure names the key."),
-        "tag_value": _field(_TEXT, "With group_by tag:<key>, the tag's value."),
+        "currency": _field(TEXT_OR_NULL, "The currency of cost, for example EUR."),
+        "date": _field(TEXT_OR_NULL, "The day, YYYY-MM-DD. Only with granularity daily."),
+        "resource_group": _field(TEXT_OR_NULL, "With group_by resource_group."),
+        "service": _field(TEXT_OR_NULL, "With group_by service, for example Virtual Machines."),
+        "resource_type": _field(TEXT_OR_NULL, "With group_by resource_type."),
+        "location": _field(TEXT_OR_NULL, "With group_by location."),
+        "meter": _field(TEXT_OR_NULL, "With group_by meter."),
+        "tag_key": _field(TEXT_OR_NULL, "With group_by tag:<key>, when Azure names the key."),
+        "tag_value": _field(TEXT_OR_NULL, "With group_by tag:<key>, the tag's value."),
     },
 )
 
@@ -271,7 +271,7 @@ COST_QUERY_RESPONSE: Final[dict[str, Any]] = _object(
             "The sum of the rows.",
             {
                 "cost": _field(_NUMBER, "Sum, 2 decimals; null with more than one currency."),
-                "currency": _field(_TEXT, "The one currency of the rows, or null."),
+                "currency": _field(TEXT_OR_NULL, "The one currency of the rows, or null."),
                 "currencies": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -291,7 +291,7 @@ COST_QUERY_RESPONSE: Final[dict[str, Any]] = _object(
                     "items": {"type": "string"},
                     "description": "The group_by names.",
                 },
-                "cost_column": _field(_TEXT, "Azure's cost column: PreTaxCost or Cost."),
+                "cost_column": _field(TEXT_OR_NULL, "Azure's cost column: PreTaxCost or Cost."),
             },
         ),
         "omissions": _OMISSIONS,
@@ -307,10 +307,10 @@ COST_FORECAST_RESPONSE: Final[dict[str, Any]] = _object(
             "items": _object(
                 "One day.",
                 {
-                    "date": _field(_TEXT, "The day, YYYY-MM-DD."),
-                    "status": _field(_TEXT, "Actual (already used) or Forecast (estimate)."),
+                    "date": _field(TEXT_OR_NULL, "The day, YYYY-MM-DD."),
+                    "status": _field(TEXT_OR_NULL, "Actual (already used) or Forecast (estimate)."),
                     "cost": _field(_NUMBER, "The cost, in currency."),
-                    "currency": _field(_TEXT, "The currency of cost."),
+                    "currency": _field(TEXT_OR_NULL, "The currency of cost."),
                 },
             ),
         },
@@ -320,7 +320,7 @@ COST_FORECAST_RESPONSE: Final[dict[str, Any]] = _object(
                 "actual_cost": _field(_NUMBER, "Sum of the Actual rows."),
                 "forecast_cost": _field(_NUMBER, "Sum of the Forecast rows."),
                 "month_total": _field(_NUMBER, "actual_cost plus forecast_cost."),
-                "currency": _field(_TEXT, "The one currency of the rows, or null."),
+                "currency": _field(TEXT_OR_NULL, "The one currency of the rows, or null."),
                 "currencies": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -336,7 +336,7 @@ COST_FORECAST_RESPONSE: Final[dict[str, Any]] = _object(
             {
                 "cost_type": _field("string", "actual or amortized."),
                 "include_actual_cost": _field("boolean", "Always true: past days are actual."),
-                "cost_column": _field(_TEXT, "Azure's name of the cost column."),
+                "cost_column": _field(TEXT_OR_NULL, "Azure's name of the cost column."),
             },
         ),
         "omissions": _OMISSIONS,
@@ -352,24 +352,24 @@ BUDGET_LIST_RESPONSE: Final[dict[str, Any]] = _object(
             "items": _object(
                 "One budget. Its notification settings are left out.",
                 {
-                    "name": _field(_TEXT, "The budget's name (text from Azure)."),
+                    "name": _field(TEXT_OR_NULL, "The budget's name (text from Azure)."),
                     "resource_group": _field(
-                        _TEXT, "The budget's resource group, or null for the subscription."
+                        TEXT_OR_NULL, "The budget's resource group, or null for the subscription."
                     ),
-                    "category": _field(_TEXT, "Cost."),
+                    "category": _field(TEXT_OR_NULL, "Cost."),
                     "amount": _field(_NUMBER, "The budget amount per time grain."),
-                    "time_grain": _field(_TEXT, "Monthly, Quarterly, Annually, or billing."),
+                    "time_grain": _field(TEXT_OR_NULL, "Monthly, Quarterly, Annually, or billing."),
                     "period": _object(
                         "When the budget runs.",
                         {
-                            "start": _field(_TEXT, "Start date (as Azure gives it)."),
-                            "end": _field(_TEXT, "End date, or null."),
+                            "start": _field(TEXT_OR_NULL, "Start date (as Azure gives it)."),
+                            "end": _field(TEXT_OR_NULL, "End date, or null."),
                         },
                     ),
                     "current_spend": _field(_NUMBER, "Spend in the current time grain."),
                     "forecast_spend": _field(_NUMBER, "Forecast spend, or null."),
                     "percent_used": _field(_NUMBER, "current_spend / amount x 100, 2 decimals."),
-                    "currency": _field(_TEXT, "The currency of the amounts."),
+                    "currency": _field(TEXT_OR_NULL, "The currency of the amounts."),
                 },
             ),
         },
@@ -388,20 +388,20 @@ ADVISOR_LIST_RESPONSE: Final[dict[str, Any]] = _object(
             "items": _object(
                 "One recommendation. Its texts come from Azure.",
                 {
-                    "id": _field(_TEXT, "The recommendation's name in Azure."),
-                    "category": _field(_TEXT, "Cost, Security, Performance, ..."),
-                    "impact": _field(_TEXT, "High, Medium or Low."),
-                    "problem": _field(_TEXT, "What Advisor found (text from Azure)."),
-                    "solution": _field(_TEXT, "What Advisor suggests (text from Azure)."),
-                    "resource_id": _field(_TEXT, "The Azure resource id it is about."),
-                    "impacted_type": _field(_TEXT, "The resource type."),
-                    "impacted_name": _field(_TEXT, "The resource name (text from Azure)."),
-                    "status": _field(_TEXT, "Azure's status, for example New."),
+                    "id": _field(TEXT_OR_NULL, "The recommendation's name in Azure."),
+                    "category": _field(TEXT_OR_NULL, "Cost, Security, Performance, ..."),
+                    "impact": _field(TEXT_OR_NULL, "High, Medium or Low."),
+                    "problem": _field(TEXT_OR_NULL, "What Advisor found (text from Azure)."),
+                    "solution": _field(TEXT_OR_NULL, "What Advisor suggests (text from Azure)."),
+                    "resource_id": _field(TEXT_OR_NULL, "The Azure resource id it is about."),
+                    "impacted_type": _field(TEXT_OR_NULL, "The resource type."),
+                    "impacted_name": _field(TEXT_OR_NULL, "The resource name (text from Azure)."),
+                    "status": _field(TEXT_OR_NULL, "Azure's status, for example New."),
                     "savings_amount": _field(_NUMBER, "Azure's savings estimate, or null."),
                     "annual_savings_amount": _field(_NUMBER, "Yearly savings, or null."),
-                    "savings_currency": _field(_TEXT, "The currency of the savings."),
-                    "last_updated": _field(_TEXT, "When the recommendation last changed."),
-                    "recommendation_type_id": _field(_TEXT, "The kind of recommendation."),
+                    "savings_currency": _field(TEXT_OR_NULL, "The currency of the savings."),
+                    "last_updated": _field(TEXT_OR_NULL, "When the recommendation last changed."),
+                    "recommendation_type_id": _field(TEXT_OR_NULL, "The kind of recommendation."),
                 },
             ),
         },
@@ -409,8 +409,8 @@ ADVISOR_LIST_RESPONSE: Final[dict[str, Any]] = _object(
         "filters": _object(
             "What was asked and what was left out.",
             {
-                "category": _field(_TEXT, "The category asked for, or null."),
-                "impact": _field(_TEXT, "The impact asked for, or null."),
+                "category": _field(TEXT_OR_NULL, "The category asked for, or null."),
+                "impact": _field(TEXT_OR_NULL, "The impact asked for, or null."),
                 "inactive_left_out": _field(
                     "integer", "Dismissed, postponed or completed recommendations left out."
                 ),
@@ -433,21 +433,31 @@ PRICE_LIST_RESPONSE: Final[dict[str, Any]] = _object(
             "items": _object(
                 "One price. Names come from Azure.",
                 {
-                    "service": _field(_TEXT, "Service, for example Virtual Machines."),
-                    "product": _field(_TEXT, "Product, for example Virtual Machines Dsv5 Series."),
-                    "sku": _field(_TEXT, "SKU name, for example D4s v5."),
-                    "arm_sku": _field(_TEXT, "Size name Azure uses, for example Standard_D4s_v5."),
-                    "meter_id": _field(_TEXT, "The meter's id."),
-                    "meter_name": _field(_TEXT, "The meter's name."),
-                    "region": _field(_TEXT, "Region name, for example westeurope."),
-                    "location": _field(_TEXT, "Azure's location label, for example EU West."),
-                    "unit": _field(_TEXT, "Unit of the price, for example 1 Hour."),
+                    "service": _field(TEXT_OR_NULL, "Service, for example Virtual Machines."),
+                    "product": _field(
+                        TEXT_OR_NULL, "Product, for example Virtual Machines Dsv5 Series."
+                    ),
+                    "sku": _field(TEXT_OR_NULL, "SKU name, for example D4s v5."),
+                    "arm_sku": _field(
+                        TEXT_OR_NULL, "Size name Azure uses, for example Standard_D4s_v5."
+                    ),
+                    "meter_id": _field(TEXT_OR_NULL, "The meter's id."),
+                    "meter_name": _field(TEXT_OR_NULL, "The meter's name."),
+                    "region": _field(TEXT_OR_NULL, "Region name, for example westeurope."),
+                    "location": _field(
+                        TEXT_OR_NULL, "Azure's location label, for example EU West."
+                    ),
+                    "unit": _field(TEXT_OR_NULL, "Unit of the price, for example 1 Hour."),
                     "retail_price": _field(_NUMBER, "Price per unit without discount."),
                     "unit_price": _field(_NUMBER, "The same as retail_price."),
-                    "price_type": _field(_TEXT, "Consumption, Reservation or DevTestConsumption."),
-                    "reservation_term": _field(_TEXT, "1 Year or 3 Years for a Reservation."),
-                    "effective_start_date": _field(_TEXT, "Since when the price is valid."),
-                    "currency": _field(_TEXT, "The currency of the price."),
+                    "price_type": _field(
+                        TEXT_OR_NULL, "Consumption, Reservation or DevTestConsumption."
+                    ),
+                    "reservation_term": _field(
+                        TEXT_OR_NULL, "1 Year or 3 Years for a Reservation."
+                    ),
+                    "effective_start_date": _field(TEXT_OR_NULL, "Since when the price is valid."),
+                    "currency": _field(TEXT_OR_NULL, "The currency of the price."),
                     "tier_minimum_units": _field(_NUMBER, "Units needed for this price."),
                     "is_primary_meter_region": _field(
                         ["boolean", "null"], "True for the meter Azure bills with."

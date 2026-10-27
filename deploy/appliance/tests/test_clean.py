@@ -46,7 +46,7 @@ KEPT = (
     f"{RKE2}/agent/images/meho-images.linux-amd64.tar.zst",
     f"{RKE2}/agent/images/rke2-images.linux-amd64.tar.zst",
     "/etc/rancher/rke2/config.yaml",
-    "/etc/rancher/rke2/meho-pss.yaml",
+    "/etc/systemd/system-preset/10-meho-appliance.preset",
     "/etc/ssh/sshd_config",
     "/etc/cloud/cloud-init.disabled",
     "/opt/meho/appliance/download/install.sh",
@@ -71,6 +71,25 @@ class CleanTests(CleanTestCase):
             with self.subTest(log=log):
                 self.assertEqual(0, self.vm.host_path(log).stat().st_size)
         self.assertIn("[ok]   nothing that must differ between appliances is left", result.stdout)
+
+    def test_rke2_stays_off_at_the_first_boot(self) -> None:
+        self.assert_succeeds(self.vm.run())
+
+        self.assertEqual(
+            "disable rke2-server.service\ndisable rke2-agent.service\n",
+            self.vm.host_path("/etc/systemd/system-preset/10-meho-appliance.preset").read_text(),
+        )
+
+    def test_a_kubectl_that_cannot_list_the_secrets_stops_before_anything_is_removed(self) -> None:
+        self.vm.answer("secrets_get_rc", "1")
+
+        result = self.vm.run()
+
+        self.assert_fails_once(result, "kubectl cannot list the Secrets", "Nothing was removed")
+        self.assertTrue(self.vm.host_path("/var/lib/meho/unseal-key").exists())
+        self.assertTrue(self.vm.host_path(f"{RKE2}/server/db").exists())
+        self.assertNotIn("rke2-killall.sh", "\n".join(self.vm.calls()))
+        self.assertNotIn("systemctl poweroff", self.vm.calls())
 
     def test_the_steps_run_in_the_order_of_the_design(self) -> None:
         self.assert_succeeds(self.vm.run())
@@ -289,11 +308,26 @@ class CheckTests(CleanTestCase):
             self.left_lines(result),
         )
 
+    def test_a_kubectl_that_cannot_answer_is_found_while_the_database_exists(self) -> None:
+        self.vm.host_file(f"{RKE2}/server/db/etcd/db", "left\n")
+        self.vm.answer("secrets_get_rc", "1")
+
+        result = self.vm.run("--check")
+
+        self.assert_fails_once(result)
+        self.assertEqual(
+            [
+                f"[LEFT] the Kubernetes database {RKE2}/server/db, and kubectl cannot list its Secrets",
+                f"[LEFT] {RKE2}/server/db is still there",
+            ],
+            self.left_lines(result),
+        )
+
     def test_what_must_stay_is_checked_too(self) -> None:
         must_stay = {
             f"{RKE2}/agent/images": f"{RKE2}/agent/images is missing; it must stay",
             f"{RKE2}/server/manifests": f"{RKE2}/server/manifests is missing; it must stay",
-            "/etc/rancher/rke2/meho-pss.yaml": "/etc/rancher/rke2/meho-pss.yaml is missing; it must stay",
+            "/etc/systemd/system-preset/10-meho-appliance.preset": "/etc/systemd/system-preset/10-meho-appliance.preset is missing; it must stay",
             "/etc/rancher/rke2/config.yaml": "/etc/rancher/rke2/config.yaml is missing; it must stay",
             "/opt/meho/appliance/download/install.sh": "/opt/meho/appliance/download/install.sh is missing; it must stay",
             "/etc/cloud/cloud-init.disabled": "/etc/cloud/cloud-init.disabled is missing; it must stay",

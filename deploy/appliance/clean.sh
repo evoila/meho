@@ -28,9 +28,10 @@
 #      the build's network file; cloud-init's state, logs and the
 #      machine-id; the SSH host keys; SSH closed for every address
 #      (meho-host admin-network none); the logs; fstrim
-# What stays: server/manifests/, agent/images/, /etc/rancher/rke2/config.yaml,
-# /etc/rancher/rke2/meho-pss.yaml and the appliance pieces under
-# /opt/meho/appliance.
+# What stays: server/manifests/, agent/images/, /etc/rancher/rke2/config.yaml
+# and the appliance pieces under /opt/meho/appliance. The preset file that
+# keeps RKE2 off at the first boot is written. (/etc/rancher/rke2/meho-pss.yaml
+# stays too once the install writes it, #4636.)
 #
 # Usage:
 #   clean.sh [--build-user <name>]   clean, check, power off
@@ -63,7 +64,10 @@ readonly RKE2_KUBECTL=$RKE2_DIR/bin/kubectl
 readonly RKE2_KUBECONFIG=/etc/rancher/rke2/rke2.yaml
 readonly RKE2_NODE_PASSWORD=/etc/rancher/node/password
 readonly RKE2_CONFIG=/etc/rancher/rke2/config.yaml
-readonly RKE2_PSS_FILE=/etc/rancher/rke2/meho-pss.yaml
+# systemd treats the appliance's first boot (machine-id "uninitialized") as
+# a first boot and enables every unit without a preset rule. This file
+# keeps RKE2 off until first start enables it (systemd.preset(5)).
+readonly RKE2_PRESET=/etc/systemd/system-preset/10-meho-appliance.preset
 # RKE2's tarball installer, which the form-2 install runs, puts it here.
 readonly RKE2_KILLALL=/usr/local/bin/rke2-killall.sh
 readonly KUBELET_DIR=/var/lib/kubelet
@@ -142,18 +146,27 @@ kubectl() {
     "${HOST_ROOT}${RKE2_KUBECTL}" --kubeconfig "${HOST_ROOT}${RKE2_KUBECONFIG}" -n "$HELM_NAMESPACE" "$@"
 }
 
+# core_secrets: the <release>-core-* Secrets, one per line. False when
+# kubectl cannot list the Secrets, so a failed kubectl never counts as none.
 core_secrets() {
-    kubectl get secret -o name | grep "^secret/${HELM_RELEASE}-core-" || true
+    local names
+    names=$(kubectl get secret -o name) || return 1
+    grep "^secret/${HELM_RELEASE}-core-" <<<"$names" || true
 }
 
 delete_core_secrets() {
     local name left
     kubectl delete secret -l "$CORE_SECRET_LABEL"
     # A <release>-core-* Secret without the label goes too.
+    left=$(core_secrets) ||
+        fail "kubectl cannot list the Secrets of the cluster. Nothing was removed from the machine." \
+            "check that RKE2 runs ('meho-host check'), then run the build again."
     while read -r name; do
         [[ -n $name ]] && kubectl delete secret "${name#secret/}"
-    done < <(core_secrets)
-    left=$(core_secrets)
+    done <<<"$left"
+    left=$(core_secrets) ||
+        fail "kubectl cannot list the Secrets of the cluster. Nothing was removed from the machine." \
+            "check that RKE2 runs ('meho-host check'), then run the build again."
     [[ -z $left ]] ||
         fail "These Secrets are still in the cluster: ${left//$'\n'/, }. Nothing was removed from the machine." \
             "find out why the core's Jobs made a Secret that kubectl cannot delete, then run the build again."
@@ -163,6 +176,8 @@ delete_core_secrets() {
 remove_rke2_state() {
     local item
     systemctl disable --now rke2-server
+    mkdir -p "${HOST_ROOT}${RKE2_PRESET%/*}"
+    printf 'disable rke2-server.service\ndisable rke2-agent.service\n' >"${HOST_ROOT}${RKE2_PRESET}"
     # The unit stops only rke2, kubelet and containerd (KillMode=process), so
     # the pods keep running. The killall script stops them and unmounts their
     # volumes; their folders under /var/lib/kubelet go below.
@@ -173,7 +188,7 @@ remove_rke2_state() {
     find "${HOST_ROOT}${RKE2_DIR}/agent" -mindepth 1 -maxdepth 1 ! -name images -exec rm -rf {} +
     rm -f "${HOST_ROOT}${RKE2_NODE_PASSWORD}" "${HOST_ROOT}${RKE2_KUBECONFIG}"
     rm -rf --one-file-system "${HOST_ROOT}${KUBELET_DIR}"
-    ok "RKE2 and its pods are stopped, RKE2 does not start at boot, and its state is gone; its images and manifests stay"
+    ok "RKE2 and its pods are stopped, RKE2 does not start at boot (also not at the first boot), and its state is gone; its images and manifests stay"
 }
 
 delete_meho_data() {
@@ -184,8 +199,14 @@ delete_meho_data() {
 }
 
 remove_build_user() {
+    local waited=0
     loginctl terminate-user "$BUILD_USER" || true
     pkill -KILL -u "$BUILD_USER" || true
+    # userdel refuses a user with a running process, and pkill returns
+    # before the processes are gone.
+    while pgrep -u "$BUILD_USER" >/dev/null && ((waited++ < 30)); do
+        sleep 1
+    done
     userdel -r "$BUILD_USER"
     # cloud-init also writes the build key into root's file (disable_root).
     rm -f "${HOST_ROOT}${ROOT_AUTHORIZED_KEYS}" "${HOST_ROOT}${SUDOERS_CLOUD_INIT}" "${HOST_ROOT}${BUILD_NETPLAN}"
@@ -206,7 +227,9 @@ close_ssh() {
 truncate_logs() {
     journalctl --rotate
     journalctl --vacuum-time=1s
-    find "${HOST_ROOT}/var/log" -type f -exec truncate -s 0 {} +
+    # Not the journal files: journald has them open, and the vacuum above
+    # has emptied them.
+    find "${HOST_ROOT}/var/log" -path "${HOST_ROOT}/var/log/journal" -prune -o -type f -exec truncate -s 0 {} +
     rm -f "${HOST_ROOT}"/root/.bash_history
     fstrim -av
     ok "the logs are empty and the free space is trimmed"
@@ -272,7 +295,9 @@ check_clean() {
     for item in "${RKE2_KEEP[@]}"; do
         [[ -d ${HOST_ROOT}${RKE2_DIR}/$item ]] || left "$RKE2_DIR/$item is missing; it must stay"
     done
-    for item in "$RKE2_CONFIG" "$RKE2_PSS_FILE" "$APPLIANCE_INSTALL" "$CLOUD_INIT_OFF"; do
+    # /etc/rancher/rke2/meho-pss.yaml must stay too, once the install writes
+    # it (#4636); add it here then.
+    for item in "$RKE2_CONFIG" "$RKE2_PRESET" "$APPLIANCE_INSTALL" "$CLOUD_INIT_OFF"; do
         [[ -f ${HOST_ROOT}${item} ]] || left "$item is missing; it must stay"
     done
     found=$(find "${HOST_ROOT}/etc/ssh" -maxdepth 1 -name 'ssh_host_*' 2>/dev/null | head -n 1)

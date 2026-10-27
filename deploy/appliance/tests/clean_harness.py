@@ -46,6 +46,8 @@ REAL_TOOLS = (
     "mktemp",
     "mv",
     "awk",
+    "mkdir",
+    "sleep",
 )
 
 STUBS = {
@@ -86,7 +88,9 @@ KUBECTL_STUB = textwrap.dedent(
     done
     secrets="$MEHO_FAKE/secrets"
     case "$*" in
-      "get secret -o name") awk '{ print "secret/" $1 }' "$secrets" ;;
+      "get secret -o name")
+        [ "$(cat "$MEHO_FAKE/secrets_get_rc")" = 0 ] || exit 1
+        awk '{ print "secret/" $1 }' "$secrets" ;;
       "delete secret -l """
     + LABEL
     + """")
@@ -140,7 +144,6 @@ MACHINE_FILES = {
     "/etc/rancher/node/password": "fake-node-password\n",
     "/etc/rancher/rke2/rke2.yaml": "fake kubeconfig\n",
     "/etc/rancher/rke2/config.yaml": "node-name: build.lab.example\n",
-    "/etc/rancher/rke2/meho-pss.yaml": "fake pod security\n",
     "/etc/ssh/ssh_host_ed25519_key": "fake host key\n",
     "/etc/ssh/ssh_host_ed25519_key.pub": "fake host key pub\n",
     "/etc/ssh/sshd_config": "PasswordAuthentication no\n",
@@ -190,6 +193,7 @@ class FakeBuildVM:
             self.host_file(path, content)
         self.answer("secrets", SECRETS)
         self.answer("secrets_stick", "0")
+        self.answer("secrets_get_rc", "0")
         self.answer("rke2_enabled", "enabled\n")
         self.answer("pods_running", "1")
         self.answer("loginctl_rc", "0")

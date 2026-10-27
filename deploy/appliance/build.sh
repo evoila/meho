@@ -66,7 +66,10 @@ Usage:
   <out-dir>      The folder for meho-appliance-<version>.ova and SHA256SUMS.
   --from-step N  Go on from step N with the build VM that exists: 2 the
                  form-2 install, 3 the appliance pieces, 4 the clean,
-                 5 the export. Default: 1, a new build VM.
+                 5 the export. Default: 1, a new build VM. 4 works only
+                 when clean.sh stopped in its step 1, while RKE2 still
+                 runs; after a later failure, destroy the VM and build
+                 again from step 1.
 
 Settings, from the environment:
   GOVC_URL, GOVC_USERNAME, GOVC_PASSWORD
@@ -305,8 +308,12 @@ EOT
     disk=$(govc device.ls -vm "$VM" | awk '/^disk-/ { print $1; exit }')
     [[ -n $disk ]] || fail "The VM $VM has no disk device." "look at 'govc device.ls -vm $VM'."
     govc vm.disk.change -vm "$VM" -disk.name "$disk" -size "$DISK_SIZE"
+    # Hardware version 20 from the start: the image ships vmx-10, and the
+    # in-guest trim of the clean step (fstrim) reaches the thin disk only
+    # from virtual hardware 13 on.
+    govc vm.upgrade -version "$HARDWARE_VERSION" -vm "$VM"
     govc vm.power -on "$VM" >/dev/null
-    ok "the build VM $VM runs: $CPUS processors, $((MEMORY_MB / 1024)) GB, a $DISK_SIZE thin disk"
+    ok "the build VM $VM runs: $CPUS processors, $((MEMORY_MB / 1024)) GB, a $DISK_SIZE thin disk, hardware version $HARDWARE_VERSION"
 }
 
 wait_for_ssh() {
@@ -356,9 +363,10 @@ run_clean() {
     # /run is a RAM disk, so the script is not in the OVA. systemd-run
     # starts it outside this SSH session, which the script cuts. Its lines
     # go to the VM console as well as the journal, so a failed check can be
-    # read in vCenter after SSH is closed.
+    # read in vCenter after SSH is closed. --collect: a failed unit does not
+    # keep the name, so a second run after a failure in its step 1 works.
     ssh_build "sudo install -m 0700 meho-clean.sh /run/meho-clean.sh && rm meho-clean.sh &&
-        sudo systemd-run --unit=$CLEAN_UNIT -p StandardOutput=journal+console -p StandardError=journal+console \
+        sudo systemd-run --unit=$CLEAN_UNIT --collect -p StandardOutput=journal+console -p StandardError=journal+console \
             /run/meho-clean.sh --build-user $BUILD_USER"
     note "the clean script runs on the build VM; waiting for the power-off"
     until [[ $(vm_power_state) == poweredOff ]]; do

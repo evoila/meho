@@ -39,9 +39,14 @@ it. Make a new SSH key for every build.
 When a step fails, the build VM stays in vCenter. Fix the cause and go on
 from that step with `--from-step N` (2 the form-2 install, 3 the appliance
 pieces, 4 the clean, 5 the export), or destroy the VM with
-`govc vm.destroy <name>`. When the clean step fails, SSH is already closed
-or the build user is gone: read the `[FAIL]` and `[LEFT]` lines on the VM
-console in vCenter.
+`govc vm.destroy <name>`.
+
+A failed clean is different. `--from-step 4` works only when `clean.sh`
+stopped in its step 1 (the Secrets), while RKE2 still runs and SSH is
+open. After any later failure, RKE2 is stopped, and the build user and SSH
+may be gone: read the `[FAIL]` and `[LEFT]` lines on the VM console in
+vCenter, destroy the VM with `govc vm.destroy <name>`, and build again
+from step 1.
 
 ## Test it
 

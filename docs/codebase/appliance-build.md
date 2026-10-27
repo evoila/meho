@@ -52,8 +52,10 @@ the tests set it, as `install.sh` does.
    the lab's DNS record for the placeholder name fits, and removes the
    image's DHCP file. Then `govc vm.change` sets 4 processors and 16 GB,
    `govc vm.disk.change` grows the one disk to 120 GB before the first
-   power-on (cloud-init's growpart then grows the root file system), and
-   the VM starts. The build waits until SSH answers.
+   power-on (cloud-init's growpart then grows the root file system),
+   `govc vm.upgrade` sets hardware version 20 (the image ships `vmx-10`,
+   and the in-guest trim of the clean step reaches the thin disk only from
+   virtual hardware 13 on), and the VM starts. The build waits until SSH answers.
 2. **The form-2 install.** The download goes to the VM with `scp`, and
    `sudo ./install.sh --hostname <placeholder>` runs. No `--admin-network`,
    so the host firewall lets in SSH only from the build's own address,
@@ -69,13 +71,17 @@ the tests set it, as `install.sh` does.
    where their lines go.
 4. **Clean for copying.** `clean.sh` goes to `/run/meho-clean.sh` (a RAM
    disk, so it is not in the OVA) and starts with
-   `systemd-run --unit=meho-clean -p StandardOutput=journal+console`,
+   `systemd-run --unit=meho-clean --collect -p StandardOutput=journal+console`,
    outside the SSH session, because it deletes the build user and closes
    SSH. Its lines go to the VM console as well as the journal. The build
    polls `govc vm.info` until the VM is powered off. When it is still on
    after 20 minutes, the script stopped or its check found something, and
-   the build fails with the advice to read the console.
-5. **Export.** `govc vm.upgrade -version 20`, then `govc export.ovf`. The
+   the build fails with the advice to read the console. `--from-step 4`
+   works only when `clean.sh` stopped in its step 1, while RKE2 still
+   runs; after a later failure the VM is destroyed and the build starts
+   again.
+5. **Export.** `govc vm.upgrade -version 20` (already set in step 1; the
+   call accepts a VM at that version), then `govc export.ovf`. The
    build checks that the descriptor says `vmx-20`. `rewrite-ovf.sh` puts
    our product section in and declares the transports. The manifest
    (`SHA256(file)= hash`, one line per file) is written again, and
@@ -89,11 +95,18 @@ the tests set it, as `install.sh` does.
 1. **The Secrets of the core.** `kubectl delete secret -l meho.evoila.com/managed-by=core-bootstrap`
    in namespace `meho`, with RKE2's own kubectl and kubeconfig, then any
    `meho-core-*` Secret that is still there, by name. When one is still
-   there after that, the script stops before it removes anything from the
-   machine, so the VM is still reachable to find out why.
+   there after that, or when kubectl cannot list the Secrets at all, the
+   script stops before it removes anything from the machine, so the VM is
+   still reachable to find out why.
 2. **RKE2, its pods and its own state.** `systemctl disable --now rke2-server`,
    so the customer's first boot does not start RKE2 with the build's
-   placeholder name; first start turns it on again. The service stops only
+   placeholder name; first start turns it on again. A disable alone does
+   not last: the clean resets the machine-id, systemd treats the next boot
+   as a first boot and enables every unit without a preset rule. So the
+   clean writes `/etc/systemd/system-preset/10-meho-appliance.preset` with
+   `disable` rules for `rke2-server` and `rke2-agent`. A preset rule stops
+   only the automatic enable; first start's `systemctl enable --now
+   rke2-server` still works. The service stops only
    `rke2`, kubelet and containerd (`KillMode=process`); the pods keep
    running. So `/usr/local/bin/rke2-killall.sh` (RKE2's tarball installer
    puts it there) stops them and unmounts their volumes. Then `server/db`,
@@ -104,8 +117,10 @@ the tests set it, as `install.sh` does.
    folders, with the on-disk `emptyDir` volumes of the core's Jobs), as
    RKE2's own uninstall script does. **Kept:** `server/manifests/` (the
    storage manifest of the form-2 install), `agent/images/` (the image
-   archives), `/etc/rancher/rke2/config.yaml` and
-   `/etc/rancher/rke2/meho-pss.yaml`. RKE2 makes new certificate
+   archives) and `/etc/rancher/rke2/config.yaml`. The pod-security file
+   `/etc/rancher/rke2/meho-pss.yaml` must stay too, but the install does
+   not write it before #4636, so the check does not require it yet. RKE2
+   makes new certificate
    authorities, a new Secrets key and a new token at first start, and
    imports the archives again.
 3. **MEHO's data**, now that no pod writes to it. Everything under
@@ -116,8 +131,10 @@ the tests set it, as `install.sh` does.
    when the file exists, and `install.json` holds the build VM's address.
    First start runs `install.sh`, which writes both again with a new
    tenant id.
-4. **The machine.** The build user's sessions end (`loginctl`, `pkill`);
-   `userdel -r` removes the user, its home and its key; the copy of the
+4. **The machine.** The build user's sessions end (`loginctl`, `pkill`,
+   then a wait of up to 30 seconds until no process of the user is left,
+   because `userdel` refuses a user with a running process); `userdel -r`
+   removes the user, its home and its key; the copy of the
    key that cloud-init writes into `/root/.ssh/authorized_keys` (with a
    "please log in as" command, because of `disable_root`), cloud-init's sudo
    rule and the build's network file `/etc/netplan/60-meho-build.yaml` go.
@@ -127,8 +144,9 @@ the tests set it, as `install.sh` does.
    `meho-host admin-network none` closes SSH for every address
    ([linux-server-meho-host.md](linux-server-meho-host.md)); the script
    runs in no SSH session, so the command does not ask. The journal is
-   rotated and emptied, every file under `/var/log` is truncated, root's
-   shell history goes, and `fstrim -av` lets the disk export small.
+   rotated and emptied, every file under `/var/log` except the journal
+   files (journald has them open) is truncated, root's shell history goes,
+   and `fstrim -av` lets the disk export small.
 5. **The check**, also `clean.sh --check` on any machine. One `[LEFT]` line
    per finding, then one `[FAIL]` line with the count; the VM is not
    powered off, so the console shows the list. It looks for: a
@@ -141,7 +159,7 @@ the tests set it, as `install.sh` does.
    sudo rule; `rke2-server` enabled; an SSH host key; the build user
    and its home; a machine-id other than `uninitialized`. It also checks
    that what must stay is there: `agent/images/`, `server/manifests/`,
-   `config.yaml`, `meho-pss.yaml`, `/opt/meho/appliance/download/install.sh`
+   `config.yaml`, the preset file, `/opt/meho/appliance/download/install.sh`
    and `/etc/cloud/cloud-init.disabled`.
 6. **Power off:** `sync`, `systemctl poweroff`.
 
@@ -207,6 +225,10 @@ test (#4816).
 - **`meho-host admin-network none`** is in evoila/meho#5066, not merged
   yet. A build from a form-2 download without it fails in the clean step,
   loudly, with the VM still on.
+- **`/etc/rancher/rke2/meho-pss.yaml` is not in the OVA yet.** The form-2
+  install writes it with the CIS profile (#4636), which is open. When it
+  does, add the file to the must-stay list of `check_clean` and to the
+  fake machine of the tests.
 - **The first-start service (#4812)**, the console banner and the
   hardening (#4640) are not in the OVA yet. `add_appliance_pieces` in
   `build.sh` is where their install lines go. Until #4812 lands, the

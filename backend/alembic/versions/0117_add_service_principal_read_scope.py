@@ -3,8 +3,8 @@
 
 """Add the service-principal read scope table (#4992).
 
-Revision ID: 0116
-Revises: 0115
+Revision ID: 0117
+Revises: 0116
 Create Date: 2026-10-27
 
 One additive table, ``service_principal_read_scope``: one row per
@@ -24,8 +24,8 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "0116"
-down_revision: str | None = "0115"
+revision: str = "0117"
+down_revision: str | None = "0116"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

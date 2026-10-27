@@ -10,8 +10,9 @@ recommended size, monthly cost). Every operation here is a ``safe`` read and
 changes nothing in Azure.
 
 This module holds the group text (:data:`WHEN_TO_USE`), the guidance for the
-AI, the operation table (:data:`OPS`) and :class:`MigrateOps`, the mixin
-that gives ``AzureConnector`` one thin method per operation. The bodies are
+AI, the operation table (:data:`OPS`) and :class:`MigrateOps`: a small class
+whose methods ``AzureConnector`` takes over (a mixin), one thin method per
+operation. The bodies are
 in :mod:`meho_backplane.connectors.azure.migrate_reads`, the row shapes in
 :mod:`meho_backplane.connectors.azure.migrate_rows`.
 """
@@ -347,7 +348,10 @@ def _connector(ops: MigrateOps) -> AzureConnector:
 
 
 class MigrateOps:
-    """The Azure Migrate reads as methods of ``AzureConnector`` (a mixin).
+    """The Azure Migrate reads as methods of ``AzureConnector``.
+
+    ``AzureConnector`` lists this class among its base classes, so it takes
+    over these methods (a mixin).
 
     Each method is thin, like ``AzureConnector.about``: it imports its body
     from :mod:`meho_backplane.connectors.azure.migrate_reads` and runs it.

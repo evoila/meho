@@ -489,8 +489,9 @@ API version:
   server sites. A CSV import puts them into an import site. A master site
   links the other sites of a project.
 
-Files: `migrate.py` (group text, guidance for the AI, operation table, the
-`MigrateOps` mixin of `AzureConnector`), `migrate_reads.py` (the operation
+Files: `migrate.py` (group text, guidance for the AI, operation table, and
+`MigrateOps`, a class whose methods `AzureConnector` takes over as one of its
+base classes), `migrate_reads.py` (the operation
 bodies), `migrate_rows.py` (row shapes, name checks, counts; no calls to
 Azure), `migrate_schemas.py` (parameter and response schemas). The paths
 and API versions are in the `migrate` section of `_paths.py`.

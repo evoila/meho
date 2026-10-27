@@ -375,79 +375,76 @@ OPS: tuple[AzureTypedOp, ...] = (
 )
 
 
+def _connector(ops: NetworkOps) -> AzureConnector:
+    """The connector a :class:`NetworkOps` method runs on.
+
+    The mixin is only ever a base of ``AzureConnector``, so the object is one.
+    """
+    return cast("AzureConnector", ops)
+
+
 class NetworkOps:
     """The thin methods of the network operations, inherited by ``AzureConnector``.
 
-    Each one hands the connector to the body in :mod:`.network_reads`. The
-    mixin is only ever a base of ``AzureConnector``, hence the ``cast``.
+    Each one hands the connector to the body in :mod:`.network_reads`.
     """
 
     async def network_vnet_list(
         self, operator: Operator, target: AzureTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """``azure.network.vnet.list``: the virtual networks of the subscription."""
-        return await network_vnet_list_impl(cast("AzureConnector", self), operator, target, params)
+        return await network_vnet_list_impl(_connector(self), operator, target, params)
 
     async def network_vnet_show(
         self, operator: Operator, target: AzureTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """``azure.network.vnet.show``: one virtual network with subnets and peerings."""
-        return await network_vnet_show_impl(cast("AzureConnector", self), operator, target, params)
+        return await network_vnet_show_impl(_connector(self), operator, target, params)
 
     async def network_nsg_list(
         self, operator: Operator, target: AzureTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """``azure.network.nsg.list``: the network security groups of the subscription."""
-        return await network_nsg_list_impl(cast("AzureConnector", self), operator, target, params)
+        return await network_nsg_list_impl(_connector(self), operator, target, params)
 
     async def network_nsg_show(
         self, operator: Operator, target: AzureTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """``azure.network.nsg.show``: one network security group with every rule."""
-        return await network_nsg_show_impl(cast("AzureConnector", self), operator, target, params)
+        return await network_nsg_show_impl(_connector(self), operator, target, params)
 
     async def network_lb_list(
         self, operator: Operator, target: AzureTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """``azure.network.lb.list``: the load balancers of the subscription."""
-        return await network_lb_list_impl(cast("AzureConnector", self), operator, target, params)
+        return await network_lb_list_impl(_connector(self), operator, target, params)
 
     async def network_publicip_list(
         self, operator: Operator, target: AzureTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """``azure.network.publicip.list``: the public IP addresses of the subscription."""
-        return await network_publicip_list_impl(
-            cast("AzureConnector", self), operator, target, params
-        )
+        return await network_publicip_list_impl(_connector(self), operator, target, params)
 
     async def network_gateway_list(
         self, operator: Operator, target: AzureTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """``azure.network.gateway.list``: the gateways of one resource group."""
-        return await network_gateway_list_impl(
-            cast("AzureConnector", self), operator, target, params
-        )
+        return await network_gateway_list_impl(_connector(self), operator, target, params)
 
     async def network_expressroute_list(
         self, operator: Operator, target: AzureTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """``azure.network.expressroute.list``: the ExpressRoute circuits, without keys."""
-        return await network_expressroute_list_impl(
-            cast("AzureConnector", self), operator, target, params
-        )
+        return await network_expressroute_list_impl(_connector(self), operator, target, params)
 
     async def network_routetable_list(
         self, operator: Operator, target: AzureTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """``azure.network.routetable.list``: the route tables with their routes."""
-        return await network_routetable_list_impl(
-            cast("AzureConnector", self), operator, target, params
-        )
+        return await network_routetable_list_impl(_connector(self), operator, target, params)
 
     async def network_privatedns_list(
         self, operator: Operator, target: AzureTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """``azure.network.privatedns.list``: the private DNS zones of the subscription."""
-        return await network_privatedns_list_impl(
-            cast("AzureConnector", self), operator, target, params
-        )
+        return await network_privatedns_list_impl(_connector(self), operator, target, params)

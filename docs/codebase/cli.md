@@ -969,7 +969,11 @@ treatment: `dispatch.UnknownStatusError` (used by `dispatch.Render`,
 probably newer than the CLI, that the operation may have run or be
 waiting for approval, and points at `meho status`. The exit code stays
 `4` (`unexpected_response`) because the CLI cannot tell whether the
-operation worked.
+operation worked. The known statuses are `ok`, `error`, `denied`,
+`rate_limited`, `not_found` and `awaiting_approval`; the last three
+are the shared constants `dispatch.StatusRateLimited`,
+`dispatch.StatusNotFound` and `dispatch.StatusAwaitingApproval`, and
+all three lists name them so a new status is added in one place.
 
 ## Global work-ref (`--work-ref`, `MEHO_WORK_REF`, #3804)
 
@@ -1502,10 +1506,13 @@ scenarios.
 
 - `0` — verb ran cleanly; for `call`, `status == "ok"`.
 - `1` — `call` only: dispatcher returned `status == "error"`,
-  `status == "denied"` or `status == "rate_limited"` (connector raised,
-  schema validation rejected, policy denied, or the caller is over its
-  rate or concurrency limit). The envelope is printed first; a
-  `rate_limited` one shows `extras.retry_after_seconds`. When the
+  `status == "denied"`, `status == "rate_limited"` or
+  `status == "not_found"` (connector raised, schema validation
+  rejected, policy denied, the caller is over its rate or concurrency
+  limit, or the connector confirmed the object does not exist). The
+  envelope is printed first; a `rate_limited` one shows
+  `extras.retry_after_seconds`; a `not_found` one adds a
+  `not found: <id>` line from `extras.resource_ids` (#4986). When the
   backplane committed an audit row, the text output ends with
   `audit receipt: <id>` on every status, not only on `ok` (#4833) —
   a failed call's row is the one that says why it failed; read it
@@ -1799,7 +1806,7 @@ unqualified names. After G0.12-T16 #1274 the 15 vendor dirs (`vault`,
 `vcf-logs`, `vcf-operations`) share **one** transport implementation
 instead of byte-near-identical `doAuthedRequest` / `sendRequest` /
 `httpError` trios. Exit codes: `0` status=ok, `1`
-status=error/denied/rate_limited (via the `errOpError` sentinel re-exported from
+status=error/denied/rate_limited/not_found (via the `errOpError` sentinel re-exported from
 `dispatch.ErrOpError`), `2` auth_expired, `3` unreachable,
 `4` unexpected_response.
 

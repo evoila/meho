@@ -240,7 +240,7 @@ func TestOutputTooLargeMessageIgnoresOtherReasons(t *testing.T) {
 // text output must show its id on every status, not only on ok (#4833).
 func TestCallFailureRendersAuditReceipt(t *testing.T) {
 	const auditID = "77777777-7777-7777-7777-777777777777"
-	for _, status := range []string{"error", "denied", "rate_limited"} {
+	for _, status := range []string{"error", "denied", "rate_limited", "not_found"} {
 		t.Run(status, func(t *testing.T) {
 			out, err := executeDeliveryCall(t, callDeliveryResponse(t, map[string]any{
 				"status": status, "op_id": "vault.kv.read", "error": "connection refused",

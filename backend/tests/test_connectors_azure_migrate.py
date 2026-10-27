@@ -901,8 +901,6 @@ class _FakeValkey:
 @pytest.fixture
 def _dispatch_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[ResultHandleStore]:
     """Register the Azure connector and use the real reducer with an in-memory store."""
-    import meho_backplane.operations.result_query as result_query_core
-
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
@@ -919,7 +917,9 @@ def _dispatch_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[ResultHandleStore
     )
     register_connector_v2(product=AZURE_PRODUCT, version="", impl_id="", cls=AzureConnector)
     store = ResultHandleStore(_FakeValkey())  # type: ignore[arg-type]
-    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: store)
+    monkeypatch.setattr(
+        "meho_backplane.operations.result_query.get_result_handle_store", lambda: store
+    )
     set_default_reducer(JsonFluxReducer(sample_size=5, store=store))
     yield store
     reset_dispatcher_caches()

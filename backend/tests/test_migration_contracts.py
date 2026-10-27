@@ -716,6 +716,37 @@ def test_csv_keeps_a_machine_whose_first_record_lacks_a_required_value() -> None
     ]
 
 
+def test_csv_keeps_one_row_when_a_repeated_record_adds_the_bios_uuid() -> None:
+    """The first read of a VM has no BIOS UUID; a later read of the same VM has it.
+
+    The guest OS read of that machine must still be matched to it, so the
+    file has one row for the machine, not two.
+    """
+    no_uuid = _linux_vm()
+    no_uuid["identity_hints"]["bios_uuid"] = None
+    no_uuid["missing"]["identity_hints.bios_uuid"] = "not_reported_by_source"
+    first = InventoryEnvelope.model_validate(_envelope([no_uuid], "vmware-rest-9.0", "vc-lab-a"))
+    again = InventoryEnvelope.model_validate(
+        _envelope([_linux_vm()], "vmware-rest-9.0", "vc-lab-a")
+    )
+    guest = InventoryEnvelope.model_validate(_guest_inventory())
+    vm_id = _linux_vm()["source_id"]
+    guest_id = _linux_guest_view()["source_id"]
+
+    records, duplicates = merge_inventories([first, again, guest])
+
+    assert [(d.source_id, d.same_as, d.match) for d in duplicates] == [
+        (vm_id, vm_id, "source_id"),
+        (guest_id, vm_id, "bios_uuid"),
+    ]
+    export = inventory_to_csv(records, duplicates)
+    assert export.row_count == 1
+    assert [(s.source_id, s.reason, s.same_as) for s in export.left_out] == [
+        (vm_id, "same_machine_as", vm_id),
+        (guest_id, "same_machine_as", vm_id),
+    ]
+
+
 def test_csv_makes_repeated_names_unique_and_cleans_text() -> None:
     first = _linux_vm()
     second = _windows_vm()
@@ -850,7 +881,8 @@ def _small_server(number: int) -> dict[str, Any]:
         "nics": [
             {
                 "mac_address": None,
-                "ip_addresses": [f"10.{number // 256 % 256}.{number % 256}.7"],
+                # Documentation-range addresses only; they may repeat in this fixture.
+                "ip_addresses": [f"192.0.2.{number % 256}"],
                 "network": "vm-net",
             }
         ],

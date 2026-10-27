@@ -112,7 +112,9 @@ handle_ids)`:
 4. Merges the envelopes in handle order (`merge_inventories`). A handle
    given twice is read once. A repeated `source_id`, or a server whose BIOS
    UUID was already seen, stays in `records` and is listed in
-   `duplicates`; the caller decides what that means.
+   `duplicates`; the caller decides what that means. A repeated record's
+   BIOS UUID still counts, so a machine whose first record had no BIOS
+   UUID is still matched to a later record from another source.
 
 ### `migration.inventory.csv`
 

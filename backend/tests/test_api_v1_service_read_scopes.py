@@ -233,11 +233,15 @@ def test_show_is_tenant_scoped(client: TestClient) -> None:
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
         headers_a = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
-        assert client.put(_PATH, headers=headers_a, json=_BODY).status_code == 200
+        set_in_a = client.put(_PATH, headers=headers_a, json=_BODY)
+        assert set_in_a.status_code == 200
         token_b = mint_token(
             key, sub="op-b", tenant_role=TenantRole.OPERATOR.value, tenant_id=str(other_tenant)
         )
         headers_b = {"Authorization": f"Bearer {token_b}"}
-        assert client.get(_PATH, headers=headers_b).status_code == 404
-        assert client.delete(_PATH, headers=headers_b).status_code == 404
-        assert client.get(_PATH, headers=headers_a).status_code == 200
+        shown_in_b = client.get(_PATH, headers=headers_b)
+        cleared_in_b = client.delete(_PATH, headers=headers_b)
+        still_in_a = client.get(_PATH, headers=headers_a)
+    assert shown_in_b.status_code == 404
+    assert cleared_in_b.status_code == 404
+    assert still_in_a.status_code == 200

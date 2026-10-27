@@ -262,10 +262,10 @@ def _price_row(item: object) -> dict[str, Any] | None:
     if not isinstance(item, dict):
         return None
     return {
-        "service": item.get("serviceName"),
-        "product": item.get("productName"),
-        "sku": item.get("skuName"),
-        "arm_sku": item.get("armSkuName"),
+        "service_name": item.get("serviceName"),
+        "product_name": item.get("productName"),
+        "sku_name": item.get("skuName"),
+        "arm_sku_name": item.get("armSkuName"),
         "meter_id": item.get("meterId"),
         "meter_name": item.get("meterName"),
         "region": item.get("armRegionName"),

@@ -205,14 +205,15 @@ _PRICE_LIST_GUIDANCE: Final[dict[str, Any]] = {
         "needs no login and reads no customer data; any Azure target works."
     ),
     "output_shape": (
-        "{items: [{service, product, sku, arm_sku, meter_id, meter_name, region, "
+        "{items: [{service_name, product_name, sku_name, arm_sku_name, meter_id, "
+        "meter_name, region, "
         "location, unit, retail_price, unit_price, price_type, reservation_term, "
         "effective_start_date, currency, tier_minimum_units, is_primary_meter_region}], "
         "lookup: {looked_up_at, currency, reference_only, note, filter, api_version, "
         "rows}, omissions}. retail_price is the price per unit (for example per 1 Hour) "
         "without discounts. price_type Consumption is pay-as-you-go; a Reservation row "
         "has reservation_term (1 Year or 3 Years) and shows the price of the whole term. "
-        "A VM size has Linux rows and Windows rows ('Windows' in product); Spot and Low "
+        "A VM size has Linux rows and Windows rows ('Windows' in product_name); Spot and Low "
         "Priority rows say so in meter_name. Prices in other currencies than USD are "
         "reference values, not quotes (lookup.reference_only). More than 50 rows come "
         "back as a stored-result link; lookup and omissions stay inline. Every text "

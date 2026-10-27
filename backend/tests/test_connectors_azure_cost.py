@@ -898,7 +898,7 @@ async def test_price_list_never_sends_a_token() -> None:
     assert login_token() not in str(request.url)
     assert login.call_count == 1
     assert loader.calls == 1
-    assert out["items"][0]["arm_sku"] == "Standard_D4s_v5"
+    assert out["items"][0]["arm_sku_name"] == "Standard_D4s_v5"
 
 
 @pytest.mark.asyncio
@@ -941,10 +941,10 @@ async def test_price_list_builds_and_quotes_the_filter() -> None:
     assert "$skip" not in query
     assert out["items"] == [
         {
-            "service": "Virtual Machines",
-            "product": "Virtual Machines Dsv5 Series",
-            "sku": "D4s v5",
-            "arm_sku": "Standard_D4s_v5",
+            "service_name": "Virtual Machines",
+            "product_name": "Virtual Machines Dsv5 Series",
+            "sku_name": "D4s v5",
+            "arm_sku_name": "Standard_D4s_v5",
             "meter_id": "00000000-0000-0000-0000-000000000001",
             "meter_name": "D4s v5",
             "region": "westeurope",

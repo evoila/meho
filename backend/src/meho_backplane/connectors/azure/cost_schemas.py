@@ -433,13 +433,14 @@ PRICE_LIST_RESPONSE: Final[dict[str, Any]] = _object(
             "items": _object(
                 "One price. Names come from Azure.",
                 {
-                    "service": _field(TEXT_OR_NULL, "Service, for example Virtual Machines."),
-                    "product": _field(
+                    "service_name": _field(TEXT_OR_NULL, "Service, for example Virtual Machines."),
+                    "product_name": _field(
                         TEXT_OR_NULL, "Product, for example Virtual Machines Dsv5 Series."
                     ),
-                    "sku": _field(TEXT_OR_NULL, "SKU name, for example D4s v5."),
-                    "arm_sku": _field(
-                        TEXT_OR_NULL, "Size name Azure uses, for example Standard_D4s_v5."
+                    "sku_name": _field(TEXT_OR_NULL, "SKU name, for example D4s v5."),
+                    "arm_sku_name": _field(
+                        TEXT_OR_NULL,
+                        "Size name Azure uses, for example Standard_D4s_v5 (the sku filter).",
                     ),
                     "meter_id": _field(TEXT_OR_NULL, "The meter's id."),
                     "meter_name": _field(TEXT_OR_NULL, "The meter's name."),

@@ -618,9 +618,12 @@ link:
   dismissed, postponed and completed recommendations, as the portal does,
   and `filters.inactive_left_out` says how many. `count` is the number of
   items.
-- **Prices** have the service, product, SKU, size name, meter id and name,
-  region, unit, retail price, unit price, price type, reservation term,
-  effective start date and currency. `lookup` has `looked_up_at`, the
+- **Prices** have `service_name`, `product_name`, `sku_name`, `arm_sku_name`
+  (the size name Azure uses, which the `sku` filter matches), `meter_id`,
+  `meter_name`, `region`, `location`, `unit`, `retail_price`, `unit_price`,
+  `price_type`, `reservation_term`, `effective_start_date`, `currency`,
+  `tier_minimum_units` and `is_primary_meter_region`. The migration estimate
+  reads these names. `lookup` has `looked_up_at`, the
   currency, the filter MEHO sent, and `reference_only`: prices in other
   currencies than USD are converted reference values, not quotes.
 - The Azure sensor recipes read two of these fields by path, so they are

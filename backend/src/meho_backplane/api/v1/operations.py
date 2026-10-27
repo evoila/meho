@@ -38,13 +38,14 @@ route layer is a thin Pydantic + Depends wrapper.
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi import status as http_status
 from fastapi.openapi.models import Example
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.json_schema import SkipJsonSchema
 
 from meho_backplane.api.v1._freetext_filter import (
     FREE_TEXT_Q_DESCRIPTION,
@@ -413,9 +414,11 @@ class ResultQueryBody(BaseModel):
             "by advancing this by the previous `limit`."
         ),
     )
-    limit: int | None = Field(
+    # The None branch is hidden from the OpenAPI schema so the generated CLI
+    # client leaves an unset limit out of the request instead of sending
+    # null, which a backplane from before #4994 refuses with a 422.
+    limit: Annotated[int, Field(ge=1)] | SkipJsonSchema[None] = Field(
         default=None,
-        ge=1,
         description=(
             f"Page size. Rows, and the items of an array value read by `path`: "
             f"default {DEFAULT_LIMIT}, at most {MAX_LIMIT} (a bigger value is "

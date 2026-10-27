@@ -32817,7 +32817,6 @@
           "limit": {
             "type": "integer",
             "minimum": 1.0,
-            "nullable": true,
             "title": "Limit",
             "description": "Page size. Rows, and the items of an array value read by `path`: default 50, at most 500 (a bigger value is refused). Characters of a text value read by `path`: default as many as fit the output budget; a bigger part is cut to fit. Matches the `result_query` MCP tool."
           },

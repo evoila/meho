@@ -7680,7 +7680,7 @@ type ResultQueryBody struct {
 	HandleId openapi_types.UUID `json:"handle_id"`
 
 	// Limit Page size. Rows, and the items of an array value read by `path`: default 50, at most 500 (a bigger value is refused). Characters of a text value read by `path`: default as many as fit the output budget; a bigger part is cut to fit. Matches the `result_query` MCP tool.
-	Limit *int `json:"limit"`
+	Limit *int `json:"limit,omitempty"`
 
 	// Offset Zero-based index of the first row to return (paging mode). Page by advancing this by the previous `limit`.
 	Offset *int `json:"offset,omitempty"`

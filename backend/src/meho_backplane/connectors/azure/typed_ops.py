@@ -149,6 +149,10 @@ _OPERATION_REFERENCE_SCHEMA: Final[dict[str, Any]] = {
             "type": _TEXT_OR_NULL,
             "description": "When MEHO started the operation (ISO 8601).",
         },
+        "retry_after_seconds": {
+            "type": ["number", "null"],
+            "description": "The Retry-After of the answer that started the operation.",
+        },
     },
     "required": ["poll_url", "poll_kind"],
 }
@@ -165,6 +169,7 @@ _OPERATION_STATUS_PARAMS: Final[dict[str, Any]] = {
                 "poll_kind": "azure-asyncoperation",
                 "resource_id": None,
                 "started_at": "2026-10-27T09:00:00+00:00",
+                "retry_after_seconds": 30,
             }
         }
     ],
@@ -205,6 +210,10 @@ _OPERATION_STATUS_RESPONSE: Final[dict[str, Any]] = {
                 "poll_kind": {"type": "string", "description": "The kind of poll URL."},
                 "resource_id": {"type": _TEXT_OR_NULL, "description": "The resource ID."},
                 "started_at": {"type": _TEXT_OR_NULL, "description": "The start time."},
+                "retry_after_seconds": {
+                    "type": ["number", "null"],
+                    "description": "The Retry-After of the answer that started the operation.",
+                },
             },
         },
     },

@@ -15,9 +15,12 @@ them into its usual result shape (``docs/codebase/error-message-shape.md``):
   kind of error), ``extras.http_status``, ``extras.upstream_message``
   (Azure's code and message) and ``extras.remediation`` (what to do).
 
-Azure's message is untrusted data. It goes only into ``upstream_message``,
-which the dispatcher cleans of secrets and cuts to a safe length. MEHO's own
-text names Azure's error code only when the code looks like a code.
+Azure's message is untrusted data. :func:`clean_azure_text` filters secrets
+out of it with MEHO's default redaction policy and then cuts it to a safe
+length, in that order: cutting first could split a token at the boundary into
+a fragment the filter no longer recognises. The cleaned text goes only into
+``upstream_message``, which the dispatcher filters and cuts once more. MEHO's
+own text names Azure's error code only when the code looks like a code.
 """
 
 from __future__ import annotations
@@ -28,6 +31,8 @@ from typing import Any, Final
 import httpx
 
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
+from meho_backplane.redaction.engine import redact
+from meho_backplane.redaction.resolver import get_default_policy
 
 __all__ = [
     "AzureApiError",
@@ -40,6 +45,7 @@ __all__ = [
     "AzureThrottledError",
     "AzureUrlRefusedError",
     "azure_error_body",
+    "clean_azure_text",
     "error_for_response",
 ]
 
@@ -51,6 +57,10 @@ _CODE_SHAPE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z][A-Za-z0-9_.\-]{0,99}
 
 #: Longest Azure message MEHO keeps before the dispatcher's own cut.
 _MESSAGE_CAP: Final[int] = 2048
+
+#: What stands in for Azure's text when the secret filter itself fails.
+#: The raw text would be the leak, so nothing of it is kept.
+_TEXT_WITHHELD: Final[str] = "<text from Azure withheld: the secret filter failed>"
 
 
 class AzureApiError(ConnectorUpstreamError):
@@ -118,8 +128,31 @@ def _clean_code(value: object) -> str | None:
     return None
 
 
+def clean_azure_text(message: object) -> str | None:
+    """Filter secrets out of a text from Azure, then cut it to :data:`_MESSAGE_CAP`.
+
+    The filter is MEHO's default redaction policy, the same one the
+    dispatcher uses for ``upstream_message``. It runs on the whole text
+    before the cut, so a token that crosses the cut boundary is filtered
+    whole and never leaves a fragment behind. ``None`` when *message* is not
+    a text or is empty. When the filter itself fails, the text is withheld.
+    """
+    if not isinstance(message, str) or not message:
+        return None
+    try:
+        cleaned = redact(message, get_default_policy()).redacted
+    except Exception:  # never let Azure's raw text through on the error path
+        return _TEXT_WITHHELD
+    if not isinstance(cleaned, str):
+        return _TEXT_WITHHELD
+    return cleaned[:_MESSAGE_CAP]
+
+
 def azure_error_body(response: httpx.Response) -> tuple[str | None, str | None]:
-    """Return Azure's error code and message from *response*, or ``None`` for each."""
+    """Return Azure's error code and message from *response*, or ``None`` for each.
+
+    The message is cleaned with :func:`clean_azure_text`.
+    """
     try:
         body = response.json()
     except ValueError:
@@ -127,9 +160,7 @@ def azure_error_body(response: httpx.Response) -> tuple[str | None, str | None]:
     error = body.get("error") if isinstance(body, dict) else None
     if not isinstance(error, dict):
         return None, None
-    message = error.get("message")
-    text = message[:_MESSAGE_CAP] if isinstance(message, str) and message else None
-    return _clean_code(error.get("code")), text
+    return _clean_code(error.get("code")), clean_azure_text(error.get("message"))
 
 
 def _code_note(code: str | None) -> str:

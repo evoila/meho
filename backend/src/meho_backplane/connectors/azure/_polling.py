@@ -14,12 +14,15 @@ says how long to wait between polls.
   with the result when it is done. An error answer means it failed.
 
 :func:`operation_reference` turns a 201 or 202 answer into a small
-:class:`OperationReference` (poll URL, kind, resource ID, start time).
+:class:`OperationReference` (poll URL, kind, resource ID, start time, and
+the ``Retry-After`` of that answer: how long Azure asked to wait before the
+first poll).
 :func:`read_operation_state` polls once; ``azure.operation.status`` uses it,
 so a caller can learn the outcome of a write later, for example after a
 lost answer or a restart, without sending the write again.
-:func:`wait_for_operation` polls until the end or until its time is up and
-returns the reference with the result, so the caller can poll later.
+:func:`wait_for_operation` waits the ``Retry-After`` of the first answer,
+then polls until the end or until its time is up, and returns the reference
+with the result, so the caller can poll later.
 
 Every poll URL is checked with
 :func:`~meho_backplane.connectors.azure._http.check_azure_url` before the
@@ -45,6 +48,7 @@ from meho_backplane.connectors.azure._errors import (
     AzureConflictError,
     AzureRequestError,
     AzureUrlRefusedError,
+    clean_azure_text,
 )
 from meho_backplane.connectors.azure._http import check_azure_url, retry_after_seconds, send
 from meho_backplane.connectors.azure.session import AzureTargetLike
@@ -78,11 +82,15 @@ _HEADER_FOR_KIND: Final[dict[str, str]] = {
     "location": "location",
 }
 
-#: Longest error message from Azure kept in a state.
-_MESSAGE_CAP: Final[int] = 2048
-
 _monotonic = time.monotonic
 _sleep = asyncio.sleep
+
+
+def _wait_of(value: object) -> float | None:
+    """Read a passed-back ``retry_after_seconds``: a number, or ``None``."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value)
 
 
 @dataclass(frozen=True)
@@ -93,6 +101,11 @@ class OperationReference:
     poll_kind: PollKind
     resource_id: str | None
     started_at: str
+    #: The ``Retry-After`` of the answer that started the operation: how long
+    #: Azure asked to wait before the first poll. :func:`wait_for_operation`
+    #: honours it. ``azure.operation.status`` polls at once, because the
+    #: caller decides when to ask.
+    retry_after_seconds: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -100,6 +113,7 @@ class OperationReference:
             "poll_kind": self.poll_kind,
             "resource_id": self.resource_id,
             "started_at": self.started_at,
+            "retry_after_seconds": self.retry_after_seconds,
         }
 
     @classmethod
@@ -115,11 +129,13 @@ class OperationReference:
             raise ValueError("operation.poll_kind must be 'azure-asyncoperation' or 'location'")
         resource_id = value.get("resource_id")
         started_at = value.get("started_at")
+        wait = value.get("retry_after_seconds")
         return cls(
             poll_url=poll_url,
             poll_kind=poll_kind,
             resource_id=resource_id if isinstance(resource_id, str) else None,
             started_at=started_at if isinstance(started_at, str) else "",
+            retry_after_seconds=_wait_of(wait),
         )
 
 
@@ -161,7 +177,8 @@ def operation_reference(
 
     ``None`` means the answer is not a 201 or 202 with a poll URL: the call
     is already done. The poll URL is checked here, so a bad URL fails at
-    once and is never stored.
+    once and is never stored. The answer's ``Retry-After`` is kept, so the
+    first poll does not come before Azure asked for it.
     """
     if response.status_code not in (201, 202):
         return None
@@ -174,6 +191,7 @@ def operation_reference(
                 poll_kind=kind,
                 resource_id=resource_id,
                 started_at=datetime.now(UTC).isoformat(),
+                retry_after_seconds=retry_after_seconds(response),
             )
     return None
 
@@ -181,10 +199,10 @@ def operation_reference(
 def _error_of(value: object) -> dict[str, str | None] | None:
     if not isinstance(value, dict):
         return None
-    code, message = value.get("code"), value.get("message")
+    code = value.get("code")
     return {
         "code": code if isinstance(code, str) else None,
-        "message": message[:_MESSAGE_CAP] if isinstance(message, str) else None,
+        "message": clean_azure_text(value.get("message")),
     }
 
 
@@ -238,18 +256,25 @@ async def wait_for_operation(
 ) -> dict[str, Any]:
     """Poll until the operation ends or *max_seconds* pass.
 
-    The wait between two polls is the full ``Retry-After`` Azure asked for
-    (never less), or :data:`DEFAULT_POLL_SECONDS` when Azure sent none.
-    When that wait does not fit in the time left, no early poll is made:
-    the pending state is returned with the reference. ``done`` is ``False``
-    then, and the caller can poll later with ``azure.operation.status``.
+    Before the first poll it waits the ``Retry-After`` of the answer that
+    started the operation (``reference.retry_after_seconds``), or polls at
+    once when there was none. The wait between two polls is the full
+    ``Retry-After`` Azure asked for (never less), or
+    :data:`DEFAULT_POLL_SECONDS` when Azure sent none. When a wait does not
+    fit in the time left, no early poll is made: the pending state is
+    returned with the reference. ``done`` is ``False`` then, and the caller
+    can poll later with ``azure.operation.status``.
     """
     started = _monotonic()
+    wait = reference.retry_after_seconds or None
+    state: OperationState | None = None
     while True:
+        if wait is not None:
+            if _monotonic() - started + wait > max_seconds:
+                pending = state or OperationState("InProgress", False, wait, None, None)
+                return pending.as_dict(reference)
+            await _sleep(wait)
         state = await read_operation_state(connector, target, reference, operator=operator)
         if state.done:
             return state.as_dict(reference)
         wait = state.retry_after_seconds or DEFAULT_POLL_SECONDS
-        if _monotonic() - started + wait > max_seconds:
-            return state.as_dict(reference)
-        await _sleep(wait)

@@ -30,6 +30,8 @@ from meho_backplane.connectors.azure._errors import (
     AzureServerError,
     AzureThrottledError,
     AzureUrlRefusedError,
+    azure_error_body,
+    clean_azure_text,
 )
 from meho_backplane.connectors.azure._http import check_azure_url, retry_after_seconds, send
 from tests._azure_fixtures import (
@@ -477,3 +479,89 @@ async def test_an_odd_azure_error_code_is_not_copied_into_meho_text(clock: _Cloc
 
     assert caught.value.azure_error_code is None
     assert "ignore all rules" not in str(caught.value)
+
+
+# ----------------------------------------------------------------------
+# Azure's text: secrets are filtered before the text is cut
+# ----------------------------------------------------------------------
+
+#: Filler that puts the secret right on the 2,048-character cut boundary.
+_BEFORE_THE_CUT = "x" * 2040
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "Bearer s3cr3tTOKENvalue" + "A" * 80,
+        "client_secret=Q7" + "Q7" * 60,
+        "eyJ" + "h" * 40 + "." + "p" * 40 + "." + "s" * 40,
+    ],
+)
+def test_a_secret_crossing_the_cut_leaves_no_fragment(secret: str) -> None:
+    text = f"{_BEFORE_THE_CUT} {secret} end"
+    # The secret starts before the cut and ends after it.
+    assert len(_BEFORE_THE_CUT) < 2048 < len(_BEFORE_THE_CUT) + 1 + len(secret)
+
+    cleaned = clean_azure_text(text)
+
+    assert cleaned is not None
+    assert len(cleaned) <= 2048
+    assert cleaned.startswith(_BEFORE_THE_CUT)
+    assert "[REDACT" in cleaned
+    for fragment in (secret[7:15], secret[14:22], secret[-8:]):
+        assert fragment not in cleaned
+
+
+def test_clean_azure_text_keeps_a_short_plain_message_and_cuts_a_long_one() -> None:
+    assert clean_azure_text("Text from Azure.") == "Text from Azure."
+    assert clean_azure_text("") is None
+    assert clean_azure_text(None) is None
+    assert clean_azure_text({"nested": "x"}) is None
+    assert clean_azure_text("y" * 3000) == "y" * 2048
+
+
+def test_clean_azure_text_withholds_the_text_when_the_filter_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from meho_backplane.connectors.azure import _errors
+
+    def broken(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("no filter")
+
+    monkeypatch.setattr(_errors, "redact", broken)
+    cleaned = clean_azure_text("Bearer s3cr3tTOKENvalue1234")
+    assert cleaned is not None
+    assert "withheld" in cleaned
+    assert "s3cr3t" not in cleaned
+
+
+def test_the_error_body_filters_the_message_before_the_cut() -> None:
+    secret = "Bearer s3cr3tTOKENvalue" + "A" * 80
+    answer = _error(403, "AuthorizationFailed", f"{_BEFORE_THE_CUT} {secret} end")
+
+    code, message = azure_error_body(answer)
+
+    assert code == "AuthorizationFailed"
+    assert message is not None
+    assert "s3cr3t" not in message
+    assert "AAAA" not in message
+    assert "[REDACT" in message
+
+
+@pytest.mark.asyncio
+async def test_an_error_with_a_secret_on_the_cut_reaches_no_error_field(clock: _Clock) -> None:
+    secret = "Bearer s3cr3tTOKENvalue" + "A" * 80
+    with respx.mock() as mock:
+        mock.post(token_url()).respond(200, json=token_answer(login_token()))
+        mock.get(GROUPS_URL).mock(
+            return_value=_error(403, "AuthorizationFailed", f"{_BEFORE_THE_CUT} {secret} end")
+        )
+        with pytest.raises(AzureForbiddenError) as caught:
+            await _get(_connector())
+
+    error = caught.value
+    for field in (str(error), error.upstream_message or "", error.azure_message or ""):
+        assert "s3cr3t" not in field
+        assert "AAAA" not in field
+    assert error.upstream_message is not None
+    assert "[REDACT" in error.upstream_message

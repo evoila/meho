@@ -269,9 +269,14 @@ into an error the dispatcher already knows
 
 For `connector_error` the extras carry `exception_class` (the kind above),
 `http_status`, `upstream_message` (Azure's code and message) and
-`remediation` (what to do). Azure's message is untrusted data: it goes only
-into `upstream_message`, which the dispatcher cleans of secrets and cuts.
-MEHO's own text names Azure's error code only when it looks like a code.
+`remediation` (what to do). Azure's message is untrusted data. `clean_azure_text`
+filters secrets out of it with MEHO's default redaction policy and then cuts
+it to 2,048 characters, in that order: cutting first could split a token at
+the boundary into a fragment the filter no longer recognises. When the filter
+itself fails, the text is withheld. The cleaned text goes only into
+`upstream_message`, which the dispatcher filters and cuts once more. The same
+function cleans the error message of a failed long-running operation. MEHO's
+own text names Azure's error code only when it looks like a code.
 
 ## URL check
 
@@ -357,8 +362,12 @@ path has "operation" in it, such as `operations`, `operationStatuses` or
 
 ```json
 {"poll_url": "...", "poll_kind": "azure-asyncoperation", "resource_id": "...",
- "started_at": "2026-10-27T09:00:00+00:00"}
+ "started_at": "2026-10-27T09:00:00+00:00", "retry_after_seconds": 30}
 ```
+
+`retry_after_seconds` is the `Retry-After` of the answer that started the
+operation: how long Azure asked to wait before the first poll. It is `null`
+when Azure sent none.
 
 `read_operation_state` polls once:
 
@@ -370,20 +379,25 @@ path has "operation" in it, such as `operations`, `operationStatuses` or
   the body as the result. A 400 or 409 answer means the operation failed.
 
 `wait_for_operation` polls until the end or until `max_seconds` (default
-300) pass. Between two polls it waits the full `Retry-After` Azure asked
-for, never less (10 seconds when Azure sent none or zero). A shorter wait
-would poll early and could make Azure throttle. When the next wait does not
-fit in the time left, it does not poll early: it returns the pending state
-with the reference and `done: false`, and the caller can poll later.
+300) pass. Before the first poll it waits the reference's
+`retry_after_seconds`, or polls at once when Azure sent none. Between two
+polls it waits the full `Retry-After` Azure asked for, never less (10 seconds
+when Azure sent none or zero). A shorter wait would poll early and could make
+Azure throttle. When a wait does not fit in the time left, it does not poll
+early: it returns the pending state with the reference and `done: false`, and
+the caller can poll later. This holds for the first wait too: a first answer
+that asks for 120 seconds with 100 seconds left returns at once, without a
+poll.
 
 ### azure.operation.status
 
 `azure.operation.status` (group `account`, `safe`) takes the `operation`
 reference an Azure write returned and polls it once, with the same checks.
-It never sends the write again. This is how a caller learns the outcome of a
-write after a lost answer or a MEHO restart: the reference holds everything
-needed, and no state in MEHO's memory is used. The answer is
-`{status, done, error, result, retry_after_seconds, operation}`.
+It never sends the write again. It polls at once: the caller decides when to
+ask, so the reference's `retry_after_seconds` is not waited here. This is how
+a caller learns the outcome of a write after a lost answer or a MEHO restart:
+the reference holds everything needed, and no state in MEHO's memory is used.
+The answer is `{status, done, error, result, retry_after_seconds, operation}`.
 
 ## azure.about, fingerprint and probe
 

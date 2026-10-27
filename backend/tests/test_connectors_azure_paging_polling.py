@@ -406,6 +406,32 @@ def test_the_async_operation_header_wins_over_location() -> None:
     assert reference.poll_url == OPERATION_URL
     assert reference.resource_id == "/subscriptions/x/resourceGroups/rg"
     assert reference.started_at
+    assert reference.retry_after_seconds is None
+
+
+def test_the_reference_keeps_the_retry_after_of_the_first_answer() -> None:
+    reference = operation_reference(
+        AzureTargetStub(),
+        _accepted({"Azure-AsyncOperation": OPERATION_URL, "Retry-After": "120"}),
+        resource_id=None,
+    )
+    assert reference is not None
+    assert reference.retry_after_seconds == 120.0
+    assert reference.as_dict()["retry_after_seconds"] == 120.0
+    assert OperationReference.from_dict(reference.as_dict()) == reference
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(30, 30.0), (2.5, 2.5), (None, None), ("30", None), (True, None)],
+)
+def test_a_passed_back_reference_reads_only_a_number_as_the_wait(
+    value: object, expected: float | None
+) -> None:
+    reference = OperationReference.from_dict(
+        {"poll_url": OPERATION_URL, "poll_kind": "location", "retry_after_seconds": value}
+    )
+    assert reference.retry_after_seconds == expected
 
 
 def test_a_finished_answer_has_no_reference() -> None:
@@ -465,6 +491,29 @@ async def test_a_failed_async_operation_returns_azures_error(clock: _Clock) -> N
 
     assert (state.status, state.done) == ("Failed", True)
     assert state.error == {"code": "QuotaExceeded", "message": "No quota."}
+
+
+@pytest.mark.asyncio
+async def test_a_secret_crossing_the_cut_in_an_operation_error_is_filtered_whole(
+    clock: _Clock,
+) -> None:
+    reference = OperationReference(OPERATION_URL, "azure-asyncoperation", None, "t0")
+    secret = "Bearer s3cr3tTOKENvalue" + "A" * 80
+    message = "x" * 2040 + f" {secret} end"
+    failed = {"status": "Failed", "error": {"code": "BadThing", "message": message}}
+    with respx.mock() as mock:
+        mock.post(token_url()).respond(200, json=token_answer(login_token()))
+        mock.get(OPERATION_URL).respond(200, json=failed)
+        state = await read_operation_state(
+            _connector(), AzureTargetStub(), reference, operator=operator()
+        )
+
+    assert state.error is not None
+    text = state.error["message"] or ""
+    assert len(text) <= 2048
+    assert "s3cr3t" not in text
+    assert "AAAA" not in text
+    assert "[REDACT" in text
 
 
 @pytest.mark.asyncio
@@ -540,6 +589,44 @@ async def test_the_full_retry_after_is_honoured_between_polls(clock: _Clock) -> 
     assert poll.call_count == 2
     assert clock.sleeps == [120.0]
     assert outcome["done"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_retry_after_of_the_first_answer_is_honoured_before_the_first_poll(
+    clock: _Clock,
+) -> None:
+    reference = OperationReference(OPERATION_URL, "azure-asyncoperation", None, "t0", 30.0)
+    with respx.mock() as mock:
+        mock.post(token_url()).respond(200, json=token_answer(login_token()))
+        poll = mock.get(OPERATION_URL).respond(200, json={"status": "Succeeded"})
+        outcome = await wait_for_operation(
+            _connector(), AzureTargetStub(), reference, operator=operator()
+        )
+
+    assert clock.sleeps == [30.0]
+    assert poll.call_count == 1
+    assert outcome["done"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_first_wait_longer_than_the_time_left_returns_pending_without_a_poll(
+    clock: _Clock,
+) -> None:
+    reference = OperationReference(OPERATION_URL, "azure-asyncoperation", None, "t0", 120.0)
+    with respx.mock(assert_all_called=False) as mock:
+        login = mock.post(token_url()).respond(200, json=token_answer(login_token()))
+        poll = mock.get(OPERATION_URL).respond(200, json={"status": "Succeeded"})
+        outcome = await wait_for_operation(
+            _connector(), AzureTargetStub(), reference, operator=operator(), max_seconds=100
+        )
+
+    assert poll.call_count == 0
+    assert not login.called
+    assert clock.sleeps == []
+    assert outcome["done"] is False
+    assert outcome["status"] == "InProgress"
+    assert outcome["retry_after_seconds"] == 120.0
+    assert outcome["operation"] == reference.as_dict()
 
 
 @pytest.mark.asyncio

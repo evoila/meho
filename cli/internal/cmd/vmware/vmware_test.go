@@ -990,7 +990,7 @@ func TestOperationCallNotFoundExitsOne(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errBuf)
-	cmd.SetArgs([]string{"vmware.object.collect", "--target", "rdc-vcenter", "--backplane", srv.URL})
+	cmd.SetArgs([]string{"vmware.object.collect", "--target", "test-vcenter", "--backplane", srv.URL})
 	err := cmd.Execute()
 	if !errors.Is(err, errOpError) {
 		t.Fatalf("not_found must exit 1 via errOpError; got %v", err)

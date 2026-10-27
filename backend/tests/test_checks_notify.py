@@ -1311,6 +1311,58 @@ async def test_member_flap_inside_the_window_is_suppressed(
 
 
 @pytest.mark.asyncio
+async def test_dashboard_mail_claims_only_the_members_it_shows(
+    monkeypatch: pytest.MonkeyPatch,
+    suppression_store: _FakeSuppressionStore,
+) -> None:
+    """A member the line limit dropped keeps its own window.
+
+    More failing members than the mail shows: the Dashboard mail lists the
+    first ``_MAX_MEMBER_LINES`` and claims only those. The last member was
+    never named, so when it recovers and fails again inside the window it
+    is mailed as a new problem. A member the mail did show, going through
+    the same recover-and-fail-again, stays suppressed.
+    """
+    fake = _install_transport(monkeypatch)
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
+    await _seed_tenant()
+    total = notify._MAX_MEMBER_LINES + 1
+    sids = [await _seed_sensor(name=f"sensor-{i:03d}") for i in range(total)]
+    dash = await _seed_dashboard(name="prod-health", sensor_ids=sids)
+    sid_shown, sid_omitted = sids[1], sids[-1]
+
+    await _evaluate(sids[0])
+    assert len(fake.calls) == 1
+    body = fake.calls[0]["body"]
+    assert "- sensor-001 [critical]\n" in body
+    assert f"sensor-{total - 1:03d}" not in body
+    assert "(1 further member(s) not shown.)" in body
+    member_keys = [name for name, _ in suppression_store.set_calls if f":{dash}:member:" in name]
+    assert member_keys == [
+        f"meho:checks:notify:{_TENANT}:{dash}:member:{sid}:critical"
+        for sid in sids[: notify._MAX_MEMBER_LINES]
+    ], "only the members the mail shows are claimed"
+
+    for state in ("ok", "critical"):
+        await _set_sensor_state(sid_omitted, state)
+        await _evaluate(sid_omitted)
+    assert len(fake.calls) == 2, "a member the mail never named must still mail"
+    assert fake.calls[1]["subject"] == (
+        f"[MEHO] prod-health: new problem sensor-{total - 1:03d} ok -> critical "
+        "(dashboard still critical)"
+    )
+    assert f"- sensor-{total - 1:03d} [critical] (new)\n" in fake.calls[1]["body"]
+
+    with capture_logs() as logs:
+        for state in ("ok", "critical"):
+            await _set_sensor_state(sid_shown, state)
+            await _evaluate(sid_shown)
+    assert len(fake.calls) == 2, "a member the mail showed is still inside its window"
+    suppressed = [e for e in logs if e["event"] == "checks_notify_suppressed"]
+    assert [e["member_name"] for e in suppressed] == ["sensor-001"]
+
+
+@pytest.mark.asyncio
 async def test_new_problem_behind_a_suppressed_dashboard_mail_still_mails_once(
     monkeypatch: pytest.MonkeyPatch,
     suppression_store: _FakeSuppressionStore,

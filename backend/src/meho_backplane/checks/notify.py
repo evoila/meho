@@ -81,8 +81,9 @@ boundary), and a member change never reaches the investigator.
 
 When the member's change also moves the Dashboard, the members that got
 worse ride along on the Dashboard notice (``member_changes``). A sent
-Dashboard mail claims every named member's own window, so none of them
-mails again on its own inside it; a Dashboard mail suppressed by its own
+Dashboard mail claims the own window of every member its body shows, so
+none of them mails again on its own inside it (a member the line limit
+dropped is not claimed); a Dashboard mail suppressed by its own
 window hands each rider to the member path instead, so a member turning
 red for the first time behind a flapping Dashboard still mails once.
 
@@ -468,14 +469,16 @@ async def _claim_member_windows(notice: DashboardNotice, window_seconds: int) ->
     the mail names at a state is not mailed again on its own at that state
     inside the window: neither by the ``member_changes`` fallback of a later
     suppressed Dashboard mail, nor by a "new problem" notice after the
-    member recovered and failed again (#5068). One ``SET NX EX`` per
-    non-green member; a window a member notice already holds is left as it
-    is. Fail-open like the claim: one warning, and the Dashboard mail still
-    goes out.
+    member recovered and failed again (#5068). Only the members the body
+    actually lists (:func:`_shown_members`) are claimed: a member the
+    line limit dropped was never named, so its next problem must still
+    mail. One ``SET NX EX`` per shown member; a window a member notice
+    already holds is left as it is. Fail-open like the claim: one
+    warning, and the Dashboard mail still goes out.
     """
     client = get_broadcast_client()
     try:
-        for member in notice.members:
+        for member in _shown_members(notice):
             key = _suppression_key(
                 notice.tenant_id,
                 notice.dashboard_id,
@@ -576,6 +579,22 @@ def _subject(notice: DashboardNotice) -> str:
     return f"[MEHO] {prefix}{name}: {notice.previous_state} -> {notice.current_state}"
 
 
+def _shown_members(notice: DashboardNotice) -> tuple[NotifyMember, ...]:
+    """The non-green members the mail body lists, in body order.
+
+    A "new problem" notice (#5068) puts its member first, so the line limit
+    can never drop it; then the first :data:`_MAX_MEMBER_LINES` members.
+    :func:`_body` renders exactly this list and
+    :func:`_claim_member_windows` claims exactly this list, so the mail
+    never claims a cool-down for a member it did not name.
+    """
+    members = notice.members
+    change = notice.member_change
+    if change is not None:
+        members = tuple(sorted(members, key=lambda m: m.sensor_id != change.sensor_id))
+    return members[:_MAX_MEMBER_LINES]
+
+
 def _body(notice: DashboardNotice) -> str:
     """Build the plain-text body: the edge, then the non-green members.
 
@@ -586,7 +605,6 @@ def _body(notice: DashboardNotice) -> str:
     """
     change = notice.member_change
     lines = [f"Dashboard: {notice.name}"]
-    members = notice.members
     if change is not None:
         if notice.previous_state == notice.current_state:
             lines.append(f"State: {notice.current_state} (unchanged)")
@@ -595,15 +613,15 @@ def _body(notice: DashboardNotice) -> str:
         lines.append(
             f"New problem: {_clip(change.name)} {change.previous_state} -> {change.current_state}"
         )
-        members = tuple(sorted(members, key=lambda m: m.sensor_id != change.sensor_id))
     else:
         lines.append(f"State: {notice.previous_state} -> {notice.current_state}")
     lines.append("")
+    members = notice.members
     if not members:
         lines.append("All clear - no member sensor is in a failing state.")
         return "\n".join(lines) + "\n"
 
-    shown = members[:_MAX_MEMBER_LINES]
+    shown = _shown_members(notice)
     lines.append(f"Non-green members ({len(members)}):")
     lines.append("")
     for member in shown:
@@ -720,11 +738,13 @@ async def notify_dashboard_transition(notice: DashboardNotice) -> None:
     it never clears the Dashboard's windows.
 
     A Dashboard-edge notice carries the members that got worse on that
-    edge (``member_changes``). When the Dashboard mail goes out it names
-    every non-green member, and it claims each one's own window for the
-    state it reports (:func:`_claim_member_windows`), so a member the
-    recipient was just told about is not mailed again on its own inside
-    the window. When the Dashboard mail is suppressed by its window, each
+    edge (``member_changes``). When the Dashboard mail goes out it lists
+    the non-green members up to the line limit, and it claims the own
+    window of each member it shows for the state it reports
+    (:func:`_claim_member_windows`), so a member the recipient was just
+    told about is not mailed again on its own inside the window -- while
+    a member the limit dropped keeps its window and still mails on its
+    next problem. When the Dashboard mail is suppressed by its window, each
     member that got worse is mailed as its own "new problem" notice through
     the same gates -- so a member turning red for the first time is never
     hidden behind a Dashboard that flapped back into a state it already

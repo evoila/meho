@@ -159,8 +159,9 @@ including `ok -> unknown`, since `unknown` shares rank 1 with
    suppression claim, so the claim stays per-edge (one window covers all
    recipients) and the attempt-based contract is unchanged. A Dashboard
    mail that won its claim also claims the member window of every
-   non-green member it names (`_claim_member_windows`, #5068); a
-   Dashboard mail that lost its claim mails its `member_changes` riders
+   non-green member its body lists (`_claim_member_windows`, #5068) —
+   only the shown members, never one the `_MAX_MEMBER_LINES` cut dropped;
+   a Dashboard mail that lost its claim mails its `member_changes` riders
    one by one as "new problem" notices instead (see below).
 4. **Outcome logging.** `checks_notify_sent` (info, with
    `recipient_count`) on delivery; `checks_notify_failed` (warning, with
@@ -247,9 +248,12 @@ same `SET NX EX`, same `CHECKS_NOTIFY_SUPPRESSION_WINDOW_MINUTES`, same
 fail-open posture. A member that recovers and fails again inside the
 window is suppressed (`checks_notify_suppressed` with `member_name`).
 A Dashboard mail that goes out claims the same key for every non-green
-member it names (`_claim_member_windows`): the recipient was just told
-about that member at that state, so neither a later fallback nor a
-recover-and-fail-again mails it again inside the window. Member keys are
+member its body shows (`_claim_member_windows`): the recipient was just
+told about that member at that state, so neither a later fallback nor a
+recover-and-fail-again mails it again inside the window. `_shown_members`
+decides the list for both the body and the claims, so a member the
+`_MAX_MEMBER_LINES` cut left out of the mail is not claimed: its next
+problem inside the window still mails as a new problem. Member keys are
 not cleared by a Dashboard recovery; they expire on their own. Escalation
 is a different state and therefore a different key, so `degraded →
 critical` on the same member mails at once.

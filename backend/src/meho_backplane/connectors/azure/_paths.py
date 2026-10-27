@@ -11,7 +11,9 @@ customer system. Later reads add their paths here, and each new ``*_PATH``
 constant gets one line in that check.
 
 Azure pins an API version per call (the ``api-version`` query parameter). The
-versions are kept next to their paths, one per family of operations.
+versions are kept next to their paths, one per family of operations. Each
+family keeps its paths in its own section below, so families built at the
+same time do not edit the same lines.
 """
 
 from __future__ import annotations
@@ -44,6 +46,30 @@ RESOURCE_GRAPH_PATH: Final[str] = "/providers/Microsoft.ResourceGraph/resources"
 
 #: The API version of Resource Graph queries (Microsoft.ResourceGraph).
 RESOURCE_GRAPH_API_VERSION: Final[str] = "2024-04-01"
+
+# ---- aks (Task #5087) ----
+
+# ---- arc (Task #5084) ----
+
+# ---- automation (Task #5092) ----
+
+# ---- avs (Task #5091) ----
+
+# ---- compute (Task #5083) ----
+
+# ---- cost (Task #5088) ----
+
+# ---- inventory (Task #5082) ----
+
+# ---- migrate (Task #5093) ----
+
+# ---- monitor (Task #5090) ----
+
+# ---- network (Task #5085) ----
+
+# ---- security (Task #5089) ----
+
+# ---- storage (Task #5086) ----
 
 
 def subscription_path(subscription_id: str) -> str:

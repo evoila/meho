@@ -109,6 +109,11 @@ BATCH_SIZE: Final = 20
 
 _SERVICE_CONTENT_PATH: Final = "/ServiceInstance/ServiceInstance/RetrieveServiceContent"
 _CONTAINER_VIEW_TYPE: Final = "ContainerView"
+#: The two view calls of the count check, in the form the vendor-spec check
+#: reads (``POST:/<Type>/{moId}/<Method>``); :func:`_method_path` makes the
+#: request path from them.
+_OP_CREATE_CONTAINER_VIEW: Final = "POST:/ViewManager/{moId}/CreateContainerView"
+_OP_DESTROY_VIEW: Final = "POST:/ContainerView/{moId}/DestroyView"
 _VM_TYPE: Final = "VirtualMachine"
 #: structlog keys the target resolver binds for the audit row. The VCF
 #: Operations lookup must not change them for this operation's own row.
@@ -212,6 +217,11 @@ def count_body(view_moid: str) -> dict[str, Any]:
     }
 
 
+def _method_path(op_id: str, moid: str) -> str:
+    """The VI-JSON request path of *op_id* (``POST:/<Type>/{moId}/<Method>``) on *moid*."""
+    return op_id.removeprefix("POST:").replace("{moId}", moid)
+
+
 def _moref(value: Any) -> str | None:
     if isinstance(value, dict) and isinstance(value.get("value"), str) and value["value"]:
         return str(value["value"])
@@ -264,7 +274,7 @@ async def _count_in_scope(
     try:
         created = await connector._post_vmomi_json(
             target,
-            f"/ViewManager/{view_manager}/CreateContainerView",
+            _method_path(_OP_CREATE_CONTAINER_VIEW, view_manager),
             operator=operator,
             json={
                 "container": vim_moref(root_type, root_moid),
@@ -290,7 +300,7 @@ async def _destroy_view(
 ) -> None:
     try:
         await connector._post_vmomi_json(
-            target, f"/{_CONTAINER_VIEW_TYPE}/{view}/DestroyView", operator=operator, json={}
+            target, _method_path(_OP_DESTROY_VIEW, view), operator=operator, json={}
         )
     except _READ_ERRORS as exc:
         # vCenter drops the view with the session; a failed destroy is not a problem of the run.

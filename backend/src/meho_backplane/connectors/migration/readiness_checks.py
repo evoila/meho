@@ -31,6 +31,7 @@ from meho_backplane.connectors.migration.readiness_rules import (
     LARGEST_VM_MEMORY_GB,
     LARGEST_VM_VCPUS,
     LINUX_ENDORSED,
+    OLD_WINDOWS_PATTERN,
     OS_DISK_LIMIT_GB,
     OTHER_SYSTEMS_PATTERN,
     RULES,
@@ -89,6 +90,8 @@ def _windows_findings(
     if release is None or release not in WINDOWS_SERVER:
         if re.search(WINDOWS_CLIENT_PATTERN, text):
             return [_finding("os.windows_client", inputs, os=label)]
+        if re.search(OLD_WINDOWS_PATTERN, text):
+            return [_finding("os.old_windows", inputs, os=label)]
         return [_finding("os.unknown", inputs, detail=f"'{label}' is not a known Windows version")]
     info = WINDOWS_SERVER[release]
     ended = info.support_end is None or as_of > info.support_end
@@ -166,6 +169,10 @@ def _boot_findings(record: ServerRecord) -> list[ReadinessFinding]:
         findings.append(_finding("boot.uefi_not_supported", inputs, os=label))
     if record.secure_boot:
         findings.append(_finding("boot.secure_boot", inputs))
+    elif record.secure_boot is None and record.boot_type == "uefi":
+        # Only UEFI servers can have secure boot, so a missing value on a
+        # BIOS server tells us nothing new and gives no finding.
+        findings.append(_finding("boot.secure_boot_unknown", inputs))
     return findings
 
 

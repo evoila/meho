@@ -180,6 +180,12 @@ def test_unknown_outranks_conditions_and_not_ready_outranks_unknown() -> None:
         (_os("Windows Server 2003"), "os.end_of_support", "ready_with_conditions"),
         (_os("Microsoft Windows Server 2019 or later (64-bit)"), "os.supported", "ready"),
         (_os("Microsoft Windows 10 (64-bit)"), "os.windows_client", "ready_with_conditions"),
+        (_os("Microsoft Windows 2000 Server"), "os.old_windows", "ready_with_conditions"),
+        (
+            _os("Microsoft Windows XP Professional (32-bit)"),
+            "os.old_windows",
+            "ready_with_conditions",
+        ),
         (_os("Windows Server"), "os.unknown", "unknown"),
         (_os("Ubuntu Linux", "22.04", family="linux"), "os.endorsed_linux", "ready"),
         (_os("Ubuntu 20.04.6 LTS", family="linux"), "os.not_endorsed", "ready_with_conditions"),
@@ -262,6 +268,26 @@ def test_secure_boot_is_noted() -> None:
     assert "Trusted launch" in next(
         f.reason for f in readiness.findings if f.flag == "boot.secure_boot"
     )
+
+
+def test_old_windows_does_not_get_the_client_reason() -> None:
+    readiness = _assess(os=_os("Microsoft Windows 2000 Server"))
+    reason = next(f.reason for f in readiness.findings if f.flag == "os.old_windows")
+    assert "end of Microsoft support" in reason
+    assert "Visual Studio" not in reason
+    assert "os.windows_client" not in _flags(readiness)
+
+
+def test_uefi_with_secure_boot_missing_is_unknown() -> None:
+    readiness = _assess(boot_type="uefi", secure_boot=None)
+    assert readiness.state == "unknown"
+    assert _flags(readiness)["boot.secure_boot_unknown"] == "unknown"
+
+
+def test_bios_with_secure_boot_missing_gives_no_secure_boot_finding() -> None:
+    readiness = _assess(boot_type="bios", secure_boot=None)
+    assert readiness.state == "ready"
+    assert "boot.secure_boot_unknown" not in _flags(readiness)
 
 
 def test_unknown_boot_type_is_unknown() -> None:

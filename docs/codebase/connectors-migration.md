@@ -154,7 +154,10 @@ The rules (`RULES` in `readiness_rules.py`; each names its source in
   `os.end_of_support` (a condition). 2003, 2008 and 2008 R2 are always past
   it. A name like "2016 or later" (vCenter) counts as the oldest version it
   names; once that one is out of support the state is unknown. Windows
-  client systems are a condition. Linux: the endorsed distributions are
+  7, 8, 8.1, 10 and 11 are a condition (Azure runs them only with a Visual
+  Studio subscription or multitenant hosting rights). Older Windows (XP,
+  Vista, 2000, NT, 95, 98, ME, 3.1) and MS-DOS are a condition too
+  (`os.old_windows`: past the end of support, upgrade before the move). Linux: the endorsed distributions are
   ready (Ubuntu 22.04, 24.04, 26.04; Debian 11, 12; SLES 12 SP5, 15 SP5 to
   SP7, 16; RHEL, Oracle Linux, AlmaLinux, Rocky Linux and Flatcar with any
   version, because Microsoft's page names none); other versions and
@@ -165,7 +168,10 @@ The rules (`RULES` in `readiness_rules.py`; each names its source in
   check runs (`support_dates_as_of` in the assumptions).
 - **Boot.** BIOS gives a generation 1 VM, UEFI a generation 2 VM. UEFI with
   Windows Server 2003, 2008 or 2008 R2 is not ready. Secure boot on is a
-  condition (Trusted launch after the move). No boot type is unknown.
+  condition (Trusted launch after the move). UEFI with secure boot not
+  reported is unknown (`boot.secure_boot_unknown`). BIOS with secure boot
+  not reported gives no finding, because only UEFI servers can use secure
+  boot. No boot type is unknown.
 - **Limits.** More than 1,792 cores or 30,400 GB of memory (the biggest
   Azure VM size) is not ready. The first disk is taken as the OS disk: over
   2,048 GB on BIOS or over 4,096 GB is not ready. A data disk over 32,768 GB

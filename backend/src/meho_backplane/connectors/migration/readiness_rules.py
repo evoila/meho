@@ -33,6 +33,7 @@ __all__ = [
     "LARGEST_VM_MEMORY_GB",
     "LARGEST_VM_VCPUS",
     "LINUX_ENDORSED",
+    "OLD_WINDOWS_PATTERN",
     "OS_DISK_LIMIT_GB",
     "OTHER_SYSTEMS_PATTERN",
     "RULES",
@@ -149,6 +150,13 @@ _RULE_LIST: Final[tuple[Rule, ...]] = (
         "assessment",
     ),
     Rule(
+        "os.old_windows",
+        "ready_with_conditions",
+        "{os} is past the end of Microsoft support. It may start in Azure, but Azure "
+        "gives no support for it. Upgrade it before the move.",
+        "assessment",
+    ),
+    Rule(
         "os.other",
         "ready_with_conditions",
         "{os} is not endorsed on Azure. It may start, but Azure gives no support for it.",
@@ -191,6 +199,12 @@ _RULE_LIST: Final[tuple[Rule, ...]] = (
         "ready_with_conditions",
         "Secure boot is on. In Azure, secure boot needs Trusted launch: turn it on after "
         "the move. Agent-based migration does not support secure boot.",
+        "migration",
+    ),
+    Rule(
+        "boot.secure_boot_unknown",
+        "unknown",
+        "It is not known whether secure boot is on.",
         "migration",
     ),
     Rule("boot.unknown", "unknown", "The boot type (BIOS or UEFI) is not known.", "generation_2"),
@@ -361,9 +375,11 @@ LINUX_ENDORSED: Final[tuple[LinuxDistro, ...]] = (
     LinuxDistro(r"\bflatcar\b"),
 )
 
-WINDOWS_CLIENT_PATTERN: Final[str] = (
-    r"\bwindows (?:xp|vista|7|8(?:\.1)?|10|11|nt|2000|95|98|3\.1|me)\b|\bms-dos\b"
-)
+#: Windows client systems Azure runs with a Visual Studio subscription or
+#: multitenant hosting rights.
+WINDOWS_CLIENT_PATTERN: Final[str] = r"\bwindows (?:7|8(?:\.1)?|10|11)\b"
+#: Old Windows and DOS systems, long past the end of Microsoft support.
+OLD_WINDOWS_PATTERN: Final[str] = r"\bwindows (?:xp|vista|nt|2000|95|98|3\.1|me)\b|\bms-dos\b"
 OTHER_SYSTEMS_PATTERN: Final[str] = r"\b(?:freebsd|solaris|macos|mac os|netware|openbsd|aix)\b"
 THIRTY_TWO_BIT_ARCHITECTURES: Final[frozenset[str]] = frozenset(
     {"x86", "i386", "i586", "i686", "32-bit"}

@@ -564,27 +564,24 @@ async def _claim_dashboard_transition(
             # would silence that member for good: its change belongs to a
             # Dashboard mail this caller does not own.
             changes = await _claim_member_changes(session, evaluations)
+        transition: _ClaimedTransition | None = None
         member_notices: list[DashboardNotice] = []
-        if dashboard_edge:
-            notice = _dashboard_notice(
-                dashboard, dashboard_snapshot, non_green, member_changes=tuple(changes)
+        if claimed:
+            transition = _ClaimedTransition(
+                dashboard=dashboard_snapshot,
+                non_green=non_green,
+                worsening=worsening,
+                notice=_dashboard_notice(
+                    dashboard, dashboard_snapshot, non_green, member_changes=tuple(changes)
+                ),
             )
-        else:
-            notice = _dashboard_notice(dashboard, dashboard_snapshot, non_green)
+        elif not dashboard_edge:
             member_notices = [
                 _dashboard_notice(dashboard, dashboard_snapshot, non_green, member_change=change)
                 for change in changes
             ]
         await session.commit()
 
-    transition = None
-    if claimed:
-        transition = _ClaimedTransition(
-            dashboard=dashboard_snapshot,
-            non_green=non_green,
-            worsening=worsening,
-            notice=notice,
-        )
     return _DashboardClaims(transition=transition, member_notices=member_notices)
 
 

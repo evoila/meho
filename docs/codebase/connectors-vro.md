@@ -151,7 +151,10 @@ MEHO stores a long list behind a result handle; the agent reads it with
   for someone to resume it). Any other state gives `unknown`; MEHO never
   guesses. When the server does not answer (a connection or time-out
   error after the retries), the read returns `outcome: not_reachable`
-  with the run id and `checked_at`, the time of the read.
+  with the run id and `checked_at`, the time of the read. A server that
+  answers with a certificate MEHO does not trust is not "not reachable":
+  the read returns the normal `connector_tls_verify_failed` error, which
+  names the host and how to fix the trust.
 
 ### Secrets
 

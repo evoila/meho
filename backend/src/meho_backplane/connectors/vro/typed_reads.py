@@ -36,7 +36,10 @@ spaces), so the same content always gives the same checksum.
 **Outcome.** ``vro.execution.get`` returns ``outcome`` next to the vendor
 ``state``: a plain result from :data:`OUTCOME_BY_STATE`. A state that is
 not in the table gives ``unknown``. When the server does not answer, the
-read returns ``outcome: not_reachable`` with the run id and the time.
+read returns ``outcome: not_reachable`` with the run id and the time. A
+server that answers with a certificate MEHO does not trust is not "not
+reachable": that error goes on to the dispatcher, which names the host and
+how to fix the trust.
 
 **More rows.** Every list read returns ``more_rows``: it asks the server
 for one row more than it returns, and the extra row only tells whether
@@ -55,6 +58,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ssl
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import quote
@@ -475,6 +479,18 @@ def _run_parameters(params: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _is_tls_verify_failure(exc: httpx.TransportError) -> bool:
+    """True when the server answered but its certificate is not trusted.
+
+    Same narrowing as the dispatcher: httpx raises the ``ConnectError``
+    from the ``ssl.SSLCertVerificationError``; the message check covers an
+    empty cause chain.
+    """
+    return isinstance(exc.__cause__, ssl.SSLCertVerificationError) or (
+        "CERTIFICATE_VERIFY_FAILED" in str(exc)
+    )
+
+
 def _outcome(state: Any) -> str:
     """The plain outcome of a vendor run state; ``unknown`` when the state is not known."""
     if not isinstance(state, str):
@@ -492,7 +508,10 @@ async def vro_execution_get_impl(
 
     When the server does not answer (a connection or time-out error after
     the retries), returns ``outcome: not_reachable`` with the run id and
-    ``checked_at``; every other field is empty.
+    ``checked_at``; every other field is empty. A certificate the server
+    answered with but MEHO does not trust is not "not reachable": that
+    error is raised on, so the dispatcher returns its
+    ``connector_tls_verify_failed`` answer with the fix guidance.
     """
     workflow_id = _segment("workflow", params.get("workflow_id"))
     execution_id = _segment("execution", params.get("execution_id"))
@@ -503,7 +522,9 @@ async def vro_execution_get_impl(
             _EXECUTION_PATH.format(workflowId=workflow_id, executionId=execution_id),
             operator=operator,
         )
-    except httpx.TransportError:
+    except httpx.TransportError as exc:
+        if _is_tls_verify_failure(exc):
+            raise
         payload = {"id": params.get("execution_id")}
         outcome = _OUTCOME_NOT_REACHABLE
     else:

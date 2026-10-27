@@ -13,7 +13,9 @@ What is covered, with a respx-mocked Orchestrator and no ingested catalog:
   ``vro.workflow.list`` (flat rows, the name and category conditions,
   paging), ``vro.workflow.get`` (both calls, no default values),
   ``vro.execution.list``, ``vro.execution.get`` (secret values replaced,
-  also API key and secret key names, in parameters and Properties entries)
+  also API key and secret key names, in parameters and Properties entries;
+  a refused connection or a time-out gives ``outcome: not_reachable``, a
+  certificate that is not trusted gives the normal certificate error)
   and ``vro.execution.logs`` (line and text caps; a labelled secret that
   crosses the text cut is removed before the cut);
 * every call asks for JSON; a vendor error reaches the answer; an id with
@@ -26,9 +28,10 @@ Fixture values are made up; no real host, user or id appears here.
 from __future__ import annotations
 
 import json
+import ssl
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import httpx
@@ -36,6 +39,7 @@ import pytest
 import respx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from tenacity import wait_none
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
@@ -622,6 +626,77 @@ async def test_execution_get_replaces_secret_values_in_properties_entries(
         assert "<host-name>" in rendered
         for secret in (_PASSWORD, "made-up-tok"):
             assert secret not in rendered
+
+
+def _tls_verify_connect_error() -> httpx.ConnectError:
+    """The error httpx raises when the server answers with an untrusted certificate."""
+    message = "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate"
+    try:
+        try:
+            raise ssl.SSLCertVerificationError(1, message)
+        except ssl.SSLCertVerificationError as ssl_exc:
+            raise httpx.ConnectError(message) from ssl_exc
+    except httpx.ConnectError as conn_exc:
+        return conn_exc
+    raise AssertionError("ConnectError was not produced")  # pragma: no cover
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "transport_error",
+    [httpx.ConnectError("[Errno 111] Connection refused"), httpx.ReadTimeout("timed out")],
+    ids=["refused", "timeout"],
+)
+async def test_execution_get_is_not_reachable_when_the_server_does_not_answer(
+    _stub_embedding: AsyncMock, session: AsyncSession, transport_error: httpx.TransportError
+) -> None:
+    connector = await _register(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        route = mock.get(_RUN_PATH).mock(side_effect=transport_error)
+        with patch.object(
+            connector._request_json.retry,
+            "wait",
+            wait_none(),
+        ):
+            result = await _dispatch(
+                "vro.execution.get", {"workflow_id": _WF, "execution_id": _RUN}
+            )
+
+    assert result.status == "ok", result.error
+    assert route.called
+    body = result.result
+    assert body["outcome"] == "not_reachable"
+    assert body["id"] == _RUN
+    assert body["checked_at"]
+    assert body["state"] is None
+    assert body["error"] is None
+    assert body["inputs"] == []
+
+
+@pytest.mark.asyncio
+async def test_execution_get_keeps_the_certificate_error(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """An untrusted certificate is not "not reachable": the server answered."""
+    connector = await _register(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.get(_RUN_PATH).mock(side_effect=_tls_verify_connect_error())
+        with patch.object(
+            connector._request_json.retry,
+            "wait",
+            wait_none(),
+        ):
+            result = await _dispatch(
+                "vro.execution.get", {"workflow_id": _WF, "execution_id": _RUN}
+            )
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("connector_tls_verify_failed:")
+    assert result.extras["error_code"] == "connector_tls_verify_failed"
+    assert result.extras["host"] == _HOST
+    assert "tls_ca_pin" in result.error
+    assert "not_reachable" not in json.dumps(result.result)
 
 
 @pytest.mark.asyncio

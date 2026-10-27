@@ -402,7 +402,7 @@ meho approvals approve <id> [flags]
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit raw JSON response instead of summary
-- `--reason` — optional rationale for the approval
+- `--reason` — optional rationale for the approval; the command help explains the Instructed-by: layout
 
 ### `meho approvals list`
 
@@ -429,7 +429,7 @@ meho approvals reject <id> [flags]
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit raw JSON response instead of summary
-- `--reason` — optional rationale for the rejection
+- `--reason` — optional rationale for the rejection; the command help explains the Instructed-by: layout
 
 ### `meho approvals show`
 

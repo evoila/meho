@@ -34,10 +34,13 @@ condition, and should surface as a deploy failure.
 
 import importlib
 import pkgutil
+from pathlib import Path
+from types import ModuleType
 
 import structlog
 
 from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.packages import check_connector_folders
 
 __all__ = [
     "_eager_import_connectors",
@@ -420,12 +423,28 @@ def _eager_import_connectors() -> None:
     today, but deterministic ordering keeps deploy diffs comparable and
     avoids surprises if a future connector ever takes a registration-
     time side-effect on another connector's presence.
+
+    Before anything is imported, :func:`check_connector_folders` checks
+    that every subpackage came with MEHO or is named in the connector
+    package list. An unknown folder raises
+    :class:`~meho_backplane.connectors.packages.ConnectorPackageError`
+    and nothing is imported.
     """
     import meho_backplane.connectors as pkg
 
-    for _, name, ispkg in sorted(pkgutil.iter_modules(pkg.__path__), key=lambda m: m[1]):
-        if ispkg:
-            importlib.import_module(f"{pkg.__name__}.{name}")
+    _import_connector_subpackages(pkg)
+
+
+def _import_connector_subpackages(pkg: ModuleType) -> None:
+    """Check, then import, every subpackage of ``pkg`` in name order."""
+    names = [
+        name
+        for _, name, ispkg in sorted(pkgutil.iter_modules(pkg.__path__), key=lambda m: m[1])
+        if ispkg
+    ]
+    check_connector_folders(Path(next(iter(pkg.__path__))), names)
+    for name in names:
+        importlib.import_module(f"{pkg.__name__}.{name}")
 
 
 def clear_registry() -> None:

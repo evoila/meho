@@ -578,9 +578,10 @@ so they are checked twice: by the parameter schema (the dispatcher answers
 `invalid_params`) and again in the body. A resource group has 1 to 90
 letters, digits, `_`, `-`, `.`, `(` or `)` and does not end with `.`; a name
 starts and ends with a letter, a digit or `_` (Microsoft's naming rules).
-Both are percent-encoded, like Microsoft's own SDK does. So `..`, `/`, `?` or
-`#` can never move the call to another path or another subscription, and no
-request is sent.
+A name with `..`, `/`, `?` or `#` is refused before any request, so it can
+never move the call to another path or another subscription. A checked name
+is then percent-encoded, like Microsoft's own SDK does: a special character
+such as `(` is written as a `%` code (`%28`), so it stays part of the name.
 
 **Result shapes.**
 

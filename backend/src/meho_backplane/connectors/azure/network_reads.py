@@ -15,9 +15,11 @@ rows sit under ``value`` and a long list goes behind a link to the stored
 result.
 
 A resource group or a name goes into a URL path only after a check against
-Microsoft's naming rules, and percent-encoded. A ``/``, a ``?`` or a name
-such as ``..`` can therefore never move the call to another path or another
-subscription.
+Microsoft's naming rules. A ``/``, a ``?`` or a name such as ``..`` is
+refused, so it can never move the call to another path or another
+subscription. The checked name is then percent-encoded: a special character
+such as ``(`` is written as a ``%`` code (``%28``), so it stays part of the
+name.
 """
 
 from __future__ import annotations
@@ -91,7 +93,7 @@ _RESOURCE_NAME: Final[re.Pattern[str]] = re.compile(RESOURCE_NAME_CHARS)
 
 
 def _checked(params: Mapping[str, Any], key: str, pattern: re.Pattern[str], max_length: int) -> str:
-    """Return ``params[key]`` checked and percent-encoded for a URL path.
+    """Return ``params[key]`` checked, then percent-encoded (special characters as ``%`` codes).
 
     The parameter schema already checks the same rule; this check keeps a
     direct call safe too. Raises ``ValueError`` without repeating the value.

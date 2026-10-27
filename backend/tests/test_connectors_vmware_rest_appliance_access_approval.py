@@ -452,7 +452,8 @@ _PINNED: list[tuple[str, str, str, frozenset[str]]] = [
         "9.0",
         frozenset(
             op_id for op_id in _FLOOR_OPS_ON_BOTH | _FLOOR_OPS_9_0_ONLY if "Manager/" not in op_id
-        ),
+        )
+        | {_HVC_LINK_DELETE},
     ),
     (
         "vcenter-9.0",

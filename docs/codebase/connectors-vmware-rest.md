@@ -3945,8 +3945,8 @@ delete sent as `POST` are deletes, so they go through the shared rule in
   rule found the word only at the start of the method name.
   `VsanVitGetIscsiLUNs` is still a read.
 - A path whose query has the whole part `action=delete` counts, for example
-  `POST:/hvc/links/{link}?action=delete` (8.0 only; the 9.0 file has no
-  hybrid links). `?action=delete-tags-and-policies` does not count.
+  `POST:/hvc/links/{link}?action=delete` (in the 8.0 and 9.0 files).
+  `?action=delete-tags-and-policies` does not count.
 
 The parser makes such an op `dangerous` with `requires_approval: true` for
 every product, and the grant checks, the flight recorder and the

@@ -440,10 +440,11 @@ own. `ssh_connection` reads `SSH_CONNECTION` from the environment first,
 then from `/proc/<pid>/environ` of each process above the script (sudo,
 the login shell), at most 32 levels up. The first value found wins.
 
-Until `meho-host admin-network` exists (#4739), the admin changes the set
-`admin_network` in `/etc/meho/firewall.nft` and runs
-`systemctl reload meho-firewall.service`. The comment above the set says
-where its value came from: `--admin-network`, the SSH session, or `none`.
+After the install, `meho-host admin-network <range>` (or `none`) changes
+the set, with the same input rules and the same lock-out question; see
+[linux-server-meho-host.md](linux-server-meho-host.md#admin-network). The
+comment above the set says where its value came from: `--admin-network`,
+the SSH session, `none`, or `meho-host admin-network`.
 
 ### For later Tasks
 
@@ -457,9 +458,10 @@ where its value came from: `--admin-network`, the SSH session, or `none`.
   2379, 2380, 2381, 9099, 30000-32767 and 8472/udp). The arrays are in
   `lib/firewall.sh`. The release test of form 2 (#4742) reads this list.
   A test checks that every port of the free-port check of step 1 is in it.
-- The SSH rule reads the set `admin_network`. So `meho-host admin-network`
-  (#4739) can change only that set, check the file with `nft -c -f`, and
-  load it again.
+- The SSH rule reads the set `admin_network`. `meho-host admin-network`
+  (#4739) changes only that set and its note, so a change to the rendering
+  of the set must keep the lines it looks for (`set admin_network {`,
+  `flags interval`, the note above the set).
 
 ### The redirect of port 80
 

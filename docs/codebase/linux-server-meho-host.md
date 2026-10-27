@@ -170,8 +170,11 @@ with `status` one of `ok`, `warn` and `fail`. `hint` is empty on an ok line.
 
 ### `admin-network`
 
-1. Check the value: `none`, or an IPv4 address or range (the patterns of
-   `lib/net.sh`). Anything else is a usage error, before root is checked.
+1. Check the value: `none`, or an IPv4 address or range, with the rules of
+   `install.sh --admin-network` (the patterns of `lib/net.sh`): a range must
+   start at its first address, so `10.0.50.7/24` is refused. Anything else
+   is a usage error, before root is checked. A `/0` range gets a `[WARN]`:
+   it allows SSH from every address.
 2. Find the set `admin_network` in `/etc/meho/firewall.nft`. Without it,
    the file is not the one `install.sh` wrote, and the command stops with
    a `[FAIL]` line.
@@ -210,12 +213,17 @@ with `status` one of `ok`, `warn` and `fail`. `hint` is empty on an ok line.
 3. Remove `/var/lib/meho` (the volumes and the one-time files) and every
    entry of `/etc/meho` except `firewall.nft`, and the drop-in
    `/etc/systemd/system/rke2-server.service.d/meho-firewall.conf`, which
-   would stop a later RKE2 install once the firewall is gone. Then
-   `systemctl daemon-reload`.
-4. The firewall file, its boot unit and the loaded table stay, so the
+   would stop a later RKE2 install once the firewall is gone, with its
+   folder when that is empty (RKE2's script removes only the
+   `rke2-*.service` files). Then `systemctl daemon-reload`.
+4. Remove the two commands `install.sh` put on the machine:
+   `/usr/local/bin/meho` and `/usr/local/sbin/meho-host`. bash keeps the
+   running script open, so `meho-host` can remove itself and still print
+   its last lines.
+5. The firewall file, its boot unit and the loaded table stay, so the
    machine is never without a firewall (ADR 0009). The last line names the
    command that removes them, for when the customer's own firewall is
-   ready. `meho-host` itself stays on the machine too.
+   ready.
 
 ## Testing
 
@@ -232,6 +240,9 @@ so the bundle test checks that no secret value was on any command line.
 The `admin-network` tests start from the fixture file and read the calls
 log to prove that `nft -c -f` ran on the new file before `nft -f` on the
 real one; a stubbed `nft` that refuses the file proves the old file stays.
+`test_firewall_nft.py` runs `meho-host admin-network` with the real `nft`
+too, in a user and network namespace, on the file `install.sh` wrote, for
+a range and for `none`. CI requires it (`MEHO_REQUIRE_NFT_CHECK=1`).
 The `uninstall` tests put a fake `rke2-uninstall.sh` on the fake machine,
 which removes RKE2's unit and data the way the real one does.
 
@@ -283,8 +294,8 @@ which `install.sh` step 1 requires), RKE2's own `kubectl` at
   writes them. A customer who reformats the set by hand gets a `[FAIL]`
   line, or an unchanged set, and `nft -c -f` cannot tell. The rewrite is
   meant for the file as `install.sh` wrote it.
-- **`uninstall` leaves the OS packages that RKE2's installer added**, and
-  `meho-host` itself (out of scope in #4739).
+- **`uninstall` leaves the OS packages that RKE2's installer added** (out
+  of scope in #4739).
 
 ## References
 

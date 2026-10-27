@@ -38,7 +38,7 @@ from harness import LINUX_SERVER, REAL_TOOLS, UBUNTU_2404, _write_script
 
 MEHO_HOST = LINUX_SERVER / "meho-host"
 NOW = dt.datetime(2026, 10, 23, 12, 0, tzinfo=dt.UTC)
-HOST_REAL_TOOLS = (*REAL_TOOLS, "cp", "rm", "find", "tar", "gzip")
+HOST_REAL_TOOLS = (*REAL_TOOLS, "cp", "rm", "rmdir", "find", "tar", "gzip")
 
 
 def expires(days: int) -> str:

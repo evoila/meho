@@ -32,6 +32,7 @@ FIREWALL_UNIT = "/etc/systemd/system/meho-firewall.service"
 RKE2_DROPIN = "/etc/systemd/system/rke2-server.service.d/meho-firewall.conf"
 RKE2_UNIT = "/etc/systemd/system/rke2-server.service"
 RKE2_UNINSTALL = "/usr/local/bin/rke2-uninstall.sh"
+MEHO_COMMANDS = ("/usr/local/bin/meho", "/usr/local/sbin/meho-host")
 # The fake rke2-uninstall.sh removes what the real one removes: RKE2's
 # unit, its data, its binaries and itself.
 RKE2_UNINSTALL_STUB = (
@@ -676,6 +677,20 @@ class AdminNetworkTests(HostTestCase):
                     self.host.run("admin-network", value), f"'{value}' is not an IPv4 range"
                 )
         self.assert_usage_error(self.host.run("admin-network"), "takes one value")
+        # The same rule as install.sh --admin-network.
+        self.assert_usage_error(
+            self.host.run("admin-network", "10.0.50.7/24"),
+            "10.0.50.7/24 does not start at the first address of its range.",
+        )
+
+    def test_every_address_gets_a_warning(self) -> None:
+        result = self.host.run("admin-network", "0.0.0.0/0", ssh_client="10.0.0.5 51234 22")
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertIn(
+            "[WARN] admin-network 0.0.0.0/0 allows SSH from every address.", result.stderr
+        )
+        self.assertIn("        elements = { 0.0.0.0/0 }\n", self.admin_set())
 
 
 class UninstallTests(HostTestCase):
@@ -689,13 +704,20 @@ class UninstallTests(HostTestCase):
         self.host.host_file(FIREWALL_UNIT, "[Unit]\n")
         self.host.host_file(RKE2_DROPIN, "[Unit]\n")
         self.host.host_file(RKE2_UNIT, "[Unit]\n")
+        for command in MEHO_COMMANDS:
+            self.host.host_file(command, "#!/bin/sh\n")
         self.host.host_file("/var/lib/rancher/rke2/server/db/state.db", "etcd\n")
         uninstall = self.host.host_path(RKE2_UNINSTALL)
         uninstall.write_text(RKE2_UNINSTALL_STUB)
         uninstall.chmod(0o755)
 
     def assert_nothing_removed(self) -> None:
-        for path in ("/var/lib/meho/volumes/postgres/data", "/etc/meho/install.json", RKE2_UNIT):
+        for path in (
+            "/var/lib/meho/volumes/postgres/data",
+            "/etc/meho/install.json",
+            RKE2_UNIT,
+            *MEHO_COMMANDS,
+        ):
             self.assertTrue(self.host.host_path(path).exists(), path)
         self.assertNotIn("rke2-uninstall.sh", self.host.calls())
 
@@ -714,7 +736,14 @@ class UninstallTests(HostTestCase):
         self.assertEqual(0, result.returncode, self.output(result))
         self.assertEqual(2, result.stdout.count("Type yes to go on: "))
         self.assertIn("rke2-uninstall.sh\n", self.host.calls())
-        for path in (RKE2_UNIT, "/var/lib/rancher", "/var/lib/meho", RKE2_DROPIN):
+        for path in (
+            RKE2_UNIT,
+            "/var/lib/rancher",
+            "/var/lib/meho",
+            RKE2_DROPIN,
+            RKE2_DROPIN.rsplit("/", 1)[0],
+            *MEHO_COMMANDS,
+        ):
             self.assertFalse(self.host.host_path(path).exists(), path)
         self.assertEqual(["firewall.nft"], os.listdir(self.host.host_path("/etc/meho")))
         self.assertEqual(RULES_FIXTURE.read_text(), self.host.host_path(RULES).read_text())

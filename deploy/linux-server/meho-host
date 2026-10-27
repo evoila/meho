@@ -44,6 +44,9 @@ readonly MEHO_FIRST_LOGIN_FILE=/var/lib/meho/first-login-passwords
 readonly MEHO_UNSEAL_KEY_FILE=/var/lib/meho/unseal-key
 readonly MEHO_INSTALL_RECORD=/etc/meho/install.json
 readonly MEHO_ETC_DIR=/etc/meho
+# The two commands install.sh puts on the machine (lib/common.sh).
+readonly MEHO_CLI_PATH=/usr/local/bin/meho
+readonly MEHO_HOST_PATH=/usr/local/sbin/meho-host
 # The MEHO host firewall of lib/firewall.sh (#4635): one nftables file, its
 # boot unit, and the drop-in that lets RKE2 start only while it is loaded.
 readonly MEHO_FIREWALL_FILE=/etc/meho/firewall.nft
@@ -644,6 +647,16 @@ ipv4_to_int() {
     printf '%d' "$(((10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d))"
 }
 
+# is_ipv4_network <range> of lib/net.sh: true for a range that starts at its
+# first address, such as 10.0.50.0/24. 10.0.50.7/24 does not name where the
+# range starts, so install.sh refuses it, and so does this command.
+is_ipv4_network() {
+    local prefix=${1#*/} address mask
+    mask=$((prefix == 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF))
+    address=$(ipv4_to_int "${1%/*}")
+    (((address & mask) == address))
+}
+
 # range_holds <address or range> <address>: true when the range holds the
 # address. An address without a prefix is a range of one address.
 range_holds() {
@@ -712,6 +725,8 @@ command_admin_network() {
     if [[ $wanted != none ]]; then
         is_ipv4_range "$wanted" ||
             usage_error "admin-network: '$wanted' is not an IPv4 range such as 10.0.50.0/24, one address, or none."
+        [[ $wanted != */* ]] || is_ipv4_network "$wanted" ||
+            usage_error "admin-network: $wanted does not start at the first address of its range. Give the first address, for example 10.0.50.0/24, or one address without a prefix."
         range=$wanted
     fi
     check_root
@@ -726,6 +741,9 @@ command_admin_network() {
     elif [[ -n $range && -n $client ]] && ! { is_ipv4 "$client" && range_holds "$range" "$client"; }; then
         warn "This SSH session comes from $client, which is outside $range. This session stays open, but a new SSH login from $client would get no answer."
         ask "Change the SSH rule anyway?" || stop_unchanged
+    fi
+    if [[ $range == */0 ]]; then
+        warn "admin-network $range allows SSH from every address."
     fi
     # The new file is checked before it takes the old one's place, so a
     # file nft refuses changes nothing.
@@ -769,9 +787,13 @@ command_uninstall() {
         find "$etc_dir" -mindepth 1 -maxdepth 1 ! -name "${MEHO_FIREWALL_FILE##*/}" -exec rm -rf {} +
     fi
     # The drop-in would stop a later RKE2 install once the firewall is gone.
+    # RKE2's script leaves its folder, which holds nothing else.
     rm -f "${HOST_ROOT}${RKE2_FIREWALL_DROPIN}"
+    rmdir "${HOST_ROOT}${RKE2_FIREWALL_DROPIN%/*}" 2>/dev/null || true
     systemctl daemon-reload
-    ok "removed $MEHO_STATE_DIR and $MEHO_ETC_DIR, except the firewall file"
+    # bash keeps the running script open, so meho-host can remove itself.
+    rm -f "${HOST_ROOT}${MEHO_CLI_PATH}" "${HOST_ROOT}${MEHO_HOST_PATH}"
+    ok "removed $MEHO_STATE_DIR and $MEHO_ETC_DIR, except the firewall file, and the commands $MEHO_CLI_PATH and $MEHO_HOST_PATH"
     printf 'The MEHO firewall stays on, so this machine is never without one. When your own firewall is ready, remove it with: %s\n' \
         "$FIREWALL_REMOVE_COMMAND"
 }

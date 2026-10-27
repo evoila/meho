@@ -63,8 +63,10 @@ func refusalDetail(err error) (apiRefusalDetail, bool) {
 // printPathReadResult renders a path read: one header line with the handle
 // id, the pointer and the JSON type of the value, then the value itself. An
 // array value comes paged in Rows, so the header also states the window and
-// the total and the items print like rows. Any other value is one node of
-// the document, pretty-printed.
+// the total and the items print like rows. A text value comes in parts
+// (#4994): the header states the character window and the total, a note
+// says how to continue when more follows, and the part prints as plain
+// text. Any other value is one node of the document, pretty-printed.
 func printPathReadResult(w io.Writer, r *ResultQueryResult) {
 	if r.ValueType == "array" {
 		end := r.Offset + r.ReturnedRows
@@ -77,11 +79,37 @@ func printPathReadResult(w io.Writer, r *ResultQueryResult) {
 		printRows(w, r.Rows)
 		return
 	}
+	if r.ValueType == "string" && r.ReturnedChars != nil && r.TotalChars != nil {
+		printTextPart(w, r)
+		return
+	}
 	fmt.Fprintf(w, "%s — path %q (%s)\n", r.HandleID, *r.Path, r.ValueType)
 	if len(r.Value) == 0 {
 		return
 	}
 	printIndentedJSON(w, r.Value)
+}
+
+// printTextPart renders one part of a text value: the character window in
+// the header, the way to continue, then the text itself without JSON
+// quoting, so a configuration export or a log reads as it was written.
+func printTextPart(w io.Writer, r *ResultQueryResult) {
+	end := r.Offset + *r.ReturnedChars
+	fmt.Fprintf(w, "%s — path %q (string) — chars %d..%d of %d, returned %d\n",
+		r.HandleID, *r.Path, r.Offset, end, *r.TotalChars, *r.ReturnedChars)
+	if r.Truncated {
+		fmt.Fprintf(w, "  note: more follows — continue with --offset %d\n", end)
+	}
+	if *r.ReturnedChars == 0 {
+		fmt.Fprintln(w, "  (empty part — the offset is past the end of the text)")
+		return
+	}
+	var text string
+	if err := json.Unmarshal(r.Value, &text); err != nil {
+		printIndentedJSON(w, r.Value)
+		return
+	}
+	fmt.Fprintln(w, text)
 }
 
 // printRows pretty-prints each row on its own.

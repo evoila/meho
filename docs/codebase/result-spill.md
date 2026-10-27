@@ -341,13 +341,50 @@ the omitted scalars to make room for the rows, there is no document at
 all. `path` cannot be combined with any relational field (a
 `ValidationError` at spec construction). An array value pages with the
 call's `offset` / `limit` (items that are not objects come back as
-`{"value": item}`); any other value comes back whole in `value`, with
+`{"value": item}`). A text value comes back in parts (#4994, see
+below). Any other value comes back whole in `value`, with
 `value_type` naming its JSON type. A pointer that does not resolve
 (missing member, `-`, a leading-zero or out-of-range index) is a
 recoverable `QueryContractError`. So is a `path` read on a rows handle
 that kept no fields beside its rows, or paging / a relational query on a
 document handle. The same output
 byte budget applies, and so does the terminal wire check (#3641).
+
+### A text value is read in parts (#4994)
+
+Some operations return one big text value: a firewall configuration
+export of about 500,000 characters, a log, a zone file. Before #4994 a
+`path` read returned a string whole, and one over the output budget was
+refused, so the value could not be read through MEHO at all. Now a
+string node is read as a window:
+
+- `offset` and `limit` count characters (Unicode code points), the
+  same way they count items for an array node. `value` holds the part.
+- Without a `limit` the part is as much text as fits the output budget
+  (`RESULT_QUERY_MAX_OUTPUT_BYTES`), so a text that fits still comes
+  back whole, as before. The budget measures JSON text, so a part full
+  of escaped characters holds fewer characters than bytes.
+- A part is always inside the budget. When the asked window is too
+  big, it is cut shorter (a binary search over the prefix length, so a
+  few encodes at most) instead of refused. Only a budget too small for
+  one character is an `output_too_large` refusal.
+- The answer carries `returned_chars` (the length of `value`),
+  `total_chars` (the full length) and `truncated` (`true` when more
+  follows). The next part starts at `offset + returned_chars`. An
+  `offset` past the end gives an empty part with `truncated: false`.
+
+Because a text part may hold far more than 500 characters, the `limit`
+argument has no static maximum on the MCP tool or the REST body any
+more. The core checks the 500 cap itself (`_page_limit`) for rows and
+array items, so that contract is unchanged: a bigger `limit` on a rows
+read is a recoverable `QueryContractError`, and a missing `limit` is
+50. The CLI sends `--limit` only when it was given, and prints a text
+part as plain text under a header that names the window, the total and
+the `--offset` to continue with.
+
+Tests: `backend/tests/test_result_document_path.py` (the `#4994`
+section), `test_mcp_tool_result_query.py`, `test_api_v1_operations.py`,
+`cli/internal/cmd/operation/resultquery_path_test.go`.
 
 ## Completed-operation receipt (`audit_id`, #3636)
 

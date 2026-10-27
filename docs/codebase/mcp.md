@@ -444,8 +444,13 @@ shape what the caller sees and how it reads more:
   whole as a document record. `result_query` reads part of it with
   `query={"path": "<RFC 6901 JSON Pointer>"}` (`""` is the whole
   document; `~1` means `/` and `~0` means `~`). `path` cannot be combined
-  with the other query fields. The `result_query` `outputSchema` covers
-  both the rows shape and the `path` shape.
+  with the other query fields. A text value comes back in parts (#4994):
+  `offset` and `limit` count characters, `value` holds the part, and
+  `returned_chars`, `total_chars` and `truncated` say where it ends. For
+  that reason the `limit` argument has no static maximum in the
+  `inputSchema`; the core refuses more than 500 rows or array items.
+  The `result_query` `outputSchema` covers both the rows shape and the
+  `path` shape.
 - **The `audit_id` receipt (#3636).** `call_operation` returns
   `audit_id` only after the dispatch audit row commits (`delivery` is
   explained above, under "Response wire ceiling"). If the operation ran but its result could

@@ -682,7 +682,7 @@ func TestReducedCallResultRendersHandleAndResultQueryAcceptsIt(t *testing.T) {
 	f := &fakeOperationsClient{resultQueryResponses: []*api.PostResultQueryApiV1OperationsResultQueryPostResponse{{
 		HTTPResponse: makeHTTPResp(200), Body: queryResponse,
 	}}}
-	if _, err := postResultQuery(context.Background(), f, makeHandleUUID(t, handleID), 0, 50, nil); err != nil {
+	if _, err := postResultQuery(context.Background(), f, makeHandleUUID(t, handleID), 0, nil, nil); err != nil {
 		t.Fatalf("result-query must accept the rendered handle: %v", err)
 	}
 	if f.lastResultQueryBody == nil || f.lastResultQueryBody.HandleId.String() != handleID {
@@ -1170,7 +1170,8 @@ func TestPostResultQueryPassesTypedBody(t *testing.T) {
 		},
 	}
 	handle := makeHandleUUID(t, "11111111-1111-1111-1111-111111111111")
-	got, err := postResultQuery(context.Background(), f, handle, 5, 50, nil)
+	limit := 50
+	got, err := postResultQuery(context.Background(), f, handle, 5, &limit, nil)
 	if err != nil {
 		t.Fatalf("postResultQuery: %v", err)
 	}
@@ -1203,7 +1204,7 @@ func TestPostResultQueryRefreshOn401(t *testing.T) {
 		},
 	}
 	handle := makeHandleUUID(t, "11111111-1111-1111-1111-111111111111")
-	if _, err := postResultQuery(context.Background(), f, handle, 0, 50, nil); err != nil {
+	if _, err := postResultQuery(context.Background(), f, handle, 0, nil, nil); err != nil {
 		t.Fatalf("postResultQuery after refresh: %v", err)
 	}
 	if f.refreshCount != 1 {
@@ -1223,7 +1224,7 @@ func TestPostResultQueryNotFoundClassifiesAsApiResponseError(t *testing.T) {
 		},
 	}
 	handle := makeHandleUUID(t, "11111111-1111-1111-1111-111111111111")
-	_, err := postResultQuery(context.Background(), f, handle, 0, 50, nil)
+	_, err := postResultQuery(context.Background(), f, handle, 0, nil, nil)
 	if err == nil {
 		t.Fatalf("expected non-2xx error; got nil")
 	}
@@ -1242,7 +1243,7 @@ func TestPostResultQueryTransportErrorPropagates(t *testing.T) {
 	transportErr := errors.New("dial tcp: connection refused")
 	f := &fakeOperationsClient{resultQueryErrors: []error{transportErr}}
 	handle := makeHandleUUID(t, "11111111-1111-1111-1111-111111111111")
-	_, err := postResultQuery(context.Background(), f, handle, 0, 50, nil)
+	_, err := postResultQuery(context.Background(), f, handle, 0, nil, nil)
 	if !errors.Is(err, transportErr) {
 		t.Fatalf("expected transport error to propagate verbatim; got %v", err)
 	}

@@ -32816,16 +32816,14 @@
           },
           "limit": {
             "type": "integer",
-            "maximum": 500.0,
             "minimum": 1.0,
             "title": "Limit",
-            "description": "Page size (paging mode). Default 50; max 500. Matches the `result_query` MCP tool's upper bound.",
-            "default": 50
+            "description": "Page size. Rows, and the items of an array value read by `path`: default 50, at most 500 (a bigger value is refused). Characters of a text value read by `path`: default as many as fit the output budget; a bigger part is cut to fit. Matches the `result_query` MCP tool."
           },
           "query": {
             "$ref": "#/components/schemas/ResultQuerySpec",
             "nullable": true,
-            "description": "Optional structured query. When present, the handle is queried server-side (filter / select / group_by / aggregate / order_by / limit) as one bounded read-only SELECT and `offset` / `limit` are ignored. Every referenced field must be a column on the handle; there is no raw-SQL argument. For a document handle, or for the fields a rows handle left out of its inline summary, send only `path` (an RFC 6901 JSON Pointer); an array value then pages with `offset` / `limit`."
+            "description": "Optional structured query. When present, the handle is queried server-side (filter / select / group_by / aggregate / order_by / limit) as one bounded read-only SELECT and `offset` / `limit` are ignored. Every referenced field must be a column on the handle; there is no raw-SQL argument. For a document handle, or for the fields a rows handle left out of its inline summary, send only `path` (an RFC 6901 JSON Pointer); an array value then pages with `offset` / `limit`, and a text value comes back in parts of `limit` characters from character `offset`."
           }
         },
         "additionalProperties": false,
@@ -32834,7 +32832,7 @@
           "handle_id"
         ],
         "title": "ResultQueryBody",
-        "description": "POST body for ``/api/v1/operations/result-query`` (#3179).\n\nThe REST twin of the MCP ``result_query`` tool's ``inputSchema``:\n``handle_id`` is the UUID minted onto a reduced ``/call`` response's\n``result.handle.handle_id`` / ``fetch_more.drill_in.example_call``, and\n``offset`` / ``limit`` window the spilled set. The bounds mirror the MCP\nschema (``offset >= 0``; ``1 <= limit <= MAX_LIMIT``) so the two surfaces\nvalidate identically. ``extra=\"forbid\"`` rejects unknown body fields with\na 422, matching the sibling ``CallOperationBody`` posture.\n\n``query`` (#3366) is the optional structured query: when present, the\nhandle is queried server-side as one bounded read-only ``SELECT``\n(filter / project / group / aggregate) and ``offset`` / ``limit`` are\nignored. It mirrors the MCP tool's ``query`` argument exactly (the same\n:class:`~meho_backplane.jsonflux.query.contract.ResultQuerySpec`), so the\ntwo surfaces stay in lockstep; there is deliberately no raw-SQL argument\non either."
+        "description": "POST body for ``/api/v1/operations/result-query`` (#3179).\n\nThe REST twin of the MCP ``result_query`` tool's ``inputSchema``:\n``handle_id`` is the UUID minted onto a reduced ``/call`` response's\n``result.handle.handle_id`` / ``fetch_more.drill_in.example_call``, and\n``offset`` / ``limit`` window the spilled set. The bounds mirror the MCP\nschema (``offset >= 0``; ``limit >= 1``) so the two surfaces validate\nidentically; the row cap (``MAX_LIMIT``) is checked by the shared core,\nbecause a text value read by ``path`` counts characters and one part\nmay hold more (#4994). ``extra=\"forbid\"`` rejects unknown body fields\nwith a 422, matching the sibling ``CallOperationBody`` posture.\n\n``query`` (#3366) is the optional structured query: when present, the\nhandle is queried server-side as one bounded read-only ``SELECT``\n(filter / project / group / aggregate) and ``offset`` / ``limit`` are\nignored. It mirrors the MCP tool's ``query`` argument exactly (the same\n:class:`~meho_backplane.jsonflux.query.contract.ResultQuerySpec`), so the\ntwo surfaces stay in lockstep; there is deliberately no raw-SQL argument\non either."
       },
       "ResultQuerySpec": {
         "properties": {

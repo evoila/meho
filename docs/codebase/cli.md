@@ -1417,11 +1417,19 @@ narrow-waist contract.
   `""` is the whole document, `/a/0/b` goes one step per `/`. It reads
   one value of a document handle, or a top-level field a rows handle
   left out of its inline summary (`omitted_scalar_count`). An array
-  value pages with `--offset` / `--limit`. The CLI refuses `--path`
+  value pages with `--offset` / `--limit`. A text value comes back in
+  parts (#4994): `--offset` and `--limit` count characters, and without
+  `--limit` a part is as much text as fits the output budget. The CLI
+  sends `limit` only when `--limit` was given, so the backplane picks
+  the default for what is read. The CLI refuses `--path`
   together with any query flag before the call. The reply carries
-  `path`, `value_type` and `value` (raw JSON) next to the paging fields;
-  the human render is one header line (handle, path, type) and the
-  pretty-printed value, or the item lines with the window for an array.
+  `path`, `value_type` and `value` (raw JSON) next to the paging fields,
+  plus `returned_chars` and `total_chars` for a text value; the human
+  render is one header line (handle, path, type) and the pretty-printed
+  value, the item lines with the window for an array, or, for a text
+  part, a header with the character window and the total, a note with
+  the `--offset` to continue with when more follows, and the part as
+  plain text.
   Paging a document handle without `--path` is a server 422; the CLI
   shows the server's message and adds the `--path` form that works
   (`resultquery_path.go`).

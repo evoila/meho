@@ -80,6 +80,25 @@ integration tests run in a separate job without coverage. The gate is
 `continue-on-error: true` — it is **advisory** and never blocks merges (see the
 new-code-period + scan-trigger section below for why it is kept advisory).
 
+## Measuring a test-to-code map (#5298)
+
+`scripts/ci/measure_test_map.py` counts how many tests a "run only the tests
+for the changed code" map would pick for recent merged pull requests. CI does
+not use it. It needs coverage data that records which test ran each line:
+`dynamic_context = test_function` in `.coveragerc.ci`. That setting is **not**
+on `main`. To get the data, open a pull request that adds it, give it the
+`ci-coverage-validate` label, and keep the combined `.coverage` file from the
+combine job (it is not uploaded today, only `coverage.xml`). How to run the
+script is in its docstring.
+
+Things to know about the data:
+
+- `test_function` records only lines that run inside the test function
+  itself. Lines that run in fixtures, at import time, or in background tasks
+  get the empty context, so the map does not see them.
+- Coverage cannot use the faster `sysmon` core with test contexts. It falls
+  back to the C tracer, so the shards run slower and need more time.
+
 ## When coverage collapses to ~24% — the invisible-import failure mode
 
 **Symptom.** The SonarCloud overall-coverage chip drops sharply (e.g. from ~66%

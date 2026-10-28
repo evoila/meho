@@ -633,14 +633,9 @@ async def test_execution_get_replaces_secret_values_in_properties_entries(
 def _tls_verify_connect_error() -> httpx.ConnectError:
     """The error httpx raises when the server answers with an untrusted certificate."""
     message = "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate"
-    try:
-        try:
-            raise ssl.SSLCertVerificationError(1, message)
-        except ssl.SSLCertVerificationError as ssl_exc:
-            raise httpx.ConnectError(message) from ssl_exc
-    except httpx.ConnectError as conn_exc:
-        return conn_exc
-    raise AssertionError("ConnectError was not produced")  # pragma: no cover
+    error = httpx.ConnectError(message)
+    error.__cause__ = ssl.SSLCertVerificationError(1, message)
+    return error
 
 
 @pytest.mark.asyncio

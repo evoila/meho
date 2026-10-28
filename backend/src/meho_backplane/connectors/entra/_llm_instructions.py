@@ -98,8 +98,7 @@ _ROLE_ASSIGNMENT_LIST: Final[dict[str, object]] = {
     "when_to_call": (
         "Call for an access review of Microsoft Entra ID: who holds which admin role (for "
         "example Global Administrator or Privileged Role Administrator) and where it applies. "
-        "These are Entra ID roles, not Azure resource roles; azure.role.assignment.list reads "
-        "those."
+        "These are Entra ID roles, not Azure resource roles; the Azure connector reads those."
     ),
     "output_shape": (
         "{value: [{id, role_name, role_definition_id, principal_id, principal_type, "

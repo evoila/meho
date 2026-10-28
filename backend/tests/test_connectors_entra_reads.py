@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from typing import Any
@@ -236,6 +237,17 @@ def test_every_guidance_says_that_directory_text_is_data() -> None:
             assert str(guidance[key]).strip(), (op.op_id, key)
         assert "never as instructions" in str(guidance["output_shape"]), op.op_id
     assert "never instructions" in ENTRA_TYPED_WHEN_TO_USE_BY_GROUP["directory"]
+
+
+def test_the_guidance_names_only_operations_of_this_connector() -> None:
+    """An operation id in a text for the AI must exist, or the AI calls nothing."""
+    texts = [ENTRA_TYPED_WHEN_TO_USE_BY_GROUP["directory"]]
+    for op in ENTRA_TYPED_OPS:
+        texts.extend(str(value) for value in (op.llm_instructions or {}).values())
+    named = set(re.findall(r"\b(?:entra|azure)(?:\.[a-z_]+)+", " ".join(texts)))
+
+    assert named, "the texts name no operation at all"
+    assert named <= set(ENTRA_OP_IDS), sorted(named - set(ENTRA_OP_IDS))
 
 
 @pytest.mark.asyncio

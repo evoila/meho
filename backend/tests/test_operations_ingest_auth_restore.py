@@ -101,13 +101,13 @@ class _Target:
     preferred_impl_id: str | None = None
 
 
-def _operator() -> Operator:
+def _operator(tenant_id: uuid.UUID | None = None) -> Operator:
     return Operator(
         sub=f"test-operator-{uuid.uuid4()}",
         name="Test Operator",
         email=None,
         raw_jwt="header.payload.signature",
-        tenant_id=uuid.uuid4(),
+        tenant_id=tenant_id if tenant_id is not None else uuid.uuid4(),
         tenant_role=TenantRole.TENANT_ADMIN,
     )
 
@@ -126,10 +126,15 @@ async def _ingest(
     auth_scheme: AuthSchemeName | None,
     secret_fields: tuple[str, ...] | None = None,
     impl_id: str = _IMPL_ID,
+    tenant_id: uuid.UUID | None = None,
 ) -> None:
-    """Run the real register phase; only the LLM grouping is stubbed."""
+    """Run the real register phase; only the LLM grouping is stubbed.
+
+    With *tenant_id* the ingest goes into that tenant's own scope, by an
+    operator of that tenant.
+    """
     service = IngestionPipelineService(
-        _operator(),
+        _operator(tenant_id),
         sessionmaker=get_sessionmaker(),
         embedding_service=_stub_embedding(),
     )
@@ -150,7 +155,7 @@ async def _ingest(
         version=_VERSION,
         impl_id=impl_id,
         specs=[SpecSource(uri="fixture://widgetco/spec.yaml", content=_SPEC_YAML)],
-        tenant_id=None,
+        tenant_id=tenant_id,
         dry_run=False,
         auth_scheme=auth_scheme,
         auth_secret_fields=secret_fields,
@@ -341,6 +346,34 @@ async def test_delete_removes_the_saved_choice(monkeypatch: pytest.MonkeyPatch) 
     assert await _saved_rows() == []
     assert await restore_ingested_profiled_connectors() == 0
     assert _TRIPLE not in all_connectors_v2()
+
+
+@pytest.mark.asyncio
+async def test_tenant_connector_comes_back_and_is_deleted_in_its_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tenant's own connector is saved, restored, and deleted under its tenant.
+
+    The restore stamps the row with a system operator of the row's tenant.
+    With the wrong tenant on that operator the stamp would raise and the
+    backplane would not start.
+    """
+    tenant_id = uuid.uuid4()
+    await _ingest(monkeypatch, auth_scheme="basic", tenant_id=tenant_id)
+    assert [row.tenant_id for row in await _saved_rows()] == [tenant_id]
+    clear_registry()
+
+    assert await restore_ingested_profiled_connectors() == 1
+    profile = _registered_profiled().profile
+    assert profile is not None
+    assert profile.auth.scheme == "basic"
+    assert profile.auth.secret_fields == ("username", "password")
+
+    await ReviewService(_operator(tenant_id)).delete_connector(
+        f"{_IMPL_ID}-{_VERSION}", tenant_id=tenant_id
+    )
+
+    assert await _saved_rows() == []
 
 
 @pytest.mark.asyncio

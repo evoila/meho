@@ -14,12 +14,18 @@ Chosen per target with ``extras["login"]`` (see
 :func:`meho_backplane.connectors.vro.session.login_mode`):
 
 * ``basic`` (default): ``Authorization: Basic`` on every call.
+* ``vcfa-session`` (VCF 9): a VCF Automation session token for
+  ``<user>@<extras.org>`` from the shared login
+  (:mod:`meho_backplane.connectors._shared.vcfa_session`), sent as
+  ``Authorization: Bearer <token>``. The connector logs in again 60
+  seconds before the token ends.
 * ``automation``: the Aria Automation token, minted with the Aria
   Automation login (``POST /csp/gateway/am/api/login?access_token``, then
   ``POST /iaas/api/login``) on the same address; sent as
   ``Authorization: Bearer <token>``.
 
-The ``Authorization`` value is cached per target and tenant
+The ``Authorization`` value (and, for ``vcfa-session``, the time the
+token ends) is cached per target and tenant
 (``target_cache_key``). Only a caller with an operator JWT, other than the
 synthesised system operator, reads or fills the cache; any other caller
 runs the credential loader, which checks it, and its login is not kept.
@@ -65,6 +71,11 @@ from meho_backplane.connectors._shared.system_operator import (
     synthesise_system_operator,
 )
 from meho_backplane.connectors._shared.vcf_auth import basic_auth_header, is_acceptable_auth_model
+from meho_backplane.connectors._shared.vcfa_session import (
+    LOGIN_VCFA_SESSION,
+    VcfaSessionToken,
+    vcfa_session_login,
+)
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.schemas import (
     AuthModel,
@@ -78,6 +89,7 @@ from meho_backplane.connectors.vro.session import (
     VroTargetLike,
     load_credentials_from_vault,
     login_mode,
+    vcfa_org,
 )
 from meho_backplane.connectors.vro.typed_reads import ABOUT_PATH, redact_secrets
 
@@ -113,8 +125,20 @@ def parse_server_version(payload: Any) -> VroServerVersion:
     return VroServerVersion(version=version, build=build, error=None)
 
 
+def _username_password(creds: dict[str, str], target: VroTargetLike) -> tuple[str, str]:
+    """``(username, password)`` from *creds*; a ``RuntimeError`` names a missing key."""
+    try:
+        return creds["username"], creds["password"]
+    except KeyError as exc:
+        raise RuntimeError(
+            f"vro credentials loader for target {target.name!r} returned a "
+            f"dict missing required key {exc.args[0]!r}; need "
+            "{'username': str, 'password': str}"
+        ) from exc
+
+
 class VroConnector(HttpConnector):
-    """Orchestrator REST API connector (``/vco/api``), Basic or Aria Automation login."""
+    """Orchestrator REST API connector (``/vco/api``) with three logins (see the module doc)."""
 
     product = "vro"
     version = "9.0"
@@ -124,7 +148,9 @@ class VroConnector(HttpConnector):
 
     def __init__(self, *, credentials_loader: VroCredentialsLoader | None = None) -> None:
         super().__init__()
-        self._authorizations: dict[tuple[str, str], str] = {}
+        #: Per (tenant, target): the ``Authorization`` value, and the session
+        #: token when it ends (``vcfa-session``); ``None`` for the other logins.
+        self._authorizations: dict[tuple[str, str], tuple[str, VcfaSessionToken | None]] = {}
         self._auth_lock = asyncio.Lock()
         self._credentials_loader: VroCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
@@ -161,8 +187,11 @@ class VroConnector(HttpConnector):
         async with self._auth_lock:
             cached = self._authorizations.get(cache_key)
             if cached is not None and checked:
-                return cached
+                value, session = cached
+                if session is None or not session.needs_renewal():
+                    return value
             creds = await self._credentials_loader(target, operator)
+            session = None
             if mode == LOGIN_AUTOMATION:
                 from meho_backplane.connectors.vra8._auth import vra8_login
 
@@ -171,17 +200,21 @@ class VroConnector(HttpConnector):
                     client, creds, target, request_extensions=self._request_extensions(target)
                 )
                 value = f"Bearer {token}"
+            elif mode == LOGIN_VCFA_SESSION:
+                username, password = _username_password(creds, target)
+                session = await vcfa_session_login(
+                    await self._http_client(target),
+                    username=username,
+                    password=password,
+                    org=vcfa_org(target),
+                    target=target,
+                    request_extensions=self._request_extensions(target),
+                )
+                value = session.authorization
             else:
-                try:
-                    value = basic_auth_header(creds["username"], creds["password"])
-                except KeyError as exc:
-                    raise RuntimeError(
-                        f"vro credentials loader for target {target.name!r} returned a "
-                        f"dict missing required key {exc.args[0]!r}; need "
-                        "{'username': str, 'password': str}"
-                    ) from exc
+                value = basic_auth_header(*_username_password(creds, target))
             if checked:
-                self._authorizations[cache_key] = value
+                self._authorizations[cache_key] = (value, session)
             _log.info("vro_login_ready", target=target.name, host=target.host, login=mode)
             return value
 

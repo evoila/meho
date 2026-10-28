@@ -756,6 +756,19 @@ async def _decode_with_kid_rotation(
         _raise_decode_401(retry_exc, settings, expected_audience=expected_audience)
 
 
+#: The 401 detail for a login without a ``tenant_id`` claim (#3872). It
+#: keeps the ``missing_tenant_claim`` code as the prefix, like
+#: ``multiple_role_groups``, so a log grep or a prefix match still works.
+#: The text names the usual cause (the person is in no role group) and
+#: the guide, because logging in again does not fix it.
+_MISSING_TENANT_CLAIM_DETAIL = (
+    "missing_tenant_claim: this login has no tenant. Usually the person is in "
+    "no MEHO role group, or the realm has no tenant-id mapper. Ask your admin "
+    "to put you in exactly one role group, then log in again. Guide: "
+    "https://evoila.github.io/meho/latest/guides/tenant-bootstrap/"
+)
+
+
 def _extract_tenant_id(claims: Any, settings: Settings) -> UUID:
     """Pull ``tenant_id`` out of *claims* and parse it as a :class:`UUID`.
 
@@ -776,7 +789,7 @@ def _extract_tenant_id(claims: Any, settings: Settings) -> UUID:
     raw = claims.get(claim_name)
     if raw is None:
         log.warning("missing_tenant_claim", claim_name=claim_name)
-        raise _http_401("missing_tenant_claim")
+        raise _http_401(_MISSING_TENANT_CLAIM_DETAIL)
     try:
         return UUID(raw) if isinstance(raw, str) else UUID(str(raw))
     except (ValueError, TypeError, AttributeError) as exc:

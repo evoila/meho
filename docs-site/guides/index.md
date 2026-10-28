@@ -19,6 +19,7 @@ Then, when an operation needs a second pair of eyes:
 | Guide | What you will have at the end |
 |---|---|
 | [Approvals and break-glass](approvals-and-break-glass.md) | A clear path through the four-eyes rule, including the two ways a **single operator** clears a gated write — the recommended agent-requester pattern and the audited emergency break-glass — and how to prove to an auditor which one your deploy runs. |
+| [Add a tenant](tenant-bootstrap.md) | A new tenant with its role groups and first users, each change approved by a second person, and a first login that shows the new tenant. |
 
 ## Go deeper
 

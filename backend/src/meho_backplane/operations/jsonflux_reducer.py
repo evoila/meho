@@ -301,6 +301,14 @@ _RESULT_OBJECTS_CONTEXT_KEY = "result_objects"
 #: so a failure never requires a drill-in (the #3084 drivability lesson).
 _RESULT_DIGEST_CONTEXT_KEY = "result_digest"
 
+#: ``context`` key carrying the op's result-handle hint (#5143). An op whose
+#: result other operations take by its handle (an inventory read) registers
+#: ``llm_instructions["result_handle"] = {"always": true}``. A result under
+#: the limits then comes back whole *and* is stored, so the caller also gets a
+#: handle. Over the limits nothing changes. A credential-class op never gets
+#: the stored copy.
+_RESULT_HANDLE_CONTEXT_KEY = "result_handle"
+
 #: Summary keys the reducer itself owns. A hinted scalar key colliding with
 #: one of these is skipped (with a warning) — the reduction bookkeeping is
 #: load-bearing for every consumer and must never be shadowed by a vendor
@@ -450,6 +458,10 @@ class JsonFluxReducer:
     ) -> tuple[Any, ResultHandle | None]:
         """Return ``(payload, None)`` or ``(summary, ResultHandle)``.
 
+        An op with the ``result_handle`` hint gets ``(payload, ResultHandle)``
+        for a result under the limits: the whole payload, plus a handle to a
+        stored copy of it (#5143).
+
         See the class docstring for the threshold + collection-detection
         contract. ``schema`` is accepted to satisfy the Protocol; the
         reducer infers the materialized schema from the DuckDB-registered
@@ -500,7 +512,7 @@ class JsonFluxReducer:
             return summary, handle
 
         if not self._over_threshold(rows, payload):
-            return payload, None
+            return await self._small_result(payload, context)
 
         materialized = self._materialize(rows, context)
         preserved_scalars, omitted_scalars = _preserved_scalars(payload, envelope_key, context)
@@ -562,7 +574,7 @@ class JsonFluxReducer:
 
         document_bytes = len(_serialize(payload))
         if document_bytes <= self._byte_threshold:
-            return payload, None
+            return await self._small_result(payload, context, document_bytes)
 
         outline = document_outline(payload)
         field_count = len(payload) if isinstance(payload, dict) else 0
@@ -591,6 +603,40 @@ class JsonFluxReducer:
             path=example_path(outline),
         )
         return summary, handle
+
+    async def _small_result(
+        self, payload: Any, context: dict[str, Any] | None, document_bytes: int | None = None
+    ) -> tuple[Any, ResultHandle | None]:
+        """Return a result under the limits whole; add a handle when the op asks (#5143).
+
+        Without the ``result_handle`` hint this is the plain pass-through. With
+        it, the whole payload is also stored as a document record and the
+        handle comes back next to the unchanged payload, so an operation that
+        takes handles can use even a small result. A credential-class op, a
+        reduce without an ``op_id``, and a ``None`` payload store nothing. When
+        the store does not keep the record, the payload still comes back whole,
+        with no handle.
+        """
+        if payload is None or not _always_handle(context) or _is_credential_class(context):
+            return payload, None
+        handle_id = uuid.uuid4()
+        if document_bytes is None:
+            document_bytes = len(_serialize(payload))
+        spill_outcome = await self._spill_document(handle_id, payload, document_bytes, context)
+        if spill_outcome.stored_rows is None:
+            return payload, None
+        handle = self._document_handle(
+            handle_id,
+            document_schema(payload, document_outline(payload)),
+            (
+                f"The whole result ({document_bytes} bytes) is inline. It is also stored "
+                "under this handle, so an operation that takes a result handle can use it."
+            ),
+            context,
+            spill_outcome,
+            path="",
+        )
+        return payload, handle
 
     async def _spill_document(
         self,
@@ -1579,6 +1625,26 @@ def _coerce_state_list(value: Any, context: dict[str, Any] | None, field: str) -
         received_type=type(value).__name__,
     )
     return frozenset()
+
+
+def _always_handle(context: dict[str, Any] | None) -> bool:
+    """True when ``context['result_handle']`` is ``{"always": true}`` (#5143).
+
+    A hint of another shape logs once and is ignored, so the size rule
+    applies. Never raises, like the other hints.
+    """
+    raw = context.get(_RESULT_HANDLE_CONTEXT_KEY) if context else None
+    if raw is None:
+        return False
+    always = raw.get("always") if isinstance(raw, dict) else None
+    if not isinstance(always, bool):
+        _log.warning(
+            "jsonflux_result_handle_invalid_shape",
+            op_id=context.get("op_id") if context else None,
+            received_type=type(raw).__name__,
+        )
+        return False
+    return always
 
 
 def _resolve_digest_hint(context: dict[str, Any] | None) -> _RowDigestSpec | None:

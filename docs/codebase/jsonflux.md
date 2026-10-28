@@ -17,3 +17,13 @@ rows (the same place as an omitted scalar), so a `result_query` read with
 `result_object_note` rides inline next to the truncations and names that read,
 or says the object could not be kept when the store dropped it. Objects the
 hint does not name are not persisted.
+
+An operation may declare `result_handle: {"always": true}` (#5143) when other
+operations take its result by its handle (an inventory read, whose result
+`migration.inventory.csv` reads back). A result under the limits (50 rows,
+4,096 bytes) then comes back **whole**, and the reducer also stores it as a
+document record and returns a handle next to it. `result_query` with
+`query={"path": ""}` returns the same answer. Over the limits nothing changes.
+A credential-class operation gets no handle and nothing is stored. When the
+store does not keep the record (no tenant, store down), the result still comes
+back whole, with no handle. See `result-spill.md`.

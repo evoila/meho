@@ -350,6 +350,39 @@ that kept no fields beside its rows, or paging / a relational query on a
 document handle. The same output
 byte budget applies, and so does the terminal wire check (#3641).
 
+### A handle for a small result (`result_handle` hint, #5143)
+
+Some operations take stored results as input: `migration.inventory.csv`
+reads inventories back by handle. A result under the limits normally comes
+back whole with **no** handle, so a one-VM inventory (about 1.7 KB) could not
+be passed on. An operation that other operations read by handle declares
+`llm_instructions["result_handle"] = {"always": true}`. The dispatcher
+forwards it in the reducer context (`_build_reducer_context`, like
+`result_scalars`), and for a result under the limits the reducer
+(`JsonFluxReducer._small_result`):
+
+- stores the whole payload as a document record (`_spill_document`, the same
+  record an oversized detail object gets) and returns the **unchanged
+  payload** together with a document handle. The handle's
+  `drill_in.example_call` uses `query={"path": ""}`, which returns the whole
+  answer; `total_rows` and `sample_rows` are `null`, as on every document
+  handle;
+- stores nothing and returns no handle for a credential-class op or a reduce
+  without an `op_id` (the same rule as for document records);
+- returns the payload whole with no handle when the store did not keep it
+  (no tenant in the context, store down, over the record cap). A handle that
+  cannot be read is never sent;
+- ignores a hint of another shape (logged as
+  `jsonflux_result_handle_invalid_shape`); the size rule then applies.
+
+Over the limits the hint changes nothing: the normal rows or document
+handle is built. The reply paths need no change for this case, because they
+already treat `result` and `handle` as two separate fields: MCP and REST
+return the `OperationResult` with both, the wire check
+(`bound_complete_response`) keeps both when they fit, the CLI prints the
+result and then the handle, and the audit row records `handle_id` with
+`total_rows: null` and `sample_rows_returned: 0`.
+
 ### A text value is read in parts (#4994)
 
 Some operations return one big text value: a firewall configuration

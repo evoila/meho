@@ -2345,6 +2345,23 @@ def _result_digest_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, 
     return None
 
 
+def _result_handle_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, Any] | None:
+    """Extract ``result_handle`` from a descriptor's ``llm_instructions`` (#5143).
+
+    An op whose result other operations take by its handle registers
+    ``{"always": true}``; the reducer then stores even a small result and
+    returns a handle next to it. A plain dict is returned, as for the other
+    hints; the reducer checks it. ``None`` when the op did not register it.
+    """
+    instructions = descriptor.llm_instructions
+    if not isinstance(instructions, dict):
+        return None
+    raw = instructions.get("result_handle")
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
 async def _unavailable_delivery_result(
     *,
     op_id: str,
@@ -2554,6 +2571,9 @@ def _build_reducer_context(
     result_digest = _result_digest_from_descriptor(descriptor)
     if result_digest is not None:
         reducer_context["result_digest"] = result_digest
+    result_handle = _result_handle_from_descriptor(descriptor)
+    if result_handle is not None:
+        reducer_context["result_handle"] = result_handle
     return reducer_context
 
 

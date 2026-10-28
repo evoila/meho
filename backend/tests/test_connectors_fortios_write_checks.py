@@ -366,6 +366,28 @@ async def test_a_single_unit_is_verified() -> None:
 
 
 @pytest.mark.parametrize(
+    "results",
+    [
+        None,
+        {},
+        [],
+        [{"serial_no": fx.CHECKSUMS_SINGLE[0]["serial_no"]}],
+        [{"checksum": fx.CHECKSUMS_SINGLE[0]["checksum"]}],
+        [fx.CHECKSUMS_SINGLE[0], {"serial_no": "FGT-made-up-2"}],
+    ],
+    ids=["null", "empty-object", "empty-list", "no-checksums", "no-serial", "one-row-incomplete"],
+)
+@pytest.mark.asyncio
+async def test_an_incomplete_ha_answer_gives_unknown_not_a_single_unit(results: Any) -> None:
+    fake = fx.FakeFortiGate(_answers(**{"monitor/system/ha-checksums": results}))
+    result = await _verify(fake, {"comment": "made-up host"})
+    assert (result.outcome, result.ha_in_sync) == ("unknown", None)
+    assert result.read_back == fx.ADDRESS
+    assert result.reasons[0].startswith("the HA state is incomplete")
+    assert fake.paths().count("monitor/system/ha-checksums") == 1
+
+
+@pytest.mark.parametrize(
     "failure",
     [httpx.Response(403, json=fx.error_answer(403)), httpx.ReadTimeout("made-up timeout")],
     ids=["forbidden", "timeout"],

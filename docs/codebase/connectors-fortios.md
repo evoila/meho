@@ -176,10 +176,12 @@ change operation exists yet; the later FortiGate work calls these.
    checksums up to five times, two seconds apart. The outcome is `verified`,
    `not_verified` (with reasons) or `unknown`: the read-back failed, or the
    read-back matches but the HA state could not be read (a 403, a timeout, a
-   FortiOS error), so MEHO does not know whether every member has the
-   change. One unit (fewer than two checksum rows) is `verified` with
-   `ha_in_sync` `null`. A read-back that differs stays `not_verified` even
-   when the HA state is unreadable.
+   FortiOS error) or the answer confirms nothing (`results` is not a list,
+   the list is empty, or a row has no serial or no checksums), so MEHO does
+   not know whether every member has the change. One unit (exactly one
+   complete checksum row) is `verified` with `ha_in_sync` `null`. A
+   read-back that differs stays `not_verified` even when the HA state is
+   unreadable or incomplete.
 
 `register_write_preview(op_id, WritePreviewSpec(...))` registers the preview
 an approver sees: the object now and after, the entries that use it, the

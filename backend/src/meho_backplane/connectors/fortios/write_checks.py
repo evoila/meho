@@ -313,15 +313,33 @@ def _differences(sent: Mapping[str, Any], read_back: Mapping[str, Any]) -> list[
     )
 
 
+def _incomplete_checksums(results: Any, rows: Sequence[Mapping[str, Any]]) -> str | None:
+    """Why the HA checksum answer confirms nothing, or ``None`` when it is complete.
+
+    A complete answer is a list with at least one member row, and every
+    row names its serial and holds checksums. ``results: null``, ``{}`` or
+    ``[]`` is not a unit that stands alone: it says nothing about the HA
+    state.
+    """
+    if not isinstance(results, list):
+        return f"results is not a list of members but {type(results).__name__}"
+    if not rows:
+        return "the list of members is empty"
+    if any(not row["serial"] or not row["checksums"] for row in rows):
+        return "a member row has no serial or no checksums"
+    return None
+
+
 async def _ha_in_sync(
     connector: FortiOSConnector, operator: Operator, target: Any, sleep: Sleep
 ) -> tuple[bool | None, str | None]:
     """Compare the HA checksums, a few times: ``(in_sync, failure)``.
 
-    ``in_sync`` is ``None`` for one unit (fewer than two checksum rows).
+    ``in_sync`` is ``None`` for one unit (one complete checksum row).
     ``failure`` says why the HA state could not be read (a 403, a timeout,
-    a FortiOS error); then ``in_sync`` is ``None`` too and the caller does
-    not know whether the members agree.
+    a FortiOS error) or why the answer confirms nothing (no member rows, a
+    row without serial or checksums); then ``in_sync`` is ``None`` too and
+    the caller does not know whether the members agree.
     """
     in_sync: bool | None = None
     for attempt in range(HA_ATTEMPTS):
@@ -329,7 +347,11 @@ async def _ha_in_sync(
             answer = await connector.api_get(target, operator, HA_CHECKSUMS_PATH)
         except (httpx.TransportError, FortiOSApiError, ConnectorAuthError) as exc:
             return None, scrub_text(f"the HA state could not be read: {exc}")
-        in_sync = reads.ha_in_sync(reads.checksums(answer.results))
+        rows = reads.checksums(answer.results)
+        incomplete = _incomplete_checksums(answer.results, rows)
+        if incomplete is not None:
+            return None, f"the HA state is incomplete: {incomplete}"
+        in_sync = reads.ha_in_sync(rows)
         if in_sync is not False:
             return in_sync, None
         if attempt + 1 < HA_ATTEMPTS:
@@ -353,7 +375,8 @@ async def verify_after_write(
     members agree (or there is one unit). ``not_verified``: the read-back
     differs, or the members still differ after a few tries. ``unknown``: the
     read-back failed, or the read-back matches but the HA state could not be
-    read, so MEHO does not know whether every member has the change.
+    read or the answer confirms nothing, so MEHO does not know whether every
+    member has the change.
     """
     try:
         read_back = await read_object(connector, operator, target, obj)

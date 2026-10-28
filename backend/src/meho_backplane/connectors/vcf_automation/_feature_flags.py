@@ -182,7 +182,7 @@ async def classic_tenant_creation_problem(
         flag, _etag = await _read_flag(
             connector, target, operator, _FLAG_URN_PREFIX + CLASSIC_TENANT_FLAG
         )
-    except (httpx.HTTPStatusError, RuntimeError, ValueError):
+    except (httpx.HTTPError, RuntimeError, ValueError):
         return None
     if flag.get("enabled") is not False:
         return None

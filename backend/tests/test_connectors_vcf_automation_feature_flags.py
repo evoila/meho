@@ -18,6 +18,7 @@ from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 import respx
 from sqlalchemy import select
@@ -273,3 +274,20 @@ async def test_org_create_all_apps_does_not_read_the_flag(vcfa: VcfAutomationCon
     assert result["result"]["status"] == "created"
     assert post.called
     assert not flag.called
+
+
+async def test_org_create_goes_ahead_when_the_flag_read_cannot_connect(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(_ORGS).respond(200, json=page([]))
+        flag = mock.get(_CLASSIC).mock(side_effect=httpx.ConnectError("connection refused"))
+        post = mock.post(_ORGS).respond(
+            201, json={"id": "urn:vcloud:org:1", "name": "example-org", "isClassicTenant": True}
+        )
+        result = await run("vcfa.provider.org.create", {"name": "example-org"})
+    assert result["status"] == "ok", result
+    assert result["result"]["status"] == "created"
+    assert flag.called
+    assert post.called

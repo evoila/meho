@@ -279,7 +279,7 @@ check_os_packages() {
         fail "The OS-package file $file is not a complete apt repository. Missing: $(join_by ', ' "${missing[@]}")." \
             "use the OS-package file of the MEHO appliance release as it was published, and check its checksum."
     fi
-    ok "the OS-package file $file is a flat apt repository with $(grep -cE '\.deb$' <<<"$names") packages"
+    ok "the OS-package file $file is a flat apt repository. Number of .deb files: $(grep -cE '\.deb$' <<<"$names")"
 }
 
 # remove_os_packages_work: remove the unpacked repository. It is also the

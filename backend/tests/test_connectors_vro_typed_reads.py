@@ -15,7 +15,8 @@ What is covered, with a respx-mocked Orchestrator and no ingested catalog:
   ``vro.execution.list``, ``vro.execution.get`` (secret values replaced,
   also API key and secret key names, in parameters and Properties entries;
   a refused connection or a time-out gives ``outcome: not_reachable``, a
-  certificate that is not trusted gives the normal certificate error)
+  certificate that is not trusted gives the normal certificate error, a
+  destination MEHO refused gives the normal connector error)
   and ``vro.execution.logs`` (line and text caps; a labelled secret that
   crosses the text cut is removed before the cut);
 * every call asks for JSON; a vendor error reaches the answer; an id with
@@ -43,6 +44,7 @@ from tenacity import wait_none
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
+from meho_backplane.connectors.adapters.http import SsrfBlockedError
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.resolver import resolve_connector
 from meho_backplane.connectors.vro import (
@@ -696,6 +698,32 @@ async def test_execution_get_keeps_the_certificate_error(
     assert result.extras["error_code"] == "connector_tls_verify_failed"
     assert result.extras["host"] == _HOST
     assert "tls_ca_pin" in result.error
+    assert "not_reachable" not in json.dumps(result.result)
+
+
+@pytest.mark.asyncio
+async def test_execution_get_keeps_the_blocked_destination_error(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """A destination MEHO refused is not "not reachable": no request was sent."""
+    connector = await _register(_stub_embedding)
+    guard_message = "target host resolves to a private address; dispatch refused"
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        route = mock.get(_RUN_PATH).mock(side_effect=SsrfBlockedError(guard_message))
+        with patch.object(
+            connector._request_json.retry,
+            "wait",
+            wait_none(),
+        ):
+            result = await _dispatch(
+                "vro.execution.get", {"workflow_id": _WF, "execution_id": _RUN}
+            )
+
+    assert result.status == "error"
+    assert result.error == "connector_error: SsrfBlockedError"
+    assert result.extras["error_code"] == "connector_error"
+    assert result.extras["exception_message"] == guard_message
+    assert route.call_count == 1, "a refused destination is not tried again"
     assert "not_reachable" not in json.dumps(result.result)
 
 

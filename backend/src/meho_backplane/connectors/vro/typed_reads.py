@@ -36,10 +36,11 @@ spaces), so the same content always gives the same checksum.
 **Outcome.** ``vro.execution.get`` returns ``outcome`` next to the vendor
 ``state``: a plain result from :data:`OUTCOME_BY_STATE`. A state that is
 not in the table gives ``unknown``. When the server does not answer, the
-read returns ``outcome: not_reachable`` with the run id and the time. A
-server that answers with a certificate MEHO does not trust is not "not
-reachable": that error goes on to the dispatcher, which names the host and
-how to fix the trust.
+read returns ``outcome: not_reachable`` with the run id and the time. Two
+errors are not "not reachable" and go on to the dispatcher: a server that
+answers with a certificate MEHO does not trust (the dispatcher names the
+host and how to fix the trust), and a destination MEHO itself refused
+before any request, because it resolves to a private address.
 
 **More rows.** Every list read returns ``more_rows``: it asks the server
 for one row more than it returns, and the extra row only tells whether
@@ -69,6 +70,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.events import is_secret_param_name
 from meho_backplane.connectors._shared.api_file_read import text_redactor
 from meho_backplane.connectors._shared.api_file_values import TextRule
+from meho_backplane.connectors.adapters.http import SsrfBlockedError
 from meho_backplane.connectors.vro.session import VroTargetLike
 from meho_backplane.operations._rfc6570 import has_dot_segment
 
@@ -491,6 +493,18 @@ def _is_tls_verify_failure(exc: httpx.TransportError) -> bool:
     )
 
 
+def _is_not_reachable(exc: httpx.TransportError) -> bool:
+    """True when the server did not answer; False for an error MEHO must report.
+
+    Two transport errors are not "the server did not answer". An
+    untrusted certificate means the server did answer. An
+    :class:`~meho_backplane.connectors.adapters.http.SsrfBlockedError`
+    means MEHO refused the destination before any request. Both are
+    raised on, so the dispatcher reports the real reason.
+    """
+    return not (isinstance(exc, SsrfBlockedError) or _is_tls_verify_failure(exc))
+
+
 def _outcome(state: Any) -> str:
     """The plain outcome of a vendor run state; ``unknown`` when the state is not known."""
     if not isinstance(state, str):
@@ -508,10 +522,13 @@ async def vro_execution_get_impl(
 
     When the server does not answer (a connection or time-out error after
     the retries), returns ``outcome: not_reachable`` with the run id and
-    ``checked_at``; every other field is empty. A certificate the server
-    answered with but MEHO does not trust is not "not reachable": that
-    error is raised on, so the dispatcher returns its
-    ``connector_tls_verify_failed`` answer with the fix guidance.
+    ``checked_at``; every other field is empty. Two errors are not "not
+    reachable" and are raised on: a certificate the server answered with
+    but MEHO does not trust (the dispatcher returns its
+    ``connector_tls_verify_failed`` answer with the fix guidance), and a
+    destination MEHO refused before any request because it resolves to a
+    private address (the dispatcher returns ``connector_error`` with the
+    guard's message).
     """
     workflow_id = _segment("workflow", params.get("workflow_id"))
     execution_id = _segment("execution", params.get("execution_id"))
@@ -523,7 +540,7 @@ async def vro_execution_get_impl(
             operator=operator,
         )
     except httpx.TransportError as exc:
-        if _is_tls_verify_failure(exc):
+        if not _is_not_reachable(exc):
             raise
         payload = {"id": params.get("execution_id")}
         outcome = _OUTCOME_NOT_REACHABLE

@@ -24,7 +24,7 @@ operations' response schemas.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from datetime import date, datetime
 from typing import Annotated, Any, Final, Literal
 
@@ -37,9 +37,13 @@ __all__ = [
     "AssessmentItem",
     "AssessmentResult",
     "Assumptions",
+    "CountCheck",
     "Disk",
     "Figure",
+    "IdentityDuplicate",
     "IdentityHints",
+    "IdentityIndex",
+    "IdentityMatch",
     "InventoryCounts",
     "InventoryEnvelope",
     "InventoryInput",
@@ -57,6 +61,7 @@ __all__ = [
     "Utilization",
     "WorkloadVolume",
     "assessment_result_json_schema",
+    "find_identity_duplicates",
     "inventory_json_schema",
     "missing_reason",
 ]
@@ -147,7 +152,13 @@ class _Record(_Shape):
 class IdentityHints(_Shape):
     """Facts that find one machine seen through two sources (vCenter and its guest OS)."""
 
-    bios_uuid: str | None = Field(default=None, description="SMBIOS / BIOS UUID, lower case.")
+    bios_uuid: str | None = Field(
+        default=None,
+        description=(
+            "SMBIOS / BIOS UUID, lower case, in the form the guest OS reports it. A "
+            "vCenter record is converted to that form (see the migration docs)."
+        ),
+    )
     mac_addresses: list[str] = Field(
         default_factory=list, description="MAC addresses, lower case with ':'."
     )
@@ -241,6 +252,13 @@ class ServerRecord(_Record):
     power_state: Literal["on", "off", "suspended"] | None = None
     nics: list[Nic] | None = None
     utilization: Utilization | None = None
+    source_attributes: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "More facts the source reports, with fixed keys per source. VMware: "
+            "'vm_id', 'instance_uuid', 'hardware_version', 'esxi_host', 'cluster'."
+        ),
+    )
 
 
 class ApplicationRecord(_Record):
@@ -303,6 +321,116 @@ class Omission(_Shape):
     what: str = Field(min_length=1, description="What was not collected.")
     reason: MissingReason
     detail: str | None = Field(default=None, description="More detail, if any.")
+    kind: RecordKind | None = Field(
+        default=None,
+        description=(
+            "Set when this omission stands for one item of the source that has no "
+            "record (one VM left out). Such omissions count in the reconciliation."
+        ),
+    )
+    source_id: str | None = Field(default=None, description="Id of the left-out item.")
+
+
+IdentityMatch = Literal["bios_uuid", "instance_uuid"]
+
+
+class IdentityDuplicate(_Shape):
+    """Two records that look like the same machine. Both stay in ``records``."""
+
+    source_id: str = Field(min_length=1, description="The later record.")
+    same_as: str = Field(
+        min_length=1, description="The first record of that machine. Never itself a duplicate."
+    )
+    match: IdentityMatch = Field(
+        description="The kind of value this record shares with another record of the machine."
+    )
+
+
+class IdentityIndex:
+    """Finds server records that look like a machine seen before.
+
+    Two records are the same machine when they share a BIOS UUID or an
+    instance UUID, directly or through other records: when C shares A's BIOS
+    UUID and B's instance UUID, A, B and C are one machine, in whatever order
+    they arrive. :meth:`add` every record first, then :meth:`duplicates`
+    names, for every later record of a machine, its first record. The caller
+    decides what a duplicate means for its output.
+    """
+
+    def __init__(self) -> None:
+        self._position: dict[str, int] = {}
+        self._parent: dict[str, str] = {}
+        self._holder: dict[tuple[IdentityMatch, str], str] = {}
+        self._linked_by: dict[str, IdentityMatch] = {}
+
+    def add(self, record: InventoryRecord) -> None:
+        """Register *record*'s identities. A record given twice counts once."""
+        if not isinstance(record, ServerRecord):
+            return
+        source_id = record.source_id
+        if source_id not in self._position:
+            self._position[source_id] = len(self._position)
+            self._parent[source_id] = source_id
+        bios_uuid = record.identity_hints.bios_uuid
+        if bios_uuid:
+            self._link(source_id, ("bios_uuid", bios_uuid.lower()))
+        instance_uuid = record.source_attributes.get("instance_uuid")
+        if instance_uuid:
+            self._link(source_id, ("instance_uuid", instance_uuid.lower()))
+
+    def _link(self, source_id: str, identity: tuple[IdentityMatch, str]) -> None:
+        holder = self._holder.setdefault(identity, source_id)
+        if holder == source_id:
+            return
+        first, later = sorted(
+            (self._first(source_id), self._first(holder)), key=self._position.__getitem__
+        )
+        if first != later:
+            self._parent[later] = first
+            self._linked_by[later] = identity[0]
+
+    def _first(self, source_id: str) -> str:
+        root = source_id
+        while self._parent[root] != root:
+            root = self._parent[root]
+        while self._parent[source_id] != root:
+            self._parent[source_id], source_id = root, self._parent[source_id]
+        return root
+
+    def duplicates(self) -> list[IdentityDuplicate]:
+        """Every later record of a machine with its first record, in record order."""
+        return [
+            IdentityDuplicate(source_id=source_id, same_as=first, match=self._linked_by[source_id])
+            for source_id in self._position
+            if (first := self._first(source_id)) != source_id
+        ]
+
+
+def find_identity_duplicates(records: Iterable[InventoryRecord]) -> list[IdentityDuplicate]:
+    """The records that look like a machine already in *records*, in record order."""
+    index = IdentityIndex()
+    for record in records:
+        index.add(record)
+    return index.duplicates()
+
+
+class CountCheck(_Shape):
+    """Does the source's own total equal records plus omissions, for one kind?"""
+
+    kind: RecordKind
+    source_total: int = Field(ge=0, description="The total the source itself reports.")
+    records: int = Field(ge=0, description="Records of this kind in the inventory.")
+    omitted: int = Field(ge=0, description="Omissions of this kind (each one item).")
+    difference: int = Field(description="source_total minus records minus omitted.")
+    matches: bool = Field(description="True when the difference is 0.")
+
+    @model_validator(mode="after")
+    def _arithmetic(self) -> CountCheck:
+        if self.difference != self.source_total - self.records - self.omitted:
+            raise ValueError("difference must be source_total - records - omitted")
+        if self.matches != (self.difference == 0):
+            raise ValueError("matches must be true exactly when difference is 0")
+        return self
 
 
 class InventoryCounts(_Shape):
@@ -315,6 +443,10 @@ class InventoryCounts(_Shape):
         default_factory=dict,
         description="The source's own total per kind, where it reports one.",
     )
+    reconciliation: list[CountCheck] = Field(
+        default_factory=list,
+        description="Per kind: source total against records plus omissions.",
+    )
 
 
 class InventoryEnvelope(_Shape):
@@ -325,6 +457,10 @@ class InventoryEnvelope(_Shape):
     records: list[InventoryRecord]
     omissions: list[Omission] = Field(default_factory=list)
     counts: InventoryCounts
+    duplicates: list[IdentityDuplicate] = Field(
+        default_factory=list,
+        description="Records that look like a machine already in the list. Not counted twice.",
+    )
 
     @model_validator(mode="after")
     def _counts_match_and_ids_are_unique(self) -> InventoryEnvelope:
@@ -342,7 +478,32 @@ class InventoryEnvelope(_Shape):
             seen.add(record.source_id)
         if repeated:
             raise ValueError(f"source_id values repeat: {sorted(repeated)}")
+        self._check_duplicates(seen)
+        self._check_reconciliation(actual)
         return self
+
+    def _check_duplicates(self, source_ids: set[str]) -> None:
+        unknown = sorted(
+            {
+                ref
+                for duplicate in self.duplicates
+                for ref in (duplicate.source_id, duplicate.same_as)
+                if ref not in source_ids
+            }
+        )
+        if unknown:
+            raise ValueError(f"duplicates name records that are not in the inventory: {unknown}")
+
+    def _check_reconciliation(self, actual: dict[str, int]) -> None:
+        for check in self.counts.reconciliation:
+            omitted = sum(1 for omission in self.omissions if omission.kind == check.kind)
+            if self.counts.source_totals.get(check.kind, check.source_total) != check.source_total:
+                raise ValueError(f"reconciliation of {check.kind!r} names another source total")
+            if check.records != actual[check.kind] or check.omitted != omitted:
+                raise ValueError(
+                    f"reconciliation of {check.kind!r} does not match the records "
+                    f"({actual[check.kind]}) and omissions ({omitted})"
+                )
 
 
 # --- assessment result ------------------------------------------------------

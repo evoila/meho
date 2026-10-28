@@ -54,9 +54,12 @@ reads the two keys (product-gated to `product == "vault"`; a blank /
 whitespace / non-string value normalises to "no override"), and
 `vault_client_for_target(operator, target)` forwards them to
 `auth.vault.vault_client_for_operator(operator, role=…, mount_path=…)`.
-Every KV handler (`ops.py`) and auth handler (`ops_auth.py`,
-`ops_auth_write.py`) opens its client through that one helper, so a target
-naming a role governs its whole KV/auth dispatch. Role selection
+Every KV handler (`ops.py`), auth handler (`ops_auth.py`,
+`ops_auth_write.py`), token-role handler (`ops_token_role.py`) and ACL-policy
+handler (`ops_sys_policy.py`, #3945) opens its client through that one
+helper, so a target naming a role governs its whole KV/auth/policy dispatch.
+The other sys ops and the identity ops (`ops_identity.py`) still log in
+through `vault_client_for_operator` and ignore the target's role. Role selection
 precedence at the login site (`auth.vault._resolve_login_role`) is:
 **per-target override (#3274) → check-runner role (#2757) → per-tenant role
 (#3852) → deployment-global `vault_oidc_role`**.
@@ -219,8 +222,14 @@ target registration) is documented in
   | `vault.sys.policy.write` | `sys.create_or_update_policy` | dangerous | True | `write` |
   | `vault.sys.policy.delete` | `sys.delete_policy` | dangerous | True | `write` |
 
-  All four forward the operator JWT via `vault_client_for_operator` and
-  offload the sync `hvac` call with `asyncio.to_thread`. `policy.read`
+  All four forward the operator JWT via `vault_client_for_target`, so the
+  target's `extras["vault_role"]` picks the Vault role (#3945), and
+  offload the sync `hvac` call with `asyncio.to_thread`. `policy.delete`
+  also registers a park-time permission preflight: `sys/capabilities-self`
+  must grant `delete` on `sys/policy/<name>` to that role, or the call is
+  refused with `write_capability_denied` before an approval row is written.
+  The tenant removal runbook that uses it is
+  `docs/cross-repo/vault-remove-tenant.md`. `policy.read`
   unwraps the `data.rules` (or `data.policy`) envelope, falling back to
   the legacy top-level keys → `{name, rules}` (rules `None` when
   absent). `policy.list` returns `{policies: [...]}` from the

@@ -360,7 +360,7 @@ MOUNT_LIBRARY_ISO_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     "oneOf": [{"required": ["library_item"]}, {"required": ["library_item_name"]}],
     "additionalProperties": False,
     "examples": [
-        {"vm": "vm-42", "library_item": "<library-item-id>"},
+        {"vm": "vm-42", "library_item": "0b6e3e0c-1f2a-4c55-9a51-2f6d7a8b9c01"},
         {"vm": "vm-42", "library_item_name": "<iso-item-name>", "library_name": "<library>"},
     ],
 }

@@ -1773,7 +1773,8 @@ shape (deterministic file-level matrix + fan-in):
   render tests really run there and fail, not skip, if helm is missing.
 - **`python-unit-lane`** — the **fan-in** carrying the exact
   branch-protection required context `Python (ruff + mypy + pytest)`. It
-  `needs: [changes, python-lint, python-unit-shard]` and, via `if: always()
+  `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`
+  and, via `if: always()
   && <fork guard>`, runs regardless of upstream results, then inspects
   `needs.*.result`. `always()` is load-bearing: a plain `needs:` gate would
   be *skipped* when a shard fails, and a skipped required check counts as
@@ -1783,10 +1784,15 @@ shape (deterministic file-level matrix + fan-in):
   guard skips this job (and the shards), reporting the required context as
   Success exactly as the old single job did. Since #3252 the step first
   fails CLOSED if the `changes` detector did not itself succeed, then
-  branches on `needs.changes.outputs.docs_only`: on the **docs-only fast
-  path** it accepts the detect-driven `skipped` lint/shards as pass; on a
-  **full run** it requires strict `success` (a `skipped` lint/shard there is
-  anomalous and fails the gate). See [Docs-only fast path
+  branches on `needs.changes.outputs.docs_only` (and, since #5296,
+  `backend_python`): on the **docs-only fast
+  path** it accepts the detect-driven `skipped` lint/shards as pass. Since
+  #5296, when no `backend/` file changed (`backend_python=false`), it accepts
+  the skipped lint/shards and passes only if `python-outside-backend` passes
+  (see [No-backend path (#5296)](#no-backend-path-5296)). On a **full run**
+  it requires strict `success` from lint and shards (a `skipped` lint/shard
+  there is anomalous and fails the gate), and `python-outside-backend` must
+  be skipped or passed. See [Docs-only fast path
   (#3252)](#docs-only-fast-path-3252).
 
 Because the required context string is unchanged and stays on a job, the

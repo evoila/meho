@@ -156,6 +156,7 @@ from meho_backplane.connectors.vmware_rest.soap import (
     build_mark_ssd_envelope,
     build_query_boot_devices_envelope,
     build_retrieve_properties_ex_envelope,
+    build_search_datastore_envelope,
     build_service_content_envelope,
     parse_boot_devices,
     parse_moref_result,
@@ -2427,10 +2428,18 @@ class VmwareRestConnector(HttpConnector):
             return build_datastore_refresh_envelope(
                 moid, storage_info=(method == "RefreshDatastoreStorageInfo")
             )
+        if method in ("SearchDatastore_Task", "SearchDatastoreSubFolders_Task"):
+            return build_search_datastore_envelope(
+                moid,
+                method,
+                str(body.get("datastorePath", "")),
+                body.get("searchSpec", {}) or {},
+            )
         raise RuntimeError(
             f"vmware vim method {method!r} has no SOAP builder — the standalone-ESXi "
             f"SOAP transport (#3363) implements RetrievePropertiesEx / QueryBootDevices "
-            f"/ CreateNasDatastore / MarkAs*_Task / RefreshDatastore(StorageInfo) only"
+            f"/ CreateNasDatastore / MarkAs*_Task / RefreshDatastore(StorageInfo) / "
+            f"SearchDatastore(SubFolders)_Task only"
         )
 
     @staticmethod
@@ -2455,7 +2464,7 @@ class VmwareRestConnector(HttpConnector):
             return parse_boot_devices(xml)
         if method in ("RefreshDatastore", "RefreshDatastoreStorageInfo"):
             return {}
-        # CreateNasDatastore / MarkAs*_Task -> a MoRef returnval.
+        # CreateNasDatastore / MarkAs*_Task / SearchDatastore*_Task -> a MoRef returnval.
         return parse_moref_result(xml, method) or {}
 
     def _soap_fault_error(

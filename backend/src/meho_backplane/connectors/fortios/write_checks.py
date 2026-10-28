@@ -8,15 +8,17 @@ these helpers. A change runs in three steps:
 
 1. :func:`check_before_write` -- refuse when the version is not on the
    tested list, when FortiManager controls the device ("change it in
-   FortiManager"; never a direct change instead), when the live object is no
-   longer what the approver saw (``expected_before``), or when the policies
-   and groups that use it changed (``expected_references``).
+   FortiManager"; never a direct change instead) or MEHO cannot tell, when
+   the live object is no longer what the approver saw (``expected_before``),
+   or when the policies and groups that use it changed
+   (``expected_references``).
 2. :func:`send_write` -- send the change once. A lost answer (a timeout, a
    dropped connection, an HA failover) gives the outcome ``unknown`` and is
    never sent a second time.
 3. :func:`verify_after_write` -- read the object back and compare it with
    what was sent, then compare the HA checksums of the members. The outcome
-   is ``verified``, ``not_verified`` or ``unknown``.
+   is ``verified``, ``not_verified`` or ``unknown`` (the read-back or the HA
+   state could not be read).
 
 :func:`register_write_preview` registers the preview an approver sees: the
 object now and after the change, the policies and groups that use it, the
@@ -200,10 +202,10 @@ async def read_references(
 
 async def fortimanager_controls(
     connector: FortiOSConnector, operator: Operator, target: Any
-) -> tuple[bool, str | None]:
-    """Whether FortiManager controls the device, and the FortiOS version of the answer."""
+) -> tuple[bool | None, str | None]:
+    """Whether FortiManager controls the device (``None``: unknown), and the answer's version."""
     answer = await connector.api_get(target, operator, CENTRAL_MANAGEMENT_PATH)
-    return bool(reads.fortimanager_state(answer.results)["fortimanager_controls"]), answer.version
+    return reads.fortimanager_state(answer.results)["fortimanager_controls"], answer.version
 
 
 async def check_before_write(
@@ -231,6 +233,12 @@ async def check_before_write(
             f"FortiOS {'.'.join(map(str, version))} is covered ({COVERED_RANGE_TEXT}) but not "
             "on the tested list, so MEHO refuses changes on it",
             code="version_untested",
+        )
+    if controls is None:
+        raise FortiOSWriteRefusedError(
+            "MEHO could not tell whether FortiManager controls this FortiGate (the central "
+            "management answer has no mode or server MEHO knows), so the change was not sent",
+            code="fortimanager_unknown",
         )
     if controls:
         raise FortiOSWriteRefusedError(
@@ -307,20 +315,26 @@ def _differences(sent: Mapping[str, Any], read_back: Mapping[str, Any]) -> list[
 
 async def _ha_in_sync(
     connector: FortiOSConnector, operator: Operator, target: Any, sleep: Sleep
-) -> bool | None:
-    """Compare the HA checksums, a few times. ``None``: one unit, or not readable."""
+) -> tuple[bool | None, str | None]:
+    """Compare the HA checksums, a few times: ``(in_sync, failure)``.
+
+    ``in_sync`` is ``None`` for one unit (fewer than two checksum rows).
+    ``failure`` says why the HA state could not be read (a 403, a timeout,
+    a FortiOS error); then ``in_sync`` is ``None`` too and the caller does
+    not know whether the members agree.
+    """
     in_sync: bool | None = None
     for attempt in range(HA_ATTEMPTS):
         try:
             answer = await connector.api_get(target, operator, HA_CHECKSUMS_PATH)
-        except (FortiOSApiError, ConnectorAuthError):
-            return None
+        except (httpx.TransportError, FortiOSApiError, ConnectorAuthError) as exc:
+            return None, scrub_text(f"the HA state could not be read: {exc}")
         in_sync = reads.ha_in_sync(reads.checksums(answer.results))
         if in_sync is not False:
-            return in_sync
+            return in_sync, None
         if attempt + 1 < HA_ATTEMPTS:
             await sleep(HA_DELAY_SECONDS)
-    return in_sync
+    return in_sync, None
 
 
 async def verify_after_write(
@@ -338,7 +352,8 @@ async def verify_after_write(
     object must be gone). ``verified``: the read-back matches and the HA
     members agree (or there is one unit). ``not_verified``: the read-back
     differs, or the members still differ after a few tries. ``unknown``: the
-    read-back failed.
+    read-back failed, or the read-back matches but the HA state could not be
+    read, so MEHO does not know whether every member has the change.
     """
     try:
         read_back = await read_object(connector, operator, target, obj)
@@ -354,14 +369,16 @@ async def verify_after_write(
             diff = _differences(sent, read_back)
             if diff:
                 reasons.append(f"read-back differs in: {', '.join(diff)}")
-    in_sync = await _ha_in_sync(connector, operator, target, sleep)
+    in_sync, ha_failure = await _ha_in_sync(connector, operator, target, sleep)
     if in_sync is False:
         reasons.append("the HA members do not have the same configuration yet")
+    outcome: Outcome = "not_verified" if reasons else "verified"
+    if ha_failure is not None:
+        reasons.append(ha_failure)
+        if outcome == "verified":
+            outcome = "unknown"
     return Verification(
-        outcome="not_verified" if reasons else "verified",
-        reasons=tuple(reasons),
-        read_back=read_back,
-        ha_in_sync=in_sync,
+        outcome=outcome, reasons=tuple(reasons), read_back=read_back, ha_in_sync=in_sync
     )
 
 

@@ -26,6 +26,7 @@ __all__ = [
     "ha_settings",
     "is_fortigate",
     "licence_rows",
+    "member_serials",
     "platform_of",
     "resource_usage",
     "status_fields",
@@ -156,16 +157,27 @@ def ha_settings(ha_results: Any) -> dict[str, Any]:
     return {"mode": _str(row.get("mode")), "group_name": _str(row.get("group-name"))}
 
 
-def device_identity(members: list[dict[str, Any]], answering_serial: str | None) -> str | None:
+def member_serials(members: list[dict[str, Any]]) -> list[str]:
+    """The serials of HA member rows (``ha_members`` or ``checksums`` rows), sorted."""
+    return sorted({m["serial"] for m in members if m.get("serial")})
+
+
+def device_identity(serials: list[str] | None, answering_serial: str | None) -> str | None:
     """One id for all targets of one device: the HA members, or the one unit.
 
-    An HA pair keeps its id through a failover, because the id lists every
-    member serial, sorted.
+    *serials* are the HA member serials: an empty list means the unit stands
+    alone, ``None`` means MEHO could not read the HA state. An HA pair keeps
+    its id through a failover, because the id lists every member serial,
+    sorted. With ``None`` the id is ``None`` too: the serial of the unit that
+    answered is not a device id, because another member answers after a
+    failover.
     """
-    serials = sorted({m["serial"] for m in members if m.get("serial")})
-    if len(serials) >= 2:
-        return "ha:" + ",".join(serials)
-    serial = serials[0] if serials else answering_serial
+    if serials is None:
+        return None
+    known = sorted(set(serials))
+    if len(known) >= 2:
+        return "ha:" + ",".join(known)
+    serial = known[0] if known else answering_serial
     return f"serial:{serial}" if serial else None
 
 
@@ -186,14 +198,23 @@ def vdom_rows(vdom_results: Any) -> list[dict[str, Any]]:
 def fortimanager_state(results: Any) -> dict[str, Any]:
     """Central management state of ``monitor/system/central-management/status``.
 
-    FortiManager controls the device when the mode is ``normal`` and a
-    FortiManager server is set. In ``backup`` mode FortiManager only keeps
-    copies of the configuration, so direct changes stay allowed.
+    ``fortimanager_controls`` is ``True`` when the mode is ``normal`` and a
+    FortiManager server is set, ``False`` when the mode is ``backup`` (then
+    FortiManager only keeps copies of the configuration) or the server field
+    is present but empty, and ``None`` when the answer has no mode MEHO
+    knows or no server field. ``None`` means unknown: a write check refuses
+    the change, because MEHO cannot tell whether direct changes are allowed.
     """
     state = _mapping(results)
     mode = _str(state.get("mode"))
     server = _str(state.get("server"))
-    controls = mode == "normal" and server is not None and server != "0.0.0.0"
+    controls: bool | None
+    if mode == "backup":
+        controls = False
+    elif mode == "normal" and "server" in state:
+        controls = server is not None and server != "0.0.0.0"
+    else:
+        controls = None
     return {
         "fortimanager_controls": controls,
         "mode": mode,

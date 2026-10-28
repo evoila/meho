@@ -49,7 +49,10 @@ product from the first part of the connector ID, so the ID must start with
   administrator with the least rights it needs, and limit its trusted hosts
   to MEHO's address. A VDOM target gets a token limited to that VDOM.
 - TLS checks stay on. Pin the device's certificate or CA with `tls_ca_pin`,
-  and set `tls_server_name` when the host is an IP address.
+  and set `tls_server_name` when the host is an IP address. A target with
+  `verify_tls: false` is refused before any call, reads and writes alike
+  (`FortiOSConnector.require_tls_checks`): the token goes with every call,
+  so MEHO never sends it over an unchecked connection.
 
 ## Operations
 
@@ -60,7 +63,7 @@ All six are `safe` reads on a device target, in the group `fortios-device`.
 | `fortios.system.status` | `GET monitor/system/status`, `monitor/system/firmware`, `monitor/license/status` | host name, model, serial, hardware or VM, version, build, FortiCare and VM licence state |
 | `fortios.ha.status` | `GET monitor/system/ha-peer`, `monitor/system/ha-checksums`, `cmdb/system/ha` | HA mode and group, members with role and priority, `in_sync`, checksums, `device_id` |
 | `fortios.vdom.list` | `GET cmdb/system/vdom` | the VDOMs |
-| `fortios.central_management.status` | `GET monitor/system/central-management/status` | whether FortiManager controls the device |
+| `fortios.central_management.status` | `GET monitor/system/central-management/status` | whether FortiManager controls the device: `true`, `false`, or `null` when the answer has no mode or server MEHO knows |
 | `fortios.license.status` | `GET monitor/license/status` | licences and support contracts (no account or company names) |
 | `fortios.resource.usage` | `GET monitor/system/resource/usage?scope=global` | current CPU, memory, disk, sessions, setup rates |
 
@@ -81,16 +84,25 @@ members, the VDOM list and the FortiManager state. It records:
 
 - `version` (for example `7.4.4`), `build`, and `edition` (`hardware` or `vm`);
 - under `extras`: model, host name, the serial of the unit that answered,
-  `scope` and `vdom`, `ha_members`, `vdoms`, `fortimanager_controls`,
+  `scope` and `vdom`, `ha_members`, `ha_member_serials`, `vdoms`,
+  `fortimanager_controls` (`true`, `false` or `null` for unknown),
   `version_warning`;
 - `extras.device_id`: one ID for all targets of one device. For an HA pair it
   is `ha:` plus the sorted member serials, so it stays the same after a
   failover; for one unit it is `serial:<serial>`. Checks and the shared
   device budget use it to treat all targets of one device as one.
 
-A token that may not read the HA members, the VDOM list or the FortiManager
-state (a VDOM token, for example) leaves that field `null`; detection still
-works. A model that is not a FortiGate, or a version outside 7.2 to 7.x, is
+The member serials come from `monitor/system/ha-peer`, or from
+`monitor/system/ha-checksums` when the token may not read the peers (then
+`ha_members` is `null` but the ID is still the cluster ID). When the token
+may read neither, `device_id` is `null` and `extras.device_id_reason` says
+why. MEHO does not use the serial of the unit that answered as the ID then:
+another member answers after a failover, so that ID would change. Give the
+token read rights on the HA state to get an ID.
+
+A token that may not read the VDOM list or the FortiManager state leaves
+that field `null`; detection still works. A model that is not a FortiGate,
+or a version outside 7.2 to 7.x, is
 refused: `reachable` is false, `extras.refused` is true and `extras.error`
 says why. The token never appears in the result.
 
@@ -101,6 +113,7 @@ says why. The token never appears in the result.
 | HTTP 401 | `connector_auth_failed`, cause `token_refused`. Sent once; never retried. |
 | HTTP 403 | `connector_auth_failed`, cause `missing_rights`: the token's profile lacks the rights. |
 | TLS check fails | `connector_tls_verify_failed`; detection says to set `tls_ca_pin` and `tls_server_name`. |
+| Target has `verify_tls: false` | refused before any call; the message says to set `verify_tls: true` and pin with `tls_ca_pin`. |
 | Answer with `status` other than `success` | `connector_error` with the FortiOS error number and the cleaned `cli_error`. |
 | Other HTTP error | `connector_error` with the status and the cleaned FortiOS error. |
 | Version 8.0 or older than 7.2 in an answer | the read is refused. |
@@ -115,7 +128,8 @@ handler returns. So the audit row, a stored result, the trace and the
 broadcast feed only see the cleaned values. It replaces with `[REDACTED]`:
 
 - any text that starts with `ENC ` (FortiOS's mark for a stored secret),
-  whatever the field name;
+  whatever the field name; an `ENC ...` value inside a longer text (a
+  `cli_error` such as `set psksecret ENC ...`) is replaced inside the text;
 - any PEM private key;
 - the value of a known secret field (`password`, `psksecret`, `passwd`,
   `secret`, `private-key`, ...), a name with a secret word in it, or a name
@@ -140,6 +154,9 @@ change operation exists yet; the later FortiGate work calls these.
    - the version is not on the tested list (`version_untested`);
    - FortiManager controls the device (`fortimanager_controls`): "change it
      in FortiManager". MEHO never falls back to a direct change;
+   - MEHO cannot tell whether FortiManager controls the device
+     (`fortimanager_unknown`): the answer has no `mode` MEHO knows, or no
+     `server` field. Unknown is never treated as "not controlled";
    - the live object is not `expected_before` (`object_changed`); for a
      create, `expected_before` is `null` and the object must not exist;
    - for a change or delete, the entries that use the object are not
@@ -154,8 +171,12 @@ change operation exists yet; the later FortiGate work calls these.
 3. `verify_after_write` reads the object back and compares the fields that
    were sent (secret fields are not compared), then compares the HA
    checksums up to five times, two seconds apart. The outcome is `verified`,
-   `not_verified` (with reasons) or `unknown` (the read-back failed). A token
-   that may not read the HA checksums leaves `ha_in_sync` `null`.
+   `not_verified` (with reasons) or `unknown`: the read-back failed, or the
+   read-back matches but the HA state could not be read (a 403, a timeout, a
+   FortiOS error), so MEHO does not know whether every member has the
+   change. One unit (fewer than two checksum rows) is `verified` with
+   `ha_in_sync` `null`. A read-back that differs stays `not_verified` even
+   when the HA state is unreadable.
 
 `register_write_preview(op_id, WritePreviewSpec(...))` registers the preview
 an approver sees: the object now and after, the entries that use it, the
@@ -175,19 +196,25 @@ reference needs a login. The first live run should confirm:
 - that `mode: normal` with a server set is the right sign of FortiManager
   control;
 - which reads a VDOM-limited token may make (central management state, HA
-  checksums).
+  peers, HA checksums); a token that may read neither HA call gets no
+  `device_id`;
+- the shape of `monitor/system/ha-checksums` on a unit that stands alone
+  (one row or an empty list; both count as one unit).
 
 ## Tests
 
 - `backend/tests/test_connectors_fortios.py`: registration, the six reads,
   the token and VDOM on every call, target kinds, detection (hardware HA
-  pair, single VM, VDOM target, FortiOS 8.0 and 7.0, a non-FortiGate model,
-  an untested 7.x), and the 401 / 403 / TLS messages.
+  pair, single VM, VDOM target, the same `device_id` before and after a
+  failover, no `device_id` for a token that may not read the HA state,
+  FortiOS 8.0 and 7.0, a non-FortiGate model, an untested 7.x), the
+  401 / 403 / TLS messages, and the refusal of `verify_tls: false`.
 - `backend/tests/test_connectors_fortios_redaction.py`: planted `ENC` values
-  and secret fields stay out of answers, audit rows, error texts, traces and
-  saved test data.
+  and secret fields stay out of answers, audit rows, error texts, traces
+  (also the trace of an error answer) and saved test data.
 - `backend/tests/test_connectors_fortios_write_checks.py`: the checks before
-  and after a write, the lost answer, and the preview.
+  and after a write (also an unknown FortiManager state, and an HA state
+  that cannot be read), the lost answer, and the preview.
 
 All tests mock HTTP with `respx` and use made-up names. No live device runs
 in CI.

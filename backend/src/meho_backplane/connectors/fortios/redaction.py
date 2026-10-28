@@ -14,7 +14,9 @@ cleaned value.
 A value is replaced with :data:`REDACTED` when one of these holds:
 
 1. it is a text that starts with ``ENC`` and a space (FortiOS's mark for an
-   encrypted secret), whatever the field name;
+   encrypted secret), whatever the field name. An ``ENC ...`` value inside a
+   longer text (a ``cli_error`` such as ``set psksecret ENC ...``) is
+   replaced inside the text;
 2. it is a text that holds a PEM private key;
 3. its field name is a known secret name (:data:`SECRET_FIELD_NAMES`), holds
    a secret word (:data:`_SECRET_NAME_PARTS`), or ends in ``-key`` / ``_key``
@@ -142,8 +144,11 @@ def scrub(value: Any) -> tuple[Any, int]:
             items.append(cleaned)
             count += found
         return items, count
-    if isinstance(value, str) and _is_secret_value(value):
-        return REDACTED, 1
+    if isinstance(value, str):
+        if _is_secret_value(value):
+            return REDACTED, 1
+        cleaned_text = scrub_text(value)
+        return cleaned_text, int(cleaned_text != value)
     return value, 0
 
 

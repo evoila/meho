@@ -19,7 +19,10 @@ TLS
 
 Checks stay on. The operator pins the device's certificate or CA
 (``tls_ca_pin``) and sets ``tls_server_name`` when the host is an IP
-address; both come from the shared HTTP base.
+address; both come from the shared HTTP base. A target with
+``verify_tls=false`` is refused before any call
+(:meth:`FortiOSConnector.require_tls_checks`): the API token goes with every
+call, so the connector never sends it over an unchecked connection.
 
 Calls
 -----
@@ -100,6 +103,13 @@ _RESERVED_QUERY_KEYS: Final[frozenset[str]] = frozenset({"vdom", "global"})
 
 #: Reads the API token of a target; tests pass a fake.
 TokenLoader = Callable[[FortiOSTargetLike, Operator], Awaitable[str]]
+
+_DEVICE_ID_UNKNOWN: Final[str] = (
+    "the token may read neither monitor/system/ha-peer nor monitor/system/ha-checksums, so "
+    "MEHO cannot tell whether this unit stands alone or is one member of an HA cluster. "
+    "extras.serial names the unit that answered; it is not a device id, because another "
+    "member answers after a failover. Give the token read rights on the HA state to get one."
+)
 
 
 def _is_tls_failure(exc: BaseException) -> bool:
@@ -189,7 +199,20 @@ class FortiOSConnector(HttpConnector):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _query(target: Any, query: Mapping[str, Any] | None) -> dict[str, Any]:
+    def require_tls_checks(target: Any) -> None:
+        """Raise :class:`FortiOSTargetError` when the target turns the TLS check off."""
+        if bool(getattr(target, "verify_tls", True)):
+            return
+        raise FortiOSTargetError(
+            f"FortiGate target {getattr(target, 'name', None)!r} has verify_tls=false. MEHO "
+            "keeps the TLS check on for a FortiGate, because the API token goes with every "
+            "call. Set verify_tls=true and pin the device's certificate or CA with "
+            "tls_ca_pin; set tls_server_name when the target's host is an IP address."
+        )
+
+    @classmethod
+    def _query(cls, target: Any, query: Mapping[str, Any] | None) -> dict[str, Any]:
+        cls.require_tls_checks(target)
         params = dict(query or {})
         reserved = sorted(k for k in params if str(k).lower() in _RESERVED_QUERY_KEYS)
         if reserved:
@@ -268,6 +291,26 @@ class FortiOSConnector(HttpConnector):
                 raise
             return None
 
+    async def _ha_membership(
+        self, target: FortiOSTargetLike, operator: Operator
+    ) -> tuple[list[dict[str, Any]] | None, list[str] | None]:
+        """The HA member rows and the member serials; ``None`` for what the token may not read.
+
+        The serials come from ``monitor/system/ha-peer``, or from
+        ``monitor/system/ha-checksums`` when the token may not read the peers.
+        When neither is readable the membership is unknown: the serial of the
+        unit that answered is not used as a device id, because another member
+        answers after a failover.
+        """
+        peers = await self._optional(target, operator, HA_PEER_PATH)
+        if peers is not None:
+            members = reads.ha_members(peers.results)
+            return members, reads.member_serials(members)
+        sums = await self._optional(target, operator, HA_CHECKSUMS_PATH)
+        if sums is not None:
+            return None, reads.member_serials(reads.checksums(sums.results))
+        return None, None
+
     # ------------------------------------------------------------------
     # Detection
     # ------------------------------------------------------------------
@@ -313,13 +356,12 @@ class FortiOSConnector(HttpConnector):
         if refusal is not None:
             return self._result(reachable=False, extras=refusal)
         try:
-            peers = await self._optional(target, effective, HA_PEER_PATH)
+            members, serials = await self._ha_membership(target, effective)
             vdoms = await self._optional(target, effective, VDOM_PATH)
             fmg = await self._optional(target, effective, CENTRAL_MANAGEMENT_PATH)
         except (httpx.HTTPError, ConnectorAuthError) as exc:
             return self._result(reachable=False, extras={"error": describe_failure(exc, target)})
         version = require_covered(status.version)
-        members = reads.ha_members(peers.results) if peers is not None else None
         fields = reads.status_fields(status.results, firmware.results)
         extras: dict[str, Any] = {
             **fields,
@@ -327,7 +369,9 @@ class FortiOSConnector(HttpConnector):
             "scope": scope.kind,
             "vdom": scope.vdom,
             "ha_members": members,
-            "device_id": reads.device_identity(members or [], status.serial),
+            "ha_member_serials": serials,
+            "device_id": reads.device_identity(serials, status.serial),
+            "device_id_reason": None if serials is not None else _DEVICE_ID_UNKNOWN,
             "vdoms": [r["name"] for r in reads.vdom_rows(vdoms.results)] if vdoms else None,
             "fortimanager_controls": (
                 reads.fortimanager_state(fmg.results)["fortimanager_controls"] if fmg else None
@@ -415,7 +459,7 @@ class FortiOSConnector(HttpConnector):
             "members": members,
             "in_sync": reads.ha_in_sync(rows),
             "checksums": rows,
-            "device_id": reads.device_identity(members, peers.serial),
+            "device_id": reads.device_identity(reads.member_serials(members), peers.serial),
             "version_warning": warning,
         }
 

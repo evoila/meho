@@ -136,6 +136,13 @@ def test_scrub_text_removes_enc_values_inside_free_text() -> None:
     assert scrub_text(text) == f"set psksecret {REDACTED} failed"
 
 
+def test_scrub_removes_enc_values_inside_a_longer_text_field() -> None:
+    """A ``cli_error`` such as ``set psksecret ENC ...`` is cleaned inside the text."""
+    cleaned, count = scrub({"cli_error": f"set psksecret {_ENC_VALUE} -- refused", "error": -5})
+    assert cleaned == {"cli_error": f"set psksecret {REDACTED} -- refused", "error": -5}
+    assert count == 1
+
+
 def test_saved_fixtures_hold_no_secret() -> None:
     """The recorded answers committed with the tests are clean."""
     _, count = scrub(fx.DEVICE_ANSWERS)
@@ -153,6 +160,12 @@ def test_the_trace_keeps_only_the_cleaned_answer() -> None:
     assert recorded["results"][0]["name"] == "root"
     text_response = httpx.Response(500, text=f"made-up failure {_ENC_VALUE}")
     _assert_clean(json.dumps(connector.trace_response_body(text_response)))
+    error_response = httpx.Response(
+        500, json=fx.error_answer(500, error=-5, cli_error=f"set psksecret {_ENC_VALUE} -- no")
+    )
+    recorded = connector.trace_response_body(error_response)
+    _assert_clean(json.dumps(recorded))
+    assert recorded["cli_error"] == f"set psksecret {REDACTED} -- no"
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +238,28 @@ async def test_planted_secrets_reach_no_answer_audit_row_or_trace(
     assert f"GET {fx.BASE_URL}/api/v2/cmdb/system/vdom" in trace
     assert REDACTED in trace
     _assert_clean(trace)
+
+
+@pytest.mark.asyncio
+async def test_planted_secrets_in_an_error_answer_reach_no_trace(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await _register()
+    await _enable_trace_capture(session)
+    cli_error = f"set psksecret {_ENC_VALUE} -- made-up refusal"
+    for answer in (
+        httpx.Response(200, json=fx.error_answer(500, error=-5, cli_error=cli_error)),
+        httpx.Response(
+            424, json={**fx.error_answer(424, cli_error=cli_error), "password": _PLAIN_PASSWORD}
+        ),
+    ):
+        result = await _dispatch("fortios.vdom.list", {"cmdb/system/vdom": answer})
+        assert result.status == "error"
+        assert result.audit_id is not None
+        trace = await _trace_text(result.audit_id)
+        assert f"GET {fx.BASE_URL}/api/v2/cmdb/system/vdom" in trace
+        assert REDACTED in trace
+        _assert_clean(trace)
 
 
 @pytest.mark.asyncio

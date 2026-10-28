@@ -48,6 +48,7 @@ class FortiTarget:
         self.port = 443
         self.secret_ref = "targets/fortigate/example"
         self.auth_model = "shared_service_account"
+        self.verify_tls = True
         self.tls_ca_pin: str | None = None
         self.tls_server_name: str | None = None
         if extras is None:

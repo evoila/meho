@@ -123,6 +123,12 @@ CHECKSUMS_SAME = [
 ]
 CHECKSUMS_DIFFER = copy.deepcopy(CHECKSUMS_SAME)
 CHECKSUMS_DIFFER[1]["checksum"]["all"] = "ccc2"
+CHECKSUMS_SINGLE = [copy.deepcopy(CHECKSUMS_SAME[0])]
+#: The same pair after a failover: the other unit is primary and answers.
+HA_PEERS_PAIR_FAILOVER = [
+    {**copy.deepcopy(HA_PEERS_PAIR[0]), "primary": True},
+    {**copy.deepcopy(HA_PEERS_PAIR[1]), "primary": False},
+]
 HA_SETTINGS = [{"group-name": "example-cluster", "group-id": 7, "mode": "a-p"}]
 VDOMS = [
     {"name": "root", "q_origin_key": "root", "short-name": "root", "vcluster-id": 0},

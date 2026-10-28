@@ -203,6 +203,28 @@ async def test_fortimanager_control_is_refused_with_change_it_in_fortimanager() 
     assert _OBJECT_PATH not in fake.paths()
 
 
+@pytest.mark.parametrize(
+    "state",
+    [{}, {"mode": "normal"}, {"mode": "made-up", "server": "fmg.test.invalid"}, {"server": ""}],
+)
+@pytest.mark.asyncio
+async def test_an_unknown_fortimanager_state_is_refused(state: dict[str, Any]) -> None:
+    fake = fx.FakeFortiGate(_answers(**{"monitor/system/central-management/status": state}))
+    with pytest.raises(FortiOSWriteRefusedError, match="could not tell") as info:
+        await _before(fake)
+    assert info.value.code == "fortimanager_unknown"
+    assert _OBJECT_PATH not in fake.paths()
+
+
+@pytest.mark.asyncio
+async def test_backup_mode_allows_a_direct_change() -> None:
+    backup = {**fx.FMG_CONTROLS, "mode": "backup"}
+    before = await _before(
+        fx.FakeFortiGate(_answers(**{"monitor/system/central-management/status": backup}))
+    )
+    assert before.live == fx.ADDRESS
+
+
 @pytest.mark.asyncio
 async def test_an_untested_version_is_refused() -> None:
     with pytest.raises(FortiOSWriteRefusedError, match="not on the tested list") as info:
@@ -337,12 +359,51 @@ async def test_ha_that_catches_up_is_verified() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ha_not_readable_with_this_token_still_verifies_the_object() -> None:
+async def test_a_single_unit_is_verified() -> None:
+    fake = fx.FakeFortiGate(_answers(**{"monitor/system/ha-checksums": fx.CHECKSUMS_SINGLE}))
+    result = await _verify(fake, {"comment": "made-up host"})
+    assert (result.outcome, result.ha_in_sync, result.reasons) == ("verified", None, ())
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [httpx.Response(403, json=fx.error_answer(403)), httpx.ReadTimeout("made-up timeout")],
+    ids=["forbidden", "timeout"],
+)
+@pytest.mark.asyncio
+async def test_ha_state_that_cannot_be_read_gives_unknown(
+    failure: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = fx.FakeFortiGate(_answers(**{"monitor/system/ha-checksums": failure}))
+    connector = FortiOSConnector(token_loader=token_loader)
+    no_retry_wait(connector, monkeypatch)
+    try:
+        async with respx.mock(base_url=fx.BASE_URL, assert_all_called=False) as mock:
+            mock.route().mock(side_effect=fake)
+            result = await verify_after_write(
+                connector,
+                make_operator(),
+                FortiTarget(scope="vdom", vdom="vdom-a"),
+                obj=_OBJ,
+                sent={"comment": "made-up host"},
+                sleep=_Sleeps(),
+            )
+    finally:
+        await connector.aclose()
+    assert (result.outcome, result.ha_in_sync) == ("unknown", None)
+    assert result.read_back == fx.ADDRESS
+    assert result.reasons[0].startswith("the HA state could not be read")
+
+
+@pytest.mark.asyncio
+async def test_a_read_back_mismatch_stays_not_verified_when_the_ha_state_is_unreadable() -> None:
     fake = fx.FakeFortiGate(
         _answers(**{"monitor/system/ha-checksums": httpx.Response(403, json=fx.error_answer(403))})
     )
-    result = await _verify(fake, {"comment": "made-up host"})
-    assert (result.outcome, result.ha_in_sync) == ("verified", None)
+    result = await _verify(fake, {"comment": "something else"})
+    assert result.outcome == "not_verified"
+    assert result.reasons[0] == "read-back differs in: comment"
+    assert result.reasons[1].startswith("the HA state could not be read")
 
 
 @pytest.mark.asyncio

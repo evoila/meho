@@ -240,6 +240,9 @@ async def test_vdom_list_central_management_licence_and_usage(
     answers = {**fx.DEVICE_ANSWERS, "monitor/system/central-management/status": fx.FMG_CONTROLS}
     fmg = await _dispatch("fortios.central_management.status", fx.FakeFortiGate(answers))
     assert fmg.result["fortimanager_controls"] is True
+    answers = {**fx.DEVICE_ANSWERS, "monitor/system/central-management/status": {}}
+    fmg = await _dispatch("fortios.central_management.status", fx.FakeFortiGate(answers))
+    assert fmg.result["fortimanager_controls"] is None
 
     licences = await _dispatch("fortios.license.status", fx.FakeFortiGate())
     services = {row["service"]: row for row in licences.result["licences"]}
@@ -410,12 +413,15 @@ async def test_detection_of_a_single_vm_unit() -> None:
     assert fp.extras["fortimanager_controls"] is True
 
 
+_FORBIDDEN = httpx.Response(403, json=fx.error_answer(403))
+
+
 @pytest.mark.asyncio
 async def test_detection_on_a_vdom_target_sends_the_vdom_and_skips_what_it_may_not_read() -> None:
     answers = {
         **fx.DEVICE_ANSWERS,
-        "monitor/system/ha-peer": httpx.Response(403, json=fx.error_answer(403)),
-        "cmdb/system/vdom": httpx.Response(403, json=fx.error_answer(403)),
+        "monitor/system/ha-peer": _FORBIDDEN,
+        "cmdb/system/vdom": _FORBIDDEN,
     }
     fake = fx.FakeFortiGate(answers)
     fp = await _fingerprint(fake, FortiTarget(scope="vdom", vdom="vdom-a"))
@@ -424,6 +430,66 @@ async def test_detection_on_a_vdom_target_sends_the_vdom_and_skips_what_it_may_n
     assert fp.extras["vdoms"] is None
     assert (fp.extras["scope"], fp.extras["vdom"]) == ("vdom", "vdom-a")
     assert {tuple(c.url.params.get_list("vdom")) for c in fake.calls} == {("vdom-a",)}
+    # The member serials come from the checksums when the peers are not readable.
+    assert fp.extras["ha_member_serials"] == [fx.SERIAL_A, fx.SERIAL_B]
+    assert fp.extras["device_id"] == f"ha:{fx.SERIAL_A},{fx.SERIAL_B}"
+    assert fp.extras["device_id_reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_device_id_is_the_same_before_and_after_a_failover() -> None:
+    """The device target and a VDOM target give one id, whichever member answers."""
+    before = await _fingerprint(fx.FakeFortiGate(serial=fx.SERIAL_A))
+    after_answers = {**fx.DEVICE_ANSWERS, "monitor/system/ha-peer": fx.HA_PEERS_PAIR_FAILOVER}
+    after = await _fingerprint(fx.FakeFortiGate(after_answers, serial=fx.SERIAL_B))
+    assert (before.extras["serial"], after.extras["serial"]) == (fx.SERIAL_A, fx.SERIAL_B)
+    assert before.extras["device_id"] == after.extras["device_id"]
+    assert after.extras["ha_members"][0]["serial"] == fx.SERIAL_B
+
+    vdom_answers = {**after_answers, "monitor/system/ha-peer": _FORBIDDEN}
+    vdom_target = FortiTarget(scope="vdom", vdom="vdom-a")
+    vdom_before = await _fingerprint(
+        fx.FakeFortiGate(vdom_answers, serial=fx.SERIAL_A), vdom_target
+    )
+    vdom_after = await _fingerprint(fx.FakeFortiGate(vdom_answers, serial=fx.SERIAL_B), vdom_target)
+    assert vdom_before.extras["device_id"] == before.extras["device_id"]
+    assert vdom_after.extras["device_id"] == before.extras["device_id"]
+
+
+@pytest.mark.asyncio
+async def test_a_token_that_may_not_read_the_ha_state_gets_no_device_id() -> None:
+    """No single-unit id for a restricted token: it would change after a failover."""
+    answers = {
+        **fx.DEVICE_ANSWERS,
+        "monitor/system/ha-peer": _FORBIDDEN,
+        "monitor/system/ha-checksums": _FORBIDDEN,
+    }
+    target = FortiTarget(scope="vdom", vdom="vdom-a")
+    before = await _fingerprint(fx.FakeFortiGate(answers, serial=fx.SERIAL_A), target)
+    after = await _fingerprint(fx.FakeFortiGate(answers, serial=fx.SERIAL_B), target)
+    for fp in (before, after):
+        assert fp.reachable is True
+        assert fp.extras["device_id"] is None
+        assert fp.extras["ha_member_serials"] is None
+        assert "not a device id" in fp.extras["device_id_reason"]
+    assert (before.extras["serial"], after.extras["serial"]) == (fx.SERIAL_A, fx.SERIAL_B)
+
+
+@pytest.mark.asyncio
+async def test_a_single_unit_that_reads_its_ha_state_gets_a_serial_id() -> None:
+    answers = {**fx.DEVICE_ANSWERS, "monitor/system/ha-peer": fx.HA_PEERS_SINGLE}
+    fp = await _fingerprint(fx.FakeFortiGate(answers, serial=fx.VM_SERIAL))
+    assert fp.extras["ha_member_serials"] == []
+    assert fp.extras["device_id"] == f"serial:{fx.VM_SERIAL}"
+    assert fp.extras["device_id_reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_detection_reports_an_unknown_fortimanager_state_as_null() -> None:
+    answers = {**fx.DEVICE_ANSWERS, "monitor/system/central-management/status": {}}
+    fp = await _fingerprint(fx.FakeFortiGate(answers))
+    assert fp.reachable is True
+    assert fp.extras["fortimanager_controls"] is None
 
 
 @pytest.mark.parametrize(
@@ -521,6 +587,41 @@ async def test_a_failed_tls_check_names_tls_ca_pin_and_tls_server_name(
     assert "tls_ca_pin" in fp.extras["error"] and "tls_server_name" in fp.extras["error"]
     assert probe.ok is False and "TLS check failed" in str(probe.reason)
     await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_read_on_a_target_without_tls_checks_is_refused_before_any_call(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await _register()
+    target = FortiTarget()
+    target.verify_tls = False
+    fake = fx.FakeFortiGate()
+    result = await _dispatch("fortios.vdom.list", fake, target)
+    assert result.status == "error"
+    assert "verify_tls=false" in _text(result)
+    assert "tls_ca_pin" in _text(result)
+    assert fake.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_write_on_a_target_without_tls_checks_is_refused_before_any_call() -> None:
+    connector = FortiOSConnector(token_loader=token_loader)
+    target = FortiTarget(scope="vdom", vdom="vdom-a")
+    target.verify_tls = False
+    fake = fx.FakeFortiGate({"cmdb/firewall/address/host-a": [fx.ADDRESS]})
+    async with respx.mock(base_url=fx.BASE_URL, assert_all_called=False) as mock:
+        mock.route().mock(side_effect=fake)
+        with pytest.raises(FortiOSTargetError, match="keeps the TLS check on"):
+            await connector.api_write(
+                target, make_operator(), "PUT", "cmdb/firewall/address/host-a", body={"x": 1}
+            )
+        fp = await connector.fingerprint(target, make_operator())
+    await connector.aclose()
+    assert fake.calls == []
+    assert fp.reachable is False
+    assert "verify_tls=false" in fp.extras["error"]
+    assert fx.TOKEN not in json.dumps(fp.model_dump(mode="json"))
 
 
 @pytest.mark.asyncio

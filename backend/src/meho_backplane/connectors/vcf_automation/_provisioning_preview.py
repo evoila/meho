@@ -25,6 +25,8 @@ generic params echo, so the bespoke builder is their only preview;
 
 ``vcfa.tenant.deployment.delete`` also has a builder here: it reads the
 deployment once so the approver sees its name and project, not only an id.
+``vcfa.provider.role.delete`` reads the role once so the approver sees
+``would: "delete"`` or ``would: "unchanged"`` (no such role).
 """
 
 from __future__ import annotations
@@ -97,6 +99,17 @@ async def _role_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "publish_to": "all" if p.get("publish_all") else p.get("publish_to_org"),
         **await _existence(ctx, lambda c: find_global_role(c, ctx.target, ctx.operator, name)),
     }
+
+
+async def _role_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    name = ctx.params.get("name")
+    if not isinstance(name, str):
+        return None
+    # The existence read answers "create" when the role is missing, which for a
+    # delete means nothing will happen.
+    found = await _existence(ctx, lambda c: find_global_role(c, ctx.target, ctx.operator, name))
+    would = {"create": "unchanged", "unchanged": "delete"}.get(found["would"], "delete_if_present")
+    return {"action": "delete_global_role", "name": name, **found, "would": would}
 
 
 async def _user_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
@@ -248,6 +261,7 @@ async def _deployment_delete_preview(ctx: PreviewContext) -> dict[str, Any] | No
 _BUILDERS = {
     "vcfa.provider.org.create": _org_create_preview,
     "vcfa.provider.role.create": _role_create_preview,
+    "vcfa.provider.role.delete": _role_delete_preview,
     "vcfa.provider.user.create": _user_create_preview,
     "vcfa.provider.api_token.create": _api_token_create_preview,
     "vcfa.provider.api_token.revoke": _api_token_revoke_preview,

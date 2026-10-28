@@ -98,8 +98,8 @@ flow only where a convertible OpenAPI 3.x spec is pinned — for VCFA only
 the 9.1 appliance-served IaaS document above would qualify, and none is
 pinned.
 
-**Operation contracts.** The 29 typed ops (the seven reads above, the
-nine provisioning ops, the four image ops and the nine network and deploy ops
+**Operation contracts.** The 30 typed ops (the seven reads above, the
+ten provisioning ops, the four image ops and the nine network and deploy ops
 below) meet the VMware operation-contract check
 (`backend/tests/test_operation_contracts.py`) and have no entry in its
 gap list:
@@ -133,7 +133,7 @@ cannot serve the tenant plane: `POST /iaas/api/login` exchanges only a
 `invalid_grant`). The bootstrap sequence — org → custom global role
 carrying `API Tokens: Manage` (the stock *Organization Administrator*
 role is `readOnly` and lacks it) → local org user → API token → project
-— is governed by nine typed ops in `provisioning_ops.py` (metadata) with
+— is governed by ten typed ops in `provisioning_ops.py` (metadata) with
 handlers in `_provisioning.py` / `_role_user.py` / `_api_token.py`,
 lookups in `_lookups.py`, paths in `_paths.py`, and park-time previews in
 `_provisioning_preview.py`:
@@ -141,9 +141,10 @@ lookups in `_lookups.py`, paths in `_paths.py`, and park-time previews in
 | op_id | tier / approval | wire |
 |---|---|---|
 | `vcfa.provider.right.list` | safe | `GET /cloudapi/1.0.0/rights` (`name_contains` → FIQL `name==*x*`) |
-| `vcfa.provider.role.list` | safe | `GET /cloudapi/1.0.0/globalRoles`; with `org`: `GET /cloudapi/1.0.0/roles` + tenant-context headers |
+| `vcfa.provider.role.list` | safe | `GET /cloudapi/1.0.0/globalRoles`; with `org`: `GET /cloudapi/1.0.0/roles` + tenant-context headers (a VM Apps org's own roles show up here) |
 | `vcfa.provider.org.create` | caution, approval | `POST /cloudapi/1.0.0/orgs` (`org_type=vm_apps` → `isClassicTenant: true`) |
 | `vcfa.provider.role.create` | caution, approval | `POST …/globalRoles`, `PUT …/{id}/rights` (rollback `DELETE …/{id}` on failure), `POST …/{id}/tenants/publish` or `…/publishAll` |
+| `vcfa.provider.role.delete` | dangerous, approval | `DELETE /cloudapi/1.0.0/globalRoles/{id}` (role found by name first) |
 | `vcfa.provider.user.create` | caution, approval | `POST /cloudapi/1.0.0/users` + tenant-context headers |
 | `vcfa.provider.api_token.create` | dangerous, approval | user session → `POST /oauth/<tenant/<org>\|provider>/register` → jwt-bearer `POST …/token` → Vault → `DELETE …/sessions/current` |
 | `vcfa.provider.api_token.revoke` | dangerous, approval | user session → `DELETE /cloudapi/1.0.0/tokens/{id}` → `DELETE …/sessions/current` |
@@ -159,7 +160,20 @@ lookups in `_lookups.py`, paths in `_paths.py`, and park-time previews in
   (`updated` + `reconciled: [...]`; rights already present are never
   replaced), and a failed rights PUT right after the create deletes the new
   role — so an interrupted run never leaves a half-built role that a re-run
-  calls `unchanged`. Upstream 4xx/5xx raise and
+  calls `unchanged`.
+- **VM Apps orgs (#3894).** A VM Apps org (`isClassicTenant: true`) has its
+  own fixed org roles, and the appliance answers `400 Cannot publish to
+  classic tenants` to a global-role publish. So `role.create` with a VM Apps
+  `publish_to_org` answers `invalid_request` before any write (before the
+  role lookup too), and its guidance names the org's own roles from
+  `GET /cloudapi/1.0.0/roles` (a failed read of those roles only drops the
+  names). `role.list` with `org` lists those roles, and `user.create`
+  takes one of them. `role.delete` removes a global role nobody needs: a
+  missing role (or a `404` on the delete) is `unchanged`, a built-in
+  (`readOnly`) role is `invalid_request` with nothing sent, and a refused
+  delete (for example a role users still hold) is a `connector_error`. Its
+  approval card reads the role once (`would: delete | unchanged`).
+- **Errors.** Upstream 4xx/5xx raise and
   the dispatcher maps them (`connector_error` / `connector_http_403` with
   `upstream_message`); a rejected login is `connector_auth_failed`.
 - **Name lookups** use the FIQL `filter` (`name==<v>`), compared
@@ -398,7 +412,7 @@ domains.
   (`deploy_ops.py`) — the six network ops and the three deploy ops (see
   **A project's own network and its first deployment** above), checked by
   the same `validate_typed_ops()`.
-- **`VCFA_PROVISIONING_OPS`** (`provisioning_ops.py`) — the nine #3890
+- **`VCFA_PROVISIONING_OPS`** (`provisioning_ops.py`) — the ten (#3890, #3894)
   provisioning ops (see **Provisioning ops** above), validated by the
   same `validate_typed_ops()`. Each `VcfaTypedOp` carries a `plane` + `path`;
   the module's `validate_typed_ops()` cross-checks them at import

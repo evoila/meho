@@ -1,18 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``vcfa.provider.role.create`` + ``vcfa.provider.user.create`` (evoila/meho#3890).
+"""``vcfa.provider.role.create`` / ``.role.delete`` + ``vcfa.provider.user.create``.
 
 A fresh VCFA org has no usable role: with ``ADVANCED_RIGHTS_BUNDLE_MODE``
 (the default) tenant roles are **global roles** that must be published to
 the org, and the stock *Organization Administrator* role is ``readOnly`` and
 lacks ``API Tokens: Manage``. So the tenant-bootstrap sequence is: a custom
 global role (a base role's rights + extra rights), published to the org,
-then a local user holding that role.
+then a local user holding that role (evoila/meho#3890).
 
-Both handlers return the provisioning envelope documented in
-:mod:`._provisioning` (``created`` / ``unchanged`` / ``invalid_request``);
-every name resolution runs before the first write.
+A **VM Apps** org (``isClassicTenant: true``) is different: it has its own
+fixed set of org roles and the appliance refuses to publish a global role
+to it (``400 Cannot publish to classic tenants``). ``role.create`` therefore
+refuses such an org before any write and names the org's own roles, and
+``role.delete`` removes a global role that is not needed (evoila/meho#3894).
+
+The handlers return the provisioning envelope documented in
+:mod:`._provisioning` (``created`` / ``unchanged`` / ``invalid_request``,
+``deleted`` for the delete); every name resolution runs before the first
+write.
 """
 
 from __future__ import annotations
@@ -53,7 +60,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vcf_automation.connector import VcfAutomationConnector
     from meho_backplane.connectors.vcf_automation.session import VcfAutomationTargetLike
 
-__all__ = ["provider_role_create", "provider_user_create"]
+__all__ = ["provider_role_create", "provider_role_delete", "provider_user_create"]
 
 _log = structlog.get_logger(__name__)
 
@@ -281,6 +288,29 @@ async def _converge_existing(
     }
 
 
+async def _vm_apps_org_guidance(
+    connector: VcfAutomationConnector,
+    target: VcfAutomationTargetLike,
+    operator: Operator,
+    org: Mapping[str, Any],
+) -> str:
+    """Why a VM Apps org cannot get the role, naming the org's own roles."""
+    name = org.get("name")
+    try:
+        rows = await list_all(
+            connector, target, operator, PROVIDER_ROLES_PATH, headers=tenant_context_headers(org)
+        )
+        roles = ", ".join(repr(r["name"]) for r in rows if isinstance(r.get("name"), str))
+    except httpx.HTTPError:
+        roles = ""
+    return (
+        f"org {name!r} is a VM Apps org: it has its own fixed roles and cannot get a "
+        "published global role, so nothing was written. Give its users one of its own "
+        f"roles{': ' + roles if roles else ''} (see vcfa.provider.role.list with "
+        f"org={name!r}) in vcfa.provider.user.create"
+    )
+
+
 async def provider_role_create(
     connector: VcfAutomationConnector,
     operator: Operator,
@@ -289,7 +319,8 @@ async def provider_role_create(
 ) -> dict[str, Any]:
     """``vcfa.provider.role.create`` — custom global role (idempotent, self-repairing).
 
-    Flow: resolve the ``publish_to_org`` org → if the role exists, converge
+    Flow: resolve the ``publish_to_org`` org (a VM Apps org answers
+    ``invalid_request`` naming its own roles) → if the role exists, converge
     it (:func:`_converge_existing`: fill empty rights, apply a missing
     publication → ``updated`` / ``unchanged``) → otherwise resolve the base
     role's rights + each extra right name (``invalid_request`` on a miss,
@@ -315,6 +346,12 @@ async def provider_role_create(
                 **envelope,
                 "status": "invalid_request",
                 "guidance": f"publish_to_org {org_name!r} is not an org on this appliance",
+            }
+        if publish_org.get("isClassicTenant") is True:
+            return {
+                **envelope,
+                "status": "invalid_request",
+                "guidance": await _vm_apps_org_guidance(connector, target, operator, publish_org),
             }
     existing = await find_global_role(connector, target, operator, params["name"])
     if existing is not None:
@@ -347,6 +384,56 @@ async def provider_role_create(
         "published_to": published,
         "guidance": None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Global role delete
+# ---------------------------------------------------------------------------
+
+
+async def provider_role_delete(
+    connector: VcfAutomationConnector,
+    operator: Operator,
+    target: VcfAutomationTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``vcfa.provider.role.delete`` — ``DELETE /cloudapi/1.0.0/globalRoles/{id}``.
+
+    Resolves the role by name first. A missing role (or a ``404`` on the
+    delete) answers ``unchanged``, so a second run is safe. A built-in
+    (``readOnly``) role answers ``invalid_request`` and nothing is sent. A
+    role the appliance will not delete (for example one that users still
+    hold) raises the upstream 4xx, which the dispatcher maps to
+    ``connector_error``.
+    """
+    name = params["name"]
+    role = await find_global_role(connector, target, operator, name)
+    unchanged = {
+        "status": "unchanged",
+        "role": None,
+        "guidance": f"no global role named {name!r}; nothing was deleted",
+    }
+    if role is None:
+        return unchanged
+    view = entity_ref(role)
+    if role.get("readOnly") is True:
+        return {
+            "status": "invalid_request",
+            "role": view,
+            "guidance": f"global role {name!r} is built in and cannot be deleted",
+        }
+    try:
+        await connector._post_json(
+            target,
+            PROVIDER_GLOBAL_ROLE_PATH.format(id=quote_segment(str(role.get("id")))),
+            operator=operator,
+            verb="DELETE",
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 404:
+            raise
+        return unchanged
+    return {"status": "deleted", "role": view, "guidance": None}
 
 
 # ---------------------------------------------------------------------------
@@ -426,9 +513,9 @@ async def provider_user_create(
             **envelope,
             "status": "invalid_request",
             "guidance": (
-                f"role {role_name!r} is not available in org {org_name!r}; publish a global "
-                "role to the org (vcfa.provider.role.create with publish_to_org) and check "
-                "vcfa.provider.role.list with org"
+                f"role {role_name!r} is not available in org {org_name!r}; pick one with "
+                "vcfa.provider.role.list with org, or (All Apps org only) publish a global "
+                "role to the org with vcfa.provider.role.create publish_to_org"
             ),
         }
     password = await read_password(operator, target, params)

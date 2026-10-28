@@ -11,7 +11,8 @@ checks both rules (``backend/tests/test_connectors_entra.py``).
 Microsoft publishes its own API description of Graph v1.0, an OpenAPI 3 file
 (``openapi/v1.0/openapi.yaml`` in ``microsoftgraph/msgraph-metadata``). Every
 path below is in that file. The file is about 44 MB, so it is not on the spec
-shelf, and no CI check compares these paths with it yet.
+shelf yet. The spec check (``backend/tests/test_connectors_entra_spec_reconcile.py``)
+compares these paths with it once it is there, and skips until then.
 
 Each path has a ``*_PERMISSION`` constant: the Microsoft Graph application
 permission the call needs (the least one Microsoft names). When Graph refuses

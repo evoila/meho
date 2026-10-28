@@ -28,6 +28,7 @@ built from Microsoft's documented answers and proven with mocked HTTP only.
 | Kind | typed operations only; nothing is ingested from a spec |
 | Operations | six reads in the group `directory`, all `safe` |
 | API | Microsoft Graph v1.0 only, never `/beta/` |
+| Spec path check | `backend/tests/test_connectors_entra_spec_reconcile.py`; the compare with the Graph file skips until the shelf folder `entra-graph-1.0` exists (see [Paths and the spec check](#paths-and-the-spec-check)) |
 | Onboarding | [`docs/cross-repo/entra-onboarding.md`](../cross-repo/entra-onboarding.md) |
 
 The version `1.0` is the Microsoft Graph API version. Entra ID has no product
@@ -322,8 +323,15 @@ its `*_PERMISSION` constant. A unit test checks that every constant is a
 v1.0 path and that none is a beta path. All eight paths are in Microsoft's
 Graph v1.0 OpenAPI file (`openapi/v1.0/openapi.yaml` in
 `microsoftgraph/msgraph-metadata`, MIT license). That file is about 44 MB,
-so it is not on the private spec shelf, and no CI check compares the paths
-with it yet.
+so it is not on the private spec shelf yet.
+
+The spec check is `backend/tests/test_connectors_entra_spec_reconcile.py`.
+It reads the `*_PATH` constants live and gives each one its HTTP method; a
+new constant without a method fails it. These parts run always. The part
+that compares the paths with the Graph file skips until the file is on the
+shelf at `entra-graph-1.0/openapi.yaml`. What was checked, and what turns
+the compare on, is in the `entra-graph-1.0` entry under "Evidenced
+exclusions" in `docs/decisions/spec-reconcile-guards-standard.md`.
 
 ## Fingerprint and probe
 

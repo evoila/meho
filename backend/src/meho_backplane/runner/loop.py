@@ -39,6 +39,7 @@ import asyncio
 import contextlib
 import signal
 from dataclasses import dataclass
+from typing import cast
 
 import structlog
 
@@ -58,7 +59,19 @@ from meho_backplane.runner.wire import RunnerAssignment, RunnerResultBatch
 
 __all__ = ["run_one_tick", "run_runner"]
 
-_log = structlog.get_logger(__name__)
+
+def _log() -> structlog.typing.FilteringBoundLogger:
+    """Get the logger on each call, not once at import.
+
+    The production log setup caches a logger on its first use, together with
+    the log setup of that moment. In the tests, each app start makes a new log
+    setup. A module-level logger then still writes to the old one, and a later
+    ``structlog.testing.capture_logs`` does not see its lines. So the log checks
+    failed only when another test had used this logger first. Getting the
+    logger on each call always uses the current setup, like
+    :mod:`meho_backplane.checks.runner`.
+    """
+    return cast("structlog.typing.FilteringBoundLogger", structlog.get_logger(__name__))
 
 
 @dataclass
@@ -82,7 +95,7 @@ async def run_one_tick(
     raises for an expected condition (down uplink) — those are logged and
     turned into spool writes / cache reuse.
     """
-    _log.info("runner_tick_start", cached_version=state.assignment_version)
+    _log().info("runner_tick_start", cached_version=state.assignment_version)
     try:
         await _drain_spool(client, spool)
         await _fetch_assignment(client, state)
@@ -92,7 +105,7 @@ async def run_one_tick(
         # nothing until an operator updates one side. Dropping the cache
         # keeps an old assignment from running on a later tick while central
         # refuses this runner. Unsent results are already in the spool.
-        _log.error(
+        _log().error(
             "runner_wire_version_mismatch",
             runner_wire_version=wire.SCHEMA_VERSION,
             error=str(exc),
@@ -100,7 +113,7 @@ async def run_one_tick(
         state.assignment = None
         state.assignment_version = None
         return
-    _log.info("runner_tick_done", cached_version=state.assignment_version)
+    _log().info("runner_tick_done", cached_version=state.assignment_version)
 
 
 async def _fetch_assignment(client: RunnerClient, state: RunnerState) -> None:
@@ -111,7 +124,7 @@ async def _fetch_assignment(client: RunnerClient, state: RunnerState) -> None:
         raise
     except RunnerClientError as exc:
         # Uplink down: keep executing the last cached assignment.
-        _log.warning("runner_assignment_fetch_failed", error=str(exc))
+        _log().warning("runner_assignment_fetch_failed", error=str(exc))
         fetched = ASSIGNMENT_UNCHANGED
     # Only a fresh assignment replaces the cache.
     if isinstance(fetched, RunnerAssignment):
@@ -132,7 +145,7 @@ async def _execute_and_report(
     except RunnerClientError as exc:
         # Keep the results for a later tick, also when central refused the
         # wire version: the refusal is handled by the tick after spooling.
-        _log.warning("runner_results_post_failed", results=len(results), error=str(exc))
+        _log().warning("runner_results_post_failed", results=len(results), error=str(exc))
         spool.write_batch(batch)
         if isinstance(exc, RunnerWireVersionMismatchError):
             raise
@@ -151,7 +164,7 @@ async def _drain_spool(client: RunnerClient, spool: ResultSpool) -> None:
             raise
         except RunnerClientError as exc:
             # Still down — leave this and the rest for the next tick.
-            _log.warning("runner_spool_drain_failed", path=str(path), error=str(exc))
+            _log().warning("runner_spool_drain_failed", path=str(path), error=str(exc))
             return
         spool.remove(path)
 
@@ -164,7 +177,7 @@ async def _run_loop(settings: RunnerSettings) -> None:
     (from the SIGTERM/SIGINT handler cancelling this task) propagates so
     the process unwinds and exits cleanly.
     """
-    _log.info(
+    _log().info(
         "runner_started",
         runner_id=settings.runner_id,
         central_url=settings.central_url,
@@ -186,7 +199,7 @@ async def _run_loop(settings: RunnerSettings) -> None:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                _log.warning("runner_tick_failed", exc_info=True)
+                _log().warning("runner_tick_failed", exc_info=True)
             await asyncio.sleep(settings.tick_interval_seconds)
 
 
@@ -194,7 +207,7 @@ def _install_signal_handlers(loop: asyncio.AbstractEventLoop, task: asyncio.Task
     """Wire SIGTERM/SIGINT to cancel *task* for a clean shutdown."""
 
     def _cancel(signum: int) -> None:
-        _log.info("runner_shutdown_signal", signal=signal.Signals(signum).name)
+        _log().info("runner_shutdown_signal", signal=signal.Signals(signum).name)
         task.cancel()
 
     for sig in (signal.SIGTERM, signal.SIGINT):

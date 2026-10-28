@@ -474,7 +474,9 @@ ASSESSMENT_START_RESPONSE: Final[dict[str, Any]] = {
             "type": "string",
             "description": (
                 "The state of Azure's operation: Succeeded, Failed, Canceled, or a running "
-                "state such as InProgress."
+                "state such as InProgress. Accepted: Azure took the check but named no URL "
+                "to follow it. Unknown: MEHO could not read the state; read it later with "
+                "azure.operation.status."
             ),
         },
         "done": {

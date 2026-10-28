@@ -54,6 +54,7 @@ from meho_backplane.connectors.azure import compute
 from meho_backplane.connectors.azure import cost
 
 # inventory (Task #5082)
+from meho_backplane.connectors.azure import inventory
 
 # migrate (Task #5093)
 
@@ -369,6 +370,7 @@ AZURE_TYPED_OPS: tuple[AzureTypedOp, ...] = (
     # cost (Task #5088)
     *cost.OPS,
     # inventory (Task #5082)
+    *inventory.OPS,
     # migrate (Task #5093)
     # monitor (Task #5090)
     # network (Task #5085)
@@ -392,6 +394,7 @@ AZURE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # cost (Task #5088)
     **cost.WHEN_TO_USE,
     # inventory (Task #5082)
+    **inventory.WHEN_TO_USE,
     # migrate (Task #5093)
     # monitor (Task #5090)
     # network (Task #5085)

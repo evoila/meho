@@ -1122,7 +1122,221 @@ proof must still show:
 
 ## inventory
 
-Not built yet (Task #5082).
+The `inventory` family reads what a subscription holds and changes the tags of
+one resource. Its Resource Graph reads can also cover other subscriptions,
+each checked first.
+
+**Proven live:** nothing yet. The lab login does not exist yet. Everything
+below is tested with mocked Azure answers only.
+
+Code, in `connectors/azure/`:
+
+- `inventory.py`: the group text, the operation table with the guidance for
+  the AI, and `InventoryOps`, the mixin of `AzureConnector` with one thin
+  method per operation and `list_candidates`. It must come before the HTTP
+  base in the connector's bases.
+- `_inventory_schemas.py`: the parameter and response schemas.
+- `inventory_reads.py`: the lists of the target's subscription, the
+  subscription list, `azure.tag.update` and the discover candidates.
+- `inventory_graph.py`: the Resource Graph operations and MEHO's own queries.
+- `_graph_set.py`: one Resource Graph query over a checked set of
+  subscriptions (batches, paging, limits, omissions). Shared; other families
+  can use it.
+- `_subscription_set.py`: the check of the set and the `subscriptions` block.
+  Shared; other families can use it.
+
+### Operations
+
+All in group `inventory`.
+
+| Operation | Risk | Azure call (API version) | Parameters |
+|---|---|---|---|
+| `azure.subscription.list` | `safe` | `GET /subscriptions` (2022-12-01) | none |
+| `azure.resource_group.list` | `safe` | `GET /subscriptions/{s}/resourcegroups` (2021-04-01) | none |
+| `azure.resource.list` | `safe` | `GET /subscriptions/{s}/resources`, or `.../resourceGroups/{rg}/resources` (2021-04-01) | `type`, `resource_group` |
+| `azure.tag.list` | `safe` | `GET /subscriptions/{s}/tagNames` (2021-04-01) | none |
+| `azure.lock.list` | `safe` | `GET /subscriptions/{s}/providers/Microsoft.Authorization/locks` (2020-05-01) | none |
+| `azure.tag.update` | `caution`, waits for approval | `GET` and `PATCH {resource ID}/providers/Microsoft.Resources/tags/default` (2021-04-01) | `resource_id`, `mode`, `tags` |
+| `azure.graph.query` | `safe` | `POST /providers/Microsoft.ResourceGraph/resources` (2024-04-01) | `query`, `subscriptions`, `page_size` |
+| `azure.inventory.summary` | `safe` | the same, with MEHO's query | `subscriptions` |
+| `azure.inventory.vm.list` | `safe` | the same, with MEHO's query | `subscriptions` |
+| `azure.inventory.aks.list` | `safe` | the same, with MEHO's query | `subscriptions` |
+| `azure.inventory.network.list` | `safe` | the same, with MEHO's query | `subscriptions` |
+
+The API version 2025-04-01 of the resource calls is in Azure's spec too. It
+is not used until the lab shows that it works in every region.
+
+### Lists of the target's subscription
+
+The lists read every page with `list_all_pages` and return the shape of
+`PagedRows.as_dict()` (see Paging above).
+
+- `azure.resource.list` filters by `type` with
+  `$filter=resourceType eq '<type>'`. With `resource_group` it reads the list
+  of that group, because Azure does not allow a filter on the type and the
+  group together. A pattern checks both values, so neither can change the
+  path or the filter.
+- `azure.subscription.list` shows every subscription the target's login can
+  see: the records only, not what is inside them. Reading inside a
+  subscription still needs a registered target. The next page of this list
+  is `/subscriptions` again, which is outside the target's subscription, so
+  the URL check of the other lists refuses it. `list_visible_subscriptions`
+  checks this link itself: https on port 443, no user name or password, the
+  target's Resource Manager host, the path exactly `/subscriptions`, at most
+  4,096 characters. It sends only the link's query values (the page token) to
+  the hand-written path, so the token cannot go anywhere else.
+
+### azure.tag.update
+
+- `resource_id` must be `/subscriptions/<the target's subscription>/resourceGroups/<group>`,
+  alone or followed by `/providers/...`. MEHO refuses, before any call:
+  another subscription, the subscription itself, an empty, `.` or `..` part,
+  `?`, `#`, `%`, a backslash, a control character, more than 2,048
+  characters, and an ID that already ends with the tag path.
+- `merge` sends one `PATCH` with `operation: Merge`: new names are added,
+  existing names get the new value, other tags stay.
+- `remove` first reads the tags (`GET`), then sends one `PATCH` with
+  `operation: Delete` and the current value of each named tag that is there
+  (names match without regard to case). Microsoft's docs do not say whether
+  a delete needs the right value; sending the current value works either
+  way. When none of the named tags is there, nothing is sent.
+- The same call twice gives the same tags. A `PATCH` is sent again only after
+  a 429 or a 401, when Azure did not run it.
+- The answer is `{resource_id, mode, tags, not_present}`: all tags after the
+  change, and the names `remove` did not find.
+- The login needs a role that may write tags there, for example Tag
+  Contributor. A ReadOnly lock blocks the change.
+
+### The subscription set
+
+A wider read names other `azure` targets in `subscriptions`.
+`resolve_subscription_set` checks each name before any call:
+
+| Check | Denied with |
+|---|---|
+| a live target with this name in the caller's MEHO tenant | "No live target with this name ..." |
+| product `azure` | "This target is not an azure target." |
+| a usable Azure target (`resolve_target_config`) | "This target is not a usable Azure target: ..." |
+| the shared login (`auth_model`) | "This target does not use the shared login ..." |
+| the same secret reference as the calling target | "This target uses another login ..." |
+| the same Azure cloud | "This target is in another Azure cloud." |
+| the caller may run this operation on it now | "You may not run ... (the reason)", or "... would wait for approval ..." |
+
+- The permission check is the dispatcher's own: `policy_gate` with
+  `decide_only=True`, so it records nothing. For an agent it runs
+  `resolve_verdict` (the grants per operation and target). For a service
+  principal it also applies its read scope. For a run of a hosted agent it
+  takes the stricter verdict of the caller and the agent.
+- A target where the read would wait for approval is denied: a read over
+  several subscriptions never waits for approval.
+- The calling target is always in the set; the dispatcher already checked
+  it. A name given twice counts once.
+- Azure then checks its own roles. What the stored login could read never
+  widens what the caller gets.
+
+The result carries `subscriptions: {requested, completed, denied, failed}`;
+`denied` and `failed` are `[{name, reason}]`.
+
+### Resource Graph over the set
+
+`read_over_set` (`_graph_set.py`):
+
+1. Checks the set.
+2. Sends the query with `subscriptions` filled in by MEHO, at most 250
+   subscriptions per query (Microsoft advises fewer than 300). It never sends
+   `managementGroups` or `authorizationScopeFilter`. Options:
+   `resultFormat: objectArray`, and `$top` when `page_size` is given.
+3. Follows `$skipToken`. One limit of pages, rows and seconds holds for the
+   whole read (the `PageLimits` defaults: 50 pages, 10,000 rows, 120 seconds).
+4. Drops a row whose `subscriptionId` is not in its batch.
+5. A batch that Azure answers with an error is listed under `failed`, and the
+   rows read before stay. When nothing could be read at all, the first error
+   is raised, so the caller gets Azure's reason (for example a query Resource
+   Graph cannot parse). A login or target error stops the whole read.
+
+With more than 250 subscriptions MEHO runs one query per batch, so
+`summarize`, `take` and `top` work per batch. Grouping by `subscriptionId`
+keeps the numbers exact. Results can lag a little behind recent changes.
+
+The result:
+
+```json
+{"value": [...], "complete": false, "pages_read": 3,
+ "subscriptions": {"requested": [...], "completed": [...], "denied": [...], "failed": [...]},
+ "omissions": {"count": 1, "items": [{"kind": "subscriptions_denied", "count": 1, "message": "..."}]}}
+```
+
+`complete` is true only when every requested subscription was read in full
+and nothing is missing. The omission kinds:
+
+| Kind | Meaning |
+|---|---|
+| `subscriptions_denied` | names MEHO did not read; `subscriptions.denied` says why |
+| `page_failed` | Azure answered a page with an error; later rows of that batch are missing |
+| `subscription_limit` | Azure answered `x-ms-tenant-subscription-limit-hit: true`: it searched only the first 10,000 subscriptions |
+| `result_truncated` | Resource Graph cut the result and gave no `$skipToken` (`limit`, `take` or `sample`, or only dynamic columns) |
+| `row_limit` | MEHO stopped at 10,000 rows, the most one stored result holds |
+| `page_limit`, `time_limit` | MEHO stopped at its page or time limit |
+| `outside_set` | Azure sent rows of a subscription that was not asked for; MEHO dropped them |
+
+`azure.inventory.summary` adds `resource_total`, the sum of `count_` over the
+rows. The fixed queries take their property names from Microsoft's samples.
+They are not checked on a live tenant yet: `power` of a VM can be empty.
+
+### The blocks at the link to the stored result
+
+A result over 50 rows or 4 KB comes back as a link to the stored result. The
+reducer keeps the plain values (`complete`, `pages_read`, `resource_total`)
+inline. `subscriptions` and `omissions` are objects, so each Resource Graph
+operation names them in `llm_instructions.result_objects`
+(`omissions` first, so it gets the inline room first). The reducer then keeps
+their fields inline next to the link, and the whole blocks are stored with the
+rows. A long list inside a block is cut inline with a note on how to read it
+whole. `test_connectors_azure_inventory.py` proves this through the real
+dispatcher and reducer for every Resource Graph operation.
+
+### The audit row
+
+`SubscriptionSet.bind_audit` binds the block as `audit_subscriptions` in the
+log context. The dispatcher copies every bound `audit_*` value into the audit
+row, so `payload["subscriptions"]` holds the same four lists as the result.
+This also holds when the read fails. The block is cleared at the start of the
+next set check. It stays bound in the log context after the call until then,
+like every value a handler binds this way.
+
+### Candidates for meho targets discover
+
+`InventoryOps.list_candidates(seed_target, operator)` lists, with the seed's
+login, every subscription the login can see that is not yet the
+`extras.subscription_id` of a live `azure` target of the seed's MEHO tenant.
+Each candidate carries the seed's Resource Manager host and port, its secret
+reference, and the extras `subscription_id`, `cloud` and `tenant_id` (the
+seed's, else the tenant of the login's token). A subscription that is not
+`Enabled` gets `confidence: low`. The name is
+`azure-<display name, letters and digits only>-<first 8 characters of the ID>`;
+the display name itself is untrusted text and goes only into `evidence`.
+
+The discover route passes the caller as `operator`, so the seed's secret is
+read under the caller's identity. Without a seed, or with a seed that is not
+an `azure` target, the list is empty.
+
+```bash
+meho targets discover azure --seed-target <target> --import-yaml > subscriptions.yaml
+# review the file, then:
+meho targets import subscriptions.yaml
+```
+
+### Known limits
+
+- No live proof yet (see above).
+- The `audit_subscriptions` value stays in the log context after the call, so
+  a later call in the same context (a step of a multi-step operation, for
+  example) can show it in its audit row until the next set check clears it.
+- When an operator marks a Resource Graph operation `requires_approval`, every
+  other subscription is denied: a read over several subscriptions never waits
+  for approval.
+- `azure.subscription.list` follows its own next link outside
+  `list_all_pages`, with the same limits.
 
 ## migrate
 

@@ -95,6 +95,13 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     "BUDGETS_PATH": (("GET",), "CONSUMPTION_API_VERSION"),
     "ADVISOR_RECOMMENDATIONS_PATH": (("GET",), "ADVISOR_API_VERSION"),
     # inventory (Task #5082)
+    "SUBSCRIPTIONS_PATH": (("GET",), "SUBSCRIPTIONS_API_VERSION"),
+    "RESOURCE_GROUPS_PATH": (("GET",), "RESOURCES_API_VERSION"),
+    "RESOURCES_PATH": (("GET",), "RESOURCES_API_VERSION"),
+    "RESOURCE_GROUP_RESOURCES_PATH": (("GET",), "RESOURCES_API_VERSION"),
+    "TAG_NAMES_PATH": (("GET",), "RESOURCES_API_VERSION"),
+    "TAGS_AT_SCOPE_PATH": (("GET", "PATCH"), "RESOURCES_API_VERSION"),
+    "LOCKS_PATH": (("GET",), "LOCKS_API_VERSION"),
     # migrate (Task #5093)
     # monitor (Task #5090)
     # network (Task #5085)
@@ -222,6 +229,14 @@ def test_the_checked_paths_are_pinned() -> None:
         "POST:/{}/providers/microsoft.costmanagement/forecast@2026-06-01",
         "POST:/{}/providers/microsoft.costmanagement/query@2026-06-01",
         "# inventory (Task #5082)",
+        "GET:/subscriptions/{}/providers/microsoft.authorization/locks@2020-05-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/resources@2021-04-01",
+        "GET:/subscriptions/{}/resourcegroups@2021-04-01",
+        "GET:/subscriptions/{}/resources@2021-04-01",
+        "GET:/subscriptions/{}/tagnames@2021-04-01",
+        "GET:/subscriptions@2022-12-01",
+        "GET:/{}/providers/microsoft.resources/tags/default@2021-04-01",
+        "PATCH:/{}/providers/microsoft.resources/tags/default@2021-04-01",
         "# migrate (Task #5093)",
         "# monitor (Task #5090)",
         "# network (Task #5085)",

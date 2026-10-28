@@ -541,7 +541,7 @@ Each write runs these steps and stops at the first failure (the answer's
 `error` starts with the step name):
 
 1. `input` — `address` must be an IP address (`ipaddress`, not unspecified,
-   not multicast); `name` must be DNS labels joined by `.` (written in lower
+   not multicast, no IPv6 zone id such as `%eth0`); `name` must be DNS labels joined by `.` (written in lower
    case). Nothing runs on the router before this check passes.
 2. `read` — read the live ConfigMap and plan the change in Python.
    `conflict` — the add refuses a name or address that is already used with

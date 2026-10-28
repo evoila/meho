@@ -96,6 +96,8 @@ def test_bound_dns_entry_accepts(params: dict[str, Any], expected: tuple[str, st
         {"address": "192.0.2.300", "name": "a.example.test"},
         {"address": "0.0.0.0", "name": "a.example.test"},
         {"address": "224.0.0.1", "name": "a.example.test"},
+        {"address": "fe80::1%eth0", "name": "a.example.test"},
+        {"address": "2001:db8::1%1", "name": "a.example.test"},
         {"address": "192.0.2.10; reboot", "name": "a.example.test"},
         {"address": "192.0.2.10", "name": "a.example.test; reboot"},
         {"address": "192.0.2.10", "name": "$(reboot).example.test"},

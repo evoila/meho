@@ -53,7 +53,7 @@ def bound_dns_entry(params: dict[str, Any]) -> tuple[str, str]:
     """Return ``(address, name)`` in canonical form, or raise.
 
     ``address`` must be an IPv4 or IPv6 address (not unspecified, not
-    multicast); it is returned in :mod:`ipaddress` canonical form. ``name``
+    multicast, no IPv6 zone id such as ``%eth0``); it is returned in :mod:`ipaddress` canonical form. ``name``
     must be a DNS name of letters, digits and ``-`` labels joined by
     ``.``, at most 253 characters, no trailing dot; it is returned in lower
     case (dnsmasq compares names without case).
@@ -64,6 +64,8 @@ def bound_dns_entry(params: dict[str, Any]) -> tuple[str, str]:
         address = ipaddress.ip_address(raw_address if isinstance(raw_address, str) else "")
     except ValueError:
         raise HolodeckDnsError("input", "address must be an IPv4 or IPv6 address") from None
+    if getattr(address, "scope_id", None) is not None:
+        raise HolodeckDnsError("input", "address must not have an IPv6 zone id ('%...')")
     if address.is_unspecified or address.is_multicast:
         raise HolodeckDnsError("input", "address must not be unspecified or multicast")
     name = raw_name.lower() if isinstance(raw_name, str) else ""

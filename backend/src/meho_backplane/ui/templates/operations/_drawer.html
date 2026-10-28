@@ -26,7 +26,7 @@
     (leaking it is a prompt-injection vector, api/v1/operations.py).
 
   Preview panel (Task #1880, T2)
-    For an HTTP-ingested op (``previewable``) the drawer carries a
+    For an HTTP-ingested op or a destructive op (``previewable``) the drawer carries a
     read-only **Preview** form: given a target + params it renders the
     literal would-be HTTP request (``operations/_preview.html``) WITHOUT
     dispatching. Preview is in the operator capability set -- no
@@ -34,8 +34,8 @@
     ``hx-headers`` ``X-CSRF-Token`` (HTMX does not inherit ``hx-headers``
     to children); the drawer GET minted the token + re-set the matching
     ``meho_csrf`` cookie. The Preview button is labelled distinctly from
-    Run (T3) and reads as safe (no dispatch). A typed / composite op is
-    NOT previewable, so the form is hidden for those.
+    Run (T3) and reads as safe (no dispatch). Any other typed / composite
+    op is NOT previewable, so the form is hidden for those.
 
   Context:
     descriptor       -- OperationDescriptor: the full read shape
@@ -43,7 +43,7 @@
     llm_instructions -- dict | None: present (and non-null) only for admins
     connector_id     -- str: the dispatchable <impl_id>-<version> id, posted
                         back by the preview form
-    previewable      -- bool: True for an HTTP-ingested op (preview offered)
+    previewable      -- bool: True for an HTTP-ingested or destructive op
     csrf_token       -- str: minted double-submit token for the preview POST
 -#}
 {% from "_icons.html" import icon %}
@@ -87,7 +87,9 @@
       {#- Policy gates: safety_level + requires_approval. -#}
       <div class="flex flex-wrap items-center gap-2">
         {% set safety = descriptor.safety_level %}
-        {% if safety == "dangerous" %}
+        {% if safety == "destructive" %}
+          <span class="badge badge-error badge-sm" title="Destructive — deletes something that cannot be undone">{{ safety }}</span>
+        {% elif safety == "dangerous" %}
           <span class="badge badge-error badge-sm" title="Dangerous — irreversible or high-impact">{{ safety }}</span>
         {% elif safety == "caution" %}
           <span class="badge badge-warning badge-sm" title="Caution — state-changing">{{ safety }}</span>
@@ -131,8 +133,8 @@
       </div>
 
       {#- Preview panel (Task #1880): the read-only would-be-request action.
-          Offered only for an HTTP-ingested op (a typed/composite op has no
-          single literal HTTP request to preview). Its own <form> carries
+          Offered for an HTTP-ingested op and for a destructive op (the
+          backend builds a synthetic preview for a destructive typed op). Its own <form> carries
           the CSRF header echo -- HTMX does not inherit hx-headers to
           children. Preview NEVER dispatches; the button is labelled
           distinctly from Run (T3). -#}

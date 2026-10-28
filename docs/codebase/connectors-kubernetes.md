@@ -438,7 +438,7 @@ the same pattern `ops_workload.py` / `ops_logs.py` use. Every op is
 | `k8s.cordon`           | caution   | `CoreV1Api.patch_node(spec.unschedulable)`; `uncordon=true` reverses. Eviction-free. |
 | `k8s.apply`            | dangerous | Server-side apply over `DynamicClient.server_side_apply` (`field_manager="meho"`), GVK resolved per manifest doc from discovery. `dry_run="server"` -> API `?dryRun=All` (mutates nothing, returns the would-be object). |
 | `k8s.delete`           | dangerous | Kind dispatch **scoped to pod/job/replicaset in v1** (namespace/PVC/PV rejected); explicit `propagation_policy` / `grace_period_seconds`. |
-| `k8s.secret.create`    | dangerous | `CoreV1Api.create_namespaced_secret`; values written but never echoed (response is key-names only). Values may be inline (`string_data` / `data`) or ref-sourced (`string_data_secret_ref` / `data_secret_ref`, resolved server-side through the credential-backend seam). |
+| `k8s.secret.create`    | dangerous | `CoreV1Api.create_namespaced_secret`; values written but never echoed (response is key-names only). Values may be inline (`string_data` / `data`) or ref-sourced (`string_data_secret_ref` / `data_secret_ref`, resolved server-side through the credential-backend seam). Optional `labels` / `annotations` maps go on the Secret's metadata. |
 | `k8s.job.create`       | dangerous | `BatchV1Api.create_namespaced_job` from a spec body; response is identity only. |
 | `k8s.cronjob.run`      | caution   | `BatchV1Api.read_namespaced_cron_job`, then `BatchV1Api.create_namespaced_job`: one Job from the CronJob's job template, now (`ops_cronjob.py`). |
 | `k8s.secret.update`    | dangerous | `CoreV1Api.patch_namespaced_secret` (mode `patch`, keeps other keys) or `read_namespaced_secret` + `replace_namespaced_secret` (mode `replace`, keeps only the given keys). Same value inputs as `k8s.secret.create`; response is key names only. `ops_secret_write.py`. |
@@ -506,6 +506,21 @@ The redaction above is unchanged and still applies: the op stays pinned in
 aggregate-only. A resolved payload missing the requested field raises
 `KubernetesSecretRefError` (never a bare `KeyError`, never echoing a
 value).
+
+**`k8s.secret.create` labels and annotations (#3680).** Some tools find a
+Secret by its label. ArgoCD, for example, reads repository credentials
+from Secrets labelled `argocd.argoproj.io/secret-type: repository`. So
+`k8s.secret.create` takes two optional string maps:
+
+- `labels` -- set as the new Secret's `metadata.labels`.
+- `annotations` -- set as the new Secret's `metadata.annotations`.
+
+With them, one call (and one approval) creates such a Secret, also when
+its value comes from a `*_secret_ref`. Before, this took a create plus a
+`k8s.apply` to add the label. Labels and annotations are not secret: the
+approval preview shows them in full. Any other unknown key is still
+rejected (`additionalProperties: false`). `k8s.secret.update` keeps the
+labels and annotations of an existing Secret as they are.
 
 **`k8s.apply` dry-run preview.** The op supports `dry_run="server"` (maps
 to the API's `?dryRun=All`) so the would-be object is returned without

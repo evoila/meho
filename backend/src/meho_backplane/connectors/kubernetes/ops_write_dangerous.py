@@ -503,7 +503,10 @@ async def k8s_secret_create(
     materialises into the Secret without the value ever transiting the op
     params (mirrors keycloak's ``password_secret_ref``, #2401). The values
     are written to the cluster but never echoed back: the response is
-    :func:`secret_create_summary` (key names only). The op classifies
+    :func:`secret_create_summary` (key names only). Optional ``labels`` /
+    ``annotations`` maps go on the Secret's metadata, so a Secret that a
+    tool finds by label (ArgoCD repository credentials) needs one call, not
+    a create plus a ``k8s.apply``. The op classifies
     ``credential_write`` so the broadcast event collapses to
     aggregate-only -- the refs in ``params`` never reach the feed either.
     """
@@ -539,7 +542,12 @@ async def k8s_secret_create(
     api_client = await connector._get_api_client(target, operator)
     core_v1 = client.CoreV1Api(api_client)
     body = client.V1Secret(
-        metadata=client.V1ObjectMeta(name=name, namespace=namespace),
+        metadata=client.V1ObjectMeta(
+            name=name,
+            namespace=namespace,
+            labels=dict(params.get("labels") or {}) or None,
+            annotations=dict(params.get("annotations") or {}) or None,
+        ),
         type=secret_type,
         string_data=string_data or None,
         data=data or None,

@@ -399,11 +399,32 @@ _DELETE_SCHEMA: dict[str, Any] = {
 }
 
 
+_SECRET_METADATA_MAP_PROP: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": {"type": "string"},
+}
+
+
 _SECRET_CREATE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "name": _NAME_PROP,
         "namespace": _NAMESPACE_PROP,
+        "labels": {
+            **_SECRET_METADATA_MAP_PROP,
+            "description": (
+                "Labels set on the new Secret, for example "
+                "{'argocd.argoproj.io/secret-type': 'repository'}. Not secret: the "
+                "approval preview shows them."
+            ),
+        },
+        "annotations": {
+            **_SECRET_METADATA_MAP_PROP,
+            "description": (
+                "Annotations set on the new Secret. Not secret: the approval preview "
+                "shows them. Do not put a secret value here."
+            ),
+        },
         "type": {
             "type": "string",
             "minLength": 1,
@@ -522,11 +543,15 @@ _SECRET_CREATE_LLM: dict[str, Any] = {
         "string_data_secret_ref / data_secret_ref (a "
         "{key: '<scheme>:<path>#<field>'} map) so the value is read "
         "server-side and NEVER transits op params. Values are NEVER echoed "
-        "back or broadcast (credential_write redaction). Requires approval."
+        "back or broadcast (credential_write redaction). Set labels / "
+        "annotations in the same call when a tool finds the Secret by label "
+        "(for example ArgoCD repository credentials). Requires approval."
     ),
     "parameter_hints": {
         "name": "Secret name.",
         "namespace": "Required.",
+        "labels": "Optional key→value map set on the Secret's metadata.",
+        "annotations": "Optional key→value map set on the Secret's metadata.",
         "type": "Opaque by default.",
         "string_data": "Plaintext key→value.",
         "data": "Base64-encoded key→value.",
@@ -604,7 +629,8 @@ WRITE_DANGEROUS_OPS: tuple[KubernetesOp, ...] = (
             "data_secret_ref ({key: '<scheme>:<path>#<field>'} maps) are "
             "resolved server-side through the credential-backend seam and "
             "merged in, so a Vault/GSM-resident value never transits op "
-            "params. The values are written to the cluster but never echoed "
+            "params. Optional labels / annotations go on the Secret's "
+            "metadata. The values are written to the cluster but never echoed "
             "back -- the response is key-names-only -- and the op classifies "
             "credential_write so the broadcast collapses to aggregate-only. "
             "Requires approval."

@@ -21,6 +21,12 @@ Each tick, in order:
 3. execute each work item locally,
 4. post the result batch; on failure, spool it.
 
+A wire version refusal on **any** of these calls ends the tick: the runner
+logs both versions, drops the cached assignment and runs nothing until an
+operator updates one side, because it cannot read central's work
+correctly. Results not yet sent stay in the spool (a refused re-post
+leaves the file, a refused fresh batch is spooled), so nothing is lost.
+
 :func:`run_runner` is the synchronous entry the ``__main__`` module calls.
 It loads config (surfacing :class:`RunnerConfigError` to the caller for a
 clean exit 1), then runs the async loop under :func:`asyncio.run` with
@@ -38,7 +44,13 @@ import structlog
 
 from meho_backplane.connectors.registry import _eager_import_connectors
 from meho_backplane.logging import configure_logging
-from meho_backplane.runner.client import ASSIGNMENT_UNCHANGED, RunnerClient, RunnerClientError
+from meho_backplane.runner import wire
+from meho_backplane.runner.client import (
+    ASSIGNMENT_UNCHANGED,
+    RunnerClient,
+    RunnerClientError,
+    RunnerWireVersionMismatchError,
+)
 from meho_backplane.runner.executor import execute_work_item
 from meho_backplane.runner.settings import RunnerSettings, get_runner_settings
 from meho_backplane.runner.spool import ResultSpool
@@ -71,20 +83,40 @@ async def run_one_tick(
     turned into spool writes / cache reuse.
     """
     _log.info("runner_tick_start", cached_version=state.assignment_version)
-    await _drain_spool(client, spool)
+    try:
+        await _drain_spool(client, spool)
+        await _fetch_assignment(client, state)
+        await _execute_and_report(client, spool, state, runner_id)
+    except RunnerWireVersionMismatchError as exc:
+        # Central speaks another wire version, whichever call said so: run
+        # nothing until an operator updates one side. Dropping the cache
+        # keeps an old assignment from running on a later tick while central
+        # refuses this runner. Unsent results are already in the spool.
+        _log.error(
+            "runner_wire_version_mismatch",
+            runner_wire_version=wire.SCHEMA_VERSION,
+            error=str(exc),
+        )
+        state.assignment = None
+        state.assignment_version = None
+        return
+    _log.info("runner_tick_done", cached_version=state.assignment_version)
+
+
+async def _fetch_assignment(client: RunnerClient, state: RunnerState) -> None:
+    """Fetch the assignment into *state*; a ``304`` or a failed fetch keeps the cache."""
     try:
         fetched = await client.fetch_assignment(state.assignment_version)
+    except RunnerWireVersionMismatchError:
+        raise
     except RunnerClientError as exc:
         # Uplink down: keep executing the last cached assignment.
         _log.warning("runner_assignment_fetch_failed", error=str(exc))
         fetched = ASSIGNMENT_UNCHANGED
-    # A ``304`` (the unchanged sentinel) or a failed fetch keeps the cache;
-    # only a fresh assignment replaces it.
+    # Only a fresh assignment replaces the cache.
     if isinstance(fetched, RunnerAssignment):
         state.assignment = fetched
         state.assignment_version = fetched.assignment_version
-    await _execute_and_report(client, spool, state, runner_id)
-    _log.info("runner_tick_done", cached_version=state.assignment_version)
 
 
 async def _execute_and_report(
@@ -98,15 +130,25 @@ async def _execute_and_report(
     try:
         await client.post_results(batch)
     except RunnerClientError as exc:
+        # Keep the results for a later tick, also when central refused the
+        # wire version: the refusal is handled by the tick after spooling.
         _log.warning("runner_results_post_failed", results=len(results), error=str(exc))
         spool.write_batch(batch)
+        if isinstance(exc, RunnerWireVersionMismatchError):
+            raise
 
 
 async def _drain_spool(client: RunnerClient, spool: ResultSpool) -> None:
-    """Re-post spooled batches oldest-first, stopping at the first failure."""
+    """Re-post spooled batches oldest-first, stopping at the first failure.
+
+    A wire version refusal propagates to the tick after leaving the file in
+    place, so the tick ends without running cached work.
+    """
     for path, batch in spool.load_oldest_first():
         try:
             await client.post_results(batch)
+        except RunnerWireVersionMismatchError:
+            raise
         except RunnerClientError as exc:
             # Still down — leave this and the rest for the next tick.
             _log.warning("runner_spool_drain_failed", path=str(path), error=str(exc))

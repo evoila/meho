@@ -129,6 +129,7 @@ def _seed_runner(
     name: str,
     revoked: bool = False,
     last_seen_ago: timedelta = timedelta(seconds=10),
+    wire_version: str | None = None,
 ) -> uuid.UUID:
     """Insert a runner-principal ORM row directly (no Keycloak round-trip)."""
     runner_id = uuid.uuid4()
@@ -148,6 +149,7 @@ def _seed_runner(
                     revoked=revoked,
                     created_by_sub="op-admin",
                     last_seen_at=last_seen,
+                    wire_version=wire_version,
                 )
             )
 
@@ -295,6 +297,23 @@ def test_list_shows_revoked_runner() -> None:
     body = response.text
     assert "gone-runner" in body
     assert "revoked" in body
+
+
+def test_list_shows_wire_version_and_marks_a_mismatch() -> None:
+    """Each runner's last wire version renders; one central cannot read is marked (#5020)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_runner(tenant_id=_TENANT_A, name="current-runner", wire_version="1")
+    _seed_runner(tenant_id=_TENANT_A, name="future-runner", wire_version="7")
+    client, mock = _client_with_role(tenant_id=_TENANT_A)
+    try:
+        response = client.get("/ui/runners")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Wire version" in body
+    assert "7 (central needs 1)" in body
+    assert body.count("badge-warning") == 1
 
 
 def test_list_full_page_arms_auto_refresh() -> None:

@@ -561,7 +561,13 @@ How a call runs:
    `moved_files`). `holodeck.instance.status` with `instance_id` reads it:
    it adds `removal` and `leftover_vms`, and sets `status` to `removed` when
    the delete finished without an error. The caller deletes each leftover VM
-   with `vmware.composite.vm.destroy`.
+   with `vmware.composite.vm.destroy`. The file stays after the remove, and a
+   later deploy may use the same id. So an old file never hides a newer
+   deploy: `status` becomes `removed` only when `Get-HoloDeckInstance` no
+   longer lists the instance, or when the remove started after the listed
+   deploy started. A remove that started before the deploy is kept only as
+   history in `removal`. When MEHO cannot compare the two times, `status`
+   stays as listed and a note says so.
 
 **Approval preview.** The preview builder (registered in `ops_remove.py`)
 runs the same read-only check. Its `blast_radius` names the instance

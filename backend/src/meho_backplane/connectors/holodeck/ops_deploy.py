@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import shlex
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors._shared.pwsh import (
@@ -417,6 +418,38 @@ async def holodeck_instance_status(
     return envelope
 
 
+def _aware_time(value: Any) -> datetime | None:
+    """Parse an ISO time with a time zone, or return ``None``."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _remove_age(envelope: dict[str, Any], record: dict[str, Any]) -> str:
+    """Say how a remove record relates to the deploy the envelope shows.
+
+    The record stays on the HoloRouter after a remove, and a later deploy may
+    reuse the id. Returns ``current`` when ``Get-HoloDeckInstance`` no longer
+    lists the instance, or the remove started after the listed deploy started;
+    ``older`` when the remove started before it; ``unsure`` when MEHO cannot
+    compare the two times.
+    """
+    listed = envelope.get("status") != "unknown" or any(
+        envelope.get(key) for key in ("instance_id", "started_at", "current_step")
+    )
+    if not listed:
+        return "current"
+    deploy_started = _aware_time(envelope.get("started_at"))
+    remove_started = _aware_time(record.get("started_at"))
+    if deploy_started is None or remove_started is None:
+        return "unsure"
+    return "current" if remove_started > deploy_started else "older"
+
+
 def merge_remove_record(envelope: dict[str, Any], record: dict[str, Any]) -> None:
     """Add the progress of a ``holodeck.instance.remove`` to a status envelope.
 
@@ -424,13 +457,13 @@ def merge_remove_record(envelope: dict[str, Any], record: dict[str, Any]) -> Non
     id (``None`` when the remove could not check). A remove that finished
     without an error sets ``status`` to ``removed``. A remove that is still
     ``running`` may also have been cut short by a router reboot; a note says so.
+    An old record must never hide a newer deploy with the same id (see
+    :func:`_remove_age`). A record older than the listed deploy is kept only
+    as history in ``removal``. When MEHO cannot tell, ``status`` stays as
+    ``Get-HoloDeckInstance`` reports it and a note says why.
     """
-    leftover = record.get("leftover_vms")
-    if leftover is not None and not isinstance(leftover, list):
-        leftover = [leftover]
-    envelope["leftover_vms"] = [str(vm) for vm in leftover] if leftover is not None else None
     moved = record.get("moved_files")
-    envelope["removal"] = {
+    removal = {
         "state": str(record.get("state") or "unknown"),
         "started_at": record.get("started_at"),
         "finished_at": record.get("finished_at"),
@@ -442,9 +475,27 @@ def merge_remove_record(envelope: dict[str, Any], record: dict[str, Any]) -> Non
             str(f) for f in (moved if isinstance(moved, list) else [moved] if moved else [])
         ],
     }
+    envelope["removal"] = removal
     notes = envelope.setdefault("notes", [])
-    state = envelope["removal"]["state"]
-    if state == "done":
+    age = _remove_age(envelope, record)
+    if age == "older":
+        envelope["leftover_vms"] = None
+        notes.append(
+            "an older remove record exists for this id; status shows the newer deploy "
+            "that Get-HoloDeckInstance lists, and removal is kept as history"
+        )
+        return
+    leftover = record.get("leftover_vms")
+    if leftover is not None and not isinstance(leftover, list):
+        leftover = [leftover]
+    envelope["leftover_vms"] = [str(vm) for vm in leftover] if leftover is not None else None
+    state = removal["state"]
+    if state == "done" and age == "unsure":
+        notes.append(
+            "a remove finished, but Get-HoloDeckInstance still lists this id and MEHO "
+            "cannot tell which is newer; status shows the listed deploy"
+        )
+    elif state == "done":
         envelope["status"] = "removed"
         envelope.pop("error", None)
         if leftover:

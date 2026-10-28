@@ -410,6 +410,59 @@ async def test_status_shows_the_remove_error_text() -> None:
     assert any("VM is locked" in note for note in result["notes"])
 
 
+_OLD_REMOVE = {
+    "instance_id": "lab01",
+    "state": "done",
+    "started_at": "2026-01-01T10:00:00.1234567Z",
+    "finished_at": "2026-01-01T10:20:00.1234567Z",
+    "error": None,
+    "leftover_vms": ["lab01-vcfinstaller-a"],
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("deploy_status", "expected"), [("InProgress", "running"), ("Completed", "completed")]
+)
+async def test_status_old_remove_record_does_not_hide_a_newer_deploy(
+    deploy_status: str, expected: str
+) -> None:
+    deploy = {"InstanceID": "lab01", "Status": deploy_status, "StartTime": "2026-01-02T08:00:00Z"}
+    result = await _status(_OLD_REMOVE, deploy)
+    assert result["status"] == expected
+    assert result["leftover_vms"] is None
+    assert result["removal"]["state"] == "done"
+    assert any("older remove record" in note for note in result["notes"])
+    assert not any("vmware.composite.vm.destroy" in note for note in result["notes"])
+
+
+@pytest.mark.asyncio
+async def test_status_old_remove_record_keeps_a_failed_deploy() -> None:
+    deploy = {
+        "InstanceID": "lab01",
+        "Status": "Failed",
+        "StartTime": "2026-01-02T08:00:00Z",
+        "Message": "host not reachable",
+    }
+    result = await _status(_OLD_REMOVE, deploy)
+    assert result["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_status_remove_newer_than_the_listed_deploy_is_removed() -> None:
+    deploy = {"InstanceID": "lab01", "Status": "Completed", "StartTime": "2025-12-31T08:00:00Z"}
+    result = await _status(_OLD_REMOVE, deploy)
+    assert result["status"] == "removed"
+    assert result["leftover_vms"] == ["lab01-vcfinstaller-a"]
+
+
+@pytest.mark.asyncio
+async def test_status_listed_deploy_without_a_time_is_not_marked_removed() -> None:
+    result = await _status(_OLD_REMOVE, {"InstanceID": "lab01", "Status": "InProgress"})
+    assert result["status"] == "running"
+    assert any("cannot tell which is newer" in note for note in result["notes"])
+
+
 @pytest.mark.asyncio
 async def test_status_without_remove_record_is_unchanged() -> None:
     result = await _status(None, {"Status": "InProgress"})

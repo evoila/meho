@@ -30,10 +30,12 @@ seeded ``operation_group`` / ``endpoint_descriptor`` rows.
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 import warnings
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from html.parser import HTMLParser
 from typing import Any
 
 import pytest
@@ -51,6 +53,7 @@ from meho_backplane.connectors.registry import clear_registry, register_connecto
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import (
+    ApprovalRequest,
     AuditLog,
     EndpointDescriptor,
     OperationGroup,
@@ -59,6 +62,7 @@ from meho_backplane.db.models import (
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
@@ -977,6 +981,218 @@ def test_operations_ui_run_call_awaiting_approval_deep_links_to_approvals() -> N
     connector = get_or_create_connector_instance(_RecordingHttpConnector)
     assert isinstance(connector, _RecordingHttpConnector)
     assert connector.calls == []
+
+
+_DESTRUCTIVE_OP_ID = "DELETE:/repos/{owner}/{repo}"
+
+
+async def _destructive_blast_radius_builder(ctx: PreviewContext) -> dict[str, Any]:
+    """Blast-radius block a destructive op must carry to wait for approval (#3197)."""
+    return {
+        "blast_radius": {
+            "object": {"kind": "repo", "id": ctx.params.get("repo")},
+            "children": [],
+            "irreversibility": "permanent",
+        },
+    }
+
+
+def _seed_destructive_op() -> uuid.UUID:
+    """Seed a ``destructive`` gh-rest delete op and its blast-radius builder."""
+    register_preview_builder(_DESTRUCTIVE_OP_ID, _destructive_blast_radius_builder)
+    return _seed_ingested_op(
+        tenant_id=None,
+        op_id=_DESTRUCTIVE_OP_ID,
+        method="DELETE",
+        path="/repos/{owner}/{repo}",
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "x-meho-param-loc": "path"},
+                "repo": {"type": "string", "x-meho-param-loc": "path"},
+            },
+        },
+        safety_level="destructive",
+    )
+
+
+def _approval_requests() -> list[ApprovalRequest]:
+    """Return every stored ``ApprovalRequest`` row."""
+
+    async def _do() -> list[ApprovalRequest]:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            result = await session.execute(select(ApprovalRequest))
+            return list(result.scalars().all())
+
+    return asyncio.run(_do())
+
+
+def test_operations_ui_run_destructive_preview_then_call_awaits_approval() -> None:
+    """#5015: preview, then run, a destructive op from the console -> it waits for approval.
+
+    Real dispatch, no stub. The preview fragment carries the hidden
+    ``preview_hash`` input; the run form posts it to ``/ui/operations/call``,
+    and the dispatcher stores one approval request bound to that hash.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_destructive_op()
+    _seed_gh_target(tenant_id=_TENANT_A)
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    form = {
+        "connector_id": "gh-rest-3",
+        "op_id": _DESTRUCTIVE_OP_ID,
+        "target": "gh-prod",
+        "params": '{"owner": "evoila", "repo": "old-repo"}',
+    }
+    with mock:
+        preview = client.post("/ui/operations/preview", headers=_csrf_headers(csrf), data=form)
+        assert preview.status_code == 200, preview.text
+        assert 'data-preview-status="ok"' in preview.text
+        match = re.search(r'name="preview_hash" value="([0-9a-f]{64})"', preview.text)
+        assert match is not None, preview.text
+        preview_hash = match.group(1)
+        assert "data-preview-hash" in preview.text
+
+        response = client.post(
+            "/ui/operations/call",
+            headers=_csrf_headers(csrf),
+            data={**form, "preview_hash": preview_hash},
+        )
+    assert response.status_code == 200, response.text
+    assert 'data-run-status="awaiting_approval"' in response.text
+    rows = _approval_requests()
+    assert len(rows) == 1
+    assert rows[0].preview_hash == preview_hash
+    # Nothing reached the vendor system: the op waits for a second person.
+    connector = get_or_create_connector_instance(_RecordingHttpConnector)
+    assert isinstance(connector, _RecordingHttpConnector)
+    assert connector.calls == []
+
+
+def test_operations_ui_run_destructive_without_preview_hash_is_denied() -> None:
+    """A destructive run without a preview hash is still refused; nothing is stored."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_destructive_op()
+    _seed_gh_target(tenant_id=_TENANT_A)
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/operations/call",
+            headers=_csrf_headers(csrf),
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": _DESTRUCTIVE_OP_ID,
+                "target": "gh-prod",
+                "params": '{"owner": "evoila", "repo": "old-repo"}',
+            },
+        )
+    assert response.status_code == 200, response.text
+    assert 'data-run-status="denied"' in response.text
+    assert "preview_binding_required" in response.text
+    assert _approval_requests() == []
+
+
+def test_operations_ui_run_modal_destructive_has_preview_step_and_red_banner() -> None:
+    """The run window of a destructive op carries the preview step and the red banner."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    desc_id = _seed_destructive_op()
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        modal = client.get(f"/ui/operations/run/{desc_id}")
+        drawer = client.get(f"/ui/operations/descriptor/{desc_id}")
+    assert modal.status_code == 200, modal.text
+    body = modal.text
+    assert "data-run-preview-step" in body
+    assert 'id="operations-run-preview-region"' in body
+    assert 'hx-post="/ui/operations/preview"' in body
+    assert 'data-safety-level="destructive"' in body
+    assert "alert-error" in body
+    assert "Destructive operation" in body
+    assert "Run (request approval)" in body
+    assert drawer.status_code == 200, drawer.text
+    assert "Destructive — deletes something that cannot be undone" in drawer.text
+    assert "Safe — read or non-impacting" not in drawer.text
+
+
+class _FormFieldAttrs(HTMLParser):
+    """Collect the attributes of every ``input`` / ``textarea`` / ``button`` by name or action."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fields: dict[str, dict[str, str | None]] = {}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag not in {"input", "textarea", "button"}:
+            return
+        attr_map = dict(attrs)
+        key = attr_map.get("name") or attr_map.get("data-action")
+        if key:
+            self.fields[key] = attr_map
+
+
+def test_operations_ui_run_modal_destructive_edit_aborts_pending_preview() -> None:
+    """#5015: editing the target or the params cancels a preview still in flight.
+
+    Scenario: the person clicks Preview, then edits before the response
+    arrives. Without the abort, the late response fills the region with the
+    old preview and its hidden hash, and the next Run sends changed values
+    with that stale hash. The input handler must send ``htmx:abort`` to the
+    Preview button (htmx drops an aborted request, nothing is swapped) BEFORE
+    it clears the region. There is no browser in this suite, so the test
+    checks the handler the template renders.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    desc_id = _seed_destructive_op()
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        modal = client.get(f"/ui/operations/run/{desc_id}")
+    assert modal.status_code == 200, modal.text
+    parser = _FormFieldAttrs()
+    parser.feed(modal.text)
+    fields = parser.fields
+    # The Preview button is the element that owns the in-flight request, so
+    # it is the element the abort event must be sent to.
+    assert fields["run-preview"]["hx-post"] == "/ui/operations/preview"
+    for name in ("target", "params"):
+        handler = fields[name].get("hx-on:input")
+        assert handler, f"{name} has no input handler"
+        assert "data-clears-preview" in fields[name]
+        abort_at = handler.find("htmx:abort")
+        clear_at = handler.find("replaceChildren")
+        assert abort_at >= 0, handler
+        assert clear_at >= 0, handler
+        assert abort_at < clear_at, "abort the pending preview before clearing the region"
+        assert "[data-action=run-preview]" in handler
+        assert "operations-run-preview-region" in handler
+    # The work ref is not part of the previewed call, so editing it keeps the preview.
+    assert "hx-on:input" not in fields["work_ref"]
+
+
+def test_operations_ui_run_modal_non_destructive_has_no_preview_step() -> None:
+    """Only a destructive op gets the preview step in the run window."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    desc_id = _seed_ingested_op(tenant_id=None, safety_level="dangerous")
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.get(f"/ui/operations/run/{desc_id}")
+    assert response.status_code == 200, response.text
+    assert "data-run-preview-step" not in response.text
 
 
 def test_operations_ui_run_call_handle_renders_metadata_not_blob(

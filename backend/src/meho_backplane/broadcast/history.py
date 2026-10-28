@@ -10,10 +10,11 @@ order (:mod:`meho_backplane.broadcast.archive_reader`, #3748, #3758).
 This module holds the primitives they share: :func:`event_matches`,
 :func:`row_to_announcement` and :func:`dump_event_wire`.
 
-It also holds the dispatch-time target-activity advisory and the
-announce-gate claim lookup, which still scan the per-tenant Valkey
-stream (:func:`parse_entry` / :func:`select_event_model`). Since #3758
-only agent announcements are written to that stream.
+It also holds the dispatch-time target-activity advisory, which still
+scans the per-tenant Valkey stream (:func:`parse_entry` /
+:func:`select_event_model`; since #3758 only agent announcements are
+written to that stream), and the caller's active-claim lookup
+(:func:`announce_claim_gap`), which reads the archive (#4091).
 
 Tenant scoping
 ==============
@@ -33,16 +34,18 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from typing import Any, Final, cast
+from typing import Any, Final, Literal, cast
 
 import structlog
 from pydantic import ValidationError
+from sqlalchemy import select
 
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
 from meho_backplane.broadcast.client import get_broadcast_client
 from meho_backplane.broadcast.events import BroadcastEvent, classify_op
+from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentAnnouncement
 from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import wrap_untrusted_text
@@ -51,6 +54,8 @@ __all__ = [
     "DEFAULT_WINDOW_MINUTES",
     "OP_CLASS_ENUM",
     "WRITE_OP_CLASSES",
+    "ClaimGap",
+    "announce_claim_gap",
     "build_target_activity_advisory",
     "caller_has_active_announce_claim",
     "dump_event_wire",
@@ -642,16 +647,37 @@ async def build_target_activity_advisory(
     return {ADVISORY_EXTRAS_KEY: [_advisory_entry(event) for event in reversed(newest)]}
 
 
-#: Lookback for the caller's own active-claim scan. Announcement TTLs are
+#: Lookback for the caller's own active-claim lookup. Announcement TTLs are
 #: bounded at 1440 minutes (``AgentAnnouncementEvent.ttl_minutes`` upper
-#: bound), which is also the stream's retention ceiling, so a claim older
-#: than this window can no longer be active. Paired with
-#: :data:`_ADVISORY_SCAN_LIMIT` (newest-first ``COUNT`` cap), the scan is
-#: one bounded round-trip; a caller who announced more than
-#: :data:`_ADVISORY_SCAN_LIMIT` events ago in a very busy tenant may fall
-#: off the tail (a bounded false-negative acceptable for an awareness
-#: nudge, and unlikely for the announce-then-write flow the gate targets).
+#: bound), so a claim older than this window can no longer be active.
 _CLAIM_SCAN_WINDOW_MINUTES: Final[int] = 1440
+
+#: Most archive rows the claim lookup reads, newest first (#4091). The rows
+#: are only the caller's own announcements of the last day, so normal use
+#: stays far below this. The cap bounds the cost for a principal that
+#: announces all day at the rate limit; such a principal does not see a
+#: claim it made more than this many announcements ago.
+_CLAIM_SCAN_LIMIT: Final[int] = 500
+
+#: Why no active claim of the caller covers a write-class op (#4091). The
+#: reflex advisory names the reason, so the agent knows what to fix:
+#:
+#: * ``no_claim`` -- the caller has no active announcement at all;
+#: * ``other_target`` -- the caller's active announcements name other targets;
+#: * ``other_op_class`` -- an active announcement names this target but
+#:   declared another ``planned_op_class``;
+#: * ``expired`` -- an announcement would cover the op, but its TTL ran out.
+ClaimGap = Literal["no_claim", "other_target", "other_op_class", "expired"]
+
+#: When the caller's announcements give different reasons, the one closest
+#: to a covering claim wins: an expired claim for this exact op says more
+#: than an active claim for another target.
+_CLAIM_GAP_RANK: Final[dict[ClaimGap, int]] = {
+    "no_claim": 0,
+    "other_target": 1,
+    "other_op_class": 2,
+    "expired": 3,
+}
 
 
 def _claim_covers_target(event: AgentAnnouncementEvent, target_name: str | None) -> bool:
@@ -668,6 +694,86 @@ def _claim_covers_target(event: AgentAnnouncementEvent, target_name: str | None)
     return _target_matches(event, target_name)
 
 
+def _claim_gap(
+    claim: AgentAnnouncementEvent,
+    *,
+    op_class: str,
+    target_name: str | None,
+    now: datetime,
+) -> ClaimGap | None:
+    """Why *claim* does not cover the op, or ``None`` when it does."""
+    covers_target = _claim_covers_target(claim, target_name)
+    covers_class = claim.planned_op_class is None or claim.planned_op_class == op_class
+    expired = _is_expired_claim(claim, now)
+    if covers_target and covers_class:
+        return "expired" if expired else None
+    if expired:
+        return "no_claim"
+    return "other_op_class" if covers_target else "other_target"
+
+
+async def announce_claim_gap(
+    operator: Operator,
+    *,
+    op_id: str,
+    target_name: str | None,
+) -> ClaimGap | None:
+    """Return ``None`` when the caller holds an active claim covering this op.
+
+    Otherwise return why not (:data:`ClaimGap`). Shared by the #3133 reflex
+    advisory's announce-before-mutate heuristic and the #3133 opt-in
+    announce gate (through :func:`caller_has_active_announce_claim`), so
+    the two agree on what "an active claim covering this op" means.
+
+    Reads the caller's announcements of the last
+    :data:`_CLAIM_SCAN_WINDOW_MINUTES` minutes from the
+    ``agent_announcement`` archive (newest first, at most
+    :data:`_CLAIM_SCAN_LIMIT` rows): the record ``meho_broadcast_recent``
+    reads too. Not the Valkey stream (#4091): its write may fail, and a
+    capped read of it drops a claim behind other principals' entries.
+
+    A claim covers the op when all hold:
+
+    * it was published for this principal (``principal_sub ==
+      operator.sub``, so a delegated agent's claim rides its human
+      principal's ``sub``);
+    * it has not expired (a claim with no ``ttl_minutes`` never expires);
+    * its declared ``planned_op_class`` matches the op's
+      :func:`classify_op` class, or the claim declared no class (a
+      class-agnostic claim covers any op); and
+    * its target attribution covers the op (see :func:`_claim_covers_target`),
+      matched on the stored values, never on the read tools' untrusted wrap.
+
+    Propagates database errors to the caller's fail-open guard (reflex
+    advisory: ``{}``; announce gate: "do not block").
+    """
+    since = datetime.now(UTC) - timedelta(minutes=_CLAIM_SCAN_WINDOW_MINUTES)
+    stmt = (
+        select(AgentAnnouncement)
+        .where(
+            AgentAnnouncement.tenant_id == operator.tenant_id,
+            AgentAnnouncement.principal_sub == operator.sub,
+            AgentAnnouncement.created_at >= since,
+        )
+        .order_by(AgentAnnouncement.created_at.desc())
+        .limit(_CLAIM_SCAN_LIMIT)
+    )
+    async with get_sessionmaker()() as session:
+        rows = (await session.execute(stmt)).scalars().all()
+    now = datetime.now(UTC)
+    op_class = classify_op(op_id)
+    gap: ClaimGap = "no_claim"
+    for row in rows:
+        row_gap = _claim_gap(
+            row_to_announcement(row), op_class=op_class, target_name=target_name, now=now
+        )
+        if row_gap is None:
+            return None
+        if _CLAIM_GAP_RANK[row_gap] > _CLAIM_GAP_RANK[gap]:
+            gap = row_gap
+    return gap
+
+
 async def caller_has_active_announce_claim(
     operator: Operator,
     *,
@@ -676,50 +782,6 @@ async def caller_has_active_announce_claim(
 ) -> bool:
     """Return ``True`` iff the caller holds an active claim covering this op.
 
-    Reads the caller's own unexpired :class:`AgentAnnouncementEvent`
-    claims off the per-tenant stream (one bounded newest-first
-    ``XREVRANGE``) and returns ``True`` as soon as one covers the
-    dispatched op. Shared by the #3133 reflex advisory's
-    announce-before-mutate heuristic and the #3133 opt-in announce gate,
-    so the two agree on what "an active claim covering this op" means.
-
-    A claim covers the op when all hold:
-
-    * it was authored by this principal (``principal_sub == operator.sub``
-      -- announcements carry no ``actor_sub``, so a delegated agent's
-      claim rides its human principal's ``sub``);
-    * it has not expired (a claim with no ``ttl_minutes`` never expires);
-    * its declared ``planned_op_class`` matches the op's
-      :func:`classify_op` class, or the claim declared no class (a
-      class-agnostic claim covers any op); and
-    * its target attribution covers the op (see :func:`_claim_covers_target`).
-
-    Propagates :class:`redis.exceptions.RedisError` to the caller's
-    fail-open guard: the reflex advisory swallows it to ``{}`` and the
-    announce gate swallows it to "do not block".
+    The yes/no form of :func:`announce_claim_gap`, for the announce gate.
     """
-    client = get_broadcast_client()
-    key = stream_key(operator.tenant_id)
-    since_ms = max(
-        int((datetime.now(UTC) - timedelta(minutes=_CLAIM_SCAN_WINDOW_MINUTES)).timestamp() * 1000),
-        0,
-    )
-    raw_entries = cast(
-        "list[tuple[str, dict[str, str]]]",
-        await client.xrevrange(key, max=_XRANGE_END, min=str(since_ms), count=_ADVISORY_SCAN_LIMIT),
-    )
-    now = datetime.now(UTC)
-    op_class = classify_op(op_id)
-    for entry_id, fields in raw_entries:
-        event = parse_entry(entry_id, fields, stream_key=key)
-        if not isinstance(event, AgentAnnouncementEvent):
-            continue
-        if event.principal_sub != operator.sub:
-            continue
-        if _is_expired_claim(event, now):
-            continue
-        if event.planned_op_class is not None and event.planned_op_class != op_class:
-            continue
-        if _claim_covers_target(event, target_name):
-            return True
-    return False
+    return await announce_claim_gap(operator, op_id=op_id, target_name=target_name) is None

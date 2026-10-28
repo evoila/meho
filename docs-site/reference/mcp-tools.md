@@ -21,15 +21,15 @@ The default agent surface. No elevation required.
 | Tool | Maturity | Extra gate | Summary |
 | --- | --- | --- | --- |
 | `add_to_knowledge` | ga | — | Add a new entry to the tenant's knowledge base. |
-| `add_to_memory` | ga | — | Add a new memory entry. |
-| `ask_docs` | experimental | capability `meho-docs` | Answer a vendor-reference question with a SYNTHESIZED, CITED answer composed over a vendor-document collection (product manuals, KB articles, design / reference guides) — e.g. 'What are the NSX 9.0 config maximums for logical switches?'. |
-| `call_operation` | ga | — | Invoke an operation. |
+| `add_to_memory` | ga | — | Save a memory: something worth keeping after this session, such as an operator preference, a tenant convention or a gotcha for one target. |
+| `ask_docs` | experimental | capability `meho-docs` | Answer a vendor-reference question with one composed answer and the chunks it cites, from one vendor-document collection (manuals, KB articles, guides), e.g. 'NSX 9.0 config maximums for logical switches?'. |
+| `call_operation` | ga | — | Run an operation. |
 | `list_doc_collections` | experimental | capability `meho-docs` | List the documentation collections you are entitled to search — the catalogue an agent reads to learn WHICH `collection` to pass to `search_docs` / `ask_docs` before searching. |
 | `list_operation_groups` | ga | — | List enabled operation groups for a connector. |
 | `list_targets` | ga | — | List the operator's accessible infrastructure targets, optionally filtered by connector. |
-| `meho_broadcast_announce` | beta | — | Publish an agent-authored announcement to the operator's tenant broadcast stream. |
-| `meho_broadcast_recent` | beta | — | Read the agent announcements in the operator's tenant: what other agents said they are starting, doing, or have finished. |
-| `meho_broadcast_watch` | beta | — | Wait for new agent announcements in the operator's tenant after 'cursor' (a watch checkpoint). |
+| `meho_broadcast_announce` | beta | — | Post a short note to your tenant's broadcast feed so other operators and agents see what you are doing. |
+| `meho_broadcast_recent` | beta | — | Read the agent announcements in your tenant: what other agents said they are starting, doing or have finished. |
+| `meho_broadcast_watch` | beta | — | Wait for new agent announcements in your tenant after 'cursor'. |
 | `meho_connector_list` | ga | — | List ingested connectors visible to the operator's tenant (plus built-in / global). |
 | `meho_runbook_abort` | beta | — | Abort an in-progress run. |
 | `meho_runbook_list_runs` | beta | — | List runs in the tenant. |
@@ -39,10 +39,10 @@ The default agent surface. No elevation required.
 | `meho_runbook_start` | beta | — | Start a new runbook run. |
 | `meho_status` | — | — | Returns the operator's identity (sub, name, email, tenant_id, tenant_role) plus the MEHO backplane's dependency status: Vault federation chain (reachable + KV read OK?), DB migration state with the database's revision and the revision this build expects, the readiness checks /ready reports (name, ok, detail), the approval settings in force (approval key state, whether a second person must approve), the gated features and the setting names they still need, the OAuth scopes this session holds, and which working-surface tools it should see versus the ones it lists. |
 | `preview_operation` | ga | — | Preview an operation WITHOUT running it. |
-| `query_topology` | beta | — | Query the topology graph. |
+| `query_topology` | beta | — | Read the topology graph: what depends on what. |
 | `read_docs` | experimental | capability `meho-docs` | Read more around a vendor-document hit: the text before and after it, the whole page, or the section it sits in. |
-| `result_query` | ga | — | Read rows back from a JSONFlux result handle. |
-| `search_docs` | experimental | capability `meho-docs` | Search a vendor-document collection (product manuals, KB articles, design / reference guides) for an authoritative vendor fact — e.g. 'NSX config maximums for 9.0' or 'vSphere 8.0 supported snapshot depth'. |
+| `result_query` | ga | — | Read the full data behind a result handle. |
+| `search_docs` | experimental | capability `meho-docs` | Search a vendor-document collection (manuals, KB articles, guides) for a vendor fact, e.g. 'NSX config maximums for 9.0' or 'vSphere 8.0 supported snapshot depth'. |
 | `search_knowledge` | ga | — | Search the tenant's knowledge base for distilled operator knowledge: vendor API patterns, lab conventions, known-good runbooks, post-incident learnings. |
 | `search_memory` | ga | — | Search the operator's accessible memories (own user-scoped entries + tenant-shared + target-shared entries visible to this operator). |
 | `search_operations` | ga | — | Hybrid BM25 + cosine retrieval over a connector's enabled operations. |

@@ -13,22 +13,14 @@ constant gets one line in that check.
 Azure pins an API version per call (the ``api-version`` query parameter). The
 versions are kept next to their paths, one per family of operations. Each
 family keeps its paths in its own section below, so families built at the
-same time do not edit the same lines.
+same time do not edit the same lines. For the same reason the module has no
+``__all__``: every family would add its names at the same place. The spec path
+check finds the constants with ``vars()``.
 """
 
 from __future__ import annotations
 
 from typing import Final
-
-__all__ = [
-    "LOCATIONS_PATH",
-    "RESOURCE_GRAPH_API_VERSION",
-    "RESOURCE_GRAPH_PATH",
-    "SUBSCRIPTIONS_API_VERSION",
-    "SUBSCRIPTION_PATH",
-    "locations_path",
-    "subscription_path",
-]
 
 #: ``GET /subscriptions/{subscriptionId}``: one subscription (Subscriptions - Get).
 SUBSCRIPTION_PATH: Final[str] = "/subscriptions/{subscription_id}"
@@ -48,6 +40,51 @@ RESOURCE_GRAPH_PATH: Final[str] = "/providers/Microsoft.ResourceGraph/resources"
 RESOURCE_GRAPH_API_VERSION: Final[str] = "2024-04-01"
 
 # ---- aks (Task #5087) ----
+#
+# Azure Kubernetes Service (AKS): clusters, node pools, upgrade options and
+# the Kubernetes versions per region. Reads only. MEHO never calls the
+# actions that return a kubeconfig (a cluster login): listClusterUserCredential,
+# listClusterAdminCredential, listClusterMonitoringUserCredential, and the
+# listCredential actions of access profiles and managed namespaces.
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.ContainerService/managedClusters``:
+#: every AKS cluster of the subscription (Managed Clusters - List).
+AKS_CLUSTERS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.ContainerService/managedClusters"
+)
+
+#: ``GET .../resourceGroups/{resourceGroupName}/providers/Microsoft.ContainerService``
+#: ``/managedClusters/{resourceName}``: one AKS cluster (Managed Clusters - Get).
+AKS_CLUSTER_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.ContainerService/managedClusters/{cluster}"
+)
+
+#: ``GET .../managedClusters/{resourceName}/upgradeProfiles/default``: the
+#: Kubernetes versions the cluster and its node pools can move to (Managed
+#: Clusters - Get Upgrade Profile).
+AKS_UPGRADE_PROFILE_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.ContainerService/managedClusters/{cluster}/upgradeProfiles/default"
+)
+
+#: ``GET .../managedClusters/{resourceName}/agentPools``: the node pools of one
+#: cluster; Azure calls them agent pools (Agent Pools - List).
+AKS_NODE_POOLS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.ContainerService/managedClusters/{cluster}/agentPools"
+)
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.ContainerService``
+#: ``/locations/{location}/kubernetesVersions``: the Kubernetes versions AKS
+#: offers in one region (Managed Clusters - List Kubernetes Versions).
+AKS_KUBERNETES_VERSIONS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.ContainerService"
+    "/locations/{location}/kubernetesVersions"
+)
+
+#: The API version of every AKS read (Microsoft.ContainerService).
+AKS_API_VERSION: Final[str] = "2026-08-01"
 
 # ---- arc (Task #5084) ----
 
@@ -56,10 +93,157 @@ RESOURCE_GRAPH_API_VERSION: Final[str] = "2024-04-01"
 # ---- avs (Task #5091) ----
 
 # ---- compute (Task #5083) ----
+#
+# Three Microsoft.Compute API versions, one per pinned spec file: VMs, images
+# and scale sets (ComputeRP), managed disks (DiskRP), and the VM sizes per
+# region (Resource SKUs).
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.Compute/virtualMachines``:
+#: every VM of the subscription (Virtual Machines - List All). With
+#: ``statusOnly=true`` the same call returns the run-time state of each VM.
+VIRTUAL_MACHINES_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Compute/virtualMachines"
+)
+
+#: ``GET .../resourceGroups/{resourceGroupName}/providers/Microsoft.Compute/virtualMachines``:
+#: the VMs of one resource group (Virtual Machines - List).
+RESOURCE_GROUP_VIRTUAL_MACHINES_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.Compute/virtualMachines"
+)
+
+#: ``GET .../virtualMachines/{vmName}``: one VM (Virtual Machines - Get). With
+#: ``$expand=instanceView`` the answer also holds its run-time state.
+VIRTUAL_MACHINE_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.Compute/virtualMachines/{vm_name}"
+)
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.Compute/images``:
+#: the managed images of the subscription (Images - List).
+IMAGES_PATH: Final[str] = "/subscriptions/{subscription_id}/providers/Microsoft.Compute/images"
+
+#: The managed images of one resource group (Images - List By Resource Group).
+RESOURCE_GROUP_IMAGES_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.Compute/images"
+)
+
+#: ``GET .../providers/Microsoft.Compute/virtualMachineScaleSets``: the scale
+#: sets of the subscription (Virtual Machine Scale Sets - List All).
+SCALE_SETS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Compute/virtualMachineScaleSets"
+)
+
+#: The scale sets of one resource group (Virtual Machine Scale Sets - List).
+RESOURCE_GROUP_SCALE_SETS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.Compute/virtualMachineScaleSets"
+)
+
+#: The API version of the VM, image and scale-set reads (Microsoft.Compute).
+COMPUTE_API_VERSION: Final[str] = "2026-04-01"
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.Compute/disks``:
+#: the managed disks of the subscription (Disks - List).
+DISKS_PATH: Final[str] = "/subscriptions/{subscription_id}/providers/Microsoft.Compute/disks"
+
+#: The managed disks of one resource group (Disks - List By Resource Group).
+RESOURCE_GROUP_DISKS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.Compute/disks"
+)
+
+#: The API version of the managed-disk reads (Microsoft.Compute disks).
+DISKS_API_VERSION: Final[str] = "2026-03-02"
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.Compute/skus``:
+#: the compute sizes the subscription can see (Resource Skus - List). Only the
+#: filter ``location eq '<region>'`` works on this call.
+COMPUTE_SKUS_PATH: Final[str] = "/subscriptions/{subscription_id}/providers/Microsoft.Compute/skus"
+
+#: The API version of the size list. The Resource SKUs call has its own API
+#: version, older than the one of the VM reads.
+COMPUTE_SKUS_API_VERSION: Final[str] = "2021-07-01"
 
 # ---- cost (Task #5088) ----
 
+#: ``POST /{scope}/providers/Microsoft.CostManagement/query``: the cost of a
+#: subscription or a resource group (Query - Usage). A read, even though it is
+#: a POST. ``scope`` is ``subscriptions/{id}`` or
+#: ``subscriptions/{id}/resourceGroups/{name}``, without a leading slash.
+COST_QUERY_PATH: Final[str] = "/{scope}/providers/Microsoft.CostManagement/query"
+
+#: ``POST /{scope}/providers/Microsoft.CostManagement/forecast``: the expected
+#: cost of a scope (Forecast - Usage). A read, even though it is a POST.
+COST_FORECAST_PATH: Final[str] = "/{scope}/providers/Microsoft.CostManagement/forecast"
+
+#: The API version of the cost query and the forecast (Microsoft.CostManagement).
+COST_MANAGEMENT_API_VERSION: Final[str] = "2026-06-01"
+
+#: ``GET /{scope}/providers/Microsoft.Consumption/budgets``: the budgets of a
+#: subscription or a resource group (Budgets - List).
+BUDGETS_PATH: Final[str] = "/{scope}/providers/Microsoft.Consumption/budgets"
+
+#: The API version of the budget reads (Microsoft.Consumption).
+CONSUMPTION_API_VERSION: Final[str] = "2026-06-01"
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.Advisor/recommendations``:
+#: Azure Advisor's recommendations for one subscription (Recommendations - List).
+ADVISOR_RECOMMENDATIONS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Advisor/recommendations"
+)
+
+#: The API version of the Advisor reads (Microsoft.Advisor).
+ADVISOR_API_VERSION: Final[str] = "2026-10-01"
+
+#: The public Azure Retail Prices API. It is not Azure Resource Manager: it
+#: needs no login and gets no token. Microsoft publishes no API description
+#: file for it, so it is a full URL and not a ``*_PATH`` constant, and the spec
+#: path check leaves it out.
+RETAIL_PRICES_URL: Final[str] = "https://prices.azure.com/api/retail/prices"
+
+#: The API version of the price list. From this version on, filter values must
+#: match in upper and lower case.
+RETAIL_PRICES_API_VERSION: Final[str] = "2023-01-01-preview"
+
 # ---- inventory (Task #5082) ----
+
+#: ``GET /subscriptions``: every subscription the login can see (Subscriptions -
+#: List). Sent with :data:`SUBSCRIPTIONS_API_VERSION`.
+SUBSCRIPTIONS_PATH: Final[str] = "/subscriptions"
+
+#: ``GET /subscriptions/{subscriptionId}/resourcegroups`` (Resource Groups - List).
+RESOURCE_GROUPS_PATH: Final[str] = "/subscriptions/{subscription_id}/resourcegroups"
+
+#: ``GET /subscriptions/{subscriptionId}/resources`` (Resources - List).
+RESOURCES_PATH: Final[str] = "/subscriptions/{subscription_id}/resources"
+
+#: ``GET /subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/resources``
+#: (Resources - List By Resource Group).
+RESOURCE_GROUP_RESOURCES_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}/resources"
+)
+
+#: ``GET /subscriptions/{subscriptionId}/tagNames``: tag names, their values and
+#: counts (Tags - List).
+TAG_NAMES_PATH: Final[str] = "/subscriptions/{subscription_id}/tagNames"
+
+#: ``GET`` and ``PATCH /{scope}/providers/Microsoft.Resources/tags/default``: the
+#: tags of one resource (Tags - Get At Scope, Tags - Update At Scope). *scope* is
+#: a resource ID without its first ``/``.
+TAGS_AT_SCOPE_PATH: Final[str] = "/{scope}/providers/Microsoft.Resources/tags/default"
+
+#: The API version of the resource, resource group and tag calls
+#: (Microsoft.Resources).
+RESOURCES_API_VERSION: Final[str] = "2021-04-01"
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.Authorization/locks``
+#: (Management Locks - List At Subscription Level).
+LOCKS_PATH: Final[str] = "/subscriptions/{subscription_id}/providers/Microsoft.Authorization/locks"
+
+#: The API version of the lock reads (Microsoft.Authorization).
+LOCKS_API_VERSION: Final[str] = "2020-05-01"
 
 # ---- migrate (Task #5093) ----
 
@@ -68,6 +252,104 @@ RESOURCE_GRAPH_API_VERSION: Final[str] = "2024-04-01"
 # ---- network (Task #5085) ----
 
 # ---- security (Task #5089) ----
+#
+# Microsoft Defender for Cloud, Azure Policy, role assignments and the
+# activity log. Every call here only reads. A ``{scope}`` path takes the scope
+# without its first slash, for example ``subscriptions/<id>`` or
+# ``subscriptions/<id>/resourceGroups/<name>``; the caller checks that the
+# scope stays inside the target's subscription.
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.Security/secureScores``:
+#: the Defender for Cloud secure scores (Secure Scores - List).
+SECURE_SCORES_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Security/secureScores"
+)
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.Security/secureScoreControls``:
+#: the controls of the secure score (Secure Score Controls - List).
+SECURE_SCORE_CONTROLS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Security/secureScoreControls"
+)
+
+#: The API version of the secure score reads (Microsoft.Security).
+SECURE_SCORE_API_VERSION: Final[str] = "2020-01-01"
+
+#: ``GET /{scope}/providers/Microsoft.Security/assessments``: the security
+#: recommendations, one row per resource and recommendation (Assessments - List).
+SECURITY_ASSESSMENTS_PATH: Final[str] = "/{scope}/providers/Microsoft.Security/assessments"
+
+#: The API version of the recommendation list (Microsoft.Security).
+SECURITY_ASSESSMENTS_API_VERSION: Final[str] = "2020-01-01"
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.Security/assessmentMetadata``:
+#: the name and severity of every kind of recommendation (Assessments Metadata -
+#: List By Subscription).
+SECURITY_ASSESSMENT_METADATA_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Security/assessmentMetadata"
+)
+
+#: The API version of the recommendation metadata (Microsoft.Security).
+SECURITY_ASSESSMENT_METADATA_API_VERSION: Final[str] = "2025-05-04"
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.Security/alerts``:
+#: the Defender for Cloud security alerts (Alerts - List).
+SECURITY_ALERTS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Security/alerts"
+)
+
+#: The API version of the alert list (Microsoft.Security).
+SECURITY_ALERTS_API_VERSION: Final[str] = "2022-01-01"
+
+#: ``GET /{scopeId}/providers/Microsoft.Security/pricings``: the Defender
+#: plans and whether each one is on (Pricings - List).
+DEFENDER_PLANS_PATH: Final[str] = "/{scope}/providers/Microsoft.Security/pricings"
+
+#: The API version of the Defender plan list (Microsoft.Security).
+DEFENDER_PLANS_API_VERSION: Final[str] = "2024-01-01"
+
+#: ``POST /subscriptions/{subscriptionId}/providers/Microsoft.PolicyInsights/
+#: policyStates/{policyStatesSummaryResource}/summarize``: the policy
+#: compliance summary (Policy States - Summarize For Subscription). A read,
+#: even though it is a POST. Azure allows only ``latest`` as the summary
+#: resource.
+POLICY_STATES_SUMMARY_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.PolicyInsights"
+    "/policyStates/{summary_resource}/summarize"
+)
+
+#: The API version of the policy compliance reads (Microsoft.PolicyInsights).
+POLICY_INSIGHTS_API_VERSION: Final[str] = "2024-10-01"
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.Authorization/policyAssignments``:
+#: every policy assignment that applies to the subscription (Policy
+#: Assignments - List).
+POLICY_ASSIGNMENTS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Authorization/policyAssignments"
+)
+
+#: The API version of the policy assignment list (Microsoft.Authorization).
+POLICY_ASSIGNMENTS_API_VERSION: Final[str] = "2026-07-01"
+
+#: ``GET /{scope}/providers/Microsoft.Authorization/roleAssignments``: the
+#: role assignments that apply to a scope (Role Assignments - List For Scope).
+ROLE_ASSIGNMENTS_PATH: Final[str] = "/{scope}/providers/Microsoft.Authorization/roleAssignments"
+
+#: ``GET /{scope}/providers/Microsoft.Authorization/roleDefinitions``: the
+#: roles that can be assigned at a scope, to turn role ids into role names
+#: (Role Definitions - List).
+ROLE_DEFINITIONS_PATH: Final[str] = "/{scope}/providers/Microsoft.Authorization/roleDefinitions"
+
+#: The API version of the role reads (Microsoft.Authorization).
+AUTHORIZATION_API_VERSION: Final[str] = "2022-04-01"
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.Insights/eventtypes/
+#: management/values``: the activity log of the subscription (Activity Logs - List).
+ACTIVITY_LOG_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Insights/eventtypes/management/values"
+)
+
+#: The API version of the activity log (Microsoft.Insights).
+ACTIVITY_LOG_API_VERSION: Final[str] = "2015-04-01"
 
 # ---- storage (Task #5086) ----
 

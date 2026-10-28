@@ -10,9 +10,10 @@ network, and they change nothing on the machine that runs them:
   image archive, a fake chart, a fake meho CLI, a VERSION file and a stub
   bin/helm.
 - MEHO_TEST_ROOT points install.sh to a temporary root folder. It holds the
-  host files the script reads (/etc/os-release, /proc/meminfo,
-  /run/systemd/system, /proc/sys/kernel/random/uuid) and receives every file
-  the script writes.
+  host files the script reads (/etc/os-release, /etc/passwd, /etc/group,
+  /proc/meminfo, /run/systemd/system, /proc/sys/kernel/random/uuid and the
+  kernel settings of RKE2's CIS profile in /proc/sys) and receives every
+  file the script writes.
 - PATH holds only stub commands and links to the few real tools the script
   needs. Each stub answers from one file in the "fake" folder and writes its
   arguments to calls.log, so a test changes one answer and reads the calls.
@@ -21,7 +22,11 @@ network, and they change nothing on the machine that runs them:
 
 The default answers describe a healthy Ubuntu 24.04 machine on which RKE2
 gets ready at once, Helm installs the core at once, and both Secrets of the
-core exist.
+core exist. RKE2's installer puts RKE2's kernel settings file for the CIS
+profile (fixtures/rke2-cis-sysctl.conf) under /usr/local/share/rke2, as
+the real one does. "systemctl restart systemd-sysctl.service" loads every
+file of /etc/sysctl.d into /proc/sys, and useradd and groupadd add their
+lines to /etc/passwd and /etc/group.
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ from pathlib import Path
 
 LINUX_SERVER = Path(__file__).resolve().parents[1]
 INSTALL_SH = LINUX_SERVER / "install.sh"
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 FAIL_LINE = re.compile(r"^\[FAIL\] .*$", re.MULTILINE)
 
 # The fake values the stubs answer with. A test greps for them. The two
@@ -47,6 +53,18 @@ ADMIN_LOGIN_VALUE = "fake-admin-login-7f3a"
 APPROVER_LOGIN_VALUE = "fake-approver-login-9c1d"
 UNSEAL_KEY = "fake-unseal-key-5e2b8a4c"
 SECRET_VALUES = (ADMIN_LOGIN_VALUE, APPROVER_LOGIN_VALUE, UNSEAL_KEY)
+
+# RKE2's kernel settings file for the CIS profile, as RKE2 v1.37.1 ships it,
+# and the place where its tarball installer puts it.
+RKE2_CIS_SYSCTL = (FIXTURES / "rke2-cis-sysctl.conf").read_text()
+RKE2_SHARE_DIR = "/usr/local/share/rke2"
+# The values of these kernel settings on a fresh Ubuntu 24.04 machine.
+KERNEL_DEFAULTS = {
+    "vm.overcommit_memory": "0",
+    "vm.panic_on_oom": "0",
+    "kernel.panic": "0",
+    "kernel.panic_on_oops": "0",
+}
 
 REAL_TOOLS = (
     "bash",
@@ -78,7 +96,7 @@ STUBS = {
     "ss": 'case "$*" in *-t*) cat "$MEHO_FAKE/ss_tcp" ;; *-u*) cat "$MEHO_FAKE/ss_udp" ;; esac',
     "timedatectl": 'cat "$MEHO_FAKE/ntp_synchronized"',
     "hostname": 'cat "$MEHO_FAKE/hostname_fqdn"',
-    "systemctl": textwrap.dedent("""\
+    "systemctl": textwrap.dedent(r"""
         case "$1" in
           is-active) grep -qxF -- "$3" "$MEHO_FAKE/active_units" ;;
           is-enabled) grep -qxF -- "$3" "$MEHO_FAKE/enabled_units" ;;
@@ -86,9 +104,39 @@ STUBS = {
             case "$*" in
               *rke2-server*) exit "$(cat "$MEHO_FAKE/systemctl_enable_rc")" ;;
             esac ;;
-          restart) exit "$(cat "$MEHO_FAKE/systemctl_restart_rc")" ;;
+          restart)
+            if [ "$2" = systemd-sysctl.service ]; then
+              rc=$(cat "$MEHO_FAKE/sysctl_restart_rc")
+              [ "$rc" = 0 ] || exit "$rc"
+              for file in "$MEHO_TEST_ROOT"/etc/sysctl.d/*.conf; do
+                [ -f "$file" ] && sed -n 's/^ *-*\([a-z0-9_.]*\) *= *\(.*\)$/\1 \2/p' "$file"
+              done | while read -r key value; do
+                path="$MEHO_TEST_ROOT/proc/sys/$(printf '%s' "$key" | sed 's|\.|/|g')"
+                mkdir -p "${path%/*}"
+                printf '%s\n' "$value" > "$path"
+              done
+              exit 0
+            fi
+            exit "$(cat "$MEHO_FAKE/systemctl_restart_rc")" ;;
           disable) exit "$(cat "$MEHO_FAKE/systemctl_disable_rc")" ;;
         esac
+        """).lstrip("\n"),
+    # useradd and groupadd add a line for the name, their last argument.
+    "useradd": textwrap.dedent("""\
+        rc=$(cat "$MEHO_FAKE/useradd_rc")
+        [ "$rc" = 0 ] || exit "$rc"
+        for name; do :; done
+        case " $* " in
+          *" -U "*) printf '%s:x:998:\\n' "$name" >> "$MEHO_TEST_ROOT/etc/group" ;;
+        esac
+        printf '%s:x:998:998:etcd user:/nonexistent:/sbin/nologin\\n' "$name" \\
+            >> "$MEHO_TEST_ROOT/etc/passwd"
+        """),
+    "groupadd": textwrap.dedent("""\
+        rc=$(cat "$MEHO_FAKE/groupadd_rc")
+        [ "$rc" = 0 ] || exit "$rc"
+        for name; do :; done
+        printf '%s:x:997:\\n' "$name" >> "$MEHO_TEST_ROOT/etc/group"
         """),
     "nft": textwrap.dedent("""\
         case "$*" in
@@ -129,10 +177,18 @@ KUBECTL_STUB = textwrap.dedent("""\
     esac
     """)
 
+# Like RKE2's installer, the stub puts RKE2's kernel settings file for the
+# CIS profile into the share folder of RKE2.
 RKE2_INSTALLER_STUB = textwrap.dedent("""\
     printf 'rke2-installer INSTALL_RKE2_ARTIFACT_PATH=%s\\n' "$INSTALL_RKE2_ARTIFACT_PATH" \\
         >> "$MEHO_FAKE/calls.log"
-    exit "$(cat "$MEHO_FAKE/rke2_installer_rc")"
+    rc=$(cat "$MEHO_FAKE/rke2_installer_rc")
+    if [ "$rc" = 0 ]; then
+        share="$MEHO_TEST_ROOT$(cat "$MEHO_FAKE/rke2_share_dir")"
+        mkdir -p "$share"
+        cat "$MEHO_FAKE/rke2_cis_sysctl" > "$share/rke2-cis-sysctl.conf"
+    fi
+    exit "$rc"
     """)
 
 HELM_STUB = textwrap.dedent("""\
@@ -189,6 +245,11 @@ DEFAULT_ANSWERS = {
     "kube_secret_unseal": f"{UNSEAL_KEY}\n",
     "kube_secret_unseal_rc": "0",
     "rke2_installer_rc": "0",
+    "rke2_share_dir": RKE2_SHARE_DIR,
+    "rke2_cis_sysctl": RKE2_CIS_SYSCTL,
+    "useradd_rc": "0",
+    "groupadd_rc": "0",
+    "sysctl_restart_rc": "0",
     "systemctl_enable_rc": "0",
     "helm_stdout": (
         'Release "meho" has been installed.\nNOTES:\nRead it with: kubectl -n meho get secret\n'
@@ -223,6 +284,11 @@ DOWNLOAD_PAYLOAD = {
 }
 
 
+def kernel_path(key: str) -> str:
+    """The /proc/sys path of a kernel setting, such as vm.panic_on_oom."""
+    return "/proc/sys/" + key.replace(".", "/")
+
+
 def _write_script(path: Path, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     log = f'printf \'%s %s\\n\' "{path.name}" "$*" >> "$MEHO_FAKE/calls.log"\n'
@@ -255,6 +321,10 @@ class FakeMachine:
         self.host_file("/etc/os-release", UBUNTU_2404)
         self.host_file("/proc/meminfo", "MemTotal:       16303756 kB\nMemFree:  1000 kB\n")
         self.host_file("/proc/sys/kernel/random/uuid", TENANT_ID + "\n")
+        self.host_file("/etc/passwd", "root:x:0:0:root:/root:/bin/bash\n")
+        self.host_file("/etc/group", "root:x:0:\n")
+        for key, value in KERNEL_DEFAULTS.items():
+            self.host_file(kernel_path(key), value + "\n")
         self.host_path("/run/systemd/system").mkdir(parents=True)
         self.ssh_connection: str | None = SSH_SESSION
 
@@ -302,6 +372,11 @@ class FakeMachine:
         target = self.host_path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
+
+    def install_rke2_files(self) -> None:
+        """What RKE2's installer leaves on the disk that install.sh reads:
+        RKE2's kernel settings file for the CIS profile."""
+        self.host_file(f"{RKE2_SHARE_DIR}/rke2-cis-sysctl.conf", RKE2_CIS_SYSCTL)
 
     def calls(self) -> str:
         """Every stub call so far, one line each: the command and its arguments."""
@@ -368,9 +443,13 @@ class InstallTestCase(unittest.TestCase):
         inputs = {
             "etc/os-release",
             "etc/hosts",
+            "etc/passwd",
+            "etc/group",
             "proc/meminfo",
             "proc/sys/kernel/random/uuid",
             "var/lib/rancher/rke2/bin/kubectl",
+            f"{RKE2_SHARE_DIR}/rke2-cis-sysctl.conf".lstrip("/"),
+            *(kernel_path(key).lstrip("/") for key in KERNEL_DEFAULTS),
         }
         found = []
         for path in self.machine.root.rglob("*"):

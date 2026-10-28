@@ -460,6 +460,7 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "audit-integrity",
         "azure-arm",
         "bind9-ssh",
+        "entra-graph",
         "fleet-lcm",
         "fleet-rest",
         "gcloud-rest",

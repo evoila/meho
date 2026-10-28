@@ -87,7 +87,9 @@ class _SnapshotConnector(Connector):
     async def discover_topology(self, target: Any) -> TopologyHints:
         return type(self).hints
 
-    async def list_candidates(self, seed_target: Any | None = None) -> list[CandidateHint]:
+    async def list_candidates(
+        self, seed_target: Any | None = None, operator: Any | None = None
+    ) -> list[CandidateHint]:
         return []
 
 

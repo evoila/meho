@@ -22,8 +22,10 @@ Heuristics (v1):
   (:func:`~meho_backplane.broadcast.events.classify_op` in
   :data:`~meho_backplane.broadcast.history.WRITE_OP_CLASSES`) and the
   caller holds no active announce claim covering it
-  (:func:`~meho_backplane.broadcast.history.caller_has_active_announce_claim`).
-  A one-liner names ``meho_broadcast_announce``.
+  (:func:`~meho_backplane.broadcast.history.announce_claim_gap`). A
+  one-liner names ``meho_broadcast_announce`` and says why no claim
+  covers the op: none at all, expired, another target, or another
+  planned op class (#4091).
 
 Design contract (mirrors the #2550 / #2718 mould):
 
@@ -70,7 +72,8 @@ from meho_backplane.broadcast.client import get_broadcast_client
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.broadcast.history import (
     WRITE_OP_CLASSES,
-    caller_has_active_announce_claim,
+    ClaimGap,
+    announce_claim_gap,
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, RequestUsageEvent
@@ -114,11 +117,32 @@ _READ_NUDGE: Final[str] = (
     "meho_broadcast_recent before acting so you see what other operators "
     "and agents are already doing in this tenant."
 )
-_ANNOUNCE_NUDGE: Final[str] = (
-    "You are running a write-class operation without an active announce "
-    "claim. Call meho_broadcast_announce first so concurrent operators "
-    "and agents can see your intent."
-)
+
+#: One announce nudge per reason (#4091), so the agent knows what to fix.
+#: ``{op_class}`` is the server's :func:`classify_op` class of the op.
+_ANNOUNCE_NUDGES: Final[dict[ClaimGap, str]] = {
+    "no_claim": (
+        "You are running a write-class operation without an active announce "
+        "claim. Call meho_broadcast_announce first so concurrent operators "
+        "and agents can see your intent."
+    ),
+    "expired": (
+        "You are running a write-class operation, but your announce claim for "
+        "it has expired. Call meho_broadcast_announce again so concurrent "
+        "operators and agents can see your intent."
+    ),
+    "other_target": (
+        "You are running a write-class operation on a target that none of "
+        "your active announce claims name. Call meho_broadcast_announce with "
+        "this target so concurrent operators and agents can see your intent."
+    ),
+    "other_op_class": (
+        "You are running a '{op_class}' operation, but your active announce "
+        "claim declared another planned_op_class. Call "
+        "meho_broadcast_announce with planned_op_class '{op_class}' so "
+        "concurrent operators and agents can see your intent."
+    ),
+}
 
 
 def _dedupe_key(session_id: uuid.UUID, heuristic: str) -> str:
@@ -225,14 +249,12 @@ async def build_reflex_advisory(
 
         # announce-before-mutate -- only for write-class ops; the claim is
         # issued only when the op qualifies and holds no covering claim.
-        if (
-            classify_op(op_id) in WRITE_OP_CLASSES
-            and not await caller_has_active_announce_claim(
-                operator, op_id=op_id, target_name=target_name
-            )
-            and await _claim(session_id, _HEURISTIC_ANNOUNCE, window_minutes)
-        ):
-            return {REFLEX_ADVISORY_EXTRAS_KEY: _ANNOUNCE_NUDGE}
+        op_class = classify_op(op_id)
+        if op_class not in WRITE_OP_CLASSES:
+            return {}
+        gap = await announce_claim_gap(operator, op_id=op_id, target_name=target_name)
+        if gap is not None and await _claim(session_id, _HEURISTIC_ANNOUNCE, window_minutes):
+            return {REFLEX_ADVISORY_EXTRAS_KEY: _ANNOUNCE_NUDGES[gap].format(op_class=op_class)}
     except Exception:
         # Advisory is best-effort; any failure (a DB or Valkey teardown, a
         # parse bug) must never convert a successful dispatch into a failure.

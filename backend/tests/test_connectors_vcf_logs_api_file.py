@@ -1065,6 +1065,27 @@ _SECRET_PAGES: list[Any] = [
         id="secret-child-element-as-the-json-key",
     ),
     pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        '<pre>{"x":{"password":"example-secret-value-0123456789"},"x":<span>1</span>}</pre>',
+        "example-secret-value-0123456789",
+        id="json-with-a-repeated-key-in-a-highlighted-block",
+    ),
+    pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        "<pre><span>x</span>:\n  password: example-secret-value-0123456789\nx: 1</pre>",
+        "example-secret-value-0123456789",
+        id="yaml-with-a-repeated-key-in-a-highlighted-block",
+    ),
+    pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        "<pre><span>user</span>: admin\n# password: example-secret-value-0123456789</pre>",
+        "example-secret-value-0123456789",
+        id="yaml-with-a-comment-in-a-highlighted-block",
+    ),
+    pytest.param(
         "application/json",
         _API_DOCS,
         '{"username": "admin", "password": "it\'s-a-secret-0123456789"}',

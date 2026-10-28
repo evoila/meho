@@ -23,7 +23,10 @@ JSON file and written back from the parsed copy. A ``<pre>`` or
 ``<span>``) fails closed: it comes back as it was only when every child
 passes its own check unchanged and the text joined over the children is
 one JSON or YAML object or list that the structured check leaves
-unchanged. Any other such block is withheld: the placeholder stands in
+unchanged. Text that names a key twice in one object, at any depth, or
+YAML text that holds a comment, is no such document: the parser would
+keep only part of it, and the block would come back with text the check
+never saw. Any other such block is withheld: the placeholder stands in
 its place, counted once.
 """
 
@@ -445,7 +448,11 @@ def _html_block(node: _HtmlNode, scrubber: Scrubber) -> str:
     combined into a rebuilt block: a child element can split a secret
     name (``{"<span>pass</span>word": ...}``) or stand inside a key, so
     that text with the children replaced is another document than the
-    one the page shows. A block with no text has only the element check.
+    one the page shows. The block comes back as the page wrote it, so
+    the parsed copy must hold all of its text: a key named twice in one
+    object (the parser keeps one value and drops the other) or a YAML
+    comment makes the text no document, see :func:`_parse_document`. A
+    block with no text has only the element check.
     """
     probe = scrubber.fresh()
     checked: list[str] = []
@@ -460,15 +467,26 @@ def _html_block(node: _HtmlNode, scrubber: Scrubber) -> str:
     return "".join(checked)
 
 
+class _RepeatedKeyError(ValueError):
+    """One object names a key twice; the parser would keep one value and drop the other."""
+
+
 def _parse_document(text: str) -> dict[str, Any] | list[Any] | None:
     """*text* as one JSON or YAML object or list; ``None`` when it is not one.
 
     JSON is tried first, then YAML with the safe loader. A YAML scalar is
     not a document: almost any text is one. Text the loader refuses or
-    cannot build, for any reason, is not a document either.
+    cannot build, for any reason, is not a document either. Neither is
+    text that names a key twice in one object, at any depth, nor YAML
+    text with a ``#`` in it: the parser keeps only part of such text (one
+    of the two values; the text without the comment), and a check of the
+    parsed copy says nothing about the rest. The caller returns the text
+    as the page wrote it, so all of it must be in the parsed copy.
     """
     try:
-        parsed: Any = json.loads(text)
+        parsed: Any = json.loads(text, object_pairs_hook=_object_without_repeats)
+    except _RepeatedKeyError:
+        return None
     except ValueError:
         parsed = _load_yaml(text)
     except RecursionError:
@@ -476,14 +494,59 @@ def _parse_document(text: str) -> dict[str, Any] | list[Any] | None:
     return parsed if isinstance(parsed, (dict, list)) else None
 
 
+def _object_without_repeats(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    mapping: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in mapping:
+            raise _RepeatedKeyError(key)
+        mapping[key] = value
+    return mapping
+
+
 def _load_yaml(text: str) -> Any:
+    if "#" in text:
+        return None
     loader = _YAML_LOADER(text)
     try:
-        return loader.get_single_data()
+        node = loader.get_single_node()
+        if node is None or _yaml_repeats_a_key(loader, node, set()):
+            return None
+        return loader.construct_document(node)
     except Exception:  # any failure to read the text means it is no document
         return None
     finally:
         loader.dispose()
+
+
+def _yaml_repeats_a_key(loader: Any, node: Any, seen: set[int]) -> bool:
+    """True when a mapping under *node* names a key twice, or has a key that is no scalar.
+
+    The loader builds a mapping by assigning key after key, so a repeated
+    key keeps the last value only. Keys are compared as the loader
+    builds them (``1`` and ``"1"`` differ, ``yes`` and ``true`` do not).
+    A key that is a mapping or a list, and a merge key (``<<``), are not
+    accepted: the block fails closed on them. An alias stands for a node
+    already seen, which is checked once.
+    """
+    if id(node) in seen:
+        return False
+    seen.add(id(node))
+    if isinstance(node, yaml.MappingNode):
+        return _yaml_mapping_repeats_a_key(loader, node, seen)
+    items = node.value if isinstance(node, yaml.SequenceNode) else ()
+    return any(_yaml_repeats_a_key(loader, item, seen) for item in items)
+
+
+def _yaml_mapping_repeats_a_key(loader: Any, node: Any, seen: set[int]) -> bool:
+    keys: set[Any] = set()
+    for key_node, value_node in node.value:
+        if not isinstance(key_node, yaml.ScalarNode):
+            return True
+        key = loader.construct_object(key_node)
+        if key in keys or _yaml_repeats_a_key(loader, value_node, seen):
+            return True
+        keys.add(key)
+    return False
 
 
 def _html_example(node: _HtmlNode, scrubber: Scrubber) -> str | None:

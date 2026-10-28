@@ -717,6 +717,60 @@ def test_html_block_with_a_secret_child_element_is_withheld(document: str) -> No
     assert count == 1
 
 
+@pytest.mark.parametrize(
+    "document",
+    [
+        f'<pre>{{"x":{{"password":"{_SECRET}"}},"x":<span>1</span>}}</pre>',
+        f'<pre>{{"a":{{"x":{{"password":"{_SECRET}"}},"x":<span>1</span>}}}}</pre>',
+        f'<pre>[{{"x":{{"password":"{_SECRET}"}},"x":<span>1</span>}}]</pre>',
+        f'<pre>{{"x":{{"password":"{_SECRET}"}},<span>"x"</span>:1}}</pre>',
+        f"<pre><span>x</span>:\n  password: {_SECRET}\nx: 1</pre>",
+        f"<pre><span>a</span>:\n  x:\n    password: {_SECRET}\n  x: 1</pre>",
+        f"<pre><span>a</span>: {{x: {{password: {_SECRET}}}, x: 1}}</pre>",
+        f"<pre><span>yes</span>:\n  password: {_SECRET}\ntrue: 1</pre>",
+        f"<pre><span>user</span>: admin\n# password: {_SECRET}</pre>",
+    ],
+    ids=[
+        "json-repeated-key",
+        "json-repeated-key-nested",
+        "json-repeated-key-in-a-list",
+        "json-repeated-key-in-a-span",
+        "yaml-repeated-key",
+        "yaml-repeated-key-nested",
+        "yaml-repeated-key-in-a-flow-mapping",
+        "yaml-repeated-key-spelled-two-ways",
+        "yaml-comment",
+    ],
+)
+def test_html_block_whose_text_the_parser_keeps_only_in_part_is_withheld(document: str) -> None:
+    """The block comes back as the page wrote it, so the parsed copy must hold all of its text.
+
+    A key named twice keeps the last value only: the first value is in the
+    text but not in the checked copy. A YAML comment is not in the copy at
+    all. Such text is no document; the block is withheld.
+    """
+    text, count = _check(document, _HTML)
+    assert text == f"<pre>{REDACTED}</pre>"
+    assert count == 1
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        '<pre>{"x":{"y":1},"z":{<span>"y"</span>:2}}</pre>',
+        "<pre><span>x</span>:\n  y: 1\nz:\n  y: 2</pre>",
+        "<pre><span>a</span>: {y: 1}\nb: {y: 2}</pre>",
+    ],
+    ids=["json", "yaml", "yaml-flow-mappings"],
+)
+def test_html_block_with_the_same_key_under_two_parents_comes_back_as_it_was(
+    document: str,
+) -> None:
+    text, count = _check(document, _HTML)
+    assert text == document
+    assert count == 0
+
+
 def test_html_example_the_parser_cannot_finish_is_withheld() -> None:
     """Brackets that open over and over and never close would cost a read per bracket."""
     text, count = _check("<pre>" + "[1,1,1,1," * 2000 + "</pre>", _HTML)

@@ -136,8 +136,12 @@ is how `{"credentials": {"default": "..."}}` got through a text scan.
      counted once; it is never rebuilt from the two checks, because a
      child element can split a secret name or stand inside a key, so the
      text with the children replaced is another document than the one
-     the page shows. A `<span>` with child elements is ordinary page
-     text and gets the element check.
+     the page shows. Because the block comes back as the page wrote it,
+     the parsed copy must hold all of its text: text that names a key
+     twice in one object, at any depth (the parser keeps one value and
+     drops the other), or YAML text with a comment, is no document, and
+     the block is withheld. A `<span>` with child elements is ordinary
+     page text and gets the element check.
    - Any text value that is itself a JSON object or list (a sample
      request in a description, a `<pre>` block) is parsed and checked
      the same way, and always written back from the parsed copy, also

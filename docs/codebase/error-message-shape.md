@@ -291,13 +291,13 @@ reaches the builders in one of three ways:
   `faultstring`;
 - an HTTP error whose body is a SOAP `<soapenv:Fault>` (for example a
   vCenter VI/JSON write that answers with a SOAP-shaped 500), parsed with
-  `connectors/vmware_rest/soap.py::parse_soap_fault` (the type comes from
+  `connectors/_shared/soap_fault.py::parse_soap_fault` (the type comes from
   the `detail` element's `xsi:type`, for example `InvalidLogin`);
 - a standalone ESXi host. There the connector's SOAP path (`_post_soap`,
   the SOAP login, and the storage-policy SOAP calls) parses the fault
   itself and raises a plain `RuntimeError` or a `ConnectorAuthError`, so
   no HTTP error reaches the builders. `_soap_fault_error` attaches the
-  parsed fault to that exception (`soap.py::attach_soap_fault`). The
+  parsed fault to that exception (`_shared/soap_fault.py::attach_soap_fault`). The
   sites that build their own `RuntimeError` for a fault do the same: the
   `RetrieveServiceContent` step at session establish (ESXi and PBM), and
   the PBM retry that still fails `NotAuthenticated` after a fresh login.

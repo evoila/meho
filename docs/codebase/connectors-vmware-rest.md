@@ -1254,7 +1254,9 @@ does **not** serve the VI-JSON surface and its `/api/*` is a **JSON-RPC
   `defusedxml` parser, per-method string-template envelope builders with a
   local XML escaper, parsers that return the **exact VI-JSON dict shapes**
   the unchanged downstream consumers already read — lives in
-  `connectors/vmware_rest/soap.py`; the connector wires it onto the pooled
+  `connectors/vmware_rest/soap.py` (the SOAP fault parser and its small XML
+  helpers sit in the public `connectors/_shared/soap_fault.py`, because the
+  core error builders read SOAP faults too); the connector wires it onto the pooled
   `httpx` client (inheriting its TLS-pin → insecure → default precedence and
   `sni_hostname` extension for free — no separate `SSLContext`). **No new
   dependency, no `pyvmomi`, no resolver change, no separate impl class.**

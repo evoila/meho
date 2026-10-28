@@ -109,11 +109,34 @@ The server start, the satellite runner start, the OpenAPI schema build and
 the topology scope-repair tool all import the package, so all of them are
 covered.
 
+## Where operators see the installed packages
+
+The start-up check keeps the packages it accepted. MEHO reads the
+allowlist file only once, at start. `installed_connector_packages()` in
+`connector_packages.py` returns that list, and these places show it:
+
+- `GET /version` (no login needed): `connector_packages`, next to
+  `git_sha`, `build_date` and `chart_version`.
+- `GET /api/v1/health` and the MCP tool `meho_status`:
+  `connector_packages`.
+- `meho version` (when a backplane is known) and `meho status`: a
+  `Connector packages:` line, with one line per package.
+- The console dashboard: the "Connector packages" row in the Deploy
+  card, under the deployed version.
+
+Each entry has the name, version, wheel digest and folders, as in the
+allowlist file. For the plain public image the list is empty, and the CLI
+and the console say "none".
+
 ## Key types
 
 - `ConnectorPackageError` — raised when the start must stop. The message
   starts with the error code.
-- `ConnectorPackage` — one entry of the allowlist file.
+- `ConnectorPackage` — one entry of the allowlist file. `GET /version` and
+  `GET /api/v1/health` use the same model for their `connector_packages`
+  list.
+- `installed_connector_packages()` — the packages the start-up check
+  accepted.
 - `CONNECTOR_PACKAGES_FILE`, `BUILTIN_DISTRIBUTION` — the file path and
   the built-in distribution name.
 

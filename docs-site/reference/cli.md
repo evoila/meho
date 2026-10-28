@@ -5905,11 +5905,13 @@ meho vcf-operations symptom list [flags]
 
 ## `meho version`
 
-Print CLI version and build metadata
+Print CLI version and build metadata, and the backplane's version and connector packages
 
 ```
-meho version
+meho version [flags]
 ```
+
+- `--backplane` — backplane URL to read the version from (defaults to the URL recorded by the most recent `meho login`)
 
 ## `meho vmware`
 

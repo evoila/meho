@@ -288,6 +288,8 @@ git push origin vX.Y.Z
 The push fans out to `cli-release.yml`, `image.yml`, `chart.yml`.
 `cli-release.yml` then calls `linux-download.yml` for the form-2 download.
 
+**Release tags are protected.** A tag ruleset refuses to create, move or delete any `v*` tag, final or rc. Only members of the evoila team `release-cutters` may push one. GitHub logs each of their pushes as a bypass in the ruleset's Rule insights.
+
 ### 5. Verify the artefacts
 
 - [ ] **GitHub Release** exists and its body is the `[X.Y.Z]` CHANGELOG

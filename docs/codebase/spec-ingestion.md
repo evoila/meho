@@ -2826,7 +2826,11 @@ All three delegate to `ReviewService.delete_connector`
     copied to every operation that has none, so the response media
     types stay as the file declared them (the library alone would
     fall back to `application/json`); an operation's own `produces`
-    wins.
+    wins. A shared response (`#/responses/Name`) is built once with
+    the root list; an operation whose `produces` differs gets its own
+    copy of that response, so its media type is kept. A form body
+    with a required field is a required `requestBody` (the library
+    alone leaves the body optional).
   - An `https://` spec is fetched by the backplane, which still rejects
     Swagger 2.0 with `UnsupportedSpecError`. Its message names the CLI
     path first (download the file, pass it as `file://`), then a local

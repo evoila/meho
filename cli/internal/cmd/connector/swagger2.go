@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/getkin/kin-openapi/openapi2"
 	"github.com/getkin/kin-openapi/openapi2conv"
+	"github.com/getkin/kin-openapi/openapi3"
 	oasyaml "github.com/oasdiff/yaml"
 	"gopkg.in/yaml.v3"
 
@@ -138,6 +140,7 @@ func convertSwagger2(content []byte) ([]byte, swagger2Conversion, error) {
 		return nil, conv, fmt.Errorf("read document: %w", err)
 	}
 	inheritRootProduces(&doc2)
+	inlineSharedResponses(&doc2)
 	// ToV3 resolves references with a default loader, which refuses any
 	// reference to another file or URL. findExternalRef above already
 	// refused those with a clearer message.
@@ -145,6 +148,7 @@ func convertSwagger2(content []byte) ([]byte, swagger2Conversion, error) {
 	if err != nil {
 		return nil, conv, err
 	}
+	requireFormBodies(doc3)
 	out, err := json.MarshalIndent(doc3, "", "  ")
 	if err != nil {
 		return nil, conv, fmt.Errorf("write OpenAPI 3 document: %w", err)
@@ -178,6 +182,79 @@ func inheritRootProduces(doc2 *openapi2.T) {
 			}
 		}
 	}
+}
+
+// inlineSharedResponses copies a shared response (`#/responses/Name`)
+// into every operation whose `produces` list differs from the root list.
+// The converter builds a shared response once, with the root list, and an
+// operation keeps only a reference to it; an operation that produces
+// another media type would then report the root's media type. An
+// operation whose list equals the root list keeps the reference. Run
+// after inheritRootProduces, so an operation without its own list
+// already carries the root list.
+func inlineSharedResponses(doc2 *openapi2.T) {
+	for _, item := range doc2.Paths {
+		for _, op := range item.Operations() {
+			if op.Responses == nil || slices.Equal(op.Produces, doc2.Produces) {
+				continue
+			}
+			for code, resp := range op.Responses.Map() {
+				name, isShared := strings.CutPrefix(resp.Ref, "#/responses/")
+				if !isShared {
+					continue
+				}
+				shared, ok := doc2.Responses[name]
+				if !ok || shared.Ref != "" {
+					continue
+				}
+				own := *shared
+				op.Responses.Set(code, &own)
+			}
+		}
+	}
+}
+
+// requireFormBodies marks a request body built from form fields as
+// required when one of the fields is required. The converter keeps the
+// fields' required list but leaves the body itself optional, so a caller
+// could leave out the whole body, including a required file.
+func requireFormBodies(doc3 *openapi3.T) {
+	if doc3.Paths == nil {
+		return
+	}
+	for _, item := range doc3.Paths.Map() {
+		for _, op := range item.Operations() {
+			body := op.RequestBody
+			if body == nil || body.Value == nil || body.Value.Required {
+				continue
+			}
+			for _, media := range body.Value.Content {
+				if isRequiredFormSchema(media.Schema) {
+					body.Value.Required = true
+					break
+				}
+			}
+		}
+	}
+}
+
+// isRequiredFormSchema reports whether a schema was built from form
+// fields (the converter marks each field with x-formData-name) and lists
+// at least one required field. A `body` parameter's own schema has no
+// such mark, so its optional body stays optional.
+func isRequiredFormSchema(ref *openapi3.SchemaRef) bool {
+	if ref == nil || ref.Value == nil || len(ref.Value.Required) == 0 {
+		return false
+	}
+	for _, prop := range ref.Value.Properties {
+		if prop == nil || prop.Value == nil {
+			continue
+		}
+		if _, ok := prop.Value.Extensions["x-formData-name"]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // findExternalRef walks a decoded JSON document and returns the first

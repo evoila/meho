@@ -175,6 +175,32 @@ func TestConvertSwagger2FormDataBecomesFormBody(t *testing.T) {
 	if len(params) != 1 || dig(t, params[0], "in") != "path" {
 		t.Errorf("only the path parameter must stay a parameter: %v", params)
 	}
+	if dig(t, op, "requestBody", "required") != true {
+		t.Error("a form with a required field must be a required request body")
+	}
+}
+
+func TestConvertSwagger2OptionalFormStaysOptional(t *testing.T) {
+	in := strings.Replace(sampleSwagger2YAML, "        - name: image\n          in: formData\n          required: true\n",
+		"        - name: image\n          in: formData\n", 1)
+	if strings.Count(in, "required: true") != 2 {
+		t.Fatal("test setup: sample spec changed shape")
+	}
+	out, _, err := convertSwagger2([]byte(in))
+	if err != nil {
+		t.Fatalf("convertSwagger2: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("converted output is not JSON: %v", err)
+	}
+	body := dig(t, doc, "paths", "/widgets/{id}/image", "post", "requestBody").(map[string]any)
+	if body["required"] == true {
+		t.Error("a form with only optional fields must stay an optional request body")
+	}
+	if req, _ := dig(t, body, "content", "multipart/form-data", "schema").(map[string]any)["required"].([]any); len(req) != 0 {
+		t.Errorf("no form field is required; required = %v", req)
+	}
 }
 
 func TestConvertSwagger2SecurityDefinitionsBecomeSchemes(t *testing.T) {
@@ -330,6 +356,63 @@ func TestConvertSwagger2InheritsRootProduces(t *testing.T) {
 	own := dig(t, doc, "paths", "/report/text", "get", "responses", "200", "content").(map[string]any)
 	if _, ok := own["text/plain"]; !ok || len(own) != 1 {
 		t.Errorf("an operation's own produces must win over the root list; content = %v", own)
+	}
+}
+
+// sharedResponseSwagger2YAML declares one shared response. The first
+// operation inherits the root `produces`; the second declares its own.
+const sharedResponseSwagger2YAML = `swagger: "2.0"
+info:
+  title: Report API
+  version: "1"
+produces: [application/json]
+responses:
+  Report:
+    description: a report
+    schema:
+      type: object
+paths:
+  /report:
+    get:
+      operationId: getReport
+      responses:
+        200:
+          $ref: "#/responses/Report"
+  /report/text:
+    get:
+      operationId: getReportText
+      produces: [text/plain]
+      responses:
+        200:
+          $ref: "#/responses/Report"
+`
+
+func TestConvertSwagger2SharedResponseKeepsOperationProduces(t *testing.T) {
+	out, _, err := convertSwagger2([]byte(sharedResponseSwagger2YAML))
+	if err != nil {
+		t.Fatalf("convertSwagger2: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("converted output is not JSON: %v", err)
+	}
+	shared := dig(t, doc, "components", "responses", "Report", "content").(map[string]any)
+	if _, ok := shared["application/json"]; !ok || len(shared) != 1 {
+		t.Errorf("the shared response must use the root produces; content = %v", shared)
+	}
+	if ref := dig(t, doc, "paths", "/report", "get", "responses", "200", "$ref"); ref != "#/components/responses/Report" {
+		t.Errorf("an operation with the root produces must keep the reference; got %v", ref)
+	}
+	own := dig(t, doc, "paths", "/report/text", "get", "responses", "200").(map[string]any)
+	if _, isRef := own["$ref"]; isRef {
+		t.Fatalf("an operation with its own produces must get its own copy; got %v", own)
+	}
+	content := dig(t, own, "content").(map[string]any)
+	if _, ok := content["text/plain"]; !ok || len(content) != 1 {
+		t.Errorf("the copy must use the operation's produces; content = %v", content)
+	}
+	if dig(t, own, "description") != "a report" || dig(t, content, "text/plain", "schema", "type") != "object" {
+		t.Errorf("the copy must keep the shared response's description and schema; got %v", own)
 	}
 }
 

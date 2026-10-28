@@ -342,8 +342,7 @@ register_mcp_tool(
         name="meho_agents_grant_revoke",
         surface=ToolSurface.OPERATOR,
         description=(
-            "Revoke (delete) a permission grant by id. "
-            "Returns {revoked: <grant_id>} on success."
+            "Revoke (delete) a permission grant by id. Returns {revoked: <grant_id>} on success."
         ),
         inputSchema={
             "type": "object",

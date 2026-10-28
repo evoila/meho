@@ -471,6 +471,58 @@ picks up the new pin. Because the pin lives in the secret, host-key
 rotation follows the same reviewed Vault-write path as credential
 rotation — no code change, no redeploy.
 
+## Connector cache keys (tokens per credential)
+
+Connector caches are process-wide and shared by all tenants. The keys come
+from `connectors/_shared/cache_key.py`:
+
+- **`target_cache_key(target)`** = `(tenant_id, id)`. One entry per target.
+  Used for the HTTP client pool, SSH connections and the caches of read
+  secrets. These carry per-target settings (TLS check, CA pin, server
+  name), so they must never be shared between targets.
+- **`credential_cache_key(target, *login_inputs)`** =
+  `(tenant_id, secret_ref, host, port, fqdn, *login_inputs)`. One entry
+  per credential. Used for login tokens and sessions, and for the lock and
+  the renewal around them (#5033).
+
+Why the token key is the credential: some vendors allow only one active
+session per user, so a second login with the same user ends the first
+one. With a token per target, two targets that use the same secret
+against the same login host would end each other's token on every login.
+With a token per credential they share one token, one login and one
+renewal: when one target logs in again, the other target uses the new
+token on its next call.
+
+Rules for the key:
+
+- The tenant is always part of the key, so tenants never share a token.
+- `host`, `port` and `fqdn` name the login host. `fqdn` is included
+  because some connectors send it as the `Host` header, and the appliance
+  picks the organisation from it.
+- `login_inputs` are the other target values the login reads, for example
+  the login domain (vra8, VCF Automation), the auth source (VCF
+  Operations), the login provider (VCF Operations for Logs), the login
+  mode (vRO) or the API version (Cloud Director). Two targets that differ
+  in one of them log in differently and keep separate tokens.
+- A target with no `secret_ref` falls back to `target_cache_key`: there is
+  nothing to compare, so the token stays per target.
+
+Connectors that key their tokens this way: the ingested (profiled)
+connectors, SRM and vSphere Replication (`_shared/dr_rest.py`), HCX, Salt,
+vRO, vra8, VCF Automation, VCF Operations, VCF Operations for Logs, VCF
+Fleet, VCF Installer, SDDC Manager (VCF 5 and 9), Cloud Director and the
+Proxmox ticket.
+
+Not changed, on purpose:
+
+- **NSX** and **vSphere (`vmware_rest`)**: part of the session lives in the
+  per-target HTTP client (the NSX `JSESSIONID` cookie, the vSphere SOAP
+  cookies and the many per-target session maps). Sharing the token alone
+  would not share the session.
+- **Keycloak, GitHub, Google Cloud, Azure**: OAuth-style tokens. A new
+  token does not end the old one, and the Keycloak token also depends on
+  the realm set on the target.
+
 ## Dependencies
 
 - **`hvac`** (2.4.0 resolved) — `client.secrets.kv.v2.read_secret_version`

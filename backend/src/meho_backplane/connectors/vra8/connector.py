@@ -46,9 +46,8 @@ authenticates **every** vRA 8 service (``/iaas`` / ``/deployment`` / ``/blueprin
 ``Authorization: Bearer <token>``) and reads send a constant ``Accept:
 application/json`` (:meth:`_vra_get`) — no per-surface negotiation (unlike ``vcd``).
 
-The bearer is minted lazily on first use, cached per tenant-unique
-``(tenant_id, target.id)`` key
-(:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`) under a lock,
+The bearer is minted lazily on first use, cached per credential and login domain
+(:func:`~meho_backplane.connectors._shared.cache_key.credential_cache_key`) under a lock,
 and re-minted on a 401 via the dispatcher's session-recovery arm
 (:meth:`invalidate_session`, #2067) — the SDDC Manager / NSX / vcd session-minting
 pattern, so no in-connector retry loop is needed and the base transport's tenacity
@@ -102,7 +101,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import is_acceptable_auth_model
 from meho_backplane.connectors.adapters.http import HttpConnector
@@ -133,14 +132,26 @@ _VRA8_PROBE_METHOD = "GET /iaas/api/about (vRA 8 IaaS supported-API-versions end
 _JSON_ACCEPT = "application/json"
 
 
+def _session_cache_key(target: Any) -> tuple[str, ...]:
+    """Key the session token on the credential plus the CSP login domain.
+
+    The login body carries ``extras["domain"]``, so two targets with one
+    secret but different domains log in as different users.
+    """
+    extras = getattr(target, "extras", None)
+    domain = extras.get("domain") if isinstance(extras, dict) else None
+    return credential_cache_key(target, domain)
+
+
 class Vra8Connector(HttpConnector):
     """vRealize Automation 8.x REST connector — two-step bearer session mint.
 
-    Per-target minted bearers cached in :attr:`_session_tokens` (keyed on the
-    tenant-unique ``(tenant_id, target.id)`` tuple) under :attr:`_session_lock`, so
-    two same-named targets in different tenants never share a token
-    (evoila/meho#1642/#1672). :meth:`auth_headers` returns ``Authorization: Bearer
-    <token>``; :meth:`_vra_get` adds the constant ``Accept: application/json``.
+    Minted bearers cached in :attr:`_session_tokens` per credential
+    (``credential_cache_key``: tenant, secret and login host, #5033) under
+    :attr:`_session_lock`, so two targets that share one credential share one
+    token and two tenants never do (evoila/meho#1642/#1672). :meth:`auth_headers`
+    returns ``Authorization: Bearer <token>``; :meth:`_vra_get` adds the constant
+    ``Accept: application/json``.
 
     :attr:`priority` is ``1`` — the shim-tie-break convention every hand-rolled
     connector uses. The ``(product, version, impl_id)`` triple is ``("vcfa", "8.0",
@@ -169,10 +180,11 @@ class Vra8Connector(HttpConnector):
         self._credentials_loader: Vra8CredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
         )
-        # Per-target minted-bearer cache, keyed on ``target_cache_key`` so the
-        # tenant-isolation invariant holds; a single lock serialises concurrent
-        # first-use callers so they don't double-run the two-step login.
-        self._session_tokens: dict[tuple[str, str], str] = {}
+        # Minted-bearer cache, keyed on :func:`_session_cache_key` (one token
+        # per credential and login domain; the tenant keeps tenants apart); a
+        # single lock serialises concurrent first-use callers so they don't
+        # double-run the two-step login.
+        self._session_tokens: dict[tuple[str, ...], str] = {}
         self._session_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
@@ -218,7 +230,7 @@ class Vra8Connector(HttpConnector):
                 f"target={target.name!r} has no operator JWT (system-initiated calls "
                 "cannot read per-target vendor credentials)"
             )
-        cache_key = target_cache_key(target)
+        cache_key = _session_cache_key(target)
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None:
@@ -495,7 +507,7 @@ class Vra8Connector(HttpConnector):
     async def _evict_session_token(self, target: Vra8TargetLike) -> None:
         """Drop the cached bearer for *target* under the session lock."""
         async with self._session_lock:
-            self._session_tokens.pop(target_cache_key(target), None)
+            self._session_tokens.pop(_session_cache_key(target), None)
 
     async def aclose(self) -> None:
         """Clear cached session tokens, then tear down the httpx pool.

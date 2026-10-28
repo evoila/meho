@@ -57,7 +57,10 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import (
+    credential_cache_key,
+    target_cache_key,
+)
 from meho_backplane.connectors._shared.profile_auth import SESSION_SCHEME_SPECS
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
@@ -148,7 +151,7 @@ class InstallerConnector(HttpConnector):
         super().__init__()
         self._creds_cache: dict[tuple[str, str], dict[str, str]] = {}
         self._creds_lock = asyncio.Lock()
-        self._session_tokens: dict[tuple[str, str], str] = {}
+        self._session_tokens: dict[tuple[str, ...], str] = {}
         self._session_lock = asyncio.Lock()
         self._credentials_loader: InstallerCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
@@ -179,7 +182,7 @@ class InstallerConnector(HttpConnector):
         always re-establishes and its token is never written to the shared cache
         (#1008).
         """
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target)
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None and not is_system_operator(operator):
@@ -209,7 +212,7 @@ class InstallerConnector(HttpConnector):
     async def _invalidate_session(self, target: InstallerTargetLike) -> None:
         """Drop the cached session token for *target* (credential cache left intact)."""
         async with self._session_lock:
-            self._session_tokens.pop(target_cache_key(target), None)
+            self._session_tokens.pop(credential_cache_key(target), None)
 
     async def invalidate_credentials(self, target: InstallerTargetLike) -> None:
         """Public duck-typed credential-eviction hook for the dispatch path (#2396)."""

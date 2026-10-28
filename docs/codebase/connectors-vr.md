@@ -110,13 +110,14 @@ dispatch. No spec ingest is needed.
 1. `POST /api/rest/vr/v2/session` with HTTP Basic (the account read from
    Vault through `load_basic_credentials`).
 2. The JSON answer carries `session_id`. The connector caches it per
-   target and tenant (`target_cache_key`). Two targets never share a
-   session, also when they have the same address: on a 9.1 appliance the
-   `srm` target and the `vr` target each log in to their own API.
+   credential (`credential_cache_key`: tenant, secret and login host), so
+   two `vr` targets that share one credential share one session. The `srm`
+   and `vr` connectors keep separate caches: on a 9.1 appliance the `srm`
+   target and the `vr` target each log in to their own API.
 3. Every later call sends `x-dr-session: <session_id>`.
 4. A `401` on a later call reaches the dispatcher, which calls
-   `invalidate_session(target)`. That drops only this target's session;
-   the `srm` target on the same address keeps its own. The dispatcher
+   `invalidate_session(target)`. That drops the session of this target's
+   credential; the `srm` target on the same address keeps its own. The dispatcher
    then runs the call once more, and the connector logs in again. A
    `401` or `403` at login itself raises `ConnectorAuthError` naming the
    target.

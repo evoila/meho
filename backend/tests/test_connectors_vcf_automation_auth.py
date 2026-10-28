@@ -40,7 +40,6 @@ import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.registry import (
     clear_registry,
@@ -53,6 +52,7 @@ from meho_backplane.connectors.vcf_automation import (
     VcfAutomationTargetLike,
 )
 from meho_backplane.connectors.vcf_automation._routing import vhost_header
+from meho_backplane.connectors.vcf_automation.connector import _plane_cache_key
 from meho_backplane.settings import get_settings
 
 
@@ -489,8 +489,8 @@ async def test_provider_and_tenant_caches_are_independent_per_target() -> None:
             _TARGET_A, operator=_make_operator(), path="/iaas/api/projects"
         )
 
-    assert connector._provider_tokens == {target_cache_key(_TARGET_A): "p-jwt-1"}
-    assert connector._tenant_tokens == {target_cache_key(_TARGET_A): "t-tok-1"}
+    assert connector._provider_tokens == {_plane_cache_key(_TARGET_A, "provider"): "p-jwt-1"}
+    assert connector._tenant_tokens == {_plane_cache_key(_TARGET_A, "tenant"): "t-tok-1"}
     await connector.aclose()
 
 
@@ -523,12 +523,12 @@ async def test_per_target_isolation_keeps_both_plane_caches_separate() -> None:
         )
 
     assert connector._provider_tokens == {
-        target_cache_key(_TARGET_A): "p-a",
-        target_cache_key(_TARGET_B): "p-b",
+        _plane_cache_key(_TARGET_A, "provider"): "p-a",
+        _plane_cache_key(_TARGET_B, "provider"): "p-b",
     }
     assert connector._tenant_tokens == {
-        target_cache_key(_TARGET_A): "t-a",
-        target_cache_key(_TARGET_B): "t-b",
+        _plane_cache_key(_TARGET_A, "tenant"): "t-a",
+        _plane_cache_key(_TARGET_B, "tenant"): "t-b",
     }
     await connector.aclose()
 
@@ -589,12 +589,12 @@ async def test_same_name_targets_in_different_tenants_get_distinct_tokens() -> N
         )
 
     assert connector._provider_tokens == {
-        target_cache_key(tenant_one): "p-one",
-        target_cache_key(tenant_two): "p-two",
+        _plane_cache_key(tenant_one, "provider"): "p-one",
+        _plane_cache_key(tenant_two, "provider"): "p-two",
     }
     assert connector._tenant_tokens == {
-        target_cache_key(tenant_one): "t-one",
-        target_cache_key(tenant_two): "t-two",
+        _plane_cache_key(tenant_one, "tenant"): "t-one",
+        _plane_cache_key(tenant_two, "tenant"): "t-two",
     }
     await connector.aclose()
 
@@ -870,7 +870,7 @@ async def test_provider_plane_401_triggers_relogin_and_retry_once() -> None:
     assert login.call_count == 2
     assert orgs.call_count == 2
     # Cache holds the refreshed token; tenant cache untouched.
-    assert connector._provider_tokens == {target_cache_key(_TARGET_A): "p-jwt-second"}
+    assert connector._provider_tokens == {_plane_cache_key(_TARGET_A, "provider"): "p-jwt-second"}
     assert connector._tenant_tokens == {}
     await connector.aclose()
 
@@ -931,8 +931,8 @@ async def test_tenant_plane_401_triggers_independent_relogin_and_retry_once() ->
     assert tenant_login.call_count == 2
     assert projects.call_count == 2
     # The provider cache survived the tenant-plane re-login.
-    assert connector._provider_tokens == {target_cache_key(_TARGET_A): "p-jwt-stable"}
-    assert connector._tenant_tokens == {target_cache_key(_TARGET_A): "t-second"}
+    assert connector._provider_tokens == {_plane_cache_key(_TARGET_A, "provider"): "p-jwt-stable"}
+    assert connector._tenant_tokens == {_plane_cache_key(_TARGET_A, "tenant"): "t-second"}
     await connector.aclose()
 
 
@@ -1114,8 +1114,8 @@ async def test_aclose_clears_both_plane_caches_and_pool() -> None:
             _TARGET_A, operator=_make_operator(), path="/iaas/api/projects"
         )
 
-    assert connector._provider_tokens == {target_cache_key(_TARGET_A): "p-jwt"}
-    assert connector._tenant_tokens == {target_cache_key(_TARGET_A): "t-tok"}
+    assert connector._provider_tokens == {_plane_cache_key(_TARGET_A, "provider"): "p-jwt"}
+    assert connector._tenant_tokens == {_plane_cache_key(_TARGET_A, "tenant"): "t-tok"}
     await connector.aclose()
     assert connector._provider_tokens == {}
     assert connector._tenant_tokens == {}
@@ -1472,8 +1472,8 @@ async def test_same_fqdn_two_alias_ips_dial_own_host_and_stay_isolated() -> None
     # ``target_cache_key``, no cross-contamination; the tenant plane, never
     # exercised by these ``/cloudapi`` calls, stays empty.
     assert connector._provider_tokens == {
-        target_cache_key(target_a): "p-jwt-a",
-        target_cache_key(target_b): "p-jwt-b",
+        _plane_cache_key(target_a, "provider"): "p-jwt-a",
+        _plane_cache_key(target_b, "provider"): "p-jwt-b",
     }
     assert connector._tenant_tokens == {}
     await connector.aclose()

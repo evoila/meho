@@ -28,11 +28,13 @@ dispatcher binds it only to a connector of that class. So ``srm.about``
 cannot run on a ``vr`` target, and ``vr.about`` cannot run on an ``srm``
 target: the dispatcher stops before any HTTP request.
 
-Sessions are cached per target and tenant (``target_cache_key``), so two
-targets on one address (a 9.1 appliance registered once as ``srm`` and
-once as ``vr``) never share a session. On ``401`` from a later call the
-dispatcher calls :meth:`DrRestConnector.invalidate_session`, which drops
-only this target's session, and dispatches once more.
+Sessions are cached per credential (``credential_cache_key``: tenant,
+secret and login host), so two targets of one product that share a
+credential share one session. Each product has its own connector and its
+own cache, so a 9.1 appliance registered once as ``srm`` and once as ``vr``
+still keeps two sessions. On ``401`` from a later call the dispatcher calls
+:meth:`DrRestConnector.invalidate_session`, which drops the shared session,
+and dispatches once more.
 """
 
 from __future__ import annotations
@@ -47,7 +49,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
 from meho_backplane.connectors._shared.vcf_auth import (
@@ -200,7 +202,7 @@ class DrRestConnector(HttpConnector):
 
     def __init__(self, *, session_loader: DrSessionLoader | None = None) -> None:
         super().__init__()
-        self._session_ids: dict[tuple[str, str], str] = {}
+        self._session_ids: dict[tuple[str, ...], str] = {}
         self._session_lock = asyncio.Lock()
         self._session_loader: DrSessionLoader = (
             session_loader if session_loader is not None else load_basic_credentials
@@ -229,7 +231,7 @@ class DrRestConnector(HttpConnector):
 
     async def _session_id(self, target: DrTargetLike, operator: Operator) -> str:
         """Return the cached session id for *target*, logging in on first use."""
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target)
         async with self._session_lock:
             cached = self._session_ids.get(cache_key)
             if cached is not None:
@@ -288,12 +290,12 @@ class DrRestConnector(HttpConnector):
         return session_id
 
     async def invalidate_session(self, target: DrTargetLike) -> None:
-        """Drop the cached session for *target* only (the dispatcher's 401 hook).
+        """Drop the cached session of *target*'s credential (the dispatcher's 401 hook).
 
         The next :meth:`auth_headers` call logs in again. Credentials are
         not cached: every login reads them through the loader.
         """
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target)
         async with self._session_lock:
             self._session_ids.pop(cache_key, None)
 
@@ -302,7 +304,7 @@ class DrRestConnector(HttpConnector):
 
         One ``GET`` of :attr:`info_path` with no retry, so a failed version
         read never costs the caller its own answer for long. A ``401``
-        drops this target's cached session, so the next call logs in again.
+        drops the cached session, so the next call logs in again.
         """
         try:
             headers = await self.auth_headers(target, operator)

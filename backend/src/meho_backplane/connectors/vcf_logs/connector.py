@@ -112,7 +112,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.profile_auth import SESSION_SCHEME_SPECS
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import (
@@ -254,10 +254,16 @@ def _extract_session_id(resp: httpx.Response) -> str | None:
     return value
 
 
+def _session_cache_key(target: Any) -> tuple[str, ...]:
+    """Key the session token on the credential plus the login ``provider``."""
+    return credential_cache_key(target, getattr(target, "provider", None) or _DEFAULT_PROVIDER)
+
+
 class VcfLogsConnector(HttpConnector):
     """vRLI 9.x REST connector with session-token Bearer auth.
 
-    Per-target session token cached in :attr:`_session_tokens`;
+    Session token cached in :attr:`_session_tokens` per credential and login
+    provider (:func:`_session_cache_key`);
     per-target credentials cached in :attr:`_credentials` (the shared
     :class:`CredentialsCache` instance). The :attr:`priority` is set to
     ``1`` so a future ``GenericRestConnector`` auto-shim that somehow
@@ -305,7 +311,7 @@ class VcfLogsConnector(HttpConnector):
         credentials_loader: VcfCredentialsLoader | None = None,
     ) -> None:
         super().__init__()
-        self._session_tokens: dict[tuple[str, str], str] = {}
+        self._session_tokens: dict[tuple[str, ...], str] = {}
         self._session_lock = asyncio.Lock()
         self._credentials = CredentialsCache(
             credentials_loader if credentials_loader is not None else load_credentials_from_vault,
@@ -389,7 +395,7 @@ class VcfLogsConnector(HttpConnector):
                 f"target={target.name!r} has no operator JWT (system-initiated calls "
                 "cannot read per-target vendor credentials)"
             )
-        cache_key = target_cache_key(target)
+        cache_key = _session_cache_key(target)
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None:
@@ -458,7 +464,7 @@ class VcfLogsConnector(HttpConnector):
         that the credentials are wrong.
         """
         async with self._session_lock:
-            self._session_tokens.pop(target_cache_key(target), None)
+            self._session_tokens.pop(_session_cache_key(target), None)
 
     async def _get_json_with_session_retry(
         self,

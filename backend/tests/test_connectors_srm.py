@@ -12,15 +12,18 @@ What is covered, with a respx-mocked appliance and no ingested catalog:
 * two targets on one address: an ``srm`` target and a target of another
   product resolve to two connector classes, and each uses its own login;
 * a ``401`` on one SRM target makes a new SRM login for that target only;
-  the session of a second SRM target on the same address and of the other
-  product's target stay as they were;
+  the session of a second SRM target on the same address with its own
+  credential and of the other product's target stay as they were;
+* two SRM targets that share one credential share one session: parallel
+  calls and a renewal on one target do not end the other target's
+  session; different credentials and different tenants keep their own;
 * ``srm.api_file.get`` for both files: status, size, SHA-256, version,
   parts; an unknown file name sends no HTTP request; a 404 and a redirect
   reach the answer; a failed version read still returns the file; a
   secret-named value, an ``Authorization`` example and a secret-named
   redirect query value come back replaced and counted; the replaced copy
   still parses and every value keeps its type; a ``401`` on the version
-  read ends only that target's session; a file that does not parse
+  read ends only that credential's session; a file that does not parse
   stops; a file too big stops;
 * no password or session id in a result; registration shape; fingerprint.
 
@@ -29,6 +32,7 @@ Fixture values are made up; no real host, user or id appears here.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import uuid
@@ -172,19 +176,30 @@ async def session() -> AsyncIterator[AsyncSession]:
         yield s
 
 
+_TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000000d0")
+_OTHER_SECRET = "targets/op-reads/srm-typed-second"
+
+
 class _Target:
     """Target satisfying the connector Protocols and the resolver shape."""
 
-    def __init__(self, *, product: str = SRM_PRODUCT, version: str = SRM_VERSION) -> None:
+    def __init__(
+        self,
+        *,
+        product: str = SRM_PRODUCT,
+        version: str = SRM_VERSION,
+        secret_ref: str = "targets/op-reads/srm-typed",
+        tenant_id: UUID = _TENANT_ID,
+    ) -> None:
         self.product = product
         self.fingerprint = type("_FP", (), {"version": version})()
         self.preferred_impl_id: str | None = None
         self.id: UUID = uuid.uuid4()
-        self.tenant_id: UUID = uuid.UUID("00000000-0000-0000-0000-0000000000d0")
+        self.tenant_id: UUID = tenant_id
         self.name = f"{product}-typed-{self.id.hex[:6]}"
         self.host = _HOST
         self.port = 443
-        self.secret_ref = "targets/op-reads/srm-typed"
+        self.secret_ref = secret_ref
         self.auth_model = "shared_service_account"
 
 
@@ -385,7 +400,7 @@ async def test_401_on_one_srm_target_logs_in_again_and_leaves_other_sessions_alo
     await register_hcx_typed_operations()
     _hcx_instance()
     first = _Target()
-    second = _Target()
+    second = _Target(secret_ref=_OTHER_SECRET)
     other = _Target(product=HCX_PRODUCT, version=HCX_VERSION)
     rejected: set[str] = set()
 
@@ -416,6 +431,102 @@ async def test_401_on_one_srm_target_logs_in_again_and_leaves_other_sessions_alo
     assert hcx_login.call_count == 1
     sent = [call.request.headers["x-dr-session"] for call in info.calls]
     assert sent == ["srm-a-1", "srm-b-1", "srm-a-1", "srm-a-2", "srm-b-1"]
+
+
+class _OneSessionPerUser:
+    """Appliance that keeps one active session per user: a login ends the one before."""
+
+    def __init__(self) -> None:
+        self.logins = 0
+        self.active: dict[str, str] = {}
+        self.rejected = 0
+
+    def login(self, request: httpx.Request) -> httpx.Response:
+        self.logins += 1
+        user = request.headers["authorization"]
+        session_id = f"srm-session-{self.logins}"
+        self.active[user] = session_id
+        return _login(session_id)
+
+    def info(self, request: httpx.Request) -> httpx.Response:
+        if request.headers["x-dr-session"] in self.active.values():
+            return httpx.Response(200, json=_INFO_PAYLOAD)
+        self.rejected += 1
+        return httpx.Response(401)
+
+    def expire_all(self) -> None:
+        self.active.clear()
+
+
+@pytest.mark.asyncio
+async def test_two_targets_with_one_credential_share_one_session_and_one_renewal(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """Parallel calls and a renewal on one target do not end the other target's session."""
+    await _register_and_resolve(_stub_embedding)
+    first = _Target()
+    second = _Target()
+    appliance = _OneSessionPerUser()
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.post(_SESSION).mock(side_effect=appliance.login)
+        info = mock.get(_INFO).mock(side_effect=appliance.info)
+
+        warm = await asyncio.gather(
+            *(_dispatch("srm.about", {}, target) for target in (first, second) * 3)
+        )
+        appliance.expire_all()
+        renewed = await _dispatch("srm.about", {}, first)
+        after = await asyncio.gather(
+            *(_dispatch("srm.about", {}, target) for target in (second, first) * 3)
+        )
+
+    for outcome in (*warm, renewed, *after):
+        assert outcome.status == "ok", outcome.error
+    assert appliance.logins == 2
+    assert appliance.rejected == 1
+    sent = {call.request.headers["x-dr-session"] for call in info.calls}
+    assert sent == {"srm-session-1", "srm-session-2"}
+
+
+@pytest.mark.asyncio
+async def test_two_targets_with_different_credentials_keep_their_own_sessions(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await _register_and_resolve(_stub_embedding)
+    first = _Target()
+    second = _Target(secret_ref=_OTHER_SECRET)
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        login = mock.post(_SESSION)
+        login.side_effect = [_login("srm-a-1"), _login("srm-b-1")]
+        info = mock.get(_INFO).respond(200, json=_INFO_PAYLOAD)
+        for target in (first, second, first, second):
+            assert (await _dispatch("srm.about", {}, target)).status == "ok"
+
+    assert login.call_count == 2
+    sent = [call.request.headers["x-dr-session"] for call in info.calls]
+    assert sent == ["srm-a-1", "srm-b-1", "srm-a-1", "srm-b-1"]
+
+
+@pytest.mark.asyncio
+async def test_two_tenants_with_the_same_secret_reference_keep_their_own_sessions(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await _register_and_resolve(_stub_embedding)
+    in_tenant = _Target()
+    in_other_tenant = _Target(tenant_id=uuid.UUID("00000000-0000-0000-0000-0000000000d9"))
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        login = mock.post(_SESSION)
+        login.side_effect = [_login("srm-t1-1"), _login("srm-t2-1")]
+        info = mock.get(_INFO).respond(200, json=_INFO_PAYLOAD)
+        for target in (in_tenant, in_other_tenant, in_tenant, in_other_tenant):
+            assert (await _dispatch("srm.about", {}, target)).status == "ok"
+
+    assert login.call_count == 2
+    sent = [call.request.headers["x-dr-session"] for call in info.calls]
+    assert sent == ["srm-t1-1", "srm-t2-1", "srm-t1-1", "srm-t2-1"]
 
 
 # ---------------------------------------------------------------------------
@@ -631,19 +742,19 @@ async def test_replaced_copy_still_parses_and_every_value_keeps_its_type(
 
 
 @pytest.mark.asyncio
-async def test_401_on_the_version_read_ends_only_that_targets_session(
+async def test_401_on_the_version_read_ends_only_that_credentials_session(
     _stub_embedding: AsyncMock, session: AsyncSession
 ) -> None:
     """The file comes back, but ``server/info`` rejects the session.
 
     The version read never raises, so the dispatcher's own ``401`` retry
     does not run. The connector drops the rejected session itself: the
-    next read of that target logs in again, and the other target keeps
-    its session.
+    next read of that target logs in again, and the other target, with its
+    own credential, keeps its session.
     """
     await _register_and_resolve(_stub_embedding)
     first = _Target()
-    second = _Target()
+    second = _Target(secret_ref=_OTHER_SECRET)
 
     def _info(request: httpx.Request) -> httpx.Response:
         if request.headers["x-dr-session"] == "srm-a-1":

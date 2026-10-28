@@ -47,10 +47,10 @@ comment + login blocks, 2026-05-21):
   application/json``. Tokens are bespoke per plane; the provider
   JWT does NOT authenticate the tenant plane and vice versa.
 
-Both per-plane token caches are keyed on the tenant-unique
-``(tenant_id, target.id)`` tuple (``target_cache_key``, #1642/#1672) --
-so two same-named targets in different tenants never share a cached
-token -- and established lazily on first request that resolves to that plane.
+Both per-plane token caches are keyed on the credential plus the plane's
+login inputs (:func:`_plane_cache_key`, #5033) -- so two targets that share
+one credential share one token, and the tenant in the key keeps tenants
+apart (#1642/#1672) -- and established lazily on first request that resolves to that plane.
 On HTTP 401 from a downstream call, the relevant plane's cache is
 invalidated and the call retries once -- consumer wrapper posture:
 re-login once on session-expiry, not a retry loop.
@@ -108,7 +108,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.adapters.http import HttpConnector, json_payload_or_empty
 from meho_backplane.connectors.schemas import (
@@ -118,6 +118,7 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
 )
 from meho_backplane.connectors.vcf_automation._auth import (
+    _tenant_domain,
     load_credentials_with_override,
     tenant_login,
     vcfa_provider_login,
@@ -153,6 +154,24 @@ __all__ = ["VcfAutomationConfigurationError", "VcfAutomationConnector"]
 _log = structlog.get_logger(__name__)
 
 
+def _plane_cache_key(target: VcfAutomationTargetLike, plane: Plane) -> tuple[str, ...]:
+    """Return the token cache key for *plane*: the credential plus the plane's login inputs.
+
+    The provider login reads ``provider_secret_ref``, ``provider_username``
+    and ``domain``; the tenant login reads the tenant domain. Both send
+    ``fqdn`` as the ``Host`` header, which :func:`credential_cache_key`
+    already includes.
+    """
+    if plane == "provider":
+        return credential_cache_key(
+            target,
+            getattr(target, "provider_secret_ref", None),
+            getattr(target, "provider_username", None),
+            getattr(target, "domain", None),
+        )
+    return credential_cache_key(target, _tenant_domain(target))
+
+
 class VcfAutomationConnector(HttpConnector):
     """VCF Automation 9.x REST connector with dual-plane Bearer-token auth.
 
@@ -186,12 +205,12 @@ class VcfAutomationConnector(HttpConnector):
         credentials_loader: VcfAutomationCredentialsLoader | None = None,
     ) -> None:
         super().__init__()
-        # Per-target, per-plane token caches. Keyed on the tenant-unique
-        # ``(tenant_id, target.id)`` tuple (``target_cache_key``, #1642/#1672)
-        # so two same-named targets in different tenants never share a
-        # cached token; same isolation invariant the NSX precedent established.
-        self._provider_tokens: dict[tuple[str, str], str] = {}
-        self._tenant_tokens: dict[tuple[str, str], str] = {}
+        # Per-plane token caches keyed on the credential
+        # (``credential_cache_key``, #5033) plus what each plane's login reads
+        # from the target. Two targets that share a credential share one
+        # token; the tenant id in the key keeps tenants apart (#1642/#1672).
+        self._provider_tokens: dict[tuple[str, ...], str] = {}
+        self._tenant_tokens: dict[tuple[str, ...], str] = {}
         # One lock per plane -- provider and tenant first-uses are
         # independent and shouldn't block each other.
         self._provider_lock = asyncio.Lock()
@@ -347,7 +366,7 @@ class VcfAutomationConnector(HttpConnector):
                 f"target={target.name!r} has no operator JWT (system-initiated calls "
                 "cannot read per-target vendor credentials)"
             )
-        cache_key = target_cache_key(target)
+        cache_key = _plane_cache_key(target, "provider")
         async with self._provider_lock:
             cached = self._provider_tokens.get(cache_key)
             if cached is not None:
@@ -399,7 +418,7 @@ class VcfAutomationConnector(HttpConnector):
                 f"target={target.name!r} has no operator JWT (system-initiated calls "
                 "cannot read per-target vendor credentials)"
             )
-        cache_key = target_cache_key(target)
+        cache_key = _plane_cache_key(target, "tenant")
         async with self._tenant_lock:
             cached = self._tenant_tokens.get(cache_key)
             if cached is not None:
@@ -419,7 +438,7 @@ class VcfAutomationConnector(HttpConnector):
         lock = self._provider_lock if plane == "provider" else self._tenant_lock
         cache = self._provider_tokens if plane == "provider" else self._tenant_tokens
         async with lock:
-            cache.pop(target_cache_key(target), None)
+            cache.pop(_plane_cache_key(target, plane), None)
 
     # ------------------------------------------------------------------
     # Transport overrides -- thread path into auth_headers + 401 retry-once

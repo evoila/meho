@@ -14,7 +14,8 @@ with HTTP Basic (HCX 4.5 removed cookie authentication):
    account registered with the HCX Manager, read from Vault through the
    :class:`~meho_backplane.connectors.hcx.session.HcxSessionLoader`.
 2. The response header ``x-hm-authorization`` carries the token. It is
-   cached per target and tenant (``target_cache_key``).
+   cached per credential (``credential_cache_key``: tenant, secret and
+   login host), so two targets that share one credential share one token.
 3. Every later call sends the token in the ``x-hm-authorization`` header.
 4. On ``401`` from a later call the dispatcher calls
    :meth:`invalidate_session`, which drops the cached token, and
@@ -60,7 +61,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vcf_auth import session_establish_auth_error
 from meho_backplane.connectors.adapters.http import HttpConnector
@@ -159,7 +160,7 @@ class HcxConnector(HttpConnector):
 
     def __init__(self, *, session_loader: HcxSessionLoader | None = None) -> None:
         super().__init__()
-        self._session_tokens: dict[tuple[str, str], str] = {}
+        self._session_tokens: dict[tuple[str, ...], str] = {}
         self._session_lock = asyncio.Lock()
         self._session_loader: HcxSessionLoader = (
             session_loader if session_loader is not None else load_session_credentials_from_vault
@@ -183,7 +184,7 @@ class HcxConnector(HttpConnector):
 
     async def _session_token(self, target: HcxTargetLike, operator: Operator) -> str:
         """Return the cached session token for *target*, logging in on first use."""
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target)
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None:
@@ -230,7 +231,7 @@ class HcxConnector(HttpConnector):
         The next :meth:`auth_headers` call logs in again. Credentials are
         not cached: every login reads them through the loader.
         """
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target)
         async with self._session_lock:
             self._session_tokens.pop(cache_key, None)
 

@@ -59,7 +59,8 @@ raise `NotImplementedError`.
 ## Key types
 
 - `VroConnector` (`connector.py`) -- the connector class. Caches one
-  `Authorization` value per target and tenant (`target_cache_key`).
+  `Authorization` value per credential and login mode
+  (`credential_cache_key`: tenant, secret and login host).
 - `VroTargetLike`, `VroCredentialsLoader`, `login_mode` (`session.py`) --
   the target shape, the credential loader type and the login mode check.
 - `VroServerVersion`, `parse_server_version` (`connector.py`) -- the

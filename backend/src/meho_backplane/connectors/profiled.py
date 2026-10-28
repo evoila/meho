@@ -105,7 +105,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.profile_auth import (
     SESSION_SCHEME_SPECS,
     STATELESS_SCHEMES,
@@ -232,18 +232,18 @@ class ProfiledRestConnector(HttpConnector):
         if profile is not None:
             self.profile = profile
         self._injected_loader = credentials_loader
-        # Per-target session-token cache keyed on the tenant-unique
-        # ``(tenant_id, id)`` tuple (#1642), guarded by one lock per
-        # connector instance. Only the two session-stateful schemes
+        # Session-token cache keyed on the credential
+        # (``credential_cache_key``: tenant, secret and login host, #5033),
+        # guarded by one lock per connector instance. Only the two session-stateful schemes
         # (session_login / oauth2_mint) populate it.
-        self._session_tokens: dict[tuple[str, str], _CachedSessionToken] = {}
-        # The login path that actually minted each target's session (#2031).
+        self._session_tokens: dict[tuple[str, ...], _CachedSessionToken] = {}
+        # The login path that actually minted each session (#2031), on the same key.
         # Only a scheme with a LegacyFallback (session_login_basic) ever
         # records anything other than its modern path here; the recorded path
         # drives op-path mount (see :meth:`mount_op_path`) and session
         # teardown so a legacy-only target (vcsim) routes ops to ``/rest``
         # instead of defaulting to the modern ``/api`` mount.
-        self._session_login_paths: dict[tuple[str, str], str] = {}
+        self._session_login_paths: dict[tuple[str, ...], str] = {}
         self._session_lock = asyncio.Lock()
 
     # -- auth -----------------------------------------------------------
@@ -358,7 +358,7 @@ class ProfiledRestConnector(HttpConnector):
             return path
         await self._session_token(target, operator)
         login_path = self._session_login_paths.get(
-            target_cache_key(target), spec.login_path(profile.auth)
+            credential_cache_key(target), spec.login_path(profile.auth)
         )
         return _mounted_path(fallback, login_path, path)
 
@@ -384,7 +384,7 @@ class ProfiledRestConnector(HttpConnector):
                 f"target={getattr(target, 'name', '?')!r} has no operator JWT "
                 "(system-initiated calls cannot read per-target vendor credentials)"
             )
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target)
         async with self._session_lock:
             now = time.monotonic()
             cached = self._session_tokens.get(cache_key)
@@ -431,7 +431,7 @@ class ProfiledRestConnector(HttpConnector):
             )
         # Record the login path that won so op-path mount + teardown follow
         # the live endpoint (modern /api vs legacy /rest for vCenter). #2031
-        self._session_login_paths[target_cache_key(target)] = established_path
+        self._session_login_paths[credential_cache_key(target)] = established_path
         _log.info(
             "profiled_session_established",
             target=getattr(target, "name", None),
@@ -608,7 +608,7 @@ class ProfiledRestConnector(HttpConnector):
         dispatcher owns the wire call + the retry.
         """
         async with self._session_lock:
-            cache_key = target_cache_key(target)
+            cache_key = credential_cache_key(target)
             self._session_tokens.pop(cache_key, None)
             # Drop the recorded login path too so a re-establish re-discovers
             # the live endpoint from a clean state (#2031).

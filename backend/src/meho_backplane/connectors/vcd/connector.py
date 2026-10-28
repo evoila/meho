@@ -34,8 +34,8 @@ surface the ``vcf-automation`` provider plane speaks): ``POST
 /cloudapi/1.0.0/sessions/provider`` with HTTP Basic (``<user>@System``) returns
 the JWT in the ``X-VMWARE-VCLOUD-ACCESS-TOKEN`` **response header**; every
 subsequent read sends ``Authorization: Bearer <jwt>``. The token is minted lazily
-on first use, cached per tenant-unique ``(tenant_id, target.id)`` key
-(:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`) under a
+on first use, cached per credential and API version
+(:func:`~meho_backplane.connectors._shared.cache_key.credential_cache_key`) under a
 lock, and re-minted on a 401 via the dispatcher's session-recovery arm
 (:meth:`invalidate_session`, #2067) — the SDDC Manager / NSX session-minting
 pattern, so no in-connector retry loop is needed and the base transport's
@@ -97,7 +97,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import is_acceptable_auth_model
 from meho_backplane.connectors.adapters.http import HttpConnector
@@ -131,9 +131,9 @@ _VCD_PROBE_METHOD = "GET /api/versions (VMware Cloud Director supported-versions
 class VcloudDirectorConnector(HttpConnector):
     """VMware Cloud Director REST connector — provider Basic→Bearer session mint.
 
-    Per-target minted JWTs cached in :attr:`_session_tokens` (keyed on the
-    tenant-unique ``(tenant_id, target.id)`` tuple) under :attr:`_session_lock`,
-    so two same-named targets in different tenants never share a token
+    Minted JWTs cached in :attr:`_session_tokens` per credential
+    (:meth:`_session_cache_key`, #5033) under :attr:`_session_lock`, so two
+    targets that share one credential share one token and two tenants never do
     (evoila/meho#1642/#1672). :meth:`auth_headers` returns
     ``Authorization: Bearer <jwt>``; the per-surface ``Accept`` is added by
     :meth:`_vcd_get` from the request path.
@@ -163,10 +163,11 @@ class VcloudDirectorConnector(HttpConnector):
         self._credentials_loader: VcloudDirectorCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
         )
-        # Per-target minted-JWT cache, keyed on ``target_cache_key`` so the
-        # tenant-isolation invariant holds; a single lock serialises concurrent
-        # first-use callers so they don't double-POST the login endpoint.
-        self._session_tokens: dict[tuple[str, str], str] = {}
+        # Minted-JWT cache, keyed on :meth:`_session_cache_key` (one token per
+        # credential; the tenant keeps tenants apart); a single lock
+        # serialises concurrent first-use callers so they don't double-POST
+        # the login endpoint.
+        self._session_tokens: dict[tuple[str, ...], str] = {}
         self._session_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
@@ -188,6 +189,10 @@ class VcloudDirectorConnector(HttpConnector):
             if isinstance(override, str) and override.strip():
                 return override
         return _DEFAULT_VCD_API_VERSION
+
+    def _session_cache_key(self, target: VcloudDirectorTargetLike) -> tuple[str, ...]:
+        """Key the session JWT on the credential plus the API version the login sends."""
+        return credential_cache_key(target, self._api_version(target))
 
     # ------------------------------------------------------------------
     # auth_headers — ABC override (Bearer; Accept added per-path by _vcd_get)
@@ -235,7 +240,7 @@ class VcloudDirectorConnector(HttpConnector):
                 f"target={target.name!r} has no operator JWT (system-initiated calls "
                 "cannot read per-target vendor credentials)"
             )
-        cache_key = target_cache_key(target)
+        cache_key = self._session_cache_key(target)
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None:
@@ -494,7 +499,7 @@ class VcloudDirectorConnector(HttpConnector):
     async def _evict_session_token(self, target: VcloudDirectorTargetLike) -> None:
         """Drop the cached provider JWT for *target* under the session lock."""
         async with self._session_lock:
-            self._session_tokens.pop(target_cache_key(target), None)
+            self._session_tokens.pop(self._session_cache_key(target), None)
 
     async def aclose(self) -> None:
         """Clear cached session tokens, then tear down the httpx pool.

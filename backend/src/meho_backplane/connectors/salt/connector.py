@@ -18,9 +18,10 @@ The vendor page "API Usage" of the RaaS 8.18 reference:
    and the header ``X-Xsrftoken: <value of the _xsrf cookie>``. The body is
    ``{"resource": ..., "method": ..., "kwarg": {...}}``.
 3. The session (the Basic header, the cookies and the xsrf value) is
-   cached per target and tenant (``target_cache_key``).
+   cached per credential (``credential_cache_key``: tenant, secret and
+   login host), so two targets that share one credential share one session.
 4. On ``401`` from a later call the dispatcher calls
-   :meth:`invalidate_session`, which drops only this target's session, and
+   :meth:`invalidate_session`, which drops the shared session, and
    dispatches once more; the next call logs in again and reads the
    credentials from Vault again.
 
@@ -64,7 +65,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vcf_auth import (
     basic_auth_header,
@@ -223,7 +224,7 @@ class SaltConnector(HttpConnector):
 
     def __init__(self, *, session_loader: SaltSessionLoader | None = None) -> None:
         super().__init__()
-        self._sessions: dict[tuple[str, str], _SaltSession] = {}
+        self._sessions: dict[tuple[str, ...], _SaltSession] = {}
         self._session_lock = asyncio.Lock()
         self._session_loader: SaltSessionLoader = (
             session_loader if session_loader is not None else load_session_credentials_from_vault
@@ -247,7 +248,7 @@ class SaltConnector(HttpConnector):
 
     async def _session(self, target: SaltTargetLike, operator: Operator) -> _SaltSession:
         """Return the cached session for *target*, logging in on first use."""
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target)
         async with self._session_lock:
             cached = self._sessions.get(cache_key)
             if cached is not None:
@@ -295,13 +296,13 @@ class SaltConnector(HttpConnector):
             return session
 
     async def invalidate_session(self, target: SaltTargetLike) -> None:
-        """Drop the cached session for *target* only (the dispatcher's 401 hook).
+        """Drop the cached session of *target*'s credential (the dispatcher's 401 hook).
 
         The next :meth:`auth_headers` call logs in again and reads the
         credentials through the loader again. The pooled client's cookie
         jar for this target is cleared too.
         """
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target)
         async with self._session_lock:
             self._sessions.pop(cache_key, None)
             client = self._clients.get(self._client_cache_key(target))
@@ -333,7 +334,7 @@ class SaltConnector(HttpConnector):
     async def server_version(self, target: SaltTargetLike, operator: Operator) -> SaltServerVersion:
         """Read the RaaS version. Never raises: a failure is named in ``error``.
 
-        A ``401`` drops this target's cached session, so the next call logs
+        A ``401`` drops the cached session, so the next call logs
         in again instead of sending the rejected session once more.
         """
         try:

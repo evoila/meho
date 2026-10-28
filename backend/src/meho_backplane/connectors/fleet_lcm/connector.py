@@ -60,8 +60,9 @@ comes from one of two places:
   The login goes to ``vcf_ops_url`` from the secret when it is set, else to
   the target's own host and port. The login paths start at the root of the
   host, so a service path carried on the target's ``host`` (for example
-  ``/fleet-lcm``) is not used for the login. The token is kept per target
-  (``(tenant_id, target.id)``) until :meth:`invalidate_session` drops it.
+  ``/fleet-lcm``) is not used for the login. The token is kept per credential
+  (``credential_cache_key``: tenant, secret and login host) until
+  :meth:`invalidate_session` drops it.
 * **Stored token (fallback).** When the secret carries a ``token``, MEHO
   sends it as is and does not log in.
 
@@ -131,7 +132,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vcf_auth import (
     CredentialsCache,
@@ -207,7 +208,7 @@ class FleetLcmConnector(HttpConnector):
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
         )
         self._creds: CredentialsCache = CredentialsCache(loader, product_label="fleet-lcm")
-        self._session_tokens: dict[tuple[str, str], str] = {}
+        self._session_tokens: dict[tuple[str, ...], str] = {}
         self._session_lock = asyncio.Lock()
 
     async def auth_headers(self, target: FleetLcmTargetLike, operator: Operator) -> dict[str, str]:
@@ -240,7 +241,7 @@ class FleetLcmConnector(HttpConnector):
 
         The lock makes concurrent first callers for a target share one login.
         """
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target)
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None:
@@ -513,7 +514,7 @@ class FleetLcmConnector(HttpConnector):
         are picked up.
         """
         async with self._session_lock:
-            self._session_tokens.pop(target_cache_key(target), None)
+            self._session_tokens.pop(credential_cache_key(target), None)
         await self._creds.invalidate(target)
 
     async def invalidate_credentials(self, target: FleetLcmTargetLike) -> None:

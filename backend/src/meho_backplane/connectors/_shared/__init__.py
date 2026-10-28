@@ -23,9 +23,12 @@ Exports:
   call runs eagerly (as ``vault_creds`` does for ``vault``) and the ``gsm``
   kind is present before any credential resolution.
 * :mod:`meho_backplane.connectors._shared.cache_key` — the canonical
-  tenant-unique ``(tenant_id, id)`` per-target cache key (#1642). Every
-  connector credential / session / client cache derives its key here so
-  same-named targets in different tenants never collapse to one entry.
+  tenant-unique cache keys. ``target_cache_key`` is the ``(tenant_id, id)``
+  per-target key (#1642) for client pools and credential caches;
+  ``credential_cache_key`` is the per-credential key (#5033) for login
+  tokens and sessions, so two targets that share one credential share one
+  token. Same-named targets in different tenants never collapse to one
+  entry.
 * :mod:`meho_backplane.connectors._shared.fingerprint` — the redaction
   seam for the direct-protocol connectors' ``fingerprint`` failure arms
   (#3297). Emits the exception type name plus a classified reason, never

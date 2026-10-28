@@ -19,12 +19,13 @@ Chosen per target with ``extras["login"]`` (see
   ``POST /iaas/api/login``) on the same address; sent as
   ``Authorization: Bearer <token>``.
 
-The ``Authorization`` value is cached per target and tenant
-(``target_cache_key``). Only a caller with an operator JWT, other than the
-synthesised system operator, reads or fills the cache; any other caller
-runs the credential loader, which checks it, and its login is not kept.
+The ``Authorization`` value is cached per credential and login mode
+(``credential_cache_key``: tenant, secret and login host). Only a caller
+with an operator JWT, other than the synthesised system operator, reads or
+fills the cache; any other caller runs the credential loader, which checks
+it, and its login is not kept.
 On ``401`` the dispatcher calls :meth:`invalidate_session`, which drops
-only this target's value, and dispatches once more; the next call logs in
+the cached value, and dispatches once more; the next call logs in
 again.
 
 Version
@@ -58,7 +59,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
@@ -124,7 +125,7 @@ class VroConnector(HttpConnector):
 
     def __init__(self, *, credentials_loader: VroCredentialsLoader | None = None) -> None:
         super().__init__()
-        self._authorizations: dict[tuple[str, str], str] = {}
+        self._authorizations: dict[tuple[str, ...], str] = {}
         self._auth_lock = asyncio.Lock()
         self._credentials_loader: VroCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
@@ -156,7 +157,7 @@ class VroConnector(HttpConnector):
         unauthenticated caller, and such a caller never primes it.
         """
         mode = login_mode(target)
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target, login_mode(target))
         checked = bool(operator.raw_jwt) and not is_system_operator(operator)
         async with self._auth_lock:
             cached = self._authorizations.get(cache_key)
@@ -187,7 +188,7 @@ class VroConnector(HttpConnector):
 
     async def invalidate_session(self, target: VroTargetLike) -> None:
         """Drop the cached login of *target* only (the dispatcher's 401 hook)."""
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target, login_mode(target))
         async with self._auth_lock:
             self._authorizations.pop(cache_key, None)
 
@@ -212,7 +213,7 @@ class VroConnector(HttpConnector):
     async def server_version(self, target: VroTargetLike, operator: Operator) -> VroServerVersion:
         """Read the Orchestrator version and build. Never raises: a failure is named in ``error``.
 
-        A ``401`` drops this target's cached login, so the next call logs in again.
+        A ``401`` drops the cached login, so the next call logs in again.
         """
         try:
             payload = await self._vro_get(target, ABOUT_PATH, operator=operator)

@@ -482,6 +482,23 @@ session still produces a readable chip (the `web_session.tenant_id`
 FK is intentionally soft; the chassis logs
 `ui_session_tenant_row_missing` and serves the page).
 
+### Tenant on the audit and approvals pages (#5238)
+
+One person can work in several tenants, so these pages name the tenant:
+
+- **Audit list** (`audit/_results_rows.html`, also used by the replay
+  tree): each row starts with its tenant. The label comes from
+  `AuditEntry.tenant_name` (joined from the `tenant` table, see
+  [audit_query.md](audit_query.md)), with the tenant id as fallback
+  (`_tenant_label` in `ui/routes/audit/routes.py`).
+- **Audit detail drawer** (`audit/_drawer.html`): a "Tenant" line. The
+  drawer reads the row's tenant name from the `tenant` table, with the
+  id as fallback.
+- **Approvals page** (`approvals/index.html`): the heading text names
+  the current tenant from `session_tenant` (`name → slug → id`).
+
+The pages still show only the rows of the current tenant.
+
 The processor also exposes `session_operator_sub` (the signed-in
 operator's Keycloak `sub`, or `None` outside a session). The sidebar
 account chip (`base.html`) used to be the hardcoded literal

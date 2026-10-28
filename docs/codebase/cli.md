@@ -53,6 +53,11 @@ names.
   first) and `trace show <audit-id>` (one trace over
   `GET /api/v1/audit/{audit_id}/trace`; headers and bodies only in
   `--json`).
+  #5238 shows the tenant: the `query` / `recent` / `who-touched` /
+  `my-recent` table has a `TENANT` column (the tenant name, else the
+  tenant id), `show` prints a `tenant_name:` line under `tenant_id:`,
+  and `--json` carries `tenant_id` and `tenant_name` as the backend
+  sends them.
 - `meho kb ...` (G4.1-T4 #418) — knowledge-base operator surface
   (`ingest`, `search`, `list`, `show`, `add`, `delete`) wrapping
   the five `/api/v1/kb*` routes shipped by G4.1-T2 (#416) plus the

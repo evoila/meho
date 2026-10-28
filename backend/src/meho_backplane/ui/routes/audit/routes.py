@@ -93,6 +93,7 @@ from typing import Final
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.api.v1.audit import _REPLAY_ROW_CAP, _count_session_rows
@@ -111,7 +112,7 @@ from meho_backplane.audit_query import (
 )
 from meho_backplane.broadcast import classify_op
 from meho_backplane.db.engine import get_raw_session, get_sessionmaker
-from meho_backplane.db.models import AuditEventClass, AuditLog
+from meho_backplane.db.models import AuditEventClass, AuditLog, Tenant
 from meho_backplane.flight_recorder import load_trace
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
@@ -315,6 +316,13 @@ def _badge_class(op_class: str) -> str:
     return OP_CLASS_BADGE_CLASSES.get(op_class, "badge-ghost")
 
 
+def _tenant_label(tenant_name: str | None, tenant_id: uuid.UUID | None) -> str:
+    """Return the tenant to show on an audit row: its name, else its id (#5238)."""
+    if tenant_name:
+        return tenant_name
+    return str(tenant_id) if tenant_id is not None else "-"
+
+
 def _project_rows(result: AuditQueryResult, *, is_admin: bool) -> list[dict[str, object]]:
     """Project substrate :class:`AuditEntry` rows to the row template shape.
 
@@ -329,6 +337,7 @@ def _project_rows(result: AuditQueryResult, *, is_admin: bool) -> list[dict[str,
         {
             "id": str(row.id),
             "ts": row.ts.isoformat(),
+            "tenant_label": _tenant_label(row.tenant_name, row.tenant_id),
             "principal_sub": row.principal_sub,
             "principal_name": row.principal_name,
             "target_name": row.target_name,
@@ -370,6 +379,7 @@ def _project_replay_node(node: ReplayNode, *, is_admin: bool) -> dict[str, objec
     return {
         "id": str(node.id),
         "ts": node.ts.isoformat(),
+        "tenant_label": _tenant_label(node.tenant_name, node.tenant_id),
         "principal_sub": node.principal_sub,
         "principal_name": node.principal_name,
         "target_name": node.target_name,
@@ -443,8 +453,15 @@ async def _build_drawer_context(
         if is_execution and row.tenant_id is not None
         else None
     )
+    # The row's own tenant, by name from the ``tenant`` table (#5238).
+    tenant_name = (
+        await db_session.scalar(select(Tenant.name).where(Tenant.id == row.tenant_id))
+        if row.tenant_id is not None
+        else None
+    )
     return {
         "row": row,
+        "tenant_label": _tenant_label(tenant_name, row.tenant_id),
         "op_id": op_id,
         "op_class": op_class,
         "badge_class": _badge_class(op_class),

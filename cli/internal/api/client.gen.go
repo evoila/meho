@@ -1808,6 +1808,8 @@ type AuditClassCountsRequest struct {
 //   - “id“ ← “audit_log.id“
 //   - “ts“ ← “audit_log.occurred_at“
 //   - “tenant_id“ ← “audit_log.tenant_id“
+//   - “tenant_name“ ← LEFT JOIN “tenant.name“ ON “audit_log.tenant_id“
+//     (#5238). “None“ when the tenant row is gone; show “tenant_id“ then.
 //   - “principal_sub“ ← “audit_log.operator_sub“
 //   - “target_id“ ← “audit_log.target_id“
 //   - “target_name“ ← LEFT JOIN “targets.name“ ON “audit_log.target_id“
@@ -1847,6 +1849,7 @@ type AuditEntry struct {
 	TargetId         *openapi_types.UUID    `json:"target_id"`
 	TargetName       *string                `json:"target_name"`
 	TenantId         *openapi_types.UUID    `json:"tenant_id"`
+	TenantName       *string                `json:"tenant_name"`
 	Ts               time.Time              `json:"ts"`
 	WorkRef          *string                `json:"work_ref"`
 }
@@ -7620,6 +7623,7 @@ type ReplayNode struct {
 	TargetId         *openapi_types.UUID    `json:"target_id"`
 	TargetName       *string                `json:"target_name"`
 	TenantId         *openapi_types.UUID    `json:"tenant_id"`
+	TenantName       *string                `json:"tenant_name"`
 	Ts               time.Time              `json:"ts"`
 	WorkRef          *string                `json:"work_ref"`
 }

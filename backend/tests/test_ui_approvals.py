@@ -431,6 +431,21 @@ def test_panel_lists_pending_requests() -> None:
     assert "<!doctype html>" not in body.lower()
 
 
+def test_page_heading_names_the_current_tenant() -> None:
+    """The full approvals page names the current tenant, not "this tenant" (#5238)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert '<span class="font-mono" data-tenant>Tenant tenant-a</span>' in body
+    assert "history for this tenant" not in body
+
+
 def test_panel_empty_state() -> None:
     """An empty queue renders the no-pending-approvals state in the bell modal."""
     _seed_tenant(_TENANT_A, "tenant-a")

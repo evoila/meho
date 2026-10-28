@@ -22,7 +22,9 @@ Child reads, all on the Kubernetes connector (``k8s-1.x``):
    ``source_id`` of those node records, so a workload links to its nodes.
 
 CPU and memory of a workload are the sums over its containers, per
-replica. A sum is only given when every container sets the value;
+replica. The containers are the app containers and the sidecars (init
+containers with ``restartPolicy: Always``), as ``k8s.workload.list``
+lists them. A sum is only given when every container sets the value;
 otherwise it is unknown, because a sum of some containers would look
 smaller than the workload is.
 """

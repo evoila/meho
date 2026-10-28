@@ -10,6 +10,11 @@ claim), the claim templates of a StatefulSet, and the label selector that
 finds the workload's pods (pass it to ``k8s.pod.list`` to see which nodes
 they run on).
 
+The containers of a row are the app containers plus the sidecars: init
+containers with ``restartPolicy: Always``, which keep running next to the
+app for the life of the pod. Plain init containers run once and stop, so
+they are left out.
+
 Quantities stay as the API writes them (``"250m"``, ``"512Mi"``); the
 reader converts them. Same namespace selectors and server-side paging as
 ``k8s.deployment.list``.
@@ -19,6 +24,7 @@ References
 
 * https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/stateful-set-v1/
 * https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/daemon-set-v1/
+* https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/
 * https://github.com/tomplus/kubernetes_asyncio/blob/master/kubernetes_asyncio/docs/AppsV1Api.md
 """
 
@@ -82,9 +88,15 @@ def _resources(container: Any) -> tuple[dict[str, str], dict[str, str]]:
     return requests, limits
 
 
+def _sidecars(pod_spec: Any) -> list[Any]:
+    return [c for c in (pod_spec.init_containers or []) if c.restart_policy == "Always"]
+
+
 def _container_rows(pod_spec: Any) -> list[dict[str, Any]]:
+    if pod_spec is None:
+        return []
     rows = []
-    for container in (pod_spec.containers or []) if pod_spec is not None else []:
+    for container in [*(pod_spec.containers or []), *_sidecars(pod_spec)]:
         requests, limits = _resources(container)
         rows.append(
             {
@@ -194,7 +206,10 @@ _ROW_SCHEMA: dict[str, Any] = {
         },
         "containers": {
             "type": "array",
-            "description": "Containers of one pod: name, image, requests, limits.",
+            "description": (
+                "Containers of one pod: name, image, requests, limits. App containers "
+                "first, then sidecars (init containers with restartPolicy Always)."
+            ),
             "items": {
                 "type": "object",
                 "properties": {
@@ -288,7 +303,8 @@ K8S_WORKLOAD_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
         "image, requests, limits}], volumes: [{name, type, claim_name}], "
         "volume_claim_templates: [{name, storage_request, storage_class}], "
         "pod_selector}], 'total', 'next_continue'?}. Quantities are API text "
-        "('250m', '512Mi')."
+        "('250m', '512Mi'). containers holds the app containers and the "
+        "sidecars (init containers with restartPolicy Always)."
     ),
     "next_step": (
         "Call k8s.pod.list with label_selector=<pod_selector> to see the nodes "

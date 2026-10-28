@@ -15,6 +15,7 @@ against a mocked ``AppsV1Api``. Names are made up.
 from __future__ import annotations
 
 import base64
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import jsonschema
@@ -23,6 +24,8 @@ from kubernetes_asyncio.client import (
     V1DaemonSet,
     V1DaemonSetSpec,
     V1DaemonSetStatus,
+    V1Deployment,
+    V1DeploymentSpec,
     V1LabelSelector,
     V1ListMeta,
     V1Node,
@@ -51,6 +54,7 @@ from meho_backplane.connectors.kubernetes.ops_workload_set import (
     k8s_workload_list,
     workload_set_row,
 )
+from meho_backplane.connectors.migration.source_k8s import build_workload_record
 from meho_backplane.connectors.winsrv import WINSRV_OPS, WinsrvConnector
 from meho_backplane.connectors.winsrv.ops_hardware import winsrv_hardware
 from meho_backplane.operations._validate import validate_params
@@ -194,6 +198,40 @@ def test_workload_set_row_for_a_daemonset_uses_the_scheduled_count() -> None:
     row = workload_set_row("DaemonSet", daemonset)
     assert (row["replicas"], row["pod_selector"]) == (5, "app=agent")
     assert row["containers"] == [{"name": "a", "image": None, "requests": {}, "limits": {}}]
+
+
+def test_workload_set_row_keeps_sidecars_and_drops_plain_init_containers() -> None:
+    def container(name: str, cpu: str, restart_policy: str | None = None) -> V1Container:
+        return V1Container(
+            name=name,
+            image=f"registry.example/{name}:1",
+            restart_policy=restart_policy,
+            resources=V1ResourceRequirements(requests={"cpu": cpu}),
+        )
+
+    deployment = V1Deployment(
+        metadata=V1ObjectMeta(name="web", namespace="shop"),
+        spec=V1DeploymentSpec(
+            replicas=2,
+            selector=V1LabelSelector(match_labels={"app": "web"}),
+            template=V1PodTemplateSpec(
+                spec=V1PodSpec(
+                    init_containers=[
+                        container("migrate-db", "1", restart_policy=None),
+                        container("log-shipper", "500m", restart_policy="Always"),
+                    ],
+                    containers=[container("app", "250m")],
+                )
+            ),
+        ),
+    )
+    row = workload_set_row("Deployment", deployment)
+    assert [c["name"] for c in row["containers"]] == ["app", "log-shipper"]
+    record = build_workload_record(
+        row, cluster="c1", claims={}, nodes=[], collected_at=datetime(2026, 10, 28, tzinfo=UTC)
+    )
+    assert record.cpu_request_millicores == 750.0
+    assert record.images == ["registry.example/app:1", "registry.example/log-shipper:1"]
 
 
 async def test_k8s_workload_list_pages_across_all_namespaces() -> None:

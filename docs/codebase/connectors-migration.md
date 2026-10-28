@@ -283,7 +283,9 @@ Per source:
   pages are kept and an omission names the rest ("... after the first
   500"); for a workload list the kind's total is then unknown. CPU and
   memory are sums over the containers per replica, given only when every
-  container sets the value. A node that is a VM has the VM's BIOS UUID, so
+  container sets the value. The containers include the sidecars (init
+  containers with `restartPolicy: Always`), because they run next to the
+  app for the life of the pod. A node that is a VM has the VM's BIOS UUID, so
   the merge lists it as a duplicate of the VM record, also when the node
   shows the UUID with the bytes of the first three groups reversed. One
   UUID reported by two nodes of the cluster cannot name one machine, so

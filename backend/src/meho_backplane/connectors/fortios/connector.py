@@ -17,12 +17,13 @@ connection errors.
 TLS
 ---
 
-Checks stay on. The operator pins the device's certificate or CA
-(``tls_ca_pin``) and sets ``tls_server_name`` when the host is an IP
-address; both come from the shared HTTP base. A target with
-``verify_tls=false`` is refused before any call
-(:meth:`FortiOSConnector.require_tls_checks`): the API token goes with every
-call, so the connector never sends it over an unchecked connection.
+Checks stay on, and every call goes over HTTPS. The operator pins the
+device's certificate or CA (``tls_ca_pin``) and sets ``tls_server_name``
+when the host is an IP address; both come from the shared HTTP base. A
+target with ``verify_tls=false`` or with ``extras.scheme`` set to ``http``
+is refused before any call (:meth:`FortiOSConnector.require_tls_checks`):
+the API token goes with every call, so the connector never sends it over
+an unchecked or unencrypted connection.
 
 Calls
 -----
@@ -200,15 +201,29 @@ class FortiOSConnector(HttpConnector):
 
     @staticmethod
     def require_tls_checks(target: Any) -> None:
-        """Raise :class:`FortiOSTargetError` when the target turns the TLS check off."""
-        if bool(getattr(target, "verify_tls", True)):
-            return
-        raise FortiOSTargetError(
-            f"FortiGate target {getattr(target, 'name', None)!r} has verify_tls=false. MEHO "
-            "keeps the TLS check on for a FortiGate, because the API token goes with every "
-            "call. Set verify_tls=true and pin the device's certificate or CA with "
-            "tls_ca_pin; set tls_server_name when the target's host is an IP address."
-        )
+        """Raise :class:`FortiOSTargetError` unless the target uses HTTPS with the check on.
+
+        The shared HTTP base sends plain HTTP when ``extras.scheme`` is
+        ``http``. A FortiGate target may not do that: the API token goes
+        with every call.
+        """
+        name = getattr(target, "name", None)
+        if not bool(getattr(target, "verify_tls", True)):
+            raise FortiOSTargetError(
+                f"FortiGate target {name!r} has verify_tls=false. MEHO keeps the TLS check "
+                "on for a FortiGate, because the API token goes with every call. Set "
+                "verify_tls=true and pin the device's certificate or CA with tls_ca_pin; "
+                "set tls_server_name when the target's host is an IP address."
+            )
+        extras = getattr(target, "extras", None)
+        scheme = extras.get("scheme", "https") if isinstance(extras, Mapping) else "https"
+        if scheme != "https":
+            raise FortiOSTargetError(
+                f"FortiGate target {name!r} has extras.scheme={scheme!r}. MEHO calls a "
+                "FortiGate only over HTTPS, because the API token goes with every call. "
+                "Remove extras.scheme or set it to https, and pin the device's certificate "
+                "or CA with tls_ca_pin."
+            )
 
     @classmethod
     def _query(cls, target: Any, query: Mapping[str, Any] | None) -> dict[str, Any]:

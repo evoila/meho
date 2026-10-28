@@ -625,6 +625,43 @@ async def test_a_write_on_a_target_without_tls_checks_is_refused_before_any_call
 
 
 @pytest.mark.asyncio
+async def test_a_read_on_a_plain_http_target_is_refused_before_any_call(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await _register()
+    target = FortiTarget(extras={"scope": "device", "scheme": "http"})
+    fake = fx.FakeFortiGate()
+    result = await _dispatch("fortios.vdom.list", fake, target)
+    assert result.status == "error"
+    assert "extras.scheme='http'" in _text(result)
+    assert "only over HTTPS" in _text(result)
+    assert fake.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_write_and_detection_on_a_plain_http_target_are_refused_before_any_call() -> (
+    None
+):
+    connector = FortiOSConnector(token_loader=token_loader)
+    target = FortiTarget(extras={"scope": "vdom", "vdom": "vdom-a", "scheme": "http"})
+    fake = fx.FakeFortiGate({"cmdb/firewall/address/host-a": [fx.ADDRESS]})
+    async with respx.mock(assert_all_called=False) as mock:
+        mock.route().mock(side_effect=fake)
+        with pytest.raises(FortiOSTargetError, match="only over HTTPS"):
+            await connector.api_write(
+                target, make_operator(), "PUT", "cmdb/firewall/address/host-a", body={"x": 1}
+            )
+        fp = await connector.fingerprint(target, make_operator())
+        probe = await connector.probe(target)
+    await connector.aclose()
+    assert fake.calls == []
+    assert fp.reachable is False
+    assert "extras.scheme='http'" in fp.extras["error"]
+    assert probe.ok is False and "only over HTTPS" in str(probe.reason)
+    assert fx.TOKEN not in json.dumps(fp.model_dump(mode="json"))
+
+
+@pytest.mark.asyncio
 async def test_detection_with_a_wrong_token_is_not_reachable() -> None:
     fake = fx.FakeFortiGate(
         {"monitor/system/status": httpx.Response(401, json=fx.error_answer(401))}

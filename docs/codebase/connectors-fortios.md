@@ -48,11 +48,13 @@ product from the first part of the connector ID, so the ID must start with
   `api_token`. MEHO reads it under the caller's identity. Use a REST API
   administrator with the least rights it needs, and limit its trusted hosts
   to MEHO's address. A VDOM target gets a token limited to that VDOM.
-- TLS checks stay on. Pin the device's certificate or CA with `tls_ca_pin`,
-  and set `tls_server_name` when the host is an IP address. A target with
-  `verify_tls: false` is refused before any call, reads and writes alike
-  (`FortiOSConnector.require_tls_checks`): the token goes with every call,
-  so MEHO never sends it over an unchecked connection.
+- TLS checks stay on, and every call goes over HTTPS. Pin the device's
+  certificate or CA with `tls_ca_pin`, and set `tls_server_name` when the
+  host is an IP address. A target with `verify_tls: false`, or with
+  `extras.scheme` set to `http`, is refused before any call, reads, writes
+  and detection alike (`FortiOSConnector.require_tls_checks`): the token
+  goes with every call, so MEHO never sends it over an unchecked or
+  unencrypted connection.
 
 ## Operations
 
@@ -114,6 +116,7 @@ says why. The token never appears in the result.
 | HTTP 403 | `connector_auth_failed`, cause `missing_rights`: the token's profile lacks the rights. |
 | TLS check fails | `connector_tls_verify_failed`; detection says to set `tls_ca_pin` and `tls_server_name`. |
 | Target has `verify_tls: false` | refused before any call; the message says to set `verify_tls: true` and pin with `tls_ca_pin`. |
+| Target has `extras.scheme: http` | refused before any call; the message says to remove `extras.scheme` or set it to `https`. |
 | Answer with `status` other than `success` | `connector_error` with the FortiOS error number and the cleaned `cli_error`. |
 | Other HTTP error | `connector_error` with the status and the cleaned FortiOS error. |
 | Version 8.0 or older than 7.2 in an answer | the read is refused. |

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import shlex
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ from meho_backplane.connectors.holodeck.connector import _WHEN_TO_USE_BY_GROUP
 from meho_backplane.connectors.holodeck.ops_remove import (
     REMOVE_OPS,
     _instance_remove_preview,
+    file_name_pattern,
     instance_vms,
 )
 from meho_backplane.operations._preview import (
@@ -305,6 +307,40 @@ async def test_remove_config_choice() -> None:
     )
     assert result["status"] == "started" and result["config_id"] == "cfg9"
     assert "-ConfigID 'cfg9'" in _decoded_script(mock_cmd.call_args.args[1])
+
+
+@pytest.mark.parametrize(
+    ("instance_id", "name", "matches"),
+    [
+        ("lab0", "lab0-state.json", True),
+        ("lab0", "lab0.json", True),
+        ("lab0", "deploy_LAB0.log", True),
+        ("lab0", "lab01-state.json", False),
+        ("lab0", "lab01.json", False),
+        ("lab0", "xlab0-state.json", False),
+        ("lab01", "lab01-state.json", True),
+        ("lab01", "lab0-state.json", False),
+    ],
+)
+def test_file_name_match_takes_the_id_only_as_a_whole_word(
+    instance_id: str, name: str, matches: bool
+) -> None:
+    # PowerShell -match ignores case, so the Python check does too.
+    pattern = file_name_pattern(instance_id)
+    assert bool(re.search(pattern, name, re.IGNORECASE)) is matches
+
+
+@pytest.mark.asyncio
+async def test_check_script_uses_the_whole_word_file_match() -> None:
+    connector = HolodeckConnector()
+    for instance_id in ("lab0", "lab01"):
+        with patch(_PWSH, new_callable=AsyncMock) as mock_pwsh:
+            mock_pwsh.return_value = _check(instance=None)
+            await connector.instance_remove(_StubTarget(), {"instance_id": instance_id})
+        script = mock_pwsh.call_args.args[2]
+        assert f"$word = '{file_name_pattern(instance_id)}';" in script
+        assert "$f.Name -match $word" in script
+        assert "-like" not in script
 
 
 def test_instance_vms_keeps_only_names_and_locations() -> None:

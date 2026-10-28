@@ -534,7 +534,8 @@ How a call runs:
    and, when asked, `-ResetHoloRouter`; that `Get-HoloDeckInstance` exists
    (9.0.2 and later); reads `Get-HoloDeckInstance -InstanceID <id>`; and
    lists the instance's files under `/holodeck-runtime/config`, `output` and
-   `state` (the file name holds the id, or the file text holds `"<id>"`).
+   `state` (the file name holds the id as a whole word, so `lab01-state.json`
+   is not a file of `lab0`; or the file text holds `"<id>"`).
 2. **Decide.**
    - A toolkit without the cmdlet, the parameter or the switch: `refused`,
      with a version message. MEHO does not guess.

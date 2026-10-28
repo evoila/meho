@@ -13,8 +13,8 @@ How a call runs:
    9.0.1) and, when asked, ``-ResetHoloRouter``; that ``Get-HoloDeckInstance``
    exists (9.0.2); reads the instance with ``Get-HoloDeckInstance -InstanceID``;
    and lists the instance's files under ``/holodeck-runtime/config``,
-   ``output`` and ``state`` (a file whose name holds the instance id, or whose
-   text holds it as a JSON string). The same script feeds the approval preview.
+   ``output`` and ``state`` (a file whose name holds the instance id as a whole
+   word, or whose text holds it as a JSON string). The same script feeds the approval preview.
 2. **Decide.** A missing cmdlet or switch is ``refused`` with a version
    message. An instance that ``Get-HoloDeckInstance`` does not list is
    ``unchanged``: nothing is deleted.
@@ -57,6 +57,7 @@ __all__ = [
     "HOLODECK_WHEN_TO_USE_REMOVE_BY_GROUP",
     "INSTANCE_ID_PATTERN",
     "REMOVE_OPS",
+    "file_name_pattern",
     "holodeck_instance_remove",
     "instance_vms",
     "read_remove_record",
@@ -88,9 +89,20 @@ def remove_record_path(instance_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def file_name_pattern(instance_id: str) -> str:
+    """Return the regex that finds *instance_id* as a whole word in a file name.
+
+    A plain "contains" match would take ``lab01-state.json`` for instance
+    ``lab0``, so the id must not touch another letter or digit. The pattern
+    reads the same in .NET (PowerShell ``-match``) and in Python ``re``.
+    """
+    return f"(^|[^A-Za-z0-9]){re.escape(instance_id)}([^A-Za-z0-9]|$)"
+
+
 def _check_script(instance_id: str) -> str:
     """Compose the read-only check script. *instance_id* is already validated."""
     quoted_id = ps_single_quote(instance_id)
+    name_pattern = ps_single_quote(file_name_pattern(instance_id))
     dirs = ", ".join(ps_single_quote(d) for d in _STATE_DIRS)
     config_dir = ps_single_quote(_STATE_DIRS[0])
     return (
@@ -108,10 +120,11 @@ def _check_script(instance_id: str) -> str:
         "if ($get) { try { $out.instance = Get-HoloDeckInstance -InstanceID $id "
         "-ErrorAction Stop } catch { $out.lookup_error = $_.Exception.Message } }; "
         "$needle = '\"' + $id + '\"'; "
+        f"$word = {name_pattern}; "
         f"foreach ($d in @({dirs})) {{ if (Test-Path -LiteralPath $d) {{ "
         "foreach ($f in @(Get-ChildItem -LiteralPath $d -File -Recurse "
         "-ErrorAction SilentlyContinue)) { "
-        'if ($f.Name -like "*$id*" -or (Select-String -LiteralPath $f.FullName '
+        "if ($f.Name -match $word -or (Select-String -LiteralPath $f.FullName "
         "-SimpleMatch -Quiet -Pattern $needle)) { $out.files += $f.FullName; "
         f"if ($d -eq {config_dir} -and $f.Extension -eq '.json') "
         "{ $out.config_ids += $f.BaseName } } } } }; "

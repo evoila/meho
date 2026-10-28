@@ -396,10 +396,15 @@ async def holodeck_instance_status(
     """
     instance_id = params.get("instance_id")
     if instance_id:
-        select = f"Get-HoloDeckInstance -InstanceID {ps_single_quote(str(instance_id))}"
+        # A real failure stops the script (non-zero exit -> PwshRunError);
+        # an instance that is not listed answers "null" (status unknown, no error).
+        script = (
+            f"$r = @(Get-HoloDeckInstance -InstanceID {ps_single_quote(str(instance_id))} "
+            "-ErrorAction Stop); "
+            "if ($r.Count -eq 0) { 'null' } else { $r | ConvertTo-Json -Depth 6 -Compress }"
+        )
     else:
-        select = "Get-HoloDeckInstance"
-    script = f"{select} | ConvertTo-Json -Depth 6 -Compress"
+        script = "Get-HoloDeckInstance | ConvertTo-Json -Depth 6 -Compress"
 
     envelope: dict[str, Any]
     try:
@@ -435,9 +440,11 @@ def _remove_age(envelope: dict[str, Any], record: dict[str, Any]) -> str:
     The record stays on the HoloRouter after a remove, and a later deploy may
     reuse the id. Returns ``current`` when ``Get-HoloDeckInstance`` no longer
     lists the instance, or the remove started after the listed deploy started;
-    ``older`` when the remove started before it; ``unsure`` when MEHO cannot
-    compare the two times.
+    ``older`` when the remove started before it; ``unsure`` when the read
+    failed (the envelope has an ``error``) or MEHO cannot compare the two times.
     """
+    if envelope.get("error"):
+        return "unsure"
     listed = envelope.get("status") != "unknown" or any(
         envelope.get(key) for key in ("instance_id", "started_at", "current_step")
     )
@@ -459,8 +466,9 @@ def merge_remove_record(envelope: dict[str, Any], record: dict[str, Any]) -> Non
     ``running`` may also have been cut short by a router reboot; a note says so.
     An old record must never hide a newer deploy with the same id (see
     :func:`_remove_age`). A record older than the listed deploy is kept only
-    as history in ``removal``. When MEHO cannot tell, ``status`` stays as
-    ``Get-HoloDeckInstance`` reports it and a note says why.
+    as history in ``removal``. When MEHO cannot tell, or the read failed,
+    ``status`` (and any ``error``) stays as ``Get-HoloDeckInstance`` reports it
+    and a note says why.
     """
     moved = record.get("moved_files")
     removal = {
@@ -490,7 +498,12 @@ def merge_remove_record(envelope: dict[str, Any], record: dict[str, Any]) -> Non
         leftover = [leftover]
     envelope["leftover_vms"] = [str(vm) for vm in leftover] if leftover is not None else None
     state = removal["state"]
-    if state == "done" and age == "unsure":
+    if state == "done" and age == "unsure" and envelope.get("error"):
+        notes.append(
+            "a remove finished, but MEHO could not read Get-HoloDeckInstance, so it "
+            "cannot tell if a newer deploy uses this id; status stays unknown"
+        )
+    elif state == "done" and age == "unsure":
         notes.append(
             "a remove finished, but Get-HoloDeckInstance still lists this id and MEHO "
             "cannot tell which is newer; status shows the listed deploy"

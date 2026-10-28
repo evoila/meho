@@ -567,7 +567,11 @@ How a call runs:
    longer lists the instance, or when the remove started after the listed
    deploy started. A remove that started before the deploy is kept only as
    history in `removal`. When MEHO cannot compare the two times, `status`
-   stays as listed and a note says so.
+   stays as listed and a note says so. The status op tells "not listed"
+   apart from a failed read, like the remove op does: a not-listed
+   instance answers `null`, and a failed `Get-HoloDeckInstance` call keeps
+   `status` as `unknown`, keeps its `error`, and adds a note. A failed read
+   never sets `removed`.
 
 **Approval preview.** The preview builder (registered in `ops_remove.py`)
 runs the same read-only check. Its `blast_radius` names the instance

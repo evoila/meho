@@ -391,13 +391,38 @@ async def test_status_reports_removed_and_leftover_vms() -> None:
         "moved_to": "/holodeck-runtime/removed/lab01-20260101-102000",
         "moved_files": ["/holodeck-runtime/state/lab01-state.json"],
     }
-    gone = PwshRunError("instance not found", exit_status=1, stderr="")
-    result = await _status(record, gone)
+    result = await _status(record, None)
     assert result["status"] == "removed"
     assert result["leftover_vms"] == ["lab01-vcfinstaller-a"]
     assert result["removal"]["moved_files"] == ["/holodeck-runtime/state/lab01-state.json"]
     assert "error" not in result
     assert any("vmware.composite.vm.destroy" in note for note in result["notes"])
+
+
+@pytest.mark.asyncio
+async def test_status_failed_read_keeps_status_unknown_and_the_error() -> None:
+    failed = PwshRunError("stdout was not valid JSON", exit_status=0, stderr="")
+    result = await _status(_OLD_REMOVE, failed)
+    assert result["status"] == "unknown"
+    assert "not valid JSON" in result["error"]
+    assert result["removal"]["state"] == "done"
+    assert any("could not read Get-HoloDeckInstance" in note for note in result["notes"])
+
+
+@pytest.mark.asyncio
+async def test_status_script_tells_not_listed_from_a_failed_read() -> None:
+    connector = HolodeckConnector()
+    with (
+        patch(_STATUS_PWSH, new_callable=AsyncMock, return_value=None) as mock_pwsh,
+        patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd,
+    ):
+        mock_cmd.return_value = _proc(exit_status=1)
+        result = await connector.instance_status(_StubTarget(), {"instance_id": "lab01"})
+    script = mock_pwsh.call_args.args[2]
+    assert "Get-HoloDeckInstance -InstanceID 'lab01' -ErrorAction Stop" in script
+    assert "{ 'null' }" in script
+    assert result["status"] == "unknown"
+    assert "error" not in result
 
 
 @pytest.mark.asyncio

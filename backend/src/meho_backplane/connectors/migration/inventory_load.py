@@ -19,11 +19,15 @@ Rules:
 * ``schema_version`` is checked before the rest, so an inventory of a
   newer shape is refused by name and not read wrongly.
 * Merging keeps the handle order. A record whose ``source_id`` was seen
-  before, or a server whose BIOS UUID was seen before, is kept in
-  ``records`` but listed in ``duplicates``. A repeated record's BIOS UUID
-  still counts, so a later record of the same machine from another
-  source is found even when the first record had no BIOS UUID. The
-  caller decides what a duplicate means for its output.
+  before, or a server that shares a BIOS UUID or an instance UUID with
+  another record, is kept in ``records`` but listed in ``duplicates``. The
+  match is found by the same :class:`~.contracts.IdentityIndex` the source
+  reads use, after every record is in: ``same_as`` always names the first
+  record of the machine, also through a chain of matches and whatever the
+  order of the records. A repeated record's identities still count, so a
+  later record of the same machine from another source is found even when
+  the first record had no BIOS UUID. The caller decides what a duplicate
+  means for its output.
 """
 
 from __future__ import annotations
@@ -37,9 +41,10 @@ from pydantic import ValidationError
 
 from meho_backplane.connectors.migration.contracts import (
     INVENTORY_SCHEMA_VERSION,
+    IdentityIndex,
+    IdentityMatch,
     InventoryEnvelope,
     InventoryRecord,
-    ServerRecord,
 )
 from meho_backplane.connectors.result_handle_store import (
     ResultHandleStore,
@@ -75,7 +80,7 @@ class Duplicate:
 
     source_id: str
     same_as: str
-    match: Literal["source_id", "bios_uuid"]
+    match: Literal["source_id"] | IdentityMatch
 
 
 @dataclass(frozen=True)
@@ -148,23 +153,22 @@ def merge_inventories(
     envelopes: list[InventoryEnvelope],
 ) -> tuple[list[InventoryRecord], list[Duplicate]]:
     records: list[InventoryRecord] = []
-    duplicates: list[Duplicate] = []
-    by_source_id: set[str] = set()
-    by_bios_uuid: dict[str, str] = {}
+    first_seen: dict[str, int] = {}
+    identities = IdentityIndex()
     for envelope in envelopes:
         for record in envelope.records:
+            first_seen.setdefault(record.source_id, len(records))
             records.append(record)
-            if record.source_id in by_source_id:
-                duplicates.append(Duplicate(record.source_id, record.source_id, "source_id"))
-            else:
-                by_source_id.add(record.source_id)
-            # A repeated record still registers its BIOS UUID: the first record
-            # may lack it, and a later source may report the same machine.
-            if not isinstance(record, ServerRecord) or not record.identity_hints.bios_uuid:
-                continue
-            first = by_bios_uuid.setdefault(record.identity_hints.bios_uuid, record.source_id)
-            if first != record.source_id:
-                duplicates.append(Duplicate(record.source_id, first, "bios_uuid"))
+            identities.add(record)
+    same_machine = {found.source_id: found for found in identities.duplicates()}
+    duplicates: list[Duplicate] = []
+    for position, record in enumerate(records):
+        source_id = record.source_id
+        if first_seen[source_id] != position:
+            duplicates.append(Duplicate(source_id, source_id, "source_id"))
+        elif source_id in same_machine:
+            found = same_machine[source_id]
+            duplicates.append(Duplicate(source_id, found.same_as, found.match))
     return records, duplicates
 
 

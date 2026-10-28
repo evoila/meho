@@ -480,10 +480,10 @@ from `connectors/_shared/cache_key.py`:
   Used for the HTTP client pool, SSH connections and the caches of read
   secrets. These carry per-target settings (TLS check, CA pin, server
   name), so they must never be shared between targets.
-- **`credential_cache_key(target, *login_inputs)`** =
-  `(tenant_id, secret_ref, host, port, fqdn, *login_inputs)`. One entry
-  per credential. Used for login tokens and sessions, and for the lock and
-  the renewal around them (#5033).
+- **`credential_cache_key(target, *login_inputs, secret_ref=None)`** =
+  `(tenant_id, secret_ref, scheme, host, port, fqdn, *login_inputs)`. One
+  entry per credential. Used for login tokens and sessions, and for the
+  lock and the renewal around them (#5033).
 
 Why the token key is the credential: some vendors allow only one active
 session per user, so a second login with the same user ends the first
@@ -496,9 +496,22 @@ token on its next call.
 Rules for the key:
 
 - The tenant is always part of the key, so tenants never share a token.
-- `host`, `port` and `fqdn` name the login host. `fqdn` is included
-  because some connectors send it as the `Host` header, and the appliance
-  picks the organisation from it.
+- `scheme`, `host` and `port` name the login address the same way the HTTP
+  adapter builds the base URL: the scheme comes from `extras["scheme"]`
+  (`https` when unset) and an unset port is the default port of the scheme.
+  So a target with no port and a target with port 443 share one key, and an
+  HTTP target never shares a token with an HTTPS target.
+- `fqdn` is included because some connectors send it as the `Host` header,
+  and the appliance picks the organisation from it.
+- `secret_ref=` replaces the target's own secret reference when the login
+  uses another secret. The VCF Automation provider plane logs in with
+  `provider_secret_ref`, so two targets with different tenant secrets and
+  one provider secret share one provider session.
+- VCF Fleet logs in at `vcf_ops_url` from the secret when it is set. Its key
+  is built from that resolved login address, not from the target's own
+  host, so two fleet targets on different hosts with one secret and one
+  `vcf_ops_url` share one token. The connector remembers which key each
+  target used, so a `401` finds the token without reading the secret again.
 - `login_inputs` are the other target values the login reads, for example
   the login domain (vra8, VCF Automation), the auth source (VCF
   Operations), the login provider (VCF Operations for Logs), the login

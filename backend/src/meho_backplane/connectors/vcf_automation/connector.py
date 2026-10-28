@@ -158,17 +158,20 @@ _log = structlog.get_logger(__name__)
 def _plane_cache_key(target: VcfAutomationTargetLike, plane: Plane) -> tuple[str, ...]:
     """Return the token cache key for *plane*: the credential plus the plane's login inputs.
 
-    The provider login reads ``provider_secret_ref``, ``provider_username``
-    and ``domain``; the tenant login reads the tenant domain. Both send
-    ``fqdn`` as the ``Host`` header, which :func:`credential_cache_key`
-    already includes.
+    The provider login uses ``provider_secret_ref`` in place of
+    ``target.secret_ref`` when it is set, so that is the secret in the key:
+    two targets with different tenant secrets but one provider secret share
+    one provider session. It also reads ``provider_username`` and
+    ``domain``. The tenant login reads the tenant domain. Both send ``fqdn``
+    as the ``Host`` header, which :func:`credential_cache_key` already
+    includes.
     """
     if plane == "provider":
         return credential_cache_key(
             target,
-            getattr(target, "provider_secret_ref", None),
             getattr(target, "provider_username", None),
             getattr(target, "domain", None),
+            secret_ref=getattr(target, "provider_secret_ref", None) or None,
         )
     return credential_cache_key(target, _tenant_domain(target))
 

@@ -515,8 +515,12 @@ the consumer repo, validated 2026-05-17):
 5. `POST /cloudapi/1.0.0/sessions/provider` with HTTP Basic and
    `Accept: application/json;version=9.0.0`. A 2xx response carries
    `X-VMWARE-VCLOUD-ACCESS-TOKEN` (a JWT) — the connector caches it under
-   `target.name`. Absence of the header on a 2xx response surfaces as a
-   `RuntimeError` rather than caching an empty token.
+   the provider credential (`_plane_cache_key(target, "provider")`: the
+   tenant, `provider_secret_ref` when set else `target.secret_ref`, the
+   login address, `fqdn`, `provider_username` and `domain`), so two targets
+   with one provider secret share one provider session (#5033). Absence of
+   the header on a 2xx response surfaces as a `RuntimeError` rather than
+   caching an empty token.
 6. `auth_headers` returns `{"Authorization": f"Bearer {jwt}", "Accept": <path-aware>}`.
 
 ### Tenant-plane session establishment

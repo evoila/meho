@@ -672,6 +672,59 @@ async def test_provider_secret_ref_override_invokes_loader_for_distinct_provider
     await connector.aclose()
 
 
+@pytest.mark.asyncio
+async def test_targets_with_one_provider_secret_share_one_provider_session() -> None:
+    """Different tenant secrets, one provider secret: one provider login, two tenant logins.
+
+    The provider plane logs in with ``provider_secret_ref``, so that secret
+    is the one in its cache key. The tenant plane keeps one token per
+    tenant secret.
+    """
+    first = _StubTarget(
+        name="vcfa-prov-a",
+        host="vcfa-shared.test.invalid",
+        port=443,
+        secret_ref="vcfa/sso-a",
+        provider_secret_ref="vcfa/provider",
+        provider_username="admin@System",
+    )
+    second = _StubTarget(
+        name="vcfa-prov-b",
+        host="vcfa-shared.test.invalid",
+        port=None,
+        secret_ref="vcfa/sso-b",
+        provider_secret_ref="vcfa/provider",
+        provider_username="admin@System",
+    )
+    assert _plane_cache_key(first, "provider") == _plane_cache_key(second, "provider")
+    assert _plane_cache_key(first, "tenant") != _plane_cache_key(second, "tenant")
+
+    connector = _make_connector()
+    async with respx.mock(base_url="https://vcfa-shared.test.invalid") as mock:
+        provider = mock.post("/cloudapi/1.0.0/sessions/provider").respond(
+            200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-shared"}
+        )
+        tenant = mock.post("/iaas/api/login")
+        tenant.side_effect = [
+            httpx.Response(200, json={"token": "t-a"}),
+            httpx.Response(200, json={"token": "t-b"}),
+        ]
+        operator = _make_operator()
+        for target in (first, second, first, second):
+            headers = await connector.auth_headers(
+                target, operator=operator, path="/cloudapi/1.0.0/orgs"
+            )
+            assert headers["Authorization"] == "Bearer p-shared"
+        h_a = await connector.auth_headers(first, operator=operator, path="/iaas/api/projects")
+        h_b = await connector.auth_headers(second, operator=operator, path="/iaas/api/projects")
+
+    assert provider.call_count == 1
+    assert tenant.call_count == 2
+    assert h_a["Authorization"] == "Bearer t-a"
+    assert h_b["Authorization"] == "Bearer t-b"
+    await connector.aclose()
+
+
 # ---------------------------------------------------------------------------
 # Failure modes -- login errors
 # ---------------------------------------------------------------------------

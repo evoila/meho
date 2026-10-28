@@ -61,8 +61,11 @@ comes from one of two places:
   the target's own host and port. The login paths start at the root of the
   host, so a service path carried on the target's ``host`` (for example
   ``/fleet-lcm``) is not used for the login. The token is kept per credential
-  (``credential_cache_key``: tenant, secret and login host) until
-  :meth:`invalidate_session` drops it.
+  (``credential_cache_key``: tenant, secret and the resolved login address)
+  until :meth:`invalidate_session` drops it. So two fleet targets with one
+  secret and one ``vcf_ops_url`` share one token, whatever their own hosts
+  are. The connector remembers which login key each target used, so the
+  ``401`` path finds the token without reading the secret again.
 * **Stored token (fallback).** When the secret carries a ``token``, MEHO
   sends it as is and does not log in.
 
@@ -132,7 +135,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import credential_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key, target_cache_key
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vcf_auth import (
@@ -210,6 +213,9 @@ class FleetLcmConnector(HttpConnector):
         )
         self._creds: CredentialsCache = CredentialsCache(loader, product_label="fleet-lcm")
         self._session_tokens: dict[tuple[str, ...], str] = {}
+        # Per target: the login key its token sits under. The key needs the
+        # login address from the secret, which the 401 path does not have.
+        self._login_keys: dict[tuple[str, str], tuple[str, ...]] = {}
         self._session_lock = asyncio.Lock()
 
     async def auth_headers(self, target: FleetLcmTargetLike, operator: Operator) -> dict[str, str]:
@@ -241,13 +247,16 @@ class FleetLcmConnector(HttpConnector):
         """Return the kept Bearer token for *target*, logging in on first use.
 
         The lock makes concurrent first callers for a target share one login.
+        The token is keyed by the resolved login address (``vcf_ops_url`` from
+        the secret, else the target's own host), not the target's address.
         """
-        cache_key = credential_cache_key(target)
+        login_target: Any = _LoginEndpoint(target, creds.get("vcf_ops_url"))
+        cache_key = credential_cache_key(login_target)
         async with self._session_lock:
+            self._login_keys[target_cache_key(target)] = cache_key
             cached = self._session_tokens.get(cache_key)
             if cached is not None:
                 return cached
-            login_target: Any = _LoginEndpoint(target, creds.get("vcf_ops_url"))
             client = await self._http_client(login_target)
             token = await mint_fleet_lcm_token(
                 client,
@@ -519,12 +528,14 @@ class FleetLcmConnector(HttpConnector):
         stays (#5033).
         """
         async with self._session_lock:
-            drop_rejected_token(
-                self._session_tokens,
-                credential_cache_key(target),
-                rejected,
-                lambda token: {"Authorization": f"Bearer {token}"},
-            )
+            cache_key = self._login_keys.get(target_cache_key(target))
+            if cache_key is not None:
+                drop_rejected_token(
+                    self._session_tokens,
+                    cache_key,
+                    rejected,
+                    lambda token: {"Authorization": f"Bearer {token}"},
+                )
         await self._creds.invalidate(target)
 
     async def invalidate_credentials(self, target: FleetLcmTargetLike) -> None:
@@ -539,6 +550,7 @@ class FleetLcmConnector(HttpConnector):
         """Clear kept tokens and credentials, then close the httpx pool."""
         async with self._session_lock:
             self._session_tokens.clear()
+            self._login_keys.clear()
         await self._creds.clear()
         await super().aclose()
 

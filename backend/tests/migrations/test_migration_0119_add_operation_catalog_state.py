@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for Alembic migration ``0118_add_operation_catalog_state`` (#5019).
+"""Behavioural tests for Alembic migration ``0119_add_operation_catalog_state`` (#5019).
 
-* ``upgrade 0118`` adds the empty one-row table ``operation_catalog_state``.
+* ``upgrade 0119`` adds the empty one-row table ``operation_catalog_state``.
 * The table takes only the row ``id = 1``.
-* ``downgrade 0117`` drops it, and ``upgrade 0118`` adds it again.
+* ``downgrade 0118`` drops it, and ``upgrade 0119`` adds it again.
 
 Every step targets this migration's own revision and its parent, never
 ``head``, so a later migration cannot break these tests.
@@ -27,8 +27,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0118"
-_DOWN_REVISION = "0117"
+_REVISION = "0119"
+_DOWN_REVISION = "0118"
 _TABLE = "operation_catalog_state"
 _INSERT = (
     f"INSERT INTO {_TABLE} (id, written_by_release, written_at) "
@@ -39,7 +39,7 @@ _INSERT = (
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0118.db"
+    db_path = tmp_path / "migration_0119.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
@@ -100,7 +100,7 @@ def test_table_takes_only_row_one(alembic_cfg: tuple[Config, str]) -> None:
 
 
 def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
-    """``downgrade 0117`` drops the table; ``upgrade 0118`` adds it again."""
+    """``downgrade 0118`` drops the table; ``upgrade 0119`` adds it again."""
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, _REVISION)
     command.downgrade(cfg, _DOWN_REVISION)

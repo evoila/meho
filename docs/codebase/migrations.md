@@ -405,7 +405,7 @@ column `audit_log.sandbox_mode` (database default `false`) are additive,
 so an older build still starts and writes audit rows against the newer
 schema; its rows carry the mark `false`.
 
-Migration `0118` adds `operation_catalog_state`: one row that names the
+Migration `0119` adds `operation_catalog_state`: one row that names the
 release whose start last wrote the built-in operation rows. The start
 writes it in the same transaction as the operation rows (#5019). An older
 build never reads it, so it changes nothing after a rollback; the next

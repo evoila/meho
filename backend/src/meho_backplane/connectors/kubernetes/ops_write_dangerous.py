@@ -50,6 +50,12 @@ References
 * Kubernetes error responses are a ``Status`` object with ``code``,
   ``reason`` and ``message``:
   https://kubernetes.io/docs/reference/kubernetes-api/common-definitions/status/
+* API-server warnings come back as ``Warning`` response headers in the
+  form ``299 - "text"``. Each warning is usually its own header line;
+  one line may also hold several, separated by commas. ``\"`` and
+  ``\\`` are the only escapes. See ``NewWarningHeader`` /
+  ``ParseWarningHeaders`` in ``k8s.io/apimachinery/pkg/util/net/http.go``
+  and https://kubernetes.io/blog/2020/09/03/warnings/ (#3842).
 * Redaction op-class (reused, not reinvented):
   :data:`meho_backplane.broadcast.events._CREDENTIAL_WRITE_OPS`
   (shipped by #1401).
@@ -58,6 +64,7 @@ References
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -71,6 +78,7 @@ from meho_backplane.connectors._shared.vault_creds import (
     strip_credential_value,
 )
 from meho_backplane.connectors.base import ConnectorUpstreamError
+from meho_backplane.redaction import get_default_policy, redact
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -230,6 +238,31 @@ def _status_message(body: str) -> str | None:
     return text
 
 
+#: One warning in a ``Warning`` header value: a 3-digit code, an agent and
+#: the quoted text (``\\`` escapes the next character).
+_WARNING_RE: re.Pattern[str] = re.compile(r'\s*\d{3}\s+\S+\s+"((?:[^"\\]|\\.)*)"')
+_ESCAPE_RE: re.Pattern[str] = re.compile(r"\\(.)")
+
+
+def _response_warnings(response: Any) -> list[str]:
+    """Return the API server's warning texts from the ``Warning`` headers.
+
+    A header value that does not match the ``299 - "text"`` shape is kept
+    as-is, so a warning is never lost. Duplicates are dropped and the
+    order is kept. Each text is redacted with the default policy, because
+    an admission webhook can write any text into a warning and the
+    approval preview stores the result without a later redaction pass.
+    """
+    warnings: list[str] = []
+    for value in response.headers.getall("Warning", []):
+        texts = [_ESCAPE_RE.sub(r"\1", m.group(1)) for m in _WARNING_RE.finditer(value)]
+        for text in texts or [value.strip()]:
+            redacted = redact(text, get_default_policy()).redacted
+            if isinstance(redacted, str) and redacted and redacted not in warnings:
+                warnings.append(redacted)
+    return warnings
+
+
 async def _apply_one(
     dyn: DynamicClient,
     doc: dict[str, Any],
@@ -243,7 +276,9 @@ async def _apply_one(
     *dry_run* is set, the API's ``dry_run="All"`` so nothing is
     persisted. The returned summary echoes the applied object's identity
     + the observed ``resourceVersion`` so a multi-doc apply reports
-    per-document outcomes the reviewer can read.
+    per-document outcomes the reviewer can read. ``warnings`` holds the
+    texts of the API server's ``Warning`` headers (for example a
+    deprecated ``apiVersion``), so the caller and the reviewer see them.
     """
     api_version = doc["apiVersion"]
     kind = doc["kind"]
@@ -309,6 +344,7 @@ async def _apply_one(
         "namespace": namespace,
         "resource_version": resource_version,
         "uid": uid,
+        "warnings": _response_warnings(response),
     }
 
 

@@ -539,6 +539,18 @@ raises from aiohttp). The discovery reads that
 path, but a denied discovery read still ends in an error (usually
 `ResourceNotFoundError`), not a false success.
 
+**`k8s.apply` API-server warnings (#3842).** The API server can accept
+an apply and still send `Warning` response headers, for example when the
+manifest uses a deprecated `apiVersion`. Each entry in `applied` has a
+`warnings` list with the text of these headers for that document (an
+empty list when there are none). This works on the real apply and on the
+dry-run, so the approval preview shows the warnings too. The header form
+is `299 - "text"`; several warnings can come as several header lines or
+comma-separated in one line. A header in an unknown form is kept as it
+is. Each text is redacted with the default policy before it is returned,
+because an admission webhook can write any text into a warning. Other
+write ops do not return warnings yet.
+
 ### Change or delete an existing Secret -- `k8s.secret.update` / `k8s.secret.delete`
 
 `k8s.secret.create` only creates (a second create answers 409), and

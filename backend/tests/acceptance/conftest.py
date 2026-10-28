@@ -344,6 +344,10 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # FK from migration ``0115`` (#4622 sandbox mode delete grants), the
     # same shape as ``service_principal_grant`` above.
     "sandbox_delete_grant",
+    # ``service_principal_read_scope.tenant_id`` is a real ``REFERENCES
+    # tenant(id)`` FK from migration ``0117`` (#4992 read scope), the same
+    # shape as ``service_principal_grant`` above.
+    "service_principal_read_scope",
     # ``addon_pairing.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
     # migration ``0079`` (#3025 add-on pairing handshake). PG rejects
     # truncating ``tenant`` unless every referencing table is listed in the

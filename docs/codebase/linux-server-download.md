@@ -22,11 +22,11 @@ The layout follows the form-2 design (meho-internal
 
 The tar has one top folder, `meho-linux-<version>-amd64/`. Every file in it
 is owned by root (0/0), and only root can change it. `install.sh`,
-`rke2/install.sh`, `bin/helm` and `bin/meho` are executable.
+`meho-host`, `rke2/install.sh`, `bin/helm` and `bin/meho` are executable.
 
 | Path | What | Source |
 | --- | --- | --- |
-| `install.sh`, `lib/*.sh`, `storage/local-path-storage.yaml` | the install script ([linux-server-install.md](linux-server-install.md)) | `deploy/linux-server/` |
+| `install.sh`, `meho-host`, `lib/*.sh`, `storage/local-path-storage.yaml` | the install script and the host command ([linux-server-install.md](linux-server-install.md), [linux-server-meho-host.md](linux-server-meho-host.md)) | `deploy/linux-server/` |
 | `VERSION` | `MEHO_VERSION`, `MEHO_IMAGE_TAG`, `CHART_VERSION`, `RKE2_VERSION`, `HELM_VERSION`, `BUILD_DATE`, one `KEY=value` per line | written by the build |
 | `rke2/install.sh` | RKE2's installer at the RKE2 release tag | GitHub, `rancher/rke2` at `v1.37.1+rke2r1`, sha256 pinned |
 | `rke2/rke2.linux-amd64.tar.gz`, `rke2/rke2-images.linux-amd64.tar.zst`, `rke2/sha256sum-amd64.txt` | RKE2 and its images | the RKE2 release; the checksum file is pinned by sha256 and checks the other two |
@@ -51,7 +51,7 @@ test keeps the two in step.
 | `packaging/common.sh` | The pinned versions and checksums, output helpers, the size check and the layout check. |
 | `packaging/images.sh` | The image list, the digests, the fetch into one OCI image layout, and the archive check. |
 | `packaging/parts.sh` | One function per part of the download, and the licence `README.txt`. |
-| `packaging/render-values.yaml` | Values for `helm template`: the core on, and placeholders the chart's schema requires. |
+| `packaging/render-values.yaml` | Placeholders for `helm template`, the keys the chart's schema requires, in the shape of the place values `install.sh` writes. `chart/values-single-node.yaml` comes after it and turns the core on. No issuer: the built-in Keycloak sets it. |
 | `packaging/image-sources.txt` | The licence and the source of each image repository. The build stops when an image has no line. |
 | `packaging/licenses/*.txt` | Licence texts of the images that are not under Apache-2.0, as their projects publish them. |
 | `values-single-node.yaml` | The values for one node, shipped as `chart/values-single-node.yaml`. |
@@ -77,7 +77,7 @@ environment:
 
 Steps, in order:
 
-1. Copy `install.sh`, `lib/`, `storage/` and `values-single-node.yaml`.
+1. Copy `install.sh`, `meho-host`, `lib/`, `storage/` and `values-single-node.yaml`.
 2. Download Helm and check its sha256. The build uses this `helm` too.
 3. Check and copy the CLI.
 4. Wait until the chart and the image of the version are on ghcr.io and
@@ -247,9 +247,11 @@ sha256sum -c SHA256SUMS-linux
   the design.
 - **`images.txt`.** Until #4050 adds it, the image list comes from
   `helm template`.
-- **The first tag run.** The release path (call from `cli-release.yml`,
-  `publish`) runs for the first time on the next `v*` tag. A manual run on
-  main covers the build and the checks before that.
+- **The first tag run.** The first tag run, v0.36.0, stopped at the chart
+  render, because `render-values.yaml` set the issuer and the chart refuses
+  it with the built-in Keycloak on (#4820). So the release path (the call
+  from `cli-release.yml`, then `publish`) has not finished in CI yet. A
+  manual run on main covers the build and the checks before the next tag.
 
 ## Testing
 
@@ -270,6 +272,14 @@ sizes), the image references and the lock, the licence table, the layout
 check (missing and extra files, owner, modes, links) and the archive check
 (`docker save` format, wrong digest, missing or extra image, changed or
 missing blob, other platform, decoder memory).
+
+The `validate` job of `.github/workflows/chart.yml` renders the chart
+source the way `chart_image_refs` does:
+`render-values.yaml`, then `values-single-node.yaml`, and
+`--set image.tag=test`. It runs in the merge queue, and on a pull request
+that changes `deploy/charts/meho/`, `chart.yml` or one of these two values
+files. So a chart rule that the values break fails on the pull request, not
+on the release tag (#4820).
 
 A full build needs the network (about 2 GB of downloads):
 

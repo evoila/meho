@@ -402,7 +402,7 @@ meho approvals approve <id> [flags]
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit raw JSON response instead of summary
-- `--reason` — optional rationale for the approval
+- `--reason` — optional rationale for the approval; the command help explains the Instructed-by: layout
 
 ### `meho approvals list`
 
@@ -414,9 +414,9 @@ meho approvals list [flags]
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit raw JSON array instead of the human table
-- `--limit` — max requests per page (1..500, server default 50 when omitted)
-- `--offset` — offset into the result set (default 0)
-- `--status` — filter by status: pending, approved, rejected, expired, withdrawn (default: all)
+- `--limit` — max requests to return (1..500; no limit when omitted)
+- `--offset` — skip this many requests first (default 0)
+- `--status` — filter by status: pending, approved, rejected, expired, withdrawn, all (default: pending)
 - `--work-ref` — filter by external change-ticket reference, exact match
 
 ### `meho approvals reject`
@@ -429,7 +429,7 @@ meho approvals reject <id> [flags]
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit raw JSON response instead of summary
-- `--reason` — optional rationale for the rejection
+- `--reason` — optional rationale for the rejection; the command help explains the Instructed-by: layout
 
 ### `meho approvals show`
 
@@ -3582,8 +3582,8 @@ meho operation result-query <handle_id> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--group-by` — query: GROUP BY key column (repeatable, max 4)
 - `--json` — emit the full result-query envelope as JSON instead of the human render
-- `--limit` — paging: page size; default 50, max 500 (matches the result_query MCP tool)
-- `--offset` — paging: zero-based index of the first row to return (advance by --limit)
+- `--limit` — paging: page size; default 50, max 500 (matches the result_query MCP tool); for a text value read by --path, characters per part (default: as many as fit the output budget)
+- `--offset` — paging: zero-based index of the first row to return (advance by --limit); for a text value read by --path, the first character
 - `--order-by` — query: sort term "<field> [asc|desc]" (repeatable, max 4)
 - `--path` — path: RFC 6901 JSON Pointer into a document handle ("" is the whole document, /a/0/b one step per /); an array value pages with --offset / --limit
 - `--query-limit` — query: max output rows (clamps to 500); the result flags truncation when more matched
@@ -4569,6 +4569,51 @@ meho service-principals grants show <grant-id> [flags]
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit raw ServiceGrantRead JSON
 
+### `meho service-principals read-scope`
+
+Limit which targets a service principal may read (operator)
+
+```
+meho service-principals read-scope
+```
+
+#### `meho service-principals read-scope clear`
+
+Clear the read scope of a service principal, so it reads every target again (operator)
+
+```
+meho service-principals read-scope clear <principal-sub> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--confirm` — confirm the clear
+- `--json` — emit a machine-readable result JSON
+
+#### `meho service-principals read-scope set`
+
+Set (replace) the read scope of a service principal (operator)
+
+```
+meho service-principals read-scope set <principal-sub> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw ServiceReadScopeRead JSON
+- `--no-target` — also allow safe calls that have no target
+- `--selector` — target selector `product=<product>` and/or `name=<fnmatch glob>`, joined by a comma (repeatable); matches targets registered later too
+- `--target` — target UUID the principal may read (repeatable)
+
+#### `meho service-principals read-scope show`
+
+Show the read scope of a service principal (operator)
+
+```
+meho service-principals read-scope show <principal-sub> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw ServiceReadScopeRead JSON
+
 ## `meho status`
 
 Show operator identity + backplane health; --watch streams live activity
@@ -4638,6 +4683,7 @@ meho targets discover <product> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--import-yaml` — print the candidates as a file for `meho targets import` instead of the tables
 - `--json` — emit machine-readable JSON to stdout instead of the human tables
 - `--seed-target` — scope discovery to one already-registered target's reach (resolved tenant-scoped)
 

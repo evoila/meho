@@ -64,7 +64,8 @@ __all__ = [
 #: Attached-disk projection (per ``Get-VMHardDiskDrive`` row). ``ControllerType``
 #: is an enum (IDE / SCSI) → stringified.
 _VMDISK_SELECT: str = (
-    "Path, @{N='ControllerType';E={\"$($_.ControllerType)\"}}, ControllerNumber, ControllerLocation"
+    "Path, @{N='ControllerType';E={\"$($_.ControllerType)\"}}, ControllerNumber, "
+    "ControllerLocation, DiskNumber, SupportPersistentReservations"
 )
 
 
@@ -221,7 +222,10 @@ DISK_OPS: tuple[HypervOp, ...] = (
             "parameter_hints": {"vm_name": "Required. The VM name."},
             "output_shape": (
                 "{'vm_name', 'rows': [{Path, ControllerType, ControllerNumber, "
-                "ControllerLocation}], 'total': <int>}."
+                "ControllerLocation, DiskNumber, SupportPersistentReservations}], "
+                "'total': <int>}. DiskNumber is set for a pass-through physical "
+                "disk (Path is then null); SupportPersistentReservations true "
+                "marks a shared disk."
             ),
         },
     ),

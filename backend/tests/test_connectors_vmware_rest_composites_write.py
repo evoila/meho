@@ -66,6 +66,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     guest_customization_spec_create_composite,
     host_detach_from_vds_composite,
     host_evacuate_composite,
+    host_maintenance_exit_composite,
     network_portgroup_create_composite,
     network_portgroup_security_set_composite,
     network_portgroup_vlan_set_composite,
@@ -5793,6 +5794,412 @@ async def test_host_evacuate_gated_maintenance_write_returns_the_gate(
     )
     assert out is parked
     assert _enter_maintenance_bodies(conn) == []
+
+
+# ===========================================================================
+# host.maintenance.exit (#4967)
+# ===========================================================================
+
+_EXIT_MAINTENANCE_OP = "POST:/HostSystem/{moId}/ExitMaintenanceMode_Task"
+
+
+def _host_state_result(
+    host_moid: str,
+    *,
+    connection_state: str = "connected",
+    in_maintenance: bool | None = True,
+    ha_state: str | None = "connectedToMaster",
+    name: str | None = "esx-01",
+) -> dict[str, Any]:
+    """A ``HostSystem`` RetrievePropertiesEx result with the four runtime leaves.
+
+    ``None`` leaves a property out, as vCenter does for ``dasHostState`` on a
+    host outside an HA cluster.
+    """
+    prop_set: list[dict[str, Any]] = []
+    if name is not None:
+        prop_set.append({"_typeName": "DynamicProperty", "name": "name", "val": name})
+    prop_set.append(
+        {
+            "_typeName": "DynamicProperty",
+            "name": "runtime.connectionState",
+            "val": connection_state,
+        }
+    )
+    if in_maintenance is not None:
+        prop_set.append(
+            {
+                "_typeName": "DynamicProperty",
+                "name": "runtime.inMaintenanceMode",
+                "val": in_maintenance,
+            }
+        )
+    if ha_state is not None:
+        prop_set.append(
+            {
+                "_typeName": "DynamicProperty",
+                "name": "runtime.dasHostState",
+                "val": {"_typeName": "ClusterDasFdmHostState", "state": ha_state},
+            }
+        )
+    return {
+        "_typeName": "RetrieveResult",
+        "objects": [
+            {
+                "_typeName": "ObjectContent",
+                "obj": {
+                    "_typeName": "ManagedObjectReference",
+                    "type": "HostSystem",
+                    "value": host_moid,
+                },
+                "propSet": prop_set,
+            }
+        ],
+    }
+
+
+class _MaintenanceExitConnector:
+    """Recording double for host.maintenance.exit: sequential host reads + the exit task.
+
+    The handler reads the host before and after the exit, so the two
+    ``HostSystem`` reads are served in order from *host_reads*; an exception
+    in that list is raised by its read, so a test can fail one read. The task
+    poll serves *task_state* (``success`` / ``error`` / ``running``); the
+    ``ExitMaintenanceMode_Task`` POST is recorded so a refused call is
+    provably off the wire.
+    """
+
+    def __init__(
+        self,
+        host_reads: list[dict[str, Any] | Exception],
+        *,
+        task_state: str = "success",
+        task_error: str | None = None,
+        task_moid: str = "task-exit-1",
+    ) -> None:
+        self._host_reads = list(host_reads)
+        self._task_state = task_state
+        self._task_error = task_error
+        self._task_moid = task_moid
+        self.vmomi_calls: list[tuple[str, Any]] = []
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        self.vmomi_calls.append((path, json))
+        if path.endswith("/ExitMaintenanceMode_Task"):
+            return _task_moref(self._task_moid)
+        spec_type = json["specSet"][0]["propSet"][0]["type"]
+        if spec_type == "HostSystem":
+            read = self._host_reads.pop(0)
+            if isinstance(read, Exception):
+                raise read
+            return read
+        if spec_type == "Task":
+            return _task_info_result(self._task_moid, self._task_state, self._task_error)
+        raise AssertionError(f"unexpected RetrievePropertiesEx type {spec_type!r}")
+
+    @property
+    def exit_calls(self) -> list[tuple[str, Any]]:
+        return [(p, b) for p, b in self.vmomi_calls if p.endswith("/ExitMaintenanceMode_Task")]
+
+    @property
+    def host_read_path_sets(self) -> list[list[str]]:
+        return [
+            b["specSet"][0]["propSet"][0]["pathSet"]
+            for p, b in self.vmomi_calls
+            if p.endswith("/RetrievePropertiesEx")
+            and b["specSet"][0]["propSet"][0]["type"] == "HostSystem"
+        ]
+
+
+async def _run_maintenance_exit(
+    conn: _MaintenanceExitConnector, params: dict[str, Any]
+) -> dict[str, Any] | OperationResult:
+    return await host_maintenance_exit_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=params,
+        connector=conn,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.asyncio
+async def test_host_maintenance_exit_sends_the_exit_task_and_reports_the_new_state(
+    gate: _GateRecorder,
+) -> None:
+    """Connected host in maintenance mode: one gated exit with {"timeout": 0}, then a re-read."""
+    conn = _MaintenanceExitConnector(
+        [
+            _host_state_result("host-1", in_maintenance=True, ha_state=None),
+            _host_state_result("host-1", in_maintenance=False, ha_state="connectedToMaster"),
+        ]
+    )
+    out = await _run_maintenance_exit(conn, {"host": "host-1"})
+    assert isinstance(out, dict)
+    assert out == {
+        "status": "exited",
+        "host": "host-1",
+        "name": "esx-01",
+        "connection_state": "connected",
+        "in_maintenance_mode": False,
+        "ha_state": "connectedToMaster",
+        "maintenance_task": "task-exit-1",
+    }
+    assert conn.exit_calls == [("/HostSystem/host-1/ExitMaintenanceMode_Task", {"timeout": 0})]
+    assert (
+        conn.host_read_path_sets
+        == [
+            ["name", "runtime.connectionState", "runtime.inMaintenanceMode", "runtime.dasHostState"]
+        ]
+        * 2
+    )
+    # The exit is the one governed write, gated with the shared sub-op posture.
+    assert gate.calls == [
+        {
+            "op_id": _EXIT_MAINTENANCE_OP,
+            "connector_id": "vmware-rest-9.0",
+            "safety_level": "dangerous",
+            "requires_approval": False,
+            "params": {"host": "host-1"},
+            "resume_state": None,
+            "after_main_effect": False,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_host_maintenance_exit_not_in_maintenance_mode_answers_unchanged(
+    gate: _GateRecorder,
+) -> None:
+    """A host that is not in maintenance mode: ``unchanged``, nothing sent, no gate."""
+    conn = _MaintenanceExitConnector([_host_state_result("host-2", in_maintenance=False)])
+    out = await _run_maintenance_exit(conn, {"host": "host-2"})
+    assert isinstance(out, dict)
+    assert out["status"] == "unchanged"
+    assert out["in_maintenance_mode"] is False
+    assert out["maintenance_task"] is None
+    assert "not in maintenance mode" in out["guidance"]
+    assert conn.exit_calls == []
+    assert len(conn.host_read_path_sets) == 1
+    assert gate.calls == []
+
+
+@pytest.mark.parametrize("connection_state", ["notResponding", "disconnected"])
+@pytest.mark.asyncio
+async def test_host_maintenance_exit_host_not_connected_stops_before_any_change(
+    gate: _GateRecorder, connection_state: str
+) -> None:
+    """A host vCenter cannot reach is refused with a clear message; nothing is sent."""
+    conn = _MaintenanceExitConnector(
+        [_host_state_result("host-3", connection_state=connection_state, in_maintenance=True)]
+    )
+    out = await _run_maintenance_exit(conn, {"host": "host-3"})
+    assert isinstance(out, dict)
+    assert out["status"] == "not_connected"
+    assert out["connection_state"] == connection_state
+    assert out["in_maintenance_mode"] is True
+    assert out["maintenance_task"] is None
+    assert f"host 'host-3' is {connection_state}, not connected to vCenter" in out["guidance"]
+    assert "Nothing was changed" in out["guidance"]
+    assert conn.exit_calls == []
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_host_maintenance_exit_unknown_maintenance_state_still_sends_the_exit(
+    gate: _GateRecorder,
+) -> None:
+    """When vCenter leaves ``inMaintenanceMode`` out, MEHO sends the exit; vCenter decides."""
+    conn = _MaintenanceExitConnector(
+        [
+            _host_state_result("host-1", in_maintenance=None),
+            _host_state_result("host-1", in_maintenance=False),
+        ]
+    )
+    out = await _run_maintenance_exit(conn, {"host": "host-1"})
+    assert isinstance(out, dict)
+    assert out["status"] == "exited"
+    assert len(conn.exit_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_host_maintenance_exit_task_fault_fails_the_call_with_the_fault_text(
+    gate: _GateRecorder,
+) -> None:
+    """A faulted exit task is a failed call; the fault text reaches the answer."""
+    conn = _MaintenanceExitConnector(
+        [_host_state_result("host-1", in_maintenance=True)],
+        task_state="error",
+        task_error="The operation is not allowed in the current state.",
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        await _run_maintenance_exit(conn, {"host": "host-1"})
+    message = str(excinfo.value)
+    assert message.startswith(
+        "host.maintenance.exit: ExitMaintenanceMode_Task on host 'host-1' faulted: "
+    )
+    assert "The operation is not allowed in the current state." in message
+    # No second host read after a fault: the answer is the error.
+    assert len(conn.host_read_path_sets) == 1
+
+
+@pytest.mark.asyncio
+async def test_host_maintenance_exit_poll_timeout_reports_the_running_task(
+    gate: _GateRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When MEHO stops waiting while the task runs, the answer says so with the task id."""
+    monkeypatch.setattr(_write, "_MAINTENANCE_TASK_TIMEOUT_SECONDS", 0.0)
+    conn = _MaintenanceExitConnector(
+        [
+            _host_state_result("host-1", in_maintenance=True),
+            _host_state_result("host-1", in_maintenance=True),
+        ],
+        task_state="running",
+        task_moid="task-exit-9",
+    )
+    out = await _run_maintenance_exit(conn, {"host": "host-1"})
+    assert isinstance(out, dict)
+    assert out["status"] == "timeout"
+    assert out["maintenance_task"] == "task-exit-9"
+    assert out["in_maintenance_mode"] is True
+    assert "task task-exit-9 still runs" in out["guidance"]
+    assert "did not fail" in out["guidance"]
+    assert out["issues"] == [
+        {
+            "category": "connector",
+            "severity": "warning",
+            "message": (
+                "exit-maintenance-mode task task-exit-9 on host 'host-1' still runs after 0s; "
+                "the host may still be in maintenance mode"
+            ),
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_host_maintenance_exit_poll_timeout_keeps_the_task_id_when_the_host_read_fails(
+    gate: _GateRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed host read after the timeout never loses the timeout answer or the task id."""
+    monkeypatch.setattr(_write, "_MAINTENANCE_TASK_TIMEOUT_SECONDS", 0.0)
+    conn = _MaintenanceExitConnector(
+        [
+            _host_state_result("host-1", in_maintenance=True),
+            httpx.ReadTimeout("read timed out"),
+        ],
+        task_state="running",
+        task_moid="task-exit-9",
+    )
+    out = await _run_maintenance_exit(conn, {"host": "host-1"})
+    assert isinstance(out, dict)
+    assert out["status"] == "timeout"
+    assert out["maintenance_task"] == "task-exit-9"
+    assert out["host"] == "host-1"
+    assert out["name"] is None
+    assert out["connection_state"] is None
+    assert out["in_maintenance_mode"] is None
+    assert out["ha_state"] is None
+    assert "task task-exit-9 still runs" in out["guidance"]
+    assert "did not fail" in out["guidance"]
+    assert "current host state is unavailable" in out["guidance"]
+    assert [i["severity"] for i in out["issues"]] == ["warning", "warning"]
+    assert out["issues"][1] == {
+        "category": "connector",
+        "severity": "warning",
+        "message": (
+            "the host read after the timeout failed (ReadTimeout); the current state of "
+            "host 'host-1' is unavailable"
+        ),
+    }
+    assert "read timed out" not in json.dumps(out)
+    assert len(conn.exit_calls) == 1
+    assert len(conn.host_read_path_sets) == 2
+
+
+@pytest.mark.asyncio
+async def test_host_maintenance_exit_parked_gate_returns_the_result_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked gate on the exit write short-circuits: nothing reaches the wire."""
+    parked = _awaiting(_EXIT_MAINTENANCE_OP)
+    _install_gate(monkeypatch, _GateRecorder({_EXIT_MAINTENANCE_OP: parked}))
+    conn = _MaintenanceExitConnector([_host_state_result("host-1", in_maintenance=True)])
+    out = await _run_maintenance_exit(conn, {"host": "host-1"})
+    assert out is parked
+    assert conn.exit_calls == []
+
+
+@pytest.mark.parametrize(
+    ("about_version", "vijson"),
+    [("8.0.3", "/sdk/vim25/8.0.3.0"), ("9.0.0", "/sdk/vim25/9.0.0.0")],
+    ids=["vcenter-8", "vcenter-9"],
+)
+@pytest.mark.asyncio
+async def test_host_maintenance_exit_through_a_fake_vcenter_respx(
+    monkeypatch: pytest.MonkeyPatch, about_version: str, vijson: str
+) -> None:
+    """respx-verified on the vCenter 8 and 9 VI-JSON paths: host read -> exit -> poll -> read.
+
+    Drives the real handler through a real ``VmwareRestConnector`` over an
+    httpx (respx) transport. The gate auto-executes here (its park path is
+    proven in the gate test above and in the e2e lane) so the exit reaches
+    the wire; the task is polled through ``running`` to ``success``.
+    """
+
+    async def _auto_execute(**_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(_write, "enforce_subop_policy", _auto_execute)
+    monkeypatch.setattr(_write, "_MAINTENANCE_TASK_TIMEOUT_SECONDS", 30.0)
+
+    base = "https://vc-grow.test.invalid"
+    connector = VmwareRestConnector(session_loader=_stub_loader)
+    _patch_no_revoke_aclose(connector)
+    try:
+        async with respx.mock(base_url=base) as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            mock.get("/api/about").respond(200, json={"version": about_version})
+            retrieve = mock.post(
+                f"{vijson}/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+            ).mock(
+                side_effect=[
+                    httpx.Response(200, json=_host_state_result("host-7", in_maintenance=True)),
+                    httpx.Response(200, json=_task_info_result("task-exit-7", "running")),
+                    httpx.Response(200, json=_task_info_result("task-exit-7", "success")),
+                    httpx.Response(
+                        200,
+                        json=_host_state_result("host-7", in_maintenance=False, ha_state="master"),
+                    ),
+                ]
+            )
+            exit_task = mock.post(f"{vijson}/HostSystem/host-7/ExitMaintenanceMode_Task").respond(
+                200, json=_task_moref("task-exit-7")
+            )
+            out = await host_maintenance_exit_composite(
+                operator=_make_operator(),
+                target=_StubTarget(),
+                params={"host": "host-7"},
+                connector=connector,
+            )
+        assert isinstance(out, dict)
+        assert out["status"] == "exited"
+        assert out["in_maintenance_mode"] is False
+        assert out["connection_state"] == "connected"
+        assert out["ha_state"] == "master"
+        assert out["maintenance_task"] == "task-exit-7"
+        assert exit_task.call_count == 1
+        assert json.loads(exit_task.calls[0].request.content) == {"timeout": 0}
+        assert retrieve.call_count == 4
+        first_read = json.loads(retrieve.calls[0].request.content)
+        assert first_read["specSet"][0]["propSet"][0]["pathSet"] == [
+            "name",
+            "runtime.connectionState",
+            "runtime.inMaintenanceMode",
+            "runtime.dasHostState",
+        ]
+    finally:
+        await connector.aclose()
 
 
 # ===========================================================================

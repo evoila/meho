@@ -1,0 +1,156 @@
+#!/usr/sbin/nft -f
+# MEHO host firewall: closed by default (ADR 0009).
+#
+# Written by MEHO install.sh. meho-firewall.service loads this file at every
+# start of the machine, before the network and before RKE2. After a change,
+# load it again with: systemctl reload meho-firewall.service
+#
+# From another machine, only these answer:
+#   - TCP 80 and 443, from every address: the console, the API and the
+#     login. Port 80 only redirects to 443.
+#   - SSH (TCP 22) and ping, from the addresses in the set admin_network.
+# The machine itself may open any connection, and the replies come back.
+# Everything else from another machine is dropped, RKE2's own ports too:
+# TCP 6443, 9345, 10250, 2379, 2380, 2381, 9099, 30000-32767 and 8472/UDP.
+#
+# The chain prerouting does this filtering. The chains input, forward and
+# output hold the rules of the MEHO appliance, for traffic to this machine,
+# through it and from it. The appliance sets their policy to drop. Here
+# their policy is accept and they have no drop rule, so every packet passes
+# them.
+#
+# The file changes only the table inet meho. It never runs "flush ruleset",
+# because RKE2's network layer (Canal) and kube-proxy keep their own rules
+# in other tables.
+#
+# To let more traffic in, add your own accept rules to the chain
+# prerouting, before its last rule (counter). Then load the file again.
+# Never add "flush ruleset" to this file.
+
+# Replace the table in one step: create it when it is missing, delete it,
+# and define it again. nft applies the whole file as one transaction.
+table inet meho
+delete table inet meho
+
+table inet meho {
+    # The addresses that may use SSH (IPv4 only).
+    # Given with --admin-network at the install.
+    set admin_network {
+        type ipv4_addr
+        flags interval
+        elements = { 10.0.50.0/24 }
+    }
+
+    # RKE2's Traefik takes ports 80 and 443 through a host port: a
+    # destination NAT (priority dstnat, -100) turns a packet for port 443 of
+    # this machine into a packet for the Traefik pod. This chain runs before
+    # that (priority mangle, -150), so it sees the original port.
+    chain prerouting {
+        type filter hook prerouting priority mangle; policy drop;
+
+        # The machine itself and its pods.
+        iifname "lo" accept
+        iifname "cali*" accept
+        iifname "flannel*" accept
+
+        # From here on, the packet came in on a network card.
+        ct state established,related accept
+        ct state invalid drop
+
+        # A pod or service address never comes from a network card.
+        ip saddr { 10.42.0.0/16, 10.43.0.0/16 } drop
+
+        # "fib daddr type local": the packet is for this machine, not passed on.
+        fib daddr type local tcp dport { 80, 443 } accept
+        fib daddr type local ip saddr @admin_network tcp dport 22 accept
+        fib daddr type local ip saddr @admin_network icmp type echo-request accept
+
+        # IPv6 neighbour discovery and router advertisements, and the
+        # replies of DHCP servers.
+        icmpv6 type { nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-query } accept
+        udp sport 67 udp dport 68 accept
+        udp sport 547 udp dport 546 accept
+
+        # Counts the packets that the policy drops.
+        counter
+    }
+
+    # Traffic to this machine, after the port forwarding. The console on 80
+    # and 443 normally does not come here: the port forwarding sends it to
+    # the Traefik pod, through the chain forward. The appliance sets the
+    # policy to drop. Here it is accept: the chain prerouting already filters.
+    chain input {
+        type filter hook input priority filter; policy accept;
+
+        # The machine itself and its pods. Programs on this machine reach
+        # each other over lo, also through the machine's own address.
+        iifname "lo" accept
+        iifname "cali*" accept
+        iifname "flannel*" accept
+
+        ct state established,related accept
+
+        # The same rules as in the chain prerouting.
+        tcp dport { 80, 443 } accept
+        ip saddr @admin_network tcp dport 22 accept
+        ip saddr @admin_network icmp type echo-request accept
+
+        # IPv6 neighbour discovery and router advertisements, and the
+        # replies of DHCP servers.
+        icmpv6 type { nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-query } accept
+        udp sport 67 udp dport 68 accept
+        udp sport 547 udp dport 546 accept
+
+        # Counts the packets that reach the policy.
+        counter
+    }
+
+    # Traffic through this machine: to and from its pods. The appliance sets
+    # the policy to drop. Here it is accept.
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+
+        ct state established,related accept
+
+        # Packets that the port forwarding rewrote: the console on 80 and
+        # 443, on its way to the Traefik pod.
+        ct status dnat accept
+
+        # The pod and service ranges.
+        ip saddr { 10.42.0.0/16, 10.43.0.0/16 } accept
+        ip daddr { 10.42.0.0/16, 10.43.0.0/16 } accept
+
+        # Counts the packets that reach the policy.
+        counter
+    }
+
+    # Traffic from this machine. The appliance sets the policy to drop. Here
+    # it is accept, because the OS and its other software belong to the
+    # customer (ADR 0009 decision 2).
+    chain output {
+        type filter hook output priority filter; policy accept;
+
+        # The machine itself and its pods, for example the health checks of
+        # the kubelet.
+        oifname "lo" accept
+        oifname "cali*" accept
+        oifname "flannel*" accept
+
+        ct state established,related accept
+        ip daddr { 10.42.0.0/16, 10.43.0.0/16 } accept
+
+        # DNS, NTP, the requests of the DHCP clients, and ping.
+        udp dport { 53, 123 } accept
+        tcp dport 53 accept
+        udp sport 68 udp dport 67 accept
+        udp sport 546 udp dport 547 accept
+        icmp type echo-request accept
+
+        # IPv6 neighbour discovery, and the multicast listener reports of
+        # MLD versions 1 and 2.
+        icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-report, mld2-listener-report } accept
+
+        # Counts the packets that reach the policy.
+        counter
+    }
+}

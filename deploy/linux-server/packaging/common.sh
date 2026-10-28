@@ -126,7 +126,7 @@ download_name() { printf 'meho-linux-%s-amd64' "$1"; }
 # (DOWNLOAD_FILES in lib/common.sh).
 expected_layout() {
     local chart_version=$1 file
-    printf '%s\n' install.sh VERSION
+    printf '%s\n' install.sh meho-host VERSION
     for file in "$LINUX_SERVER_DIR"/lib/*.sh; do
         printf 'lib/%s\n' "${file##*/}"
     done
@@ -150,7 +150,7 @@ expected_layout() {
 }
 
 # The files of the download that must be executable.
-readonly EXECUTABLE_FILES=(install.sh rke2/install.sh bin/helm bin/meho)
+readonly EXECUTABLE_FILES=(install.sh meho-host rke2/install.sh bin/helm bin/meho)
 
 # check_layout <download tar> <top folder> <chart version>: the tar holds
 # exactly the files of expected_layout below one top folder, owned by root,

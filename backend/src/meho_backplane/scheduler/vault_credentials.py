@@ -41,7 +41,7 @@ and ``{client_id}`` segments are derived per-tenant, per-principal
 (security S10, #298): see
 :func:`~meho_backplane.scheduler.credentials.agent_client_id_from_identity_ref`.
 The default joins them under one ``_`` (a single dynamic path segment) so
-the deployed ``secret/data/agents/*/credentials`` ACL keeps matching
+the deployed ``secret/data/agents/+/credentials`` ACL keeps matching
 without a policy re-scope. hvac's
 ``secrets.kv.v2`` helpers want the **logical** path relative to the
 mount (they insert ``data/`` themselves — verified against hvac 2.4.0).

@@ -146,6 +146,7 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     "k8s.deployment.info",
     "k8s.job.list",
     "k8s.job.info",
+    "k8s.workload.list",
     "k8s.service.list",
     "k8s.ingress.list",
     "k8s.configmap.list",
@@ -170,12 +171,18 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     "k8s.delete",
     "k8s.secret.create",
     "k8s.job.create",
+    # Start a CronJob's job now (caution, approval-gated).
+    "k8s.cronjob.run",
     # G3.14-T2 exec op (websocket pod-exec, approval-gated).
     "k8s.exec",
     # #3496 governed guest-cluster kubeconfig read (credential_read,
     # approval-gated): reads a Secret's data value and stages it to a
     # tenant-scoped Vault secret_ref.
     "k8s.secret.read_to_ref",
+    # Change or delete an existing Secret (approval-gated; delete is
+    # destructive and needs a preview hash).
+    "k8s.secret.update",
+    "k8s.secret.delete",
 )
 
 

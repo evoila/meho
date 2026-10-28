@@ -17,7 +17,7 @@ import (
 
 // newListCmd returns the `meho approvals list` command.
 //
-//	meho approvals list [--status pending] [--limit N] [--offset N] [--json] [--backplane <url>]
+//	meho approvals list [--status pending|approved|rejected|expired|all] [--limit N] [--offset N] [--json] [--backplane <url>]
 //
 // Role: operator. Lists approval requests for the operator's tenant,
 // newest-first, via GET /api/v1/approvals.
@@ -34,14 +34,16 @@ func newListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List approval requests in your tenant",
 		Long: "list calls GET /api/v1/approvals and renders approval " +
-			"requests in the operator's tenant, newest first. Use " +
-			"--status pending for the most common query: requests " +
-			"awaiting a decision. --work-ref filters to the requests " +
+			"requests in the operator's tenant, newest first. By " +
+			"default it shows only pending requests: the ones that " +
+			"wait for a decision. Use --status all to see requests in " +
+			"every state, or --status approved|rejected|expired for " +
+			"one state. --work-ref filters to the requests " +
 			"authorised by an external change ticket (exact match, " +
-			"e.g. gh:evoila/meho#1). --limit caps the page size " +
-			"(1..500, server default 50). --offset advances the page " +
-			"window. --json emits the raw JSON array for " +
-			"jq pipelines.",
+			"e.g. gh:evoila/meho#1). --limit caps how many requests " +
+			"come back (1..500; no limit when omitted). --offset " +
+			"skips that many requests first. --json emits the raw " +
+			"JSON array for jq pipelines.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -57,21 +59,15 @@ func newListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&statusFilter, "status", "",
-		"filter by status: pending, approved, rejected, expired, withdrawn (default: all)")
+		"filter by status: pending, approved, rejected, expired, withdrawn, all (default: pending)")
 	cmd.Flags().StringVar(&workRef, "work-ref", "",
 		"filter by external change-ticket reference, exact match (e.g. gh:evoila/meho#1)")
-	// --limit and --offset are preserved for CLI-signature compatibility
-	// (operator scripts may pass them). The backend's
-	// /api/v1/approvals route doesn't accept either parameter today
-	// (see backend/src/meho_backplane/api/v1/approvals.py:list_approvals),
-	// and the generated client's ListApprovalsApiV1ApprovalsGetParams
-	// therefore exposes only `status`. We still client-side-validate
-	// the flag ranges so operators get a clear error on bad input;
-	// adding paging on the server is its own (out-of-scope) Task.
+	// 0 means "not set": the flag is then left off the request and the
+	// server applies no limit / no offset.
 	cmd.Flags().IntVar(&limit, "limit", 0,
-		"max requests per page (1..500, server default 50 when omitted)")
+		"max requests to return (1..500; no limit when omitted)")
 	cmd.Flags().IntVar(&offset, "offset", 0,
-		"offset into the result set (default 0)")
+		"skip this many requests first (default 0)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit raw JSON array instead of the human table")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -91,13 +87,13 @@ type listOpts struct {
 func runList(cmd *cobra.Command, opts listOpts) error {
 	validStatuses := map[string]bool{
 		"pending": true, "approved": true, "rejected": true, "expired": true,
-		"withdrawn": true,
+		"withdrawn": true, "all": true,
 	}
 	if opts.StatusFilter != "" && !validStatuses[opts.StatusFilter] {
 		return output.RenderError(
 			cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf(
-				"--status must be one of: pending, approved, rejected, expired, withdrawn; got %q",
+				"--status must be one of: pending, approved, rejected, expired, withdrawn, all; got %q",
 				opts.StatusFilter,
 			)),
 			opts.JSONOut,
@@ -143,7 +139,7 @@ func runList(cmd *cobra.Command, opts listOpts) error {
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), items)
 	}
-	printListTable(cmd.OutOrStdout(), items)
+	printListTable(cmd.OutOrStdout(), items, opts.StatusFilter, opts.WorkRef, opts.Offset)
 	return nil
 }
 
@@ -166,6 +162,14 @@ func fetchList(
 	if opts.WorkRef != "" {
 		w := opts.WorkRef
 		params.WorkRef = &w
+	}
+	if opts.Limit > 0 {
+		l := opts.Limit
+		params.Limit = &l
+	}
+	if opts.Offset > 0 {
+		o := opts.Offset
+		params.Offset = &o
 	}
 	resp, err := client.ListApprovalsApiV1ApprovalsGetWithResponse(ctx, params)
 	if err != nil {
@@ -193,9 +197,13 @@ func fetchList(
 // Columns: ID, STATUS, RUN, CONNECTOR, OP, PRINCIPAL, CREATED. RUN (#3543)
 // says whether an approved request ran and how it ended, so a run that
 // failed after the approval does not look like a plain "approved".
-func printListTable(w io.Writer, items []api.ApprovalRequestView) {
+// statusFilter, workRef and offset are the --status, --work-ref and
+// --offset values; an empty list names them, so an empty default
+// (pending-only) list, an empty match for one change ticket, or an empty
+// page past the end is not read as "no requests at all".
+func printListTable(w io.Writer, items []api.ApprovalRequestView, statusFilter, workRef string, offset int) {
 	if len(items) == 0 {
-		fmt.Fprintln(w, "no approval requests in this tenant")
+		fmt.Fprintln(w, emptyListMessage(statusFilter, workRef, offset))
 		return
 	}
 	fmt.Fprintf(w, "%-36s %-9s %-11s %-24s %-32s %-20s %s\n",
@@ -212,6 +220,45 @@ func printListTable(w io.Writer, items []api.ApprovalRequestView) {
 		)
 	}
 	fmt.Fprintf(w, "\nShowing %d.\n", len(items))
+}
+
+// emptyListMessage says which state filter, change ticket and offset
+// gave the empty list and how to see more. The server lists only pending
+// requests when --status is not set. With --work-ref, only requests for
+// that change ticket count, so the hint is to drop the filter. With an
+// offset, the page is empty because the offset skipped every match, so
+// the hint is a smaller --offset.
+func emptyListMessage(statusFilter, workRef string, offset int) string {
+	state := statusFilter + " "
+	switch statusFilter {
+	case "all":
+		state = ""
+	case "":
+		state = "pending "
+	}
+	ticket := ""
+	if workRef != "" {
+		ticket = fmt.Sprintf(" for change ticket %q", workRef)
+	}
+	if offset > 0 {
+		return fmt.Sprintf(
+			"no %sapproval requests%s after skipping %d (this page is empty; use a smaller --offset)",
+			state, ticket, offset,
+		)
+	}
+	if workRef != "" {
+		if statusFilter == "all" {
+			return fmt.Sprintf("no approval requests%s (remove --work-ref to see every request)", ticket)
+		}
+		return fmt.Sprintf(
+			"no %sapproval requests%s (use --status all or remove --work-ref to see more)",
+			state, ticket,
+		)
+	}
+	if statusFilter == "all" {
+		return "no approval requests in this tenant"
+	}
+	return fmt.Sprintf("no %sapproval requests (use --status all to see every request)", state)
 }
 
 // truncate cuts s to maxLen runes, appending an ellipsis on truncation.

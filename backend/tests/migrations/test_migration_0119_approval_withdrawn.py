@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0116_add_approval_request_withdrawn`` (#4987).
+"""Tests for Alembic migration ``0119_add_approval_request_withdrawn`` (#4987).
 
 The migration adds the ``withdrawn`` status and the ``withdrawn_at`` /
 ``withdraw_reason`` columns to ``approval_request``. The tests check that
@@ -30,8 +30,8 @@ from meho_backplane.db.migrations import alembic_config
 from meho_backplane.db.models import ApprovalRequestStatus
 from meho_backplane.settings import get_settings
 
-_REVISION = "0116"
-_DOWN_REVISION = "0115"
+_REVISION = "0119"
+_DOWN_REVISION = "0118"
 _TABLE = "approval_request"
 _TENANT = "00000000-0000-0000-0000-000000004987"
 _VERSIONS = Path(__file__).resolve().parent.parent.parent / "alembic" / "versions"
@@ -40,7 +40,7 @@ _VERSIONS = Path(__file__).resolve().parent.parent.parent / "alembic" / "version
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0116.db"
+    db_path = tmp_path / "migration_0119.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
@@ -97,14 +97,14 @@ def _columns(sync_url: str) -> dict[str, dict[str, object]]:
 
 def test_status_check_matches_enum() -> None:
     """The newest status tuple equals :class:`ApprovalRequestStatus` (drift guard)."""
-    migration = _load("0116_add_approval_request_withdrawn.py")
+    migration = _load("0119_add_approval_request_withdrawn.py")
     assert set(migration._STATUSES_WITH_WITHDRAWN) == {s.value for s in ApprovalRequestStatus}
 
 
 def test_before_tuple_matches_migration_0023() -> None:
     """``downgrade`` narrows back to exactly the values migration 0023 allowed."""
     old = _load("0023_create_approval_request.py")
-    new = _load("0116_add_approval_request_withdrawn.py")
+    new = _load("0119_add_approval_request_withdrawn.py")
     assert set(new._STATUSES_BEFORE) == set(old._APPROVAL_REQUEST_STATUSES)
 
 

@@ -86,7 +86,10 @@ from openapi_spec_validator.schemas import (
 )
 
 from meho_backplane.connectors._shared.pinned_transport import build_pinned_sync_transport
-from meho_backplane.delete_names import is_destructive_action_name
+from meho_backplane.delete_names import (
+    destructive_action_name_in_path,
+    is_destructive_action_name,
+)
 from meho_backplane.operations._rfc6570 import split_path_operator
 from meho_backplane.operations.ingest.exceptions import (
     InvalidSchemaError,
@@ -1195,8 +1198,9 @@ def default_safety_posture(
 ) -> tuple[SafetyLevel, bool]:
     """Return the parser's ``(safety_level, requires_approval)`` for one operation.
 
-    The verb heuristic sets the level. A ``DELETE`` (#3827) or a destructive
-    action name (``Destroy``, ``Delete``, ``Remove``, ``Unregister``) turns
+    The verb heuristic sets the level. A ``DELETE`` (#3827), a destructive
+    action name (``Destroy``, ``Delete``, ``Remove``, ``Unregister``, also
+    after a vSAN prefix) or an ``action=delete`` query (#4973) turns
     approval on and lifts the level to at least ``dangerous``. The review
     report for stored deletes calls this with the row's method and path to
     say what a fresh ingest would assign, before any connector floor.
@@ -1224,14 +1228,14 @@ def _has_destructive_action_hint(*, operation_id: str | None, path: str) -> bool
 
     OpenAPI's ``operationId`` is the author-provided semantic identifier. A
     VI-JSON path also ends with the managed-object method, so inspect both: a
-    vendor can omit ``operationId`` without bypassing the safety posture. The
+    vendor can omit ``operationId`` without bypassing the safety posture. A
+    path whose query is ``action=delete`` is a delete sent as ``POST``. The
     word list and the rule live in :mod:`meho_backplane.delete_names`, shared
     with the grant checks, the flight recorder and the stored-delete review.
     """
-    candidates = (operation_id, path.rsplit("/", maxsplit=1)[-1])
-    return any(
-        candidate is not None and is_destructive_action_name(candidate) for candidate in candidates
-    )
+    if operation_id is not None and is_destructive_action_name(operation_id):
+        return True
+    return destructive_action_name_in_path(path) is not None
 
 
 def _raise_safety_level(current: SafetyLevel, floor: SafetyLevel) -> SafetyLevel:

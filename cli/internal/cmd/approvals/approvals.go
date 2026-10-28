@@ -38,8 +38,10 @@ package approvals
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/spf13/cobra"
@@ -162,6 +164,10 @@ func renderClientError(
 // right structured-error category. The typed-client surface returns
 // `(nil, err)` for these; non-2xx HTTP responses arrive as
 // `(*Response, nil)` and are routed through `renderHTTPStatus` instead.
+//
+// A JSON decode error from a generated parser means the server answered
+// with a body the CLI could not read. That is unexpected_response
+// (exit 4), not unreachable: the network is fine (#5134).
 func renderTransportError(
 	cmd *cobra.Command,
 	backplaneURL string,
@@ -174,6 +180,16 @@ func renderTransportError(
 				"stored token rejected and no refresh_token present; run `meho login %s`",
 				backplaneURL,
 			)),
+			jsonOut,
+		)
+	}
+	var syntaxErr *json.SyntaxError
+	var unmarshalErr *json.UnmarshalTypeError
+	if errors.As(err, &syntaxErr) ||
+		errors.As(err, &unmarshalErr) ||
+		errors.Is(err, io.ErrUnexpectedEOF) {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("call %s: %v", backplaneURL, err)),
 			jsonOut,
 		)
 	}

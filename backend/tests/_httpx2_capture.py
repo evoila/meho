@@ -142,9 +142,20 @@ def client_ssl_context(client: httpx2.AsyncClient) -> ssl.SSLContext:
 
 
 def ca_common_names(ssl_context: ssl.SSLContext) -> set[str]:
-    """Return the common names of the CA certificates an SSL context trusts."""
+    """Return the common names of the CA certificates loaded into an SSL context.
+
+    A ``truststore`` context (what ``httpx2`` builds on macOS and Windows,
+    and on Linux before ``httpx2`` 2.15.1) leaves certificate checks to the
+    operating system store and loads no CA file of its own. It cannot list
+    its CAs and raises ``NotImplementedError``. The helper returns an empty
+    set for it, so a test CA is never reported as trusted there.
+    """
+    try:
+        ca_certs = ssl_context.get_ca_certs()
+    except NotImplementedError:
+        return set()
     names: set[str] = set()
-    for cert in ssl_context.get_ca_certs():
+    for cert in ca_certs:
         for rdn in cert["subject"]:
             for key, value in rdn:
                 if key == "commonName":

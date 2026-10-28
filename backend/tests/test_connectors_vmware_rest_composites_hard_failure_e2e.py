@@ -656,6 +656,38 @@ def _no_reads(mp: pytest.MonkeyPatch) -> Any:
     return _RecordingVmwareConnector()
 
 
+def _host_runtime(connection_state: str, in_maintenance: bool) -> dict[str, Any]:
+    """A ``HostSystem`` runtime read with the two leaves the exit handler checks first."""
+    return {
+        "objects": [
+            {
+                "obj": {"type": "HostSystem", "value": "host-1"},
+                "propSet": [
+                    {"name": "runtime.connectionState", "val": connection_state},
+                    {"name": "runtime.inMaintenanceMode", "val": in_maintenance},
+                ],
+            }
+        ]
+    }
+
+
+def _host_not_in_maintenance(mp: pytest.MonkeyPatch) -> Any:
+    # host.maintenance.exit (#4967): a host that is not in maintenance mode
+    # answers ``unchanged``; nothing is sent.
+    del mp
+    recorder = _RecordingVmwareConnector()
+    recorder.vmomi_responses["HostSystem"] = _host_runtime("connected", False)
+    return recorder
+
+
+def _host_not_connected(mp: pytest.MonkeyPatch) -> Any:
+    # A host vCenter cannot reach is refused before any change.
+    del mp
+    recorder = _RecordingVmwareConnector()
+    recorder.vmomi_responses["HostSystem"] = _host_runtime("notResponding", True)
+    return recorder
+
+
 _SOFT_REFUSALS: list[tuple[str, dict[str, Any], Setup, str]] = [
     ("vmware.composite.cluster.drs_rule.create", _DRS_RULE_PARAMS, _drs_rule_exists, "rule_exists"),
     ("vmware.composite.vm.resize", {"vm": "vm-1", "cpu_count": 1}, _vm_resize_reads, "no_change"),
@@ -670,6 +702,18 @@ _SOFT_REFUSALS: list[tuple[str, dict[str, Any], Setup, str]] = [
         {"vm": "vm-1", "snapshot_name": "missing"},
         _vm_snapshot_revert_timeout,
         "not_found",
+    ),
+    (
+        "vmware.composite.host.maintenance.exit",
+        {"host": "host-1"},
+        _host_not_in_maintenance,
+        "unchanged",
+    ),
+    (
+        "vmware.composite.host.maintenance.exit",
+        {"host": "host-1"},
+        _host_not_connected,
+        "not_connected",
     ),
 ]
 

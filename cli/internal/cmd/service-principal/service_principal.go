@@ -25,7 +25,7 @@ func NewRootCmd() *cobra.Command {
 		Short:        "Manage service-principal operator surfaces",
 		SilenceUsage: true,
 	}
-	cmd.AddCommand(NewGrantsCmd())
+	cmd.AddCommand(NewGrantsCmd(), NewReadScopeCmd())
 	return cmd
 }
 

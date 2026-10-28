@@ -8914,6 +8914,16 @@
               "nullable": true,
               "title": "Authorization"
             }
+          },
+          {
+            "name": "X-MEHO-Runner-Wire-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Wire-Version"
+            }
           }
         ],
         "responses": {
@@ -8969,6 +8979,16 @@
               "type": "string",
               "nullable": true,
               "title": "Authorization"
+            }
+          },
+          {
+            "name": "X-MEHO-Runner-Wire-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Wire-Version"
             }
           }
         ],
@@ -9076,7 +9096,7 @@
           "checks"
         ],
         "summary": "Get Assignment",
-        "description": "Return runner *runner*'s versioned assignment (runner-authenticated).\n\nA runner may fetch only its own assignment\n(:func:`assert_runner_scope`). ``known_version`` matching the current\ncontent digest yields ``304 Not Modified`` (empty body); the runner\nkeeps its cache.",
+        "description": "Return runner *runner*'s versioned assignment (runner-authenticated).\n\nA runner may fetch only its own assignment\n(:func:`assert_runner_scope`). A runner on another wire version gets a\n409 that names both versions. ``known_version`` matching the current\ncontent digest yields ``304 Not Modified`` (empty body); the runner\nkeeps its cache.",
         "operationId": "get_assignment_api_v1_checks_assignment_get",
         "parameters": [
           {
@@ -9107,6 +9127,16 @@
               "type": "string",
               "nullable": true,
               "title": "Authorization"
+            }
+          },
+          {
+            "name": "X-MEHO-Runner-Wire-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Wire-Version"
             }
           }
         ],
@@ -9151,6 +9181,16 @@
               "type": "string",
               "nullable": true,
               "title": "Authorization"
+            }
+          },
+          {
+            "name": "X-MEHO-Runner-Wire-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Wire-Version"
             }
           }
         ],
@@ -10005,7 +10045,7 @@
           "approvals"
         ],
         "summary": "List Approvals",
-        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired`` / ``?status=withdrawn`` and by change ticket via\n``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first\n(``created_at DESC``).",
+        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired`` / ``?status=withdrawn``, ``?status=all`` for every\nstate (the same sentinel ``meho_approvals_list`` accepts), and by\nchange ticket via\n``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first\n(``created_at DESC``). ``limit`` / ``offset`` page through the\nresult; no ``limit`` returns every match.",
         "operationId": "list_approvals_api_v1_approvals_get",
         "parameters": [
           {
@@ -10014,11 +10054,11 @@
             "required": false,
             "schema": {
               "type": "string",
-              "description": "Filter by status. One of: pending, approved, rejected, expired, withdrawn. Defaults to 'pending'.",
+              "description": "Filter by status. One of: pending, approved, rejected, expired, withdrawn, all. 'all' returns requests in every state. Defaults to 'pending'.",
               "default": "pending",
               "title": "Status"
             },
-            "description": "Filter by status. One of: pending, approved, rejected, expired, withdrawn. Defaults to 'pending'."
+            "description": "Filter by status. One of: pending, approved, rejected, expired, withdrawn, all. 'all' returns requests in every state. Defaults to 'pending'."
           },
           {
             "name": "work_ref",
@@ -10031,6 +10071,33 @@
               "title": "Work Ref"
             },
             "description": "Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#1' \u2014 the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "nullable": true,
+              "description": "Return at most this many requests (1..500). Omit for no limit.",
+              "title": "Limit"
+            },
+            "description": "Return at most this many requests (1..500). Omit for no limit."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Skip this many requests first (newest first). Defaults to 0.",
+              "default": 0,
+              "title": "Offset"
+            },
+            "description": "Skip this many requests first (newest first). Defaults to 0."
           },
           {
             "name": "authorization",
@@ -10668,6 +10735,176 @@
               "title": "Reason"
             },
             "description": "Optional reason for the revoke. Stored on the grant and the audit row."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/service-principals/read-scopes/{principal_sub}": {
+      "put": {
+        "tags": [
+          "service-principal-read-scopes"
+        ],
+        "summary": "Set Read Scope",
+        "description": "Set (replace) the read scope of one service principal.\n\nOnly a person may set it: a machine principal gets 403\n``human_principal_required`` before this runs. Returns 422 when\n``principal_sub`` carries a wildcard. Audited via the audit middleware,\nwith the stored entries on the audit row.",
+        "operationId": "set_read_scope_api_v1_service_principals_read_scopes__principal_sub__put",
+        "parameters": [
+          {
+            "name": "principal_sub",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "description": "JWT sub of the service principal.",
+              "title": "Principal Sub"
+            },
+            "description": "JWT sub of the service principal."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServiceReadScopeSet"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceReadScopeRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "service-principal-read-scopes"
+        ],
+        "summary": "Show Read Scope",
+        "description": "Return the read scope of one service principal; 404 when none is set.",
+        "operationId": "show_read_scope_api_v1_service_principals_read_scopes__principal_sub__get",
+        "parameters": [
+          {
+            "name": "principal_sub",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "description": "JWT sub of the service principal.",
+              "title": "Principal Sub"
+            },
+            "description": "JWT sub of the service principal."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceReadScopeRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "service-principal-read-scopes"
+        ],
+        "summary": "Clear Read Scope",
+        "description": "Clear the read scope of one service principal; it then reads every target again.\n\nOnly a person may clear it. Returns 204; 404 when no scope is set.\nAudited via the audit middleware.",
+        "operationId": "clear_read_scope_api_v1_service_principals_read_scopes__principal_sub__delete",
+        "parameters": [
+          {
+            "name": "principal_sub",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "description": "JWT sub of the service principal.",
+              "title": "Principal Sub"
+            },
+            "description": "JWT sub of the service principal."
           },
           {
             "name": "authorization",
@@ -20326,7 +20563,7 @@
           "ui-operations"
         ],
         "summary": "Operations Call",
-        "description": "Dispatch the chosen op in-process; render the ``OperationResult`` inline.\n\nThe highest-blast-radius action the console gains -- it executes a\nreal connector op against a live target. CSRF-gated (a ``POST`` under\n``/ui/``) and ``require_ui_session``-gated; calls\n:func:`~meho_backplane.operations.meta_tools.call_operation`\nin-process (the same BFF pattern the approvals decision POSTs use).\nThe structured envelope is surfaced verbatim\n(``ok`` / ``error`` / ``denied`` / ``awaiting_approval``); the one\n``ValueError`` the meta-tool raises (a missing target name) is mapped\nto an inline ``400`` form error so the operator stays in the modal.",
+        "description": "Dispatch the chosen op in-process; render the ``OperationResult`` inline.\n\nThe highest-blast-radius action the console gains -- it executes a\nreal connector op against a live target. CSRF-gated (a ``POST`` under\n``/ui/``) and ``require_ui_session``-gated; calls\n:func:`~meho_backplane.operations.meta_tools.call_operation`\nin-process (the same BFF pattern the approvals decision POSTs use).\nThe structured envelope is surfaced verbatim\n(``ok`` / ``error`` / ``denied`` / ``awaiting_approval``); the one\n``ValueError`` the meta-tool raises (a missing target name) is mapped\nto an inline ``400`` form error so the operator stays in the modal.\n\n``preview_hash`` comes from the run window's preview step. A\n``destructive`` op needs it, or MEHO refuses to store the approval\nrequest (#5015).",
         "operationId": "operations_call_ui_operations_call_post",
         "requestBody": {
           "content": {
@@ -23094,7 +23331,7 @@
           "withdrawn"
         ],
         "title": "ApprovalRequestStatus",
-        "description": "Closed lifecycle status of an :class:`ApprovalRequest`.\n\nInitiative #803 (G11.2 Agent permission model), Task #817 (T4). The\napproval queue parks a ``requires_approval`` dispatch durably; the\nrow walks a simple five-state lifecycle enforced by the service\n(:mod:`meho_backplane.operations.approval_queue`).\n\nMembers:\n\n* :attr:`PENDING` -- the request was written but no decision has\n  been made (initial state on insert). The associated agent run (if\n  any) is in ``awaiting_approval``.\n* :attr:`APPROVED` -- an authorized operator approved the request;\n  the dispatcher has re-executed the original call. Terminal.\n* :attr:`REJECTED` -- an authorized operator rejected the request;\n  the original call was not executed. Terminal.\n* :attr:`EXPIRED` -- the ``expires_at`` deadline passed without a\n  decision; the expiry sweep transitioned the row and wrote the\n  decision audit row. Terminal.\n* :attr:`WITHDRAWN` -- the sender took its own pending request back\n  (#4987). Not a decision: ``reviewed_by`` stays NULL, and\n  ``withdrawn_at`` / ``withdraw_reason`` say when and why. The\n  original call was not executed. Terminal.\n\nThe enum and the ``CHECK (status IN (...))`` constraint on the DB\ntable move in lock-step (migration ``0023``, widened by ``0116``); the\ndrift guard\n:func:`tests.migrations.test_migration_0116_approval_withdrawn.test_status_check_matches_enum`\nasserts equality at unit-test time."
+        "description": "Closed lifecycle status of an :class:`ApprovalRequest`.\n\nInitiative #803 (G11.2 Agent permission model), Task #817 (T4). The\napproval queue parks a ``requires_approval`` dispatch durably; the\nrow walks a simple five-state lifecycle enforced by the service\n(:mod:`meho_backplane.operations.approval_queue`).\n\nMembers:\n\n* :attr:`PENDING` -- the request was written but no decision has\n  been made (initial state on insert). The associated agent run (if\n  any) is in ``awaiting_approval``.\n* :attr:`APPROVED` -- an authorized operator approved the request;\n  the dispatcher has re-executed the original call. Terminal.\n* :attr:`REJECTED` -- an authorized operator rejected the request;\n  the original call was not executed. Terminal.\n* :attr:`EXPIRED` -- the ``expires_at`` deadline passed without a\n  decision; the expiry sweep transitioned the row and wrote the\n  decision audit row. Terminal.\n* :attr:`WITHDRAWN` -- the sender took its own pending request back\n  (#4987). Not a decision: ``reviewed_by`` stays NULL, and\n  ``withdrawn_at`` / ``withdraw_reason`` say when and why. The\n  original call was not executed. Terminal.\n\nThe enum and the ``CHECK (status IN (...))`` constraint on the DB\ntable move in lock-step (migration ``0023``, widened by ``0119``); the\ndrift guard\n:func:`tests.migrations.test_migration_0119_approval_withdrawn.test_status_check_matches_enum`\nasserts equality at unit-test time."
       },
       "ApprovalRequestView": {
         "properties": {
@@ -24833,6 +25070,12 @@
             "maxLength": 512,
             "title": "Work Ref",
             "default": ""
+          },
+          "preview_hash": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Preview Hash",
+            "default": ""
           }
         },
         "type": "object",
@@ -25602,12 +25845,12 @@
             "title": "Safety Level"
           },
           "requires_approval": {
-            "type": "boolean",
+            "type": "string",
             "nullable": true,
             "title": "Requires Approval"
           },
           "is_enabled": {
-            "type": "boolean",
+            "type": "string",
             "nullable": true,
             "title": "Is Enabled"
           },
@@ -26577,6 +26820,16 @@
               "low"
             ],
             "title": "Confidence"
+          },
+          "secret_ref": {
+            "type": "string",
+            "nullable": true,
+            "title": "Secret Ref"
+          },
+          "extras": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Extras"
           }
         },
         "type": "object",
@@ -26587,7 +26840,7 @@
           "confidence"
         ],
         "title": "CandidateHint",
-        "description": "One candidate target a connector's :meth:`Connector.list_candidates` returns.\n\nCandidates are potentially-reachable targets the connector inferred\nfrom an existing seed (e.g. a vCenter exposing its managed ESXi\nhosts; a kubeconfig listing peer cluster contexts). The\nG9.1-T6 ``meho targets discover`` CLI verb surfaces these to the\noperator; auto-registration is intentionally out of scope per\nInitiative #363 (operator runs ``meho targets import`` after review).\n\n``evidence`` is the debugging payload \u2014 whatever made the connector\nthink this candidate exists (e.g. ``{\"source\": \"kubeconfig\",\n\"context_name\": \"cluster-2\"}``); ``confidence`` is the connector's\nself-assessment of probe-vs-curation reliability."
+        "description": "One candidate target a connector's :meth:`Connector.list_candidates` returns.\n\nCandidates are potentially-reachable targets the connector inferred\nfrom an existing seed (e.g. a vCenter exposing its managed ESXi\nhosts; a kubeconfig listing peer cluster contexts). The\nG9.1-T6 ``meho targets discover`` CLI verb surfaces these to the\noperator; auto-registration is intentionally out of scope per\nInitiative #363 (operator runs ``meho targets import`` after review).\n\n``evidence`` is the debugging payload \u2014 whatever made the connector\nthink this candidate exists (e.g. ``{\"source\": \"kubeconfig\",\n\"context_name\": \"cluster-2\"}``); ``confidence`` is the connector's\nself-assessment of probe-vs-curation reliability.\n\n``secret_ref`` and ``extras`` are set when the connector knows them:\nthe secret reference and the target extras a target for this candidate\nneeds (Azure: the seed's secret reference and ``subscription_id``,\n``tenant_id`` and ``cloud``). ``meho targets discover --import-yaml``\nwrites them into a file that ``meho targets import`` reads."
       },
       "CapabilityDeclaration": {
         "properties": {
@@ -32306,6 +32559,43 @@
         "title": "ReadDocsRequest",
         "description": "POST body for ``/api/v1/read_docs``, the same fields as the MCP tool.\n\n``collection`` is typed optional so a missing value gets the docs\nsurfaces' own 422 naming the mandatory scope. ``product`` / ``version``\nare needed only on a collection whose scope gates send hard filters: the\nhandle is bound to the filters of the hit's search. So a caller passes\nthem only for a hit from a single-collection search that used them, and\nleaves them out for a hit from a cross-collection search, which ignores\nthem. ``extra=\"forbid\"`` rejects unknown fields."
       },
+      "ReadScopeEntry": {
+        "properties": {
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Target Id",
+            "description": "Allow reads on exactly this target."
+          },
+          "target_product": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Target Product",
+            "description": "Selector: allow reads on every target whose product equals this value."
+          },
+          "target_name_pattern": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Target Name Pattern",
+            "description": "Selector: allow reads on every target whose name matches this fnmatch glob."
+          },
+          "no_target": {
+            "type": "boolean",
+            "title": "No Target",
+            "description": "Allow safe calls that have no target. Not set: such calls are refused.",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ReadScopeEntry",
+        "description": "One entry of a read scope. Exactly one shape per entry.\n\n* ``target_id`` -- exactly that target.\n* ``target_product`` and/or ``target_name_pattern`` -- a selector:\n  ``product`` exact, ``name`` an ``fnmatch`` glob. It is checked at\n  call time, so a target registered after the scope was set can match.\n* ``no_target: true`` -- allow ``safe`` calls that have no target."
+      },
       "ReadinessCheck": {
         "properties": {
           "name": {
@@ -32891,16 +33181,14 @@
           },
           "limit": {
             "type": "integer",
-            "maximum": 500.0,
             "minimum": 1.0,
             "title": "Limit",
-            "description": "Page size (paging mode). Default 50; max 500. Matches the `result_query` MCP tool's upper bound.",
-            "default": 50
+            "description": "Page size. Rows, and the items of an array value read by `path`: default 50, at most 500 (a bigger value is refused). Characters of a text value read by `path`: default as many as fit the output budget; a bigger part is cut to fit. Matches the `result_query` MCP tool."
           },
           "query": {
             "$ref": "#/components/schemas/ResultQuerySpec",
             "nullable": true,
-            "description": "Optional structured query. When present, the handle is queried server-side (filter / select / group_by / aggregate / order_by / limit) as one bounded read-only SELECT and `offset` / `limit` are ignored. Every referenced field must be a column on the handle; there is no raw-SQL argument. For a document handle, or for the fields a rows handle left out of its inline summary, send only `path` (an RFC 6901 JSON Pointer); an array value then pages with `offset` / `limit`."
+            "description": "Optional structured query. When present, the handle is queried server-side (filter / select / group_by / aggregate / order_by / limit) as one bounded read-only SELECT and `offset` / `limit` are ignored. Every referenced field must be a column on the handle; there is no raw-SQL argument. For a document handle, or for the fields a rows handle left out of its inline summary, send only `path` (an RFC 6901 JSON Pointer); an array value then pages with `offset` / `limit`, and a text value comes back in parts of `limit` characters from character `offset`."
           }
         },
         "additionalProperties": false,
@@ -32909,7 +33197,7 @@
           "handle_id"
         ],
         "title": "ResultQueryBody",
-        "description": "POST body for ``/api/v1/operations/result-query`` (#3179).\n\nThe REST twin of the MCP ``result_query`` tool's ``inputSchema``:\n``handle_id`` is the UUID minted onto a reduced ``/call`` response's\n``result.handle.handle_id`` / ``fetch_more.drill_in.example_call``, and\n``offset`` / ``limit`` window the spilled set. The bounds mirror the MCP\nschema (``offset >= 0``; ``1 <= limit <= MAX_LIMIT``) so the two surfaces\nvalidate identically. ``extra=\"forbid\"`` rejects unknown body fields with\na 422, matching the sibling ``CallOperationBody`` posture.\n\n``query`` (#3366) is the optional structured query: when present, the\nhandle is queried server-side as one bounded read-only ``SELECT``\n(filter / project / group / aggregate) and ``offset`` / ``limit`` are\nignored. It mirrors the MCP tool's ``query`` argument exactly (the same\n:class:`~meho_backplane.jsonflux.query.contract.ResultQuerySpec`), so the\ntwo surfaces stay in lockstep; there is deliberately no raw-SQL argument\non either."
+        "description": "POST body for ``/api/v1/operations/result-query`` (#3179).\n\nThe REST twin of the MCP ``result_query`` tool's ``inputSchema``:\n``handle_id`` is the UUID minted onto a reduced ``/call`` response's\n``result.handle.handle_id`` / ``fetch_more.drill_in.example_call``, and\n``offset`` / ``limit`` window the spilled set. The bounds mirror the MCP\nschema (``offset >= 0``; ``limit >= 1``) so the two surfaces validate\nidentically; the row cap (``MAX_LIMIT``) is checked by the shared core,\nbecause a text value read by ``path`` counts characters and one part\nmay hold more (#4994). ``extra=\"forbid\"`` rejects unknown body fields\nwith a 422, matching the sibling ``CallOperationBody`` posture.\n\n``query`` (#3366) is the optional structured query: when present, the\nhandle is queried server-side as one bounded read-only ``SELECT``\n(filter / project / group / aggregate) and ``offset`` / ``limit`` are\nignored. It mirrors the MCP tool's ``query`` argument exactly (the same\n:class:`~meho_backplane.jsonflux.query.contract.ResultQuerySpec`), so the\ntwo surfaces stay in lockstep; there is deliberately no raw-SQL argument\non either."
       },
       "ResultQuerySpec": {
         "properties": {
@@ -33636,6 +33924,11 @@
             "format": "date-time",
             "nullable": true,
             "title": "Last Seen At"
+          },
+          "wire_version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Wire Version"
           }
         },
         "type": "object",
@@ -34930,6 +35223,65 @@
         "title": "ServiceGrantRead",
         "description": "Row shape every accessor returns.\n\n``from_attributes=True`` allows direct construction from an ORM row.\nExposes ``revoked_at`` / ``revoked_by_sub`` / ``revoked_reason`` so\ncallers can tell a live grant from a revoked one in the history, and why\nit was revoked.\n\n``orphaned`` / ``orphan_remediation`` are filled in by the service when\nit reads the grant (see\n:func:`~meho_backplane.operations.service_grants.classify_orphaned_grants`);\nbuilding the shape straight from an ORM row leaves them at the\nnot-orphaned default."
       },
+      "ServiceReadScopeRead": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "principal_sub": {
+            "type": "string",
+            "title": "Principal Sub"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/ReadScopeEntry"
+            },
+            "type": "array",
+            "title": "Entries"
+          },
+          "set_by_sub": {
+            "type": "string",
+            "title": "Set By Sub"
+          },
+          "set_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Set At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "principal_sub",
+          "entries",
+          "set_by_sub",
+          "set_at"
+        ],
+        "title": "ServiceReadScopeRead",
+        "description": "The stored read scope of one service principal."
+      },
+      "ServiceReadScopeSet": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/ReadScopeEntry"
+            },
+            "type": "array",
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Entries"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "title": "ServiceReadScopeSet",
+        "description": "Body for ``PUT /api/v1/service-principals/read-scopes/{principal_sub}``.\n\nReplaces the whole scope. At least one entry: a scope with no entry\nwould refuse every read, which is a job for revoking the principal."
+      },
       "ShowTemplateResponse": {
         "properties": {
           "slug": {
@@ -35670,7 +36022,9 @@
             "title": "Product",
             "enum": [
               "argocd",
+              "azure",
               "bind9",
+              "entra",
               "fleet",
               "gcloud",
               "gh",
@@ -37457,6 +37811,10 @@
     },
     {
       "name": "service-principal-grants",
+      "x-maturity": "ga"
+    },
+    {
+      "name": "service-principal-read-scopes",
       "x-maturity": "ga"
     },
     {

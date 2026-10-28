@@ -163,6 +163,16 @@ The vendor-neutral steps live in `connectors/_shared/api_file_read.py`.
 They are the same steps the `fleet.api_file.get` read uses
 (`docs/codebase/connectors-vcf-fleet.md`):
 
+- the fetch and the file check are one step, `fetch_checked_api_file`;
+  the size check of the stored record, the last redaction check and the
+  flight recorder call are a second step, `finish_api_file_read`. The
+  flight recorder (the stored record of each vendor call) gets the
+  checked copy of the file, never the body as it came, and only after
+  every check has passed: a file the read refuses, for any reason, is
+  recorded with no body. A `401` body goes through the same check before
+  the error is raised, or the error is raised with no body, also when
+  the body is too big or cannot be decoded; the status and the headers
+  stay, so the login retry still runs;
 - the body is read in a stream; `gzip` and `deflate` are decoded in
   bounded steps, so a small compressed body that decodes past the limit
   stops at the limit; a cut stream is refused;
@@ -236,7 +246,8 @@ call is sent.
   session, registration shape, fingerprint. One test reads the pinned 9.1 files through
   `srm.api_file.get`; it runs only when the spec shelf is present.
 - `backend/tests/test_connectors_shared_api_file_read.py` -- the shared
-  read steps, including `text_redactor`.
+  read steps, including `text_redactor` and what the flight recorder and
+  a raised `401` carry.
 - `backend/tests/test_connectors_srm_spec_reconcile.py` -- the login and
   `server/info` paths against the pinned 9.1 file
   (`vcf-protection-and-recovery-9.1/recovery-srm-v2.yaml` on the spec

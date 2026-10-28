@@ -64,6 +64,15 @@ rollup (no LLM), and the *deep tier* is the scheduled agent run.
    the notifier applies its own per-Dashboard `notify_min_state` floor and
    never reaches this module's correlation, suppression, or agent path.
 
+   Since #5068 the same claim transaction also compare-and-swaps each
+   member's counted state on the link row
+   (`check_dashboard_sensors.last_member_state`, `_claim_member_changes`)
+   and returns a "new problem" notice for a member that got worse while
+   the Dashboard's overall state stayed the same. Those notices go to the
+   notifier only (`docs/codebase/checks-notifications.md`); the
+   investigator's gate is unchanged and does not look at a new member
+   problem on an already-red Dashboard.
+
    **What counts as an edge, since #2799:** on a sensor with
    `retry_times > 0`, an unconfirmed (pending soft-state) evaluation
    never changes the sensor's `last_state`, so the fold this hook

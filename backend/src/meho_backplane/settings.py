@@ -263,9 +263,11 @@ class Settings(BaseModel):
         scheduler is operator-less — it has no Keycloak JWT to forward to
         Vault's JWT/OIDC auth method — so it reads under its own service
         identity instead. A token bound to a narrow policy that grants
-        read/write on ``scheduler_agent_vault_path_pattern`` (default
-        ``secret/data/agents/*/credentials``) is the lowest-friction
-        service identity: it reuses the ``hvac.Client(token=…)`` primitive
+        read/write on the paths that ``scheduler_agent_vault_path_pattern``
+        resolves to (setting default
+        ``secret/data/agents/{tenant_id}_{client_id}/credentials``, which the
+        policy path ``secret/data/agents/+/credentials`` covers) is the
+        lowest-friction service identity: it reuses the ``hvac.Client(token=…)`` primitive
         with no AppRole ``secret_id`` bootstrap. **Write** (``create`` +
         ``update``) is required because agent-principal registration mints
         the Keycloak client secret into Vault via
@@ -2080,7 +2082,7 @@ class Settings(BaseModel):
     # Threading both means two distinct principals — name-variants within a
     # tenant, or the same name across tenants — never collide on one key.
     # The default joins them under one ``_`` (a single dynamic path
-    # segment) so the deployed ``secret/data/agents/*/credentials`` ACL
+    # segment) so the deployed ``secret/data/agents/+/credentials`` ACL
     # keeps matching without a policy re-scope
     # (``docs/cross-repo/vault-provisioning.md``). The default addresses the
     # ``secret/`` KV-v2 mount; the leading ``secret/data/`` is the raw API

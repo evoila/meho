@@ -150,7 +150,7 @@ pod env var only when Vault yields nothing (#1478). The lookup chain:
      tenant `t` resolves to
      `secret/data/agents/<t.hex>_<hex(agent:ops-writer)>/credentials`.
      The default joins the two under one `_` (a single dynamic path
-     segment) so the deployed `secret/data/agents/*/credentials` ACL
+     segment) so the deployed `secret/data/agents/+/credentials` ACL
      keeps matching without a policy re-scope. Both the read here and the
      write below call this one helper with the same tenant, so the two
      paths cannot diverge. The raw KV-v2 API path is split into hvac's

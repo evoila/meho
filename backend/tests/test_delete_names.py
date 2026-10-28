@@ -18,8 +18,10 @@ from __future__ import annotations
 import pytest
 
 from meho_backplane.delete_names import (
+    DELETE_ACTION_QUERY,
     DELETE_SHAPED_OP_ID_PATTERNS,
     DESTRUCTIVE_ACTION_PREFIXES,
+    VENDOR_ACTION_PREFIXES,
     WRITE_WORDS,
     destructive_action_name_in_op_id,
     is_destructive_action_name,
@@ -41,13 +43,34 @@ def test_word_list_is_the_parser_vocabulary() -> None:
         "UnregisterVM",
         "Unregister",
         "Remove",
+        # A delete word after a vSAN prefix (#4973).
+        "VsanClusterRemoveShare",
+        "VsanVitRemoveIscsiLUN",
+        "VsanPerfDeleteStatsObject",
+        "VsanDeleteObjects_Task",
+        "VsanDestroyDatastoreSource",
     ],
 )
 def test_action_names_that_mean_delete(value: str) -> None:
     assert is_destructive_action_name(value) is True
 
 
-@pytest.mark.parametrize("value", ["Destroyer_Task", "Reset_Task", "Removed", "destroy", ""])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Destroyer_Task",
+        "Reset_Task",
+        "Removed",
+        "destroy",
+        "",
+        # A vSAN read, a vSAN noun that only looks similar, and a prefix not
+        # at the start of the name.
+        "VsanVitGetIscsiLUNs",
+        "VsanRemoteDatastoreSystem",
+        "VsanClusterRemovedShares",
+        "QueryVsanClusterRemoveShare",
+    ],
+)
 def test_action_names_that_only_look_similar(value: str) -> None:
     assert is_destructive_action_name(value) is False
 
@@ -60,6 +83,16 @@ def test_action_names_that_only_look_similar(value: str) -> None:
         ("POST:/HostNetworkSystem/{moId}/RemovePortGroup", "RemovePortGroup"),
         ("POST:/FileManager/{moId}/DeleteDatastoreFile_Task", "DeleteDatastoreFile_Task"),
         ("POST:/VirtualMachine/{moId}/UnregisterVM", "UnregisterVM"),
+        (
+            "POST:/vsan/VsanFileServiceSystem/{moId}/VsanClusterRemoveShare",
+            "VsanClusterRemoveShare",
+        ),
+        # A delete sent as POST on an action-style REST API (#4973).
+        ("POST:/hvc/links/{link}?action=delete", "action=delete"),
+        ("POST:/vcenter/vm/{vm}/guest/processes/{pid}?action=delete", "action=delete"),
+        ("POST:/api/things/{id}?vmw-task=true&action=delete", "action=delete"),
+        # The query is not part of the action name.
+        ("POST:/Datastore/{moId}/Destroy_Task?x=1", "Destroy_Task"),
     ],
 )
 def test_ingested_op_id_reports_its_delete_action_name(op_id: str, action_name: str) -> None:
@@ -84,6 +117,11 @@ def test_ingested_op_id_reports_its_delete_action_name(op_id: str, action_name: 
         "Destroy_Task",
         "POST:Destroy_Task",
         "POST:/",
+        # Only the whole query part ``action=delete`` counts.
+        "POST:/vcenter/compute/policies?action=delete-tags-and-policies",
+        "POST:/cis/tagging/tag-association/{tagId}?action=detach",
+        "POST:/things?mode=action=delete",
+        "POST:/vsan/VsanIscsiTargetSystem/{moId}/VsanVitGetIscsiLUNs",
     ],
 )
 def test_op_ids_without_a_delete_action_name(op_id: str) -> None:
@@ -97,6 +135,11 @@ def test_every_delete_sign_is_a_write_word() -> None:
     for pattern in DELETE_SHAPED_OP_ID_PATTERNS:
         word = pattern.removeprefix("*.").removesuffix(":*").lower()
         assert word in WRITE_WORDS, pattern
+    assert DELETE_ACTION_QUERY.removeprefix("action=") in WRITE_WORDS
+
+
+def test_vendor_prefixes_are_the_vsan_ones() -> None:
+    assert VENDOR_ACTION_PREFIXES == ("Vsan", "VsanCluster", "VsanPerf", "VsanVit")
 
 
 def test_delete_shaped_patterns_are_the_grant_check_defaults() -> None:

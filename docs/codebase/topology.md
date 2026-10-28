@@ -640,6 +640,39 @@ shutdown before the DB/redis pools dispose). Each iteration:
 The advisory-lock key is a blake2b digest of the two UUIDs masked to 63
 bits (non-negative, fits asyncpg's signed `bigint` binding).
 
+**The scheduled run does not update Kubernetes targets whose
+credentials live in Vault (#4952).** The scheduler's system operator has
+no person's token (`raw_jwt=""`), and MEHO does not read a target's
+credentials from Vault without one (the guard in
+`connectors/_shared/vault_creds.py`). The Kubernetes connector — the
+only populator today — needs the target's kubeconfig, so every
+scheduled refresh of such a target fails with
+`OperatorTokenRequiredError`. Their map entries are updated only when a
+logged-in operator runs `meho topology refresh <target>`. A deployment
+that stores credentials in GCP Secret Manager reads with its own
+service identity, so its scheduled refreshes work. Giving the scheduler
+a login of its own is out of scope until that is decided (see #4952 and
+the parent #4124).
+
+Two failures are **expected outcomes**, not crashes (`_record_failure`):
+
+- `OperatorTokenRequiredError` (Vault refused the read because the run
+  has no person's token) → metric outcome `skipped_no_credentials`. Only
+  this subclass counts; every other credential-store failure, for
+  example a GCP Secret Manager outage or a malformed Vault payload, is
+  still an `error` with a stack trace.
+- `NoMatchingConnector` (no connector supports the target's product) →
+  metric outcome `no_connector`. This is a problem in the target record.
+
+Both still go on backoff. The first time per target after a start, the
+scheduler logs one `topology_refresh_target_skipped` **warning** without
+a stack trace (target id, target name, product, plain reason). Later
+failures of the same kind for that target log nothing, even when a
+refusal of the other kind came in between; only the metric counts them.
+A success clears the markers. Any other exception counts as `error` and
+logs `topology_refresh_target_failed` with the full stack trace on every
+failure, carrying the target name as well as the id.
+
 ### Why `asyncio.create_task`, not APScheduler 4.x
 
 Task #450 prefers APScheduler 4.x but explicitly allows reusing an
@@ -766,7 +799,8 @@ front maps the exception to `404 node_untracked`; the MCP front
 returns the typed `{kind, status: "node_untracked", name,
 nodes: []}` envelope, which also carries `direction`,
 `relation_class` and `evidence` like every other closure answer
-(#3760). The CLI's `formatNotFound` renders the
+(#3760), and a `detail` text (#4112) that says the answer is not
+"safe to delete" and how to add the missing data. The CLI's `formatNotFound` renders the
 operator-actionable "register / refresh the target or annotate
 the relationship" prompt. `find_path` keeps its G9.1 silent-on-miss
 contract by default — `None` is the recoverable "no route" answer.
@@ -1699,7 +1733,13 @@ Load-bearing details:
   on each, and merges the results. One connector raising is recorded
   in `skipped` with the exception summary and does not abort the
   sweep. `seed_target` (optional) is resolved tenant-scoped before
-  being forwarded. The verb never creates `targets` rows
+  being forwarded. The caller is forwarded too
+  (`list_candidates(seed, operator=operator)`), so a connector that must
+  read the seed's secret reads it under the caller's identity, like the
+  probe. A candidate may carry `secret_ref` and `extras` (the Azure
+  connector sets both), and `meho targets discover <product>
+  --import-yaml` prints the candidates as a file for `meho targets
+  import`. The verb never creates `targets` rows
   (auto-registration is v0.2.next per #363).
 - **Tenant scoping.** No route accepts a `tenant_id` from the path,
   query string, or body. The query verbs filter on
@@ -1904,7 +1944,8 @@ tables, happy path, `--json`, cross-tenant seed 404).
   `topology_history_prune_interval_seconds`,
   `topology_history_prune_enabled` (the G9.3-T6 retention knobs).
 - `meho_backplane.metrics` — `TOPOLOGY_REFRESH_TOTAL` counter
-  (`outcome` label: `ok` / `error` / `skipped_locked`).
+  (`outcome` label: `ok` / `error` / `skipped_locked` /
+  `skipped_no_credentials` / `no_connector`).
 - SQLAlchemy 2.0 `text()` with `:named` binds — same raw-SQL pattern
   `meho_backplane.retrieval.retriever` uses (`CAST(:x AS text) IS NULL
   OR ...` for optional filters, UUIDs passed as `str`). Every read

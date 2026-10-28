@@ -24,7 +24,7 @@ Test matrix
   ``principal_sub`` / ``op_id`` / ``connector_id`` / ``params_hash`` /
   ``proposed_effect`` / ``status`` / ``created_at``) reject it.
 * The status drift guard (CHECK values == ORM enum) lives in
-  ``test_migration_0116_approval_withdrawn``, the newest migration that
+  ``test_migration_0119_approval_withdrawn``, the newest migration that
   changed the status rule.
 
 The tests follow the synchronous pattern of

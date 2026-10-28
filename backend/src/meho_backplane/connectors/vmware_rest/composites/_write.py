@@ -91,6 +91,7 @@ import asyncio
 import re
 import secrets
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 import httpx
@@ -139,6 +140,7 @@ __all__ = [
     "guest_customization_spec_create_composite",
     "host_detach_from_vds_composite",
     "host_evacuate_composite",
+    "host_maintenance_exit_composite",
     "network_portgroup_create_composite",
     "network_portgroup_security_set_composite",
     "resource_pool_create_composite",
@@ -852,6 +854,22 @@ _VM_POWER_STATE_ON = "POWERED_ON"
 _HOST_MAINTENANCE_SPEC_TYPE = "HostMaintenanceSpec"
 _VSAN_HOST_DECOMMISSION_MODE_TYPE = "VsanHostDecommissionMode"
 _VSAN_MODE_DEFAULT = "ensureObjectAccessibility"
+# host.maintenance.exit (#4967): the ``HostRuntimeInfo`` leaves read before
+# and after the exit. ``dasHostState`` is a ``ClusterDasFdmHostState`` whose
+# ``state`` is the vSphere HA availability state; vCenter leaves it out on a
+# host outside an HA cluster.
+_PROP_HOST_NAME = "name"
+_PROP_HOST_CONNECTION_STATE = "runtime.connectionState"
+_PROP_HOST_IN_MAINTENANCE_MODE = "runtime.inMaintenanceMode"
+_PROP_HOST_DAS_HOST_STATE = "runtime.dasHostState"
+_HOST_MAINTENANCE_STATE_PATH_SET: tuple[str, ...] = (
+    _PROP_HOST_NAME,
+    _PROP_HOST_CONNECTION_STATE,
+    _PROP_HOST_IN_MAINTENANCE_MODE,
+    _PROP_HOST_DAS_HOST_STATE,
+)
+# ``HostSystemConnectionState`` value of a host vCenter can send a call to.
+_HOST_CONNECTION_STATE_CONNECTED = "connected"
 
 # Wall-clock bounds for the #2970 vim task polls + the cluster.patch cis
 # task poll -- the 600s ``vm.disk.grow`` / ``vm.clone_from_template``
@@ -881,6 +899,10 @@ _VIM_SUB_OPS_VM_DESTROY: tuple[str, ...] = (
 _VIM_SUB_OPS_HOST_EVACUATE: tuple[str, ...] = (
     _OP_RETRIEVE_PROPERTIES,
     _OP_ENTER_MAINTENANCE_TASK,
+)
+_VIM_SUB_OPS_HOST_MAINTENANCE_EXIT: tuple[str, ...] = (
+    _OP_RETRIEVE_PROPERTIES,
+    _OP_EXIT_MAINTENANCE_TASK,
 )
 _VIM_SUB_OPS_CLUSTER_PATCH: tuple[str, ...] = (
     _OP_RETRIEVE_PROPERTIES,
@@ -5790,6 +5812,225 @@ async def host_evacuate_composite(
         failed=failed,
         outcome=outcome,
         moved_by=moved_by,
+    )
+
+
+# ===========================================================================
+# host.maintenance.exit
+# ===========================================================================
+
+
+@dataclass(frozen=True)
+class _HostMaintenanceState:
+    """The host leaves read before and after a maintenance-mode exit (#4967)."""
+
+    name: str | None
+    connection_state: str | None
+    in_maintenance_mode: bool | None
+    ha_state: str | None
+
+    @property
+    def connected(self) -> bool:
+        return self.connection_state == _HOST_CONNECTION_STATE_CONNECTED
+
+    def as_fields(self) -> dict[str, Any]:
+        """The envelope fields the operator reads."""
+        return {
+            "name": self.name,
+            "connection_state": self.connection_state,
+            "in_maintenance_mode": self.in_maintenance_mode,
+            "ha_state": self.ha_state,
+        }
+
+
+async def _read_host_maintenance_state(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    host_moid: str,
+) -> _HostMaintenanceState:
+    """One ``RetrievePropertiesEx`` read of the host's name, connection and maintenance state.
+
+    The HA state is ``runtime.dasHostState.state``; a host outside a vSphere
+    HA cluster has no ``dasHostState``, so it reads as ``None``.
+    """
+    payload = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=retrieve_properties_body(
+            _HOST_SYSTEM_MO_TYPE, [host_moid], _HOST_MAINTENANCE_STATE_PATH_SET
+        ),
+    )
+    name = _extract_single_prop(payload, _PROP_HOST_NAME)
+    connection_state = _extract_single_prop(payload, _PROP_HOST_CONNECTION_STATE)
+    in_maintenance = _extract_single_prop(payload, _PROP_HOST_IN_MAINTENANCE_MODE)
+    das_state = _extract_single_prop(payload, _PROP_HOST_DAS_HOST_STATE)
+    ha_state = das_state.get("state") if isinstance(das_state, dict) else None
+    return _HostMaintenanceState(
+        name=name if isinstance(name, str) else None,
+        connection_state=connection_state if isinstance(connection_state, str) else None,
+        in_maintenance_mode=in_maintenance if isinstance(in_maintenance, bool) else None,
+        ha_state=ha_state if isinstance(ha_state, str) else None,
+    )
+
+
+def _maintenance_exit_envelope(
+    *,
+    status: str,
+    host_moid: str,
+    state: _HostMaintenanceState,
+    maintenance_task: str | None = None,
+    guidance: str | None = None,
+) -> dict[str, Any]:
+    envelope: dict[str, Any] = {
+        "status": status,
+        "host": host_moid,
+        **state.as_fields(),
+        "maintenance_task": maintenance_task,
+    }
+    if guidance is not None:
+        envelope["guidance"] = guidance
+    return envelope
+
+
+async def _maintenance_exit_timed_out(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    host_moid: str,
+    task: str,
+) -> dict[str, Any]:
+    """The ``timeout`` answer: the task still runs, the call did not fail (a warning issue).
+
+    The host read after the timeout is best effort. MEHO already stopped
+    waiting, so a failed read must not turn the answer into a failed call
+    that loses the task id. The answer then keeps the ``timeout`` status and
+    the task id, leaves the four state fields ``None`` and says the current
+    host state is unavailable (the fault class only, like the preview).
+    """
+    seconds = int(_MAINTENANCE_TASK_TIMEOUT_SECONDS)
+    guidance = (
+        f"MEHO stopped waiting after {seconds}s, but the exit-maintenance-mode task {task} "
+        "still runs on vCenter. The call did not fail. Check the task (vmware.tasks.recent) "
+        "and read the host again before you put VMs on it."
+    )
+    issues = [
+        issue(
+            "connector",
+            "warning",
+            f"exit-maintenance-mode task {task} on host {host_moid!r} still runs after "
+            f"{seconds}s; the host may still be in maintenance mode",
+        )
+    ]
+    try:
+        state = await _read_host_maintenance_state(
+            connector=connector, target=target, operator=operator, host_moid=host_moid
+        )
+    except Exception as exc:
+        state = _HostMaintenanceState(
+            name=None, connection_state=None, in_maintenance_mode=None, ha_state=None
+        )
+        guidance += (
+            " The current host state is unavailable: the host read after the timeout "
+            "failed, so the state fields are empty."
+        )
+        issues.append(
+            issue(
+                "connector",
+                "warning",
+                f"the host read after the timeout failed ({type(exc).__name__}); the current "
+                f"state of host {host_moid!r} is unavailable",
+            )
+        )
+    envelope = _maintenance_exit_envelope(
+        status="timeout",
+        host_moid=host_moid,
+        state=state,
+        maintenance_task=task,
+        guidance=guidance,
+    )
+    envelope["issues"] = issues
+    return envelope
+
+
+async def host_maintenance_exit_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """End maintenance mode on one host, after approval.
+
+    Op-id: ``vmware.composite.host.maintenance.exit``. Steps (#4967):
+
+    1. Read the host's connection state and maintenance state (vim). A host
+       that is not connected is refused before any change
+       (``not_connected``). A host that is not in maintenance mode answers
+       ``unchanged`` and sends nothing, so the call is safe to run twice.
+    2. Send ``ExitMaintenanceMode_Task`` with ``{"timeout": 0}`` through the
+       governed vim seam (the same call ``cluster.patch`` sends as its last
+       step) and poll it.
+    3. Read the host again and return its maintenance state, connection
+       state and vSphere HA state. A poll timeout is the ``timeout`` status
+       with the task id, not a failure, and its host read is best effort;
+       a faulted task is a failed call.
+    """
+    host_moid = params["host"]
+    before = await _read_host_maintenance_state(
+        connector=connector, target=target, operator=operator, host_moid=host_moid
+    )
+    if not before.connected:
+        return _maintenance_exit_envelope(
+            status="not_connected",
+            host_moid=host_moid,
+            state=before,
+            guidance=(
+                f"host {host_moid!r} is {before.connection_state or 'in an unknown state'}, "
+                "not connected to vCenter, so it cannot leave maintenance mode. Nothing was "
+                "changed. Reconnect the host first (check its management network and the "
+                "host agent), then call again."
+            ),
+        )
+    if before.in_maintenance_mode is False:
+        return _maintenance_exit_envelope(
+            status="unchanged",
+            host_moid=host_moid,
+            state=before,
+            guidance=f"host {host_moid!r} is not in maintenance mode. Nothing was sent.",
+        )
+
+    outcome = await _run_host_maintenance_task(
+        connector=connector,
+        target=target,
+        operator=operator,
+        host_moid=host_moid,
+        op_id=_OP_EXIT_MAINTENANCE_TASK,
+    )
+    if isinstance(outcome, OperationResult):
+        return outcome
+    if outcome.state == TASK_STATE_ERROR:
+        # A faulted task is a failed call; the dispatcher wraps the fault text
+        # as ``connector_error`` (the host.evacuate convention, #4895).
+        reason = _maintenance_task_failure(outcome, _OP_EXIT_MAINTENANCE_TASK, host_moid)
+        raise RuntimeError(f"host.maintenance.exit: {reason}")
+
+    if outcome.timed_out:
+        return await _maintenance_exit_timed_out(
+            connector=connector,
+            target=target,
+            operator=operator,
+            host_moid=host_moid,
+            task=outcome.task,
+        )
+    after = await _read_host_maintenance_state(
+        connector=connector, target=target, operator=operator, host_moid=host_moid
+    )
+    return _maintenance_exit_envelope(
+        status="exited", host_moid=host_moid, state=after, maintenance_task=outcome.task
     )
 
 

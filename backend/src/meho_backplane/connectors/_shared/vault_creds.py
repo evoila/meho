@@ -113,6 +113,7 @@ __all__ = [
     "DEFAULT_KV_MOUNT",
     "BasicCredentialsTargetLike",
     "CredentialsReadError",
+    "OperatorTokenRequiredError",
     "SecretRefReadError",
     "VaultCredentialBackend",
     "VaultCredentialsReadError",
@@ -186,7 +187,8 @@ class VaultCredentialsReadError(CredentialsReadError):
     requested credential fields:
 
     * empty ``operator.raw_jwt`` — the fail-closed system-call carve-out
-      (no authenticated operator to read under);
+      (no authenticated operator to read under), raised as the
+      :class:`OperatorTokenRequiredError` subclass;
     * ``target.secret_ref`` is unset — the target is unconfigured;
     * the KV-v2 payload is missing a requested field — a misconfigured
       Vault secret.
@@ -209,6 +211,19 @@ class VaultCredentialsReadError(CredentialsReadError):
     (#2642) so a caller that means "the credential could not be read" catches
     the base and still sees a GSM-backend failure, while everything that
     already catches this class keeps working unchanged.
+    """
+
+
+class OperatorTokenRequiredError(VaultCredentialsReadError):
+    """The Vault read was refused because the call has no person's token.
+
+    Raised by :meth:`VaultCredentialBackend.load_secret_data` before any
+    network round-trip when ``operator.raw_jwt`` is empty: a
+    system-initiated call (the topology scheduler, a runbook verify
+    dispatch, a legacy ``execute()`` shim) cannot read a target's
+    credentials from Vault. Callers that treat that refusal as an
+    expected outcome (#4952) catch this class; every other read-phase
+    failure stays a plain :class:`VaultCredentialsReadError`.
     """
 
 
@@ -402,7 +417,7 @@ class VaultCredentialBackend:
         # operator's JWT, so fail closed before any network round-trip
         # rather than reaching for a backplane identity.
         if not operator.raw_jwt:
-            raise VaultCredentialsReadError(
+            raise OperatorTokenRequiredError(
                 "operator-context credential read requires an authenticated operator; "
                 f"target={target_name!r} has no operator JWT (system-initiated calls "
                 "cannot read per-target vendor credentials)"

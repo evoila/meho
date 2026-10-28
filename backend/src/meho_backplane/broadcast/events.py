@@ -230,6 +230,10 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         "vault.kv.put",
         "vault.kv.patch",
         "k8s.secret.create",
+        # The values of an existing Secret ride in the same params shape as
+        # k8s.secret.create (inline maps or store refs), so the same pin
+        # keeps them off the approval row and the broadcast.
+        "k8s.secret.update",
         "k8s.job.create",
         # G3.13-T4 #1406 — Keycloak user-credential write ops. Both source
         # the password from Vault (it is never an inline param), so the
@@ -584,7 +588,11 @@ _WRITE_OPS: Final[frozenset[str]] = frozenset(
 #: the ``vmware.composite.performance.summary`` metrics composite from
 #: ``other`` to ``read`` — the correct class for a non-mutating read;
 #: neither class is sensitive (:data:`~meho_backplane.broadcast.overrides._SENSITIVE_OP_CLASSES`),
-#: so the broadcast detail level is unchanged for it.
+#: so the broadcast detail level is unchanged for it. ``.ha_status`` and
+#: ``.autopilot_state`` are the Vault cluster-wide node reads
+#: (``vault.sys.ha_status`` / ``vault.sys.raft.autopilot_state``): like
+#: ``.health`` / ``.seal_status`` they carry no secret content and no
+#: params, so they broadcast as ``read``.
 _READ_SUFFIXES: Final[tuple[str, ...]] = (
     ".list",
     ".info",
@@ -593,6 +601,8 @@ _READ_SUFFIXES: Final[tuple[str, ...]] = (
     ".ls",
     ".health",
     ".seal_status",
+    ".ha_status",
+    ".autopilot_state",
     ".versions",
     ".vulnerabilities",
     ".summary",

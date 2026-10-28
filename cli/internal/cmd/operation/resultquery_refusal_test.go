@@ -41,7 +41,7 @@ func TestPostResultQueryObjectDetail422IsReadable(t *testing.T) {
 	}
 
 	_, err = postResultQuery(context.Background(), realClient{gen},
-		makeHandleUUID(t, "11111111-1111-1111-1111-111111111111"), 0, 50, nil)
+		makeHandleUUID(t, "11111111-1111-1111-1111-111111111111"), 0, nil, nil)
 
 	var apiErr *apiResponseError
 	if !errors.As(err, &apiErr) {

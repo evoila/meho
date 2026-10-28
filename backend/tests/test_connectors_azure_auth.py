@@ -333,8 +333,12 @@ async def test_aclose_forgets_cached_secrets_and_tokens(clock: _Clock) -> None:
 
 @pytest.mark.asyncio
 async def test_no_token_or_secret_reaches_a_log_line(
-    clock: _Clock, caplog: pytest.LogCaptureFixture
+    clock: _Clock, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # structlog caches a logger on its first use, with the processors of that
+    # moment. When an earlier test used it and then changed the structlog
+    # setup, capture_logs below would miss it. A fresh logger is always seen.
+    monkeypatch.setattr(azure_connector, "_log", structlog.get_logger(azure_connector.__name__))
     connector = AzureConnector(credentials_loader=CountingLoader())
     target = AzureTargetStub()
     refusal = {"error": "invalid_client", "error_codes": [7000215]}

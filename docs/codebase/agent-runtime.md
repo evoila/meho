@@ -308,7 +308,10 @@ pieces make that work:
 - `meho_connector_list` follows the spec's `connectors` allow-list. When the
   list is set, `_make_meta_tool` keeps only the rows whose `connector_id` is
   in it, so the agent is shown only connectors it may call. With no list, all
-  rows come back.
+  rows come back. The hosted handler is `list_connector_rows`, which returns
+  the rows before the JSONFlux step; `_make_meta_tool` filters first and then
+  calls `reduce_connector_list`. So a long list comes back as a result handle,
+  as on MCP, and the handle holds only allowed rows (#4121).
 
 Both are in the default `{}` surface. The usual flow is: `meho_connector_list`
 → `list_operation_groups` / `search_operations` → `call_operation`.

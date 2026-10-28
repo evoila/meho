@@ -73,8 +73,22 @@ methods that `AzureConnector` takes over.
 - `_model.py` holds what every family imports: `AzureTypedOp`, `NO_PARAMS`
   and `TEXT_OR_NULL`.
 - `typed_ops.py` and `connector.py` collect the families: an import and one
-  line per list for each family, in alphabetical order.
-- `_paths.py` keeps the paths, in one marked section per family.
+  line per list for each family.
+- `_paths.py` keeps the paths, in one marked section per family. It has no
+  `__all__`, because every family would add its names at the same place.
+
+Every place that collects the families has one fixed comment line per family,
+`# <family> (Task #<n>)`, in alphabetical order. A family adds its lines
+directly under its own comment and leaves the comment as it is. Git merges two
+changes without a conflict only when at least one unchanged line lies between
+them, so two family branches then merge in any order. In the two import parts
+an empty line follows each family comment, because Ruff wants an empty line
+between two imports there; leave it as it is. The same holds for the
+spec path check: its `_DECLARED` table has the same comment lines, and its list
+of checked paths has the same lines as strings (`"# <family> (Task #<n>)"`),
+because the test reads them to check that each block is sorted. The end of
+this page has one section per family: a family replaces the line "Not built
+yet" under its heading with its text and keeps the heading.
 
 ## Target shape
 
@@ -542,6 +556,427 @@ as MEHO's system identity, which cannot read the secret, so it reports
   <https://learn.microsoft.com/en-us/azure/azure-government/compare-azure-government-global-azure>
 - Related pages: `connectors-keycloak.md` (the same client credentials request),
   `connectors-shared-vault-creds.md`, `error-message-shape.md`.
+
+## aks
+
+The `aks` family reads Azure Kubernetes Service (AKS): clusters, their node
+pools, their upgrade options and the Kubernetes versions AKS offers per
+region. All four operations are in the group `aks`, all are `safe`, and none
+needs approval. Nothing changes in Azure. These reads show the Azure side of
+a cluster. MEHO's Kubernetes connector reads inside a cluster, through the
+cluster's own API, with a target of its own.
+
+Files: `aks.py` (group text, guidance for the AI, operation table, and the
+`AksOps` methods `AzureConnector` inherits), `aks_schemas.py` (parameter and
+response schemas), `aks_rows.py` (how Azure's answers become rows, and the
+parameter checks) and `aks_reads.py` (the calls).
+
+### Operations
+
+| Operation | Azure call | Parameters |
+|---|---|---|
+| `azure.aks.cluster.list` | `GET /subscriptions/{id}/providers/Microsoft.ContainerService/managedClusters` | none |
+| `azure.aks.cluster.show` | `GET .../resourceGroups/{rg}/providers/Microsoft.ContainerService/managedClusters/{name}`, then `GET .../managedClusters/{name}/upgradeProfiles/default` | `resource_group`, `name` |
+| `azure.aks.nodepool.list` | `GET .../managedClusters/{cluster}/agentPools` | `resource_group`, `cluster` |
+| `azure.aks.version.list` | `GET /subscriptions/{id}/providers/Microsoft.ContainerService/locations/{location}/kubernetesVersions` | `location` |
+
+Every call uses api-version `2026-08-01` (`AKS_API_VERSION`), the version of
+the pinned spec file. Reader on the subscription allows every read here.
+
+### No cluster credentials
+
+A kubeconfig is a login to the cluster, so it is a secret. MEHO never calls
+the Azure actions that return one: `listClusterUserCredential`,
+`listClusterAdminCredential`, `listClusterMonitoringUserCredential`, and the
+`listCredential` actions of access profiles and managed namespaces. No
+operation returns a kubeconfig, a token or a certificate.
+
+- `test_no_azure_path_ends_in_a_cluster_credential_action` fails when any
+  `*_PATH` constant in `_paths.py` ends in one of these actions.
+- `test_the_aks_paths_hold_no_credential_kubeconfig_or_command_path` fails
+  when an AKS path names a credential, an access profile, a kubeconfig or a
+  run command.
+- The rows copy only the fields named below. A cluster answer can also hold
+  the service principal's secret, the Windows admin password and the old
+  Microsoft Entra ID server app secret (Azure marks them as secrets and
+  does not return them in reads), SSH public keys, add-on settings, node
+  labels and taints. None of them is copied. A test feeds made-up values
+  for all of them through the real dispatcher and checks that none reaches
+  the result.
+
+### What each operation returns
+
+The list answers have the rows under `value`, their number in `count`, and
+the paging fields of `PagedRows.as_dict()` (`truncated`, `omission`,
+`omission_kind`, `pages_read`).
+
+- **Clusters**: `name`, `id`, `resource_group`, `location`,
+  `kubernetes_version` (asked for; may be only `major.minor`),
+  `current_kubernetes_version` (the version that runs), `provisioning_state`,
+  `power_state` (`Running` or `Stopped`), `sku_tier`, `support_plan`,
+  `node_resource_group`, `network_plugin`, `network_plugin_mode`,
+  `network_policy`, `network_dataplane`, `outbound_type`, `private_cluster`
+  (true only when `apiServerAccessProfile.enablePrivateCluster` is true),
+  `identity_type`, `auto_upgrade_channel`, `node_os_upgrade_channel`,
+  `node_pools` (the pool names), `node_count` (the sum of the pools' node
+  counts) and `addons`.
+- `identity_type` is `SystemAssigned` or `UserAssigned` when Azure reports
+  that managed identity in `identity.type`. It is `ServicePrincipal` when the
+  cluster has no managed identity and `servicePrincipalProfile.clientId`
+  names an application: then the cluster logs in to Azure with a service
+  principal and a secret. A managed identity cluster has `msi` in that
+  field, which does not count. Otherwise it is null, also when Azure writes
+  the text `None`.
+- `addons` lists, sorted, Azure's own name of every `addonProfiles` entry
+  with `enabled: true` (for example `omsagent`, `azurepolicy`,
+  `azureKeyvaultSecretsProvider`, `ingressApplicationGateway`), plus MEHO's
+  name for add-ons and managed features Azure keeps in other settings:
+
+  | Name | Azure setting |
+  |---|---|
+  | `app_routing` | `ingressProfile.webAppRouting.enabled` |
+  | `container_insights` | `azureMonitorProfile.containerInsights.enabled` |
+  | `istio` | `serviceMeshProfile.mode` is `Istio` |
+  | `keda` | `workloadAutoScalerProfile.keda.enabled` |
+  | `managed_prometheus` | `azureMonitorProfile.metrics.enabled` |
+  | `pod_identity` | `podIdentityProfile.enabled` (Microsoft's replacement is workload identity) |
+  | `workload_identity` | `securityProfile.workloadIdentity.enabled` |
+
+  Only a real `true` counts (a `1` does not). The add-on settings are never
+  copied.
+- **One cluster** (`azure.aks.cluster.show`): the cluster fields above, plus
+  `fqdn` and `private_fqdn` (the API server host names, for example to match
+  a Kubernetes target in MEHO), `pod_cidrs` and `service_cidrs` (from
+  `podCidrs` and `serviceCidrs`, or the single `podCidr` and `serviceCidr`),
+  and `upgrades`: `control_plane` and one entry per node pool (`name`,
+  `os_type`), each with `kubernetes_version`, `upgrades` (released versions)
+  and `preview_upgrades` (versions Azure marks `isPreview`). Both lists are
+  sorted by version number, oldest first. A missing cluster is `not_found`,
+  and then the upgrade profile is not read.
+- **Node pools**: `name`, `mode` (`System`, `User` or `Gateway`), `vm_size`,
+  `count`, `autoscaling`, `min_count`, `max_count`, `os_type`, `os_sku`,
+  `orchestrator_version`, `current_orchestrator_version`,
+  `node_image_version`, `power_state`, `provisioning_state`,
+  `availability_zones`, `max_pods`, `priority` (`Regular` or `Spot`) and
+  `pool_type`, plus `cluster` and `resource_group` next to the rows.
+- **Versions**: one row per Kubernetes minor version: `version`,
+  `is_default`, `is_preview`, `support_plans` (`KubernetesOfficial`, and
+  `AKSLongTermSupport` when long-term support is offered) and
+  `patch_versions`, plus `location` and `default_version`. Azure answers
+  with `values` (not `value`) and no next page, so this read is one GET
+  without paging fields. Rows and patch versions are sorted by version
+  number, so `1.29.10` comes after `1.29.9`. A cluster version that is in no
+  row's `patch_versions` is no longer offered in the region, and its support
+  ends after a short grace period. A minor version in no row is out of
+  regular support. A row whose `support_plans` holds only
+  `AKSLongTermSupport` is supported only for clusters on the long-term
+  support plan (`support_plan` `AKSLongTermSupport`).
+
+### Parameter checks
+
+`resource_group` (letters and digits of any script, `_`, `-`, `.`, `(` and
+`)`, not only dots, at most 90 characters), the cluster `name` or `cluster`
+(Azure's own pattern: 1 to 63 letters, digits, `-` and `_`, starting and
+ending with a letter or a digit) and `location` (letters and digits only)
+go into a path. So no slash, `?`, `#`, `%`, space or `..` can reach a
+request.
+
+The patterns are in the parameter schemas, so the dispatcher refuses a bad
+value with `invalid_params` before the operation runs. The operation checks
+each value again with a full match: a `$` in a JSON Schema pattern lets a
+line break at the end through, and the check in the operation does not. A
+value it refuses fails with `AksParameterError` (the dispatcher returns
+`connector_error` with `remediation`). Both checks run before the login and
+before any request, and no message repeats the value.
+
+### Result handles
+
+A list over 50 rows or 4 KB becomes a link to the stored result. AKS allows
+up to 100 node pools per cluster, so the node pool list can pass 50 rows.
+The plain values next to the rows (`count`, the paging fields, `cluster`,
+`resource_group`, `location`, `default_version`) stay inline under the
+reducer's default rule. No list carries an object next to its rows, so no
+operation needs a `result_objects` hint. `test_connectors_azure_aks.py`
+proves this for all three lists with more than 50 rows, with the real
+reducer and `result_query`.
+
+`azure.aks.cluster.show` is one object, not a list. Up to 4 KB it comes back
+whole. A bigger answer (many node pools) is kept whole as a stored document:
+the inline summary holds the plain values and the outline of the fields,
+and `result_query` with `path` `/upgrades` reads the upgrade options. A test
+proves this too.
+
+### Untrusted text
+
+Cluster, pool and resource group names, versions and add-on names are text
+from Azure. They are copied as data and never used to build a request: the
+paths take only the caller's checked parameters. The guidance of every
+operation tells the AI to treat this text as data, never as instructions.
+
+### Spec path check
+
+The five paths are `*_PATH` constants in the `aks` section of `_paths.py`,
+each with one line in the check's `_DECLARED` table, and all five are in the
+pinned file
+`specification/containerservice/resource-manager/Microsoft.ContainerService/aks/stable/2026-08-01/managedClusters.json`.
+
+### Proven live
+
+Nothing yet: the lab login does not exist. Every operation is proven with
+mocked HTTP shaped like Microsoft's documented examples for api-version
+2026-08-01. The lab proof lists the lab cluster with its real version and
+node pools (compared with the portal), shows its upgrade options, checks
+that the version list of its region holds its version, and checks that no
+result holds a kubeconfig, a token or a certificate.
+
+### Known issues
+
+- `msi` in `servicePrincipalProfile.clientId` of a managed identity cluster
+  is what Azure returns in practice; Microsoft's documentation does not name
+  the value. The lab proof checks `identity_type` against the portal.
+- `kubernetes_version` holds what was asked for, which may be only
+  `major.minor`. Compare `current_kubernetes_version` with the version list.
+- The node pool list follows `nextLink` with the shared paging helper; AKS
+  usually answers in one page.
+
+### References
+
+- Managed Clusters - List: <https://learn.microsoft.com/en-us/rest/api/aks/managed-clusters/list>
+- Managed Clusters - Get: <https://learn.microsoft.com/en-us/rest/api/aks/managed-clusters/get>
+- Managed Clusters - Get Upgrade Profile: <https://learn.microsoft.com/en-us/rest/api/aks/managed-clusters/get-upgrade-profile>
+- Agent Pools - List: <https://learn.microsoft.com/en-us/rest/api/aks/agent-pools/list>
+- Managed Clusters - List Kubernetes Versions: <https://learn.microsoft.com/en-us/rest/api/aks/managed-clusters/list-kubernetes-versions>
+- AKS add-ons: <https://learn.microsoft.com/en-us/azure/aks/integrations>
+- Supported Kubernetes versions and long-term support: <https://learn.microsoft.com/en-us/azure/aks/supported-kubernetes-versions>
+- Managed identities in AKS: <https://learn.microsoft.com/en-us/azure/aks/managed-identity-overview>
+- Reader role: <https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles/general#reader>
+
+## arc
+
+Not built yet (Task #5084).
+
+## automation
+
+Not built yet (Task #5092).
+
+## avs
+
+Not built yet (Task #5091).
+
+## compute
+
+Not built yet (Task #5083).
+
+## cost
+
+Five read operations in the group `cost`. All are `safe` and need no
+approval. The cost query and the forecast are POST calls that only read.
+
+Modules: `cost.py` (group text, guidance for the AI, the operation table and
+the `CostOps` mixin that `AzureConnector` inherits), `cost_schemas.py`
+(parameter and response schemas), `cost_reads.py` (query, forecast and the
+shared helpers), `cost_lists.py` (budgets and Advisor) and `cost_prices.py`
+(the public price list).
+
+| Operation | Call | API version |
+|---|---|---|
+| `azure.cost.query` | `POST /{scope}/providers/Microsoft.CostManagement/query` | `2026-06-01` |
+| `azure.cost.forecast` | `POST /{scope}/providers/Microsoft.CostManagement/forecast` | `2026-06-01` |
+| `azure.cost.budget.list` | `GET /{scope}/providers/Microsoft.Consumption/budgets` | `2026-06-01` |
+| `azure.advisor.recommendation.list` | `GET /subscriptions/{id}/providers/Microsoft.Advisor/recommendations` | `2026-10-01` |
+| `azure.price.list` | `GET https://prices.azure.com/api/retail/prices` (public, no login) | `2023-01-01-preview` |
+
+`{scope}` is the target's subscription, or one of its resource groups when
+the call names `resource_group`. A resource group name is checked (1 to 90
+letters, digits, `_ - . ( )`, not ending with a period) before it goes into
+a path.
+
+### Parameters that matter
+
+- `azure.cost.query`:
+  - `type`: `actual` (the default, cost as billed) or `amortized`
+    (reservation and savings plan purchases spread over their term).
+  - `period`: `month_to_date` (the default) or `last_month`, or your own
+    days with `from` and `to` (`YYYY-MM-DD`). MEHO always sends dates to
+    Azure (`timeframe: Custom`, days in UTC), so the result shows exactly
+    which days it covers.
+  - `granularity`: `total` (the default; Azure's `None`) or `daily`.
+  - `group_by`: up to two of `resource_group`, `service`, `resource_type`,
+    `location`, `meter`, or `tag:<key>` for a tag key.
+- `azure.cost.forecast`: `type` and `resource_group`. Always this calendar
+  month (UTC), per day, with the cost so far included
+  (`includeActualCost: true`).
+- `azure.cost.budget.list`: `resource_group`. The subscription's list can also
+  hold budgets of its resource groups; each budget says which (`resource_group`).
+- `azure.advisor.recommendation.list`: `category` (Azure filters it with
+  `$filter`) and `impact` (MEHO filters it).
+- `azure.price.list`: at least one of `service_name`, `region`, `sku` (the
+  size name Azure uses, for example `Standard_D4s_v5`), `price_type`,
+  `product_name`, `meter_name`, and `currency` (default `EUR`). From API
+  version `2023-01-01-preview` on, values must match exactly, in upper and
+  lower case; MEHO writes `region` in lower case, as the price list does.
+
+### Results
+
+Each list keeps its metadata in objects next to the rows, and each operation
+names them in its `result_objects` hint. So when a list has more than 50 rows
+(or 4 KB) and goes to a stored result, these objects stay inline next to the
+link:
+
+| Operation | Rows | Kept next to a stored result |
+|---|---|---|
+| `azure.cost.query` | `items` | `totals`, `period`, `scope`, `query`, `omissions` |
+| `azure.cost.forecast` | `items` | `totals`, `period`, `scope`, `query`, `omissions` |
+| `azure.cost.budget.list` | `budgets` | `scope`, `omissions`, and `count` |
+| `azure.advisor.recommendation.list` | `items` | `filters`, `scope`, `omissions`, and `count` |
+| `azure.price.list` | `items` | `lookup`, `omissions` |
+
+- **Cost rows** have `cost`, `currency`, `date` (only per day) and one key
+  per group (`resource_group`, `service`, `resource_type`, `location`,
+  `meter`, `tag_key`, `tag_value`). Azure names its cost column `PreTaxCost`
+  or `Cost`, depending on the agreement type. MEHO reads both, and
+  `query.cost_column` says which one Azure sent. When the rows have a cost
+  but no such column, the call fails: MEHO does not guess.
+- **`totals.cost`** is the sum of the rows, rounded to 2 decimals. It is
+  `null` when the rows have more than one currency. It is not called
+  `total`, because the result reduction writes its own `total` (the number
+  of rows) next to a stored result.
+- **Forecast rows** have `status`: `Actual` (cost already used) or
+  `Forecast` (Azure's estimate). `totals.month_total` is `actual_cost` plus
+  `forecast_cost`.
+- **Budgets** have `name`, `resource_group` (read from the budget's id; `null`
+  for a budget of the whole subscription), `category`, `amount`, `time_grain`,
+  `period: {start, end}`, `current_spend`, `forecast_spend`, `percent_used`
+  and `currency`. `percent_used` is `current_spend / amount * 100`, rounded to
+  2 decimals, and `null` when the amount is 0. The budgets' notification
+  settings are left out, because they hold people's mail addresses.
+- **Advisor items** have `category`, `impact`, `problem`, `solution`,
+  `resource_id`, `status`, `savings_amount`, `annual_savings_amount` and
+  `savings_currency` (from Azure's `extendedProperties`). MEHO leaves out
+  dismissed, postponed and completed recommendations, as the portal does,
+  and `filters.inactive_left_out` says how many. `count` is the number of
+  items.
+- **Prices** have `service_name`, `product_name`, `sku_name`, `arm_sku_name`
+  (the size name Azure uses, which the `sku` filter matches), `meter_id`,
+  `meter_name`, `region`, `location`, `unit`, `retail_price`, `unit_price`,
+  `price_type`, `reservation_term`, `effective_start_date`, `currency`,
+  `tier_minimum_units` and `is_primary_meter_region`. The migration estimate
+  reads these names. `lookup` has `looked_up_at`, the
+  currency, the filter MEHO sent, and `reference_only`: prices in other
+  currencies than USD are converted reference values, not quotes.
+- The Azure sensor recipes read two of these fields by path, so they are
+  contracts: `budgets[*].percent_used` and Advisor's `count`.
+
+Text from Azure (resource group and budget names, Advisor's problem and
+solution, price names) is data. The guidance for the AI says so.
+
+### The public price list never gets a token
+
+The Retail Prices API is not Azure Resource Manager. `cost_prices.py` does
+not use `send` (which adds the target's token). It opens its own short-lived
+HTTP client with no `Authorization` header, follows no redirect, and caps the
+answer size like every connector call. It does not read the target's secret
+at all. MEHO builds the `$filter` text itself from the parameters and doubles
+a single quote inside a value. From Azure's `NextPageLink` it reads only the
+`$skip` number, after checking that the link points at the price list over
+https, and it asks for the next page with its own query. A link to anything
+else fails the call. Each page is recorded in the trace like other vendor
+calls. A test proves that the request to the price list carries no
+`Authorization` header, also after an Azure Resource Manager call put a token
+in the cache.
+
+### Errors that name a billing setting
+
+Cost data can be hidden from a login that has the right role. When Azure
+answers a cost query, forecast or budget read like this, MEHO's error names
+what the customer must switch on:
+
+| Azure answer | MEHO's error names |
+|---|---|
+| 401, also after a new login | "Account owners can view charges" (Enterprise Agreement) and the billing profile's "Azure charges" policy (Microsoft Customer Agreement), and the Cost Management Reader role |
+| `AccountCostDisabled` | "Account owners can view charges" (AO view charges) |
+| `DepartmentCostDisabled` | "Department admins can view charges" (DA view charges) |
+| `IndirectCostDisabled` | the partner must publish its prices |
+| `FailedDependency` (forecast) | about one week of cost data is needed, and only one currency |
+
+The 401 error stays a `connector_auth_failed` error. The other errors keep
+their kind (for example `AzureForbiddenError`) and Azure's code; only the
+message and the remediation are MEHO's. A login that Microsoft Entra ID
+refuses (for example a wrong or expired client secret) keeps its own error:
+there the secret is the problem, not a billing setting. The
+`FailedDependency` text is added only to the forecast.
+
+### Proven live
+
+Nothing yet: the lab login does not exist. The operations are built from
+Microsoft's documented answers and tested with mocked HTTP and the real
+result reduction (`backend/tests/test_connectors_azure_cost.py`). The lab
+proof must still show:
+
+- which cost column (`PreTaxCost` or `Cost`) the lab's agreement type sends
+  (`query.cost_column`);
+- whether Advisor's list includes dismissed or postponed recommendations
+  (MEHO leaves them out either way);
+- whether today's cost comes as an `Actual` or a `Forecast` row of the
+  forecast (MEHO asks without the incomplete cost of today,
+  `includeFreshPartialCost: false`);
+- which HTTP status Azure uses for the cost-visibility errors.
+
+### Known limits
+
+- Azure's cost data arrives 8 to 24 hours late (up to 72 hours for
+  pay-as-you-go), so today's cost is not complete. The costs of a month that
+  has no invoice yet are estimates.
+- Cost Management answers a 429 with its own wait headers
+  (`x-ms-ratelimit-microsoft.costmanagement-*-retry-after`). The shared
+  retry budget reads only `Retry-After`, so it waits its short default
+  back-off instead.
+- The price list is not retried. A 429 fails at once and says how long Azure
+  asked to wait.
+- All five operations read one subscription, the target's.
+
+### References
+
+- Query - Usage (API version 2026-06-01):
+  <https://learn.microsoft.com/en-us/rest/api/cost-management/query/usage>
+- Forecast - Usage (API version 2026-06-01):
+  <https://learn.microsoft.com/en-us/rest/api/cost-management/forecast/usage>
+- Budgets - List (Microsoft.Consumption):
+  <https://learn.microsoft.com/en-us/rest/api/consumption/budgets/list>
+- Recommendations - List (Advisor, API version 2026-10-01):
+  <https://learn.microsoft.com/en-us/rest/api/advisor/recommendations/list>
+- Advisor savings in `extendedProperties`:
+  <https://learn.microsoft.com/en-us/azure/advisor/resource-graph-samples>
+- Azure Retail Prices API:
+  <https://learn.microsoft.com/en-us/rest/api/cost-management/retail-prices/azure-retail-prices>
+- Cost Management error codes:
+  <https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/cost-management-error-codes>
+- How fresh cost data is, and rounding:
+  <https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/understand-cost-mgt-data>
+- Access to cost data (AO view charges, Azure charges):
+  <https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/assign-access-acm-data>
+- The evidenced exclusion of the price list from the spec path check:
+  `docs/decisions/spec-reconcile-guards-standard.md`.
+
+## inventory
+
+Not built yet (Task #5082).
+
+## migrate
+
+Not built yet (Task #5093).
+
+## monitor
+
+Not built yet (Task #5090).
+
+## network
+
+Not built yet (Task #5085).
+
+## security
+
+Not built yet (Task #5089).
 
 ## storage
 

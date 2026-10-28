@@ -88,7 +88,9 @@ def _build_guard_app() -> FastAPI:
         operator: Operator = _REQUIRE_RUNNER,
     ) -> dict[str, str]:
         async with get_sessionmaker()() as session:
-            row = await assert_runner_scope(operator, runner_name=runner, session=session)
+            row = await assert_runner_scope(
+                operator, runner_name=runner, session=session, wire_version="1"
+            )
         return {"resolved_id": str(row.id), "resolved_name": row.name}
 
     # Gateway-prefixed but guard-less: exercises the cage's *allow* arm.

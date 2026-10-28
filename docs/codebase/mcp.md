@@ -1056,7 +1056,9 @@ dispatcher's `connector_error` maps them to `-32602` with a clean
 message.
 
 `targets.remove` (#4623) is the opposite write and does not follow the
-`caution` dial above. It is `dangerous` with `requires_approval=True`, and
+`caution` dial above. Like `DELETE /api/v1/targets/{name}`, it needs the
+`tenant_admin` role; after approval, the approver's role counts. It is
+`dangerous` with `requires_approval=True`, and
 its name ends in `.remove`, so the rules for deletes apply: a person's call
 waits until a second person approves it, an agent login is refused, a
 service principal waits for a person and cannot get a standing grant for

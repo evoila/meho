@@ -10,6 +10,8 @@
   exist, and a target of another tenant (which is never removed).
 * **Topology check** -- the shared delete service refuses a target that
   ``graph_node`` rows point at unless ``force`` is set.
+* **Role** -- like the REST route, only a ``tenant_admin`` login removes a
+  target; after approval, the approver's role counts.
 * **Policy** -- a person waits for a second person and cannot approve the
   own request; an agent login is refused, also in sandbox mode; a service
   principal waits and cannot get a standing grant (422); in sandbox mode a
@@ -55,6 +57,7 @@ from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations.approval_queue import (
     SelfApprovalForbiddenError,
     approve_request,
+    resume_dispatch_after_approval,
 )
 from meho_backplane.operations.meta_tools import call_operation, preview_operation
 from meho_backplane.settings import get_settings
@@ -112,6 +115,7 @@ def _operator(
     *,
     kind: PrincipalKind = PrincipalKind.USER,
     tenant_id: uuid.UUID = _TENANT_ID,
+    role: TenantRole = TenantRole.TENANT_ADMIN,
 ) -> Operator:
     return Operator(
         sub=sub,
@@ -119,7 +123,7 @@ def _operator(
         email=None,
         raw_jwt="fixture-jwt-not-real",
         tenant_id=tenant_id,
-        tenant_role=TenantRole.TENANT_ADMIN,
+        tenant_role=role,
         principal_kind=kind,
     )
 
@@ -281,6 +285,54 @@ async def test_topology_records_block_the_removal_unless_force() -> None:
 
     forced = await _run_approved(_operator("op-person"), row.id, force=True)
     assert forced.result["status"] == "removed"
+    assert await _is_removed(row.id) is True
+
+
+# ---------------------------------------------------------------------------
+# Role: tenant_admin only, like DELETE /api/v1/targets/{name}
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("role", [TenantRole.OPERATOR, TenantRole.READ_ONLY])
+async def test_a_caller_without_tenant_admin_is_refused(role: TenantRole) -> None:
+    row = await _seed(f"role-{role.value}")
+    result = await _run_approved(_operator("op-person", role=role), row.id)
+    assert result.status == "error", result
+    assert "tenant_admin" in str(result.extras.get("exception_message"))
+    assert await _is_removed(row.id) is False
+    assert await _audit_rows()
+
+
+async def _ask_and_approve(asker: Operator, approver: Operator, target_id: uuid.UUID) -> Any:
+    call = await call_operation(asker, _args(target_id))
+    assert call["status"] == "awaiting_approval", call
+    request_id = uuid.UUID(str(call["extras"]["approval_request_id"]))
+    async with get_sessionmaker()() as session:
+        request = await approve_request(session, request_id, operator=approver)
+        await session.commit()
+    return await resume_dispatch_after_approval(operator=approver, request=request)
+
+
+@pytest.mark.parametrize("asker_role", [TenantRole.OPERATOR, TenantRole.READ_ONLY])
+async def test_the_target_stays_when_an_operator_approves(asker_role: TenantRole) -> None:
+    row = await _seed(f"asked-by-{asker_role.value}")
+    asker = _operator("op-asker", role=asker_role)
+    approver = _operator("op-approver", role=TenantRole.OPERATOR)
+
+    result = await _ask_and_approve(asker, approver, row.id)
+    assert result.status == "error", result
+    assert "tenant_admin" in str(result.extras.get("exception_message"))
+    assert await _is_removed(row.id) is False
+
+
+async def test_the_target_goes_when_a_tenant_admin_approves() -> None:
+    row = await _seed("admin-approves")
+    asker = _operator("op-asker", role=TenantRole.OPERATOR)
+    approver = _operator("op-approver")
+
+    result = await _ask_and_approve(asker, approver, row.id)
+    assert result.status == "ok", result
+    assert result.result["status"] == "removed"
     assert await _is_removed(row.id) is True
 
 

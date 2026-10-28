@@ -85,6 +85,7 @@ from meho_backplane.api.v1.targets import (
     create_target,
     soft_delete_target,
 )
+from meho_backplane.auth.operator import TenantRole
 from meho_backplane.connectors.targets.schemas import (
     TARGETS_REGISTER_PARAMETER_SCHEMA,
     TARGETS_REGISTER_RESPONSE_SCHEMA,
@@ -284,6 +285,11 @@ async def register_targets_registry_operations(
 # the row is soft-deleted (``deleted_at`` is stamped) and stops resolving.
 # The system itself and the Vault secret the target points to stay.
 #
+# Role: like the REST route, only a ``tenant_admin`` login can remove a
+# target. The handler checks the login it runs under. A call that runs at
+# once runs under the caller; a call that runs after approval runs under the
+# person who approved it (``resume_dispatch_after_approval``).
+#
 # Approval posture: ``safety_level="dangerous"`` + ``requires_approval=True``.
 # A person's call waits for a second person; an agent login is refused (the
 # ``dangerous`` default for agents); a service principal waits, and the
@@ -301,7 +307,8 @@ _REMOVE_DESCRIPTION = (
     "Remove one target of your tenant by its UUID. Runs the same delete "
     "service as REST `DELETE /api/v1/targets/{name}`. Removes MEHO's record "
     "only: the system and its Vault secret stay. A missing target gives "
-    "`unchanged`. A second person must approve every call."
+    "`unchanged`. Needs the `tenant_admin` role. A second person must "
+    "approve every call."
 )
 
 _REMOVE_LLM_INSTRUCTIONS: dict[str, Any] = {
@@ -311,6 +318,7 @@ _REMOVE_LLM_INSTRUCTIONS: dict[str, Any] = {
         "list_targets."
     ),
     "preconditions": (
+        "Needs the `tenant_admin` role; any other role is refused. "
         "Get the target's `id` from list_targets; do not pass a name. "
         "Preview the call first: the preview shows the target, its product "
         "and how many topology records point at it. When that count is not "
@@ -322,7 +330,9 @@ _REMOVE_LLM_INSTRUCTIONS: dict[str, Any] = {
     },
     "output_shape": "{'status': 'removed' | 'unchanged', 'target_id', 'name'}",
     "next_step": (
-        "The call waits until a second person approves it. After it runs, "
+        "The call waits until a second person approves it. It then runs "
+        "under that person's login, so that person needs `tenant_admin`. "
+        "After it runs, "
         "list_targets no longer shows the target. `unchanged` means there "
         "was nothing to remove in your tenant."
     ),
@@ -347,7 +357,14 @@ async def targets_remove(operator: Operator, target: Any, params: dict[str, Any]
     ``unchanged`` instead of an error, so a retry is safe. Service
     exceptions are re-raised as :class:`ValueError`, like
     :func:`targets_register`.
+
+    The REST route asks for ``tenant_admin``; so does this op. Any other
+    role is refused before the target is looked up.
     """
+    if operator.tenant_role is not TenantRole.TENANT_ADMIN:
+        raise ValueError(
+            f"targets.remove needs the tenant_admin role; your role is {operator.tenant_role}"
+        )
     target_id = _parse_target_id(params)
     force = bool(params.get("force", False))
     sessionmaker = get_sessionmaker()

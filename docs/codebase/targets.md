@@ -125,6 +125,10 @@ params={"target_id": "<target-uuid>"})`. It is the opposite of
   `unchanged`.
 - **What stays.** Only MEHO's record goes. The system, its Vault secret and
   its checks stay.
+- **Role.** Only a login with the `tenant_admin` role can remove a target,
+  the same rule as the REST route. Any other role gets an error and the
+  target stays. A call that waits for approval runs, once approved, under
+  the login of the person who approved it, so that person's role counts.
 - **Approval.** `dangerous` with `requires_approval=True`; the name ends in
   `.remove`, so the delete rules apply. A second person must approve every
   call. See [`mcp.md`](mcp.md#admin-registry-writes-route-through-the-dispatcher).

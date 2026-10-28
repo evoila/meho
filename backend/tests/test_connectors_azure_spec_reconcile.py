@@ -77,6 +77,11 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     "AKS_KUBERNETES_VERSIONS_PATH": (("GET",), "AKS_API_VERSION"),
     # arc (Task #5084)
     # automation (Task #5092)
+    "AUTOMATION_ACCOUNTS_PATH": (("GET",), "AUTOMATION_API_VERSION"),
+    "AUTOMATION_RUNBOOKS_PATH": (("GET",), "AUTOMATION_API_VERSION"),
+    "AUTOMATION_JOBS_PATH": (("GET",), "AUTOMATION_API_VERSION"),
+    "AUTOMATION_SCHEDULES_PATH": (("GET",), "AUTOMATION_API_VERSION"),
+    "AUTOMATION_JOB_SCHEDULES_PATH": (("GET",), "AUTOMATION_API_VERSION"),
     # avs (Task #5091)
     # compute (Task #5083)
     "VIRTUAL_MACHINES_PATH": (("GET",), "COMPUTE_API_VERSION"),
@@ -211,6 +216,11 @@ def test_the_checked_paths_are_pinned() -> None:
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.containerservice/managedclusters/{}@2026-08-01",
         "# arc (Task #5084)",
         "# automation (Task #5092)",
+        "GET:/subscriptions/{}/providers/microsoft.automation/automationaccounts@2024-10-23",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.automation/automationaccounts/{}/jobs@2024-10-23",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.automation/automationaccounts/{}/jobschedules@2024-10-23",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.automation/automationaccounts/{}/runbooks@2024-10-23",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.automation/automationaccounts/{}/schedules@2024-10-23",
         "# avs (Task #5091)",
         "# compute (Task #5083)",
         "GET:/subscriptions/{}/providers/microsoft.compute/disks@2026-03-02",

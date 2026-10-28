@@ -83,6 +83,7 @@ from meho_backplane.connectors.azure.aks import AksOps
 # arc (Task #5084)
 
 # automation (Task #5092)
+from meho_backplane.connectors.azure.automation import AutomationOps
 
 # avs (Task #5091)
 
@@ -162,6 +163,7 @@ class AzureConnector(
     AksOps,
     # arc (Task #5084)
     # automation (Task #5092)
+    AutomationOps,
     # avs (Task #5091)
     # compute (Task #5083)
     ComputeOps,

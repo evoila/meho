@@ -44,6 +44,7 @@ from meho_backplane.connectors.azure import aks
 # arc (Task #5084)
 
 # automation (Task #5092)
+from meho_backplane.connectors.azure import automation
 
 # avs (Task #5091)
 
@@ -364,6 +365,7 @@ AZURE_TYPED_OPS: tuple[AzureTypedOp, ...] = (
     *aks.OPS,
     # arc (Task #5084)
     # automation (Task #5092)
+    *automation.OPS,
     # avs (Task #5091)
     # compute (Task #5083)
     *compute.OPS,
@@ -388,6 +390,7 @@ AZURE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     **aks.WHEN_TO_USE,
     # arc (Task #5084)
     # automation (Task #5092)
+    **automation.WHEN_TO_USE,
     # avs (Task #5091)
     # compute (Task #5083)
     **compute.WHEN_TO_USE,

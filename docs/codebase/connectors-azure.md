@@ -757,7 +757,175 @@ Not built yet (Task #5084).
 
 ## automation
 
-Not built yet (Task #5092).
+The `automation` group reads Azure Automation: the runbooks a team runs for
+maintenance, their jobs and their schedules. Every operation is a read
+(`safe`, no approval) and changes nothing in Azure. Every call goes to
+`Microsoft.Automation` with API version `2024-10-23`.
+
+Files: `automation.py` (group text, guidance for the AI, operation table, and
+`AutomationOps`, a class whose methods `AzureConnector` takes over as one of
+its base classes), `automation_reads.py` (name checks, row shapes and the
+operation bodies), `automation_schemas.py` (name rules, parameter and
+response schemas), `automation_trace.py` (what the trace keeps of an
+answer). The paths are in the `automation` section of `_paths.py`.
+
+### Operations
+
+| Operation | Parameters | Reads |
+|---|---|---|
+| `azure.automation.account.list` | none | `GET /subscriptions/{s}/providers/Microsoft.Automation/automationAccounts` |
+| `azure.automation.runbook.list` | `resource_group`, `account` | `.../automationAccounts/{account}/runbooks` |
+| `azure.automation.job.list` | `resource_group`, `account`, optional `days` (1 to 30, default 7) and `status` | `.../automationAccounts/{account}/jobs`, with a `$filter` |
+| `azure.automation.schedule.list` | `resource_group`, `account` | `.../automationAccounts/{account}/schedules`, then `.../jobSchedules` |
+
+`account` is the Automation account name and `resource_group` its resource
+group, both from `azure.automation.account.list` (MEHO reads the resource
+group from the account's resource ID). Every list follows `nextLink` with
+`list_all_pages` and its limits (see Paging above).
+
+| Operation | Row fields |
+|---|---|
+| `azure.automation.account.list` | `name`, `id`, `resource_group`, `location`, `state` (`Ok`, `Unavailable`, `Suspended`), `sku` (`Free`, `Basic`), `creation_time`, `last_modified_time` |
+| `azure.automation.runbook.list` | `name`, `runbook_type`, `state` (`New`, `Edit`, `Published`), `description`, `creation_time`, `last_modified_time`, `last_modified_by` |
+| `azure.automation.job.list` | `name`, `job_id`, `runbook`, `status`, `creation_time`, `start_time`, `end_time`, `started_by`, `run_on` |
+| `azure.automation.schedule.list` | `name`, `enabled`, `frequency`, `interval`, `next_run`, `start_time`, `expiry_time`, `time_zone`, `week_days`, `month_days`, `monthly_occurrences`, `description`, `runbooks` |
+
+### What is never read
+
+Runbook code, job output and streams, credentials and variables can hold
+secrets. No operation reads them:
+
+- No path in `_paths.py` has a fixed part that ends in `content`, `output`,
+  `streams`, `credentials` or `variables` (so `runbookContent` is out too).
+  `test_connectors_azure_automation.py` fails when such a path is added, in
+  any family.
+- The rows copy only the fields above. Azure's runbook answer also holds
+  content links (`publishContentLink`, `draftContentLink`) and the default
+  values of runbook parameters; a job schedule holds the `parameters` the
+  runbook gets; an account holds `automationHybridServiceUrl`. None of them
+  is copied. The tests feed such values in and check that they never reach
+  the result.
+- Azure's job list has no error text or output (`exception` and
+  `statusDetails` are only in the answer for one job), so
+  `azure.automation.job.list` has none either.
+- The trace (the flight recorder's record of each call) leaves these fields
+  out too. Its shared filter finds secrets by their shape only, and a
+  parameter value or a signed link can have any shape. So every Automation
+  list is read through `TraceMaskingCaller` (`automation_trace.py`): the
+  trace gets Azure's answer with `parameters`, `publishContentLink` and
+  `draft` in each row replaced by a fixed text. A test switches the recorder
+  on and checks the spans.
+
+Names, descriptions, `last_modified_by` and `started_by` are text from Azure.
+MEHO copies them as data and never puts them into a path or a filter. The
+guidance tells the AI to treat them as data, never as instructions, and the
+dispatcher's secret filter runs on every result.
+
+### Jobs: the time window and the status
+
+Azure removes a job 30 days after its last change, so `days` is at most 30
+(7 by default). MEHO sends Azure a filter in the form that Microsoft's own
+Az.Automation PowerShell module sends (`Get-AzAutomationJob -StartTime
+-Status`):
+
+```text
+properties/startTime ge 2026-10-20T09:30:15.0000000Z and properties/status eq 'Failed'
+```
+
+The status part is there only when `status` is given. It must be one of
+Azure's job states: `New`, `Activating`, `Running`, `Completed`, `Failed`,
+`Stopped`, `Blocked`, `Suspended`, `Disconnected`, `Suspending`, `Stopping`,
+`Resuming` or `Removing`. The result carries `window` (`days`, `from`, `to`,
+in UTC) and `status_filter`. A job that has not started yet has no start
+time, so it can be missing from the list.
+
+### Schedules and their runbooks
+
+A schedule does not name its runbooks. The links are job schedules
+(`.../jobSchedules`), so `azure.automation.schedule.list` reads both lists
+and joins them by schedule name (case does not matter). `runbooks` is the
+sorted list of linked runbook names; `[]` means no runbook is linked.
+
+When the job schedules cannot be read (for example after a 403), the
+schedules still come back, with `runbooks: null` (not known), and
+`omissions` names `runbook links` with the reason. A login error stops the
+whole read.
+
+Weekly and monthly details come from Azure's `advancedSchedule`:
+`week_days`, `month_days` and `monthly_occurrences` such as `1 Monday` (the
+first Monday of the month; `-1` is the last).
+
+### Result shape and result handles
+
+Every read returns:
+
+```json
+{"value": [...], "truncated": false,
+ "omissions": {"count": 0, "items": [{"what": "...", "reason": "...", "detail": "..."}]}}
+```
+
+The job list also returns `window` and `status_filter`. `truncated` is
+true when something is missing from the answer: rows, or the runbook links
+of the schedules. `reason` is a paging limit (`page_limit`, `time_limit`,
+`row_limit`) or, for the schedule links, an error (`no_permission`,
+`not_found`, `provider_not_registered`, `throttled`, `read_failed`).
+`detail` is MEHO's own text; Azure's message is never copied into it.
+
+A list over 50 rows or 4 KB comes back as a link to the stored result. The
+reducer keeps scalar values such as `truncated` next to the link, but not
+objects. So each operation's `llm_instructions` carries a `result_objects`
+hint that names `omissions` (and `window` for the job list); the reducer
+keeps their fields inline and stores the whole objects with the rows.
+`test_connectors_azure_automation.py` proves this for each operation with 60
+rows, through the real dispatcher, the real reducer and the real result
+store, and for a paging limit on the job list.
+
+### Names in paths
+
+`resource_group` must match Azure's rule for resource group names. `account`
+must match Azure's rule for Automation account names: 6 to 50 letters,
+digits and `-`, starting with a letter and ending with a letter or a digit.
+The dispatcher checks the parameter schemas first; the bodies check again
+with a full match (a schema `$` also matches before a line end). So no name
+can change the path.
+
+### Roles and provider
+
+Every read needs the Reader role on the account, its resource group or the
+subscription. `Microsoft.Automation` must be registered on the subscription;
+when it is not, the call fails with `AzureProviderNotRegisteredError`, and
+MEHO never registers it.
+
+### Not in this group yet
+
+Starting a job, publishing a runbook and changing a schedule are writes for
+later Tasks. They change the customer's side, so they will be `caution` and
+need approval.
+
+### Proven live
+
+Nothing yet. The lab login does not exist yet, so every read is proven with
+mocked HTTP only, with answers shaped like the examples in Azure's pinned
+API description file. Open points for the lab proof:
+
+- that Azure accepts the job filter as MEHO sends it (the query string
+  writes a space as `+`);
+- whether a job that has not started yet shows up in the list;
+- what Azure puts into `started_by` for a job started by a schedule.
+
+### References
+
+- Job - List By Automation Account (2024-10-23):
+  <https://learn.microsoft.com/en-us/rest/api/automation/job/list-by-automation-account?view=rest-automation-2024-10-23>
+- Get-AzAutomationJob (`-StartTime`, `-Status`):
+  <https://learn.microsoft.com/en-us/powershell/module/az.automation/get-azautomationjob>
+- How long Azure Automation keeps data (jobs: 30 days):
+  <https://learn.microsoft.com/en-us/azure/automation/automation-managing-data>
+- Naming rules (`Microsoft.Automation`, resource groups):
+  <https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/resource-name-rules>
+- Pinned API description file:
+  `Microsoft.Automation/Automation/stable/2024-10-23/openapi.json` in
+  <https://github.com/Azure/azure-rest-api-specs>.
 
 ## avs
 

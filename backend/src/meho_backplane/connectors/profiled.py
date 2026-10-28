@@ -115,6 +115,7 @@ from meho_backplane.connectors._shared.profile_auth import (
     SessionToken,
     build_static_headers,
 )
+from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.vault_creds import (
     VaultCredentialsReadError,
     load_basic_credentials,
@@ -161,6 +162,12 @@ def _mounted_path(fallback: LegacyFallback, login_path: str, descriptor_path: st
     mount = fallback.op_mount_for_login_path(login_path)
     normalised = descriptor_path if descriptor_path.startswith("/") else f"/{descriptor_path}"
     return f"{mount}{normalised}"
+
+
+def _token_headers(spec: SessionSchemeSpec, token: str) -> dict[str, str]:
+    """Return the header a session-stateful scheme sends *token* in."""
+    value = f"Bearer {token}" if spec.token_value_kind == "bearer" else token
+    return {spec.token_header: value}
 
 
 class _CachedSessionToken:
@@ -318,8 +325,7 @@ class ProfiledRestConnector(HttpConnector):
 
         spec = self._session_spec(auth.scheme)
         token = await self._session_token(target, operator)
-        value = f"Bearer {token}" if spec.token_value_kind == "bearer" else token
-        return {spec.token_header: value}
+        return _token_headers(spec, token)
 
     # -- op-path mount (modern/legacy endpoint fallback) ----------------
 
@@ -583,7 +589,9 @@ class ProfiledRestConnector(HttpConnector):
             )
         return spec
 
-    async def invalidate_session(self, target: Any) -> None:
+    async def invalidate_session(
+        self, target: Any, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Public duck-typed session-eviction hook for the dispatch path.
 
         The seam the generic-ingested dispatch path calls on an auth-class
@@ -595,9 +603,11 @@ class ProfiledRestConnector(HttpConnector):
         (#1974) without an ``isinstance`` ladder, and without #2067 depending
         on that migration.
         """
-        await self._invalidate_session(target)
+        await self._invalidate_session(target, rejected=rejected)
 
-    async def _invalidate_session(self, target: Any) -> None:
+    async def _invalidate_session(
+        self, target: Any, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Drop the cached session token for *target*.
 
         Called on a downstream session-expiry status so the next
@@ -606,13 +616,24 @@ class ProfiledRestConnector(HttpConnector):
         the lock so a concurrent re-establish doesn't race the invalidation.
         Mirrors the typed connectors' re-login-once recovery seam; the
         dispatcher owns the wire call + the retry.
+
+        With *rejected*, the token is dropped only when that request sent it;
+        a newer token another call just logged in for stays (#5033).
         """
         async with self._session_lock:
             cache_key = credential_cache_key(target)
-            self._session_tokens.pop(cache_key, None)
-            # Drop the recorded login path too so a re-establish re-discovers
-            # the live endpoint from a clean state (#2031).
-            self._session_login_paths.pop(cache_key, None)
+            dropped = drop_rejected_token(
+                self._session_tokens,
+                cache_key,
+                rejected,
+                lambda cached: _token_headers(
+                    self._session_spec(self._require_profile(target).auth.scheme), cached.token
+                ),
+            )
+            if dropped:
+                # Drop the recorded login path too so a re-establish
+                # re-discovers the live endpoint from a clean state (#2031).
+                self._session_login_paths.pop(cache_key, None)
 
     # -- fingerprint / probe (G0.28-T6 #1972) ---------------------------
 

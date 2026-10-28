@@ -78,6 +78,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
+from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.system_operator import is_system_operator
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import (
@@ -283,7 +284,7 @@ class SddcVcf5Connector(HttpConnector):
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code not in _SESSION_EXPIRED_STATUSES:
                 raise
-            await self._evict_session_token(target)
+            await self._evict_session_token(target, rejected=exc.request)
         try:
             return await self._get_json(target, path, operator=operator, params=params)
         except httpx.HTTPStatusError as exc:
@@ -470,7 +471,9 @@ class SddcVcf5Connector(HttpConnector):
     # Dispatch-path session-recovery hooks (#2067 / #2396)
     # ------------------------------------------------------------------
 
-    async def invalidate_session(self, target: SddcTargetLike) -> None:
+    async def invalidate_session(
+        self, target: SddcTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Public duck-typed session-eviction hook for the dispatch path (#2067).
 
         **The load-bearing 401-recovery hook.** On an auth-class status (SDDC
@@ -482,7 +485,7 @@ class SddcVcf5Connector(HttpConnector):
         the next dispatch without a backplane restart — the modern ``sddc_manager`` /
         NSX precedent (a connector *without* this hook wedges on the stale token).
         """
-        await self._evict_session_token(target)
+        await self._evict_session_token(target, rejected=rejected)
 
     async def invalidate_credentials(self, target: SddcTargetLike) -> None:
         """Establish-auth-failure companion hook (#2396).
@@ -494,10 +497,21 @@ class SddcVcf5Connector(HttpConnector):
         """
         await self._evict_session_token(target)
 
-    async def _evict_session_token(self, target: SddcTargetLike) -> None:
-        """Drop the cached session token for *target* under the session lock."""
+    async def _evict_session_token(
+        self, target: SddcTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
+        """Drop the cached session token for *target* under the session lock.
+
+        With *rejected*, the token is dropped only when that request sent it;
+        a newer token another call just logged in for stays (#5033).
+        """
         async with self._session_lock:
-            self._session_tokens.pop(credential_cache_key(target), None)
+            drop_rejected_token(
+                self._session_tokens,
+                credential_cache_key(target),
+                rejected,
+                lambda token: {"Authorization": f"Bearer {token}"},
+            )
 
     async def aclose(self) -> None:
         """Clear cached session tokens, then tear down the httpx pool.

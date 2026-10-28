@@ -120,6 +120,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.license_key import mask_license_key
+from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import (
@@ -351,7 +352,9 @@ class VcfOperationsConnector(VropsLicensingHandlers, HttpConnector):
             )
             return token
 
-    async def invalidate_session(self, target: VcfOperationsTargetLike) -> None:
+    async def invalidate_session(
+        self, target: VcfOperationsTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Public duck-typed session-eviction hook for the dispatch path.
 
         The seam the generic-ingested dispatch path calls on an auth-class
@@ -361,9 +364,11 @@ class VcfOperationsConnector(VropsLicensingHandlers, HttpConnector):
         session state would expose no such hook and never be retried; vROps
         now does, so an idle-expired token re-acquires there.
         """
-        await self._invalidate_session(target)
+        await self._invalidate_session(target, rejected=rejected)
 
-    async def _invalidate_session(self, target: VcfOperationsTargetLike) -> None:
+    async def _invalidate_session(
+        self, target: VcfOperationsTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Drop the cached session token for *target*.
 
         Called by the public :meth:`invalidate_session` dispatch-path hook
@@ -372,9 +377,17 @@ class VcfOperationsConnector(VropsLicensingHandlers, HttpConnector):
         the lock so a concurrent re-acquire doesn't race the invalidation.
         The credentials cache is left intact — a 401 means the *session token*
         expired or was rejected, not that the credentials are wrong.
+
+        With *rejected*, the token is dropped only when that request sent it;
+        a newer token another call just logged in for stays (#5033).
         """
         async with self._session_lock:
-            self._session_tokens.pop(_session_cache_key(target), None)
+            drop_rejected_token(
+                self._session_tokens,
+                _session_cache_key(target),
+                rejected,
+                lambda token: {"Authorization": f"{_OPS_TOKEN_SCHEME} {token}"},
+            )
 
     async def fingerprint(
         self,

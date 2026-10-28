@@ -114,6 +114,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.profile_auth import SESSION_SCHEME_SPECS
+from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import (
     CredentialsCache,
@@ -426,7 +427,9 @@ class VcfLogsConnector(HttpConnector):
             )
             return token
 
-    async def invalidate_session(self, target: VcfLogsTargetLike) -> None:
+    async def invalidate_session(
+        self, target: VcfLogsTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Public duck-typed session-eviction hook for the dispatch path.
 
         The seam the generic-ingested dispatch path calls on an auth-class
@@ -437,7 +440,7 @@ class VcfLogsConnector(HttpConnector):
         so the dispatch-path recovery and the helper's internal retry share
         one eviction implementation.
         """
-        await self._invalidate_session(target)
+        await self._invalidate_session(target, rejected=rejected)
 
     async def invalidate_credentials(self, target: VcfLogsTargetLike) -> None:
         """Public duck-typed credential-eviction hook for the dispatch path (#2396).
@@ -451,7 +454,9 @@ class VcfLogsConnector(HttpConnector):
         """
         await self._credentials.invalidate(target)
 
-    async def _invalidate_session(self, target: VcfLogsTargetLike) -> None:
+    async def _invalidate_session(
+        self, target: VcfLogsTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Drop the cached session token for *target*.
 
         Called by :meth:`_get_json_with_session_retry` on a session-expiry
@@ -462,9 +467,17 @@ class VcfLogsConnector(HttpConnector):
         doesn't race with the invalidation. Credentials cache is left intact
         -- a 440/401 means the *session token* expired or was rejected, not
         that the credentials are wrong.
+
+        With *rejected*, the token is dropped only when that request sent it;
+        a newer token another call just logged in for stays (#5033).
         """
         async with self._session_lock:
-            self._session_tokens.pop(_session_cache_key(target), None)
+            drop_rejected_token(
+                self._session_tokens,
+                _session_cache_key(target),
+                rejected,
+                lambda token: {"Authorization": f"Bearer {token}"},
+            )
 
     async def _get_json_with_session_retry(
         self,
@@ -500,7 +513,7 @@ class VcfLogsConnector(HttpConnector):
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code not in _SESSION_EXPIRED_STATUSES:
                 raise
-            await self._invalidate_session(target)
+            await self._invalidate_session(target, rejected=exc.request)
         try:
             return await self._get_json(target, path, operator=operator, params=params)
         except httpx.HTTPStatusError as exc:

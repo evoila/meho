@@ -1310,7 +1310,7 @@ async def _run_branch_with_error_handling(
     vRLI's ``440``); G0.29-T2 (#2067) then makes that status *recoverable*
     at the dispatch path itself (the delegation lives in
     :func:`_handle_http_status_error`): a session-stateful connector that
-    advertises a duck-typed ``invalidate_session(target)`` hook has its
+    advertises a duck-typed ``invalidate_session(target, *, rejected)`` hook has its
     cached token evicted and the op re-dispatched once, so an expired vCenter
     (401) / vRLI (440) session re-logs-in and recovers without a backplane
     restart. Only when the re-login *also* fails does the missing/invalid/
@@ -1968,7 +1968,7 @@ async def _handle_http_status_error(
     future ``ProfiledRestConnector`` traverse: this is the only place a
     generic-ingested dispatch acts on an auth failure. When the status is
     auth-class **and** the connector advertises a duck-typed
-    ``invalidate_session(target)`` hook, evict the cached session token and
+    ``invalidate_session(target, *, rejected)`` hook, evict the cached session token and
     re-dispatch the *same* ingested request exactly once. A re-login that
     succeeds returns the raw payload up to the caller's success path, which
     runs the redact -> reduce -> audit sequence -- so a recovered call writes
@@ -2003,6 +2003,7 @@ async def _handle_http_status_error(
     if is_auth_failure and callable(invalidate_session):
         recovered = await _retry_after_session_invalidation(
             invalidate_session=invalidate_session,
+            rejected=http_exc.request,
             descriptor=descriptor,
             connector_instance=connector_instance,
             operator=operator,
@@ -2036,7 +2037,8 @@ async def _handle_http_status_error(
 
 async def _retry_after_session_invalidation(
     *,
-    invalidate_session: Callable[[Any], Awaitable[None]],
+    invalidate_session: Callable[..., Awaitable[None]],
+    rejected: httpx.Request,
     descriptor: EndpointDescriptor,
     connector_instance: Connector | None,
     operator: Operator,
@@ -2066,8 +2068,13 @@ async def _retry_after_session_invalidation(
     every other status => its usual shape); any other exception (a
     second-attempt ``ConnectError``, a loader ``RuntimeError`` from the
     re-login itself, ...) flattens to ``connector_error``.
+
+    The hook gets the *rejected* request (#5033). A connector whose token is
+    shared by several targets drops its cached token only when the rejected
+    request sent it: a late ``401`` must not drop the new token another call
+    just logged in for.
     """
-    await invalidate_session(target)
+    await invalidate_session(target, rejected=rejected)
     try:
         raw = await _run_source_kind_branch(
             descriptor=descriptor,

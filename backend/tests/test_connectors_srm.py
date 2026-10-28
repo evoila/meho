@@ -16,7 +16,9 @@ What is covered, with a respx-mocked appliance and no ingested catalog:
   credential and of the other product's target stay as they were;
 * two SRM targets that share one credential share one session: parallel
   calls and a renewal on one target do not end the other target's
-  session; different credentials and different tenants keep their own;
+  session; calls on both targets at once after expiry all work with one
+  renewal, even when ``401`` answers arrive late; different credentials
+  and different tenants keep their own;
 * ``srm.api_file.get`` for both files: status, size, SHA-256, version,
   parts; an unknown file name sends no HTTP request; a 404 and a redirect
   reach the answer; a failed version read still returns the file; a
@@ -487,6 +489,44 @@ async def test_two_targets_with_one_credential_share_one_session_and_one_renewal
     assert appliance.rejected == 1
     sent = {call.request.headers["x-dr-session"] for call in info.calls}
     assert sent == {"srm-session-1", "srm-session-2"}
+
+
+@pytest.mark.asyncio
+async def test_late_401s_after_a_renewal_do_not_end_the_new_shared_session(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """Calls on both targets at once after expiry: every call works, one renewal.
+
+    The appliance waits a little before it checks the session, so many calls
+    send the expired session, and their ``401`` answers arrive after the
+    first renewal. Such a late ``401`` must keep the new session.
+    """
+    await _register_and_resolve(_stub_embedding)
+    first = _Target()
+    second = _Target()
+    appliance = _OneSessionPerUser()
+
+    async def _slow_info(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.02)
+        return appliance.info(request)
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.post(_SESSION).mock(side_effect=appliance.login)
+        mock.get(_INFO).mock(side_effect=_slow_info)
+
+        warm = await asyncio.gather(
+            *(_dispatch("srm.about", {}, target) for target in (first, second))
+        )
+        appliance.expire_all()
+        after = await asyncio.gather(
+            *(_dispatch("srm.about", {}, target) for target in (first, second) * 10)
+        )
+
+    for outcome in (*warm, *after):
+        assert outcome.status == "ok", outcome.error
+    assert appliance.logins == 2
+    # More than one call got a 401, so late 401s did happen.
+    assert appliance.rejected > 1
 
 
 @pytest.mark.asyncio

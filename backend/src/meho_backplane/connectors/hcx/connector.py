@@ -18,8 +18,9 @@ with HTTP Basic (HCX 4.5 removed cookie authentication):
    login host), so two targets that share one credential share one token.
 3. Every later call sends the token in the ``x-hm-authorization`` header.
 4. On ``401`` from a later call the dispatcher calls
-   :meth:`invalidate_session`, which drops the cached token, and
-   dispatches once more; the next call logs in again.
+   :meth:`invalidate_session` with the rejected request. The token is
+   dropped only when that request sent it, so a late ``401`` never drops
+   a newer token. The dispatcher then runs the call once more.
 
 Version
 -------
@@ -62,6 +63,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
+from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vcf_auth import session_establish_auth_error
 from meho_backplane.connectors.adapters.http import HttpConnector
@@ -225,15 +227,21 @@ class HcxConnector(HttpConnector):
             _log.info("hcx_session_established", target=target.name, host=target.host)
             return token
 
-    async def invalidate_session(self, target: HcxTargetLike) -> None:
+    async def invalidate_session(
+        self, target: HcxTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Drop the cached session token for *target* (the dispatcher's 401 hook).
 
-        The next :meth:`auth_headers` call logs in again. Credentials are
-        not cached: every login reads them through the loader.
+        With *rejected*, the token is dropped only when that request sent
+        it; a newer token stays. The next :meth:`auth_headers` call logs in
+        again when the token was dropped. Credentials are not cached: every
+        login reads them through the loader.
         """
         cache_key = credential_cache_key(target)
         async with self._session_lock:
-            self._session_tokens.pop(cache_key, None)
+            drop_rejected_token(
+                self._session_tokens, cache_key, rejected, lambda token: {_AUTH_HEADER: token}
+            )
 
     async def manager_version(self, target: HcxTargetLike, operator: Operator) -> HcxManagerVersion:
         """Read the HCX Manager version. Never raises: a failure is named in ``error``."""

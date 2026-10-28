@@ -109,6 +109,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
+from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.adapters.http import HttpConnector, json_payload_or_empty
 from meho_backplane.connectors.schemas import (
@@ -433,12 +434,23 @@ class VcfAutomationConnector(HttpConnector):
             self._tenant_tokens[cache_key] = token
             return token
 
-    async def _invalidate_plane(self, target: VcfAutomationTargetLike, plane: Plane) -> None:
-        """Drop the cached token for *plane* on *target* under the plane's lock."""
+    async def _invalidate_plane(
+        self, target: VcfAutomationTargetLike, plane: Plane, rejected: httpx.Request
+    ) -> None:
+        """Drop the cached token for *plane* on *target* under the plane's lock.
+
+        The token is dropped only when *rejected* sent it; a newer token
+        another call just logged in for stays (#5033).
+        """
         lock = self._provider_lock if plane == "provider" else self._tenant_lock
         cache = self._provider_tokens if plane == "provider" else self._tenant_tokens
         async with lock:
-            cache.pop(_plane_cache_key(target, plane), None)
+            drop_rejected_token(
+                cache,
+                _plane_cache_key(target, plane),
+                rejected,
+                lambda token: {"Authorization": f"Bearer {token}"},
+            )
 
     # ------------------------------------------------------------------
     # Transport overrides -- thread path into auth_headers + 401 retry-once
@@ -587,7 +599,7 @@ class VcfAutomationConnector(HttpConnector):
             headers = {**headers, **extra_headers}
         resp = await _fire(headers)
         if resp.status_code == 401:
-            await self._invalidate_plane(target, plane)
+            await self._invalidate_plane(target, plane, resp.request)
             headers = await self.auth_headers(target, operator, path=path)
             if extra_headers:
                 headers = {**headers, **extra_headers}

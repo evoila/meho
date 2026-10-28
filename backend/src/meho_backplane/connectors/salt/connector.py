@@ -21,9 +21,10 @@ The vendor page "API Usage" of the RaaS 8.18 reference:
    cached per credential (``credential_cache_key``: tenant, secret and
    login host), so two targets that share one credential share one session.
 4. On ``401`` from a later call the dispatcher calls
-   :meth:`invalidate_session`, which drops the shared session, and
-   dispatches once more; the next call logs in again and reads the
-   credentials from Vault again.
+   :meth:`invalidate_session` with the rejected request. The session is
+   dropped only when that request sent it, so a late ``401`` never drops
+   a newer session. The dispatcher then runs the call once more; the next
+   call logs in again and reads the credentials from Vault again.
 
 The answer of ``/rpc`` is ``{"riq": ..., "ret": <result>, "error": ...,
 "warnings": [...]}``. :func:`unwrap_rpc` returns ``ret``, or raises
@@ -66,6 +67,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
+from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vcf_auth import (
     basic_auth_header,
@@ -295,17 +297,23 @@ class SaltConnector(HttpConnector):
             )
             return session
 
-    async def invalidate_session(self, target: SaltTargetLike) -> None:
+    async def invalidate_session(
+        self, target: SaltTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Drop the cached session of *target*'s credential (the dispatcher's 401 hook).
 
-        The next :meth:`auth_headers` call logs in again and reads the
-        credentials through the loader again. The pooled client's cookie
-        jar for this target is cleared too.
+        With *rejected*, the session is dropped only when that request sent
+        it; a newer session stays. When the session is dropped, the next
+        :meth:`auth_headers` call logs in again and reads the credentials
+        through the loader again, and the pooled client's cookie jar for
+        this target is cleared too.
         """
         cache_key = credential_cache_key(target)
         async with self._session_lock:
-            self._sessions.pop(cache_key, None)
-            client = self._clients.get(self._client_cache_key(target))
+            dropped = drop_rejected_token(
+                self._sessions, cache_key, rejected, lambda session: session.headers()
+            )
+            client = self._clients.get(self._client_cache_key(target)) if dropped else None
             if client is not None:
                 client.cookies.clear()
 
@@ -341,7 +349,7 @@ class SaltConnector(HttpConnector):
             ret = await self.rpc(target, operator, GET_VERSIONS_RPC)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == httpx.codes.UNAUTHORIZED:
-                await self.invalidate_session(target)
+                await self.invalidate_session(target, rejected=exc.request)
             return SaltServerVersion(version=None, raw=None, error=f"HTTPStatusError: {exc}")
         except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
             return SaltServerVersion(version=None, raw=None, error=f"{type(exc).__name__}: {exc}")

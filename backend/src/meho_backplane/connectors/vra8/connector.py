@@ -102,6 +102,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
+from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import is_acceptable_auth_model
 from meho_backplane.connectors.adapters.http import HttpConnector
@@ -473,7 +474,9 @@ class Vra8Connector(HttpConnector):
     # Dispatch-path session-recovery hooks (#2067 / #2396)
     # ------------------------------------------------------------------
 
-    async def invalidate_session(self, target: Vra8TargetLike) -> None:
+    async def invalidate_session(
+        self, target: Vra8TargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Public duck-typed session-eviction hook for the dispatch path (#2067).
 
         **The load-bearing 401-recovery hook.** On an auth-class status (vRA 8's
@@ -489,7 +492,7 @@ class Vra8Connector(HttpConnector):
         dispatcher.py #2067). Holds :attr:`_session_lock` so a concurrent
         re-establish doesn't race the eviction.
         """
-        await self._evict_session_token(target)
+        await self._evict_session_token(target, rejected=rejected)
 
     async def invalidate_credentials(self, target: Vra8TargetLike) -> None:
         """Establish-auth-failure companion hook (#2396).
@@ -504,10 +507,21 @@ class Vra8Connector(HttpConnector):
         """
         await self._evict_session_token(target)
 
-    async def _evict_session_token(self, target: Vra8TargetLike) -> None:
-        """Drop the cached bearer for *target* under the session lock."""
+    async def _evict_session_token(
+        self, target: Vra8TargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
+        """Drop the cached bearer for *target* under the session lock.
+
+        With *rejected*, the token is dropped only when that request sent it;
+        a newer token another call just logged in for stays (#5033).
+        """
         async with self._session_lock:
-            self._session_tokens.pop(_session_cache_key(target), None)
+            drop_rejected_token(
+                self._session_tokens,
+                _session_cache_key(target),
+                rejected,
+                lambda token: {"Authorization": f"Bearer {token}"},
+            )
 
     async def aclose(self) -> None:
         """Clear cached session tokens, then tear down the httpx pool.

@@ -29,6 +29,10 @@ Exports:
   tokens and sessions, so two targets that share one credential share one
   token. Same-named targets in different tenants never collapse to one
   entry.
+* :mod:`meho_backplane.connectors._shared.rejected_token` — the one check
+  a ``401`` runs before it drops a shared login token (#5033): drop the
+  cached token only when the failed call sent it, so a late ``401`` never
+  drops the new token another call just logged in for.
 * :mod:`meho_backplane.connectors._shared.fingerprint` — the redaction
   seam for the direct-protocol connectors' ``fingerprint`` failure arms
   (#3297). Emits the exception type name plus a classified reason, never
@@ -60,6 +64,7 @@ from meho_backplane.connectors._shared import (
     cache_key,
     fingerprint,
     gsm_creds,
+    rejected_token,
     system_operator,
     vault_creds,
     vcf_auth,
@@ -70,6 +75,7 @@ __all__ = [
     "cache_key",
     "fingerprint",
     "gsm_creds",
+    "rejected_token",
     "system_operator",
     "vault_creds",
     "vcf_auth",

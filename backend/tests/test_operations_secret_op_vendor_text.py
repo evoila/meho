@@ -364,7 +364,7 @@ class _FailingConnector(HttpConnector):
     async def _post_json(self, *args: Any, **kwargs: Any) -> dict[str, Any]:  # type: ignore[override]
         return self._raise()
 
-    async def invalidate_session(self, target: Any) -> None:
+    async def invalidate_session(self, target: Any, *, rejected: Any = None) -> None:
         self.invalidations += 1
 
     async def fingerprint(  # type: ignore[override]

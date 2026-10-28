@@ -16,7 +16,9 @@ person straight to the company login (auto-redirect), the person types the
 password there, and Keycloak sends them back with a MEHO token. Keycloak
 reads the company login's addresses inside the container
 (``http://localhost:8080``); the test's browser reaches the same Keycloak at
-the mapped port, so it swaps that prefix in the redirects it follows.
+the mapped port, so it swaps that prefix in every address it calls. Realm
+``company`` has that inside address as its front-end address, so its
+tokens carry one issuer, whichever port the browser used.
 
 1. A person in a mapped company group gets ``tenant_id``, ``tenant_role``
    and ``groups`` of the mapped MEHO group.
@@ -40,7 +42,7 @@ import os
 import re
 import secrets
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from pathlib import Path
@@ -82,6 +84,7 @@ class _Keycloak:
     env: dict[str, str]
     bootstrap: tuple[str, str]
     password: str
+    logs: Callable[[], str]
     output: str = ""
 
 
@@ -137,6 +140,7 @@ def _company_realm(password: str, broker_secret: str) -> dict[str, Any]:
         "realm": "company",
         "enabled": True,
         "sslRequired": "none",
+        "attributes": {"frontendUrl": _INSIDE},
         "groups": [{"name": "acme-ops"}, {"name": "acme-readers"}],
         "clients": [
             {
@@ -226,8 +230,18 @@ def keycloak() -> Iterator[_Keycloak]:
         host = container.get_container_host_ip()
         base_url = f"http://{host}:{container.get_exposed_port(8080)}/auth"
         _wait_for_realm(base_url)
+
+        def logs() -> str:
+            out, err = container.get_logs()
+            lines = (out + err).decode(errors="replace").splitlines()
+            return "\n".join(line for line in lines if "WARN" in line or "ERROR" in line)[-4000:]
+
         kc = _Keycloak(
-            base_url=base_url, env=env, bootstrap=bootstrap, password=secrets.token_hex(12)
+            base_url=base_url,
+            env=env,
+            bootstrap=bootstrap,
+            password=secrets.token_hex(12),
+            logs=logs,
         )
         httpx.post(
             f"{base_url}/admin/realms",
@@ -363,7 +377,10 @@ def _company_login(kc: _Keycloak) -> dict[str, Any]:
                 continue
             if response.status_code != 200 or "/realms/company/" not in str(response.url):
                 # Only the company login may show a page: its password form.
-                pytest.fail(f"{response.status_code} after {seen}: {_page_text(response.text)}")
+                pytest.fail(
+                    f"{response.status_code} after {seen}: {_page_text(response.text)}\n"
+                    f"Keycloak log:\n{kc.logs()}"
+                )
             response = browser.send(
                 "POST",
                 _form(response.text, "kc-form-login"),

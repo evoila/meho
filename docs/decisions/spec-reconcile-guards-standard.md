@@ -586,6 +586,50 @@ no login, and MEHO sends it no token.
   Retail Prices API. Then the file goes on the shelf, the constant becomes
   a `*_PATH` on the lane, and this entry is withdrawn.
 
+### entra-graph-1.0 — spec exists but is too big for the shelf; check ships skipping (#5097)
+
+The `entra-graph-1.0` connector (product `entra`) calls Microsoft Graph
+v1.0 with eight hand-written `GET` paths. Microsoft publishes an OpenAPI
+3.0 file for all of Graph v1.0, so a spec exists. It is not on the shelf
+yet only because of its size. The check file ships now and skips until the
+file is there.
+
+- **Check file:** `backend/tests/test_connectors_entra_spec_reconcile.py`.
+  It reads the `*_PATH` constants of `connectors/entra/_paths.py` live,
+  gives each one its HTTP method (all `GET`), and fails when a constant has
+  no method. These tests run always. The compare test reads
+  `entra-graph-1.0/openapi.yaml` from the shelf and skips while it is
+  missing. It reads the file with a YAML loader itself (not with MEHO's
+  spec ingest, whose size limit is 20 MiB), puts the `servers[0].url`
+  prefix `/v1.0` in front of every spec path, and ignores parameter names
+  (`{group-id}` in the spec, `{group_id}` in the connector).
+- **What was checked (2026-10-28).** The file
+  `openapi/v1.0/openapi.yaml` in
+  [`microsoftgraph/msgraph-metadata`](https://github.com/microsoftgraph/msgraph-metadata)
+  (MIT license) at commit `29d027ab701b8d16c5fafc8cee31bb22d29eecad`
+  (the last commit that changed the file, 2026-10-20). Size 44,457,302
+  bytes, sha256
+  `69de68b2c895bc608a58229e662e2b3eeb23524385516afc250ff0b8f165ff29`,
+  OpenAPI 3.0.4, 11,582 paths, server `https://graph.microsoft.com/v1.0`.
+  All eight paths are in it with a `get` operation: `/organization`,
+  `/users`, `/groups`, `/groups/{group-id}/members/$count`,
+  `/roleManagement/directory/roleAssignments`,
+  `/roleManagement/directory/roleDefinitions`, `/applications`,
+  `/servicePrincipals`. The compare test passed against this file with
+  `MEHO_CONSUMER_DOCS_ROOT` pointed at a local folder that held it.
+- **Why it is not pinned.** About 44 MB for eight paths. That is far more
+  than any other shelf file, and every CI job would check it out. A trimmed
+  copy is possible but needs its own provenance note.
+- **Residual risk, named.** Until the file is on the shelf, CI does not
+  compare a new or renamed path with Graph. The always-on tests still make
+  sure every new `*_PATH` constant gets a method and shows up in the pinned
+  list, so a change cannot slip past the check without an edit here.
+- **Activation:** the file, or a trimmed copy of it with a provenance note
+  (source commit and sha256), lands on the shelf at
+  `entra-graph-1.0/openapi.yaml`. The activating task runs the extension
+  mechanics above (CI checkout widened, provenance recorded) and the
+  compare test then runs for real.
+
 ## Red lane = finding (the protocol)
 
 A red lane on first run against the real shelf is **the guard working**,

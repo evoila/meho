@@ -35939,6 +35939,7 @@
               "argocd",
               "azure",
               "bind9",
+              "entra",
               "fleet",
               "gcloud",
               "gh",

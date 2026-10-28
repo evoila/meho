@@ -649,6 +649,43 @@ async def test_other_wire_version_is_refused_with_both_versions(client: TestClie
 
 
 @pytest.mark.asyncio
+async def test_other_wire_version_is_refused_before_the_result_body_is_read(
+    client: TestClient,
+) -> None:
+    """A result body the central models cannot read still gets the 409, not a bare 422.
+
+    This is the case the check exists for: the other wire version changed a
+    required result field. The runner must read both versions, and the
+    version it sent must be stored.
+    """
+    await _seed_identities()
+    key = make_rsa_keypair("kid-A")
+    before = (await _runner_a_row()).last_seen_at
+    unreadable = {"runner_id": "runner-a", "results": [{"result_uid": "w-3"}]}
+
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        auth = {"Authorization": f"Bearer {_runner_token(key, runner_id=_RUNNER_A_ID)}"}
+        refused = client.post(
+            "/api/v1/checks/results",
+            json=unreadable,
+            headers={**auth, wire.WIRE_VERSION_HEADER: "2"},
+        )
+        # The same body on the central version is the usual body validation error.
+        same_version = client.post("/api/v1/checks/results", json=unreadable, headers=auth)
+
+    assert refused.status_code == 409
+    assert refused.json()["detail"] == (
+        "runner_wire_version_mismatch: runner wire version 2, "
+        "central MEHO needs 1: update the central MEHO"
+    )
+    assert same_version.status_code == 422
+    row = await _runner_a_row()
+    assert row.wire_version == "2"
+    assert row.last_seen_at == before
+
+
+@pytest.mark.asyncio
 async def test_central_route_compares_with_schema_version(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

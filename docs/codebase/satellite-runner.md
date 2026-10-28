@@ -99,11 +99,17 @@ Each tick (`run_one_tick`):
 2. **Fetch the assignment**, echoing the cached `assignment_version` as
    `known_version`. A `304` or a fetch failure keeps the cached
    assignment — the runner keeps executing the last assignment while the
-   uplink is down. A wire version refusal is different: the runner logs
-   `runner_wire_version_mismatch` with both versions, drops the cached
-   assignment, and ends the tick without running anything.
+   uplink is down.
 3. **Execute** each work item through `execute_work_item`.
 4. **Post** the result batch; on POST failure, write it to the spool.
+
+A wire version refusal on any of these calls is different from a down
+uplink: the runner logs `runner_wire_version_mismatch` with both versions,
+drops the cached assignment, and ends the tick. So no cached work runs on
+a later tick while central refuses this runner, even when that later fetch
+fails for another reason. Results not yet sent stay in the spool: a refused
+re-post leaves its file in place, and a refused fresh batch is spooled
+before the tick ends.
 
 `execute_work_item` is fail-closed defence in depth (the real
 authorization boundary is central minting, #2500):
@@ -483,22 +489,27 @@ visible instead of letting one side misread the other's messages.
 
 - **What is sent.** The runner sends `runner.wire.SCHEMA_VERSION` on every
   call in the `X-MEHO-Runner-Wire-Version` request header.
-- **What central checks.** All four runner-plane routes read the header
-  through `auth/runner_guard.py::runner_wire_version` and pass it to
-  `assert_runner_scope`. A missing header counts as version `1` (every
-  runner built before the header existed). A value that is not a short
-  whole number gets HTTP 400 `runner_wire_version_invalid`.
-- **On a mismatch.** After the scope match, `assert_runner_scope` stores
-  the version on `runner_principal.wire_version` and answers HTTP 409. The
-  text names both versions and the side to update, for example
-  `runner_wire_version_mismatch: runner wire version 1, central MEHO needs
-  2: update the runner`. It does **not** stamp `last_seen_at` then, so a
-  runner that cannot do its work does not look alive and the dead-man
-  switch flips its checks to unknown.
+- **What central checks.** All four runner-plane routes read and check
+  the header through the `auth/runner_guard.py::runner_wire_version`
+  dependency. It runs after the runner token check and **before** FastAPI
+  validates the request body. This order matters: when the other wire
+  version changed a required result field, the body would otherwise fail
+  as an HTTP 422 that names no version, and the runner would never learn
+  why. A missing header counts as version `1` (every runner built before
+  the header existed). A value that is not a short whole number gets
+  HTTP 400 `runner_wire_version_invalid`.
+- **On a mismatch.** The dependency stores the version on the row of the
+  token's own `runner_id` (`runner_principal.wire_version`) and answers
+  HTTP 409. The text names both versions and the side to update, for
+  example `runner_wire_version_mismatch: runner wire version 1, central
+  MEHO needs 2: update the runner`. It does **not** stamp `last_seen_at`,
+  so a runner that cannot do its work does not look alive and the dead-man
+  switch flips its checks to unknown. On a match, `assert_runner_scope`
+  stores the version together with the heartbeat.
 - **On the runner.** `RunnerClient` turns that 409 into
-  `RunnerWireVersionMismatchError`. The tick loop logs it and runs no work
-  (see "Each tick" above); a refused result batch is spooled like any
-  failed post.
+  `RunnerWireVersionMismatchError` on every call. The tick loop logs it,
+  drops the cached assignment and runs no work, whichever call was refused
+  (see "Each tick" above); results not yet sent stay in the spool.
 - **Where an operator sees it.** `runner_principal.wire_version` (migration
   `0118`) is the version the runner sent last. `GET
   /api/v1/runner-principals`, `meho runner-principal list` (column `WIRE`)

@@ -22,11 +22,12 @@ drift silently. Do not fork.
 ``SCHEMA_VERSION`` is the wire version: the version of these models.
 The runner sends it on every call in the :data:`WIRE_VERSION_HEADER`
 header. The central MEHO compares it with its own ``SCHEMA_VERSION``
-(:func:`~meho_backplane.auth.runner_guard.assert_runner_scope`) and, when
-they differ, refuses the call with HTTP 409. The refusal text starts with
-:data:`WIRE_VERSION_MISMATCH` and names both versions (see
-:func:`wire_version_mismatch_message`). The runner logs that text and runs
-no work for that tick. A call without the header counts as version
+(:func:`~meho_backplane.auth.runner_guard.runner_wire_version`, before it
+reads the request body) and, when they differ, refuses the call with HTTP
+409. The refusal text starts with :data:`WIRE_VERSION_MISMATCH` and names
+both versions (see :func:`wire_version_mismatch_message`). The runner logs
+that text, drops its cached work and runs nothing for that tick, whichever
+call was refused. A call without the header counts as version
 :data:`WIRE_VERSION_WHEN_MISSING`, so runners built before the header
 existed keep working.
 

@@ -9,7 +9,7 @@ the versioned assignment / result-ingest API (#2499) — are the consumers
 of this module; they do not exist yet, so the guard ships with its own
 unit tests against a stub route.
 
-Two primitives, layered:
+Three primitives, layered:
 
 * :func:`require_runner` — a FastAPI dependency factory (moulded on
   :func:`~meho_backplane.auth.rbac.require_role`). It asserts the caller
@@ -17,6 +17,11 @@ Two primitives, layered:
   ``runner_id`` and returns the :class:`~meho_backplane.auth.operator.Operator`.
   This is a **kind** gate, not a **scope** gate: it proves *a* runner is
   calling, not *which* runner may act on the route's target.
+
+* :func:`runner_wire_version` — the wire version gate (#5020). It reads
+  the runner's wire version header, stores it and refuses another version
+  with HTTP 409 before FastAPI reads the request body, so an old runner
+  always gets the message that names both versions.
 
 * :func:`assert_runner_scope` — the scope gate. Given the runner operator
   and the runner **name** the route addresses (the gateway set keys
@@ -60,6 +65,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, PrincipalKind
+from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import RunnerPrincipal
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.runner import wire
@@ -125,26 +131,72 @@ def require_runner() -> Callable[[Operator], Operator]:
     return _checker
 
 
-def runner_wire_version(
+#: One runner-kind check shared by :func:`runner_wire_version`. Routes keep
+#: their own ``require_runner()`` closure; the JWT check behind both is run
+#: once per request (FastAPI caches it by function).
+_require_runner_operator = require_runner()
+
+
+async def runner_wire_version(
+    operator: Annotated[Operator, Depends(_require_runner_operator)],
     header_value: Annotated[str | None, Header(alias=wire.WIRE_VERSION_HEADER)] = None,
 ) -> str:
-    """Read the runner's wire version from the request header (FastAPI dependency).
+    """Read and check the runner's wire version (FastAPI dependency).
+
+    Runs after the runner token is checked and **before** FastAPI validates
+    the request body. So a runner on another wire version always gets the
+    clear 409 that names both versions, even when its result body no longer
+    fits the central models (that would otherwise be an HTTP 422 that names
+    no version). The stored version is updated before the refusal, so the
+    runner list shows what the refused runner sent.
 
     A call without the header counts as
     :data:`~meho_backplane.runner.wire.WIRE_VERSION_WHEN_MISSING`, so a
     runner built before the header existed keeps working. A value that is
-    not a short whole number is refused with HTTP 400. This only reads the
-    value; :func:`assert_runner_scope` stores it and compares it with the
-    central version.
+    not a short whole number is refused with HTTP 400. A version other than
+    the central :data:`~meho_backplane.runner.wire.SCHEMA_VERSION` is
+    refused with HTTP 409 and
+    :func:`~meho_backplane.runner.wire.wire_version_mismatch_message`.
+
+    The refused version is stored on the row of the token's own
+    ``runner_id`` (never on a row the request names), and ``last_seen_at``
+    is **not** stamped: a runner that cannot do its work must not look
+    alive, so the dead-man switch still flips its checks to unknown. On a
+    match the version is returned and :func:`assert_runner_scope` stores it
+    together with the heartbeat.
     """
     if header_value is None:
-        return wire.WIRE_VERSION_WHEN_MISSING
-    if _WIRE_VERSION_PATTERN.fullmatch(header_value) is None:
+        wire_version = wire.WIRE_VERSION_WHEN_MISSING
+    elif _WIRE_VERSION_PATTERN.fullmatch(header_value) is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"runner_wire_version_invalid: {wire.WIRE_VERSION_HEADER} must be a number",
         )
-    return header_value
+    else:
+        wire_version = header_value
+    if wire_version == wire.SCHEMA_VERSION:
+        return wire_version
+    await _store_refused_wire_version(operator, wire_version=wire_version)
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=wire.wire_version_mismatch_message(wire_version, wire.SCHEMA_VERSION),
+    )
+
+
+async def _store_refused_wire_version(operator: Operator, *, wire_version: str) -> None:
+    """Store a refused wire version on the runner's own row and log the refusal."""
+    structlog.get_logger(__name__).warning(
+        wire.WIRE_VERSION_MISMATCH,
+        operator_sub=operator.sub,
+        runner_wire_version=wire_version,
+        central_wire_version=wire.SCHEMA_VERSION,
+    )
+    async with get_sessionmaker()() as session:
+        row = await session.get(RunnerPrincipal, operator.runner_id)
+        if row is None or row.tenant_id != operator.tenant_id:
+            return
+        row.wire_version = wire_version
+        await session.commit()
 
 
 async def assert_runner_scope(
@@ -179,8 +231,10 @@ async def assert_runner_scope(
     at least one authenticated request per poll window, so the idle work
     cycle *is* the heartbeat (the #1501 zombie-heartbeat lesson).
 
-    After the scope match the guard also checks the runner's wire version
-    (#5020, see :func:`_store_and_check_wire_version`).
+    After the scope match the guard stores the runner's wire version on the
+    row (#5020). The version was already checked by
+    :func:`runner_wire_version`, which refuses a mismatch before the request
+    body is read, so the value here always equals the central version.
 
     Fail-closed with **no existence oracle**: a name that resolves to no
     row *and* a name that resolves to a **different** runner both raise the
@@ -194,8 +248,9 @@ async def assert_runner_scope(
             :func:`require_runner`). ``operator.runner_id`` must be set;
             :func:`require_runner` guarantees this.
         runner_name: The runner name the route addresses (path/query param).
-        wire_version: The runner's wire version, as read by
-            :func:`runner_wire_version`.
+        wire_version: The runner's wire version, as read and checked by
+            :func:`runner_wire_version`. Stored on the row so the runner
+            list shows it.
         session: An open :class:`AsyncSession` the caller owns. On a
             successful match this guard stamps the heartbeat and
             ``commit()``s it on this session (see "Heartbeat side effect");
@@ -210,8 +265,7 @@ async def assert_runner_scope(
     Raises:
         HTTPException: 403 ``runner_scope_violation`` when no tenant-scoped
             runner named *runner_name* exists, or the row's id does not
-            match the token's ``runner_id``; 409 when *wire_version* is not
-            the central wire version.
+            match the token's ``runner_id``.
     """
     result = await session.execute(
         select(RunnerPrincipal).where(
@@ -231,44 +285,15 @@ async def assert_runner_scope(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=_RUNNER_SCOPE_VIOLATION,
         )
-    await _store_and_check_wire_version(session, row, wire_version=wire_version)
+    row.wire_version = wire_version
     # Heartbeat (#2501): stamp runner liveness on the central clock, keyed
     # by the token's ``runner_id`` claim (``row.id``), reading no request
     # field. Committed on the caller's own session (no nested session -- the
     # SQLite dev/test pool is a single-connection StaticPool). This guard is
     # always the first operation in each runner-plane handler, so the commit
-    # flushes only the heartbeat and it persists even for the callers (the
-    # long-poll GET and the assignment GET) that never otherwise commit.
+    # flushes only the heartbeat and the stored wire version, and it persists
+    # even for the callers (the long-poll GET and the assignment GET) that
+    # never otherwise commit.
     row.last_seen_at = datetime.now(UTC)
     await session.commit()
     return row
-
-
-async def _store_and_check_wire_version(
-    session: AsyncSession, row: RunnerPrincipal, *, wire_version: str
-) -> None:
-    """Store the runner's wire version and refuse it when central needs another.
-
-    The version is stored on the row in every case, so the runner list shows
-    it. On a mismatch with the central
-    :data:`~meho_backplane.runner.wire.SCHEMA_VERSION` this commits only the
-    stored version and raises HTTP 409 with
-    :func:`~meho_backplane.runner.wire.wire_version_mismatch_message`. The
-    caller then does **not** stamp ``last_seen_at``: a runner that cannot do
-    its work must not look alive, so the dead-man switch still flips its
-    checks to unknown.
-    """
-    row.wire_version = wire_version
-    if wire_version == wire.SCHEMA_VERSION:
-        return
-    structlog.get_logger(__name__).warning(
-        wire.WIRE_VERSION_MISMATCH,
-        runner_name=row.name,
-        runner_wire_version=wire_version,
-        central_wire_version=wire.SCHEMA_VERSION,
-    )
-    await session.commit()
-    raise HTTPException(
-        status_code=status.HTTP_409_CONFLICT,
-        detail=wire.wire_version_mismatch_message(wire_version, wire.SCHEMA_VERSION),
-    )

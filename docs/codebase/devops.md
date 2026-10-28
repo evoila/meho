@@ -1647,7 +1647,7 @@ workflow files, this doc, and the changelog.
 | Job | Surface | Steps |
 | --- | --- | --- |
 | `python-lint` (`Python lint + typecheck (ruff + mypy)`) | `backend/src/` + `backend/tests/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict`. Non-required; whole-tree, unshardable-by-file, runs once on a GitHub-hosted runner (#3251, #4626). |
-| `python-unit-shard` (`Python unit shard N/4`) | `backend/` unit + acceptance subtree, split 4 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). |
+| `python-unit-shard` (`Python unit shard N/4`) | `backend/` unit + acceptance subtree, split 4 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). A pull request that changes one connector runs one leg instead (`Python unit tests for connector <name>`, see [One-connector unit run](#one-connector-unit-run-5297)). |
 | `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252). |
 | `python-integration` (`Python (integration testcontainers)`) | `backend/tests/integration/` | `uv sync --locked --all-groups` -> `pytest tests/integration/` against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. **Required merge gate (#698)** so the lane that exercises real connector dispatch can no longer ship red. |
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
@@ -1845,6 +1845,45 @@ completes CI in minutes.
   the heavy 60-min lane; its detect-crash exposure is identical to the
   pre-existing migration gate and is neutralised for code PRs by the unit
   lane's fail-closed guard above.
+
+### One-connector unit run (#5297)
+
+A pull request that changes only one connector folder runs **one** unit
+job instead of the four `python-unit-shard` legs. The job is named
+`Python unit tests for connector <name>`. It runs that connector's tests
+plus a fixed contract set. The merge queue and pushes to `main` always run
+the four shards, so every test still runs before a change lands on `main`.
+
+- **Who decides.** The `changes` job sets the output `single_connector`.
+  It pipes the changed files into
+  `python3 backend/tests/_unit_connector_select.py detect` (standard
+  library only, because the job installs nothing). Empty means the full
+  run. It is only computed on a `pull_request` that is not docs-only.
+- **When it is set.** Every changed file that is not `.md` is in one folder
+  `backend/src/meho_backplane/connectors/<name>/`, or is that connector's
+  test file (`backend/tests/test_connectors_<name>_*.py`,
+  `test_connectors_<name>.py`, `_<name>_fixtures.py`). The folder is a real
+  connector (not `_shared`, `adapters` or `profiles`). And no code outside
+  the connector folders uses the connector, directly or through another
+  connector that uses it. Core code is shared by many tests, so a connector
+  that core code uses (for example `vault`, `kubernetes`, `vmware_rest`)
+  always gets the full run. Anything else, including a change to `ci.yml`
+  or to the tool itself, gives the full run.
+- **What runs.** The matrix of `python-unit-shard` becomes `[1]`. Its
+  pytest step calls `tests/_unit_connector_select.py select --connector
+  <name>`. That picks: the test files that use the connector, or any
+  connector that uses it (found by scanning imports and
+  `meho_backplane.connectors.<name>` names, also through test helper
+  modules); and the fixed list `CONTRACT_TESTS` in the same file
+  (registry, catalog, operation contract, flight recorder, reference docs,
+  MCP tool list and app start tests). A missing contract file fails the job.
+- **The required check.** The fan-in `python-unit-lane` is unchanged: the
+  matrix result is `success` only if its one leg passed, so the required
+  check `Python (ruff + mypy + pytest)` keeps its name and its strict rule.
+  The one-connector job does not upload its per-test times, so a partial
+  run never feeds the shard split.
+- **Tests.** `tests/test_unit_connector_select.py` checks the rules on a
+  small fake tree and checks the wiring in `ci.yml`.
 
 ### Runner-CPU rule
 

@@ -211,6 +211,15 @@ jobs:
     # batch may mix docs + code; a push to `main` must always run the full
     # matrix) — they emit `docs_only=false` unconditionally.
     #
+    #   single_connector — the connector name when a PR changes only one
+    #                connector folder (plus its tests and docs), else empty
+    #                (#5297). The `python-unit-shard` matrix then runs ONE
+    #                job with that connector's tests and a fixed contract
+    #                set instead of the four shards. Same fail-closed rule as
+    #                docs_only: backend/tests/_unit_connector_select.py says
+    #                which diffs qualify, and any doubt, any error, and every
+    #                merge_group / push run give empty (the full run).
+    #
     # Same fork-PR guard as the other jobs; the dependent jobs re-check
     # head.repo in their own `if:`.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -219,6 +228,7 @@ jobs:
     outputs:
       migrations: ${{ steps.detect.outputs.migrations }}
       docs_only: ${{ steps.detect.outputs.docs_only }}
+      single_connector: ${{ steps.detect.outputs.single_connector }}
     steps:
       - name: Checkout
         # On a PR, HEAD is the test merge: the PR on top of the newest
@@ -235,6 +245,7 @@ jobs:
           # docs-only fast path. Only a positive classification flips either.
           migrations=true
           docs_only=false
+          single_connector=
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             # push / merge_group: never fast-path; always the full matrix.
             echo "non-PR event (${{ github.event_name }}) -> migrations=${migrations}, docs_only=${docs_only} (full run)"
@@ -278,9 +289,18 @@ jobs:
               docs_only=true
               echo "all changed files are docs/*.md -> docs_only=true (fast path)"
             fi
+            # --- one-connector classification (#5297) ---
+            # An error in the tool leaves single_connector empty (full run).
+            if [ "${docs_only}" = "false" ]; then
+              single_connector="$(printf '%s\n' "${changed}" | python3 backend/tests/_unit_connector_select.py detect)" || single_connector=
+              echo "single_connector=${single_connector:-<empty>} (empty -> four unit shards)"
+            fi
           fi
-          echo "migrations=${migrations}" >> "$GITHUB_OUTPUT"
-          echo "docs_only=${docs_only}" >> "$GITHUB_OUTPUT"
+          {
+            echo "migrations=${migrations}"
+            echo "docs_only=${docs_only}"
+            echo "single_connector=${single_connector}"
+          } >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------
   # Required unit lane, sharded (#3251). The pre-#3251 monolithic
@@ -381,7 +401,13 @@ jobs:
         run: uv run mypy src/
 
   python-unit-shard:
-    name: Python unit shard ${{ matrix.shard }}/4
+    name: ${{ needs.changes.outputs.single_connector != '' && format('Python unit tests for connector {0}', needs.changes.outputs.single_connector) || format('Python unit shard {0}/4', matrix.shard) }}
+    # One-connector run (#5297): when `changes` sets single_connector, the
+    # matrix below has ONE leg, and the pytest step runs that connector's
+    # tests plus the contract set (tests/_unit_connector_select.py) instead
+    # of a quarter of the suite. Only a pull request can get there; the
+    # merge queue and pushes to `main` always run the four shards.
+    #
     # Non-required checks (one per matrix leg: `Python unit shard 1/4`,
     # `.../2/4`, `.../3/4`, `.../4/4`) — the required context is carried by
     # the python-unit-lane fan-in below. This is the pytest half of the old
@@ -418,7 +444,7 @@ jobs:
       # (tests/_unit_shard_durations.json, see tests/_unit_shard_split.py).
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: ${{ fromJSON(needs.changes.outputs.single_connector != '' && '[1]' || '[1, 2, 3, 4]') }}
     # 20-min cap: hang backstop only. Expected job wall is ~8 min (setup ~2 min
     # + pytest ~6 min); the perf-budget step below is the PR-level early-warning
     # gate that fires well before this cap. The pre-shard lane's 25-min cap
@@ -900,6 +926,8 @@ jobs:
           # canary module lands in exactly one shard, so this opt-out
           # must stay on every shard.
           MEHO_SKIP_SPEC_INGEST_TESTS: "1"
+          # #5297: set only on a pull request that changes one connector.
+          SINGLE_CONNECTOR: ${{ needs.changes.outputs.single_connector }}
         # PARALLELIZED two ways now (#3251): by test FILE across shards
         # (this matrix) AND pytest-xdist WITHIN each shard. #585 unblocked
         # xdist by adding process-wide global-registry snapshot/restore +
@@ -954,7 +982,15 @@ jobs:
           # the file count and the predicted seconds per shard on stderr.
           TOTAL=4
           SHARD="${{ matrix.shard }}"
-          mapfile -t SHARD_FILES < <(find tests -name 'test_*.py' -not -path 'tests/integration/*' -not -path 'tests/migrations/*' | sort | uv run python tests/_unit_shard_split.py --shard "${SHARD}" --total "${TOTAL}")
+          if [ -n "${SINGLE_CONNECTOR}" ]; then
+            # One-connector run (#5297): one job, no split. The tool exits
+            # non-zero (and fails this step) if the short run is not safe.
+            TOTAL=1
+            find tests -name 'test_*.py' -not -path 'tests/integration/*' -not -path 'tests/migrations/*' | sort | uv run python tests/_unit_connector_select.py select --connector "${SINGLE_CONNECTOR}" > "${RUNNER_TEMP}/unit-files.txt"
+          else
+            find tests -name 'test_*.py' -not -path 'tests/integration/*' -not -path 'tests/migrations/*' | sort | uv run python tests/_unit_shard_split.py --shard "${SHARD}" --total "${TOTAL}" > "${RUNNER_TEMP}/unit-files.txt"
+          fi
+          mapfile -t SHARD_FILES < "${RUNNER_TEMP}/unit-files.txt"
           echo "shard ${SHARD}/${TOTAL}: ${#SHARD_FILES[@]} test files"
           if [ "${#SHARD_FILES[@]}" -eq 0 ]; then
             echo "::error::shard ${SHARD} selected 0 test files — shard split broken"
@@ -1016,7 +1052,9 @@ jobs:
         # a shard that ran over the budget still shows where the time went.
         # continue-on-error + timeout-minutes: a failed or hung upload must
         # never fail or hold the shard.
-        if: always() && hashFiles('backend/pytest-unit-shard.xml') != ''
+        # Not on a one-connector run (#5297): its times cover only some
+        # files, so they must not be mixed into a refresh.
+        if: always() && hashFiles('backend/pytest-unit-shard.xml') != '' && needs.changes.outputs.single_connector == ''
         continue-on-error: true
         timeout-minutes: 2
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -1152,7 +1190,8 @@ jobs:
           shards='${{ needs.python-unit-shard.result }}'
           echo "changes (detect): result=${detect}, docs_only=${docs_only}"
           echo "python-lint (ruff + ruff format + mypy): ${lint}"
-          echo "python-unit-shard (aggregate of all 4 shard legs): ${shards}"
+          echo "python-unit-shard (aggregate of all 4 shard legs, or the one connector leg): ${shards}"
+          echo "single_connector='${{ needs.changes.outputs.single_connector }}' (empty = four shards)"
 
           # The detect job MUST have succeeded for its docs_only classification
           # to be trustworthy. If not (failure / cancelled / an unexpected

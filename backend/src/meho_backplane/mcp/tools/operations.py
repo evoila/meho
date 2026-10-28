@@ -557,9 +557,10 @@ register_mcp_tool(
             '"error", "denied", "awaiting_approval", ...) and `result`. '
             "Do NOT retry an `invalid_params` error unchanged: read "
             "`extras.validation_errors` and fix `params` first. `target` "
-            "is the target's NAME (not the id `list_targets` returns); it "
-            "is required for operations that act on a target. If "
-            "`delivery` is `partial`, read the full result with "
+            "is a target's `name` from `list_targets` (not its id), as "
+            '`"<target-name>"` or `{"name": "<target-name>"}`; do not '
+            "guess it. It is required for operations that act on a "
+            "target. If `delivery` is `partial`, read the full result with "
             "`result_query` and `handle`; the operation already ran, so do "
             "not call it again. For a long call (a deploy, a multi-step "
             'operation) pass `async: true`: you get `status="pending"` and '
@@ -581,10 +582,11 @@ register_mcp_tool(
                 "target": {
                     "type": ["string", "object", "null"],
                     "description": (
-                        'Target name, e.g. `"prod-vcenter"`. Use the form '
-                        '`{"name": ..., "fqdn": ...}` only when you must '
-                        "override the host name for this call. Null for "
-                        "operations without a target."
+                        "Target `name` from `list_targets`, as "
+                        '`"<target-name>"` or `{"name": "<target-name>"}`. '
+                        "Do not guess it. Use the dict form with `fqdn` "
+                        "only when you must override the host name for "
+                        "this call. Null for operations without a target."
                     ),
                     "minLength": 1,
                     "properties": {
@@ -784,8 +786,9 @@ register_mcp_tool(
             "nothing is written. Arguments mirror "
             "`call_operation`: "
             "`connector_id` (required), `op_id` (required), `target` "
-            '(optional; bare string `"rdc-vcenter"` or dict '
-            '`{"name": "rdc-vcenter"}`), `params` (operation-specific).'
+            '(optional; bare string `"<target-name>"` or dict '
+            '`{"name": "<target-name>"}`; use a `name` returned by '
+            "`list_targets`, do not guess), `params` (operation-specific)."
         ),
         inputSchema={
             "type": "object",
@@ -803,9 +806,10 @@ register_mcp_tool(
                 "target": {
                     "type": ["string", "object", "null"],
                     "description": (
-                        "Target reference. Same two shapes as "
-                        '`call_operation`: a bare string `"rdc-vcenter"` '
-                        'or a dict `{"name": "rdc-vcenter"}` (with an '
+                        "Target reference. Use a `name` returned by "
+                        "`list_targets`. Do not guess. Same two shapes as "
+                        '`call_operation`: a bare string `"<target-name>"` '
+                        'or a dict `{"name": "<target-name>"}` (with an '
                         "optional `fqdn` override). Pass null for ops that "
                         "do not act on a target. Resolving the target lets "
                         "the preview reflect the same connector + mount "

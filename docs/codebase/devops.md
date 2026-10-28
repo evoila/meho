@@ -1563,6 +1563,17 @@ these workflows:
   cancelled queue check fails the merge attempt and drops the PR out of
   the queue, so `merge_group` runs are never cancelled; `pull_request` /
   `push` runs still cancel their own predecessors as before.
+- **The runs of a dropped group are cancelled.** GitHub does not stop the
+  runs of a group that leaves the queue. Two helpers do it, so the runs
+  stop using our runners:
+  - The `merge-queue-watchdog` job in `ci.yml` (#4732) stops its own CI
+    run about a minute after the drop.
+  - `merge-queue-cleanup.yml` (#5292) runs every 5 minutes on a
+    GitHub-hosted runner and covers every workflow. It cancels an open
+    merge-queue run only when three reads agree: the run's commit is not
+    in the queue (GraphQL `mergeQueue`), its queue branch is gone, and
+    its commit is not on `main` (a merged group's commit is a `main`
+    commit). If any read fails, it cancels nothing.
 - **Third-party actions that derive their own scan range must be told
   the `merge_group` range explicitly.** A `merge_group` trigger makes the
   workflow *run*, but an action that computes its diff from the event

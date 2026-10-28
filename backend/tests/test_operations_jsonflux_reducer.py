@@ -459,6 +459,64 @@ async def test_reduce_keeps_oversized_string_shaped_payload_as_document() -> Non
     assert reduced["top_level_fields"]["stdout"] == "string (200000 chars)"
 
 
+async def test_reduce_result_document_always_stores_a_small_payload() -> None:
+    """``result_document: {always: true}`` keeps even a small payload as a document.
+
+    The migration inventory reads register the hint: other operations load
+    the inventory by its handle, so a one-record inventory needs one too.
+    Without the hint the same payload passes through inline, and its single
+    list would make it a rows record.
+    """
+    store = ResultHandleStore(_ResultStoreRedis())  # type: ignore[arg-type]
+    reducer = JsonFluxReducer(store=store)
+    payload = {"schema_version": "1", "records": [{"source_id": "a:1"}], "counts": {"server": 1}}
+    context = {
+        "op_id": "vmware.migration.inventory",
+        "tenant_id": str(uuid.uuid4()),
+        "operator_sub": "operator:fixture",
+    }
+
+    plain, no_handle = await reducer.reduce(payload, None, context)
+    reduced, handle = await reducer.reduce(
+        payload, None, {**context, "result_document": {"always": True}}
+    )
+
+    assert (plain, no_handle) == (payload, None)
+    assert handle is not None
+    assert reduced["result_record"] == "document"
+    assert reduced["schema_version"] == "1"
+    assert handle.fetch_more.drill_in.available is True
+    stored = await store.fetch_document(
+        tenant_id=uuid.UUID(context["tenant_id"]),
+        operator_sub=context["operator_sub"],
+        handle_id=handle.handle_id,
+    )
+    assert stored is not None
+    assert stored.document == payload
+
+
+async def test_reduce_result_document_hint_malformed_or_false_keeps_the_size_rule() -> None:
+    reducer = JsonFluxReducer()
+    payload = {"schema_version": "1", "records": [{"source_id": "a:1"}]}
+    base = {"op_id": "vmware.migration.inventory"}
+
+    for hint in ({"always": False}, {"always": "yes"}, "always", {}):
+        reduced, handle = await reducer.reduce(payload, None, {**base, "result_document": hint})
+        assert (reduced, handle) == (payload, None), hint
+
+
+async def test_reduce_result_document_small_payload_passes_through_when_not_stored() -> None:
+    """Without a tenant in the context nothing is stored; a small payload still arrives whole."""
+    reducer = JsonFluxReducer()
+    payload = {"schema_version": "1", "records": []}
+
+    reduced, handle = await reducer.reduce(
+        payload, None, {"op_id": "vmware.migration.inventory", "result_document": {"always": True}}
+    )
+
+    assert (reduced, handle) == (payload, None)
+
+
 async def test_reduce_rows_summary_stays_under_threshold_with_large_scalar_siblings() -> None:
     """A list plus many big scalar siblings: the summary stays small (#3633).
 

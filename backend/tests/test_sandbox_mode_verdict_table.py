@@ -17,6 +17,9 @@ call, a step gate) -- the policy gate's verdict is recorded as ``runs``,
   test counts the queries: zero).
 * **Mode on:** only cells with "service principal, delete grant" may
   change, and only from ``waits`` to ``runs``. Every other cell is equal.
+* **``MEHO_SANDBOX_DELETE_GRANTS_FROM_API`` (#5251):** with the setting on,
+  every cell equals the same cell with it off, in both modes. The setting
+  changes only who may create a delete grant, not what a grant allows.
 
 A ``destructive`` direct call under a delete grant needs the right preview
 hash and a valid blast radius to run; the gate alone, with no hash, keeps
@@ -254,3 +257,12 @@ async def test_verdict_table(monkeypatch: pytest.MonkeyPatch) -> None:
     assert all("|destructive|" not in key for key in changed)
     for sign in ("verb", "tag", "name"):
         assert _key("service", "dangerous", "no", sign, "delete", "direct") in changed
+
+    # The setting that lets REST create delete grants changes no verdict.
+    monkeypatch.setenv("MEHO_SANDBOX_DELETE_GRANTS_FROM_API", "true")
+    turn_sandbox_mode_on(monkeypatch)
+    assert get_settings().sandbox_delete_grants_from_api is True
+    assert await _table() == on
+    turn_sandbox_mode_off(monkeypatch)
+    assert get_settings().sandbox_delete_grants_from_api is True
+    assert await _table() == off

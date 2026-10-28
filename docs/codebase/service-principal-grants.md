@@ -431,7 +431,19 @@ What the code does:
   (no request field, header or token claim can set it; otherwise
   `DeleteGrantConsoleOnlyError`, HTTP 403 `delete_grant_console_only` on
   REST), and an expiry within 30 days (`SANDBOX_DELETE_GRANT_MAX_DAYS`).
-  The CLI refuses a delete op before it calls the server. The console
+  **The REST setting (#5251).** With `MEHO_SANDBOX_DELETE_GRANTS_FROM_API`
+  on (a `Settings` field, read at boot only, default `false`; chart value
+  `sandboxMode.deleteGrantsFromApi`), REST and the CLI may create a delete
+  grant too: `POST /api/v1/service-principals/grants` passes
+  `by_tenant_admin`, and an `operator` without `tenant_admin` gets
+  `DeleteGrantNeedsTenantAdminError`, HTTP 403
+  `grants_require_tenant_admin`. A machine token still gets 403 before the
+  route runs. The checks are the console's (`_review`). The mode check
+  runs first, so outside sandbox mode the setting changes nothing. The
+  CLI sends a delete op to the server and shows its answer, because only
+  the server knows the setting. The audit row of `service_grant.create`
+  carries `payload.created_via` (`console` or `api`). Renewal stays in
+  the console; a script renews by revoking and creating again. The console
   route itself runs only for a tenant admin who is a person
   (`is_human_principal`): a console session that holds an agent, service
   or runner token gets 403 `human_principal_required`, as on REST.
@@ -477,7 +489,8 @@ What the code does:
 - **The audit mark.** `audit_log.sandbox_mode` (boolean, not null,
   database default `false`). One model default reads the process flag, so
   every writer stamps it.
-- **Chart.** `sandboxMode.enabled` and `sandboxMode.confirmHost`; the
+- **Chart.** `sandboxMode.enabled`, `sandboxMode.confirmHost` and
+  `sandboxMode.deleteGrantsFromApi` (rendered only with `enabled`); the
   render fails when the host is not `ingress.host`; the notes warn.
 
 Tests: `test_sandbox_mode_boot.py`, `test_sandbox_mode_grants.py`,

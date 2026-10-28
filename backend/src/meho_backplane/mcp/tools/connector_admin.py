@@ -483,14 +483,14 @@ register_mcp_tool(
             "rollup split enabled-vs-total (enabled_operation_count = "
             "ops whose per-op is_enabled flag is set, i.e. actually "
             "dispatchable; operation_count = every ingested/typed/"
-            "composite op) — and the aggregate review status (staged / "
-            "enabled / disabled). Use as the entry point when an "
-            "operator needs to find a connector to review or to see "
-            "what's already in place. Filter via status=staged to "
-            "surface only connectors that need review. Pair with "
-            "meho_connector_review to drill into an individual "
-            "connector. Read-only; visible to operator and "
-            "tenant_admin roles."
+            "composite op) — and the aggregate review status. The "
+            "review status says if a person has checked the connector's "
+            "operations yet: 'staged' = at least one group still waits "
+            "for review; 'enabled' = reviewed and ready to use; "
+            "'disabled' = every group is turned off. With no `status`, "
+            "it lists every connector. Do not pass `status` unless the "
+            "user asks for connectors in one review state. Read-only; "
+            "visible to operator and tenant_admin roles."
         ),
         inputSchema={
             "type": "object",

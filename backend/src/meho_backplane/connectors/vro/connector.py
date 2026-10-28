@@ -25,8 +25,9 @@ Chosen per target with ``extras["login"]`` (see
   ``Authorization: Bearer <token>``.
 
 The ``Authorization`` value (and, for ``vcfa-session``, the time the
-token ends) is cached per credential, login mode and org
-(``credential_cache_key``: tenant, secret and login host). Only a caller
+token ends) is cached per credential, login mode, org and login domain
+(``credential_cache_key``: tenant, secret and login host; see
+:func:`_login_cache_key`). Only a caller
 with an operator JWT, other than the synthesised system operator, reads or
 fills the cache; any other caller runs the credential loader, which checks
 it, and its login is not kept.
@@ -128,6 +129,18 @@ def parse_server_version(payload: Any) -> VroServerVersion:
     return VroServerVersion(version=version, build=build, error=None)
 
 
+def _login_cache_key(target: VroTargetLike) -> tuple[str, ...]:
+    """Key the cached login on the credential plus every target value the login reads.
+
+    That is the login mode, the VCF Automation org (``vcfa-session``) and
+    ``extras["domain"]``, which the ``automation`` login sends. Two targets
+    that differ in one of them log in as different users.
+    """
+    extras = getattr(target, "extras", None)
+    domain = extras.get("domain") if isinstance(extras, dict) else None
+    return credential_cache_key(target, login_mode(target), vcfa_org(target), domain)
+
+
 def _username_password(creds: dict[str, str], target: VroTargetLike) -> tuple[str, str]:
     """``(username, password)`` from *creds*; a ``RuntimeError`` names a missing key."""
     try:
@@ -185,7 +198,7 @@ class VroConnector(HttpConnector):
         unauthenticated caller, and such a caller never primes it.
         """
         mode = login_mode(target)
-        cache_key = credential_cache_key(target, mode, vcfa_org(target))
+        cache_key = _login_cache_key(target)
         checked = bool(operator.raw_jwt) and not is_system_operator(operator)
         async with self._auth_lock:
             cached = self._authorizations.get(cache_key)
@@ -229,7 +242,7 @@ class VroConnector(HttpConnector):
         With *rejected*, the login is dropped only when that request sent
         it; a newer login stays.
         """
-        cache_key = credential_cache_key(target, login_mode(target), vcfa_org(target))
+        cache_key = _login_cache_key(target)
         async with self._auth_lock:
             drop_rejected_token(
                 self._authorizations,

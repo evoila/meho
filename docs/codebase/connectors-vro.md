@@ -63,8 +63,9 @@ raise `NotImplementedError`.
 ## Key types
 
 - `VroConnector` (`connector.py`) -- the connector class. Caches one
-  `Authorization` value per credential, login mode and org
-  (`credential_cache_key`: tenant, secret and login host).
+  `Authorization` value per credential, login mode, org and login domain
+  (`_login_cache_key`, built on `credential_cache_key`: tenant, secret and
+  login host).
 - `VroTargetLike`, `VroCredentialsLoader`, `login_mode`, `vcfa_org`
   (`session.py`) -- the target shape, the credential loader type, the
   login mode check and the VCF Automation org of the login user.
@@ -107,9 +108,11 @@ The login mode comes from the target's `extras["login"]`:
   names the allowed values.
 
 The `Authorization` value (for `vcfa-session` also the time the token
-ends) is cached per credential, login mode and org
-(`credential_cache_key`: tenant, secret and login host). Two targets with
-the same secret, login host, mode and org share one login. Only a caller
+ends) is cached per credential, login mode, org and login domain
+(`_login_cache_key`, built on `credential_cache_key`: tenant, secret and
+login host). The login domain is `extras["domain"]`, which the
+`automation` login sends. Two targets with the same secret, login host,
+mode, org and domain share one login. Only a caller
 with an operator JWT, other than the synthesised system operator, reads or
 fills the cache. Any other caller (a probe, a background job) runs the
 credential loader, which checks it: the Vault loader fails closed without

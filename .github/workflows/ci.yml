@@ -1476,7 +1476,7 @@ jobs:
         # 55-min job cap. A shard that hits this cap loses ALL its coverage
         # data (its processes are killed before they write), so raise the
         # shard count before any shard gets near it.
-        timeout-minutes: 30
+        timeout-minutes: 45
         # Force bash so the run below gets pipefail + PIPESTATUS: the
         # self-hosted pool's default shell does NOT enable `pipefail`, which
         # let `pytest | tee` mask a hang's non-zero exit as step SUCCESS
@@ -1672,7 +1672,7 @@ jobs:
     # checkout/uv/sync — the step caps always fire before this job cap, so
     # a stall degrades to an absorbed step failure, never a run-level
     # cancellation (the #2800/#3172 leak).
-    timeout-minutes: 26
+    timeout-minutes: 45
     continue-on-error: true
     defaults:
       run:
@@ -1790,13 +1790,16 @@ jobs:
         # of bounded steps + checkout/uv/sync (~1-2 min honest) under the
         # 26-min job cap, so step caps always fire first.
         if: always()
-        timeout-minutes: 4
+        timeout-minutes: 15
         run: |
           if ! ls .coverage.* >/dev/null 2>&1; then
             echo "::warning::no per-worker coverage data files — pytest produced no coverage (crash before first test?); skipping combine"
             exit 0
           fi
-          uv run coverage combine --rcfile=.coveragerc.ci
+          ls -la .coverage.* | awk '{ s += $5 } END { print "shard data files: " NR ", " int(s / 1048576) " MiB" }'
+          uv run python -c 'import resource, subprocess, sys; rc = subprocess.call(["coverage", "combine", "--rcfile=.coveragerc.ci"]); print("combine max RSS: %d MiB" % (resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss // 1024)); sys.exit(rc)'
+          ls -la .coverage
+          if [ -r /sys/fs/cgroup/memory.peak ]; then echo "container peak: $(( $(cat /sys/fs/cgroup/memory.peak) / 1048576 )) MiB, limit: $(cat /sys/fs/cgroup/memory.max)"; fi
           uv run coverage xml --rcfile=.coveragerc.ci -o coverage.xml
           # Sanity: the file must exist and carry the empty <source></source>
           # that quality-gate.yml's sed rewrites to <source>backend</source>.
@@ -1820,6 +1823,18 @@ jobs:
           name: python-coverage
           path: backend/coverage.xml
           retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload combined coverage data with test contexts (measurement, #5298)
+        if: always() && hashFiles('backend/.coverage') != ''
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: python-coverage-test-contexts
+          path: backend/.coverage
+          include-hidden-files: true
+          retention-days: 90
           if-no-files-found: warn
 
 

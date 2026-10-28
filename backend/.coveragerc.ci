@@ -31,3 +31,5 @@
 parallel = true
 relative_files = true
 source = meho_backplane
+# MEASUREMENT ONLY (#5298) - do not merge. Records which test ran each line.
+dynamic_context = test_function

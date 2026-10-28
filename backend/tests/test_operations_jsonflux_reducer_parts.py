@@ -214,3 +214,103 @@ def test_parts_keys_are_reserved() -> None:
     assert {"parts_not_inline", "parts_not_inline_count", "parts_note"} <= (
         reducer_module._RESERVED_SUMMARY_KEYS
     )
+
+
+async def test_the_names_and_the_note_never_push_the_summary_over_the_limit() -> None:
+    """A hinted scalar fills the summary; the parts rule must not grow it past 4,096 bytes.
+
+    Before the shared budget, the names and the note were added after the
+    size check, so a summary of 3,953 bytes became 4,145 bytes. Now the
+    largest plain value moves out to the store, the summary fits, and both
+    the value and the part stay readable with a ``path``.
+    """
+    store = ResultHandleStore(_Valkey())  # type: ignore[arg-type]
+    payload = {
+        "items": [{"server": f"srv-{i}", "cores": 4, "fit": "ok"} for i in range(60)],
+        "report": "r" * 3850,
+        "assumptions": {"text": "a" * 500},
+    }
+    context = _context(result_scalars={"keys": ["report"]})
+
+    reduced, handle = await JsonFluxReducer(store=store).reduce(payload, None, context)
+
+    assert handle is not None
+    assert json_text_bytes(reduced) < 4096
+    assert "report" not in reduced
+    assert reduced["omitted_scalar_count"] == 1
+    assert reduced["assumptions"] == payload["assumptions"]
+    assert "parts_not_inline" not in reduced
+    assert "omitted_scalar_count" in handle.fetch_more.drill_in.rationale
+    assert await _path_read(store, handle.handle_id, "/report") == payload["report"]
+    assert await _path_read(store, handle.handle_id, "/assumptions") == payload["assumptions"]
+
+
+async def test_a_moved_out_value_still_leaves_the_parts_named_when_they_do_not_fit() -> None:
+    store = ResultHandleStore(_Valkey())  # type: ignore[arg-type]
+    payload = {
+        "items": [{"server": f"srv-{i}", "cores": 4, "fit": "ok"} for i in range(60)],
+        "report": "r" * 3850,
+        "inputs": {"servers": [f"srv-{i}" for i in range(500)]},
+    }
+    context = _context(result_scalars={"keys": ["report"]})
+
+    reduced, handle = await JsonFluxReducer(store=store).reduce(payload, None, context)
+
+    assert handle is not None
+    assert json_text_bytes(reduced) < 4096
+    assert "report" not in reduced
+    assert reduced["omitted_scalar_count"] == 1
+    assert reduced["parts_not_inline"] == ["inputs"]
+    assert reduced["parts_note"] in handle.fetch_more.drill_in.rationale
+    assert await _path_read(store, handle.handle_id, "/report") == payload["report"]
+    assert await _path_read(store, handle.handle_id, "/inputs") == payload["inputs"]
+
+
+async def test_the_limit_holds_without_parts_too() -> None:
+    """A hinted scalar over the limit is moved out and stays readable."""
+    store = ResultHandleStore(_Valkey())  # type: ignore[arg-type]
+    payload = {
+        "items": [{"i": i} for i in range(60)],
+        "id": "task-1",
+        "log": "l" * 5000,
+    }
+    context = _context(result_scalars={"keys": ["id", "log"]})
+
+    reduced, handle = await JsonFluxReducer(store=store).reduce(payload, None, context)
+
+    assert handle is not None
+    assert json_text_bytes(reduced) < 4096
+    assert reduced["id"] == "task-1"
+    assert "log" not in reduced
+    assert reduced["omitted_scalar_count"] == 1
+    assert await _path_read(store, handle.handle_id, "/log") == payload["log"]
+
+
+def test_fit_inline_takes_the_largest_plain_value_first_and_places_parts_again() -> None:
+    summary = {"small": "s", "big": "b" * 3900, "row_count": 60, "total": 60}
+    parts = {"totals": {"n": 60}}
+
+    fitted, displaced, not_inline = reducer_module._fit_inline(
+        summary, parts, movable=frozenset({"small", "big"})
+    )
+
+    assert displaced == {"big": "b" * 3900}
+    assert not_inline == []
+    assert fitted["small"] == "s"
+    assert fitted["totals"] == {"n": 60}
+    assert fitted["omitted_scalar_count"] == 1
+    assert json_text_bytes(fitted) < reducer_module._INLINE_SUMMARY_BYTE_LIMIT
+
+
+def test_fit_inline_stops_when_nothing_can_move() -> None:
+    """Reducer keys and the digest never move; a part that does not fit is still named."""
+    summary = {"failed": [{"e": "x" * 4000}], "row_count": 60, "total": 60}
+
+    fitted, displaced, not_inline = reducer_module._fit_inline(
+        summary, {"totals": {"n": 60}}, movable=frozenset()
+    )
+
+    assert displaced == {}
+    assert not_inline == ["totals"]
+    assert fitted["parts_not_inline"] == ["totals"]
+    assert fitted["failed"] == summary["failed"]

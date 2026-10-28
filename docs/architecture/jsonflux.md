@@ -708,7 +708,10 @@ that read when the count is above zero and the store kept the value. A
 value that leaves no room for the rows under the per-record cap is
 dropped, the rows are still stored, and the rationale says the value is
 not retrievable. With a hint, the listed keys are kept on top of
-the default copy, outside that budget. Credential-class ops
+the default copy, outside that budget, but inside the 4,096-byte limit
+of the whole inline summary (#5139, next sections): a hinted value that
+would push the summary over moves out like any other, is counted under
+`omitted_scalar_count`, and is stored with the rows. Credential-class ops
 (`credential_read` / `credential_mint` / `credential_write`) get no
 default copy: for them the hint is still the only path, so a secret-shaped
 scalar is never copied by accident. The registry sweep in
@@ -762,7 +765,14 @@ while the summary stays under 4,096 bytes. A part is never cut. The parts left
 out are named in `parts_not_inline` (with `parts_not_inline_count` when the
 names list itself is cut), and `parts_note` names the `path` read. When the
 store must drop the parts to keep the rows (its per-record size cap), the note
-says they cannot be read. Credential-class ops keep the old rule: no part is
+says they cannot be read. The 4,096 bytes are one budget for the whole summary:
+the reducer's own keys, the scalars (hinted or not), the `result_objects`
+projection, the digest, the parts, the names and the notes. The fit runs before
+the spill (`_plan_inline` → `_fit_inline`): the notes get room for their longer
+text, and when the names and the note still leave no room, the largest scalar
+moves out, is counted under `omitted_scalar_count` and stored with the rows,
+and the parts are placed again in the room it left. The reducer's own keys, the
+projection and the digest never move. Credential-class ops keep the old rule: no part is
 copied or stored without their own hint. The registry sweep in
 `tests/test_operations_jsonflux_conformance.py` reduces a large sample for every
 typed and multi-step op whose declared answer has rows plus parts and fails

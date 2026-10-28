@@ -37,7 +37,13 @@ threshold (>50 rows or >4 KB by default), the caller gets back:
   parts ride inline while the summary stays under 4,096 bytes; the rest
   are named in `parts_not_inline`, and `parts_note` names the `path`
   read, or says the parts cannot be read when the store dropped them to
-  keep the rows. Credential-class ops get no default parts; and
+  keep the rows. The 4,096 bytes are one budget for the whole summary:
+  the reducer's own keys, the scalars (hinted or not), the `result_objects`
+  projection, the parts, the names and the notes. When the names and the
+  note leave no room, the largest scalars move out of the summary, are
+  counted under `omitted_scalar_count` and stored with the rows like the
+  other omitted scalars, and the parts are placed again in the room they
+  left. Credential-class ops get no default parts; and
 - a `ResultHandle` on `OperationResult.handle` carrying `summary_md`,
   `schema_`, `total_rows`, `sample_rows`, and the self-documenting
   `fetch_more` envelope. `schema_` comes from the result field catalog

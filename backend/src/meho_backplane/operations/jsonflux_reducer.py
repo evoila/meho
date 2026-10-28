@@ -350,12 +350,17 @@ _DEFAULT_SCALAR_MAX_KEYS = 32
 _DEFAULT_SCALAR_BYTE_BUDGET = 1024
 _DEFAULT_SCALAR_VALUE_BYTE_CAP = 512
 
-#: Bounds for the parts rule (#5139). A part is a top-level object or list
-#: next to the reduced rows (``assumptions``, ``totals``, ``unknowns``). Every
-#: part is stored with the rows. Whole parts are copied inline while the
-#: inline summary stays under :data:`_INLINE_SUMMARY_BYTE_LIMIT` bytes; the
-#: rest are named under ``parts_not_inline``. The names list has its own
-#: budget, so many long names cannot grow the summary past the limit either.
+#: The one byte budget of the whole inline summary (#5139). It covers the
+#: reducer's own keys, the plain values next to the rows (hinted or not),
+#: the ``result_objects`` projection, the digest, the parts and every note.
+#: A part is a top-level object or list next to the reduced rows
+#: (``assumptions``, ``totals``, ``unknowns``). Every part is stored with the
+#: rows. Whole parts are copied inline while the summary stays under the
+#: limit; the rest are named under ``parts_not_inline``. The names list has
+#: its own budget, so many long names cannot grow the summary either. When
+#: the names and the note still leave no room, the largest plain values are
+#: moved out to the store (:func:`_fit_inline`), so the limit always holds
+#: and nothing moved out is lost.
 _INLINE_SUMMARY_BYTE_LIMIT = 4096
 _PARTS_NAMES_BYTE_BUDGET = 512
 
@@ -409,6 +414,25 @@ class _SpillOutcome:
     #: ``path`` read on the handle returns them. Only meaningful when
     #: ``stored_rows`` is set.
     omitted_fields_stored: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _InlinePlan:
+    """What :meth:`JsonFluxReducer._plan_inline` decided before the spill (#5139).
+
+    ``summary`` is the inline summary without the two notes whose text
+    depends on the spill outcome (``parts_note``, ``result_object_note``);
+    :meth:`JsonFluxReducer._assemble` writes those. ``sample_rows`` is the
+    bounded preview. ``displaced`` holds the plain values the byte budget
+    moved out of the summary; :meth:`JsonFluxReducer.reduce` stores them
+    with the rows, like the scalars the default rule left out, so a ``path``
+    read returns them. ``parts_not_inline`` names the parts that did not fit.
+    """
+
+    summary: dict[str, Any]
+    sample_rows: list[dict[str, Any]]
+    displaced: dict[str, Any]
+    parts_not_inline: list[str]
 
 
 class JsonFluxReducer:
@@ -504,9 +528,9 @@ class JsonFluxReducer:
             materialized = self._admission_limited_materialized(len(rows))
             summary, handle = self._assemble(
                 materialized,
-                None,
                 context,
                 _SpillOutcome(skip_reason="admission_limit_exceeded"),
+                self._plan_inline(materialized, None, context),
             )
             self._record_flux_span(rows, materialized, summary, context)
             return summary, handle
@@ -518,19 +542,20 @@ class JsonFluxReducer:
         preserved_scalars, omitted_scalars = _preserved_scalars(payload, envelope_key, context)
         hinted_objects = _hinted_objects(payload, envelope_key, context)
         parts = _sibling_parts(payload, envelope_key, context, skip=frozenset(hinted_objects))
+        digest = _row_digest(rows, envelope_key, digest_spec)
+        # The inline layout is decided before the spill, so every value the
+        # byte budget moves out of the summary is stored with the rows.
+        plan = self._plan_inline(
+            materialized, envelope_key, context, preserved_scalars, hinted_objects, digest, parts
+        )
         kept_fields = {
             **omitted_scalars,
+            **plan.displaced,
             **{key: value for key, (value, _fields) in hinted_objects.items()},
             **parts,
         }
         spill_outcome = await self._spill(materialized, context, kept_fields)
-        preserved_scalars.update(
-            _project_hinted_objects(hinted_objects, stored=spill_outcome.omitted_fields_stored)
-        )
-        digest = _row_digest(rows, envelope_key, digest_spec)
-        summary, handle = self._assemble(
-            materialized, envelope_key, context, spill_outcome, preserved_scalars, digest, parts
-        )
+        summary, handle = self._assemble(materialized, context, spill_outcome, plan)
         self._record_flux_span(rows, materialized, summary, context)
         return summary, handle
 
@@ -900,29 +925,26 @@ class JsonFluxReducer:
         )
         return _SpillOutcome(skip_reason=reason)
 
-    def _assemble(
+    def _plan_inline(
         self,
         materialized: _MaterializedSet,
         envelope_key: str | None,
         context: dict[str, Any] | None,
-        spill_outcome: _SpillOutcome,
         preserved_scalars: dict[str, Any] | None = None,
+        hinted_objects: dict[str, tuple[dict[str, Any], list[str]]] | None = None,
         digest: dict[str, Any] | None = None,
         parts: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, Any], ResultHandle]:
-        """Build the inline summary + the :class:`ResultHandle`.
+    ) -> _InlinePlan:
+        """Build the inline summary and fit it to the byte budget, before the spill.
 
-        ``spill_outcome`` carries either the count :meth:`_spill`
-        persisted -- the handle's drill-in branch flips to
-        ``available=True`` pointing at ``result_query`` -- or the skip
-        reason the unavailable branch surfaces verbatim (#1629).
+        ``preserved_scalars`` (#3084) carries the payload's scalar siblings
+        (:func:`_preserved_scalars`); they seed the summary *before* the
+        reduction bookkeeping is written, so a hinted key can never shadow
+        ``row_count`` / ``total`` / ``sample_rows_returned`` / ``sample_bytes``
+        / ``source_key`` even if the helper's reserved filter is bypassed.
 
-        ``preserved_scalars`` (#3084) carries the payload's hinted scalar
-        siblings (:func:`_preserved_scalars`); they seed the summary
-        *before* the reduction bookkeeping is written, so a hinted key can
-        never shadow ``row_count`` / ``total`` / ``sample_rows_returned``
-        / ``sample_bytes`` / ``source_key`` even if the helper's reserved
-        filter is bypassed.
+        ``hinted_objects`` (#3425) is the ``result_objects`` hint; its bounded
+        projection (:func:`_project_hinted_objects`) follows the scalars.
 
         ``digest`` (#3122) carries the reduced collection's inline digest
         (:func:`_row_digest`): per-state ``status_counts`` plus, when the op
@@ -932,9 +954,11 @@ class JsonFluxReducer:
 
         ``parts`` (#5139) carries the payload's top-level objects and lists
         next to the rows (:func:`_sibling_parts`), all stored with the rows.
-        :func:`_add_parts_inline` copies whole parts into the summary last,
-        while it stays under :data:`_INLINE_SUMMARY_BYTE_LIMIT`, and names
-        the rest; the drill-in rationale repeats how to read them.
+        :func:`_fit_inline` runs last: it copies whole parts while the summary
+        stays under :data:`_INLINE_SUMMARY_BYTE_LIMIT`, names the rest, and
+        moves the largest plain values out when the names and the note leave
+        no room. The plan returns those under ``displaced`` so
+        :meth:`reduce` stores them with the rows before the spill.
 
         The inline sample is serialized **exactly once** (#134): it lives
         only on :attr:`ResultHandle.sample_rows` -- the audit hoist
@@ -948,7 +972,6 @@ class JsonFluxReducer:
         serialized size is bounded independently of per-row object size.
         """
         total_rows = materialized.total_rows
-        omitted_fields = (preserved_scalars or {}).get("omitted_scalar_count", 0)
         sample_rows = _fit_sample_to_budget(
             materialized.sample_rows,
             self._resolve_sample_byte_budget(),
@@ -960,10 +983,12 @@ class JsonFluxReducer:
         # serialized size the reducer bounded the preview to, so an agent
         # reading the summary knows a preview exists and where to find it
         # without re-measuring the handle. Hinted scalar siblings (#3084)
-        # seed the dict first, then the collection digest (#3122); the
-        # reducer-owned bookkeeping keys are written after both and
-        # therefore always win.
+        # seed the dict first, then the object projection (#3425) and the
+        # collection digest (#3122); the reducer-owned bookkeeping keys are
+        # written after all three and therefore always win.
         summary: dict[str, Any] = dict(preserved_scalars or {})
+        movable = frozenset(summary) - _RESERVED_SUMMARY_KEYS
+        summary.update(_project_hinted_objects(hinted_objects or {}))
         if digest:
             summary.update(digest)
         summary.update(
@@ -983,9 +1008,44 @@ class JsonFluxReducer:
             summary["sample_note"] = (
                 "Preview omitted because the selected row exceeds the byte budget."
             )
-        parts_note = _add_parts_inline(
-            summary, parts or {}, stored=spill_outcome.omitted_fields_stored
+        summary, displaced, parts_not_inline = _fit_inline(summary, parts or {}, movable=movable)
+        return _InlinePlan(
+            summary=summary,
+            sample_rows=sample_rows,
+            displaced=displaced,
+            parts_not_inline=parts_not_inline,
         )
+
+    def _assemble(
+        self,
+        materialized: _MaterializedSet,
+        context: dict[str, Any] | None,
+        spill_outcome: _SpillOutcome,
+        plan: _InlinePlan,
+    ) -> tuple[dict[str, Any], ResultHandle]:
+        """Finish the planned inline summary and build the :class:`ResultHandle`.
+
+        ``spill_outcome`` carries either the count :meth:`_spill`
+        persisted -- the handle's drill-in branch flips to
+        ``available=True`` pointing at ``result_query`` -- or the skip
+        reason the unavailable branch surfaces verbatim (#1629). It also
+        says whether the fields kept with the rows were stored, which
+        decides the text of ``result_object_note`` (#4841) and
+        ``parts_note`` (#5139): the ``path`` read that returns them, or
+        that they cannot be read. :func:`_fit_inline` kept room for the
+        longer text of each, so writing them here cannot push the summary
+        over :data:`_INLINE_SUMMARY_BYTE_LIMIT`.
+        """
+        summary = plan.summary
+        stored = spill_outcome.omitted_fields_stored
+        truncations = summary.get(_RESULT_OBJECT_TRUNCATIONS_KEY)
+        if truncations:
+            summary[_RESULT_OBJECT_NOTE_KEY] = _result_object_note(truncations, stored)
+        parts_note = _parts_note(stored) if plan.parts_not_inline else ""
+        if parts_note:
+            summary["parts_note"] = parts_note
+        total_rows = materialized.total_rows
+        omitted_fields = summary.get("omitted_scalar_count", 0)
         handle = ResultHandle(
             handle_id=materialized.handle_id,
             summary_md=(
@@ -993,7 +1053,7 @@ class JsonFluxReducer:
             ),
             schema_=materialized.schema_,
             total_rows=total_rows,
-            sample_rows=tuple(sample_rows) if sample_rows else None,
+            sample_rows=tuple(plan.sample_rows) if plan.sample_rows else None,
             ttl_seconds=self._ttl_seconds,
             fetch_more=_build_fetch_more(
                 context,
@@ -1412,25 +1472,70 @@ def _sibling_parts(
     }
 
 
-def _add_parts_inline(summary: dict[str, Any], parts: dict[str, Any], *, stored: bool) -> str:
-    """Copy whole *parts* into *summary* while it fits; name the rest (#5139).
+def _fit_inline(
+    summary: dict[str, Any], parts: dict[str, Any], *, movable: frozenset[str]
+) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+    """Fit *summary* to the one inline byte budget (#5139).
+
+    Returns ``(fitted summary, displaced, parts_not_inline)``. The budget is
+    :data:`_INLINE_SUMMARY_BYTE_LIMIT`, always with room kept for the notes
+    :meth:`JsonFluxReducer._assemble` writes after the spill (the longer of
+    their two texts). :func:`_place_parts` copies whole parts and names the
+    rest. When the summary still reaches the limit -- a hinted scalar is the
+    one inline value no earlier budget bounds, so the names and the note can
+    push it over -- the largest *movable* value (a plain value next to the
+    rows, hinted or not) is taken out, counted under ``omitted_scalar_count``,
+    and the parts are placed again in the room it left. The values taken out
+    come back as ``displaced``; the caller stores them with the rows so a
+    ``path`` read returns them. The loop ends when the summary fits, or when
+    nothing movable is left (the reducer's own keys, the ``result_objects``
+    projection and the digest never move).
+    """
+    notes = 0
+    truncations = summary.get(_RESULT_OBJECT_TRUNCATIONS_KEY)
+    if truncations:
+        notes += _longest_entry(
+            _RESULT_OBJECT_NOTE_KEY,
+            _result_object_note(truncations, True),
+            _result_object_note(truncations, False),
+        )
+    parts_note_bytes = _longest_entry("parts_note", _parts_note(True), _parts_note(False))
+    base = dict(summary)
+    displaced: dict[str, Any] = {}
+    while True:
+        fitted, not_inline = _place_parts(base, parts, notes + parts_note_bytes)
+        # A summary that is not plain JSON cannot be measured; it is sent as is.
+        measured = _json_bytes_or_none(fitted)
+        candidates = [key for key in base if key in movable]
+        if (
+            measured is None
+            or measured + notes + (parts_note_bytes if not_inline else 0)
+            < _INLINE_SUMMARY_BYTE_LIMIT
+            or not candidates
+        ):
+            return fitted, displaced, not_inline
+        key = max(candidates, key=lambda name: json_text_bytes({name: base[name]}))
+        displaced[key] = base.pop(key)
+        base["omitted_scalar_count"] = base.get("omitted_scalar_count", 0) + 1
+
+
+def _place_parts(
+    base: dict[str, Any], parts: dict[str, Any], notes: int
+) -> tuple[dict[str, Any], list[str]]:
+    """Copy whole *parts* onto a copy of *base* while it fits; name the rest (#5139).
 
     Parts are copied in payload order, never cut. A part is left out when it
     would push the summary to :data:`_INLINE_SUMMARY_BYTE_LIMIT` bytes or
-    more (room is kept for the names list and the note), when its key is a
-    reducer key, or when it would replace a key the summary already has.
-    The names of the parts left out go under ``parts_not_inline`` (cut to
-    :data:`_PARTS_NAMES_BYTE_BUDGET` bytes, with ``parts_not_inline_count``
-    when cut) next to ``parts_note``, which says how to read them, or that
-    the store could not keep them (*stored* is false). Returns that note, or
-    ``""`` when every part is inline.
+    more (room is kept for the names list and *notes*, the bytes of the
+    notes written later), when its key is a reducer key, or when it would
+    replace a key the summary already has. The names of the parts left out
+    go under ``parts_not_inline`` (cut to :data:`_PARTS_NAMES_BYTE_BUDGET`
+    bytes, with ``parts_not_inline_count`` when cut).
     """
+    summary = dict(base)
     if not parts:
-        return ""
-    note = _parts_note(stored)
-    reserve = _PARTS_NAMES_BYTE_BUDGET + json_text_bytes(
-        {"parts_not_inline": [], "parts_not_inline_count": len(parts), "parts_note": note}
-    )
+        return summary, []
+    reserve = _PARTS_NAMES_BYTE_BUDGET + notes + _entry_bytes("parts_not_inline_count", len(parts))
     used = _json_bytes_or_none(summary) or 0
     not_inline: list[str] = []
     for key, value in parts.items():
@@ -1446,7 +1551,7 @@ def _add_parts_inline(summary: dict[str, Any], parts: dict[str, Any], *, stored:
         summary[key] = value
         used += cost - 1  # the braces are already counted; add one comma
     if not not_inline:
-        return ""
+        return summary, []
     names: list[str] = []
     for name in not_inline:
         if json_text_bytes([*names, name]) > _PARTS_NAMES_BYTE_BUDGET:
@@ -1454,8 +1559,17 @@ def _add_parts_inline(summary: dict[str, Any], parts: dict[str, Any], *, stored:
             break
         names.append(name)
     summary["parts_not_inline"] = names
-    summary["parts_note"] = note
-    return note
+    return summary, not_inline
+
+
+def _entry_bytes(key: str, value: Any) -> int:
+    """Bytes one more ``key: value`` entry adds to a non-empty JSON object."""
+    return json_text_bytes({key: value}) - 1
+
+
+def _longest_entry(key: str, *texts: str) -> int:
+    """The most bytes an entry under *key* holding one of *texts* can add."""
+    return max(_entry_bytes(key, text) for text in texts)
 
 
 def _parts_note(stored: bool) -> str:
@@ -1516,7 +1630,11 @@ def _preserved_objects(
     cannot. Invalid hints are logged and ignored; reduction must never turn
     an otherwise successful connector read into an error.
     """
-    return _project_hinted_objects(_hinted_objects(payload, envelope_key, context), stored=stored)
+    preserved = _project_hinted_objects(_hinted_objects(payload, envelope_key, context))
+    truncations = preserved.get(_RESULT_OBJECT_TRUNCATIONS_KEY)
+    if truncations:
+        preserved[_RESULT_OBJECT_NOTE_KEY] = _result_object_note(truncations, stored)
+    return preserved
 
 
 def _hinted_objects(
@@ -1564,9 +1682,14 @@ def _hinted_objects(
 
 
 def _project_hinted_objects(
-    hinted: dict[str, tuple[dict[str, Any], list[str]]], *, stored: bool
+    hinted: dict[str, tuple[dict[str, Any], list[str]]],
 ) -> dict[str, Any]:
-    """The bounded inline projection of :func:`_hinted_objects`, plus its truncation note."""
+    """The bounded inline projection of :func:`_hinted_objects`, plus its truncations.
+
+    The ``result_object_note`` that goes with a truncation is written after
+    the spill (:meth:`JsonFluxReducer._assemble`), because its text depends
+    on whether the whole object was stored.
+    """
     preserved: dict[str, Any] = {}
     truncations: dict[str, list[str]] = {}
     used_bytes = 0
@@ -1590,7 +1713,6 @@ def _project_hinted_objects(
             preserved[object_key] = projected
     if truncations:
         preserved[_RESULT_OBJECT_TRUNCATIONS_KEY] = truncations
-        preserved[_RESULT_OBJECT_NOTE_KEY] = _result_object_note(truncations, stored)
     return preserved
 
 

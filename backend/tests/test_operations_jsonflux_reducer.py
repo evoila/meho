@@ -3084,7 +3084,7 @@ async def test_default_rule_does_not_apply_to_a_bare_list() -> None:
 async def test_hinted_scalars_are_kept_on_top_of_the_default_copy() -> None:
     """A hint keeps its keys outside the default budget; the rest still apply."""
     payload: dict[str, Any] = {"items": [{"i": i} for i in range(60)]}
-    payload["report"] = "r" * 20_000  # over the default budget on its own
+    payload["report"] = "r" * 2_000  # over the default budget on its own
     payload["state"] = "done"
     context = {"op_id": "example.list", "result_scalars": {"keys": ["report"]}}
     reducer = JsonFluxReducer(sample_size=5)
@@ -3094,3 +3094,25 @@ async def test_hinted_scalars_are_kept_on_top_of_the_default_copy() -> None:
     assert reduced["report"] == payload["report"]
     assert reduced["state"] == "done"
     assert "omitted_scalar_count" not in reduced
+
+
+async def test_a_hinted_scalar_over_the_summary_limit_is_moved_out() -> None:
+    """The whole summary stays under 4,096 bytes, hint or not (#5139).
+
+    The hint lifts the default per-value and total budgets, not the limit of
+    the whole summary. A hinted value that would push the summary over is
+    counted under ``omitted_scalar_count`` and stored with the rows (see
+    ``test_operations_jsonflux_reducer_parts.py`` for the read-back).
+    """
+    payload: dict[str, Any] = {"items": [{"i": i} for i in range(60)]}
+    payload["report"] = "r" * 20_000
+    payload["state"] = "done"
+    context = {"op_id": "example.list", "result_scalars": {"keys": ["report"]}}
+    reducer = JsonFluxReducer(sample_size=5)
+
+    reduced, _handle = await reducer.reduce(payload, None, context)
+
+    assert "report" not in reduced
+    assert reduced["state"] == "done"
+    assert reduced["omitted_scalar_count"] == 1
+    assert len(_serialize(reduced)) < reducer_module._INLINE_SUMMARY_BYTE_LIMIT

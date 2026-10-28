@@ -184,8 +184,14 @@
       {% endif %}
       {# An expired row is closed by timeout, not a decision: it carries
          ``expires_at`` and a null ``decided_at``, so fall back to the
-         expiry deadline for the "Expired at T" timestamp (#1827 m1). #}
-      {% set decision_ts = request.expires_at if request.status == "expired" else request.decided_at %}
+         expiry deadline for the "Expired at T" timestamp (#1827 m1). A
+         request that an update ended before its deadline (#5030) shows
+         the time it was ended, ``decided_at``, not the unused deadline. #}
+      {% if request.status == "expired" and request.expired_reason != "release_changed" %}
+        {% set decision_ts = request.expires_at %}
+      {% else %}
+        {% set decision_ts = request.decided_at %}
+      {% endif %}
       <div class="alert {{ decision_alert }} mt-4" role="status" aria-live="polite">
         <div>
           <h4 class="font-semibold">
@@ -204,7 +210,11 @@
           {#- What happened when the approved request ran (#3543), read off
               the stored result. The result body stays on the owner-only
               /result read. -#}
-          {% if request.result_state == "failed" %}
+          {% if request.result_state == "failed" and request.outcome and request.outcome.error_code == "release_changed_while_waiting" %}
+            {#- MEHO refused the approved run because it was updated (#5030):
+                nothing ran and the vendor got no call. -#}
+            <p class="text-sm font-semibold" data-testid="approval-release-refused">MEHO was updated after this request was made, so the approval does not cover the running release. The operation did not run. The requester must ask again.</p>
+          {% elif request.result_state == "failed" %}
             <p class="text-sm font-semibold">The approved operation ran, but it did not succeed. Open the audit row to see why.</p>
           {% endif %}
           {% if request.result_state %}

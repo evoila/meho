@@ -1751,6 +1751,11 @@ def test_detail_modal_shows_release_changed_reason_and_release() -> None:
     assert "Ask again." in body
     assert "MEHO release" in body
     assert "feedfacefeedfacefeedfacefeedfacefeedface" in body
+    # The banner shows when the update ended the request (``decided_at``),
+    # not the deadline it never reached. Prefix match, as the SQLite
+    # round-trip may drop the tz offset.
+    assert 'datetime="2026-06-16T08:00:00' in body
+    assert "2026-06-20T08:00:00" not in body
 
 
 def test_detail_modal_expired_row_shows_expiry_timestamp() -> None:
@@ -2386,6 +2391,91 @@ def test_detail_modal_renders_the_failed_run() -> None:
     assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
     # The free-text error detail stays on the owner-only /result read.
     assert "secret detail" not in body
+
+
+#: The stored envelope of a run MEHO refused because it was updated (#5030).
+_RELEASE_REFUSED_ENVELOPE: dict[str, object] = {
+    "status": "denied",
+    "op_id": "vsphere.vm.create",
+    "error": "release_changed_while_waiting: MEHO was updated after this request was made.",
+    "duration_ms": 0.0,
+    "audit_id": _RUN_AUDIT_ID,
+    "extras": {
+        "error_code": "release_changed_while_waiting",
+        "request_release": "feedfacefeedfacefeedfacefeedfacefeedface",
+        "running_release": "0123456789abcdef0123456789abcdef01234567",
+    },
+}
+
+
+def test_detail_modal_release_refusal_says_the_run_did_not_happen() -> None:
+    """A run MEHO refused because it was updated is not described as a run (#5030).
+
+    The stored refusal reads as ``result_state = "failed"`` like any other
+    failed run, but nothing ran and the vendor got no call. The banner must
+    say MEHO was updated, the operation did not run, and the requester must
+    ask again, not "the approved operation ran".
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_ran_request(op_id="refused.op", resume_result=_RELEASE_REFUSED_ENVELOPE)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-testid="approval-release-refused"' in body
+    assert "MEHO was updated after this request was made" in body
+    assert "The operation did not run." in body
+    assert "The requester must ask again." in body
+    assert "The approved operation ran" not in body
+    assert "did not succeed" not in body
+    # The outcome block still names the error code and the audit row.
+    assert 'data-result-state="failed"' in body
+    assert "release_changed_while_waiting" in body
+    assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
+
+
+def test_approve_refused_by_release_change_says_nothing_ran() -> None:
+    """An approve that MEHO refuses because it was updated does not say the run failed (#5030)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    refused = SimpleNamespace(
+        status="denied",
+        op_id="vsphere.vm.create",
+        audit_id=uuid.UUID(_RUN_AUDIT_ID),
+        extras={"error_code": "release_changed_while_waiting"},
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, AsyncMock(return_value=refused)),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/approve",
+                data={"reason": "looks safe"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Approved, but MEHO did not run it" in body
+    assert "The operation did not run." in body
+    assert "Approved, but the run failed" not in body
+    assert "was approved and ran" not in body
+    assert "Request approved" not in body
+    assert "release_changed_while_waiting" in body
+    assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
 
 
 def test_approve_whose_run_fails_shows_a_failed_card() -> None:

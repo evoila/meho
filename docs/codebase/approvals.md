@@ -164,7 +164,11 @@ a plain sentence with the advice to ask again. `meho approvals show`
 prints `Release:` and `Expired:` lines. The reason is read off the row and
 not stored: only the start-up expiry ends a request before its deadline,
 so an `expired` row with `decided_at < expires_at` expired because the
-release changed.
+release changed. The console modal shows such a request with the time
+the update ended it (`decided_at`), not the deadline it never reached.
+For a run MEHO refused (error code `release_changed_while_waiting`), the
+console says MEHO was updated, the operation did not run, and the
+requester must ask again; it does not say the operation ran and failed.
 
 **During a rolling update.** For a short time old and new pods run side
 by side. A new pod ends the waiting requests it finds when it starts. A

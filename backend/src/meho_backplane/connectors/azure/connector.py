@@ -78,6 +78,7 @@ from meho_backplane.connectors.schemas import (
 # Keep the empty line under each family: Ruff wants one between two imports.
 # isort: off
 # aks (Task #5087)
+from meho_backplane.connectors.azure.aks import AksOps
 
 # arc (Task #5084)
 
@@ -155,6 +156,7 @@ class AzureConnector(
     # list_candidates). Their order among themselves does not matter today:
     # no two families define a method with the same name.
     # aks (Task #5087)
+    AksOps,
     # arc (Task #5084)
     # automation (Task #5092)
     # avs (Task #5091)

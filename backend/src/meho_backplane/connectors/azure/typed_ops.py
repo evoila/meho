@@ -39,6 +39,7 @@ from meho_backplane.connectors.azure._model import NO_PARAMS, TEXT_OR_NULL, Azur
 # Keep the empty line under each family: Ruff wants one between two imports.
 # isort: off
 # aks (Task #5087)
+from meho_backplane.connectors.azure import aks
 
 # arc (Task #5084)
 
@@ -357,6 +358,7 @@ AZURE_TYPED_OPS: tuple[AzureTypedOp, ...] = (
     # Each family module adds one line, *<family>.OPS, under its own comment below.
     *_ACCOUNT_OPS,
     # aks (Task #5087)
+    *aks.OPS,
     # arc (Task #5084)
     # automation (Task #5092)
     # avs (Task #5091)
@@ -377,6 +379,7 @@ AZURE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # Each family module adds one line, **<family>.WHEN_TO_USE, under its own comment below.
     **_ACCOUNT_WHEN_TO_USE,
     # aks (Task #5087)
+    **aks.WHEN_TO_USE,
     # arc (Task #5084)
     # automation (Task #5092)
     # avs (Task #5091)

@@ -170,11 +170,30 @@ def test_json_text_value_that_is_itself_json_is_checked() -> None:
     assert count == 1
 
 
-def test_json_text_value_that_is_json_with_a_repeated_key_comes_back_parsed() -> None:
-    sample = '{"a": {"password": "' + _SECRET + '"}, "a": {}}'
+@pytest.mark.parametrize(
+    "sample",
+    [
+        '{"a": {"password": "' + _SECRET + '"}, "a": {}}',
+        '{"b": {"a": {"password": "' + _SECRET + '"}, "a": {}}}',
+        '[{"a": {"password": "' + _SECRET + '"}, "a": {}}]',
+    ],
+    ids=["top-level", "nested", "in-a-list"],
+)
+def test_json_text_value_that_is_json_with_a_repeated_key_is_withheld(sample: str) -> None:
+    """The parser would keep one value and drop the other, so the whole value is withheld."""
     text, count = _check(json.dumps({"description": sample}), _JSON)
-    assert json.loads(text) == {"description": '{"a":{}}'}
-    assert count == 0
+    assert json.loads(text) == {"description": REDACTED}
+    assert count == 1
+    assert _SECRET not in text
+
+
+def test_json_text_value_holding_json_whose_own_text_value_repeats_a_key_is_withheld() -> None:
+    """The rule holds at every depth: only the value with the repeated key is withheld."""
+    inner = '{"a": {"password": "' + _SECRET + '"}, "a": {}}'
+    text, count = _check(json.dumps({"description": json.dumps({"c": inner})}), _JSON)
+    assert json.loads(json.loads(text)["description"]) == {"c": REDACTED}
+    assert count == 1
+    assert _SECRET not in text
 
 
 def test_json_pem_private_key_under_any_name_is_replaced() -> None:
@@ -612,6 +631,7 @@ def test_html_highlighted_block_with_a_secret_is_withheld(document: str, expecte
         '<pre>{<span class="k">"user"</span>: <span class="s">"admin"</span>}</pre>',
         '<pre><code class="json">{\n  <span>"user"</span>: <span>"admin"</span>\n}</code></pre>',
         '<p>Body:</p><code>[<span>{"user":"admin"}</span>]</code>',
+        '<pre>{<span>"example"</span>:"{\\"x\\":{\\"y\\":1},\\"z\\":2}"}</pre>',
         "<pre><span>[</span>1<span>]</span></pre>",
         '<pre><span class="k">user</span>: <span class="s">admin</span>\nroles: [reader]</pre>',
         "<pre><br></pre>",
@@ -620,6 +640,7 @@ def test_html_highlighted_block_with_a_secret_is_withheld(document: str, expecte
         "json-with-spans",
         "pre-code-with-spans",
         "code-list-with-a-span",
+        "json-with-an-embedded-json-string",
         "json-list-of-numbers",
         "yaml",
         "no-text",
@@ -729,6 +750,13 @@ def test_html_block_with_a_secret_child_element_is_withheld(document: str) -> No
         f"<pre><span>a</span>: {{x: {{password: {_SECRET}}}, x: 1}}</pre>",
         f"<pre><span>yes</span>:\n  password: {_SECRET}\ntrue: 1</pre>",
         f"<pre><span>user</span>: admin\n# password: {_SECRET}</pre>",
+        '<pre>{"example":"{\\"x\\":{\\"password\\":\\"'
+        + _SECRET
+        + '\\"},\\"x\\":<span>1</span>}"}</pre>',
+        '<pre>{<span>"a"</span>:'
+        + json.dumps(json.dumps({"b": '{"x":{"password":"' + _SECRET + '"},"x":1}'}))
+        + "}</pre>",
+        f'<pre><span>a</span>: \'{{"x":{{"password":"{_SECRET}"}},"x":1}}\'</pre>',
     ],
     ids=[
         "json-repeated-key",
@@ -740,6 +768,9 @@ def test_html_block_with_a_secret_child_element_is_withheld(document: str) -> No
         "yaml-repeated-key-in-a-flow-mapping",
         "yaml-repeated-key-spelled-two-ways",
         "yaml-comment",
+        "json-repeated-key-in-an-embedded-json-string",
+        "json-repeated-key-in-a-string-two-levels-down",
+        "yaml-string-holding-json-with-a-repeated-key",
     ],
 )
 def test_html_block_whose_text_the_parser_keeps_only_in_part_is_withheld(document: str) -> None:
@@ -747,8 +778,11 @@ def test_html_block_whose_text_the_parser_keeps_only_in_part_is_withheld(documen
 
     A key named twice keeps the last value only: the first value is in the
     text but not in the checked copy. A YAML comment is not in the copy at
-    all. Such text is no document; the block is withheld.
+    all. Such text is no document; the block is withheld. A text value in
+    the document that is itself JSON with a key named twice is withheld
+    and counted by the value check, so the block is withheld as well.
     """
+    assert _SECRET in document
     text, count = _check(document, _HTML)
     assert text == f"<pre>{REDACTED}</pre>"
     assert count == 1

@@ -33,11 +33,13 @@ from meho_backplane.broadcast.events import (
 __all__ = [
     "REDACTED",
     "ApiFileFormatError",
+    "RepeatedKeyError",
     "Scrubber",
     "TextRule",
     "dump_json",
     "is_secret_name",
     "is_secret_name_lowercased",
+    "load_json",
 ]
 
 #: A rule for one text value: returns the changed value and the count of
@@ -90,6 +92,32 @@ def dump_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
+class RepeatedKeyError(ValueError):
+    """One JSON object names a key twice; the parser would keep one value and drop the other."""
+
+
+def load_json(text: str) -> Any:
+    """Parse *text* as JSON, whole: an object that names a key twice is refused.
+
+    :func:`json.loads` keeps the last value under a repeated key and drops
+    the others without a word. A check of the parsed copy then says
+    nothing about a dropped value, and a count of replacements stays at
+    zero while the text still holds it. Raises :exc:`RepeatedKeyError`,
+    a :exc:`ValueError`, for a key named twice in one object at any
+    depth; any other :exc:`ValueError` is the parser's own.
+    """
+    return json.loads(text, object_pairs_hook=_object_without_repeats)
+
+
+def _object_without_repeats(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    mapping: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in mapping:
+            raise RepeatedKeyError(key)
+        mapping[key] = value
+    return mapping
+
+
 class Scrubber:
     """Replace secret values in parsed data; keep the count of replacements."""
 
@@ -135,11 +163,15 @@ class Scrubber:
     def text(self, value: str) -> str:
         """Check one text value: a PEM private key, JSON inside the text, the text rule.
 
-        JSON inside the text always comes back written from the parsed
-        copy, also when nothing was replaced: the original text can hold
-        a repeated key the parser dropped, and its value with it. The
-        text rule runs on the values inside such JSON, not on the written
-        JSON text, so the text stays JSON.
+        JSON inside the text comes back written from the parsed copy,
+        also when nothing was replaced. JSON that names a key twice in
+        one object, at any depth, is withheld whole and counted once:
+        the parser would keep one value and drop the other, so neither
+        the parsed copy nor the count would say anything about the
+        dropped one, and a caller that keeps the original text (the
+        fail-closed HTML block) would keep it unseen. The text rule runs
+        on the values inside such JSON, not on the written JSON text, so
+        the text stays JSON.
         """
         if _PEM_PRIVATE_KEY.search(value):
             self.count += 1
@@ -147,7 +179,10 @@ class Scrubber:
         stripped = value.strip()
         if stripped and stripped[0] in "{[":
             try:
-                parsed = json.loads(stripped)
+                parsed = load_json(stripped)
+            except RepeatedKeyError:
+                self.count += 1
+                return REDACTED
             except ValueError:
                 parsed = None
             if isinstance(parsed, (dict, list)):

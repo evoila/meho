@@ -140,13 +140,20 @@ is how `{"credentials": {"default": "..."}}` got through a text scan.
      the parsed copy must hold all of its text: text that names a key
      twice in one object, at any depth (the parser keeps one value and
      drops the other), or YAML text with a comment, is no document, and
-     the block is withheld. A `<span>` with child elements is ordinary
-     page text and gets the element check.
+     the block is withheld. The same holds for a text value inside the
+     document that is itself JSON with a key named twice: the value
+     check withholds and counts it (next point), so the block is
+     withheld too. A `<span>` with child elements is ordinary page text
+     and gets the element check.
    - Any text value that is itself a JSON object or list (a sample
      request in a description, a `<pre>` block) is parsed and checked
-     the same way, and always written back from the parsed copy, also
-     when nothing was replaced: the original text can hold a repeated
-     key the parser dropped, and its value with it.
+     the same way, and written back from the parsed copy, also when
+     nothing was replaced. Such a value that names a key twice in one
+     object, at any depth, is withheld whole and counted once: the
+     parser would keep one value and drop the other, so neither the
+     parsed copy nor the count would say anything about the dropped
+     one. The rule holds at every depth of nesting, also for JSON text
+     inside a text value inside JSON text.
    - Any text value that holds a private key in PEM form
      (`-----BEGIN ... PRIVATE KEY-----`), under any name.
 4. Write the copy in the same format from the parsed file. JSON is

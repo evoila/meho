@@ -1074,6 +1074,14 @@ _SECRET_PAGES: list[Any] = [
     pytest.param(
         "text/html",
         "/rest-api/login.html",
+        '<pre>{"example":"{\\"x\\":{\\"password\\":\\"example-secret-value-0123456789\\"},'
+        '\\"x\\":<span>1</span>}"}</pre>',
+        "example-secret-value-0123456789",
+        id="json-with-a-repeated-key-in-an-embedded-string-in-a-highlighted-block",
+    ),
+    pytest.param(
+        "text/html",
+        "/rest-api/login.html",
         "<pre><span>x</span>:\n  password: example-secret-value-0123456789\nx: 1</pre>",
         "example-secret-value-0123456789",
         id="yaml-with-a-repeated-key-in-a-highlighted-block",

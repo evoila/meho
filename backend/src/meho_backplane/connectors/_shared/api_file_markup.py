@@ -26,8 +26,10 @@ one JSON or YAML object or list that the structured check leaves
 unchanged. Text that names a key twice in one object, at any depth, or
 YAML text that holds a comment, is no such document: the parser would
 keep only part of it, and the block would come back with text the check
-never saw. Any other such block is withheld: the placeholder stands in
-its place, counted once.
+never saw. A text value inside the document that is itself JSON with a
+key named twice counts as a replacement for the same reason. Any other
+such block is withheld: the placeholder stands in its place, counted
+once.
 """
 
 from __future__ import annotations
@@ -48,11 +50,13 @@ from defusedxml import DefusedXmlException
 from meho_backplane.connectors._shared.api_file_values import (
     REDACTED,
     ApiFileFormatError,
+    RepeatedKeyError,
     Scrubber,
     TextRule,
     dump_json,
     is_secret_name,
     is_secret_name_lowercased,
+    load_json,
 )
 
 __all__ = ["check_html", "check_xml"]
@@ -451,8 +455,12 @@ def _html_block(node: _HtmlNode, scrubber: Scrubber) -> str:
     one the page shows. The block comes back as the page wrote it, so
     the parsed copy must hold all of its text: a key named twice in one
     object (the parser keeps one value and drops the other) or a YAML
-    comment makes the text no document, see :func:`_parse_document`. A
-    block with no text has only the element check.
+    comment makes the text no document, see :func:`_parse_document`.
+    The same holds one level down: a text value in the document that is
+    itself JSON with a key named twice is withheld and counted by
+    :meth:`Scrubber.text`, so the probe's count is never zero while the
+    text holds a value the parser dropped. A block with no text has only
+    the element check.
     """
     probe = scrubber.fresh()
     checked: list[str] = []
@@ -467,10 +475,6 @@ def _html_block(node: _HtmlNode, scrubber: Scrubber) -> str:
     return "".join(checked)
 
 
-class _RepeatedKeyError(ValueError):
-    """One object names a key twice; the parser would keep one value and drop the other."""
-
-
 def _parse_document(text: str) -> dict[str, Any] | list[Any] | None:
     """*text* as one JSON or YAML object or list; ``None`` when it is not one.
 
@@ -481,26 +485,19 @@ def _parse_document(text: str) -> dict[str, Any] | list[Any] | None:
     text with a ``#`` in it: the parser keeps only part of such text (one
     of the two values; the text without the comment), and a check of the
     parsed copy says nothing about the rest. The caller returns the text
-    as the page wrote it, so all of it must be in the parsed copy.
+    as the page wrote it, so all of it must be in the parsed copy. A
+    text value inside the document that is itself JSON gets the same
+    rule from :meth:`Scrubber.text`, which withholds and counts it.
     """
     try:
-        parsed: Any = json.loads(text, object_pairs_hook=_object_without_repeats)
-    except _RepeatedKeyError:
+        parsed: Any = load_json(text)
+    except RepeatedKeyError:
         return None
     except ValueError:
         parsed = _load_yaml(text)
     except RecursionError:
         return None
     return parsed if isinstance(parsed, (dict, list)) else None
-
-
-def _object_without_repeats(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    mapping: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in mapping:
-            raise _RepeatedKeyError(key)
-        mapping[key] = value
-    return mapping
 
 
 def _load_yaml(text: str) -> Any:

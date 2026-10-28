@@ -320,6 +320,54 @@ target registration) is documented in
   `VaultAuthBackendNotMountedError` are reused from `ops_auth.py` so a
   404 from an unmounted backend surfaces the same error class as the
   read ops.
+- **`auth` group, JWT/OIDC login roles** (`ops_auth_jwt.py` /
+  `ops_auth_jwt_schemas.py`, #3694). The JWT/OIDC login method is how
+  people and services log in to Vault with a token from an identity
+  provider; MEHO itself logs in this way. Four ops in the `auth` group:
+
+  | op_id | Vault call | safety_level | approval | op_class (broadcast) |
+  |---|---|---|---|---|
+  | `vault.auth.jwt.role.list` | `LIST /v1/auth/<mount>/role` | safe | no | `read` |
+  | `vault.auth.jwt.role.read` | `GET /v1/auth/<mount>/role/<name>` | safe | no | `other` |
+  | `vault.auth.jwt.role.write` | `POST /v1/auth/<mount>/role/<name>` | dangerous | yes | `write` |
+  | `vault.auth.jwt.config.read` | `GET /v1/auth/<mount>/config` | safe | no | `other` |
+
+  - The mount is a parameter (`mount`, default `jwt`). One plugin serves
+    both `jwt` and `oidc` mounts, and a site often runs one of each.
+    The schema allows only letters, digits, `_`, `-`, `.` and `/`
+    between parts, and no part may start with `.`, so a call cannot
+    leave `auth/<mount>/`.
+  - All four handlers call `client.adapter` (`list` / `get` / `post`)
+    on the same paths hvac uses. The write sends **only the fields the
+    caller gives**. Vault keeps every field that is not in the body, so
+    a `token_ttl` change leaves `bound_audiences`, `user_claim` and the
+    rest as they were. hvac's `auth.jwt.create_role` is not used because
+    it always sends `role_type`, `bound_claims_type` and
+    `verbose_oidc_logging`, which would reset them. The dev-Vault test
+    checks this: after a one-field write, only that field differs.
+  - Tokens issued before a role write keep their old lease. The write's
+    answer carries a `note` that says only new logins get the new
+    settings, so a read-back with an old token is not taken for a failed
+    write.
+  - `config.read` returns only the fields in
+    `VAULT_AUTH_JWT_CONFIG_FIELDS`. `oidc_client_secret` and
+    `provider_config` (which can hold a provider key) are never
+    returned, and a field a later Vault adds is dropped until it is
+    reviewed and added to that list.
+  - `role.list` turns Vault's `404` into `{"keys": []}`. Vault answers
+    `404` both for a mount with no roles and for a path with no JWT/OIDC
+    method, so the guidance points to `vault.sys.auth.list` when the
+    list is empty. `role.read` and `config.read` let the `404` surface
+    as a `connector_error` with `exception_class="InvalidPath"`.
+  - The write has a park-time permission preflight (see below) on
+    `auth/<mount>/role/<name>`.
+  - Registered by `register_vault_auth_jwt_operations()`, its own
+    lifespan registrar entry queued after `register_vault_typed_operations`
+    (which creates the `auth` group). The group text is the shared
+    `AUTH_WHEN_TO_USE` in `ops_auth.py`, which names all three login
+    methods. Group text is first-write-wins: a database whose `auth`
+    group row already exists keeps its old text until an operator edits
+    the group. Unit coverage in `test_connectors_vault_auth_jwt.py`.
 - **`identity` op group** (`ops_identity.py` / `ops_identity_schemas.py`,
   G3.15-T4 #1412) — entity / entity-alias / group lifecycle on the core
   `identity/` engine, group key `identity`:
@@ -734,6 +782,10 @@ approval request is written, exactly like a KV write. The policy lines a
 deployment adds are in
 [`docs/cross-repo/connector-vault-policy.md`](../cross-repo/connector-vault-policy.md)
 §6.4. Coverage in `test_connectors_vault_token_role.py`.
+**`vault.auth.jwt.role.write`** registers a third preflight
+(`ops_auth_jwt.py`) on `auth/<mount>/role/<name>` with the same
+`create` + `update` requirement. Coverage in
+`test_connectors_vault_auth_jwt.py`.
 
 ## JSONFlux result-handle path (`vault.kv.list`)
 
@@ -765,9 +817,10 @@ raw >50-key list once a handle is produced.
 
 1. Importing `connectors.vault` (package `__init__.py`) registers
    `VaultConnector` against the v2 registry synchronously and queues
-   three typed-op registrars (`register_vault_typed_operations`,
+   four typed-op registrars (`register_vault_typed_operations`,
    `register_vault_sys_typed_operations`,
-   `register_vault_identity_token_operations`) onto the lifespan-driven
+   `register_vault_identity_token_operations`,
+   `register_vault_auth_jwt_operations`) onto the lifespan-driven
    registrar list. `register_vault_typed_operations` registers the
    KV-v2 group and then calls `register_vault_auth_operations` (auth
    read) + `register_vault_auth_write_operations` (auth write).

@@ -94,6 +94,7 @@ import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vault import (
     VaultConnector,
+    register_vault_auth_jwt_operations,
     register_vault_identity_token_operations,
     register_vault_sys_typed_operations,
     register_vault_typed_operations,
@@ -229,6 +230,23 @@ def vault_dev_addr() -> Iterator[str]:
         container.stop()
 
 
+#: Mount of the JWT/OIDC login method the seed enables.
+_JWT_MOUNT: str = "jwt-e2e"
+
+
+def _throwaway_public_key_pem() -> str:
+    """A fresh RSA public key in PEM form, only for the dev Vault's jwt config."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return (
+        key.public_key()
+        .public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+        .decode()
+    )
+
+
 def _root_client(addr: str) -> hvac.Client:
     """Construct a root-token hvac client bound to the dev container."""
     return hvac.Client(url=addr, token=_DEV_ROOT_TOKEN)
@@ -303,6 +321,19 @@ def _seed_vault(addr: str) -> None:
         policy='path "secret/data/app/*" {\n  capabilities = ["read", "list"]\n}\n',
     )
 
+    # --- JWT/OIDC login method (#3694) -----------------------------
+    # A ``jwt`` mount checked against one public key made for this run,
+    # so the config holds no identity-provider address to reach.
+    client.sys.enable_auth_method(method_type="jwt", path=_JWT_MOUNT)
+    client.write_data(
+        f"auth/{_JWT_MOUNT}/config",
+        data={
+            "jwt_validation_pubkeys": [_throwaway_public_key_pem()],
+            "bound_issuer": "https://issuer.example.test",
+            "default_role": "e2e-login",
+        },
+    )
+
 
 # ---------------------------------------------------------------------------
 # Per-test wiring: seam swap, descriptor registration
@@ -363,6 +394,7 @@ async def vault_e2e(
     await register_vault_typed_operations(embedding_service=stub_embedding_service)
     await register_vault_sys_typed_operations(embedding_service=stub_embedding_service)
     await register_vault_identity_token_operations(embedding_service=stub_embedding_service)
+    await register_vault_auth_jwt_operations(embedding_service=stub_embedding_service)
 
     @asynccontextmanager
     async def _root_client_cm(
@@ -1698,3 +1730,107 @@ async def test_token_role_write_read_list_against_dev_vault(
     assert after["renewable"] is False
     assert after["orphan"] is True
     assert after["token_period"] == 3600
+
+
+# ---------------------------------------------------------------------------
+# auth group — JWT/OIDC login roles and mount config
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auth_jwt_role_write_read_list_and_config_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+) -> None:
+    """role.write creates a login role; a later write of one field keeps the rest.
+
+    Vault merges a role write: the second write sends only ``token_ttl``,
+    and every other field reads back as before. config.read returns the
+    seeded issuer and default role. Audit classes: ``write`` for the write,
+    ``other`` for the two single reads, ``read`` for the list.
+    """
+    target, addr = vault_e2e
+    role_path = f"auth/{_JWT_MOUNT}/role/e2e-login"
+    created = await dispatch(
+        operator=_make_operator(sub="op-jwt-role-write"),
+        connector_id="vault-1.x",
+        op_id="vault.auth.jwt.role.write",
+        target=target,
+        params={
+            "mount": _JWT_MOUNT,
+            "role_name": "e2e-login",
+            "role_type": "jwt",
+            "user_claim": "sub",
+            "groups_claim": "groups",
+            "bound_audiences": ["meho-e2e"],
+            "token_policies": ["default"],
+            "token_ttl": "1h",
+        },
+        _approved=True,
+    )
+    assert created.status == "ok", created.error
+    assert created.result["written"] is True
+    assert "new logins" in created.result["note"]
+    await _assert_audited(
+        "vault.auth.jwt.role.write", operator_sub="op-jwt-role-write", expected_op_class="write"
+    )
+
+    before = _root_client(addr).read(role_path)["data"]
+    assert before["token_ttl"] == 3600
+
+    changed = await dispatch(
+        operator=_make_operator(sub="op-jwt-role-change"),
+        connector_id="vault-1.x",
+        op_id="vault.auth.jwt.role.write",
+        target=target,
+        params={"mount": _JWT_MOUNT, "role_name": "e2e-login", "token_ttl": "4h"},
+        _approved=True,
+    )
+    assert changed.status == "ok", changed.error
+    assert changed.result["settings"] == {"token_ttl": "4h"}
+    after = _root_client(addr).read(role_path)["data"]
+    assert set(after) == set(before)
+    assert {k for k in before if before[k] != after[k]} == {"token_ttl"}
+    assert after["token_ttl"] == 4 * 3600
+
+    read = await dispatch(
+        operator=_make_operator(sub="op-jwt-role-read"),
+        connector_id="vault-1.x",
+        op_id="vault.auth.jwt.role.read",
+        target=target,
+        params={"mount": _JWT_MOUNT, "role_name": "e2e-login"},
+    )
+    assert read.status == "ok", read.error
+    assert read.result == after
+    await _assert_audited(
+        "vault.auth.jwt.role.read", operator_sub="op-jwt-role-read", expected_op_class="other"
+    )
+
+    listing = await dispatch(
+        operator=_make_operator(sub="op-jwt-role-list"),
+        connector_id="vault-1.x",
+        op_id="vault.auth.jwt.role.list",
+        target=target,
+        params={"mount": _JWT_MOUNT},
+    )
+    assert listing.status == "ok", listing.error
+    assert listing.result == {"mount": _JWT_MOUNT, "keys": ["e2e-login"]}
+    await _assert_audited(
+        "vault.auth.jwt.role.list", operator_sub="op-jwt-role-list", expected_op_class="read"
+    )
+
+    config = await dispatch(
+        operator=_make_operator(sub="op-jwt-config-read"),
+        connector_id="vault-1.x",
+        op_id="vault.auth.jwt.config.read",
+        target=target,
+        params={"mount": _JWT_MOUNT},
+    )
+    assert config.status == "ok", config.error
+    assert config.result["bound_issuer"] == "https://issuer.example.test"
+    assert config.result["default_role"] == "e2e-login"
+    assert "oidc_client_secret" not in config.result
+    await _assert_audited(
+        "vault.auth.jwt.config.read",
+        operator_sub="op-jwt-config-read",
+        expected_op_class="other",
+    )

@@ -25,11 +25,16 @@ Four ops in the ``auth`` group:
 The mount is a parameter (default ``jwt``): one plugin serves both
 ``jwt`` and ``oidc`` mounts, and a site often runs one of each.
 
-The write sends **only the fields the caller gives**. Vault's role write
-keeps every field that is not in the request body. hvac's
-``auth.jwt.create_role`` always sends ``role_type``, ``bound_claims_type``
-and ``verbose_oidc_logging`` (they have defaults), so a change to
-``token_ttl`` alone would reset those three. The handlers therefore call
+The write must keep every field the caller does not give. Vault's role
+write keeps most fields that are not in the request body, with two
+exceptions: when ``role_type`` or ``bound_claims_type`` is missing, Vault
+sets it back to its default (``oidc`` / ``string``). So a ``token_ttl``
+change alone would turn a ``jwt`` role into an ``oidc`` role. The handler
+therefore reads the current role first and sends those two values again
+when the caller did not give them. A new role (Vault ``404`` on the read)
+gets only the given fields. hvac's ``auth.jwt.create_role`` is not used:
+it always sends ``role_type``, ``bound_claims_type`` and
+``verbose_oidc_logging`` with its own defaults. The handlers call
 ``client.adapter`` on the same API paths hvac uses. Tokens issued before
 a write keep their old lease; the write's answer says so
 (:data:`~meho_backplane.connectors.vault.ops_auth_jwt_schemas.VAULT_AUTH_JWT_WRITE_NOTE`).
@@ -38,7 +43,7 @@ Login goes through
 :func:`~meho_backplane.connectors.vault.target_auth.vault_client_for_target`,
 so the target's ``extras["vault_role"]`` decides which Vault role reads
 or makes the change. Before MEHO asks for approval of a write,
-``sys/capabilities-self`` must grant ``create`` and ``update`` on
+``sys/capabilities-self`` must grant ``create``, ``read`` and ``update`` on
 ``auth/<mount>/role/<name>``; otherwise the call is refused with
 ``write_capability_denied``.
 """
@@ -100,8 +105,13 @@ AUTH_JWT_OP_ROLE_WRITE = "vault.auth.jwt.role.write"
 AUTH_JWT_OP_CONFIG_READ = "vault.auth.jwt.config.read"
 
 #: Vault asks for ``create`` when the role does not exist yet and
-#: ``update`` when it does, so an unconditional write needs both.
-AUTH_JWT_ROLE_WRITE_CAPABILITIES: frozenset[str] = frozenset({"create", "update"})
+#: ``update`` when it does, so an unconditional write needs both. The
+#: write reads the current role first, so it needs ``read`` too.
+AUTH_JWT_ROLE_WRITE_CAPABILITIES: frozenset[str] = frozenset({"create", "read", "update"})
+
+#: Fields Vault sets back to their default when a role write leaves them
+#: out. The write copies them from the current role when not given.
+_FIELDS_VAULT_RESETS: tuple[str, ...] = ("role_type", "bound_claims_type")
 
 _DEFAULT_MOUNT = "jwt"
 
@@ -147,26 +157,36 @@ async def vault_auth_jwt_role_write(
 ) -> dict[str, Any]:
     """Create a login role, or change one (``POST auth/<mount>/role/<name>``).
 
-    Sends only the settings the caller gave, so Vault keeps every other
-    field of an existing role (see the module docstring). Returns the
-    settings sent and a note that only new logins get them.
+    Sends the settings the caller gave. For an existing role it also sends
+    the current ``role_type`` / ``bound_claims_type`` when the caller did
+    not give them, because Vault would reset those two (see the module
+    docstring). Returns the given settings, the kept values, and a note
+    that only new logins get the change.
     """
     mount = _mount(params)
     role_name = str(params["role_name"]).strip()
+    api_path = f"/v1/{_role_auth_path(mount, role_name)}"
     settings: dict[str, Any] = {
         field: params[field]
         for field in VAULT_AUTH_JWT_ROLE_WRITE_FIELDS
         if params.get(field) is not None
     }
+    missing = [field for field in _FIELDS_VAULT_RESETS if field not in settings]
+    kept: dict[str, Any] = {}
     async with vault_client_for_target(operator, target) as client:
-        await asyncio.to_thread(
-            client.adapter.post, f"/v1/{_role_auth_path(mount, role_name)}", json=settings
-        )
+        if missing:
+            try:
+                current = _extract_data(await asyncio.to_thread(client.adapter.get, api_path))
+            except hvac.exceptions.InvalidPath:
+                current = {}
+            kept = {field: current[field] for field in missing if current.get(field)}
+        await asyncio.to_thread(client.adapter.post, api_path, json=settings | kept)
     return {
         "mount": mount,
         "role_name": role_name,
         "written": True,
         "settings": settings,
+        "kept_from_current_role": kept,
         "note": VAULT_AUTH_JWT_WRITE_NOTE,
     }
 
@@ -255,9 +275,9 @@ AUTH_JWT_OP_SPECS: tuple[dict[str, Any], ...] = (
         "summary": "Create a Vault JWT/OIDC login role, or change one.",
         "description": (
             "Creates or changes a JWT/OIDC login role (POST "
-            "auth/<mount>/role/<name>). Only the fields given are sent; Vault "
-            "keeps the others. Tokens issued before the change keep their old "
-            "lifetime. Dangerous; needs approval."
+            "auth/<mount>/role/<name>). Fields not given keep their value. "
+            "Tokens issued before the change keep their old lifetime. "
+            "Dangerous; needs approval."
         ),
         "parameter_schema": VAULT_AUTH_JWT_ROLE_WRITE_PARAMETER_SCHEMA,
         "response_schema": VAULT_AUTH_JWT_ROLE_WRITE_RESPONSE_SCHEMA,

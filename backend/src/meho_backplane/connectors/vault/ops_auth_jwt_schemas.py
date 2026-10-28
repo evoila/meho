@@ -247,8 +247,16 @@ VAULT_AUTH_JWT_ROLE_WRITE_RESPONSE_SCHEMA: dict[str, Any] = {
         "settings": {
             "type": "object",
             "description": (
-                "The settings this call sent, by field name. A field the caller did "
+                "The settings the caller gave, by field name. A field the caller did "
                 "not give is not listed and keeps its current value in Vault."
+            ),
+        },
+        "kept_from_current_role": {
+            "type": "object",
+            "description": (
+                "role_type and bound_claims_type copied from the current role and "
+                "sent again, because Vault resets them when a write leaves them "
+                "out. Empty for a new role or when the caller gave both."
             ),
         },
         "note": {
@@ -256,7 +264,7 @@ VAULT_AUTH_JWT_ROLE_WRITE_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": "Says that only new logins get the new settings.",
         },
     },
-    "required": ["mount", "role_name", "written", "settings", "note"],
+    "required": ["mount", "role_name", "written", "settings", "kept_from_current_role", "note"],
     "description": "Confirms the write. Use vault.auth.jwt.role.read to see the whole role.",
 }
 
@@ -265,12 +273,13 @@ VAULT_AUTH_JWT_ROLE_WRITE_LLM_INSTRUCTIONS: dict[str, Any] = {
         "Create a JWT/OIDC login role, or change one: for example the token "
         "lifetime (token_ttl), the policies a login gets (token_policies), or "
         "the accepted audiences and redirect URIs. Dangerous and needs approval: "
-        "the role decides who can log in to Vault and what they can do. Only the "
-        "fields you give are sent. Vault keeps every other field of an existing "
-        "role as it is."
+        "the role decides who can log in to Vault and what they can do. Give only "
+        "the fields to change; every other field of an existing role keeps its "
+        "value. MEHO reads the role first and sends its role_type and "
+        "bound_claims_type again, because Vault would reset those two."
     ),
     "preconditions": (
-        "The target's Vault role needs 'create' and 'update' on "
+        "The target's Vault role needs 'create', 'read' and 'update' on "
         "auth/<mount>/role/<role_name>. MEHO checks this before it asks for "
         "approval; when a right is missing the call is refused with error_code "
         "'write_capability_denied' and no approval is requested. Read the role "
@@ -288,7 +297,8 @@ VAULT_AUTH_JWT_ROLE_WRITE_LLM_INSTRUCTIONS: dict[str, Any] = {
     },
     "output_shape": (
         "On success: {'mount': ..., 'role_name': ..., 'written': true, "
-        "'settings': {<the fields sent>}, 'note': ...}. The note says that only "
+        "'settings': {<the fields given>}, 'kept_from_current_role': {...}, "
+        "'note': ...}. The note says that only "
         "new logins get the new settings; tokens issued earlier keep their old "
         "lifetime. Before approval, a missing Vault right gives status 'denied' "
         "with error_code 'write_capability_denied'. On failure after approval: a "

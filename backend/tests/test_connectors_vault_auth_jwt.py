@@ -11,8 +11,9 @@ Coverage:
 * Registration: ``role.write`` is ``dangerous`` and needs approval; the
   three reads are ``safe`` with no approval. All four sit in the ``auth``
   group, whose text names them and the JWT/OIDC login method.
-* ``role.write`` posts only the fields the caller gave to
-  ``/v1/auth/<mount>/role/<name>``, so Vault keeps every other field. A
+* ``role.write`` posts the fields the caller gave to
+  ``/v1/auth/<mount>/role/<name>``, plus the current ``role_type`` and
+  ``bound_claims_type`` when not given, because Vault resets those two. A
   fake that merges like Vault proves that a one-field write leaves the
   other fields as they were. The answer says that only new logins get the
   new settings.
@@ -23,7 +24,7 @@ Coverage:
   that could leave ``auth/<mount>/role/`` is refused by the schema.
 * All handlers log in under the target's Vault role.
 * The write's permission preflight probes ``auth/<mount>/role/<name>``
-  for ``create`` + ``update``; without them MEHO refuses the call before
+  for ``create`` + ``read`` + ``update``; without them MEHO refuses the call before
   approval and writes no approval request.
 
 Vault is faked in-process through ``tests/_vault_fakes.py``.
@@ -262,17 +263,33 @@ def test_ops_classify_without_a_secret_class(op_id: str, op_class: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-class _MergingVault:
-    """Stands in for Vault's role write: fields in the body replace, the rest stay."""
+#: Fields Vault's role write sets back to these defaults when left out.
+_RESET_WHEN_MISSING: dict[str, str] = {"role_type": "oidc", "bound_claims_type": "string"}
+
+
+class _VaultRoleStore:
+    """Stands in for Vault's role write, as the upstream JWT plugin does it.
+
+    A field in the body replaces the stored value and every other field
+    stays, except ``role_type`` and ``bound_claims_type``: Vault sets those
+    back to ``oidc`` / ``string`` when the body leaves them out.
+    """
 
     def __init__(self, stored: dict[str, Any]) -> None:
         self.stored = dict(stored)
 
     def apply(self, body: dict[str, Any]) -> None:
-        # Vault stores a duration as seconds; "4h" is the only one this test sends.
+        # Vault stores a duration as seconds; "4h" is the only one these tests send.
         seconds = {"4h": 4 * 3600}
+        for field, default in _RESET_WHEN_MISSING.items():
+            self.stored[field] = body.get(field, default)
         for field, value in body.items():
             self.stored[field] = seconds.get(value, value) if isinstance(value, str) else value
+
+
+#: A jwt role with glob claims: the two fields Vault would reset differ
+#: from Vault's defaults, so a reset would show up.
+_JWT_GLOB_ROLE: dict[str, Any] = _ROLE_DATA | {"role_type": "jwt", "bound_claims_type": "glob"}
 
 
 async def test_partial_write_keeps_every_other_field(
@@ -280,23 +297,55 @@ async def test_partial_write_keeps_every_other_field(
 ) -> None:
     """Write only token_ttl: the other 29 fields read back unchanged."""
     fake = install_fake_client(monkeypatch)
-    vault = _MergingVault(_ROLE_DATA)
+    fake.adapter.payloads[_ROLE_API_PATH] = {"data": dict(_JWT_GLOB_ROLE)}
+    vault = _VaultRoleStore(_JWT_GLOB_ROLE)
 
     result = await _dispatch_vault(AUTH_JWT_OP_ROLE_WRITE, {"role_name": _ROLE, "token_ttl": "4h"})
 
     assert result.status == "ok", result.error
-    assert fake.adapter.post_calls == [{"url": _ROLE_API_PATH, "json": {"token_ttl": "4h"}}]
+    sent = {"token_ttl": "4h", "role_type": "jwt", "bound_claims_type": "glob"}
+    assert fake.adapter.post_calls == [{"url": _ROLE_API_PATH, "json": sent}]
     vault.apply(fake.adapter.post_calls[0]["json"])
-    changed = {k for k in _ROLE_DATA if vault.stored[k] != _ROLE_DATA[k]}
+    changed = {k for k in _JWT_GLOB_ROLE if vault.stored[k] != _JWT_GLOB_ROLE[k]}
     assert changed == {"token_ttl"}
     assert vault.stored["token_ttl"] == 4 * 3600
-    assert set(vault.stored) == set(_ROLE_DATA)
+    assert set(vault.stored) == set(_JWT_GLOB_ROLE)
+    assert result.result["settings"] == {"token_ttl": "4h"}
+    assert result.result["kept_from_current_role"] == {
+        "role_type": "jwt",
+        "bound_claims_type": "glob",
+    }
+
+
+async def test_body_with_only_the_given_fields_would_reset_the_role_type() -> None:
+    """Why the write reads first: Vault turns a jwt role into an oidc role."""
+    vault = _VaultRoleStore(_JWT_GLOB_ROLE)
+
+    vault.apply({"token_ttl": "4h"})
+
+    assert vault.stored["role_type"] == "oidc"
+    assert vault.stored["bound_claims_type"] == "string"
+
+
+async def test_write_with_both_reset_fields_given_does_not_read_first(
+    monkeypatch: pytest.MonkeyPatch, _registered_vault_typed_ops: None
+) -> None:
+    fake = install_fake_client(monkeypatch)
+    given = {"role_name": _ROLE, "role_type": "jwt", "bound_claims_type": "string"}
+
+    result = await _dispatch_vault(AUTH_JWT_OP_ROLE_WRITE, given)
+
+    assert result.status == "ok", result.error
+    assert fake.adapter.get_calls == []
+    assert fake.adapter.post_calls[0]["json"] == {"role_type": "jwt", "bound_claims_type": "string"}
+    assert result.result["kept_from_current_role"] == {}
 
 
 async def test_write_answer_says_only_new_logins_get_the_change(
     monkeypatch: pytest.MonkeyPatch, _registered_vault_typed_ops: None
 ) -> None:
-    install_fake_client(monkeypatch)
+    fake = install_fake_client(monkeypatch)
+    fake.adapter.payloads[f"/v1/auth/oidc/role/{_ROLE}"] = {"data": dict(_ROLE_DATA)}
 
     result = await _dispatch_vault(
         AUTH_JWT_OP_ROLE_WRITE,
@@ -312,18 +361,21 @@ async def test_write_answer_says_only_new_logins_get_the_change(
     assert "keep their old lifetime" in result.result["note"]
 
 
-async def test_write_sends_no_default_for_fields_not_given(
+async def test_new_role_gets_only_the_given_fields(
     monkeypatch: pytest.MonkeyPatch, _registered_vault_typed_ops: None
 ) -> None:
-    """hvac's helper would send role_type, bound_claims_type and verbose_oidc_logging."""
+    """No role yet (Vault 404 on the read): nothing is copied, no hvac defaults are sent."""
     fake = install_fake_client(monkeypatch)
+    fake.adapter.raise_on_get[_ROLE_API_PATH] = hvac.exceptions.InvalidPath("none")
 
     result = await _dispatch_vault(
-        AUTH_JWT_OP_ROLE_WRITE, {"role_name": _ROLE, "bound_audiences": ["meho"]}
+        AUTH_JWT_OP_ROLE_WRITE,
+        {"role_name": _ROLE, "user_claim": "sub", "bound_audiences": ["meho"]},
     )
 
     assert result.status == "ok", result.error
-    assert fake.adapter.post_calls[0]["json"] == {"bound_audiences": ["meho"]}
+    assert fake.adapter.post_calls[0]["json"] == {"user_claim": "sub", "bound_audiences": ["meho"]}
+    assert result.result["kept_from_current_role"] == {}
 
 
 @pytest.mark.parametrize(
@@ -486,7 +538,7 @@ async def test_write_preflight_probes_the_role_path_on_the_given_mount(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = install_fake_client(monkeypatch)
-    fake.sys.capabilities_by_path = {"auth/oidc/role/humans": ["create", "update"]}
+    fake.sys.capabilities_by_path = {"auth/oidc/role/humans": ["create", "read", "update"]}
     target = _make_vault_target(vault_role="meho-auth-admin", vault_mount="jwt-meho")
 
     result = await vault_auth_jwt_role_write_capability_preflight(
@@ -497,7 +549,7 @@ async def test_write_preflight_probes_the_role_path_on_the_given_mount(
 
     assert result is not None
     assert result["path"] == "auth/oidc/role/humans"
-    assert result["required"] == ["create", "update"]
+    assert result["required"] == ["create", "read", "update"]
     assert result["will_be_denied"] is False
     assert fake.auth.jwt.login_calls == [_TARGET_LOGIN]
 
@@ -524,7 +576,7 @@ async def test_write_with_rights_waits_for_approval(
 ) -> None:
     """With the rights in place the write waits for approval; nothing reaches Vault."""
     fake = install_fake_client(monkeypatch)
-    fake.sys.capabilities_by_path = {_ROLE_AUTH_PATH: ["create", "update"]}
+    fake.sys.capabilities_by_path = {_ROLE_AUTH_PATH: ["create", "read", "update"]}
 
     result = await _dispatch_vault(
         AUTH_JWT_OP_ROLE_WRITE, {"role_name": _ROLE, "token_ttl": "4h"}, approved=False

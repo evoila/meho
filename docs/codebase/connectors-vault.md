@@ -338,12 +338,18 @@ target registration) is documented in
     between parts, and no part may start with `.`, so a call cannot
     leave `auth/<mount>/`.
   - All four handlers call `client.adapter` (`list` / `get` / `post`)
-    on the same paths hvac uses. The write sends **only the fields the
-    caller gives**. Vault keeps every field that is not in the body, so
-    a `token_ttl` change leaves `bound_audiences`, `user_claim` and the
-    rest as they were. hvac's `auth.jwt.create_role` is not used because
+    on the same paths hvac uses. A role write must keep every field the
+    caller does not give. Vault keeps most fields that are not in the
+    body, but sets a missing `role_type` back to `oidc` and a missing
+    `bound_claims_type` back to `string`. So a `token_ttl` change alone
+    would turn a `jwt` role into an `oidc` role (and Vault then refuses
+    it, because an `oidc` role needs redirect URIs). The write therefore
+    reads the current role first and sends those two values again when
+    the caller did not give them; the answer lists them under
+    `kept_from_current_role`. A new role (`404` on the read) gets only
+    the given fields. hvac's `auth.jwt.create_role` is not used because
     it always sends `role_type`, `bound_claims_type` and
-    `verbose_oidc_logging`, which would reset them. The dev-Vault test
+    `verbose_oidc_logging` with its own defaults. The dev-Vault test
     checks this: after a one-field write, only that field differs.
   - Tokens issued before a role write keep their old lease. The write's
     answer carries a `note` that says only new logins get the new
@@ -783,8 +789,8 @@ deployment adds are in
 [`docs/cross-repo/connector-vault-policy.md`](../cross-repo/connector-vault-policy.md)
 §6.4. Coverage in `test_connectors_vault_token_role.py`.
 **`vault.auth.jwt.role.write`** registers a third preflight
-(`ops_auth_jwt.py`) on `auth/<mount>/role/<name>` with the same
-`create` + `update` requirement. Coverage in
+(`ops_auth_jwt.py`) on `auth/<mount>/role/<name>`. It needs `create`,
+`read` and `update`, because the write reads the current role first. Coverage in
 `test_connectors_vault_auth_jwt.py`.
 
 ## JSONFlux result-handle path (`vault.kv.list`)

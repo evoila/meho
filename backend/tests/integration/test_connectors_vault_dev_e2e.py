@@ -1743,8 +1743,10 @@ async def test_auth_jwt_role_write_read_list_and_config_against_dev_vault(
 ) -> None:
     """role.write creates a login role; a later write of one field keeps the rest.
 
-    Vault merges a role write: the second write sends only ``token_ttl``,
-    and every other field reads back as before. config.read returns the
+    The second write gives only ``token_ttl``. Vault would set a missing
+    ``role_type`` back to ``oidc`` (and then refuse the write, because an
+    oidc role needs redirect URIs), so MEHO sends the current ``role_type``
+    and ``bound_claims_type`` again. Every other field reads back as before. config.read returns the
     seeded issuer and default role. Audit classes: ``write`` for the write,
     ``other`` for the two single reads, ``read`` for the list.
     """
@@ -1787,6 +1789,10 @@ async def test_auth_jwt_role_write_read_list_and_config_against_dev_vault(
     )
     assert changed.status == "ok", changed.error
     assert changed.result["settings"] == {"token_ttl": "4h"}
+    assert changed.result["kept_from_current_role"] == {
+        "role_type": "jwt",
+        "bound_claims_type": "string",
+    }
     after = _root_client(addr).read(role_path)["data"]
     assert set(after) == set(before)
     assert {k for k in before if before[k] != after[k]} == {"token_ttl"}

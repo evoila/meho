@@ -664,7 +664,9 @@ async def test_sequential_ui_requests_do_not_serialise_on_a_blocking_probe(
     An earlier version of this test also checked that the 30 page loads
     took under 2 s. That check failed on busy CI runners: most of the time
     is normal page work (session lookup, template rendering), and that
-    work gets slower under load. Only a loose limit against a hang stays.
+    work gets slower under load. Only a loose 10 s limit stays. It catches
+    a hang, and a build where every page load waits out the probe time
+    limit.
 
     The test sends requests through ``httpx.ASGITransport`` on this test's
     own event loop, not through ``TestClient``. ``TestClient`` waits for
@@ -677,9 +679,11 @@ async def test_sequential_ui_requests_do_not_serialise_on_a_blocking_probe(
     from meho_backplane import health
     from meho_backplane.ui.auth import middleware as ui_middleware
 
-    # A short time limit per sweep keeps the test fast. On the pre-fix
-    # head every page load waits this long.
-    bound = 0.1
+    # The time limit per sweep. In a correct build only the first page
+    # load waits this long, so the test stays fast. In a build where every
+    # page load waits this long, 30 x 0.5 s = 15 s fails the 10 s limit
+    # below.
+    bound = 0.5
     monkeypatch.setattr(ui_middleware, "_READINESS_TIMEOUT_S", bound)
     # Keep the cached result fresh for the whole test. Then the machine's
     # speed cannot decide whether a background refresh starts, and the
@@ -745,15 +749,21 @@ async def test_sequential_ui_requests_do_not_serialise_on_a_blocking_probe(
         release_probe.set()
     elapsed = loop.time() - started
 
-    # Only a guard against a hang, not the proof (the proof is the probe
-    # count below). Normal page work gets much slower on a busy CI runner,
-    # so a tight clock limit here fails for reasons unrelated to readiness.
-    assert elapsed < 10.0, f"{n_requests} page loads took {elapsed:.2f}s; this looks like a hang"
+    # A loose limit, not a tight stopwatch. Normal page work gets much
+    # slower on a busy CI runner, so a tight clock limit here fails for
+    # reasons unrelated to readiness. The limit catches a hang. It also
+    # catches a build where every page load waits out the bound, one after
+    # another, even if the probe count stays low: 30 serialised waits would
+    # take 15 s, above this limit.
+    assert elapsed < 10.0, (
+        f"{n_requests} page loads took {elapsed:.2f}s: a hang, or every page "
+        f"load waited out the {bound} s probe bound"
+    )
     # The proof. The first page load runs the probe once to fill the
     # cache; the other page loads only read the cache. Pre-fix every page
     # load runs the probe again, so the count is far above 1. The check is
     # ``<= 1`` and not ``== 1``: on a very slow runner the probe thread may
-    # not start inside the 0.1 s bound, and then the count is 0.
+    # not start inside the 0.5 s bound, and then the count is 0.
     assert invocations <= 1, (
         f"probe should run at most once (to fill the cache), "
         f"got {invocations} for {n_requests} page loads"

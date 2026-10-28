@@ -210,8 +210,7 @@ TARGETS_REMOVE_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Remove the target even when topology records (`graph_node` "
                 "rows) point at it. Default `false`: the call fails and names "
-                "the count. The topology records stay; their link to the "
-                "target is cleared."
+                "the count. The topology records stay as they are."
             ),
         },
     },

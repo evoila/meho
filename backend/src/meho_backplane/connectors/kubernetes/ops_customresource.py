@@ -33,7 +33,8 @@ the result envelope; when the excerpt is truncated, ``spec_truncated``
 is ``true`` and the excerpt is a preview (not parseable JSON). The
 truncation rule is documented in each op's ``llm_instructions``.
 ``.status`` gets the same capped excerpt, and annotations are kept with
-capped values minus the last-applied copy of the manifest (#3878). The
+capped values minus the last-applied copy of the manifest (#3878); on a
+``Secret`` every annotation value is the redacted placeholder. The
 verbose ``metadata.managedFields`` block (server-side-apply carries huge
 ones) is dropped from the projection entirely.
 
@@ -214,8 +215,9 @@ def custom_resource_row(obj: dict[str, Any]) -> dict[str, Any]:
     credential pattern). For a ``Secret`` the projection then surfaces
     the **redacted** ``data`` / ``string_data`` key inventory -- so the
     read answers "which keys does this Secret carry?" with a per-value
-    digest, never the bytes. A non-Secret CR gets neither field and is
-    otherwise untouched by the walk.
+    digest, never the bytes. The same walk replaces every annotation
+    value of a Secret with the placeholder (keys kept). A non-Secret CR
+    gets neither field and is otherwise untouched by the walk.
     """
     is_secret = obj.get("kind") == SECRET_KIND
     if is_secret:
@@ -442,7 +444,8 @@ _CR_ROW_NOTES = (
     "JSON). ``annotations`` values are cut at "
     f"{CR_ANNOTATION_VALUE_MAX_BYTES} bytes (``annotations_truncated``) "
     "and ``kubectl.kubernetes.io/last-applied-configuration`` is left "
-    "out. A changed ``resource_version`` means the object changed."
+    "out. On a Secret every annotation value is a redacted placeholder "
+    "(keys kept). A changed ``resource_version`` means the object changed."
 )
 
 

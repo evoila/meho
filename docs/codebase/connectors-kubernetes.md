@@ -897,6 +897,9 @@ consumer session that fell back to raw kubectl):
   - The `kubectl.kubernetes.io/last-applied-configuration` annotation
     is always left out. It is a copy of the whole last manifest, so it
     is large, and on a Secret it repeats every value.
+  - On a `Secret`, every annotation value is the redacted placeholder
+    (the same one `data` values get). The keys stay. Deploy tools can
+    copy the whole manifest into an annotation, so no value is shown.
   - `status_excerpt` is the JSON `.status`, capped like `spec_excerpt`
     (2048 B), with its own `status_truncated` flag. It is `null` when
     the object has no `.status`.
@@ -936,8 +939,8 @@ audit / broadcast.
 
 **Projection note.** `custom_resource_row` otherwise keeps only
 `metadata` + bounded `.spec` / `.status` excerpts and drops every other
-top-level field (a Secret's annotations show, but never its
-last-applied annotation); a `Secret` has no `.spec`, so before #3501 a CR read of a Secret
+top-level field (a Secret's annotation keys show, but every annotation
+value is replaced by the placeholder); a `Secret` has no `.spec`, so before #3501 a CR read of a Secret
 returned no `data` at all (safe, but uninformative). The redactor lets
 the projection surface a `data` / `string_data` **key inventory** (values
 redacted, digests attached) for a `kind: Secret` object instead — safe
@@ -1057,9 +1060,9 @@ happened" apply could not be explained from the trace.
 - Secret payloads are masked before capture. Every JSON request and
   response body first goes through the connector's structural Secret
   redactor (`redaction.py`, the same walk `k8s.cr.*` reads use). Every
-  `data` / `stringData` value of a `kind: Secret` object, and its
-  `last-applied-configuration` annotation, is replaced by a placeholder
-  plus a digest; key names stay. This covers a `k8s.apply` of a Secret
+  `data` / `stringData` value of a `kind: Secret` object, and every
+  annotation value on it, is replaced by a placeholder plus a digest;
+  key names stay. This covers a `k8s.apply` of a Secret
   manifest, a `k8s.cr.info` read of one, and the items of a
   `SecretList` (which carry no `kind` of their own). The normal body
   redaction then runs over the masked body.

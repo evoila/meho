@@ -29,7 +29,6 @@ import asyncssh
 import jsonschema
 import pytest
 
-import meho_backplane.connectors.holodeck  # noqa: F401 -- import for registry side-effects
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.holodeck import HolodeckConnector, ops_dns
 from meho_backplane.connectors.holodeck.dns_hosts import (

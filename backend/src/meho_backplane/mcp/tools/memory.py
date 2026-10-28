@@ -553,7 +553,7 @@ register_mcp_tool(
             "— requires `target_name`. "
             "An operator without tenant_admin role attempting a 'tenant' "
             "write is denied (INVALID_PARAMS); promote via the operator-"
-            "driven `meho promote` verb (G5.2) instead. "
+            "driven `meho promote` verb instead. "
             "ALWAYS call `search_memory` FIRST with the topic you're "
             "about to capture: re-adding under a different slug "
             "fragments the corpus. If a matching entry already exists, "
@@ -587,7 +587,7 @@ register_mcp_tool(
                         "document (BM25 over tsvector + 384-dim embedding "
                         "for cosine). Field name aligned with "
                         "`add_to_knowledge` and the REST `POST /api/v1/memory` "
-                        "body schema (G0.9.1-T7, #779)."
+                        "body schema."
                     ),
                 },
                 "content": {

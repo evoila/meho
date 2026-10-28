@@ -228,7 +228,7 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "rows (the inventory-survey shape, replaces a "
                 "standalone `list_edges` meta-tool); `timeline` = "
                 "tenant-wide chronological feed of graph changes from "
-                "the G9.3 `graph_node_history` + `graph_edge_history` "
+                "the `graph_node_history` + `graph_edge_history` "
                 "tables, cursor-paginated -- 'what's been happening in "
                 "the graph in the last hour?' without rooting at a "
                 "specific resource; `diff` = net per-resource delta "
@@ -298,7 +298,7 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
             "enum": [None, "auto", "curated"],
             "description": (
                 "Optional `graph_edge.source` filter for `kind=edges`: "
-                "`auto` for probe-derived edges (G9.1 refresh service), "
+                "`auto` for probe-derived edges (topology refresh), "
                 "`curated` for operator-asserted ones "
                 "(`meho_topology_annotate`). Omit to list both. "
                 "Ignored for the closure kinds and `path`."
@@ -310,7 +310,7 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
             "description": (
                 "When `true` with `kind=edges`, restrict the listing to "
                 "edges carrying a non-empty `properties.conflicts_with` "
-                "marker — the recoverability view for §6 conflicts "
+                "marker — the recoverability view for conflicts "
                 "(annotations contradicting probe-derived auto edges). "
                 "Ignored for the closure kinds and `path`."
             ),
@@ -462,7 +462,7 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "Opaque forward-pagination token from a prior "
                 "`kind=timeline` page's `next_cursor`. Encodes "
                 "`(valid_from, history_id, source)`; stable under "
-                "concurrent inserts from the G9.3 diff-on-write hook. "
+                "concurrent inserts from the diff-on-write hook. "
                 "Ignored for non-timeline kinds."
             ),
             "maxLength": 1024,
@@ -569,7 +569,7 @@ _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
     "understand what a resource needs. Use `kind=path` to trace "
     "connectivity between two specific resources. Use `kind=edges` for "
     "the flat inventory survey — list curated / auto edges with "
-    "optional filters; pair with `conflicts=true` to surface §6 "
+    "optional filters; pair with `conflicts=true` to surface "
     "conflicts that need operator review. Tenant-scoped automatically.\n\n"
     "WHEN TO CALL: before suggesting any delete/shutdown/detach — "
     "'is it safe to delete namespace customer-a-prod-foo?' → "
@@ -645,7 +645,7 @@ _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
     "'safe to delete'; the call has produced no blast-radius signal. "
     "The recovery is `meho topology refresh <target>` for a k8s "
     "target or `meho_topology_annotate` for cross-system relationships "
-    "the probes can't infer (G0.18-T4 #1357, RDC #789 N2). "
+    "the probes can't infer. "
     'For `path`: `{kind: "path", status, direction, relation_class, '
     "path: TopologyPath|null, evidence}`. `status` is `found`, "
     "`node_untracked` (an endpoint is not in the graph; `name` says "
@@ -1317,8 +1317,7 @@ register_mcp_tool(
                         "`meho_backplane.topology.schemas.TopologyNode`. "
                         "A larger answer has `handle` instead. "
                         "When the anchor is untracked the array is empty "
-                        "and `status` carries `node_untracked` (G0.18-T4 "
-                        "#1357)."
+                        "and `status` carries `node_untracked`."
                     ),
                 },
                 "status": {
@@ -1333,10 +1332,10 @@ register_mcp_tool(
                         "one-element `[root]` in `nodes`). Auto-discovery "
                         "is k8s-only today; non-k8s targets surface here "
                         "until a populator or curated annotation lands. "
-                        "(G0.18-T4 #1357, RDC #789 N2.) `kind=path`: "
+                        "`kind=path`: "
                         "always present — `found`, `node_untracked` (an "
                         "endpoint is not in the graph) or `no_route` "
-                        "(both ends exist, no route) (#3760)."
+                        "(both ends exist, no route)."
                     ),
                 },
                 "detail": {
@@ -1611,19 +1610,16 @@ _LIST_TARGETS_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "Cross-tenant scope. Omit / null → the operator's own "
                 "tenant. A tenant slug OR UUID naming a DIFFERENT tenant "
                 "selects that tenant's targets and REQUIRES the "
-                "`platform_admin` capability (#1641); a caller who is "
+                "`platform_admin` capability; a caller who is "
                 "not a platform-admin passing a foreign tenant gets "
                 "-32602 (naming your own tenant explicitly is always "
-                "allowed). Canonical name "
-                "(G0.18-T5 #1358); matches `tenant_id` on "
+                "allowed). Canonical name; matches `tenant_id` on "
                 "`meho_connector_*` / `meho_scheduler_create`. "
                 "NOTE: `list_targets.tenant_id` accepts a slug OR a "
                 "UUID; the connector / scheduler tools accept UUID-"
                 "only because they cannot resolve slugs from inside "
                 "their service layer (cross-tenant slug resolution "
-                "requires a session). The accepted-shape asymmetry "
-                "is documented in "
-                "`docs/codebase/api-shape-conventions.md` §14."
+                "requires a session)."
             ),
             "maxLength": 256,
         },
@@ -2132,9 +2128,9 @@ _ANNOTATE_DESCRIPTION: Final[str] = (
     "AUTO-DISCOVERABLE KINDS (`runs-on`, `mounts`, `routes-through`, "
     "`belongs-to`) — accepted, with one caveat: when a probe-written "
     "**auto** edge already exists for the same pair, the curated row "
-    "lands as a §6 conflict marker (`conflicts_with`) for operator "
+    "lands as a conflict marker (`conflicts_with`) for operator "
     "review. Today only the Kubernetes connector populates auto edges "
-    "(G0.18-T4 #1357 — every other shipped connector inherits the "
+    "(every other shipped connector inherits the "
     "no-op `Connector.discover_topology` from the ABC), so on a "
     "non-k8s pair (or any pair no probe covers) the curated row "
     "inserts clean (`source: curated, conflicts: []`) and is the "
@@ -2197,7 +2193,7 @@ register_mcp_tool(
 
 
 _UNANNOTATE_DESCRIPTION: Final[str] = (
-    "Hard-delete a curated `graph_edge` and clear its reciprocal §6 "
+    "Hard-delete a curated `graph_edge` and clear its reciprocal conflict "
     "markers (tenant_admin only). Pass either `edge_id` OR the full "
     "`(from_name, kind, to_name)` triple — both forms, partial triples, "
     "or empty strings are rejected at the inputSchema layer (-32602) "
@@ -2207,7 +2203,7 @@ _UNANNOTATE_DESCRIPTION: Final[str] = (
     "but it turns out the real dependency is `database-Z`. "
     "`meho_topology_unannotate {from_name: service-X, kind: depends-on, "
     "to_name: database-Y}` removes the curated row and re-promotes any "
-    "auto edge it had marked superseded (§6 recoverability invariant). "
+    "auto edge it had marked superseded. "
     "After this, blast-radius checks no longer include the wrong edge.\n\n"
     "Refuses to delete an `source='auto'` edge — those resurrect on the "
     "next refresh, making manual deletion meaningless. The refusal "

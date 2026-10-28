@@ -645,7 +645,7 @@ register_mcp_tool(
         surface=ToolSurface.WORKING,
         description=(
             "Publish an agent-authored announcement to the operator's "
-            "tenant broadcast stream (Initiative #1090, Task #1092). "
+            "tenant broadcast stream. "
             "Use this to surface intent ('about to investigate cluster "
             "X latency'), progress updates ('halfway through the "
             "vCenter migration'), or completion summaries ('finished -- "
@@ -658,8 +658,7 @@ register_mcp_tool(
             "lands on "
             "the same meho:feed:{tenant_id} stream that audit-driven "
             "events use, distinguished by kind='agent_announcement' "
-            "(audit-driven events carry kind='operation' per "
-            "docs/codebase/api-shape-conventions.md §6); other "
+            "(audit-driven events carry kind='operation'); other "
             "operators read it back via meho_broadcast_recent. "
             "ONLY A TRUSTED AGENT CAN PUBLISH: a call from inside a "
             "MEHO-hosted agent run, or a call with the token of a "

@@ -144,8 +144,8 @@ register_mcp_tool(
         name="meho_agents_grant_list",
         surface=ToolSurface.OPERATOR,
         description=(
-            "List agent permission grants for the operator's tenant "
-            "(G11.2-T6). Returns {grants: [...]}; each row carries "
+            "List agent permission grants for the operator's tenant. "
+            "Returns {grants: [...]}; each row carries "
             "`grant_id` (accepted verbatim by meho_agents_grant_show / "
             ".revoke) alongside the model-native `id`. "
             "Optional principal_sub filters to one agent. "
@@ -200,7 +200,7 @@ register_mcp_tool(
         name="meho_agents_grant_show",
         surface=ToolSurface.OPERATOR,
         description=(
-            "Fetch one agent permission grant by id (G11.2-T6). "
+            "Fetch one agent permission grant by id. "
             "Returns the grant row (carrying both `grant_id` and the "
             "model-native `id`) or raises not-found."
         ),
@@ -254,7 +254,7 @@ register_mcp_tool(
         name="meho_agents_grant_create",
         surface=ToolSurface.OPERATOR,
         description=(
-            "Grant a permission to an agent principal (G11.2-T6). "
+            "Grant a permission to an agent principal. "
             "verdict: auto-execute | needs-approval | deny. "
             "expires_at (ISO-8601 UTC) makes the grant time-bounded. "
             "Omit expires_at for a permanent grant. The created row "
@@ -342,7 +342,7 @@ register_mcp_tool(
         name="meho_agents_grant_revoke",
         surface=ToolSurface.OPERATOR,
         description=(
-            "Revoke (delete) a permission grant by id (G11.2-T6). "
+            "Revoke (delete) a permission grant by id. "
             "Returns {revoked: <grant_id>} on success."
         ),
         inputSchema={

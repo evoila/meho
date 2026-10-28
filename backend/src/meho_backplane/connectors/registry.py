@@ -424,7 +424,7 @@ def _eager_import_connectors() -> None:
 
     The folders were already checked against the connector package list
     when :mod:`meho_backplane.connectors` itself was imported (see
-    :func:`~meho_backplane.connectors.packages.check_connector_folders`).
+    :func:`~meho_backplane.connector_packages.check_connector_folders`).
     That import is a precondition of reaching this function, so the walk
     only imports.
     """

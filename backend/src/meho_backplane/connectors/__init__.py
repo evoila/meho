@@ -10,13 +10,16 @@ root.
 
 from pathlib import Path
 
-from meho_backplane.connectors.packages import check_connector_folders
+from meho_backplane.connector_packages import check_connector_folders
 
 # This must stay the first thing this package does. Python runs this
 # ``__init__`` before any ``connectors.<folder>`` module, whoever imports
 # it: the registry walk, a route module in ``main.py``, or a test. The
 # imports below already pull in ``connectors._shared``, so the check has
-# to come before them. See ``docs/codebase/connector-packages.md``.
+# to come before them. The check itself lives outside this folder: a
+# folder added under ``connectors/`` would shadow a module of the same
+# name here, and Python would run it in place of the check. See
+# ``docs/codebase/connector-packages.md``.
 check_connector_folders(Path(next(iter(__path__))))
 
 from meho_backplane.connectors.base import Connector, ShimKind, shim_kind  # noqa: E402

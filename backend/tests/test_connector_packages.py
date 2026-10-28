@@ -13,7 +13,9 @@ reads them exactly as it reads an installed wheel. The made-up
 
 The last test starts a fresh Python process on a copy of the real
 ``meho_backplane`` tree with a planted folder, and shows that importing
-``meho_backplane.main`` stops before any connector code runs.
+``meho_backplane.main`` stops before any connector code runs. One of its
+cases plants a folder named like the check module itself, to show that
+no folder under ``connectors/`` can take the place of the check.
 """
 
 from __future__ import annotations
@@ -29,8 +31,8 @@ from types import ModuleType
 
 import pytest
 
-from meho_backplane.connectors import packages
-from meho_backplane.connectors.packages import (
+from meho_backplane import connector_packages
+from meho_backplane.connector_packages import (
     ConnectorPackageError,
     check_connector_folders,
     load_connector_packages,
@@ -48,7 +50,7 @@ _EXTRA_DIST = "fake-acme-connectors"
 
 _CONNECTORS_INIT = (
     "from pathlib import Path\n"
-    "from meho_backplane.connectors.packages import check_connector_folders\n"
+    "from meho_backplane.connector_packages import check_connector_folders\n"
     "check_connector_folders(Path(next(iter(__path__))))\n"
 )
 
@@ -96,7 +98,7 @@ class _LogRecorder:
 @pytest.fixture
 def logs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
     recorder = _LogRecorder()
-    monkeypatch.setattr(packages, "_log", recorder)
+    monkeypatch.setattr(connector_packages, "_log", recorder)
     return recorder.events
 
 
@@ -120,8 +122,10 @@ def site(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         ],
     )
     monkeypatch.syspath_prepend(str(site))
-    monkeypatch.setattr(packages, "BUILTIN_DISTRIBUTION", _BUILTIN_DIST)
-    monkeypatch.setattr(packages, "CONNECTOR_PACKAGES_FILE", tmp_path / "connector-packages.json")
+    monkeypatch.setattr(connector_packages, "BUILTIN_DISTRIBUTION", _BUILTIN_DIST)
+    monkeypatch.setattr(
+        connector_packages, "CONNECTOR_PACKAGES_FILE", tmp_path / "connector-packages.json"
+    )
     registrars_before = list(typed_register._TYPED_OP_REGISTRARS)
     yield site
     typed_register._TYPED_OP_REGISTRARS[:] = registrars_before
@@ -382,7 +386,7 @@ def test_source_checkout_counts_every_folder_in_it_as_built_in(
         direct_url={"url": checkout.as_uri(), "dir_info": {"editable": True}},
     )
     monkeypatch.syspath_prepend(str(site))
-    monkeypatch.setattr(packages, "BUILTIN_DISTRIBUTION", "fake-meho-editable")
+    monkeypatch.setattr(connector_packages, "BUILTIN_DISTRIBUTION", "fake-meho-editable")
 
     check_connector_folders(connectors_dir, tmp_path / "absent.json")
 
@@ -412,16 +416,23 @@ sys.path.insert(0, sys.argv[1])
 try:
     import meho_backplane.main
 except Exception as exc:  # noqa: BLE001
-    loaded = sorted(m for m in sys.modules if m.startswith("meho_backplane.connectors"))
+    loaded = sorted(
+        m
+        for m in sys.modules
+        if m == "meho_backplane.connectors" or m.startswith("meho_backplane.connectors.")
+    )
+    guard = sys.modules.get("meho_backplane.connector_packages")
     print("STOPPED:", exc)
     print("LOADED:", " ".join(loaded))
+    print("GUARD:", "" if guard is None else guard.__file__)
     sys.exit(3)
 print("STARTED")
 """
 
 
+@pytest.mark.parametrize("folder", ["zz_planted", "packages"], ids=["any-name", "check-name"])
 def test_fresh_process_rejects_a_planted_folder_before_any_connector_code_runs(
-    tmp_path: Path,
+    tmp_path: Path, folder: str
 ) -> None:
     """Start a new interpreter on a copy of the real tree, installed like a wheel.
 
@@ -430,19 +441,29 @@ def test_fresh_process_rejects_a_planted_folder_before_any_connector_code_runs(
     whose file list names every file but the planted folder, so the check
     sees it as a wheel install. The import must stop on the planted folder,
     and no ``connectors.<folder>`` module may have been loaded.
+
+    The second case plants a folder named ``packages``, the old name of
+    the check module inside ``connectors/``. Python prefers a folder over
+    a module file of the same name, so a check that lived there would be
+    replaced by the planted code. The check lives outside the tree, so
+    the planted code must never run, and the check that stops the start
+    must be the real one.
     """
-    real_pkg = Path(packages.__file__).resolve().parents[1]
+    real_pkg = Path(connector_packages.__file__).resolve().parent
     src = tmp_path / "src"
     copy = src / "meho_backplane"
     shutil.copytree(real_pkg, copy, ignore=shutil.ignore_patterns("__pycache__"))
     marker = tmp_path / "marker"
-    _write(copy / "connectors" / "zz_planted" / "__init__.py", f"open({str(marker)!r}, 'w')\n")
+    _write(
+        copy / "connectors" / folder / "__init__.py",
+        f"open({str(marker)!r}, 'w')\ndef check_connector_folders(*args, **kwargs):\n    pass\n",
+    )
     installed = [
         p.relative_to(src).as_posix()
         for p in sorted(copy.rglob("*"))
-        if p.is_file() and "zz_planted" not in p.parts
+        if p.is_file() and folder not in p.parts
     ]
-    _dist(src, packages.BUILTIN_DISTRIBUTION, "0.0.0+test", installed)
+    _dist(src, connector_packages.BUILTIN_DISTRIBUTION, "0.0.0+test", installed)
     script = tmp_path / "fresh_start.py"
     script.write_text(_FRESH_START, encoding="utf-8")
 
@@ -457,6 +478,7 @@ def test_fresh_process_rejects_a_planted_folder_before_any_connector_code_runs(
 
     assert result.returncode == 3, result.stdout + result.stderr
     assert "STOPPED: connector_package_not_allowed" in result.stdout
-    assert "'zz_planted'" in result.stdout
-    assert "LOADED: meho_backplane.connectors.packages\n" in result.stdout
+    assert f"{folder!r}" in result.stdout
+    assert "LOADED: \n" in result.stdout
+    assert f"GUARD: {copy / 'connector_packages.py'}\n" in result.stdout
     assert not marker.exists()

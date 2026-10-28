@@ -15,7 +15,17 @@ check runs in the `__init__` of the `connectors` package itself. Python
 runs that file before any module inside `connectors/`, no matter who
 imports it. So the check also runs when a route module in `main.py`
 imports one connector directly, which happens long before the server's
-start-up steps. The rules:
+start-up steps.
+
+The code of the check lives outside the `connectors/` folder, in
+`meho_backplane/connector_packages.py`. Python prefers a folder over a
+module file of the same name. If the check were a module inside
+`connectors/`, a folder added there with the same name would be imported
+in its place, and the planted code would run before any check. A folder
+under `connectors/` cannot take the place of a module of `meho_backplane`
+itself.
+
+The rules:
 
 - A folder is allowed when all its files were installed by the
   `meho-backplane` distribution. The folder came with MEHO.
@@ -81,7 +91,7 @@ editable install, so the full check applies there.
 1. Some code imports `meho_backplane.connectors` or any module under it.
    Python runs `connectors/__init__.py` first.
 2. The first thing that file does is call `check_connector_folders()` in
-   `connectors/packages.py`. It lists the subpackage folders with
+   `meho_backplane/connector_packages.py`. It lists the subpackage folders with
    `pkgutil.iter_modules`, sorted by name, reads the allowlist file,
    checks each listed package, then checks each folder.
 3. An unknown folder raises `ConnectorPackageError`. The import of
@@ -121,7 +131,7 @@ covered.
 
 ## References
 
-- `backend/src/meho_backplane/connectors/packages.py`
+- `backend/src/meho_backplane/connector_packages.py`
 - `backend/src/meho_backplane/connectors/registry.py`
 - `backend/tests/test_connector_packages.py`
 - Python `importlib.metadata`:

@@ -50,6 +50,8 @@ What is never shown
 * A Secret document's ``data`` and ``stringData`` values: only the key names
   stay.
 * Every ``env`` entry's ``value``: only the variable name stays.
+* Every ``httpHeaders`` entry's ``value`` in a probe or lifecycle hook
+  ``httpGet``: only the header name stays.
 * The ``kubectl.kubernetes.io/last-applied-configuration`` annotation: it is
   a full copy of an earlier object and can hold all of the above.
 
@@ -225,12 +227,17 @@ async def _cronjob_run_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
+#: Lists of ``{name, value}`` entries whose ``value`` is hidden: container
+#: ``env`` and the ``httpHeaders`` of a probe or lifecycle ``httpGet``.
+_NAME_VALUE_LISTS = ("env", "httpHeaders")
+
+
 def _hide_env_values(node: Any) -> Any:
-    """Copy *node*, hiding the ``value`` of every entry in an ``env`` list."""
+    """Copy *node*, hiding the ``value`` of every entry in an ``env`` or ``httpHeaders`` list."""
     if isinstance(node, dict):
         out: dict[str, Any] = {}
         for key, item in node.items():
-            if key == "env" and isinstance(item, list):
+            if key in _NAME_VALUE_LISTS and isinstance(item, list):
                 out[key] = [
                     {**entry, "value": _HIDDEN}
                     if isinstance(entry, dict) and "value" in entry
@@ -279,8 +286,8 @@ def _identity_only(doc: dict[str, Any], size: int) -> dict[str, Any]:
 def apply_manifest_echo(manifest: str) -> list[dict[str, Any]]:
     """The ``k8s.apply`` manifest as one dict per document, safe to show.
 
-    Secret ``data`` / ``stringData`` values, ``env`` values and the
-    last-applied annotation are hidden (see the module docstring). The
+    Secret ``data`` / ``stringData`` values, ``env`` and ``httpHeaders``
+    values and the last-applied annotation are hidden (see the module docstring). The
     documents are kept in order until :data:`MANIFEST_ECHO_MAX_BYTES` is
     used up; each document after that keeps only its identity. The caller
     still runs the shared params redaction over the result.

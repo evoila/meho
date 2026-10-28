@@ -9,8 +9,9 @@ approver could not see which fields the apply sets. These tests pin:
 * a single-document and a multi-document manifest are echoed under
   ``preview.manifest``, one dict per document, in order;
 * ``preview.subject`` names the objects (``<kind>/<namespace>/<name>``);
-* Secret ``data`` / ``stringData`` values, ``env`` values and the
-  last-applied annotation never reach the echo; key and variable names do;
+* Secret ``data`` / ``stringData`` values, ``env`` values, probe and
+  lifecycle ``httpHeaders`` values and the last-applied annotation never
+  reach the echo; key, variable and header names do;
 * a manifest larger than the echo budget keeps only the identity of the
   documents that do not fit.
 
@@ -39,6 +40,7 @@ from meho_backplane.operations._preview import PreviewContext, build_proposed_ef
 _SECRET_VALUE = "not-a-real" + "-value-1"
 _ENV_VALUE = "not-a-real" + "-value-2"
 _STRING_DATA_VALUE = "not-a-real" + "-value-3"
+_HEADER_VALUE = "not-a-real" + "-value-4"
 
 
 @dataclass
@@ -149,6 +151,73 @@ async def test_single_document_manifest_is_echoed(monkeypatch: pytest.MonkeyPatc
     assert env["LOG_LEVEL"]["value"] == "***REDACTED***"
     assert env["DB_HOST"]["valueFrom"] == {"configMapKeyRef": {"name": "db", "key": "host"}}
     assert _ENV_VALUE not in json.dumps(preview)
+
+
+_HEADERS = f"""
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: report
+  namespace: prod
+spec:
+  schedule: "0 1 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          initContainers:
+            - name: wait
+              image: registry.example.test/wait:1
+              startupProbe:
+                httpGet:
+                  path: /ready
+                  port: 8080
+                  httpHeaders:
+                    - name: X-Check
+                      value: {_HEADER_VALUE}
+          containers:
+            - name: report
+              image: registry.example.test/report:1
+              livenessProbe:
+                httpGet:
+                  path: /healthz
+                  port: 8080
+                  httpHeaders:
+                    - name: X-Check
+                      value: {_HEADER_VALUE}
+              lifecycle:
+                preStop:
+                  httpGet:
+                    path: /stop
+                    port: 8080
+                    httpHeaders:
+                      - name: X-Stop
+                        value: {_HEADER_VALUE}
+"""
+
+
+@pytest.mark.asyncio
+async def test_http_header_values_are_hidden_at_every_depth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preview = await _preview(monkeypatch, _HEADERS)
+
+    [doc] = preview["manifest"]
+    pod_spec = doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+    init = pod_spec["initContainers"][0]
+    container = pod_spec["containers"][0]
+    # The header names stay, the values do not.
+    assert init["startupProbe"]["httpGet"]["httpHeaders"] == [
+        {"name": "X-Check", "value": "***REDACTED***"}
+    ]
+    assert container["livenessProbe"]["httpGet"]["httpHeaders"] == [
+        {"name": "X-Check", "value": "***REDACTED***"}
+    ]
+    assert container["livenessProbe"]["httpGet"]["path"] == "/healthz"
+    assert container["lifecycle"]["preStop"]["httpGet"]["httpHeaders"] == [
+        {"name": "X-Stop", "value": "***REDACTED***"}
+    ]
+    assert _HEADER_VALUE not in json.dumps(preview)
 
 
 _MULTI = f"""

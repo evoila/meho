@@ -517,7 +517,8 @@ the manifest itself (`preview.manifest`, one dict per document) and a
 `preview.subject` line such as `Deployment/prod/web` (#3877). Before the
 manifest is stored, `apply_manifest_echo` in `ops_write_preview.py` hides
 Secret `data` / `stringData` values (key names stay), every `env` value
-(variable names stay) and the last-applied annotation.
+(variable names stay), every `httpHeaders` value of a probe or lifecycle
+hook (header names stay) and the last-applied annotation.
 
 **`k8s.apply` API-server rejections (#3876).** `DynamicClient.request`
 calls the API with `_preload_content=False`, and kubernetes_asyncio only

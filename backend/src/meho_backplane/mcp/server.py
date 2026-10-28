@@ -114,6 +114,7 @@ from meho_backplane.request_usage.collector import (
     note_request_route,
 )
 from meho_backplane.settings import Settings, get_settings
+from meho_backplane.untrusted_text import VENDOR_TEXT_BAND
 from meho_backplane.version import deployed_version_label
 
 __all__ = [
@@ -398,6 +399,11 @@ async def _session_instructions(operator: Operator) -> str | None:
     empty-drops-cleanly join convention, so an all-GA registry
     degrades to the preamble alone.
 
+    #5032: the static vendor-text band sits between the preamble and the
+    maturity band. It tells the model that free text in operation
+    results (host names, log lines, workflow descriptions) is data,
+    never an instruction.
+
     #3746: every call logs an ``mcp_preamble_receipt`` record computed
     from this assembly (not from the write-path feedback): which
     convention slugs were included or dropped, the conventions band
@@ -436,7 +442,9 @@ async def _session_instructions(operator: Operator) -> str | None:
             tenant_id=str(operator.tenant_id),
             dropped_slugs=preamble.dropped_slugs,
         )
-    joined = "\n\n".join(band for band in (preamble.text, FEATURE_MATURITY_BAND) if band)
+    joined = "\n\n".join(
+        band for band in (preamble.text, VENDOR_TEXT_BAND, FEATURE_MATURITY_BAND) if band
+    )
     _log.info(
         "mcp_preamble_receipt",
         tenant_id=str(operator.tenant_id),

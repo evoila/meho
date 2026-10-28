@@ -47,6 +47,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Tenant, TenantConvention
 from meho_backplane.mcp.maturity import FEATURE_MATURITY_BAND, MATURITY_BLOCK_END
 from meho_backplane.mcp.schemas import PROTOCOL_VERSION
+from meho_backplane.untrusted_text import VENDOR_TEXT_BAND, VENDOR_TEXT_RULE
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
@@ -80,14 +81,14 @@ async def test_initialize_instructions_omitted_for_empty_tenant(
     client_with_operator: tuple[TestClient, Operator],
     seeded_operator_tenant: None,
 ) -> None:
-    """Empty tenant -> ``instructions`` carries the two static bands.
+    """Empty tenant -> ``instructions`` carries the three static bands.
 
     Since G6.5-T6 (#2546) the static broadcast-discipline band is
     injected into every assembled preamble, so even a tenant with no
-    operational conventions receives it. #2675 appends the static
-    feature-maturity band after the preamble. The ``instructions``
-    field is therefore present and equals exactly those two bands (no
-    conventions block).
+    operational conventions receives it. #5032 adds the static
+    vendor-text band after the preamble, and #2675 appends the static
+    feature-maturity band last. The ``instructions`` field is therefore
+    present and equals exactly those three bands (no conventions block).
     """
     client, _op = client_with_operator
 
@@ -96,7 +97,9 @@ async def test_initialize_instructions_omitted_for_empty_tenant(
     body = response.json()
     assert "error" not in body
     instructions = body["result"]["instructions"]
-    assert instructions == f"{BROADCAST_DISCIPLINE_BAND}\n\n{FEATURE_MATURITY_BAND}"
+    assert instructions == (
+        f"{BROADCAST_DISCIPLINE_BAND}\n\n{VENDOR_TEXT_BAND}\n\n{FEATURE_MATURITY_BAND}"
+    )
     assert BLOCK_START not in instructions  # no conventions block
 
 
@@ -144,16 +147,31 @@ async def test_initialize_instructions_populated_for_seeded_tenant(
     # leads the preamble; the conventions block follows and (with no
     # priming / catalogue) closes the preamble text. #2675 appends the
     # feature-maturity band after the preamble, so it now closes the
-    # instructions payload; the conventions delimiter still terminates
-    # its own band immediately before it.
+    # instructions payload. #5032 puts the vendor-text band between the
+    # conventions delimiter and the maturity band.
     assert instructions.startswith(BROADCAST_BLOCK_START)
     assert BLOCK_START in instructions
     assert instructions.endswith(MATURITY_BLOCK_END)
-    assert f"{BLOCK_END}\n\n{FEATURE_MATURITY_BAND}" in instructions
+    assert f"{BLOCK_END}\n\n{VENDOR_TEXT_BAND}\n\n{FEATURE_MATURITY_BAND}" in instructions
     assert GUARD_PREFIX in instructions
     # Convention content is included verbatim.
     assert "RBAC is canonical" in instructions
     assert "Every operation runs through MEHO's RBAC layer." in instructions
+
+
+@pytest.mark.asyncio
+async def test_initialize_instructions_say_vendor_text_is_data(
+    client_with_operator: tuple[TestClient, Operator],
+    seeded_operator_tenant: None,
+) -> None:
+    """#5032: the start text says vendor text is data, never an instruction."""
+    client, _op = client_with_operator
+
+    response = post_mcp(client, _initialize_envelope())
+    assert response.status_code == 200
+    instructions = response.json()["result"]["instructions"]
+    assert instructions.count(VENDOR_TEXT_BAND) == 1
+    assert VENDOR_TEXT_RULE in instructions
 
 
 @pytest.mark.asyncio

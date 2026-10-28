@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""JSON Schema documents for the synthetic ``targets.register`` typed op.
+"""JSON Schema documents for the synthetic ``targets.*`` typed ops.
+
+``targets.remove`` (the opposite of ``targets.register``) has its own small
+parameter and response schemas at the end of this module.
 
 Single source for both the ``endpoint_descriptor.parameter_schema`` (the
 dispatcher's validation layer) and the ``meho_targets_register`` MCP
@@ -30,6 +33,8 @@ from meho_backplane.connectors.schemas import AuthModel
 __all__ = [
     "TARGETS_REGISTER_PARAMETER_SCHEMA",
     "TARGETS_REGISTER_RESPONSE_SCHEMA",
+    "TARGETS_REMOVE_PARAMETER_SCHEMA",
+    "TARGETS_REMOVE_RESPONSE_SCHEMA",
 ]
 
 #: ``auth_model`` accepted values, materialised from the enum so the
@@ -184,4 +189,57 @@ TARGETS_REGISTER_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["target_id", "name", "product", "host", "tenant_id"],
+}
+
+
+TARGETS_REMOVE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": (
+                "UUID of the target to remove, as `list_targets` returns it in "
+                "`id`. Never the name: a name or alias could point at another "
+                "target. Only targets of your own tenant are found."
+            ),
+        },
+        "force": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Remove the target even when topology records (`graph_node` "
+                "rows) point at it. Default `false`: the call fails and names "
+                "the count. The topology records stay; their link to the "
+                "target is cleared."
+            ),
+        },
+    },
+    "required": ["target_id"],
+    "additionalProperties": False,
+    "examples": [{"target_id": "<target-uuid>"}],
+}
+
+
+TARGETS_REMOVE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["removed", "unchanged"],
+            "description": (
+                "`removed` when the target was removed now; `unchanged` when "
+                "no live target with this id exists in your tenant."
+            ),
+        },
+        "target_id": {
+            "type": "string",
+            "description": "The `target_id` from the call.",
+        },
+        "name": {
+            "type": ["string", "null"],
+            "description": "Name of the removed target; `null` when `unchanged`.",
+        },
+    },
+    "required": ["status", "target_id", "name"],
 }

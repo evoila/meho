@@ -1297,7 +1297,8 @@ reviewer reads. The builder also adds `manifest` (the applied manifest,
 one dict per document) and `subject` (the objects it touches), so the
 approver sees what the apply sets, not only which objects it touches
 (#3877). Secret `data` / `stringData` values, every `env` value, every
-`httpHeaders` value of a probe or lifecycle hook and the
+`httpHeaders` value of a probe or lifecycle hook, every `command` / `args`
+list (only its size in bytes stays) and the
 `kubectl.kubernetes.io/last-applied-configuration` annotation are hidden
 first (`connectors/kubernetes/ops_write_preview.py`), then the echo goes
 through the same two-pass redaction as the generic params echo. The echo

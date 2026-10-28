@@ -52,6 +52,10 @@ What is never shown
 * Every ``env`` entry's ``value``: only the variable name stays.
 * Every ``httpHeaders`` entry's ``value`` in a probe or lifecycle hook
   ``httpGet``: only the header name stays.
+* Every ``command`` and ``args`` list, at any depth (containers, init and
+  ephemeral containers, probe and lifecycle ``exec``): only its size in
+  bytes stays, as ``{"hidden": true, "bytes": N}``, for the same reason as
+  the Job preview above.
 * The ``kubectl.kubernetes.io/last-applied-configuration`` annotation: it is
   a full copy of an earlier object and can hold all of the above.
 
@@ -138,10 +142,14 @@ def _env_from_names(container: dict[str, Any]) -> list[str]:
     return names
 
 
+def _parts_bytes(parts: list[Any]) -> int:
+    """Total UTF-8 size of the parts of a command line."""
+    return sum(len(str(part).encode("utf-8")) for part in parts)
+
+
 def _command_bytes(container: dict[str, Any]) -> int:
     """Total UTF-8 size of ``command`` + ``args``; the text itself is withheld."""
-    parts = [*(container.get("command") or []), *(container.get("args") or [])]
-    return sum(len(str(part).encode("utf-8")) for part in parts)
+    return _parts_bytes([*(container.get("command") or []), *(container.get("args") or [])])
 
 
 def _container_summary(container: Any) -> dict[str, Any] | None:
@@ -231,9 +239,19 @@ async def _cronjob_run_preview(ctx: PreviewContext) -> dict[str, Any] | None:
 #: ``env`` and the ``httpHeaders`` of a probe or lifecycle ``httpGet``.
 _NAME_VALUE_LISTS = ("env", "httpHeaders")
 
+#: Command-line lists shown only by their size: a container's ``command`` and
+#: ``args``, and the ``exec.command`` of a probe or lifecycle hook.
+_COMMAND_LISTS = ("command", "args")
 
-def _hide_env_values(node: Any) -> Any:
-    """Copy *node*, hiding the ``value`` of every entry in an ``env`` or ``httpHeaders`` list."""
+
+def _hide_values(node: Any) -> Any:
+    """Copy *node*, hiding env and header values and command lines at any depth.
+
+    The ``value`` of every entry in an ``env`` or ``httpHeaders`` list is
+    hidden; the name stays. Every ``command`` or ``args`` list becomes
+    ``{"hidden": true, "bytes": <size>}``, like the ``k8s.job.create``
+    preview's ``command_bytes``.
+    """
     if isinstance(node, dict):
         out: dict[str, Any] = {}
         for key, item in node.items():
@@ -241,20 +259,22 @@ def _hide_env_values(node: Any) -> Any:
                 out[key] = [
                     {**entry, "value": _HIDDEN}
                     if isinstance(entry, dict) and "value" in entry
-                    else _hide_env_values(entry)
+                    else _hide_values(entry)
                     for entry in item
                 ]
+            elif key in _COMMAND_LISTS and isinstance(item, list):
+                out[key] = {"hidden": True, "bytes": _parts_bytes(item)}
             else:
-                out[key] = _hide_env_values(item)
+                out[key] = _hide_values(item)
         return out
     if isinstance(node, list):
-        return [_hide_env_values(item) for item in node]
+        return [_hide_values(item) for item in node]
     return node
 
 
 def _hide_document_secrets(doc: dict[str, Any]) -> dict[str, Any]:
     """Copy one manifest document with the values that can hold a secret hidden."""
-    hidden: dict[str, Any] = _hide_env_values(doc)
+    hidden: dict[str, Any] = _hide_values(doc)
     if hidden.get("kind") == "Secret":
         for field in ("data", "stringData"):
             if field in hidden:
@@ -287,7 +307,8 @@ def apply_manifest_echo(manifest: str) -> list[dict[str, Any]]:
     """The ``k8s.apply`` manifest as one dict per document, safe to show.
 
     Secret ``data`` / ``stringData`` values, ``env`` and ``httpHeaders``
-    values and the last-applied annotation are hidden (see the module docstring). The
+    values, ``command`` / ``args`` text and the last-applied annotation are
+    hidden (see the module docstring). The
     documents are kept in order until :data:`MANIFEST_ECHO_MAX_BYTES` is
     used up; each document after that keeps only its identity. The caller
     still runs the shared params redaction over the result.

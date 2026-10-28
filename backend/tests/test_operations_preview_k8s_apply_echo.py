@@ -10,8 +10,9 @@ approver could not see which fields the apply sets. These tests pin:
   ``preview.manifest``, one dict per document, in order;
 * ``preview.subject`` names the objects (``<kind>/<namespace>/<name>``);
 * Secret ``data`` / ``stringData`` values, ``env`` values, probe and
-  lifecycle ``httpHeaders`` values and the last-applied annotation never
-  reach the echo; key, variable and header names do;
+  lifecycle ``httpHeaders`` values, ``command`` / ``args`` text and the
+  last-applied annotation never reach the echo; key, variable and header
+  names do, and a command line keeps only its size;
 * a manifest larger than the echo budget keeps only the identity of the
   documents that do not fit.
 
@@ -41,6 +42,7 @@ _SECRET_VALUE = "not-a-real" + "-value-1"
 _ENV_VALUE = "not-a-real" + "-value-2"
 _STRING_DATA_VALUE = "not-a-real" + "-value-3"
 _HEADER_VALUE = "not-a-real" + "-value-4"
+_ARG_VALUE = "not-a-real" + "-value-5"
 
 
 @dataclass
@@ -218,6 +220,68 @@ async def test_http_header_values_are_hidden_at_every_depth(
         {"name": "X-Stop", "value": "***REDACTED***"}
     ]
     assert _HEADER_VALUE not in json.dumps(preview)
+
+
+_COMMANDS = f"""
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: prod
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: migrate
+          image: registry.example.test/migrate:1
+          command: ["sh", "-c", "migrate --key {_ARG_VALUE}"]
+      containers:
+        - name: api
+          image: registry.example.test/api:1
+          args: ["--token", "{_ARG_VALUE}"]
+          readinessProbe:
+            exec:
+              command: ["check", "{_ARG_VALUE}"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: debug
+  namespace: prod
+spec:
+  containers:
+    - name: main
+      image: registry.example.test/main:1
+  ephemeralContainers:
+    - name: shell
+      image: registry.example.test/shell:1
+      command: ["{_ARG_VALUE}"]
+"""
+
+
+@pytest.mark.asyncio
+async def test_command_and_args_keep_only_their_size_at_every_depth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preview = await _preview(monkeypatch, _COMMANDS)
+
+    deployment, pod = preview["manifest"]
+    pod_spec = deployment["spec"]["template"]["spec"]
+    init = pod_spec["initContainers"][0]
+    container = pod_spec["containers"][0]
+    command = ["sh", "-c", f"migrate --key {_ARG_VALUE}"]
+    assert init["command"] == {"hidden": True, "bytes": len("".join(command))}
+    assert container["args"] == {
+        "hidden": True,
+        "bytes": len("--token") + len(_ARG_VALUE),
+    }
+    assert container["readinessProbe"]["exec"]["command"]["hidden"] is True
+    assert container["image"] == "registry.example.test/api:1"
+    assert pod["spec"]["ephemeralContainers"][0]["command"] == {
+        "hidden": True,
+        "bytes": len(_ARG_VALUE),
+    }
+    assert _ARG_VALUE not in json.dumps(preview)
 
 
 _MULTI = f"""

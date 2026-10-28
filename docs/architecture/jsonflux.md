@@ -467,8 +467,8 @@ TTL:   the handle's ttl_seconds (server-enforced)
 ```
 
 `record_kind` is `rows` or `document` (#3633). On a rows record,
-`document` holds the top-level fields left out of the inline summary, or
-is null. One record is also capped at `RESULT_HANDLE_MAX_RECORD_BYTES`
+`document` holds the top-level fields kept with the rows, or is null.
+One record is also capped at `RESULT_HANDLE_MAX_RECORD_BYTES`
 (default 16 MiB): the store keeps the longest run of rows from the start
 that fits, never a gap, and sets `storage_coverage` to `complete` or
 `partial`.
@@ -584,11 +584,11 @@ under RFC 6901 rules: `""` is the whole document, `~1` means `/` and
 resolves. A `path` read never touches SQL, so it cannot be combined with
 `filter`, `select`, or the other query fields. An array value pages with
 `offset` / `limit`; any other value comes back whole. A rows handle also
-answers `path` reads, but only for the top-level **scalar** fields its
-summary left out and the store kept with the rows. Lists and objects
-beside the rows are not kept, and the store drops the omitted scalars
-when they leave no room for the rows; the drill-in rationale says which
-case applies. The full rules are in
+answers `path` reads for the top-level fields the store kept with the
+rows: the scalars its summary left out, the objects a `result_objects`
+hint names, and every object or list beside the rows (#5139). The store
+drops these fields only when they leave no room for the first row; the
+drill-in rationale says which case applies. The full rules are in
 [`docs/codebase/result-spill.md`](../codebase/result-spill.md#document-records-and-path-reads-3633).
 
 ### Completed-operation receipt (`audit_id`, #3636)

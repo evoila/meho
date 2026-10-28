@@ -60,8 +60,8 @@ Key shape + isolation
 ``"document"`` (one whole payload with no single collection, read with a
 JSON Pointer ``path``, #3633). Records written before the field existed
 decode as ``"rows"``. A rows record may also carry a ``document``: the
-top-level fields the reducer left out of the inline summary because they
-did not fit its byte budget. They are read with the same ``path`` read.
+top-level fields kept with the rows. They are read with the same ``path``
+read.
 
 JSON (not msgpack) so the value is ``str``-compatible with the shared
 broadcast client's ``decode_responses=True`` posture; the rows are
@@ -270,7 +270,7 @@ class ResultRecordKindError(QueryContractError):
             )
         else:
             hint = (
-                "it holds rows and no fields left out of the inline summary. "
+                "it holds rows and no fields kept with the rows. "
                 "Page it with `offset` / `limit` or query it."
             )
         super().__init__(f"handle {handle_id} cannot be read this way: {hint}")
@@ -367,7 +367,7 @@ def _select_record(
 ) -> tuple[_StoredPayload, list[dict[str, Any]]]:
     """Return the record base and the longest row prefix that fit the cap together.
 
-    The omitted fields a rows record carries (#3633) must never cost the
+    The fields a rows record keeps beside its rows (#3633) must never cost the
     caller its rows. When they leave no room for even the first row --
     because they alone break the cap, or because they fit but the first row
     no longer does beside them -- they are dropped with a warning and the

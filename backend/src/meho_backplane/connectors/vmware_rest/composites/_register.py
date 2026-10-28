@@ -153,6 +153,19 @@ from meho_backplane.connectors.vmware_rest.composites._license import (
     LICENSE_ASSIGN_RESPONSE_SCHEMA,
     license_assign_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._migration_inventory import (
+    migration_inventory_composite,
+    register_migration_inventory_dispatch_surface,
+)
+from meho_backplane.connectors.vmware_rest.composites._migration_inventory_schemas import (
+    MIGRATION_GROUP_WHEN_TO_USE,
+    MIGRATION_INVENTORY_DESCRIPTION,
+    MIGRATION_INVENTORY_LLM_INSTRUCTIONS,
+    MIGRATION_INVENTORY_OP_ID,
+    MIGRATION_INVENTORY_PARAMETER_SCHEMA,
+    MIGRATION_INVENTORY_RESPONSE_SCHEMA,
+    MIGRATION_INVENTORY_SUMMARY,
+)
 from meho_backplane.connectors.vmware_rest.composites._namespace import (
     namespace_create_composite,
     namespace_delete_composite,
@@ -646,6 +659,7 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # #4383: shared with the typed read vmware.alarm.triggered.list, which
     # registers under the same group key with the same text.
     ALARMS_GROUP_KEY: ALARMS_WHEN_TO_USE,
+    "migration": MIGRATION_GROUP_WHEN_TO_USE,
 }
 
 
@@ -689,6 +703,19 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     # ----------------------------------------------------------------
     # Read composites (T5 / #508) -- safe / no approval
     # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id=MIGRATION_INVENTORY_OP_ID,
+        handler=migration_inventory_composite,
+        summary=MIGRATION_INVENTORY_SUMMARY,
+        description=MIGRATION_INVENTORY_DESCRIPTION,
+        parameter_schema=MIGRATION_INVENTORY_PARAMETER_SCHEMA,
+        response_schema=MIGRATION_INVENTORY_RESPONSE_SCHEMA,
+        group_key="migration",
+        tags=["composite", "read-only", "migration", "inventory", "vi-json"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=MIGRATION_INVENTORY_LLM_INSTRUCTIONS,
+    ),
     _CompositeSpec(
         op_id="vmware.composite.cluster.drs_recommendations",
         handler=cluster_drs_recommendations_composite,
@@ -2138,6 +2165,7 @@ async def register_vmware_composite_operations(
     singleton.
     """
     await _register_specs(_COMPOSITES, version=_VERSION, embedding_service=embedding_service)
+    register_migration_inventory_dispatch_surface()
 
     # #3349: publish each write composite's governed child-op set into the
     # discovery registry the GET /api/v1/operations/governed-subops surface
@@ -2165,6 +2193,7 @@ async def register_vmware_composite_operations_8_0(
     """
     specs = tuple(spec for spec in _COMPOSITES if spec.op_id not in COMPOSITES_NOT_ON_8_0)
     await _register_specs(specs, version=_VERSION_8_0, embedding_service=embedding_service)
+    register_migration_inventory_dispatch_surface()
 
 
 async def _register_specs(

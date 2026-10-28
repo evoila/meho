@@ -648,9 +648,7 @@ async def test_a_read_on_a_plain_http_target_is_refused_before_any_call(
 
 
 @pytest.mark.asyncio
-async def test_a_write_and_detection_on_a_plain_http_target_are_refused_before_any_call() -> (
-    None
-):
+async def test_a_write_and_detection_on_a_plain_http_target_are_refused_before_any_call() -> None:
     connector = FortiOSConnector(token_loader=token_loader)
     target = FortiTarget(extras={"scope": "vdom", "vdom": "vdom-a", "scheme": "http"})
     fake = fx.FakeFortiGate({"cmdb/firewall/address/host-a": [fx.ADDRESS]})

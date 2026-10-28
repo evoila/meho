@@ -216,41 +216,32 @@ so the value never transits an operator terminal or shell history.
 1. **Register the target.** The resolver matches a target to the versioned,
    profile-backed connector by `(product, version)`, and a profiled connector
    registers no wildcard fallback — so the target must carry a `version`
-   before it can resolve (or dispatch, or even probe). `meho targets add`
-   sets `--version` but has no `--extras` flag; the plain-`http` scheme lives
-   in the `extras` column, and only `meho targets import` can write it.
-   Register in two moves:
-
-   ```
-   # a) Create the target with its product + operator-asserted version.
-   #    (No ingress, no TLS — the add-on Service is plain http in-cluster.)
-   meho targets add automation-addon \
-     --product mehoauto --version 0.1.0 \
-     --host meho-automation --port 8000 \
-     --secret-ref <vault-kv-path-holding-client_id/client_secret/token_url>
-   ```
+   before it can resolve (or dispatch, or even probe). The plain-`http` scheme
+   lives in the `extras` column. One `meho targets import` file sets both:
+   `version` maps to the target's version column, and the `extras:` block is
+   stored as-is.
 
    ```yaml
-   # b) automation-addon-scheme.yaml — carry the plain-http scheme in extras.
-   #    The HTTP adapter builds the base URL as {scheme}://{host}[:port] from
-   #    extras.scheme (default https), so an in-cluster Service with no TLS
-   #    needs scheme=http. The add-on OpenAPI declares no `servers` block, so
-   #    the connector derives the base URL from host / port / extras.scheme.
-   #    `name`, `product`, and `host` are required on every import entry (even
-   #    with --update); `product`/`host` must repeat the values set in (a).
+   # automation-addon.yaml
+   # No ingress, no TLS — the add-on Service is plain http in-cluster.
+   # The HTTP adapter builds the base URL as {scheme}://{host}[:port] from
+   # extras.scheme (default https), so an in-cluster Service with no TLS
+   # needs scheme=http. The add-on OpenAPI declares no `servers` block, so
+   # the connector derives the base URL from host / port / extras.scheme.
+   # Quote the version: YAML reads an unquoted value like 8.0 as a number.
    targets:
      - name: automation-addon
        product: mehoauto
+       version: "0.1.0"
        host: meho-automation
+       port: 8000
+       secret_ref: <vault-kv-path-holding-client_id/client_secret/token_url>
        extras:
          scheme: http
    ```
 
    ```
-   # `targets import --update` is a sparse update that leaves the version set
-   # in (a) intact (name/product are stripped as immutable; host is
-   # re-asserted to the same value).
-   meho targets import --update automation-addon-scheme.yaml
+   meho targets import automation-addon.yaml
    ```
 
    Prerequisites, both about the backplane reaching the add-on Service: admit

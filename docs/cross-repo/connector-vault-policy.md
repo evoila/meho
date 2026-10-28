@@ -527,6 +527,8 @@ caveat). The contract a deploy must satisfy is therefore:
 | Write (`vault.kv.metadata.delete` permanent removal) | same | `read` + `delete` on `secret/metadata/…/{{identity…}}/*` (§6.1) |
 | Write (`vault.token.role.write` create or change a token role) | same | `create` + `update` on `auth/token/roles/<role>` (§6.4) |
 | Read (`vault.token.role.read` / `vault.token.role.list`) | same | `read` on `auth/token/roles/<role>`; `list` on `auth/token/roles` (§6.4) |
+| Delete (`vault.identity.oidc.role.delete` / `vault.identity.oidc.key.delete`) | same | `delete` on `identity/oidc/role/<name>` or `identity/oidc/key/<name>` (§6.6) |
+| Read (`vault.identity.oidc.role.*` / `vault.identity.oidc.key.*` list and read) | same | `read` on the role or key path; `list` on `identity/oidc/role` or `identity/oidc/key` (§6.6) |
 
 A deploy that follows only the §2 read grant provisions **read-only** and
 discovers the missing write grant *after* an operator approves a parked
@@ -604,6 +606,52 @@ Notes:
   role is a separate operation with its own grant on `auth/token/create`
   (and `auth/token/create/<role>`); this section only covers the role
   settings.
+
+### 6.6 Identity token roles and keys (`vault.identity.oidc.*`)
+
+Vault signs identity tokens (JWTs) that another system, such as a cloud
+provider, trusts. A **role** under `identity/oidc/role/<name>` says which
+**key** under `identity/oidc/key/<name>` signs its tokens and who the
+token audience is. MEHO lists, reads and deletes both. The deletes are
+dangerous and wait until a person approves. Like §6.4, the rules go into
+the policy of the role that will manage them (the target's `vault_role`),
+not into the shared read policy of every operator:
+
+```hcl
+# List the names (`vault.identity.oidc.role.list` / `.key.list`).
+path "identity/oidc/role" {
+  capabilities = ["list"]
+}
+path "identity/oidc/key" {
+  capabilities = ["list"]
+}
+
+# Read and delete one role (`vault.identity.oidc.role.read` / `.delete`).
+# Replace <name> with the role this identity may remove.
+path "identity/oidc/role/<name>" {
+  capabilities = ["read", "delete"]
+}
+
+# Read and delete one key (`vault.identity.oidc.key.read` / `.delete`).
+path "identity/oidc/key/<name>" {
+  capabilities = ["read", "delete"]
+}
+```
+
+Notes:
+
+- **Check before approval.** Before MEHO asks for approval of a delete, it
+  runs the §6.2 `sys/capabilities-self` probe on the role or key path under
+  the target's role. When `delete` is missing, the call is refused with
+  `error_code: "write_capability_denied"` and no approval request is
+  written.
+- **Delete the role before its key.** Vault refuses to delete a key while
+  a role still uses it. MEHO then returns `connector_error` with
+  `exception_class: "VaultOidcKeyInUseError"`, and the `remediation` names
+  the roles. Vault never deletes the key named `default`.
+- **The trust on the other side stays.** Deleting the role stops new
+  tokens. The system that trusted those tokens keeps its own trust
+  setting until someone removes it there.
 
 ## Scope note — `shared_service_account` only; `per_user`/`impersonation` deferred
 

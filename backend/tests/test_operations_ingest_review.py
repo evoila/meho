@@ -2941,6 +2941,42 @@ async def test_group_advisory_flags_approval_claim_without_all() -> None:
 
 
 @pytest.mark.asyncio
+async def test_group_advisory_change_approval_claim_is_true_with_a_safe_read() -> None:
+    """The change claim is about the write only, so no flag."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="Manage virtual machines. Every change requires approval.",
+        ops=[
+            ("GET:/vcenter/vm", "List virtual machines", "safe", False, True),
+            ("POST:/vcenter/vm", "Create a virtual machine", "caution", True, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert advisory.flags == []
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_all_ops_approval_claim_is_false_with_a_safe_read() -> None:
+    """The all-ops claim counts the read, so it is flagged."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="Manage virtual machines. All operations are approval-required.",
+        ops=[
+            ("GET:/vcenter/vm", "List virtual machines", "safe", False, True),
+            ("POST:/vcenter/vm", "Create a virtual machine", "caution", True, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert advisory.flags == ["The text says all ops need approval, but 1 op(s) do not."]
+
+
+@pytest.mark.asyncio
 async def test_group_advisory_all_approval_claim_is_flagged_once() -> None:
     """An "all ... require approval" sentence gives one flag, not two."""
     tenant_id = uuid.uuid4()

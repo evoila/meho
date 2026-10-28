@@ -186,6 +186,32 @@ async def test_true_approval_claim_stays() -> None:
 
 
 @pytest.mark.asyncio
+async def test_change_claim_stays_and_all_ops_claim_goes_for_the_same_ops() -> None:
+    """One safe read without approval, one gated write: the subject decides the check.
+
+    "Every change requires approval." is about the write, so it is true
+    and stays. "All operations are approval-required." is about the read
+    too, so it is false and goes.
+    """
+    await _register([_LIST, _CREATE_GATED])
+    propose = json.dumps(
+        [
+            _group(
+                "gadgets",
+                "Use to list and create gadgets. Every change requires approval. "
+                "All operations are approval-required.",
+            )
+        ]
+    )
+    assign = json.dumps({op.op_id: "gadgets" for op in (_LIST, _CREATE_GATED)})
+
+    await _run([propose, assign])
+
+    text = (await _texts())["gadgets"]
+    assert text == "Use to list and create gadgets. Every change requires approval."
+
+
+@pytest.mark.asyncio
 async def test_text_with_only_broken_claims_gets_a_plain_text() -> None:
     """When no sentence is left, the group gets a plain text with no claim."""
     await _register([_CREATE, _STOP])
@@ -237,6 +263,23 @@ def test_dangerous_claim_is_removed_when_a_change_is_caution() -> None:
 def test_dangerous_claim_stays_when_every_change_is_dangerous_or_higher() -> None:
     ops = _ops(("safe", False), ("dangerous", True), ("destructive", True))
     text = "Use to remove widgets. Delete operations are dangerous."
+    assert drop_unsupported_claims(text, ops) == text
+
+
+def test_level_claim_about_changes_stays_when_the_read_is_safe() -> None:
+    ops = _ops(("safe", False), ("dangerous", True))
+    text = "Every change is dangerous."
+    assert drop_unsupported_claims(text, ops) == text
+
+
+def test_level_claim_about_all_ops_is_removed_when_the_read_is_safe() -> None:
+    ops = _ops(("safe", False), ("dangerous", True))
+    assert drop_unsupported_claims("All operations are dangerous.", ops) == ""
+
+
+def test_all_with_a_change_word_is_a_claim_about_changes() -> None:
+    ops = _ops(("safe", False), ("caution", True), ("dangerous", True))
+    text = "All write operations require approval."
     assert drop_unsupported_claims(text, ops) == text
 
 

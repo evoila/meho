@@ -2365,16 +2365,29 @@ Each `ConnectorReviewGroup` carries `advisory`
 * `flags` — short, plain notes, at most five, without repeats:
   * the text makes a safety claim the ops break: "read-only" (or "no
     side effects", "does not modify") while an op is not `safe` or needs
-    approval; "non-destructive" while an op is `destructive`; "all ...
-    dangerous/destructive" while an op is at another level, higher or
-    lower; "all ... require approval" while an op does not;
-  * the same claims without "all" or "every" (#4971): "approval-required",
-    "require(s) approval", or "need(s) approval" while a change op does
-    not need approval; "dangerous" while a change op is `safe` or
-    `caution`. A change op is an op that is not `safe`. When every op is
-    `safe`, every op counts. These are checked per sentence, and only in a
-    sentence where the "all" form does not match, so one claim gives one
-    flag;
+    approval; "non-destructive" while an op is `destructive`;
+  * an approval claim ("approval-required", "require(s) approval",
+    "need(s) approval") or a level claim ("dangerous", "destructive")
+    that the ops it is about break (#4971). Each sentence is checked on
+    its own, and the subject of the sentence decides which ops it is
+    about:
+    * a sentence with "all" or "every" that names no change ("All
+      operations are approval-required.", "Every call is dangerous.") is
+      about every op in the group. The approval claim is flagged while an
+      op does not need approval. The level claim is flagged while an op
+      is at another level, higher or lower;
+    * any other sentence ("Write operations are approval-required.",
+      "Every change requires approval.", "Delete operations are
+      dangerous.") is about the changes: the ops that are not `safe`, or
+      every op when all of them are `safe`. The approval claim is flagged
+      while a change op does not need approval. The level claim is
+      flagged while a change op is below the named level.
+
+    So with one `safe` read without approval and one `caution` write
+    that needs approval, "Every change requires approval." is true and
+    "All operations are approval-required." is flagged. A change is
+    named by a word such as "write", "change", "update", "create",
+    "delete", "remove", "edit", "modify", or "mutate";
   * the text shares no word with the op ids and summaries.
 
 A `staged` group has no enabled op until the operator enables it. Then
@@ -2420,10 +2433,12 @@ So the grouping run checks each new text before it is stored:
    this run created (full runs and extend runs).
 2. `drop_unsupported_claims` in `group_truth.py` splits the text into
    sentences. It removes each sentence that makes a safety claim the
-   group's ops break. It uses the same word match as the review advice
-   above, with the real `safety_level` and `requires_approval` of the
-   member ops. A true claim stays: a group whose every change needs
-   approval may say so.
+   group's ops break. It uses the same word match and the same claim
+   subjects as the review advice above, with the real `safety_level` and
+   `requires_approval` of the member ops. A true claim stays: a group
+   whose every change needs approval may say "Every change requires
+   approval.", even when it also holds reads that run at once. The same
+   group may not say "All operations are approval-required.".
 3. When no sentence is left, the group gets the plain text
    `Operations for <name>.` A group with no member ops keeps its text.
 4. Each changed text logs `llm_grouping_unsupported_claims_dropped`.

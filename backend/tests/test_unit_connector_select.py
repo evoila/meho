@@ -163,6 +163,42 @@ def test_every_contract_test_file_exists() -> None:
     assert missing == []
 
 
+# Unit test files that walk a folder tree, but not the backend package or
+# the docs. They do not need to join every one-connector run.
+WALKS_SOMETHING_ELSE = {
+    "tests/acceptance/test_g41_kb_canary.py": "a sample knowledge folder",
+    "tests/test_connectors_azure_spec_reconcile.py": "the azure spec files",
+    "tests/test_connectors_bind9_atomic.py": "a temp folder",
+    "tests/test_connectors_vmware_rest_8_0_spec_reconcile.py": "the vmware_rest folder",
+    "tests/test_kb_service.py": "a fake rglob in a knowledge folder",
+    "tests/test_operations_connector_auth_failed.py": "the Go CLI source",
+    "tests/test_ui_static_assets.py": "the UI templates",
+    "tests/test_ui_templates.py": "the UI templates",
+    "tests/test_unit_connector_select.py": "this file",
+    "tests/test_unit_shard_split.py": "the test files",
+}
+
+
+def test_every_tree_walking_test_is_in_the_contract_set() -> None:
+    """A unit test that walks a folder tree may scan every connector.
+
+    Such a test must be in ``CONTRACT_TESTS`` (so a one-connector run runs
+    it) or in ``WALKS_SOMETHING_ELSE`` with a reason.
+    """
+    walk = ("rglob(", "os.walk(", 'glob("**')
+    known = set(picker.CONTRACT_TESTS) | set(WALKS_SOMETHING_ELSE)
+    unlisted = []
+    for path in sorted((BACKEND_DIR / "tests").rglob("test_*.py")):
+        rel = path.relative_to(BACKEND_DIR).as_posix()
+        if rel.startswith(("tests/integration/", "tests/migrations/")):
+            continue
+        text = path.read_text(encoding="utf-8")
+        if rel not in known and any(marker in text for marker in walk):
+            unlisted.append(rel)
+
+    assert unlisted == []
+
+
 def test_real_tree_core_change_gives_the_full_run() -> None:
     changed = ["backend/src/meho_backplane/main.py"]
 

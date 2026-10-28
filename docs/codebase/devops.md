@@ -1876,14 +1876,21 @@ the four shards, so every test still runs before a change lands on `main`.
   `meho_backplane.connectors.<name>` names, also through test helper
   modules); and the fixed list `CONTRACT_TESTS` in the same file
   (registry, catalog, operation contract, flight recorder, reference docs,
-  MCP tool list and app start tests). A missing contract file fails the job.
+  MCP tool list and app start tests, plus the tests that scan the source of
+  every connector or all docs: read-back hints, broadcast and audit calls,
+  sandbox mode, one unique class name, and `sudo` command lines). A missing
+  contract file fails the job.
 - **The required check.** The fan-in `python-unit-lane` is unchanged: the
   matrix result is `success` only if its one leg passed, so the required
   check `Python (ruff + mypy + pytest)` keeps its name and its strict rule.
   The one-connector job does not upload its per-test times, so a partial
   run never feeds the shard split.
 - **Tests.** `tests/test_unit_connector_select.py` checks the rules on a
-  small fake tree and checks the wiring in `ci.yml`.
+  small fake tree and checks the wiring in `ci.yml`. It also fails when a
+  unit test walks a folder tree (`rglob`, `os.walk`) and is neither in
+  `CONTRACT_TESTS` nor in its short list of tests that walk something else.
+  So a new test that scans every connector cannot be left out of the
+  short run by mistake.
 
 ### Runner-CPU rule
 

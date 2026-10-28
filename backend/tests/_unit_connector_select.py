@@ -8,7 +8,8 @@ whole unit suite. CI then runs one job with the tests that can break:
 
 * the tests of that connector, and of every connector that imports it;
 * a fixed contract set (:data:`CONTRACT_TESTS`): registry, catalog,
-  operation contract and app start tests that look at every connector.
+  operation contract and app start tests that look at every connector,
+  and tests that scan the source of every connector or all docs.
 
 The merge queue and pushes to ``main`` always run the whole suite, so a
 test this tool leaves out still runs before the change lands on ``main``.
@@ -95,6 +96,20 @@ CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_mcp_surface_conformance.py",
     # The target product list in the OpenAPI document.
     "tests/test_openapi_target_product_enum.py",
+    # Read-back hints in every connector file and every docs page.
+    "tests/test_connectors_no_phantom_readback_tool.py",
+    # Broadcast publish calls anywhere in the package.
+    "tests/test_broadcast_agent_intent_cutover.py",
+    # Audit row calls anywhere in the package.
+    "tests/test_audit_event_class.py",
+    "tests/test_audit_wrapper_cutover.py",
+    # Sandbox mode rules for every file in the package.
+    "tests/test_sandbox_mode_audit_mark.py",
+    "tests/test_sandbox_mode_boot.py",
+    # One class name that must exist only once in the package.
+    "tests/test_gateway_assignment_api.py",
+    # ``sudo`` command lines in every connector folder.
+    "tests/test_connectors_sudo_argv_gate.py",
 )
 
 _DOTTED = re.compile(r"\bmeho_backplane\.connectors\.([A-Za-z0-9_]+)")

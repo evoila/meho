@@ -82,7 +82,10 @@ cannot.
 4. Select **Grant admin consent** and confirm. Each permission now shows
    "Granted".
 
-**With the Azure CLI** (signed in as such an admin; use your own client ID):
+**With the Azure CLI** (use your own client ID). Adding the permissions needs
+the right to change the app. For `admin-consent`, Microsoft's Azure CLI
+reference asks you to sign in as a **Global Administrator**; with only
+Privileged Role Administrator, grant the consent in the admin center instead.
 
 ```bash
 az ad app permission add \
@@ -115,10 +118,13 @@ call, without a restart.
 
 ## Step 3: put the secret in Vault
 
-Skip this step when you reuse the secret of an Azure target. Otherwise the
-secret holds three keys. MEHO reads it with the caller's own Vault identity,
-so the Vault policy must let your operators read this path (see
-[`connector-vault-policy.md`](connector-vault-policy.md)).
+Skip this step when you reuse the secret of an Azure target. Then put that
+Azure target's `secret_ref` into the Entra ID target in step 4, instead of
+`entra/example-tenant`.
+
+Otherwise the secret holds three keys. MEHO reads it with the caller's own
+Vault identity, so the Vault policy must let your operators read this path
+(see [`connector-vault-policy.md`](connector-vault-policy.md)).
 
 ```bash
 vault kv put -mount=secret entra/example-tenant \

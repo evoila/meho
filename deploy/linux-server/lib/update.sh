@@ -332,32 +332,53 @@ os_packages_apt_options() {
 # when InRelease is not signed with the key, and when a file does not match
 # its checksum in InRelease. apt reads a package list only when InRelease
 # names it uncompressed, so a list that is only compressed is skipped with
-# a warning; the check after the run finds that.
+# a warning; the check after the run finds that. apt may keep the list it
+# read compressed (Acquire::GzipIndexes), for example as _Packages.lz4.
 read_os_packages_index() {
     local work=$1 options
     mapfile -t options < <(os_packages_apt_options "$work")
     apt-get "${options[@]}" update --error-on=any >/dev/null ||
         fail "apt could not read the OS-package file: the signature or a checksum does not match, or a file is missing. apt's message is above." \
             "use the OS-package file of the MEHO appliance release as it was published, and check its checksum."
-    compgen -G "$work/lists/*_Packages" >/dev/null ||
+    compgen -G "$work/lists/*_Packages*" >/dev/null ||
         fail "apt found no package list in the OS-package file: InRelease names no uncompressed Packages file." \
             "use the OS-package file of the MEHO appliance release as it was published, and check its checksum."
     ok "apt checked the signature of the OS-package file with $MEHO_OS_PACKAGES_KEYRING"
 }
 
+# os_packages_left_behind <work dir>: the packages of the repository that
+# are still older than their version in the repository, one name per line.
+# apt simulates the upgrade that may also remove packages (dist-upgrade)
+# and prints an "Inst" line for each package it would still install.
+os_packages_left_behind() {
+    local options
+    mapfile -t options < <(os_packages_apt_options "$1")
+    apt-get "${options[@]}" -s -q dist-upgrade 2>/dev/null | awk '$1 == "Inst" { print $2 }'
+}
+
 # upgrade_os_packages <work dir>: install the newer versions of the
 # installed packages from the repository. "upgrade --with-new-pkgs" may add
-# a package that an update needs, and never removes one. A configuration
+# a package that an update needs, and never removes one. So a package
+# whose new version needs a removal stays at its old version; the check
+# after the upgrade names such packages in a [WARN] line. A configuration
 # file that the hardening changed keeps its version (dpkg --force-confold).
 # apt's own output is in /var/log/apt/term.log.
 upgrade_os_packages() {
-    local work=$1 options
+    local work=$1 options left left_names
     mapfile -t options < <(os_packages_apt_options "$work")
     DEBIAN_FRONTEND=noninteractive apt-get "${options[@]}" -y -q \
         -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
         upgrade --with-new-pkgs >/dev/null ||
         fail "apt could not install the OS packages. apt's message is above, and its log is /var/log/apt/term.log." \
             "revert the VM snapshot, then run 'meho-host support-bundle' and send the file to support."
+    if ! left=$(os_packages_left_behind "$work"); then
+        warn "apt could not check whether every package of the OS-package file is installed. The update goes on. Run 'meho-host support-bundle' after the update and send the file to support."
+    elif [[ -n $left ]]; then
+        mapfile -t left_names <<<"$left"
+        warn "These packages of the OS-package file stay at their old version, because apt would have to remove another package for them: $(join_by ', ' "${left_names[@]}"). The update goes on. Run 'meho-host support-bundle' after the update and send the file to support."
+        ok "installed the other OS updates from the OS-package file (apt's log: /var/log/apt/term.log)"
+        return 0
+    fi
     ok "installed the OS updates from the OS-package file (apt's log: /var/log/apt/term.log)"
 }
 

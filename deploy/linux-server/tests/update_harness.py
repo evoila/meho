@@ -39,10 +39,14 @@ def sha256(path: Path) -> str:
 
 
 def run_update_lib(
-    machine: FakeMachine, snippet: str, path: str | None = None
+    machine: FakeMachine,
+    snippet: str,
+    path: str | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run bash with the files of lib/ that the update uses sourced, on the
-    fake machine. path replaces the stub PATH, for a test with real tools."""
+    fake machine. path replaces the stub PATH, for a test with real tools,
+    and extra_env adds to the environment."""
     sources = "".join(
         f'source "{LINUX_SERVER}/lib/{name}.sh"\n'
         for name in ("common", "net", "checks", "core", "rke2", "update")
@@ -53,6 +57,7 @@ def run_update_lib(
         "MEHO_FAKE": str(machine.fake),
         "HOME": str(machine.home),
         "LC_ALL": "C",
+        **(extra_env or {}),
     }
     return subprocess.run(
         [str(machine.tools / "bash"), "-c", "set -Eeuo pipefail\n" + sources + snippet],

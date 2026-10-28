@@ -462,13 +462,22 @@ package lists stay as they are:
 1. `apt-get update --error-on=any` reads `InRelease`, checks its signature
    and the checksum of `Packages`. It fails on a missing signature, another
    key or a changed file. The script then checks that apt wrote a package
-   list, which finds the case of an `InRelease` without `Packages`.
+   list, which finds the case of an `InRelease` without `Packages`. The list
+   may be compressed, for example `_Packages.lz4`, when the machine's apt
+   sets `Acquire::GzipIndexes`.
 2. `DEBIAN_FRONTEND=noninteractive apt-get -y -q -o
    Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold
    upgrade --with-new-pkgs` installs the newer versions of the installed
    packages. It may add a package that an update needs, and never removes
    one. A configuration file that the hardening changed keeps its version.
    apt's output goes to its own log, `/var/log/apt/term.log`.
+3. `apt-get -s -q dist-upgrade`, with the same settings, simulates the
+   upgrade that may also remove packages. Each `Inst` line names a package
+   of the file that is still at its old version, because its new version
+   needs the removal of another package. The script names these packages
+   in one `[WARN]` line and goes on, so the admin and support see that an
+   OS fix is missing. The release test of the appliance (#4816) compares
+   the package versions with a fresh OVA.
 
 The folder is removed after the run, also when a step fails. When
 `/run/reboot-required` exists after the upgrade, for example after a new
@@ -929,11 +938,13 @@ the fake RKE2 run and the fake Helm list the release.
 
 `tests/test_os_packages.py` covers `--os-packages` with a stub `apt-get`:
 the sources list, the apt settings, the order (after the backup, before
-RKE2), each refused file, each apt failure, and the removed folder. Its
+RKE2), each refused file, each apt failure, the warning for packages that
+stay at their old version, and the removed folder. Its
 `RealAptTests` run the real `apt-get` and `gpg`: the test builds a small
 flat repository, signs `InRelease` with a new key, and checks that apt
-accepts it, refuses a signature of another key, refuses a package list
-changed after signing, and skips an `InRelease` without `Packages`. They
+accepts it, also with `Acquire::GzipIndexes` (a compressed list), refuses
+a signature of another key, refuses a package list changed after signing,
+and skips an `InRelease` without `Packages`. They
 need `apt-get`, `gpg` and `gpgv`, and they are skipped without them. The
 CI job sets `MEHO_REQUIRE_APT_CHECK=1`, which turns that skip into a
 failure.

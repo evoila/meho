@@ -40,7 +40,8 @@ PACKAGE_FIX = "use the OS-package file of the MEHO appliance release as it was p
 
 # The stub keeps what apt-get saw: the sources list, the files of the
 # repository, and DEBIAN_FRONTEND. "update" writes a package list into the
-# list folder, as apt does for an InRelease that names Packages.
+# list folder, as apt does for an InRelease that names Packages, under the
+# name in apt_package_list. "-s dist-upgrade" prints apt_simulation.
 APT_GET_STUB = textwrap.dedent("""\
     list=""
     lists=""
@@ -56,10 +57,14 @@ APT_GET_STUB = textwrap.dedent("""\
         for file in "${list%/*}"/repo/*; do echo "${file##*/}"; done > "$MEHO_FAKE/apt_repo_seen"
         rc=$(cat "$MEHO_FAKE/apt_update_rc")
         [ "$rc" = 0 ] || exit "$rc"
-        if [ "$(cat "$MEHO_FAKE/apt_update_finds_packages")" = yes ]; then
-          : > "$lists/_var_tmp_repo_._Packages"
+        name=$(cat "$MEHO_FAKE/apt_package_list")
+        if [ -n "$name" ]; then
+          : > "$lists/$name"
         fi
         exit 0 ;;
+      *" dist-upgrade "*)
+        cat "$MEHO_FAKE/apt_simulation"
+        exit "$(cat "$MEHO_FAKE/apt_simulation_rc")" ;;
       *" upgrade "*)
         printf '%s\\n' "${DEBIAN_FRONTEND:-}" > "$MEHO_FAKE/apt_frontend_seen"
         exit "$(cat "$MEHO_FAKE/apt_upgrade_rc")" ;;
@@ -99,8 +104,10 @@ class OsPackagesTests(UpdateTestCase):
         self.machine.add_stub("apt-get", APT_GET_STUB)
         for name, value in {
             "apt_update_rc": "0",
-            "apt_update_finds_packages": "yes",
+            "apt_package_list": "_var_tmp_repo_._Packages",
             "apt_upgrade_rc": "0",
+            "apt_simulation": "Reading package lists...\n0 upgraded, 0 newly installed\n",
+            "apt_simulation_rc": "0",
         }.items():
             self.machine.answer(name, value)
         self.machine.host_file(KEYRING, "fake key\n")
@@ -120,7 +127,7 @@ class OsPackagesTests(UpdateTestCase):
         result = self.run_update()
 
         self.assert_succeeds(result)
-        update, upgrade = self.apt_calls()
+        update, upgrade, check = self.apt_calls()
         sources = (self.machine.fake / "apt_sources_seen").read_text()
         work = sources.split("file:", 1)[1].split(" ", 1)[0].removesuffix("/repo")
         self.assertEqual(
@@ -139,6 +146,9 @@ class OsPackagesTests(UpdateTestCase):
             " -o Dpkg::Options::=--force-confold upgrade --with-new-pkgs",
             upgrade,
         )
+        self.assertEqual(f"apt-get {options} -s -q dist-upgrade", check)
+        self.assertIn("[ok]   installed the OS updates from the OS-package file", result.stdout)
+        self.assertNotIn("[WARN]", result.stderr)
         self.assertEqual(
             ["InRelease", "Packages", "Packages.gz", DEB],
             (self.machine.fake / "apt_repo_seen").read_text().split(),
@@ -222,8 +232,13 @@ class OsPackagesTests(UpdateTestCase):
         self.assertNotIn(INSTALLER, self.machine.calls())
         self.assertEqual([], self.work_folders())
 
+    def test_a_package_list_that_apt_keeps_compressed_is_found(self) -> None:
+        self.machine.answer("apt_package_list", "_var_tmp_repo_._Packages.lz4")
+
+        self.assert_succeeds(self.run_update())
+
     def test_an_index_without_an_uncompressed_package_list_stops(self) -> None:
-        self.machine.answer("apt_update_finds_packages", "no")
+        self.machine.answer("apt_package_list", "")
 
         self.assert_fails_once(
             self.run_update(), "InRelease names no uncompressed Packages file.", PACKAGE_FIX
@@ -239,6 +254,35 @@ class OsPackagesTests(UpdateTestCase):
         self.assertIn("Fix: revert the VM snapshot", line)
         self.assertNotIn(INSTALLER, self.machine.calls())
         self.assertEqual([], self.work_folders())
+
+    def test_packages_that_stay_at_their_old_version_are_named(self) -> None:
+        self.machine.answer(
+            "apt_simulation",
+            "Inst openssh-server [1:9.6p1-3ubuntu13.5] (1:9.6p1-3ubuntu13.14 localhost [amd64])\n"
+            "Inst libssl3t64 [3.0.13-0ubuntu3.4] (3.0.13-0ubuntu3.6 localhost [amd64])\n"
+            "Remv libold1 [1.0]\n",
+        )
+
+        result = self.run_update()
+
+        self.assert_succeeds(result)
+        self.assertIn(
+            "[WARN] These packages of the OS-package file stay at their old version, because apt"
+            " would have to remove another package for them: openssh-server, libssl3t64.",
+            result.stderr,
+        )
+        self.assertIn("[ok]   installed the other OS updates", result.stdout)
+
+    def test_a_failed_check_of_the_packages_warns(self) -> None:
+        self.machine.answer("apt_simulation_rc", "100")
+
+        result = self.run_update()
+
+        self.assert_succeeds(result)
+        self.assertIn(
+            "[WARN] apt could not check whether every package of the OS-package file is installed.",
+            result.stderr,
+        )
 
     def test_a_package_that_needs_a_restart_gets_a_note(self) -> None:
         self.machine.host_file("/run/reboot-required", "*** System restart required ***\n")
@@ -333,12 +377,17 @@ class RealAptTests(UpdateTestCase):
         members.update({"./InRelease": signed, f"./{DEB}": deb})
         self.package_file.write_bytes(tar_bytes(members))
 
-    def read_index(self) -> subprocess.CompletedProcess[str]:
+    def read_index(self, apt_config: str = "") -> subprocess.CompletedProcess[str]:
+        """Unpack the file and read its index with the real apt. apt_config
+        is more apt settings, for this run only (APT_CONFIG)."""
+        config = self.machine.home / "apt.conf"
+        config.write_text(apt_config)
         result = run_update_lib(
             self.machine,
             f'unpack_os_packages "{self.package_file}"\n'
             'read_os_packages_index "$OS_PACKAGES_WORK"\n',
             path=os.environ["PATH"],
+            extra_env={"APT_CONFIG": str(config)},
         )
         self.assertEqual([], list(self.machine.host_path("/var/tmp").glob("meho-os-packages.*")))
         return result
@@ -347,6 +396,14 @@ class RealAptTests(UpdateTestCase):
         self.write_repository("evoila", ("Packages", "Packages.gz"))
 
         result = self.read_index()
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("[ok]   apt checked the signature of the OS-package file", result.stdout)
+
+    def test_a_package_list_kept_compressed_is_found(self) -> None:
+        self.write_repository("evoila", ("Packages", "Packages.gz"))
+
+        result = self.read_index('Acquire::GzipIndexes "true";\n')
 
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("[ok]   apt checked the signature of the OS-package file", result.stdout)

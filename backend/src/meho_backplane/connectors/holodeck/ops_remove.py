@@ -576,6 +576,18 @@ REMOVE_OPS: tuple[HolodeckOp, ...] = (
                 "is removed. Delete each name in its leftover_vms with "
                 "vmware.composite.vm.destroy."
             ),
+            # Keep the outcome next to vms[] and files_to_move[] when the
+            # answer is reduced to a link to the stored result.
+            "result_scalars": {
+                "keys": [
+                    "status",
+                    "reason",
+                    "instance_id",
+                    "config_id",
+                    "reset_router",
+                    "move_state_files",
+                ]
+            },
         },
     ),
 )

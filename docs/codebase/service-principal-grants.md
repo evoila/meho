@@ -96,6 +96,33 @@ Parking is not refusal: a service principal can still propose a
 destructive op and read its result after a human approves. The steps are in
 [`approvals.md`](approvals.md#an-add-on-proposes-a-governed-destroy-3478).
 
+**A multi-step operation is checked twice (#5063).** A composite (for
+example `vmware.composite.vm.create`) has its own `safety_level` and
+`requires_approval`; the vCenter write composites ship as `dangerous` with
+`requires_approval=True`, or as `caution`. The dispatcher's policy gate
+checks the composite's **own** op id first, before the handler runs. Then
+`enforce_subop_policy` (`operations/composite.py`) checks each **write
+step** on the step's op id. Neither check reads the other's grants: a grant
+on the composite does not cover a step, and grants on the steps do not
+cover the composite. So a service principal that runs a composite
+unattended needs **both**:
+
+- a grant on the composite op id, naming the connector of the call, and
+- a grant on each write step, naming the connector the step check uses
+  (for the vCenter composites that is `vmware-rest-9.0` today, whatever the
+  target's version; see #4991).
+
+What happens when one kind is missing:
+
+| Missing grant | What happens |
+|---|---|
+| on the composite | The whole call answers `awaiting_approval` before any step runs. The step grants are not read. After a human approves, the resume runs as that person, so the step grants are still not used. |
+| on a write step | The composite runs up to that step. That step waits for approval; the result names the approval request. The steps before it are done. |
+| on a read step | Nothing. Read steps (`GET` / `HEAD`, or a `safe` typed step) are not gated and need no grant. |
+
+The write steps of a composite are listed by the governed-subop route
+(see [Governed-subop discovery](#governed-subop-discovery-3349)).
+
 ### The grant (`db/models.py::ServicePrincipalGrant`, `operations/service_grants.py`)
 
 One row authorises exactly one `(principal_sub, op_id, connector_id,
@@ -463,11 +490,14 @@ the checked-in mode-off table `tests/data/sandbox_mode_verdict_table_off.json`),
 
 A composite fans out to child ops, and child gating consults the grant plane
 on the **child** op id with **no parent→child inheritance** (by design —
-`docs/architecture/operations-substrate.md`), so a service principal running
-a composite unattended needs a standing grant for **each** governed child. To
-assemble that grant set an operator previously had to read the connector's
-`_SUB_OPS_*` / `_VIM_SUB_OPS_*` manifests in source. The supported
-alternative:
+`docs/architecture/operations-substrate.md`). So a service principal running
+a composite unattended needs a standing grant on the composite op id
+**and** a standing grant for **each** governed write child; the composite's
+own gate runs first and a missing composite grant parks the whole call
+before any child is reached (see [The gate](#the-gate-operations_validatepy_non_agent_verdict)).
+To assemble the child grant set an operator previously had to read the
+connector's `_SUB_OPS_*` / `_VIM_SUB_OPS_*` manifests in source. The
+supported alternative:
 
 | Verb | Path | Purpose |
 |---|---|---|
@@ -534,7 +564,7 @@ audit, and error rules as REST. There is no MCP tool for this plane.
 |---|---|---|
 | `meho service-principals grants list` | `GET /api/v1/service-principals/grants` | `--principal`, `--include-revoked`, `--include-expired`, `--limit`, `--offset`, `--json`. Shows only active grants unless you pass `--include-expired` (REST includes expired grants by default). |
 | `meho service-principals grants show <grant-id>` | `GET /api/v1/service-principals/grants/{id}` | `--json`. |
-| `meho service-principals grants create` | `POST /api/v1/service-principals/grants` | `--principal`, `--op-id`, `--connector-id`, `--reason` (all required); either `--target`, or `--target-product` and/or `--target-name-pattern`, or none (targetless); `--expires`; `--json`. A 422 from the server is shown as a one-line error. |
+| `meho service-principals grants create` | `POST /api/v1/service-principals/grants` | `--principal`, `--op-id`, `--connector-id`, `--reason` (all required); either `--target`, or `--target-product` and/or `--target-name-pattern`, or none (targetless); `--expires`; `--json`. A 422 from the server is shown as a one-line error. A grant on a multi-step operation (an op id with `.composite.`) is accepted; the CLI then prints a note that each write step needs its own grant and names the governed-subop route that lists them (with `--json` the note goes to stderr). Globs and delete-shaped op ids are still refused. |
 | `meho service-principals grants revoke <grant-id>` | `DELETE /api/v1/service-principals/grants/{id}` | Asks before it revokes; `--confirm` skips the question. `--json`. |
 
 The read scope (#4992) has one `meho service-principals read-scope` verb

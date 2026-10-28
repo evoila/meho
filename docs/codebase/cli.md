@@ -194,7 +194,9 @@ cli/
     │   ├── doctor.go          # `meho doctor` (#3666) — command, report model, redaction, exit codes.
     │   ├── doctor_offline.go  # offline layer: binary, config, credential store, plugin shim/lock/cache, plugin settings, CA bundle.
     │   ├── doctor_online.go   # authenticated layer: DNS, token + refresh, MCP handshake, working-surface compare.
+    │   ├── doctor_server.go   # server layer (#4740): runs `meho-host check --json` as root on a form-2 server.
     │   ├── doctor_test.go     # offline, credential-store, redaction, and httptest MCP-stub tests.
+    │   ├── doctor_server_test.go # server layer with a fake meho-host: root, not root, laptop, bad answers, time limit.
     │   ├── audit/            # G8.1-T3 #467 — `meho audit …` verb tree.
     │   │   ├── audit.go          # NewRootCmd + shared typed-client helpers (G0.12-T5 #1263).
     │   │   ├── query.go          # `meho audit query` (POST /api/v1/audit/query).
@@ -1101,11 +1103,62 @@ makes exactly the calls it reports, and none with `--no-network`.
    server lists for this session but the client did not see is a
    `surface_gap`.
 
+### Server layer (form-2 server only, #4740)
+
+`runServerChecks` in `doctor_server.go`. It runs last, after the
+authenticated layer. It is the ADR 0007 amendment of 2026-10-16: the
+checks of the built-in Kubernetes (RKE2) live in `meho-host check`, and
+the doctor runs them on the server, so the CLI needs no Kubernetes
+library.
+
+- **No `/usr/local/sbin/meho-host`** (a laptop): no server layer and no
+  line. The output is the same as before #4740. The path is the
+  constant `mehoHostPath`; `install.sh` of install form 2 puts the file
+  there.
+- **`--no-network`**: one `skip` line. `meho-host check` asks the
+  Kubernetes API, and the backplane runs in that same cluster.
+- **Not root** (effective user id is not 0): one `warn` line with the
+  hint "RKE2 checks need root: run `sudo meho doctor`". The doctor does
+  not run `meho-host` and does not ask for a password.
+- **Root**: runs `meho-host check --json` with a 60-second limit
+  (`mehoHostTimeout`) and adds one line per check, in its order, after
+  the doctor's own lines. `meho-host` exits 1 when a line is red. With
+  valid JSON that is a normal answer: the lines decide, not the exit
+  code.
+
+The status words map one to one: `ok`, `warn` and `fail` (the words
+`meho-host` uses), and `skip`. A line with another word becomes a
+`fail` line that names the word. These answers become one `fail` line
+named `meho-host check`, with a hint to run `sudo meho-host check`:
+no output, output that is not valid JSON, an empty list, a command that
+could not start, and the time limit. The detail names the exit status
+and the first line of `meho-host`'s error output, where it prints its
+own `[FAIL]` message.
+
+`exec.CommandContext` stops only `meho-host` itself at the limit. A
+`kubectl` or `rke2` that it started can keep the output pipe open, so
+`Cmd.WaitDelay` (5 seconds) bounds the wait for the output after that.
+Such a child process ends on its own; `kubectl` has a 10-second request
+limit in `meho-host`.
+
+The seams in `doctorDeps` are `stat` (the file check), `geteuid` (the
+user id), `runCommand` (runs the command and returns its standard output
+and standard error) and `serverTimeout`. The human output prints the
+server lines after the summary of the authenticated layer (scopes,
+working surface, session id). The JSON output has them at the end of
+`checks`, with `"layer":"server"`.
+
+Under `sudo`, the doctor runs as root. The offline and authenticated
+layers then read the settings and the login that root sees, which are
+usually not those of the admin's own user.
+
 Failure classes: `dns`, `tls`, `unreachable` (from `internal/netdiag`),
 `not_logged_in`, `refresh_rejected`, `no_refresh_token`, `unauthorized`,
 `surface_gap`, `unexpected`. Exit codes follow the `meho status`
 taxonomy: 2 login problem, 3 network problem, 4 unexpected answer or
-surface gap, 1 an offline check failed, 0 no failure.
+surface gap, 1 an offline or server check failed, 0 no failure. The
+first failed line decides, so a red server line gives 1 only when no
+earlier line failed. Warning lines keep 0.
 
 The scopes shown are the CLI login's scopes. A Claude client logs in on
 its own through `mcp-remote` and can hold other scopes (for example

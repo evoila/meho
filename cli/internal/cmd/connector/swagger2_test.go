@@ -638,3 +638,158 @@ func TestRunIngestConvertsSwagger2WithoutNetwork(t *testing.T) {
 		t.Errorf("stderr must summarise the conversion: %q", stderr.String())
 	}
 }
+
+// sharedBodySwagger2YAML declares one shared body parameter. The first
+// operation accepts the root `consumes`; the second and the third declare
+// their own, the third through a path-level parameter.
+const sharedBodySwagger2YAML = `swagger: "2.0"
+info:
+  title: Widget API
+  version: "1"
+consumes: [application/json]
+parameters:
+  Payload:
+    name: payload
+    in: body
+    required: true
+    schema:
+      type: object
+paths:
+  /widgets:
+    post:
+      operationId: createWidget
+      parameters:
+        - $ref: "#/parameters/Payload"
+      responses:
+        201:
+          description: created
+  /widgets/xml:
+    post:
+      operationId: createWidgetXML
+      consumes: [application/xml]
+      parameters:
+        - $ref: "#/parameters/Payload"
+      responses:
+        201:
+          description: created
+  /widgets/{id}:
+    parameters:
+      - $ref: "#/parameters/Payload"
+    put:
+      operationId: replaceWidgetXML
+      consumes: [application/xml]
+      responses:
+        200:
+          description: replaced
+`
+
+func TestConvertSwagger2SharedBodyKeepsOperationConsumes(t *testing.T) {
+	out, _, err := convertSwagger2([]byte(sharedBodySwagger2YAML))
+	if err != nil {
+		t.Fatalf("convertSwagger2: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("converted output is not JSON: %v", err)
+	}
+	shared := dig(t, doc, "components", "requestBodies", "Payload", "content").(map[string]any)
+	if _, ok := shared["application/json"]; !ok || len(shared) != 1 {
+		t.Errorf("the shared body must use the root consumes; content = %v", shared)
+	}
+	if ref := dig(t, doc, "paths", "/widgets", "post", "requestBody", "$ref"); ref != "#/components/requestBodies/Payload" {
+		t.Errorf("an operation with the root consumes must keep the reference; got %v", ref)
+	}
+	for _, tc := range []struct{ path, method string }{
+		{"/widgets/xml", "post"},
+		{"/widgets/{id}", "put"},
+	} {
+		own := dig(t, doc, "paths", tc.path, tc.method, "requestBody").(map[string]any)
+		if _, isRef := own["$ref"]; isRef {
+			t.Fatalf("%s %s: an operation with its own consumes must get its own copy; got %v", tc.method, tc.path, own)
+		}
+		content := dig(t, own, "content").(map[string]any)
+		if _, ok := content["application/xml"]; !ok || len(content) != 1 {
+			t.Errorf("%s %s: the copy must use the operation's consumes; content = %v", tc.method, tc.path, content)
+		}
+		if dig(t, own, "required") != true || dig(t, content, "application/xml", "schema", "type") != "object" {
+			t.Errorf("%s %s: the copy must keep the shared body's required flag and schema; got %v", tc.method, tc.path, own)
+		}
+	}
+}
+
+// queryArraySwagger2YAML declares array query parameters with no
+// collectionFormat, with csv, and with multi, one of them shared.
+const queryArraySwagger2YAML = `swagger: "2.0"
+info:
+  title: Widget API
+  version: "1"
+parameters:
+  Fields:
+    name: fields
+    in: query
+    type: array
+    items:
+      type: string
+paths:
+  /widgets:
+    get:
+      operationId: listWidgets
+      parameters:
+        - name: ids
+          in: query
+          type: array
+          items:
+            type: string
+        - name: tags
+          in: query
+          type: array
+          collectionFormat: csv
+          items:
+            type: string
+        - name: colors
+          in: query
+          type: array
+          collectionFormat: multi
+          items:
+            type: string
+        - $ref: "#/parameters/Fields"
+      responses:
+        200:
+          description: ok
+`
+
+func TestConvertSwagger2QueryArraysKeepCommaDefault(t *testing.T) {
+	out, _, err := convertSwagger2([]byte(queryArraySwagger2YAML))
+	if err != nil {
+		t.Fatalf("convertSwagger2: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("converted output is not JSON: %v", err)
+	}
+	byName := map[string]map[string]any{}
+	for _, p := range dig(t, doc, "paths", "/widgets", "get", "parameters").([]any) {
+		param := p.(map[string]any)
+		if ref, isRef := param["$ref"]; isRef {
+			if ref != "#/components/parameters/Fields" {
+				t.Fatalf("unexpected parameter reference %v", ref)
+			}
+			param = dig(t, doc, "components", "parameters", "Fields").(map[string]any)
+		}
+		byName[param["name"].(string)] = param
+	}
+	for name, wantExplode := range map[string]bool{
+		"ids":    false, // no collectionFormat: Swagger 2.0 defaults to csv
+		"tags":   false,
+		"colors": true,
+		"fields": false,
+	} {
+		param, ok := byName[name]
+		if !ok {
+			t.Fatalf("parameter %q missing; got %v", name, byName)
+		}
+		if param["style"] != "form" || param["explode"] != wantExplode {
+			t.Errorf("%s: want style form and explode %v; got style %v, explode %v", name, wantExplode, param["style"], param["explode"])
+		}
+	}
+}

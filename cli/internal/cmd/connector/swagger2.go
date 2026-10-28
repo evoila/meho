@@ -141,6 +141,8 @@ func convertSwagger2(content []byte) ([]byte, swagger2Conversion, error) {
 	}
 	inheritRootProduces(&doc2)
 	inlineSharedResponses(&doc2)
+	inlineSharedBodies(&doc2)
+	defaultQueryCollectionFormat(&doc2)
 	// ToV3 resolves references with a default loader, which refuses any
 	// reference to another file or URL. findExternalRef above already
 	// refused those with a clearer message.
@@ -211,6 +213,85 @@ func inlineSharedResponses(doc2 *openapi2.T) {
 				op.Responses.Set(code, &own)
 			}
 		}
+	}
+}
+
+// inlineSharedBodies copies a shared body parameter (`#/parameters/Name`
+// with `in: body`) into every path that has an operation with its own
+// `consumes` list that differs from the root list. The converter builds a
+// shared body once, with the root list, and an operation keeps only a
+// reference to it; an operation that accepts another media type would
+// then still say it accepts the root's. The copy replaces the reference
+// in the path's own parameters and in all of the path's operations,
+// because an operation overrides a path-level parameter only when both
+// are written the same way. A path whose operations all accept the root
+// list keeps the references.
+func inlineSharedBodies(doc2 *openapi2.T) {
+	for _, item := range doc2.Paths {
+		if !hasOwnConsumes(item, doc2.Consumes) {
+			continue
+		}
+		copySharedBodies(item.Parameters, doc2.Parameters)
+		for _, op := range item.Operations() {
+			copySharedBodies(op.Parameters, doc2.Parameters)
+		}
+	}
+}
+
+// hasOwnConsumes reports whether an operation of the path declares a
+// `consumes` list that differs from the root list.
+func hasOwnConsumes(item *openapi2.PathItem, root []string) bool {
+	for _, op := range item.Operations() {
+		if len(op.Consumes) > 0 && !slices.Equal(op.Consumes, root) {
+			return true
+		}
+	}
+	return false
+}
+
+// copySharedBodies replaces each reference to a shared body parameter in
+// params with a copy of that parameter.
+func copySharedBodies(params openapi2.Parameters, shared map[string]*openapi2.Parameter) {
+	for i, param := range params {
+		name, isShared := strings.CutPrefix(param.Ref, "#/parameters/")
+		if !isShared {
+			continue
+		}
+		def, ok := shared[name]
+		if !ok || def.Ref != "" || def.In != "body" {
+			continue
+		}
+		own := *def
+		params[i] = &own
+	}
+}
+
+// defaultQueryCollectionFormat writes the Swagger 2.0 default `csv` on
+// every array query parameter that has no collectionFormat. Swagger 2.0
+// sends such a parameter as one comma-separated value (ids=1,2). The
+// converter leaves the OpenAPI 3 fields unset for a parameter without
+// the field, and OpenAPI 3 then repeats the name (ids=1&ids=2), so the
+// request format would change. Header and path parameters need no help:
+// the OpenAPI 3 default for them is already comma-separated.
+func defaultQueryCollectionFormat(doc2 *openapi2.T) {
+	for _, param := range doc2.Parameters {
+		defaultCSV(param)
+	}
+	for _, item := range doc2.Paths {
+		for _, param := range item.Parameters {
+			defaultCSV(param)
+		}
+		for _, op := range item.Operations() {
+			for _, param := range op.Parameters {
+				defaultCSV(param)
+			}
+		}
+	}
+}
+
+func defaultCSV(param *openapi2.Parameter) {
+	if param.Ref == "" && param.In == "query" && param.Type.Is("array") && param.CollectionFormat == "" {
+		param.CollectionFormat = "csv"
 	}
 }
 

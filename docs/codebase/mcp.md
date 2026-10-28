@@ -614,6 +614,41 @@ Every other result has an `outcome` field:
 Code: `operations/meta_tools.py` (`search_operations`, `_run_search`,
 `_classify_hits`). Tests: `tests/test_operations_meta_tools.py`.
 
+## Tool hints: read-only tools (`annotations`, #4202)
+
+A `tools/list` entry can carry MCP tool hints in `annotations`
+(MCP 2025-06-18 `ToolAnnotations`). Clients use them to decide whether
+to ask the user before a call. For example, VS Code Copilot runs a tool
+with `readOnlyHint: true` without asking.
+
+- `ToolDefinition.annotations` takes a `ToolAnnotations` model
+  (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`).
+  It forbids unknown keys, so a typo fails at startup.
+- A tool that only reads passes `annotations=READ_ONLY`. On the wire this
+  is `"annotations": {"readOnlyHint": true}`.
+- `ToolDefinition.meta` is the tool's MCP `_meta` object. No tool sets it
+  yet.
+- `to_wire()` sends `annotations` and `_meta` only when they are set.
+  A tool without hints keeps the spec defaults: it may change things and
+  may delete things, so the client asks first.
+- These working-surface tools carry the read-only hint: `list_targets`,
+  `meho_connector_list`, `list_operation_groups`, `search_operations`,
+  `preview_operation`, `result_query`, `query_topology`,
+  `search_knowledge`, `search_memory`, `meho_broadcast_recent`,
+  `meho_broadcast_watch`, the four docs tools, `meho_runbook_list_runs`,
+  `meho_runbook_list_templates`, `meho_runbook_show_template` and
+  `meho_status`.
+- `call_operation` has no hint, because it can run writes. Tools that
+  add, change or start things have no hint either.
+- Hints are only hints. The spec says a client must not trust them from
+  an untrusted server. MEHO's own role, grant and approval checks run on
+  every call, whatever a tool declares.
+
+Code: `mcp/registry.py` (`ToolAnnotations`, `READ_ONLY`,
+`ToolDefinition.to_wire`). Tests: `tests/test_mcp_surface_conformance.py`
+(`READ_ONLY_HINT_TOOLS`, the exact set on the wire) and
+`tests/test_mcp_registry.py` (the wire shape).
+
 ## Agent-surface scoping (working vs. operator, #3154)
 
 `tools/list` is filtered by **four orthogonal gates**, all AND-composed

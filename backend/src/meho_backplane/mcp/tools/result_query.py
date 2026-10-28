@@ -42,7 +42,12 @@ from pydantic import ValidationError
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.jsonflux.query.json_pointer import MAX_POINTER_LENGTH
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
 from meho_backplane.operations.result_query import (
     DEFAULT_LIMIT,
@@ -188,6 +193,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="result_query",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Read rows back from a JSONFlux result handle. After "

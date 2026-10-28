@@ -111,7 +111,12 @@ from typing import Any, Final
 import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 from meho_backplane.mcp.tools._memory_evidence import (
     SEARCH_OUTPUT_SCHEMA,
@@ -441,6 +446,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="memory_knowledge",
         name="search_memory",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Search the operator's accessible memories (own user-scoped "

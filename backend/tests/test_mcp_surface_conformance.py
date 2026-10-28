@@ -170,6 +170,35 @@ WORKING_SURFACE_SORTED: tuple[str, ...] = (
     "search_operations",
 )
 
+#: The tools whose ``tools/list`` entry carries ``annotations.readOnlyHint``
+#: = true (#4202). A client such as VS Code runs these without asking the user
+#: first. Every other tool sends no hints, so it keeps the spec default (may
+#: change and may delete things) and the client still asks. ``call_operation``
+#: must never be in this set: it can run writes.
+READ_ONLY_HINT_TOOLS: frozenset[str] = frozenset(
+    {
+        "ask_docs",
+        "list_doc_collections",
+        "list_operation_groups",
+        "list_targets",
+        "meho_broadcast_recent",
+        "meho_broadcast_watch",
+        "meho_connector_list",
+        "meho_runbook_list_runs",
+        "meho_runbook_list_templates",
+        "meho_runbook_show_template",
+        "meho_status",
+        "preview_operation",
+        "query_topology",
+        "read_docs",
+        "result_query",
+        "search_docs",
+        "search_knowledge",
+        "search_memory",
+        "search_operations",
+    }
+)
+
 #: The operator planes an ``mcp:admin``-elevated session additionally
 #: lists, as the exact sorted listing. Same snapshot discipline.
 OPERATOR_SURFACE_SORTED: tuple[str, ...] = (
@@ -449,6 +478,30 @@ async def test_wire_listing_entries_are_spec_shape_no_surface_leak() -> None:
         assert {"name", "description", "inputSchema"} <= set(tool)
         assert "surface" not in tool
         assert "required_role" not in tool
+
+
+async def test_wire_listing_read_only_hints_are_pinned() -> None:
+    """Exactly the pinned read tools carry ``readOnlyHint: true`` on the wire.
+
+    Checked on the full elevated listing, so a write tool on either surface
+    that wrongly claims the hint also fails here. ``call_operation`` sends no
+    hints at all on the normal listing.
+    """
+    op = _operator(
+        capabilities=frozenset({_DOCS_CAPABILITY}),
+        scopes=frozenset({MCP_ADMIN_SCOPE}),
+    )
+    result = await handle_tools_list(op, None)
+    tools = {tool["name"]: tool for tool in result["tools"]}
+    hinted = {
+        name for name, tool in tools.items() if tool.get("annotations", {}).get("readOnlyHint")
+    }
+    assert hinted == READ_ONLY_HINT_TOOLS
+    for name in READ_ONLY_HINT_TOOLS:
+        assert tools[name]["annotations"] == {"readOnlyHint": True}
+    assert READ_ONLY_HINT_TOOLS.issubset(WORKING_SURFACE_SORTED)
+    assert "annotations" not in tools["call_operation"]
+    assert "_meta" not in tools["call_operation"]
 
 
 # ---------------------------------------------------------------------------

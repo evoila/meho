@@ -116,7 +116,12 @@ from meho_backplane.connectors.topology.schemas import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphEdgeKind, Tenant
 from meho_backplane.db.models import Target as TargetORM
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.server import (
     McpInternalError,
     McpInvalidParamsError,
@@ -1289,6 +1294,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="topology",
         name=_QUERY_TOPOLOGY_NAME,
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=_QUERY_TOPOLOGY_DESCRIPTION,
         inputSchema=_QUERY_TOPOLOGY_INPUT_SCHEMA,
@@ -1889,6 +1895,7 @@ register_mcp_tool(
         # registry entry, not Topology v2's.
         feature="targets",
         name=_LIST_TARGETS_NAME,
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=_LIST_TARGETS_DESCRIPTION,
         inputSchema=_LIST_TARGETS_INPUT_SCHEMA,

@@ -388,23 +388,56 @@ async def _visible_connector_triples(tenant_id: UUID) -> set[tuple[str, str, str
     return triples
 
 
-def _builtin_registered_triples() -> set[tuple[str, str, str]]:
-    """Return the parsed *(product, version, impl_id)* of every hand-coded connector class.
+def _shipped_profile_triples() -> set[tuple[str, str, str]]:
+    """Return the parsed triple of every catalog row shipped with an execution profile.
 
-    Only a hand-coded class (``shim_kind == "none"``) counts as built-in.
-    Ingest also registers a class, a bare auto-shim or a profiled class,
-    and it does so for a tenant-scoped ingest too. Such a connector is
-    known through its rows, which :func:`_visible_connector_triples`
-    filters by tenant. Naming it from the registry would tell a caller
-    of another tenant that it exists. The v1-compat ``(product, "", "")``
-    entries are skipped, and each entry is rendered and parsed back, the
-    same round trip :func:`connector_class_registered` uses.
+    Startup stamps a profiled connector class for each such row under
+    the built-in scope
+    (:func:`~meho_backplane.operations.ingest.boot_stamp.stamp_catalog_profiled_connectors`).
+    The triple is derived the way that stamp derives it: from the row's
+    ``<impl_id>-<version>`` id, so a catalog product that does not round
+    trip (``_fixture`` -> ``fixture``) still matches the registry entry.
     """
+    # Local import: the ingest package imports this module at load time.
+    from meho_backplane.operations.ingest.catalog import load_catalog
+
+    return {
+        parse_connector_id(f"{entry.impl_id}-{entry.version}")
+        for entry in load_catalog().entries
+        if entry.profile_resource is not None
+    }
+
+
+def _builtin_registered_triples() -> set[tuple[str, str, str]]:
+    """Return the parsed *(product, version, impl_id)* of every built-in connector class.
+
+    Two kinds of registered class are built-in: a hand-coded class
+    (``shim_kind == "none"``), and the profiled class startup stamps for
+    a catalog row shipped with a profile (``mehoauto-rest-0.1.0``; see
+    :func:`_shipped_profile_triples`). Before its first ingest such a
+    connector has no operation rows, yet ``meho_connector_list`` shows
+    it, so its id is named here too.
+
+    Ingest also registers a class, a bare auto-shim or a profiled class
+    for a triple the catalog does not ship a profile for, and it does so
+    for a tenant-scoped ingest too. Such a connector is known only through
+    its rows, which :func:`_visible_connector_triples` filters by tenant.
+    Naming it from the registry would tell a caller of another tenant
+    that it exists. The v1-compat ``(product, "", "")`` entries are
+    skipped, and each entry is rendered and parsed back, the same round
+    trip :func:`connector_class_registered` uses.
+    """
+    shipped_profiles = _shipped_profile_triples()
     triples: set[tuple[str, str, str]] = set()
     for (_product, version, impl_id), cls in all_connectors_v2().items():
-        if not version or not impl_id or shim_kind(cls) != "none":
+        if not version or not impl_id:
             continue
-        triples.add(parse_connector_id(f"{impl_id}-{version}"))
+        kind = shim_kind(cls)
+        if kind == "bare":
+            continue
+        parsed = parse_connector_id(f"{impl_id}-{version}")
+        if kind == "none" or parsed in shipped_profiles:
+            triples.add(parsed)
     return triples
 
 
@@ -425,8 +458,9 @@ async def close_connector_ids(*, tenant_id: UUID, connector_id: str) -> list[str
 
     Only ids the caller can see are named: built-in connectors and the
     caller's own tenant, the same rule as :func:`connector_exists`. A
-    hand-coded connector class with no rows yet is built-in and is
-    named too (:func:`_builtin_registered_triples`).
+    built-in connector class with no rows yet, hand-coded or stamped at
+    startup from a shipped profile, is named too
+    (:func:`_builtin_registered_triples`).
     """
     needle = connector_id.strip().lower()
     if not needle:
@@ -452,9 +486,10 @@ async def connector_product_known(*, tenant_id: UUID, product: str) -> bool:
 
     ``list_targets`` uses this when its ``connector_id`` filter finds no
     target (#4136): a product no connector has means the id is wrong, not
-    that the tenant has no targets of that kind. A hand-coded connector
-    class with no rows yet also counts. A class that ingest registered
-    counts only through its rows, so a connector of another tenant stays
+    that the tenant has no targets of that kind. A built-in connector
+    class with no rows yet, hand-coded or stamped at startup from a
+    shipped profile, also counts. A class that ingest registered counts
+    only through its rows, so a connector of another tenant stays
     unknown (:func:`_builtin_registered_triples`).
     """
     triples = await _visible_connector_triples(tenant_id) | _builtin_registered_triples()

@@ -17,9 +17,11 @@ ids the caller can see, so the model can fix its call at once:
 
 A connector of another tenant is never named. Rows are real rows in the
 autouse-migrated SQLite database, so the tenant rule runs as real SQL.
-A hand-coded connector class with no rows yet is built-in and is named.
-The class that ingest registers is not named on its own: a tenant-scoped
-ingest registers one too, so it counts only through its tenant rows.
+A built-in connector class with no rows yet is named: a hand-coded
+class, or the profiled class that startup stamps for a catalog row
+shipped with a profile. The class that ingest registers is not named on
+its own: a tenant-scoped ingest registers one too, so it counts only
+through its tenant rows.
 """
 
 from __future__ import annotations
@@ -32,10 +34,12 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.base import Connector, shim_kind
+from meho_backplane.connectors.profile import ExecutionProfile
 from meho_backplane.connectors.registry import (
     all_connectors_v2,
     deregister_connector_v2,
@@ -48,7 +52,15 @@ from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.operations import _lookup, dispatch
 from meho_backplane.operations._lookup import close_connector_ids, connector_product_known
 from meho_backplane.operations._request_preview import preview_dispatch
+from meho_backplane.operations.ingest import catalog as catalog_module
 from meho_backplane.operations.ingest import ensure_connector_class_registered
+from meho_backplane.operations.ingest.boot_stamp import stamp_catalog_profiled_connectors
+from meho_backplane.operations.ingest.catalog import (
+    ConnectorSpecCatalog,
+    ConnectorSpecEntry,
+    load_profile_resource,
+)
+from meho_backplane.operations.ingest.connector_registration import synthesise_profiled_class
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -115,6 +127,52 @@ def _register_acme_as_tenant_ingest_does() -> None:
     assert ensure_connector_class_registered(
         product=_ACME[0], version=_ACME[1], impl_id=_ACME[2], base_url=None
     )
+
+
+#: The shipped fixture profile, reused for the made-up connector.
+_PROFILE_RESOURCE = "_fixture_minimal.yaml"
+
+
+def _acme_shipped_profile_catalog() -> ConnectorSpecCatalog:
+    """A catalog with one profile-backed row for the made-up connector."""
+    return ConnectorSpecCatalog(
+        entries=(
+            ConnectorSpecEntry.model_validate(
+                {
+                    "product": _ACME[0],
+                    "version": _ACME[1],
+                    "impl_id": _ACME[2],
+                    "requires_connector_class": "ProfiledRestConnector_acme_2_0",
+                    "upstream": None,
+                    "spec_resource": _PROFILE_RESOURCE,
+                    "profile_resource": _PROFILE_RESOURCE,
+                }
+            ),
+        )
+    )
+
+
+async def _stamp_acme_as_startup_does(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the startup stamp over a catalog that ships a profile for the made-up connector."""
+    catalog = _acme_shipped_profile_catalog()
+    monkeypatch.setattr(catalog_module, "load_catalog", lambda: catalog)
+    assert await stamp_catalog_profiled_connectors(catalog) == 1
+    assert shim_kind(all_connectors_v2()[_ACME]) == "profiled"
+
+
+def _stamp_acme_as_tenant_profile_stamp_does() -> None:
+    """Register the profiled class a tenant-scoped profile stamp registers.
+
+    Same class shape as the startup stamp, but the shipped catalog has no
+    profile row for the triple, so it is not built-in.
+    """
+    profile = ExecutionProfile.model_validate(
+        yaml.safe_load(load_profile_resource(_PROFILE_RESOURCE))
+    )
+    cls = synthesise_profiled_class(
+        product=_ACME[0], version=_ACME[1], impl_id=_ACME[2], profile=profile
+    )
+    register_connector_v2(product=_ACME[0], version=_ACME[1], impl_id=_ACME[2], cls=cls)
 
 
 async def _seed_connector(
@@ -267,6 +325,38 @@ async def test_builtin_class_without_rows_is_named() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_acme_registry_cleanup")
+async def test_shipped_profile_stamped_at_startup_is_named_before_ingest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A profiled class stamped at startup from a shipped profile is built-in.
+
+    Before its first ingest it has no operation rows, yet its id is a
+    real id, so it is named and its product is known.
+    """
+    await _stamp_acme_as_startup_does(monkeypatch)
+
+    assert await close_connector_ids(tenant_id=OPERATOR_TENANT_ID, connector_id="acme-rest") == [
+        "acme-rest-2.0"
+    ]
+    assert await connector_product_known(tenant_id=OPERATOR_TENANT_ID, product="acme")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_acme_registry_cleanup")
+async def test_tenant_profile_stamp_is_not_named_to_another_tenant() -> None:
+    """A profiled class for a triple the catalog ships no profile for counts only through rows."""
+    _stamp_acme_as_tenant_profile_stamp_does()
+    await _seed_connector(*_ACME, tenant_id=_OTHER_TENANT)
+
+    assert await close_connector_ids(tenant_id=OPERATOR_TENANT_ID, connector_id="acme-rest") == []
+    assert not await connector_product_known(tenant_id=OPERATOR_TENANT_ID, product="acme")
+    assert await close_connector_ids(tenant_id=_OTHER_TENANT, connector_id="acme-rest") == [
+        "acme-rest-2.0"
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_acme_registry_cleanup")
 async def test_tenant_ingest_registration_is_not_named_to_another_tenant() -> None:
     """The class a tenant-scoped ingest registers counts only through the tenant's rows."""
     _register_acme_as_tenant_ingest_does()
@@ -367,6 +457,23 @@ async def test_list_targets_known_product_without_targets_is_empty(
     await _seed_target("vc-1", "vmware")
 
     body = _tools_call(client, "list_targets", {"connector_id": "linux-ssh-1.x"})
+
+    payload = json.loads(body["result"]["content"][0]["text"])
+    assert payload["targets"] == []
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.usefixtures("_acme_registry_cleanup")
+async def test_list_targets_shipped_profile_without_rows_or_targets_is_empty(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connector stamped at startup, not yet ingested, with no targets is an empty list."""
+    client, _op = client_with_operator
+    await _stamp_acme_as_startup_does(monkeypatch)
+    await _seed_target("vc-1", "vmware")
+
+    body = _tools_call(client, "list_targets", {"connector_id": "acme-rest-2.0"})
 
     payload = json.loads(body["result"]["content"][0]["text"])
     assert payload["targets"] == []

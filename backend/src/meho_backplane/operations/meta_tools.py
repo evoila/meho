@@ -1342,8 +1342,8 @@ def _normalize_target_arg(
     """Normalise ``call_operation``'s ``target`` to the canonical dict shape.
 
     G0.13-T2 (#1132) additive widening: ``call_operation`` accepts either
-    a bare string ``"rdc-vault"`` (matches ``query_topology`` /
-    ``query_audit``) or the existing dict ``{"name": "rdc-vault"}``.
+    a bare string ``"prod-vault"`` (matches ``query_topology`` /
+    ``query_audit``) or the existing dict ``{"name": "prod-vault"}``.
     Both reduce to the same dict before dispatch so downstream code
     (resolver, connectors, audit) sees one canonical form.
 

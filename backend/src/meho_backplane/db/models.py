@@ -8964,7 +8964,7 @@ class DispatchTraceSpan(Base):
       ``composite_step`` / ``jsonflux_reduction`` / ``typed`` / ``opaque``
       (the decision's enumerated span kinds). Text (no DB ``CHECK``) so a
       new kind lands without a migration; the seam validates.
-    * ``name`` -- Text NOT NULL. Human label (``"GET /rest/vm"``,
+    * ``name`` -- Text NOT NULL. Human label (``"GET /repos/{owner}/{repo}"``,
       ``"jsonflux.reduce"``, a composite sub-step name).
     * ``started_at`` -- ``timestamptz`` NOT NULL. Span start time.
     * ``duration_ms`` -- ``numeric(10,2)`` nullable. Same shape as

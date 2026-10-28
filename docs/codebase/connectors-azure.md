@@ -1508,7 +1508,176 @@ meho targets import subscriptions.yaml
 
 ## migrate
 
-Not built yet (Task #5093).
+The `migrate` group reads what Azure Migrate knows about the servers a team
+plans to move to Azure. Every operation is a read (`safe`, no approval) and
+changes nothing in Azure.
+
+Azure Migrate keeps its data with two providers, each with its own pinned
+API version:
+
+- `Microsoft.Migrate` (`2024-01-15`): assessment projects, the machines a
+  project knows, groups of machines, assessments and the assessed machines
+  of an assessment.
+- `Microsoft.OffAzure` (`2023-06-06`): discovery sites. The Azure Migrate
+  appliance puts the machines it finds into VMware, Hyper-V or physical
+  server sites. A CSV import puts them into an import site. A master site
+  links the other sites of a project.
+
+Files: `migrate.py` (group text, guidance for the AI, operation table, and
+`MigrateOps`, a class whose methods `AzureConnector` takes over as one of its
+base classes), `migrate_reads.py` (the operation
+bodies), `migrate_rows.py` (row shapes, name checks, counts; no calls to
+Azure), `migrate_schemas.py` (parameter and response schemas). The paths
+and API versions are in the `migrate` section of `_paths.py`.
+
+### Operations
+
+| Operation | Parameters | Reads |
+|---|---|---|
+| `azure.migrate.project.list` | none | `GET /subscriptions/{s}/providers/Microsoft.Migrate/assessmentProjects` |
+| `azure.migrate.site.list` | `resource_group` | the five site lists of the resource group: `vmwareSites`, `hypervSites`, `serverSites`, `importSites`, `masterSites` |
+| `azure.migrate.machine.list` | `resource_group`, `project` | `.../assessmentProjects/{project}/machines` |
+| `azure.migrate.group.list` | `resource_group`, `project` | `.../assessmentProjects/{project}/groups` |
+| `azure.migrate.assessment.list` | `resource_group`, `project`, optional `group` | `.../groups/{group}/assessments`, for one group or for every group |
+| `azure.migrate.assessment.machine.list` | `resource_group`, `project`, `group`, `assessment` | `.../groups/{group}/assessments/{assessment}`, then `.../assessedMachines` |
+
+`project` is the assessment project name and `resource_group` its resource
+group, both from `azure.migrate.project.list`. Azure's paths hold the
+resource group, so every project read needs it. `migrate_project` in a
+project row is the Azure Migrate project name the portal shows; it is read
+from the project's `assessmentSolutionId` and can differ from the assessment
+project name.
+
+Every list follows `nextLink` with `list_all_pages` and its limits (see
+Paging above).
+
+### Appliance or CSV import
+
+Results from a CSV import and from the appliance stay apart. Every machine
+row (`azure.migrate.machine.list`) and every assessed machine row
+(`azure.migrate.assessment.machine.list`) has:
+
+| Field | Value |
+|---|---|
+| `source` | `appliance`, `import` or `unknown` |
+| `site_kind` | `vmware`, `hyperv`, `server` or `import` (or `null`) |
+| `site` | the name of the discovery site |
+| `discovery_machine_id` | the resource ID of the discovered machine |
+
+`machine_origin` (`migrate_rows.py`) reads them from the ID of the
+discovered machine (`discoveryMachineArmId` of a machine,
+`datacenterMachineArmId` of an assessed machine):
+`.../providers/Microsoft.OffAzure/<site type>/<site>/machines/<machine>`. A
+VMware, Hyper-V or physical server site means `appliance`, an import site
+means `import`. Any other ID gives `unknown`; MEHO never guesses. The ID is
+read by position after `/providers/Microsoft.OffAzure/`, so a resource group
+called like a site type does not confuse it. Machine lists are sorted by
+source (appliance, import, unknown), then by name. Groups and assessments
+also carry Azure's own `type` / `group_type` (`Default` or `Import`).
+
+An imported machine has only the numbers of its CSV file: no measured
+history, and it cannot be migrated. The guidance tells the AI to report the
+two sources apart.
+
+### Result shape and result handles
+
+Every read returns:
+
+```json
+{"value": [...], "truncated": false,
+ "omissions": {"count": 0, "items": [{"what": "...", "reason": "...", "detail": "..."}]},
+ "...": "count blocks"}
+```
+
+`truncated` is true when rows are missing; `omissions` says what is missing
+and why. `reason` is a paging limit (`page_limit`, `time_limit`,
+`row_limit`), an error of one part (`no_permission`, `not_found`,
+`provider_not_registered`, `throttled`, `read_failed`), `name_not_usable`
+(Azure returned a group name MEHO does not put into a path) or
+`group_limit`. `detail` is MEHO's own text; Azure's free text is never
+copied into it.
+
+Count blocks:
+
+| Operation | Blocks |
+|---|---|
+| `azure.migrate.site.list` | `kind_counts`: sites per kind; `null` for a kind that could not be read |
+| `azure.migrate.machine.list` | `source_counts`: machines per source |
+| `azure.migrate.assessment.machine.list` | `assessment` (the assessment with its currency, sizing criterion, region and status), `source_counts`, `readiness_counts` (Azure's readiness values plus `Other`) |
+
+A list over 50 rows or 4 KB comes back as a link to the stored result. The
+reducer keeps scalar values such as `truncated` next to the link, but not
+objects. So each operation's `llm_instructions` carries a `result_objects`
+hint that names `omissions` and its count blocks; the reducer keeps their
+fields inline and stores the whole objects with the rows (a `path` read on
+the handle returns them). `test_connectors_azure_migrate.py` proves this for
+each operation with 60 rows, through the real dispatcher, the real reducer
+and the real result store.
+
+### Reads made of several parts
+
+- `azure.migrate.site.list` reads five lists. A kind that cannot be read
+  (for example a 403 on one site type) becomes an omission and its count is
+  `null`; the other kinds still count. When no kind can be read, the first
+  error is returned as it is (a missing resource group comes back as
+  `not_found`).
+- `azure.migrate.assessment.list` without `group` lists the groups first,
+  because Azure lists assessments per group only, and then reads each group,
+  at most 50 (`MAX_GROUPS`; more groups give a `group_limit` omission). A
+  group that cannot be read becomes an omission; when no group can be read,
+  the first error is returned. With `group`, it reads that group only.
+- A login error always stops the whole read.
+
+### Names in paths
+
+`resource_group` must match Azure's rule for resource group names.
+`project`, `group` and `assessment` must match Azure's rule for Azure Migrate
+names, without `%`, `\`, control characters, `.` or `..`. The dispatcher
+checks the parameter schemas first; the bodies check again with a full match
+(a schema `$` also matches before a line end). Group names that come from
+Azure are checked the same way before MEHO puts them into a path. So no name
+can change the path.
+
+### Roles and providers
+
+Reads need the Reader role on the resource group (or the subscription) of
+the Azure Migrate project. Azure Migrate has no read-only role of its own.
+`Microsoft.Migrate` and `Microsoft.OffAzure` must be registered on the
+subscription; when they are not, the call fails with
+`AzureProviderNotRegisteredError`, and MEHO never registers them.
+
+### Not in this group yet
+
+- `azure.migrate.report.link` (a short-lived download link for an assessment
+  report, `dangerous`, after approval) is not built yet. The link is a
+  secret: it must reach only the caller, never the audit row, a trace or the
+  stored result.
+- The writes (CSV import, groups, assessments) come later. They can reuse the
+  name checks and rows in `migrate_rows.py` and `read_assessment` in
+  `migrate_reads.py`.
+
+### Proven live
+
+Nothing yet. The lab login does not exist yet, so every read is proven with
+mocked HTTP only, with answers shaped like the examples in Azure's pinned
+API description files. Open points for the lab proof:
+
+- that the ID of an imported machine points at its import site, as the API
+  description implies;
+- Azure's page size for machine lists, which is not documented; MEHO reads
+  at most 50 pages and 10,000 rows and names the cut in `omissions`.
+
+### References
+
+- Machines - List By Assessment Project (2024-01-15):
+  <https://learn.microsoft.com/en-us/rest/api/migrate/assessment/machines-operations/list-by-assessment-project?view=rest-migrate-assessment-2024-01-15>
+- Azure Migrate built-in roles:
+  <https://learn.microsoft.com/en-us/azure/migrate/prepare-azure-accounts>
+- Assess servers from an imported CSV file:
+  <https://learn.microsoft.com/en-us/azure/migrate/tutorial-discover-import>
+- Pinned API description files: `Microsoft.Migrate/AssessmentProjects/stable/2024-01-15/migrate.json`
+  and `Microsoft.OffAzure/OffAzure/stable/2023-06-06/migrate.json` in
+  <https://github.com/Azure/azure-rest-api-specs>.
 
 ## monitor
 

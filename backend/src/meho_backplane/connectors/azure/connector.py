@@ -97,6 +97,7 @@ from meho_backplane.connectors.azure.cost import CostOps
 from meho_backplane.connectors.azure.inventory import InventoryOps
 
 # migrate (Task #5093)
+from meho_backplane.connectors.azure.migrate import MigrateOps
 
 # monitor (Task #5090)
 
@@ -173,6 +174,7 @@ class AzureConnector(
     # inventory (Task #5082)
     InventoryOps,
     # migrate (Task #5093)
+    MigrateOps,
     # monitor (Task #5090)
     # network (Task #5085)
     # security (Task #5089)

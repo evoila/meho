@@ -108,6 +108,17 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     "TAGS_AT_SCOPE_PATH": (("GET", "PATCH"), "RESOURCES_API_VERSION"),
     "LOCKS_PATH": (("GET",), "LOCKS_API_VERSION"),
     # migrate (Task #5093)
+    "MIGRATE_PROJECTS_PATH": (("GET",), "MIGRATE_API_VERSION"),
+    "MIGRATE_MACHINES_PATH": (("GET",), "MIGRATE_API_VERSION"),
+    "MIGRATE_GROUPS_PATH": (("GET",), "MIGRATE_API_VERSION"),
+    "MIGRATE_ASSESSMENTS_PATH": (("GET",), "MIGRATE_API_VERSION"),
+    "MIGRATE_ASSESSMENT_PATH": (("GET",), "MIGRATE_API_VERSION"),
+    "MIGRATE_ASSESSED_MACHINES_PATH": (("GET",), "MIGRATE_API_VERSION"),
+    "OFFAZURE_VMWARE_SITES_PATH": (("GET",), "OFFAZURE_API_VERSION"),
+    "OFFAZURE_HYPERV_SITES_PATH": (("GET",), "OFFAZURE_API_VERSION"),
+    "OFFAZURE_SERVER_SITES_PATH": (("GET",), "OFFAZURE_API_VERSION"),
+    "OFFAZURE_IMPORT_SITES_PATH": (("GET",), "OFFAZURE_API_VERSION"),
+    "OFFAZURE_MASTER_SITES_PATH": (("GET",), "OFFAZURE_API_VERSION"),
     # monitor (Task #5090)
     # network (Task #5085)
     # security (Task #5089)
@@ -254,6 +265,27 @@ def test_the_checked_paths_are_pinned() -> None:
         "GET:/{}/providers/microsoft.resources/tags/default@2021-04-01",
         "PATCH:/{}/providers/microsoft.resources/tags/default@2021-04-01",
         "# migrate (Task #5093)",
+        "GET:/subscriptions/{}/providers/microsoft.migrate/assessmentprojects@2024-01-15",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.migrate/"
+        + "assessmentprojects/{}/groups/{}/assessments/{}/assessedmachines@2024-01-15",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.migrate/"
+        + "assessmentprojects/{}/groups/{}/assessments/{}@2024-01-15",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.migrate/"
+        + "assessmentprojects/{}/groups/{}/assessments@2024-01-15",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.migrate/"
+        + "assessmentprojects/{}/groups@2024-01-15",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.migrate/"
+        + "assessmentprojects/{}/machines@2024-01-15",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
+        + "hypervsites@2023-06-06",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
+        + "importsites@2023-06-06",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
+        + "mastersites@2023-06-06",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
+        + "serversites@2023-06-06",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
+        + "vmwaresites@2023-06-06",
         "# monitor (Task #5090)",
         "# network (Task #5085)",
         "# security (Task #5089)",

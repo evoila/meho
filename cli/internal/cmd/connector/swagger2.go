@@ -137,6 +137,7 @@ func convertSwagger2(content []byte) ([]byte, swagger2Conversion, error) {
 	if err := doc2.UnmarshalJSON(asJSON); err != nil {
 		return nil, conv, fmt.Errorf("read document: %w", err)
 	}
+	inheritRootProduces(&doc2)
 	// ToV3 resolves references with a default loader, which refuses any
 	// reference to another file or URL. findExternalRef above already
 	// refused those with a clearer message.
@@ -161,16 +162,36 @@ func convertSwagger2(content []byte) ([]byte, swagger2Conversion, error) {
 	return out, conv, nil
 }
 
+// inheritRootProduces copies the document's `produces` list to every
+// operation that has none. In Swagger 2.0 an operation without its own
+// list inherits the root list; the converter reads only the operation's
+// list and falls back to application/json, so an inherited media type
+// would be lost. An operation's own list stays as it is.
+func inheritRootProduces(doc2 *openapi2.T) {
+	if len(doc2.Produces) == 0 {
+		return
+	}
+	for _, item := range doc2.Paths {
+		for _, op := range item.Operations() {
+			if len(op.Produces) == 0 {
+				op.Produces = doc2.Produces
+			}
+		}
+	}
+}
+
 // findExternalRef walks a decoded JSON document and returns the first
 // `$ref` that does not point inside the same document (it does not start
 // with "#"), plus a JSON-pointer-like location. Map keys are visited in
 // sorted order so the reported reference is stable. Keys are escaped as in
 // a JSON pointer ("~" as "~0", "/" as "~1").
 //
-// Example data (`example`, `examples`) and `x-` extensions are free data,
-// not part of the spec, so a "$ref" key inside them is not a reference and
-// is skipped. In a map of names (named is true, for example the keys under
-// `properties` or `definitions`) these keys are names, so they are walked.
+// Example data (`example`, `examples`), `default` and `enum` values, and
+// `x-` extensions are free data, not part of the spec, so a "$ref" key
+// inside them is not a reference and is skipped. In a map of names (named
+// is true, for example the keys under `properties` or `definitions`) these
+// keys are names, so they are walked. The `default` response under
+// `responses` is such a name, so it is still checked.
 func findExternalRef(node any, where string, named bool) (string, string, bool) {
 	switch v := node.(type) {
 	case map[string]any:
@@ -185,7 +206,7 @@ func findExternalRef(node any, where string, named bool) (string, string, bool) 
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			if !named && (k == "example" || k == "examples" || strings.HasPrefix(k, "x-")) {
+			if !named && (dataKeys[k] || strings.HasPrefix(k, "x-")) {
 				continue
 			}
 			childNamed := !named && namedMapKeys[k]
@@ -217,6 +238,15 @@ func printSwagger2Conversions(w io.Writer, convs []swagger2Conversion, savedTo s
 }
 
 var pointerEscaper = strings.NewReplacer("~", "~0", "/", "~1")
+
+// dataKeys are the Swagger 2.0 keys whose value is free data, not spec
+// objects, so a "$ref" key inside them is not a reference.
+var dataKeys = map[string]bool{
+	"default":  true,
+	"enum":     true,
+	"example":  true,
+	"examples": true,
+}
 
 // namedMapKeys are the Swagger 2.0 keys whose value is a map from a name
 // the spec author picked to a spec object.

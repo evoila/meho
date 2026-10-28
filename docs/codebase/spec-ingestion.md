@@ -2806,7 +2806,11 @@ All three delegate to `ReviewService.delete_connector`
     Code: `cli/internal/cmd/connector/swagger2.go`.
   - The conversion fetches nothing. A `$ref` to another file or a URL
     is refused with the name and place of the reference, like the
-    backplane's own cross-document `$ref` rule.
+    backplane's own cross-document `$ref` rule. A `$ref` key inside
+    free data (`example`, `examples`, `default`, `enum`, or an `x-`
+    extension) is data, not a reference, and is not checked. A
+    property or response that is *named* `default` or `example` is
+    still checked.
   - `--save-converted <file>` also writes the converted copy, so the
     operator can check it and keep it next to the original.
   - What changes in the conversion: `in: body` becomes `requestBody`,
@@ -2818,7 +2822,11 @@ All three delegate to `ReviewService.delete_connector`
     become `servers`. A `description` written next to a `$ref` is
     dropped (OpenAPI 3.0 ignores it anyway). When the file declares no
     `consumes`, the body media type is `*/*`; the parser's media-type
-    fallback still finds the schema.
+    fallback still finds the schema. A root-level `produces` list is
+    copied to every operation that has none, so the response media
+    types stay as the file declared them (the library alone would
+    fall back to `application/json`); an operation's own `produces`
+    wins.
   - An `https://` spec is fetched by the backplane, which still rejects
     Swagger 2.0 with `UnsupportedSpecError`. Its message names the CLI
     path first (download the file, pass it as `file://`), then a local

@@ -286,6 +286,122 @@ func TestConvertSwagger2RefusesRefInPropertyNamedExample(t *testing.T) {
 	}
 }
 
+// producesSwagger2YAML declares `produces` at the root. The first
+// operation has no list of its own and must inherit the root list. The
+// second has its own list, which wins.
+const producesSwagger2YAML = `swagger: "2.0"
+info:
+  title: Report API
+  version: "1"
+produces: [application/xml]
+paths:
+  /report:
+    get:
+      operationId: getReport
+      responses:
+        200:
+          description: ok
+          schema:
+            type: object
+  /report/text:
+    get:
+      operationId: getReportText
+      produces: [text/plain]
+      responses:
+        200:
+          description: ok
+          schema:
+            type: string
+`
+
+func TestConvertSwagger2InheritsRootProduces(t *testing.T) {
+	out, _, err := convertSwagger2([]byte(producesSwagger2YAML))
+	if err != nil {
+		t.Fatalf("convertSwagger2: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("converted output is not JSON: %v", err)
+	}
+	inherited := dig(t, doc, "paths", "/report", "get", "responses", "200", "content").(map[string]any)
+	if _, ok := inherited["application/xml"]; !ok || len(inherited) != 1 {
+		t.Errorf("an operation without produces must inherit the root list; content = %v", inherited)
+	}
+	own := dig(t, doc, "paths", "/report/text", "get", "responses", "200", "content").(map[string]any)
+	if _, ok := own["text/plain"]; !ok || len(own) != 1 {
+		t.Errorf("an operation's own produces must win over the root list; content = %v", own)
+	}
+}
+
+func TestConvertSwagger2DefaultsToJSONWithoutProduces(t *testing.T) {
+	in := strings.Replace(producesSwagger2YAML, "produces: [application/xml]\n", "", 1)
+	if strings.Count(in, "produces:") != 1 {
+		t.Fatal("test setup: sample spec changed shape")
+	}
+	out, _, err := convertSwagger2([]byte(in))
+	if err != nil {
+		t.Fatalf("convertSwagger2: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("converted output is not JSON: %v", err)
+	}
+	content := dig(t, doc, "paths", "/report", "get", "responses", "200", "content").(map[string]any)
+	if _, ok := content["application/json"]; !ok || len(content) != 1 {
+		t.Errorf("with no produces anywhere the response must be application/json; content = %v", content)
+	}
+}
+
+func TestConvertSwagger2AllowsRefKeyInDefaultAndEnum(t *testing.T) {
+	in := strings.Replace(sampleSwagger2YAML, "      name:\n        type: string\n", `      name:
+        type: string
+      shape:
+        type: object
+        default:
+          $ref: literal-value
+        enum:
+          - $ref: other.json#/Shape
+          - $ref: "#/definitions/Widget"
+`, 1)
+	if !strings.Contains(in, "literal-value") {
+		t.Fatal("test setup: sample spec changed shape")
+	}
+	if _, _, err := convertSwagger2([]byte(in)); err != nil {
+		t.Fatalf("a $ref key inside a default or enum value is data and must not be refused: %v", err)
+	}
+}
+
+func TestConvertSwagger2RefusesRefInPropertyNamedDefault(t *testing.T) {
+	in := strings.Replace(sampleSwagger2YAML, "    properties:\n", `    properties:
+      default:
+        $ref: common.yaml#/definitions/Default
+      enum:
+        $ref: "#/definitions/Widget"
+`, 1)
+	if !strings.Contains(in, "common.yaml") {
+		t.Fatal("test setup: sample spec changed shape")
+	}
+	_, _, err := convertSwagger2([]byte(in))
+	if err == nil || !strings.Contains(err.Error(), "#/definitions/Widget/properties/default") {
+		t.Fatalf("a property named default is a schema; its external $ref must be refused: %v", err)
+	}
+}
+
+func TestConvertSwagger2RefusesRefInDefaultResponse(t *testing.T) {
+	in := strings.Replace(sampleSwagger2YAML, "        200:\n          description: ok\n", `        200:
+          description: ok
+        default:
+          $ref: common.yaml#/responses/Error
+`, 1)
+	if !strings.Contains(in, "common.yaml") {
+		t.Fatal("test setup: sample spec changed shape")
+	}
+	_, _, err := convertSwagger2([]byte(in))
+	if err == nil || !strings.Contains(err.Error(), "#/paths/~1widgets~1{id}~1image/post/responses/default") {
+		t.Fatalf("the default response is a response object; its external $ref must be refused: %v", err)
+	}
+}
+
 func TestConvertSwagger2SpecsLeavesOthersUnchanged(t *testing.T) {
 	specs := []api.SpecSource{
 		{Uri: "file:///specs/openapi.yaml", Content: strPtr(sampleOpenAPI3YAML)},

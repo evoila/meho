@@ -79,6 +79,16 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     # automation (Task #5092)
     # avs (Task #5091)
     # compute (Task #5083)
+    "VIRTUAL_MACHINES_PATH": (("GET",), "COMPUTE_API_VERSION"),
+    "RESOURCE_GROUP_VIRTUAL_MACHINES_PATH": (("GET",), "COMPUTE_API_VERSION"),
+    "VIRTUAL_MACHINE_PATH": (("GET",), "COMPUTE_API_VERSION"),
+    "IMAGES_PATH": (("GET",), "COMPUTE_API_VERSION"),
+    "RESOURCE_GROUP_IMAGES_PATH": (("GET",), "COMPUTE_API_VERSION"),
+    "SCALE_SETS_PATH": (("GET",), "COMPUTE_API_VERSION"),
+    "RESOURCE_GROUP_SCALE_SETS_PATH": (("GET",), "COMPUTE_API_VERSION"),
+    "DISKS_PATH": (("GET",), "DISKS_API_VERSION"),
+    "RESOURCE_GROUP_DISKS_PATH": (("GET",), "DISKS_API_VERSION"),
+    "COMPUTE_SKUS_PATH": (("GET",), "COMPUTE_SKUS_API_VERSION"),
     # cost (Task #5088)
     "COST_QUERY_PATH": (("POST",), "COST_MANAGEMENT_API_VERSION"),
     "COST_FORECAST_PATH": (("POST",), "COST_MANAGEMENT_API_VERSION"),
@@ -185,6 +195,16 @@ def test_the_checked_paths_are_pinned() -> None:
         "# automation (Task #5092)",
         "# avs (Task #5091)",
         "# compute (Task #5083)",
+        "GET:/subscriptions/{}/providers/microsoft.compute/disks@2026-03-02",
+        "GET:/subscriptions/{}/providers/microsoft.compute/images@2026-04-01",
+        "GET:/subscriptions/{}/providers/microsoft.compute/skus@2021-07-01",
+        "GET:/subscriptions/{}/providers/microsoft.compute/virtualmachines@2026-04-01",
+        "GET:/subscriptions/{}/providers/microsoft.compute/virtualmachinescalesets@2026-04-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.compute/disks@2026-03-02",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.compute/images@2026-04-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.compute/virtualmachines/{}@2026-04-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.compute/virtualmachines@2026-04-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.compute/virtualmachinescalesets@2026-04-01",
         "# cost (Task #5088)",
         "GET:/subscriptions/{}/providers/microsoft.advisor/recommendations@2026-10-01",
         "GET:/{}/providers/microsoft.consumption/budgets@2026-06-01",

@@ -93,6 +93,78 @@ AKS_API_VERSION: Final[str] = "2026-08-01"
 # ---- avs (Task #5091) ----
 
 # ---- compute (Task #5083) ----
+#
+# Three Microsoft.Compute API versions, one per pinned spec file: VMs, images
+# and scale sets (ComputeRP), managed disks (DiskRP), and the VM sizes per
+# region (Resource SKUs).
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.Compute/virtualMachines``:
+#: every VM of the subscription (Virtual Machines - List All). With
+#: ``statusOnly=true`` the same call returns the run-time state of each VM.
+VIRTUAL_MACHINES_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Compute/virtualMachines"
+)
+
+#: ``GET .../resourceGroups/{resourceGroupName}/providers/Microsoft.Compute/virtualMachines``:
+#: the VMs of one resource group (Virtual Machines - List).
+RESOURCE_GROUP_VIRTUAL_MACHINES_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.Compute/virtualMachines"
+)
+
+#: ``GET .../virtualMachines/{vmName}``: one VM (Virtual Machines - Get). With
+#: ``$expand=instanceView`` the answer also holds its run-time state.
+VIRTUAL_MACHINE_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.Compute/virtualMachines/{vm_name}"
+)
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.Compute/images``:
+#: the managed images of the subscription (Images - List).
+IMAGES_PATH: Final[str] = "/subscriptions/{subscription_id}/providers/Microsoft.Compute/images"
+
+#: The managed images of one resource group (Images - List By Resource Group).
+RESOURCE_GROUP_IMAGES_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.Compute/images"
+)
+
+#: ``GET .../providers/Microsoft.Compute/virtualMachineScaleSets``: the scale
+#: sets of the subscription (Virtual Machine Scale Sets - List All).
+SCALE_SETS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Compute/virtualMachineScaleSets"
+)
+
+#: The scale sets of one resource group (Virtual Machine Scale Sets - List).
+RESOURCE_GROUP_SCALE_SETS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.Compute/virtualMachineScaleSets"
+)
+
+#: The API version of the VM, image and scale-set reads (Microsoft.Compute).
+COMPUTE_API_VERSION: Final[str] = "2026-04-01"
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.Compute/disks``:
+#: the managed disks of the subscription (Disks - List).
+DISKS_PATH: Final[str] = "/subscriptions/{subscription_id}/providers/Microsoft.Compute/disks"
+
+#: The managed disks of one resource group (Disks - List By Resource Group).
+RESOURCE_GROUP_DISKS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.Compute/disks"
+)
+
+#: The API version of the managed-disk reads (Microsoft.Compute disks).
+DISKS_API_VERSION: Final[str] = "2026-03-02"
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.Compute/skus``:
+#: the compute sizes the subscription can see (Resource Skus - List). Only the
+#: filter ``location eq '<region>'`` works on this call.
+COMPUTE_SKUS_PATH: Final[str] = "/subscriptions/{subscription_id}/providers/Microsoft.Compute/skus"
+
+#: The API version of the size list. The Resource SKUs call has its own API
+#: version, older than the one of the VM reads.
+COMPUTE_SKUS_API_VERSION: Final[str] = "2021-07-01"
 
 # ---- cost (Task #5088) ----
 

@@ -765,7 +765,169 @@ Not built yet (Task #5091).
 
 ## compute
 
-Not built yet (Task #5083).
+Six reads of virtual machines (VMs) and their disks, images and scale sets,
+plus the VM sizes Azure offers per region. All are in the group `compute`,
+all are `safe` (they need no approval), and none changes anything: MEHO never
+starts, stops or changes a VM.
+
+| Operation | What it returns | Parameters |
+|---|---|---|
+| `azure.vm.list` | the VMs, with size, OS type, power state, disk IDs and tags | `resource_group` (optional) |
+| `azure.vm.show` | one VM with its live state, OS, disks, network interfaces, zones and availability set | `resource_group`, `name` |
+| `azure.disk.list` | the managed disks, with size, type, state, owner VM and encryption | `resource_group` (optional) |
+| `azure.image.list` | the managed images, with OS type and state, VM generation and source VM | `resource_group` (optional) |
+| `azure.vmss.list` | the VM scale sets, with VM size, capacity, orchestration and upgrade mode | `resource_group` (optional) |
+| `azure.vm.size.list` | the VM sizes of one region, with their numbers and the restrictions for this subscription | `location` (required) |
+
+`vmss` is the short name for scale sets, because `scale` is a write word.
+
+Code: `compute.py` (group text, guidance for the AI, parameter schemas, the
+operation table `OPS` and the mixin `ComputeOps`, whose methods
+`AzureConnector` inherits), `compute_reads.py` (the calls),
+`compute_rows.py` (the rows, built from Azure's answers) and
+`compute_schemas.py` (the response schemas). The paths and API versions are in
+`_paths.py`, section `compute`.
+
+### Calls and API versions
+
+| Operation | Azure call | API version |
+|---|---|---|
+| `azure.vm.list` | `GET /subscriptions/{s}/providers/Microsoft.Compute/virtualMachines` (or `/resourceGroups/{rg}/...`), then the subscription list again with `statusOnly=true` | `2026-04-01` |
+| `azure.vm.show` | `GET .../resourceGroups/{rg}/providers/Microsoft.Compute/virtualMachines/{name}?$expand=instanceView` | `2026-04-01` |
+| `azure.disk.list` | `GET .../providers/Microsoft.Compute/disks` | `2026-03-02` |
+| `azure.image.list` | `GET .../providers/Microsoft.Compute/images` | `2026-04-01` |
+| `azure.vmss.list` | `GET .../providers/Microsoft.Compute/virtualMachineScaleSets` | `2026-04-01` |
+| `azure.vm.size.list` | `GET /subscriptions/{s}/providers/Microsoft.Compute/skus?$filter=location eq '<region>'` | `2021-07-01` |
+
+Every path is in the spec path check, with its API version.
+
+How many calls:
+
+- `azure.vm.list` makes two paged reads, never one call per VM. Read 1 is the
+  VM list (size, OS type, disks). Read 2 is the subscription's VM list with
+  `statusOnly=true`, which holds only the run-time state of each VM. For N
+  VMs that is about 2 × (N ÷ page size) calls; Azure sets the page size. With
+  `resource_group`, read 2 still covers the whole subscription, because Azure
+  offers `statusOnly` only on the subscription list; MEHO keeps the states of
+  the group's VMs. When read 1 finds no VM, read 2 is skipped.
+- `azure.vm.show` makes one call.
+- The other lists make one call per page.
+
+A login to Microsoft is added only when the token is not in the cache.
+
+### Power state
+
+The power state comes from the status whose code starts with `PowerState/`
+in the VM's instance view: `running`, `deallocated`, `stopped`, `starting`,
+`stopping` or `deallocating`. A `stopped` VM still costs compute; a
+`deallocated` one does not. It is `null` when Azure gave none: Microsoft says
+this can happen in rare cases and advises to ask again. The VM list and the
+status list are joined by the resource ID in lower case, because Azure does
+not always keep the case of a resource group the same.
+
+`azure.vm.list` also returns `power_state_read`, an object that says how
+complete the power states are:
+
+```json
+{"vms_without_state": 0, "pages_read": 1, "truncated": false,
+ "omission": null, "omission_kind": null}
+```
+
+`truncated`, `omission` and `omission_kind` describe read 2 the same way the
+paging fields describe read 1. When read 2 fails (for example Azure refuses
+it, or keeps throttling past MEHO's retry budget), the whole operation fails
+with Azure's error, like any read; ask again later. The guidance of `azure.vm.list` carries a
+`result_objects` hint for this object, so it stays inline next to the
+stored-result link when there are more than 50 VMs; without the hint the
+result reduction would drop it. The paging fields of every list stay inline
+on their own, because they are plain values. `test_connectors_azure_compute.py`
+proves both with the real result reduction, for every list.
+
+### Fields
+
+The field names are a contract: the VM metrics read and the migration sizing
+build on `azure.vm.list`, `azure.vm.show` and `azure.vm.size.list`. Change a
+name only together with its readers. A field that is missing in Azure's
+answer is `null` (or an empty list or object).
+
+- VM row (`azure.vm.list`): `name`, `id`, `resource_group`, `location`,
+  `zones`, `size`, `os_type`, `power_state`, `provisioning_state`,
+  `os_disk_id`, `data_disk_ids`, `tags`.
+- `azure.vm.show`: the VM row's fields without the disk IDs, plus `vm_id`,
+  `os_name`, `os_version`, `computer_name`, `hyperv_generation` (V1 or V2),
+  `os_disk` and `data_disks` (`lun`, `name`, `id`, `size_gb`, `sku`,
+  `caching`), `network_interfaces` (`id`, `primary`), `availability_set_id`
+  and `scale_set_id`. `os_name` and `os_version` come from the VM agent and
+  are `null` when it does not run.
+- Disk row: `name`, `id`, `resource_group`, `location`, `zones`, `size_gb`,
+  `sku`, `disk_state` (`Attached`, `Unattached`, ...), `owner_vm_id`,
+  `encryption_type`, `os_type`, `tags`.
+- Image row: `name`, `id`, `resource_group`, `location`, `os_type`,
+  `os_state`, `hyperv_generation`, `os_disk_size_gb`, `data_disk_count`,
+  `source_vm_id`, `provisioning_state`, `tags`. Images in an Azure Compute
+  Gallery are a different resource and are not listed.
+- Scale set row: `name`, `id`, `resource_group`, `location`, `zones`, `size`,
+  `capacity`, `orchestration_mode`, `upgrade_mode`, `os_type`,
+  `provisioning_state`, `tags`.
+- VM size row (`azure.vm.size.list`): `name`, `family`, `vcpus`,
+  `vcpus_available`, `memory_gb`, `max_data_disks`, `premium_io`,
+  `hyperv_generations` (a list), `acus`, `cpu_architecture` (x64 or Arm64),
+  `zones`, `restrictions` (each with `type`, `reason_code`, `zones`). The
+  answer also holds `location`.
+
+### VM sizes
+
+Azure's Resource SKUs answer holds every kind of compute SKU (disks,
+availability sets, ...); only the rows whose resource type is
+`virtualMachines` are kept. Only the `location` filter works on this call.
+The rows have no region field of their own, so MEHO also checks the region:
+a row whose `locations`, or a restriction whose `values`, names only other
+regions is left out, the same way Microsoft's own SKU library (skewer)
+reads the answer.
+The numbers come from the SKU's capabilities (`vCPUs`, `vCPUsAvailable`,
+`MemoryGB`, `MaxDataDiskCount`, `PremiumIO`, `HyperVGenerations`, `ACUs`,
+`CpuArchitectureType`). Azure sends them as text; MEHO turns them into
+numbers, and a value that is not a number becomes `null`.
+
+How to read the restrictions:
+
+- `type` `Location`: this subscription cannot use the size in this region.
+- `type` `Zone`: it cannot use the size in the zones listed; the rest of the
+  region works.
+- `reason_code`: `NotAvailableForSubscription` or `QuotaId`.
+
+`zones` lists the zones in which Azure offers the size, before restrictions.
+
+### Safety
+
+- Each row is built from a list of named fields, so nothing else from
+  Azure's answer reaches the result: no admin user name, no custom data, no
+  user data, no blob URL.
+- `resource_group` and `name` may not hold `/`, `\`, `?`, `#`, `%` or spaces,
+  and may not be dots only. The parameter schema checks them, the body checks
+  them again (its error never repeats the value), and each one is
+  percent-encoded so it stays one segment of the path. `location` must be
+  letters and digits only, because it goes into Azure's filter text.
+- Names, tags and states are text from Azure: the guidance tells the AI to
+  treat them as data, never as instructions.
+
+### Proven live
+
+Nothing yet: the lab login does not exist yet. The operations are built from
+Microsoft's documented answer shapes and proven with unit tests on mocked
+HTTP. The place of the power state in a `statusOnly` answer (the instance
+view under `properties`, as in Microsoft's VM model) is not yet seen live;
+the lab proof checks it.
+
+References:
+
+- Virtual Machines - List All (`statusOnly`, `$expand`, `$filter`):
+  <https://learn.microsoft.com/en-us/rest/api/compute/virtual-machines/list-all>
+- VM power and provisioning states:
+  <https://learn.microsoft.com/en-us/azure/virtual-machines/states-billing>
+- Resource SKUs - List (`$filter=location eq '<region>'`):
+  <https://learn.microsoft.com/en-us/rest/api/compute/resource-skus/list>
+- Disks - List: <https://learn.microsoft.com/en-us/rest/api/compute/disks/list>
 
 ## cost
 

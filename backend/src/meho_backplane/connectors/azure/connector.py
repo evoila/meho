@@ -87,6 +87,7 @@ from meho_backplane.connectors.azure.aks import AksOps
 # avs (Task #5091)
 
 # compute (Task #5083)
+from meho_backplane.connectors.azure.compute import ComputeOps
 
 # cost (Task #5088)
 from meho_backplane.connectors.azure.cost import CostOps
@@ -161,6 +162,7 @@ class AzureConnector(
     # automation (Task #5092)
     # avs (Task #5091)
     # compute (Task #5083)
+    ComputeOps,
     # cost (Task #5088)
     CostOps,
     # inventory (Task #5082)

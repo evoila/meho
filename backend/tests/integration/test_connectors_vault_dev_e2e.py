@@ -34,7 +34,8 @@ What this harness proves (issue #551 DoD)
   (CLAUDE.md postulate 7), and that the audit row's
   ``op_class`` is correct — ``credential_write`` for ``vault.kv.put``
   and ``vault.kv.patch`` (their KV-v2 secret rides in the request
-  params, per G11.7-T1 #1401 / G3.15-T1 #1409), ``write`` for ``vault.kv.delete``,
+  params, per G11.7-T1 #1401 / G3.15-T1 #1409), ``write`` for ``vault.kv.delete``
+  and ``vault.kv.metadata.delete``,
   ``credential_read`` for ``vault.kv.read`` /
   ``vault.kv.list``, ``read`` for the KV-v2 / sys metadata reads and
   the ``.list`` auth ops, and ``other`` for the two ``.read``
@@ -451,7 +452,7 @@ async def _assert_audited(
 
 
 # ---------------------------------------------------------------------------
-# KV-v2 group — read / list / put / versions / delete
+# KV-v2 group — read / list / put / versions / delete / metadata.delete
 # ---------------------------------------------------------------------------
 
 
@@ -680,6 +681,91 @@ async def test_kv_delete_against_dev_vault(
     await _assert_audited(
         "vault.kv.delete",
         operator_sub="op-kv-delete",
+        expected_op_class="write",
+    )
+
+
+@pytest.mark.asyncio
+async def test_kv_metadata_delete_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+) -> None:
+    """``vault.kv.metadata.delete`` removes every version for good; safe to run twice.
+
+    The handler decides ``deleted`` / ``unchanged`` from how Vault answers a
+    metadata read of a missing path (404, which hvac raises as
+    ``InvalidPath``). The unit suite proves this with a fake client; this
+    case proves it against a real Vault. A second run on the same path must
+    report ``unchanged``. Each run is audited with op_class=write.
+    """
+    target, addr = vault_e2e
+    path = "app/to-purge"
+    root = _root_client(addr)
+    # Seed a dedicated secret with two versions so the delete doesn't
+    # perturb other tests and has more than one version to remove.
+    for value in ("v1", "v2"):
+        root.secrets.kv.v2.create_or_update_secret(
+            path=path,
+            secret={"x": value},
+            mount_point=_KV_MOUNT,
+        )
+    seeded = root.secrets.kv.v2.read_secret_metadata(path=path, mount_point=_KV_MOUNT)
+    assert seeded["data"]["current_version"] == 2
+
+    operator = _make_operator(sub="op-kv-metadata-delete")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.metadata.delete",
+        target=target,
+        params={"path": path},
+        # ``vault.kv.metadata.delete`` is approval-gated (requires_approval=True,
+        # #3424); resume via the approvals-API flag so the delete executes.
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {
+        "status": "deleted",
+        "object": {"kind": "kv_secret", "mount": _KV_MOUNT, "path": path},
+        "guidance": None,
+    }
+    # A direct read with the root client finds no metadata and no version.
+    # ``raise_on_deleted_version=False`` returns a soft-deleted version
+    # instead of raising, so the raise proves the versions are gone for good.
+    with pytest.raises(hvac.exceptions.InvalidPath):
+        root.secrets.kv.v2.read_secret_metadata(path=path, mount_point=_KV_MOUNT)
+    for version in (1, 2):
+        with pytest.raises(hvac.exceptions.InvalidPath):
+            root.secrets.kv.v2.read_secret_version(
+                path=path,
+                version=version,
+                mount_point=_KV_MOUNT,
+                raise_on_deleted_version=False,
+            )
+    await _assert_audited(
+        "vault.kv.metadata.delete",
+        operator_sub="op-kv-metadata-delete",
+        expected_op_class="write",
+    )
+
+    # Second run on the now-missing path: nothing to delete. A separate
+    # operator keeps the one-audit-row-per-operator check exact.
+    again_operator = _make_operator(sub="op-kv-metadata-delete-again")
+    again = await dispatch(
+        operator=again_operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.metadata.delete",
+        target=target,
+        params={"path": path},
+        _approved=True,
+    )
+    assert again.status == "ok", again.error
+    assert again.result is not None
+    assert again.result["status"] == "unchanged"
+    assert again.result["object"] == {"kind": "kv_secret", "mount": _KV_MOUNT, "path": path}
+    assert "Nothing was deleted" in again.result["guidance"]
+    await _assert_audited(
+        "vault.kv.metadata.delete",
+        operator_sub="op-kv-metadata-delete-again",
         expected_op_class="write",
     )
 

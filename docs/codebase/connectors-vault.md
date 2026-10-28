@@ -853,6 +853,11 @@ and a real Postgres audit store (reusing the integration conftest's
   `current_version == 2`), and a `bulk/` folder with > 50 child keys
   (the set-shape fixture G3.3-T4's threshold test also consumes). It
   enables `userpass` + `approle` and seeds one user / one role.
+- **Permanent delete.** The `kv.metadata.delete` case seeds two
+  versions at its own path, checks `status: "deleted"`, then checks
+  with the root client that a metadata read and a read of each
+  version find nothing. A second run on the same path must return
+  `status: "unchanged"` (safe to run twice).
 - **Client seam.** Dev mode has no OIDC method, so the test
   monkeypatches `vault_client_for_operator` to yield a root-token
   client bound to the container and pins `VAULT_ADDR` for the
@@ -862,7 +867,7 @@ and a real Postgres audit store (reusing the integration conftest's
 - **Assertions.** Each op asserts the live response shape, a single
   synchronously-committed `audit_log` row (postulate 7), and the
   broadcast `op_class` — `credential_write` for `kv.put` (G11.7-T1
-  #1401) and `write` for `kv.delete`,
+  #1401) and `write` for `kv.delete` / `kv.metadata.delete`,
   `credential_read` for `kv.read` / `kv.list`, `read` for the
   KV-v2 / sys metadata reads and the `.list` auth ops
   (`auth.userpass.list` / `auth.approle.list`), and `other` for the

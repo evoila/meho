@@ -77,6 +77,8 @@ def test_select_applies_the_rules_per_changed_file(tool: ModuleType) -> None:
         [
             "backend/src/pkg/a.py",
             "backend/src/pkg/unused.py",
+            "backend/src/pkg/new.py",
+            "backend/tests/test_new.py",
             "backend/tests/conftest.py",
             "backend/uv.lock",
         ],
@@ -85,11 +87,36 @@ def test_select_applies_the_rules_per_changed_file(tool: ModuleType) -> None:
     )
     assert len(unknown.map_only) == 2
     assert unknown.safe_full
-    assert unknown.cannot_judge == [
-        "backend/src/pkg/unused.py",
-        "backend/tests/conftest.py",
-        "backend/uv.lock",
-    ]
+    # A file the coverage data or the test list does not have at all.
+    assert unknown.not_in_data == ["backend/src/pkg/new.py", "backend/tests/test_new.py"]
+    # A file in the coverage data that no test function ran.
+    assert unknown.no_test_ran == ["backend/src/pkg/unused.py"]
+    assert unknown.other == ["backend/tests/conftest.py", "backend/uv.lock"]
+
+    only_new = tool.select(["backend/src/pkg/new.py"], file_map, suite)
+    assert only_new.safe_full
+    assert only_new.not_in_data == ["backend/src/pkg/new.py"]
+    assert only_new.no_test_ran == []
+
+    only_unused = tool.select(["backend/src/pkg/unused.py"], file_map, suite)
+    assert only_unused.safe_full
+    assert only_unused.not_in_data == []
+    assert only_unused.no_test_ran == ["backend/src/pkg/unused.py"]
+
+
+def test_unmatched_functions_finds_tests_missing_from_the_list(tool: ModuleType) -> None:
+    suite = tool.Suite.from_nodeids(_NODEIDS)
+    file_map = {
+        "backend/src/pkg/a.py": {"tests.test_a.test_one", "tests.test_new.test_four"},
+        "backend/src/pkg/b.py": {"tests.sub.test_b.TestB.test_three"},
+        "backend/src/pkg/unused.py": set(),
+    }
+
+    assert tool.unmatched_functions(file_map, suite) == {"tests.test_new.test_four"}
+    assert tool.unmatched_functions({"backend/src/pkg/b.py": set()}, suite) == set()
+
+    text = tool.report([], file_map, suite, top=1)
+    assert "not in the test list: 1." in text
 
 
 def test_load_map_reads_test_contexts_and_drops_the_empty_one(

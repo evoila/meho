@@ -91,6 +91,21 @@ on `main`. To get the data, open a pull request that adds it, give it the
 combine job (it is not uploaded today, only `coverage.xml`). How to run the
 script is in its docstring.
 
+The script also needs the list from `pytest --collect-only`. Make that list
+on the **exact commit the coverage run tested**. For a `pull_request` run this
+is the merge commit, not the pull request head. The log of the checkout step
+shows its SHA ("HEAD is now at ..."). If the list comes from another commit,
+the counts are wrong. The script prints how many test functions in the
+coverage data are not in the list, and warns when that number is not zero.
+A small number can also come from tests that a decorator wraps (for example
+`@respx.mock`): coverage then names them after the decorator's module, such
+as `functools.test_x`, and the map loses them.
+
+The report splits the changed files the map cannot judge into three kinds:
+files the data does not have (for example files added after the coverage
+run), files in the data that no test function ran, and other files (config,
+test helpers, files outside `backend/`).
+
 Things to know about the data:
 
 - `test_function` records only lines that run inside the test function

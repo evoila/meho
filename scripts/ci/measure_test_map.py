@@ -15,7 +15,15 @@ Input:
 * The list of collected unit tests, from ``pytest --collect-only -q``.
   Coverage knows test functions; pytest runs test items (one function
   can be many items, one per parameter set). The list turns functions
-  into items and gives the full suite size.
+  into items and gives the full suite size. **Make this list on the exact
+  commit the coverage run tested.** For a ``pull_request`` run that is the
+  merge commit, not the pull request head; the log of the checkout step
+  shows its SHA ("HEAD is now at ..."). If the two inputs come from
+  different commits, the counts are wrong. The script counts the test
+  functions in the coverage data that are not in the list and warns when
+  that count is not zero. A small count can also come from tests that a
+  decorator wraps: coverage then names them after the decorator's module
+  (for example ``functools.test_x``).
 * The files changed by the last N merged pull requests, read with ``gh``.
 
 For each pull request it counts the test items the map would pick, in two
@@ -26,15 +34,26 @@ ways:
   nothing.
 * **safe**: like "map only", but a changed file that the map cannot judge
   picks the full suite. Docs (``docs/`` or ``*.md``) never pick tests,
-  like the docs-only rule in CI today. "Cannot judge" means: a config or
-  data file, a test helper or ``conftest.py``, a file outside ``backend/``,
-  or a source file that no test function ran (for example a new file).
+  like the docs-only rule in CI today. The map cannot judge three kinds of
+  files, and the report counts them apart:
+
+  * **not in data**: a source or test file that the coverage data or the
+    test list does not have, for example a file added after the coverage
+    run.
+  * **no test ran**: a source file that is in the coverage data, but no
+    test function ran any of its lines (its code runs only at import time
+    or in fixtures).
+  * **other**: a config or data file, a test helper or ``conftest.py``, or
+    a file outside ``backend/``.
 
 It also lists the source files that almost every test runs.
 
-Usage (from ``backend/``, so ``coverage`` is installed)::
+Usage (from ``backend/``, so ``coverage`` is installed). Run the collect
+step in a checkout of the commit the coverage run tested::
 
-    uv run pytest --collect-only -q tests --ignore=tests/integration > /tmp/collected.txt
+    git worktree add /tmp/tested <tested-commit>
+    (cd /tmp/tested/backend && uv run pytest --collect-only -q tests \\
+        --ignore=tests/integration) > /tmp/collected.txt
     uv run python ../scripts/ci/measure_test_map.py \\
         --data .coverage --collected /tmp/collected.txt --last 30
 """
@@ -46,6 +65,7 @@ import json
 import re
 import statistics
 import subprocess
+import sys
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -112,26 +132,45 @@ def load_map(data_file: str) -> dict[str, set[str]]:
 @dataclass
 class Selection:
     map_only: set[str]
-    safe_full: bool
-    cannot_judge: list[str]
+    not_in_data: list[str] = field(default_factory=list)
+    no_test_ran: list[str] = field(default_factory=list)
+    other: list[str] = field(default_factory=list)
+
+    @property
+    def safe_full(self) -> bool:
+        return bool(self.not_in_data or self.no_test_ran or self.other)
 
 
 def select(changed: Iterable[str], file_map: dict[str, set[str]], suite: Suite) -> Selection:
-    picked: set[str] = set()
-    cannot_judge: list[str] = []
+    sel = Selection(map_only=set())
     for path in changed:
         if _DOCS.search(path) or _INTEGRATION.match(path):
             continue
-        if _TEST_FILE.match(path) and path in suite.by_file:
-            picked.update(suite.by_file[path])
+        if _TEST_FILE.match(path):
+            if path in suite.by_file:
+                sel.map_only.update(suite.by_file[path])
+            else:
+                sel.not_in_data.append(path)
             continue
-        functions = file_map.get(path, set()) if _SOURCE.match(path) else set()
-        if not functions:
-            cannot_judge.append(path)
-            continue
-        for function in functions:
-            picked.update(suite.by_function.get(function, ()))
-    return Selection(map_only=picked, safe_full=bool(cannot_judge), cannot_judge=cannot_judge)
+        if not _SOURCE.match(path):
+            sel.other.append(path)
+        elif path not in file_map:
+            sel.not_in_data.append(path)
+        elif not file_map[path]:
+            sel.no_test_ran.append(path)
+        else:
+            for function in file_map[path]:
+                sel.map_only.update(suite.by_function.get(function, ()))
+    return sel
+
+
+def unmatched_functions(file_map: dict[str, set[str]], suite: Suite) -> set[str]:
+    """Return the test functions in the coverage data that the test list does not have.
+
+    Not empty means the two inputs come from different commits.
+    """
+    in_data: set[str] = set().union(*file_map.values()) if file_map else set()
+    return in_data - suite.by_function.keys()
 
 
 def touched_by_most(file_map: dict[str, set[str]], top: int) -> tuple[int, list[tuple[str, float]]]:
@@ -180,7 +219,7 @@ def fetch_prs(repo: str, last: int) -> list[tuple[int, str, list[str]]]:
             capture_output=True,
             text=True,
         )
-        prs.append((pr["number"], pr["title"], files.stdout.split()))
+        prs.append((pr["number"], pr["title"], files.stdout.splitlines()))
     return prs
 
 
@@ -188,29 +227,55 @@ def _stats(values: list[int]) -> str:
     return f"median {statistics.median(values):g}, smallest {min(values)}, largest {max(values)}"
 
 
+def _shown(paths: list[str]) -> str:
+    shown = ", ".join(f"`{p}`" for p in paths[:3])
+    return shown + (f" and {len(paths) - 3} more" if len(paths) > 3 else "")
+
+
 def report(
     prs: list[tuple[int, str, list[str]]], file_map: dict[str, set[str]], suite: Suite, top: int
 ) -> str:
     full = len(suite.items)
+    unmatched = unmatched_functions(file_map, suite)
     lines = [
         f"Full unit suite: {full} test items.",
+        f"Test functions in the coverage data that are not in the test list: {len(unmatched)}.",
         "",
-        "| PR | files | map only | safe | files the map cannot judge |",
-        "|---|---|---|---|---|",
+        "| PR | files | map only | safe | not in data | no test ran | other |",
+        "|---|---|---|---|---|---|---|",
     ]
     map_counts: list[int] = []
     safe_counts: list[int] = []
+    # Safe count if "no test ran" files were handled some other way
+    # (for example by import analysis), so only the other two kinds fall back.
+    without_no_test_ran: list[int] = []
+    reasons = {"not in data": 0, "no test ran": 0, "other": 0}
     for number, _title, files in prs:
         sel = select(files, file_map, suite)
         map_count = len(sel.map_only)
-        safe_count = full if sel.safe_full else map_count
         map_counts.append(map_count)
-        safe_counts.append(safe_count)
-        shown = ", ".join(f"`{p}`" for p in sel.cannot_judge[:3])
-        more = f" and {len(sel.cannot_judge) - 3} more" if len(sel.cannot_judge) > 3 else ""
-        lines.append(f"| #{number} | {len(files)} | {map_count} | {safe_count} | {shown}{more} |")
+        safe_counts.append(full if sel.safe_full else map_count)
+        without_no_test_ran.append(full if sel.not_in_data or sel.other else map_count)
+        reasons["not in data"] += bool(sel.not_in_data)
+        reasons["no test ran"] += bool(sel.no_test_ran)
+        reasons["other"] += bool(sel.other)
+        lines.append(
+            f"| #{number} | {len(files)} | {map_count} | {safe_counts[-1]} "
+            f"| {_shown(sel.not_in_data)} | {_shown(sel.no_test_ran)} | {_shown(sel.other)} |"
+        )
     if prs:
-        lines += ["", f"- Map only: {_stats(map_counts)}.", f"- Safe: {_stats(safe_counts)}."]
+        n_full = sum(1 for count in safe_counts if count == full and full)
+        n_full_without = sum(1 for count in without_no_test_ran if count == full and full)
+        lines += [
+            "",
+            f"- Map only: {_stats(map_counts)}.",
+            f"- Safe: {_stats(safe_counts)}. Full suite for {n_full} of {len(prs)}.",
+            "- Pull requests with a file of each kind the map cannot judge: "
+            + ", ".join(f"{name}: {count}" for name, count in reasons.items())
+            + ".",
+            f'- Safe if "no test ran" files were handled another way: '
+            f"{_stats(without_no_test_ran)}. Full suite for {n_full_without} of {len(prs)}.",
+        ]
     total, shares = touched_by_most(file_map, top)
     never = sum(1 for path, fns in file_map.items() if not fns)
     lines += [
@@ -239,6 +304,17 @@ def main(argv: list[str] | None = None) -> int:
     with open(args.collected, encoding="utf-8") as fh:
         suite = Suite.from_nodeids(read_collected(fh.read()))
     file_map = load_map(args.data)
+    unmatched = unmatched_functions(file_map, suite)
+    if unmatched:
+        print(
+            f"WARNING: {len(unmatched)} test functions in the coverage data are not in the "
+            "test list, for example "
+            + ", ".join(sorted(unmatched)[:3])
+            + ". Make the test list on the exact commit the coverage run tested. A few"
+            " names can also differ when a decorator wraps the test (for example"
+            " functools.test_x); the map loses those tests.",
+            file=sys.stderr,
+        )
     print(report(fetch_prs(args.repo, args.last), file_map, suite, args.top))
     return 0
 

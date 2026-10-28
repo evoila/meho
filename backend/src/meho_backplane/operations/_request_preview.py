@@ -579,9 +579,10 @@ async def preview_dispatch(
 
     Returns a JSON-shaped envelope: ``status`` ``"ok"`` (request/synthetic
     preview resolved), ``"error"`` (structured ``unknown_op`` /
-    ``invalid_params`` / ``no_connector`` / ``ambiguous_connector`` /
-    ``dispatch_error``), or ``"unavailable"`` (a non-governed typed/composite
-    op). ``op_id`` / ``connector_id`` / ``source_kind`` echo for correlation.
+    ``target_required`` / ``invalid_params`` / ``no_connector`` /
+    ``ambiguous_connector`` / ``dispatch_error``), or ``"unavailable"`` (a
+    non-governed typed/composite op). ``op_id`` / ``connector_id`` /
+    ``source_kind`` echo for correlation.
     Every envelope whose op resolved (every status except ``unknown_op`` /
     ``unknown_connector``) carries ``safety_level``, ``requires_approval``,
     ``policy_verdict`` and ``policy_reason`` (#4923).

@@ -61,6 +61,8 @@ from meho_backplane.db.models import (
 from meho_backplane.settings import get_settings
 from tests._vmware_cluster_config_fake import cluster_config_ex, reject_config_ex_member_paths
 
+_ITEM_OVF = "aaaaaaaa-0000-0000-0000-00000000000f"
+
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000025a6")
 
 
@@ -791,7 +793,7 @@ class _DeployRecordingConnector:
 
 
 def _deploy_gate_params() -> dict[str, Any]:
-    return {"library_item": "li-ovf", "resource_pool": "resgroup-8"}
+    return {"library_item": _ITEM_OVF, "resource_pool": "resgroup-8"}
 
 
 @pytest.mark.asyncio

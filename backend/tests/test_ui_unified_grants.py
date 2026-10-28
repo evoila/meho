@@ -411,3 +411,116 @@ def test_console_marks_orphaned_service_grant_with_remediation() -> None:
     assert "orphaned" in row
     assert "data-grant-remediation" in row
     assert "target_name_pattern=&#39;rebuilt-appliance&#39;" in row
+
+
+def _service_form(**overrides: str) -> dict[str, str]:
+    form = {
+        "kind": "service",
+        "principal_sub": "service:form-errors",
+        "op": "POST:/vcenter/vm?action=start",
+        "connector_id": "vmware-rest-9.0",
+        "target_id": "",
+        "target_product": "",
+        "target_name_pattern": "",
+        "reason": "needed for inventory",
+        "expires_at": "",
+    }
+    form.update(overrides)
+    return form
+
+
+def _post_create(form: dict[str, str]):
+    _seed_tenant(_TENANT_A, "tenant-a")
+    client, mock, token = _admin_client(csrf=True)
+    try:
+        return client.post("/ui/grants/create", data=form, headers=_csrf_headers(token))
+    finally:
+        mock.stop()
+
+
+def _service_grant_count() -> int:
+    async def _count() -> int:
+        async with get_sessionmaker()() as session:
+            rows = (await session.execute(select(ServicePrincipalGrant))).scalars().all()
+            return len(rows)
+
+    return asyncio.run(_count())
+
+
+def test_wrong_expiry_shows_its_message_next_to_the_expiry_field() -> None:
+    response = _post_create(_service_form(expires_at="026-11-27T10:00:00Z"))
+    assert response.status_code == 422, response.text
+    assert 'data-error-for="expires_at"' in response.text
+    assert "invalid character in year" in response.text
+    # The values the person typed stay in the form.
+    assert 'value="026-11-27T10:00:00Z"' in response.text
+    assert _service_grant_count() == 0
+
+
+@pytest.mark.parametrize(
+    ("overrides", "field"),
+    [
+        ({"op": ""}, "op"),
+        ({"connector_id": ""}, "connector_id"),
+        ({"reason": ""}, "reason"),
+        ({"target_id": "not-a-uuid"}, "target_id"),
+        ({"target_product": "x" * 300}, "target_product"),
+        ({"target_name_pattern": "x" * 600}, "target_name_pattern"),
+        ({"principal_sub": ""}, "principal_sub"),
+    ],
+)
+def test_service_field_errors_show_next_to_their_field(
+    overrides: dict[str, str], field: str
+) -> None:
+    response = _post_create(_service_form(**overrides))
+    assert response.status_code == 422, response.text
+    assert f'data-error-for="{field}"' in response.text
+    assert 'class="alert alert-error"' not in response.text
+
+
+@pytest.mark.parametrize(
+    ("overrides", "field"),
+    [
+        ({"op": ""}, "op"),
+        ({"verdict": "allow-everything"}, "verdict"),
+        ({"expires_at": "026-11-27T10:00:00Z"}, "expires_at"),
+    ],
+)
+def test_agent_field_errors_show_next_to_their_field(overrides: dict[str, str], field: str) -> None:
+    form = {
+        "kind": "agent",
+        "principal_sub": "agent:new",
+        "op": "vault.kv.*",
+        "target_scope": "*",
+        "verdict": "deny",
+        "expires_at": "",
+    }
+    form.update(overrides)
+    response = _post_create(form)
+    assert response.status_code == 422, response.text
+    assert f'data-error-for="{field}"' in response.text
+
+
+def test_target_uuid_with_a_selector_shows_at_the_top_of_the_form() -> None:
+    response = _post_create(_service_form(target_id=str(uuid.uuid4()), target_product="vmware"))
+    assert response.status_code == 422, response.text
+    assert '<div class="alert alert-error" role="alert">' in response.text
+    assert "mutually exclusive with a target selector" in response.text
+    assert _service_grant_count() == 0
+
+
+def test_an_error_with_no_field_on_the_form_shows_at_the_top() -> None:
+    from pydantic import BaseModel, ValidationError
+
+    from meho_backplane.ui.routes.grants import _create_form_errors
+
+    class _Probe(BaseModel):
+        principal_kind: int
+        op_id: int
+
+    with pytest.raises(ValidationError) as caught:
+        _Probe.model_validate({"principal_kind": "x", "op_id": "y"})
+    errors = _create_form_errors(caught.value)
+    assert errors["__root__"].startswith("principal_kind: ")
+    assert "op" in errors
+    assert "op_id" not in errors

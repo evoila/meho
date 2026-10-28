@@ -276,10 +276,15 @@ CENTRAL_MANAGEMENT_OP = _op(
     "Read whether FortiManager controls the FortiGate (then MEHO refuses direct changes).",
     "Reads monitor/system/central-management/status on the device target. "
     "fortimanager_controls is true in normal mode with a FortiManager server set; then every "
-    "change must be made in FortiManager.",
+    "change must be made in FortiManager. It is null when the answer has no mode or server "
+    "MEHO knows; then MEHO refuses a direct change, because it cannot tell.",
     _object(
         {
-            "fortimanager_controls": _field("boolean", "True when FortiManager controls it."),
+            "fortimanager_controls": _field(
+                ["boolean", "null"],
+                "True when FortiManager controls it, false when not, null when unknown (the "
+                "answer has no mode or server MEHO knows; a direct change is refused).",
+            ),
             "mode": _field(_TEXT, "normal or backup."),
             "server": _field(_TEXT, "The FortiManager address, when set."),
             "status": _field(_TEXT, "Connection state to FortiManager."),
@@ -289,7 +294,8 @@ CENTRAL_MANAGEMENT_OP = _op(
     _guidance(
         "Call before planning a change, to know whether it must go through FortiManager.",
         "{fortimanager_controls, mode, server, status, registration_status, version_warning}.",
-        "If fortimanager_controls is true, plan the change in FortiManager, not on the device.",
+        "If fortimanager_controls is true, plan the change in FortiManager, not on the device. "
+        "If it is null, find out from the operator who manages the device.",
     ),
 )
 

@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 import respx
+from jsonschema import Draft202012Validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -90,6 +91,10 @@ async def _dispatch(op_id: str, fake: fx.FakeFortiGate, target: FortiTarget | No
             target=target or FortiTarget(),
             params={},
         )
+
+
+def _op(op_id: str) -> Any:
+    return next(op for op in FORTIOS_TYPED_OPS if op.op_id == op_id)
 
 
 def _text(result: Any) -> str:
@@ -235,14 +240,18 @@ async def test_vdom_list_central_management_licence_and_usage(
     assert vdoms.result["count"] == 2
     assert [v["name"] for v in vdoms.result["vdoms"]] == ["root", "vdom-a"]
 
+    schema = Draft202012Validator(_op("fortios.central_management.status").response_schema)
     fmg = await _dispatch("fortios.central_management.status", fx.FakeFortiGate())
     assert fmg.result["fortimanager_controls"] is False
+    schema.validate(fmg.result)
     answers = {**fx.DEVICE_ANSWERS, "monitor/system/central-management/status": fx.FMG_CONTROLS}
     fmg = await _dispatch("fortios.central_management.status", fx.FakeFortiGate(answers))
     assert fmg.result["fortimanager_controls"] is True
+    schema.validate(fmg.result)
     answers = {**fx.DEVICE_ANSWERS, "monitor/system/central-management/status": {}}
     fmg = await _dispatch("fortios.central_management.status", fx.FakeFortiGate(answers))
     assert fmg.result["fortimanager_controls"] is None
+    schema.validate(fmg.result)
 
     licences = await _dispatch("fortios.license.status", fx.FakeFortiGate())
     services = {row["service"]: row for row in licences.result["licences"]}

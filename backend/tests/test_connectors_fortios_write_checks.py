@@ -374,8 +374,19 @@ async def test_a_single_unit_is_verified() -> None:
         [{"serial_no": fx.CHECKSUMS_SINGLE[0]["serial_no"]}],
         [{"checksum": fx.CHECKSUMS_SINGLE[0]["checksum"]}],
         [fx.CHECKSUMS_SINGLE[0], {"serial_no": "FGT-made-up-2"}],
+        [fx.CHECKSUMS_SINGLE[0], None],
+        [fx.CHECKSUMS_SINGLE[0], "made-up text"],
     ],
-    ids=["null", "empty-object", "empty-list", "no-checksums", "no-serial", "one-row-incomplete"],
+    ids=[
+        "null",
+        "empty-object",
+        "empty-list",
+        "no-checksums",
+        "no-serial",
+        "one-row-incomplete",
+        "one-member-null",
+        "one-member-text",
+    ],
 )
 @pytest.mark.asyncio
 async def test_an_incomplete_ha_answer_gives_unknown_not_a_single_unit(results: Any) -> None:

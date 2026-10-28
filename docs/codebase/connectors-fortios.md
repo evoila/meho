@@ -204,7 +204,9 @@ reference needs a login. The first live run should confirm:
   peers, HA checksums); a token that may read neither HA call gets no
   `device_id`;
 - the shape of `monitor/system/ha-checksums` on a unit that stands alone
-  (one row or an empty list; both count as one unit).
+  (one complete row counts as one unit; an empty list, a missing list, or
+  a member entry that is not an object counts as unknown, not as one
+  unit).
 
 ## Tests
 

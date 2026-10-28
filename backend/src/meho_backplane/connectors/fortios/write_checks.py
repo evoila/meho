@@ -316,15 +316,19 @@ def _differences(sent: Mapping[str, Any], read_back: Mapping[str, Any]) -> list[
 def _incomplete_checksums(results: Any, rows: Sequence[Mapping[str, Any]]) -> str | None:
     """Why the HA checksum answer confirms nothing, or ``None`` when it is complete.
 
-    A complete answer is a list with at least one member row, and every
-    row names its serial and holds checksums. ``results: null``, ``{}`` or
-    ``[]`` is not a unit that stands alone: it says nothing about the HA
-    state.
+    A complete answer is a list with at least one member entry, every
+    entry is an object, and every row names its serial and holds
+    checksums. ``results: null``, ``{}`` or ``[]`` is not a unit that
+    stands alone: it says nothing about the HA state. An entry that is not
+    an object (``[member, null]``) is checked before *rows* drops it, so an
+    answer with a broken member never passes as one unit.
     """
     if not isinstance(results, list):
         return f"results is not a list of members but {type(results).__name__}"
-    if not rows:
+    if not results:
         return "the list of members is empty"
+    if len(rows) != len(results):
+        return "a member entry is not an object"
     if any(not row["serial"] or not row["checksums"] for row in rows):
         return "a member row has no serial or no checksums"
     return None

@@ -315,6 +315,8 @@ replace), `vault.kv.patch` (merge fields onto the current version), and
 ([`connectors/vault/ops.py`](../../backend/src/meho_backplane/connectors/vault/ops.py)).
 `vault.kv.metadata.delete` (evoila/meho#3424) adds the permanent removal of
 a whole secret: every version and its metadata.
+`vault.kv.folder.delete` (evoila/meho#3939) soft-deletes many secrets under
+one folder with one approval.
 These ops register `requires_approval=True`, so a human/operator write
 parks for a four-eyes review before it executes. **The review is wasted
 if the write then hits Vault `permission denied`** — the templated §2
@@ -377,6 +379,17 @@ path "secret/delete/targets/{{identity.entity.aliases.<ACCESSOR>.name}}/*" {
 path "secret/metadata/targets/{{identity.entity.aliases.<ACCESSOR>.name}}/*" {
   capabilities = ["read", "delete"]
 }
+
+# Only if this identity may soft-delete a whole folder at once
+# (`vault.kv.folder.delete`, evoila/meho#3939). The op lists the folder
+# again when it runs (`list`) and reads each secret's versions (`read`)
+# on the /metadata/ path. It also needs `update` on the /delete/ path,
+# which the second stanza above already grants. If you also use the
+# permanent-removal stanza above, put all three rights in one block:
+# ["list", "read", "delete"].
+path "secret/metadata/targets/{{identity.entity.aliases.<ACCESSOR>.name}}/*" {
+  capabilities = ["list", "read"]
+}
 ```
 
 Notes:
@@ -415,6 +428,14 @@ Notes:
   dedicated teardown role ([vault-provisioning.md](vault-provisioning.md)
   §8). Destroying single versions (`PUT <mount>/destroy/<path>`) is still
   **not** a wired op and needs no grant.
+- **`vault.kv.folder.delete` needs `list` and `read` on the
+  `/metadata/` path and `update` on the `/delete/` path** (the fourth
+  and the second stanza above). `list` lets the op walk the folder.
+  `read` lets it see which versions are still live. `update` on
+  `/delete/` is the same soft delete as `vault.kv.delete`. Before the
+  call waits for approval, MEHO checks all three rights and refuses with
+  `write_capability_denied` when one is missing. When you grant this
+  and permanent removal, use one block with all three rights.
 - The **same per-operator templating constraints** from §2 apply: no
   glob inside the rendered `{{identity...}}` segment; the trailing `/*`
   is a literal glob in the static path portion.
@@ -525,6 +546,7 @@ caveat). The contract a deploy must satisfy is therefore:
 | Write (`vault.kv.patch`) | same | `read` + `update` on `secret/data/…/{{identity…}}/*` (§6.1); it reads before it writes and never needs `create` |
 | Write (`vault.kv.delete` version soft-delete) | same | `update` on the data path (§6.1) |
 | Write (`vault.kv.metadata.delete` permanent removal) | same | `read` + `delete` on `secret/metadata/…/{{identity…}}/*` (§6.1) |
+| Write (`vault.kv.folder.delete` soft-delete a folder) | same | `list` + `read` on `secret/metadata/…/{{identity…}}/*` and `update` on `secret/delete/…/{{identity…}}/*` (§6.1) |
 | Write (`vault.token.role.write` create or change a token role) | same | `create` + `update` on `auth/token/roles/<role>` (§6.4) |
 | Read (`vault.token.role.read` / `vault.token.role.list`) | same | `read` on `auth/token/roles/<role>`; `list` on `auth/token/roles` (§6.4) |
 

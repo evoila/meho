@@ -123,6 +123,12 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     "ROLE_DEFINITIONS_PATH": (("GET",), "AUTHORIZATION_API_VERSION"),
     "ACTIVITY_LOG_PATH": (("GET",), "ACTIVITY_LOG_API_VERSION"),
     # storage (Task #5086)
+    "STORAGE_ACCOUNTS_PATH": (("GET",), "STORAGE_API_VERSION"),
+    "BLOB_CONTAINERS_PATH": (("GET",), "STORAGE_API_VERSION"),
+    # Data-plane paths, relative to the account's blob host. The check cuts the
+    # fixed query part, so List Blobs compares as GET /{container}.
+    "BLOB_LIST_PATH": (("GET",), "BLOB_API_VERSION"),
+    "BLOB_PATH": (("GET", "HEAD"), "BLOB_API_VERSION"),
 }
 
 _PARAMETER = re.compile(r"\{[^}]*\}")
@@ -263,6 +269,11 @@ def test_the_checked_paths_are_pinned() -> None:
         "GET:/{}/providers/microsoft.security/pricings@2024-01-01",
         "POST:/subscriptions/{}/providers/microsoft.policyinsights/policystates/{}/summarize@2024-10-01",
         "# storage (Task #5086)",
+        "GET:/subscriptions/{}/providers/microsoft.storage/storageaccounts@2026-09-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.storage/storageaccounts/{}/blobservices/default/containers@2026-09-01",
+        "GET:/{}/{}@2026-10-06",
+        "GET:/{}@2026-10-06",
+        "HEAD:/{}/{}@2026-10-06",
     ]
     blocks: list[tuple[str, list[str]]] = []
     for line in pinned:

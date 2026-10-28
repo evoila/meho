@@ -385,6 +385,44 @@ ACTIVITY_LOG_PATH: Final[str] = (
 ACTIVITY_LOG_API_VERSION: Final[str] = "2015-04-01"
 
 # ---- storage (Task #5086) ----
+#
+# Two hosts. The account and container lists go to Resource Manager, like
+# every path above. The blob paths (``BLOB_LIST_PATH`` and ``BLOB_PATH``) are
+# data-plane paths: they go to the storage account's own blob host,
+# ``https://<account>.blob.core.windows.net``, which takes a token for Azure
+# Storage and answers in XML. A data-plane path takes the Blob service
+# version in the ``x-ms-version`` header, not as ``api-version``.
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.Storage/storageAccounts``:
+#: the storage accounts of one subscription (Storage Accounts - List).
+STORAGE_ACCOUNTS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Storage/storageAccounts"
+)
+
+#: ``GET .../storageAccounts/{accountName}/blobServices/default/containers``:
+#: the containers of one storage account, read on Resource Manager (Blob
+#: Containers - List). The Reader role is enough.
+BLOB_CONTAINERS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/"
+    "Microsoft.Storage/storageAccounts/{account}/blobServices/default/containers"
+)
+
+#: The API version of the storage reads on Resource Manager (Microsoft.Storage).
+STORAGE_API_VERSION: Final[str] = "2026-09-01"
+
+#: ``GET /{containerName}?restype=container&comp=list`` on the account's blob
+#: host: the files (blobs) of one container (List Blobs). The query part is
+#: fixed; MEHO sends it with the other query values.
+BLOB_LIST_PATH: Final[str] = "/{container}?restype=container&comp=list"
+
+#: ``/{containerName}/{blob}`` on the account's blob host: ``HEAD`` reads one
+#: file's properties (Get Blob Properties), ``GET`` its bytes (Get Blob).
+BLOB_PATH: Final[str] = "/{container}/{blob}"
+
+#: The Blob service version of the data-plane calls, sent as ``x-ms-version``.
+#: The pinned spec files also have 2026-12-06, a date after this code was
+#: written; the lab proof checks which version the lab account accepts.
+BLOB_API_VERSION: Final[str] = "2026-10-06"
 
 
 def subscription_path(subscription_id: str) -> str:

@@ -67,6 +67,7 @@ from meho_backplane.connectors.azure import inventory
 from meho_backplane.connectors.azure import security
 
 # storage (Task #5086)
+from meho_backplane.connectors.azure import storage
 # isort: on
 
 if TYPE_CHECKING:
@@ -379,6 +380,7 @@ AZURE_TYPED_OPS: tuple[AzureTypedOp, ...] = (
     # security (Task #5089)
     *security.OPS,
     # storage (Task #5086)
+    *storage.OPS,
 )
 
 #: The text of each group. The AI reads it through ``list_operation_groups``
@@ -404,6 +406,7 @@ AZURE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # security (Task #5089)
     **security.WHEN_TO_USE,
     # storage (Task #5086)
+    **storage.WHEN_TO_USE,
 }
 
 

@@ -109,11 +109,46 @@ The server start, the satellite runner start, the OpenAPI schema build and
 the topology scope-repair tool all import the package, so all of them are
 covered.
 
+## When a package is removed
+
+Each operation row records the package that wrote it, in the column
+`endpoint_descriptor.owner_package`. `NULL` means the op is built into
+MEHO (ingested ops are `NULL` too).
+
+- At start, the `connectors` package records the allowed packages and
+  their folders (`record_installed_connector_packages`).
+- When a registrar writes a typed or composite op, MEHO looks at the
+  op's `handler_ref`. If it lies in a folder of an installed package
+  (`meho_backplane.connectors.<folder>....`), the row gets that package's
+  name. Otherwise the row gets `NULL`. Every start writes it again.
+- A row whose package is not installed is hidden. `search_operations`
+  (also its exact-op mode), `list_operation_groups` and the descriptor
+  lookup do not see it. A group that holds only such rows is hidden too.
+- A call or a preview of such an op answers
+  `connector_package_not_installed`, with the package name in
+  `extras.package`.
+- Nothing is deleted or changed. When the package is installed again,
+  the rows are visible again with the operator's settings on them, for
+  example an op the operator turned off stays off.
+
+"Installed" is per MEHO process. Two servers with different images can
+share one database: each one hides only the rows of the packages it does
+not have.
+
+Limit: an op of a package whose handler lives outside the package's own
+folders (for example in a built-in shared module) is recorded as built
+in.
+
 ## Key types
 
 - `ConnectorPackageError` — raised when the start must stop. The message
   starts with the error code.
 - `ConnectorPackage` — one entry of the allowlist file.
+- `installed_connector_packages()`, `connector_package_of()` — the
+  installed package names, and the package that owns a module path.
+- `installed_owner_clause()`, `package_visible_group_clause()` in
+  `operations/_lookup.py` — the filters that hide a removed package's
+  rows and groups.
 - `CONNECTOR_PACKAGES_FILE`, `BUILTIN_DISTRIBUTION` — the file path and
   the built-in distribution name.
 
@@ -134,6 +169,7 @@ covered.
 - `backend/src/meho_backplane/connector_packages.py`
 - `backend/src/meho_backplane/connectors/registry.py`
 - `backend/tests/test_connector_packages.py`
+- `backend/tests/test_connector_package_owner.py`
 - Python `importlib.metadata`:
   https://docs.python.org/3/library/importlib.metadata.html
 - Installed file list (`RECORD`):

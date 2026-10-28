@@ -136,6 +136,7 @@ import structlog
 from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.connector_packages import connector_package_of
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations._handler_resolve import import_handler
@@ -1433,6 +1434,10 @@ async def _register_in_session(
 
     log = structlog.get_logger()
     now = datetime.now(UTC)
+    # #5037: the connector package whose folder holds the handler, or None
+    # for a built-in op. Written on every path, so the row always names
+    # the code that wrote it last.
+    owner_package = connector_package_of(handler_ref)
 
     # Compose the embedding text + hash from the incoming args; the
     # same composer applies to the persisted row's text below for
@@ -1524,6 +1529,7 @@ async def _register_in_session(
             # the same values back would needlessly invalidate any
             # ORM identity-map sharing.
             existing.handler_ref = handler_ref
+            existing.owner_package = owner_package
             existing.parameter_schema = parameter_schema
             existing.response_schema = response_schema
             existing.llm_instructions = llm_instructions
@@ -1551,6 +1557,7 @@ async def _register_in_session(
             service=embedding_service,
         )
         existing.handler_ref = handler_ref
+        existing.owner_package = owner_package
         existing.summary = summary
         existing.description = description
         existing.custom_description = custom_description
@@ -1606,6 +1613,7 @@ async def _register_in_session(
         embedding=embedding,
         custom_description=custom_description,
         custom_notes=None,
+        owner_package=owner_package,
         created_at=now,
         updated_at=now,
     )

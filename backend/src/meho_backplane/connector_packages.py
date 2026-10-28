@@ -31,6 +31,12 @@ The allowlist file (:data:`CONNECTOR_PACKAGES_FILE`) is written by the
 build of an overlay image. The plain public image has none, so only the
 built-in folders are allowed there.
 
+The ``connectors`` package records the allowed packages
+(:func:`record_installed_connector_packages`). Operation registration
+then marks each row a package writes with that package's name
+(:func:`connector_package_of`), and discovery and dispatch hide rows whose
+package is not installed (:func:`installed_connector_packages`).
+
 "Files belong to a distribution" is read from the installed file list of
 that distribution (its ``RECORD``, through :mod:`importlib.metadata`).
 Every file on disk in the folder must be in that list; ``__pycache__``
@@ -48,6 +54,7 @@ from __future__ import annotations
 import json
 import os
 import pkgutil
+from collections.abc import Mapping
 from importlib import metadata
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Final
@@ -62,7 +69,10 @@ __all__ = [
     "ConnectorPackage",
     "ConnectorPackageError",
     "check_connector_folders",
+    "connector_package_of",
+    "installed_connector_packages",
     "load_connector_packages",
+    "record_installed_connector_packages",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -74,6 +84,13 @@ BUILTIN_DISTRIBUTION: str = "meho-backplane"
 """The distribution whose connector folders are built in."""
 
 _PYCACHE: Final[str] = "__pycache__"
+
+_CONNECTORS_MODULE_PREFIX: Final[str] = "meho_backplane.connectors."
+
+#: Connector folder -> name of the listed package that installed it. Set
+#: once, when :mod:`meho_backplane.connectors` is imported. Built-in
+#: folders are not in it.
+_installed_folders: dict[str, str] = {}
 
 
 class ConnectorPackageError(RuntimeError):
@@ -229,14 +246,17 @@ def _listed_folders(
     return listed
 
 
-def check_connector_folders(connectors_dir: Path, allowlist_path: Path | None = None) -> None:
+def check_connector_folders(
+    connectors_dir: Path, allowlist_path: Path | None = None
+) -> dict[str, str]:
     """Stop the start unless every subpackage folder in ``connectors_dir`` is built in or listed.
 
     Called from the ``__init__`` of the ``connectors`` package, so it runs
     before any connector subpackage is imported. Raises
     :class:`ConnectorPackageError` that names the first folder (in name
     order) that is not allowed. On success, logs one
-    ``connector_packages_allowed`` line.
+    ``connector_packages_allowed`` line and returns the listed folders,
+    each mapped to the name of its package.
     """
     path = CONNECTOR_PACKAGES_FILE if allowlist_path is None else allowlist_path
     connectors_dir = connectors_dir.resolve()
@@ -282,3 +302,31 @@ def check_connector_folders(connectors_dir: Path, allowlist_path: Path | None = 
         ],
         source_checkout=editable_root is not None,
     )
+    return listed
+
+
+def record_installed_connector_packages(folders: Mapping[str, str]) -> None:
+    """Remember the listed folders and their packages for this process.
+
+    *folders* is what :func:`check_connector_folders` returned. The
+    ``connectors`` package calls this once, right after the check.
+    """
+    _installed_folders.clear()
+    _installed_folders.update(folders)
+
+
+def installed_connector_packages() -> frozenset[str]:
+    """Names of the connector packages that are installed and allowed in this process."""
+    return frozenset(_installed_folders.values())
+
+
+def connector_package_of(dotted_path: str) -> str | None:
+    """The installed package that owns *dotted_path*, or ``None`` for built-in code.
+
+    *dotted_path* is a module path or a ``handler_ref``. It belongs to a
+    package when it lies in a connector folder that the package installed.
+    """
+    if not dotted_path.startswith(_CONNECTORS_MODULE_PREFIX):
+        return None
+    folder = dotted_path[len(_CONNECTORS_MODULE_PREFIX) :].split(".", 1)[0]
+    return _installed_folders.get(folder)

@@ -36,8 +36,13 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.connector_packages import installed_connector_packages
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
-from meho_backplane.operations._lookup import visible_scope_clause
+from meho_backplane.operations._lookup import (
+    installed_owner_clause,
+    package_visible_group_clause,
+    visible_scope_clause,
+)
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RRF_K
 
@@ -60,6 +65,12 @@ _VISIBLE_SCOPE_SQL = """
                  AND owned.product = :product
                  AND owned.version = :version
                  AND owned.impl_id = :impl_id)))"""
+
+# Raw-SQL twin of :func:`~meho_backplane.operations._lookup.installed_owner_clause`:
+# a row written by a connector package that is not installed is hidden (#5037).
+_INSTALLED_OWNER_SQL = """
+          AND (owner_package IS NULL
+               OR owner_package = ANY(CAST(:installed_packages AS text[])))"""
 
 # The two candidate queries spell the visible-scope predicate out in full,
 # so each ``text()`` argument is a plain string literal (the
@@ -85,6 +96,8 @@ _BM25_CANDIDATES_SQL = text(
           AND version = :version
           AND impl_id = :impl_id
           AND is_enabled = TRUE
+          AND (owner_package IS NULL
+               OR owner_package = ANY(CAST(:installed_packages AS text[])))
           AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)
           AND to_tsvector('english', coalesce(summary, '') || ' ' || coalesce(description, ''))
               @@ plainto_tsquery('english', :query)
@@ -109,6 +122,8 @@ _COSINE_CANDIDATES_SQL = text(
           AND version = :version
           AND impl_id = :impl_id
           AND is_enabled = TRUE
+          AND (owner_package IS NULL
+               OR owner_package = ANY(CAST(:installed_packages AS text[])))
           AND embedding IS NOT NULL
           AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)
         ORDER BY embedding <=> CAST(:emb AS vector)
@@ -118,23 +133,28 @@ _COSINE_CANDIDATES_SQL = text(
 
 
 def _assert_scope_inlined() -> None:
-    """Fail at import if a candidate query no longer holds the scope predicate.
+    """Fail at import if a candidate query no longer holds the scope predicates.
 
     Whitespace is normalised, then each query must contain
-    :data:`_VISIBLE_SCOPE_SQL` word for word. An edit to one copy that is
-    not made to the others is a loud ``AssertionError`` at import, not a
-    silent change in which rows a tenant can see.
+    :data:`_VISIBLE_SCOPE_SQL` and :data:`_INSTALLED_OWNER_SQL` word for
+    word. An edit to one copy that is not made to the others is a loud
+    ``AssertionError`` at import, not a silent change in which rows a
+    tenant can see.
     """
-    scope = " ".join(_VISIBLE_SCOPE_SQL.split())
-    for name, statement in (
-        ("_BM25_CANDIDATES_SQL", _BM25_CANDIDATES_SQL),
-        ("_COSINE_CANDIDATES_SQL", _COSINE_CANDIDATES_SQL),
+    for predicate_name, predicate in (
+        ("_VISIBLE_SCOPE_SQL", _VISIBLE_SCOPE_SQL),
+        ("_INSTALLED_OWNER_SQL", _INSTALLED_OWNER_SQL),
     ):
-        if scope not in " ".join(str(statement.text).split()):
-            raise AssertionError(
-                f"{name} no longer contains _VISIBLE_SCOPE_SQL word for word; "
-                "keep the inlined predicate identical to it."
-            )
+        wanted = " ".join(predicate.split())
+        for name, statement in (
+            ("_BM25_CANDIDATES_SQL", _BM25_CANDIDATES_SQL),
+            ("_COSINE_CANDIDATES_SQL", _COSINE_CANDIDATES_SQL),
+        ):
+            if wanted not in " ".join(str(statement.text).split()):
+                raise AssertionError(
+                    f"{name} no longer contains {predicate_name} word for word; "
+                    "keep the inlined predicate identical to it."
+                )
 
 
 _assert_scope_inlined()
@@ -172,10 +192,13 @@ async def resolve_group_id(
         .where(
             EndpointDescriptor.group_id == OperationGroup.id,
             EndpointDescriptor.is_enabled.is_(True),
+            installed_owner_clause(),
         )
         .exists()
     )
-    visible = (OperationGroup.review_status == "enabled") | has_enabled_op
+    visible = (
+        (OperationGroup.review_status == "enabled") & package_visible_group_clause()
+    ) | has_enabled_op
     result = await session.execute(
         select(OperationGroup.id).where(
             visible_scope_clause(
@@ -255,6 +278,7 @@ async def _hybrid_search_pg(
     ``coalesce(summary, '') || ' ' || coalesce(description, '')``
     expression the ``endpoint_descriptor_bm25_idx`` is built on.
     """
+    installed = sorted(installed_connector_packages())
     query_embedding = await get_embedding_service().encode_one(query)
     embedding_literal = "[" + ", ".join(f"{x:.7f}" for x in query_embedding) + "]"
 
@@ -267,6 +291,7 @@ async def _hybrid_search_pg(
             "version": version,
             "impl_id": impl_id,
             "group_id": str(group_id) if group_id is not None else None,
+            "installed_packages": installed,
             "limit": CANDIDATE_LIMIT,
         },
     )
@@ -281,6 +306,7 @@ async def _hybrid_search_pg(
             "version": version,
             "impl_id": impl_id,
             "group_id": str(group_id) if group_id is not None else None,
+            "installed_packages": installed,
             "limit": CANDIDATE_LIMIT,
         },
     )
@@ -324,6 +350,7 @@ async def _hybrid_search_fallback(
             EndpointDescriptor.version == version,
             EndpointDescriptor.impl_id == impl_id,
             EndpointDescriptor.is_enabled.is_(True),
+            installed_owner_clause(),
         )
         .order_by(EndpointDescriptor.op_id)
         .limit(CANDIDATE_LIMIT)

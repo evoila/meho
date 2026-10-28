@@ -101,6 +101,8 @@ from meho_backplane.operations._errors import (
 from meho_backplane.operations._lookup import (
     connector_class_registered,
     connector_exists,
+    installed_owner_clause,
+    package_visible_group_clause,
     parse_connector_id,
     visible_scope_clause,
 )
@@ -734,6 +736,7 @@ async def _count_ops_per_group(
     count_stmt = select(EndpointDescriptor.group_id).where(
         EndpointDescriptor.group_id.in_(group_ids),
         EndpointDescriptor.is_enabled.is_(True),
+        installed_owner_clause(),
     )
     count_rows = (await session.execute(count_stmt)).all()
     counts: dict[uuid.UUID, int] = {}
@@ -774,12 +777,17 @@ def _build_operation_groups_query(
     per-op ``is_enabled``; the marker fields on
     :class:`OperationGroupSummary` tell a fully-enabled group apart from
     a per-op-only (``partial``) one.
+
+    Rows of a connector package that is not installed do not count, and a
+    group that holds only such rows is hidden (#5037,
+    :func:`~meho_backplane.operations._lookup.package_visible_group_clause`).
     """
     has_enabled_op = (
         select(EndpointDescriptor.id)
         .where(
             EndpointDescriptor.group_id == OperationGroup.id,
             EndpointDescriptor.is_enabled.is_(True),
+            installed_owner_clause(),
         )
         .exists()
     )
@@ -789,7 +797,8 @@ def _build_operation_groups_query(
             OperationGroup.product == product,
             OperationGroup.version == version,
             OperationGroup.impl_id == impl_id,
-            (OperationGroup.review_status == "enabled") | has_enabled_op,
+            ((OperationGroup.review_status == "enabled") & package_visible_group_clause())
+            | has_enabled_op,
             visible_scope_clause(
                 OperationGroup,
                 tenant_id=tenant_id,
@@ -1021,6 +1030,7 @@ async def _has_enabled_operation(
             EndpointDescriptor.version == version,
             EndpointDescriptor.impl_id == impl_id,
             EndpointDescriptor.is_enabled.is_(True),
+            installed_owner_clause(),
         )
         .exists()
     )

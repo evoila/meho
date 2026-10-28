@@ -16,6 +16,11 @@ form ``"<impl_id>-<version>"`` and resolves it into the
 * :func:`visible_scope_clause` -- the one tenant-scope predicate that
   dispatch, preview, ``list_operation_groups`` and ``search_operations``
   share, so they always agree on which rows a tenant can use.
+* :func:`installed_owner_clause` / :func:`package_visible_group_clause`
+  -- hide the rows (and groups) of a connector package that is not
+  installed (#5037). Every lookup below applies it.
+* :func:`find_uninstalled_package_owner` -- names the missing package
+  for the ``connector_package_not_installed`` error.
 * :func:`descriptor_exists_any_state` -- ``is_enabled``-agnostic
   presence probe. Used only to classify a non-dispatchable sub-op as
   *present-but-disabled* versus *truly absent*; never used to dispatch.
@@ -41,6 +46,7 @@ from uuid import UUID
 from sqlalchemy import ColumnElement, SQLColumnExpression, and_, select
 from sqlalchemy.orm import aliased
 
+from meho_backplane.connector_packages import installed_connector_packages
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
@@ -51,7 +57,10 @@ __all__ = [
     "count_known_ops",
     "descriptor_exists_any_state",
     "find_connectors_with_op",
+    "find_uninstalled_package_owner",
+    "installed_owner_clause",
     "lookup_descriptor",
+    "package_visible_group_clause",
     "parse_connector_id",
     "visible_scope_clause",
 ]
@@ -159,6 +168,74 @@ def visible_scope_clause(
     )
 
 
+def installed_owner_clause() -> ColumnElement[bool]:
+    """Return the predicate for descriptor rows whose owner package is installed.
+
+    A row with ``owner_package IS NULL`` is built in and always passes. A
+    row written by a connector package passes only while that package is
+    installed in this process
+    (:func:`~meho_backplane.connector_packages.installed_connector_packages`).
+    The rows of a removed package are hidden, not deleted, so the
+    operator's settings on them come back with the package (#5037).
+    """
+    return EndpointDescriptor.owner_package.is_(None) | EndpointDescriptor.owner_package.in_(
+        sorted(installed_connector_packages())
+    )
+
+
+def package_visible_group_clause() -> ColumnElement[bool]:
+    """Return the predicate for :class:`OperationGroup` rows not hidden by a missing package.
+
+    A group is hidden when it holds rows of a package that is not
+    installed and no row that is visible. A group with no rows, or with at
+    least one built-in or installed row, is not hidden by this rule.
+    """
+    in_group = EndpointDescriptor.group_id == OperationGroup.id
+    hidden_row = select(EndpointDescriptor.id).where(in_group, ~installed_owner_clause()).exists()
+    shown_row = select(EndpointDescriptor.id).where(in_group, installed_owner_clause()).exists()
+    return ~hidden_row | shown_row
+
+
+async def find_uninstalled_package_owner(
+    *,
+    tenant_id: UUID,
+    product: str,
+    version: str,
+    impl_id: str,
+    op_id: str,
+) -> str | None:
+    """Return the missing package that owns the enabled op, else ``None``.
+
+    Runs only after :func:`lookup_descriptor` found nothing. It looks for
+    the same caller-visible, enabled row without the installed-package
+    filter. A hit means the op exists but its connector package is not
+    installed, so the caller gets ``connector_package_not_installed``
+    rather than ``unknown_op``.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(
+            select(EndpointDescriptor.owner_package)
+            .where(
+                visible_scope_clause(
+                    EndpointDescriptor,
+                    tenant_id=tenant_id,
+                    product=product,
+                    version=version,
+                    impl_id=impl_id,
+                ),
+                EndpointDescriptor.product == product,
+                EndpointDescriptor.version == version,
+                EndpointDescriptor.impl_id == impl_id,
+                EndpointDescriptor.op_id == op_id,
+                EndpointDescriptor.is_enabled.is_(True),
+                ~installed_owner_clause(),
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+
 async def lookup_descriptor(
     *,
     tenant_id: UUID,
@@ -174,6 +251,9 @@ async def lookup_descriptor(
     or absent op there resolves to ``None``. There is no fallback to the
     built-in row (#3870). Otherwise the built-in row is used. Because
     only one bucket is ever visible, one SELECT finds at most one row.
+
+    A row of a connector package that is not installed is not found
+    (:func:`installed_owner_clause`).
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -191,6 +271,7 @@ async def lookup_descriptor(
                 EndpointDescriptor.impl_id == impl_id,
                 EndpointDescriptor.op_id == op_id,
                 EndpointDescriptor.is_enabled.is_(True),
+                installed_owner_clause(),
             )
         )
         return result.scalar_one_or_none()
@@ -237,6 +318,7 @@ async def descriptor_exists_any_state(
                 EndpointDescriptor.version == version,
                 EndpointDescriptor.impl_id == impl_id,
                 EndpointDescriptor.op_id == op_id,
+                installed_owner_clause(),
             )
             .limit(1)
         )
@@ -285,6 +367,7 @@ async def count_known_ops(
                 EndpointDescriptor.version == version,
                 EndpointDescriptor.impl_id == impl_id,
                 EndpointDescriptor.is_enabled.is_(True),
+                installed_owner_clause(),
             )
         )
         return len(result.all())
@@ -338,6 +421,7 @@ async def find_connectors_with_op(
                 ),
                 EndpointDescriptor.op_id == op_id,
                 EndpointDescriptor.is_enabled.is_(True),
+                installed_owner_clause(),
             )
             .distinct()
         )

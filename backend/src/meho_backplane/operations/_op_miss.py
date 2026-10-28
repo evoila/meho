@@ -10,6 +10,8 @@
 * ``unknown_connector`` -- the connector id matches no connector the
   caller can see (no operation rows, no registered class). Same test the
   ``list_operation_groups`` / ``search_operations`` meta-tools use.
+* ``connector_package_not_installed`` -- the enabled op exists, but the
+  connector package that wrote it is not installed (#5037).
 * ``unknown_op`` -- the connector exists but has no such enabled op. The
   error names the other caller-visible connectors that have the op
   (``extras.connectors_with_op``), or points at ``search_operations``
@@ -25,12 +27,17 @@ import time
 from uuid import UUID
 
 from meho_backplane.connectors import OperationResult
-from meho_backplane.operations._errors import result_unknown_connector, result_unknown_op
+from meho_backplane.operations._errors import (
+    result_connector_package_not_installed,
+    result_unknown_connector,
+    result_unknown_op,
+)
 from meho_backplane.operations._lookup import (
     connector_class_registered,
     connector_exists,
     count_known_ops,
     find_connectors_with_op,
+    find_uninstalled_package_owner,
 )
 
 __all__ = ["op_miss_result"]
@@ -44,13 +51,20 @@ async def op_miss_result(
     triple: tuple[str, str, str],
     started: float,
 ) -> OperationResult:
-    """Return the ``unknown_connector`` or ``unknown_op`` result for a lookup miss.
+    """Return the error result for a descriptor lookup miss.
 
     *triple* is the parsed *(product, version, impl_id)* of
     *connector_id*. *started* is the caller's ``time.monotonic()`` start
     mark, used for ``duration_ms``.
     """
     product, version, impl_id = triple
+    package = await find_uninstalled_package_owner(
+        tenant_id=tenant_id, product=product, version=version, impl_id=impl_id, op_id=op_id
+    )
+    if package is not None:
+        return result_connector_package_not_installed(
+            op_id, connector_id, package, _elapsed_ms(started)
+        )
     known_op_count = await count_known_ops(
         tenant_id=tenant_id, product=product, version=version, impl_id=impl_id
     )

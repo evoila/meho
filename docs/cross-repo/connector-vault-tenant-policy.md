@@ -65,7 +65,7 @@ the single source of truth in
 | --- | --- | --- | --- |
 | `read_only` | `meho-tenant-read-only` | `read`, `list` | — |
 | `operator` | `meho-tenant-operator` | `read`, `list` | `+ create,update` on the rotation sub-path `secret/data/tenants/<id>/rotation/*` |
-| `tenant_admin` | `meho-tenant-admin` | `create`, `read`, `update`, `delete`, `list` (full CRUD) | `+ full CRUD` on the break-glass sub-path `secret/data/tenants/<id>/privileged/*` |
+| `tenant_admin` | `meho-tenant-admin` | `create`, `read`, `update`, `delete`, `list` (full CRUD) | `+ full CRUD` on the break-glass sub-path `secret/data/tenants/<id>/privileged/*`; `+ update` on `secret/delete/tenants/<id>/*` for `vault.kv.delete` |
 
 Notes:
 
@@ -76,6 +76,13 @@ Notes:
   ([`connector-vault-policy.md`](./connector-vault-policy.md) §2).
 - **`list` is granted on `secret/metadata/...`**, not `secret/data/...`:
   KV-v2 authorises a LIST against the metadata path.
+- **A soft delete needs a third path.** `vault.kv.delete` sends
+  `POST secret/delete/<path>`. Vault checks `update` on that `/delete/`
+  path, not `delete` on `/data/` or `/metadata/`
+  ([`connector-vault-policy.md`](./connector-vault-policy.md) §6.1). So
+  `meho-tenant-admin` has its own `secret/delete/tenants/...` rule.
+  `vault.kv.metadata.delete` (permanent removal) needs `read` and `delete`
+  on `/metadata/`, which the admin policy already has.
 - **Admin break-glass lives under `privileged/`** and is reachable by the
   `tenant_admin` policy *alone* — `read_only`/`operator` policies never
   template that sub-path, so a non-admin operator cannot reach it even
@@ -136,7 +143,18 @@ path "secret/metadata/tenants/{{identity.entity.metadata.tenant_id}}/*" {
 path "secret/data/tenants/{{identity.entity.metadata.tenant_id}}/privileged/*" {
   capabilities = ["create", "read", "update", "delete", "list"]
 }
+# vault.kv.delete (soft delete) sends POST secret/delete/<path>. Vault
+# checks `update` on this /delete/ path, so the /data/ rules above do not
+# allow it.
+path "secret/delete/tenants/{{identity.entity.metadata.tenant_id}}/*" {
+  capabilities = ["update"]
+}
 ```
+
+A test reads this block and checks that `vault.kv.delete` and
+`vault.kv.metadata.delete` pass MEHO's permission check under it
+(`backend/tests/test_vault_tenant_admin_policy_doc.py`). If you change the
+block, run that test.
 
 Write each via the approval-gated op
 ([`ops_sys_policy.py`](../../backend/src/meho_backplane/connectors/vault/ops_sys_policy.py),
@@ -279,6 +297,12 @@ missing/mismatched (§3) or the group binding is absent (§4) — fix the
 identity wiring, not the connector. A **success** on step 3 means a glob
 leaked into the templated segment (§1) — every tenant could read every
 secret; fix the policy body immediately.
+
+## Removing a tenant
+
+To remove a finished tenant from Vault (its secrets, its login role, its
+policy and its groups), follow
+[`vault-remove-tenant.md`](./vault-remove-tenant.md).
 
 ## References
 

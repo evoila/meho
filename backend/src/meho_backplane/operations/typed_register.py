@@ -165,6 +165,7 @@ __all__ = [
     "clear_typed_op_registrars",
     "clear_typed_op_snapshot",
     "derive_handler_ref",
+    "operation_catalog_write",
     "register_composite_operation",
     "register_typed_op_registrar",
     "register_typed_operation",
@@ -444,21 +445,50 @@ async def run_typed_op_registrars(
 
     Every step above runs in **one** database transaction, and the
     transaction commits only after the last step passed. The registrars
-    write through that transaction (see :func:`_catalog_transaction`). In
+    write through that transaction (see :func:`_bind_catalog_session`). In
     the same transaction, :func:`~meho_backplane.operations.catalog_release.record_catalog_release`
     stores this release as the writer of the rows. When any step fails
     (one registrar, the retirement sweep or the invariant sweep), the
     transaction rolls back: no operation row changes, and a pod of the
-    previous release that still serves keeps its own settings. The
-    lifespan runs this function as its last start-up step, so a later
-    start-up check cannot fail after the commit either.
+    previous release that still serves keeps its own settings.
+
+    This function commits as soon as the last step passed. The lifespan
+    uses :func:`operation_catalog_write` instead, which holds the
+    transaction open until the rest of the start (the background loops)
+    succeeded too.
+    """
+    async with operation_catalog_write(embedding_service=embedding_service):
+        pass
+
+
+@asynccontextmanager
+async def operation_catalog_write(
+    *,
+    embedding_service: EmbeddingService | None = None,
+) -> AsyncIterator[None]:
+    """Write the built-in operation rows; commit when the ``with`` block ends well.
+
+    On entry, every step of :func:`run_typed_op_registrars` runs in one
+    transaction: the registrars, the retirement sweep, the invariant
+    sweep and the release stamp. The transaction then stays open while
+    the ``with`` block runs, and commits only when the block ends without
+    an exception. The lifespan puts the start of its background loops in
+    the block, so a start that fails at any step, also after the rows
+    were written, changes no operation row and no release stamp (#5019).
+
+    When a step or the block fails, the session closes without a commit,
+    which rolls everything back, and the log says
+    ``operation_catalog_unchanged``.
     """
     try:
-        async with _catalog_transaction() as session:
-            await _populate_catalog(session, embedding_service=embedding_service)
-            await retire_dead_handler_rows(session=session)
-            await assert_registered_composites_have_no_ingested_dispatch(session=session)
-            await record_catalog_release(session)
+        async with get_sessionmaker()() as session:
+            async with _bind_catalog_session(session):
+                await _populate_catalog(session, embedding_service=embedding_service)
+                await retire_dead_handler_rows(session=session)
+                await assert_registered_composites_have_no_ingested_dispatch(session=session)
+                await record_catalog_release(session)
+            yield
+            await session.commit()
     except Exception as exc:
         structlog.get_logger(__name__).error(
             "operation_catalog_unchanged",
@@ -469,7 +499,7 @@ async def run_typed_op_registrars(
 
 
 #: The session of the start-up registration transaction while
-#: :func:`_catalog_transaction` is open. :func:`register_typed_operation`
+#: :func:`_bind_catalog_session` is open. :func:`register_typed_operation`
 #: and :func:`register_composite_operation` write through it when the
 #: caller passes no session, so every registrar's rows land in one
 #: transaction without each registrar threading a session.
@@ -479,19 +509,18 @@ _CATALOG_SESSION: ContextVar[AsyncSession | None] = ContextVar(
 
 
 @asynccontextmanager
-async def _catalog_transaction() -> AsyncIterator[AsyncSession]:
-    """Open one session, bind it for the registration helpers, commit on success.
+async def _bind_catalog_session(session: AsyncSession) -> AsyncIterator[None]:
+    """Bind ``session`` for the registration helpers while the block runs.
 
-    On an exception the session closes without a commit, which rolls the
-    whole transaction back.
+    The binding ends with the block, before the caller commits, so a
+    task the caller starts afterwards does not inherit a session that is
+    about to close. Nothing here commits; the caller owns the session.
     """
-    async with get_sessionmaker()() as session:
-        token = _CATALOG_SESSION.set(session)
-        try:
-            yield session
-            await session.commit()
-        finally:
-            _CATALOG_SESSION.reset(token)
+    token = _CATALOG_SESSION.set(session)
+    try:
+        yield
+    finally:
+        _CATALOG_SESSION.reset(token)
 
 
 async def _run_typed_op_registrars(
@@ -499,8 +528,10 @@ async def _run_typed_op_registrars(
     embedding_service: EmbeddingService | None = None,
 ) -> None:
     """Write the registrars' rows in one transaction, without the sweeps. Test seam."""
-    async with _catalog_transaction() as session:
-        await _populate_catalog(session, embedding_service=embedding_service)
+    async with get_sessionmaker()() as session:
+        async with _bind_catalog_session(session):
+            await _populate_catalog(session, embedding_service=embedding_service)
+        await session.commit()
 
 
 async def _populate_catalog(
@@ -510,7 +541,7 @@ async def _populate_catalog(
 ) -> None:
     """Populate descriptor rows via a real registrar pass or the amortized replay.
 
-    Runs inside :func:`_catalog_transaction`; nothing here commits. Split
+    Runs inside :func:`_bind_catalog_session`; nothing here commits. Split
     from :func:`run_typed_op_registrars` so the sweeps run on every path
     regardless of which branch produced the rows.
     """

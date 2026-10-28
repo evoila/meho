@@ -9,6 +9,8 @@ release may still serve those rows during an update. So the write must be
 all or nothing:
 
 * A start that fails at a later start-up check changes no row.
+* A start that fails while it starts its background loops changes no
+  row, and the loops it already started are stopped.
 * A registrar that fails in the middle of the run changes no row, also
   not the rows earlier registrars wrote.
 * A check that fails after every registrar wrote (the invariant sweep)
@@ -321,6 +323,55 @@ def test_start_that_fails_after_registration_step_changes_no_row(
 
     assert asyncio.run(_built_in_rows()) == before
     assert asyncio.run(_stored_release()) == stored_before
+
+
+def test_start_that_fails_while_starting_background_loops_changes_no_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rows were written, then the start of a background loop fails: nothing changed.
+
+    The background loops start after the operation rows are written. So
+    the rows must commit only when every loop started. The first loop
+    starts, the last one fails: the rows and the release stamp still
+    equal the copy from the first start, and the first loop is stopped
+    again.
+    """
+    from meho_backplane import main
+
+    _use_registrars(monkeypatch, widget_registrar)
+    with TestClient(main.app):
+        pass
+    before = asyncio.run(_built_in_rows())
+    stored_before = asyncio.run(_stored_release())
+    assert before[_OP_ID]["safety_level"] == "safe"
+    assert stored_before is not None
+
+    started: list[asyncio.Task[None]] = []
+    real_start_first_loop = main.start_topology_refresh_scheduler
+
+    def start_first_loop() -> asyncio.Task[None]:
+        task = real_start_first_loop()
+        started.append(task)
+        return task
+
+    def start_last_loop_fails() -> asyncio.Task[None]:
+        raise RuntimeError("background loop failed on purpose")
+
+    monkeypatch.setenv("GIT_SHA", "new0000000000000000000000000000000000000")
+    get_settings.cache_clear()
+    _set_new_release()
+    monkeypatch.setattr(main, "start_topology_refresh_scheduler", start_first_loop)
+    monkeypatch.setattr(main, "start_gateway_unreported_mint_sweeper", start_last_loop_fails)
+    with (
+        pytest.raises(RuntimeError, match="background loop failed on purpose"),
+        TestClient(main.app),
+    ):
+        pass
+
+    assert asyncio.run(_built_in_rows()) == before
+    assert asyncio.run(_stored_release()) == stored_before
+    assert len(started) == 1
+    assert started[0].cancelled()
 
 
 @pytest.mark.asyncio

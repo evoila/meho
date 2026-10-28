@@ -49,9 +49,10 @@ code-shipped op's declared sub-op may resolve to an `ingested` row.
 
 ## Control flow
 
-The sweep runs at the tail of `run_typed_op_registrars`
-(`operations/typed_register.py`), invoked from the FastAPI lifespan after
-every connector has registered its typed/composite rows. It runs on both
+The sweep runs at the tail of `operation_catalog_write`
+(`operations/typed_register.py`; `run_typed_op_registrars` wraps it),
+invoked from the FastAPI lifespan after every connector has registered
+its typed/composite rows. It runs on both
 the real registrar pass and the amortized snapshot-replay test path,
 because the verdict is a function of live descriptor state. A violation
 propagates as a lifespan crash — the same crash-loud posture the registrar

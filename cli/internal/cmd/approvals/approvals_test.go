@@ -666,35 +666,65 @@ func TestPrintDetailRendersOptionalFields(t *testing.T) {
 }
 
 // TestPrintListTableEmpty — an empty list names the state filter that
-// produced it and how to see more; only --status all with no offset says
-// "none at all". With an --offset, the page is empty because the offset
-// skipped every match, so the message says so and points to a smaller
-// --offset instead of claiming the tenant has no requests.
+// produced it and how to see more; only --status all with no --work-ref
+// and no offset says "none at all". With --work-ref, the message names
+// the change ticket and points to removing the filter, so an empty match
+// for one ticket is not read as an empty tenant. With an --offset, the
+// page is empty because the offset skipped every match, so the message
+// says so and points to a smaller --offset.
 func TestPrintListTableEmpty(t *testing.T) {
 	cases := []struct {
-		status string
-		offset int
-		want   string
+		status  string
+		workRef string
+		offset  int
+		want    string
 	}{
-		{"", 0, "no pending approval requests (use --status all to see every request)"},
-		{"pending", 0, "no pending approval requests (use --status all to see every request)"},
-		{"approved", 0, "no approved approval requests (use --status all to see every request)"},
-		{"all", 0, "no approval requests in this tenant"},
-		{"all", 15, "no approval requests after skipping 15 (this page is empty; use a smaller --offset)"},
-		{"", 15, "no pending approval requests after skipping 15 (this page is empty; use a smaller --offset)"},
-		{"pending", 3, "no pending approval requests after skipping 3 (this page is empty; use a smaller --offset)"},
-		{"rejected", 1, "no rejected approval requests after skipping 1 (this page is empty; use a smaller --offset)"},
+		{"", "", 0, "no pending approval requests (use --status all to see every request)"},
+		{"pending", "", 0, "no pending approval requests (use --status all to see every request)"},
+		{"approved", "", 0, "no approved approval requests (use --status all to see every request)"},
+		{"all", "", 0, "no approval requests in this tenant"},
+		{"all", "", 15, "no approval requests after skipping 15 (this page is empty; use a smaller --offset)"},
+		{"", "", 15, "no pending approval requests after skipping 15 (this page is empty; use a smaller --offset)"},
+		{"pending", "", 3, "no pending approval requests after skipping 3 (this page is empty; use a smaller --offset)"},
+		{"rejected", "", 1, "no rejected approval requests after skipping 1 (this page is empty; use a smaller --offset)"},
+		{"all", "gh:evoila/meho#1", 0, `no approval requests for change ticket "gh:evoila/meho#1" (remove --work-ref to see every request)`},
+		{"", "gh:evoila/meho#1", 0, `no pending approval requests for change ticket "gh:evoila/meho#1" (use --status all or remove --work-ref to see more)`},
+		{"approved", "gh:evoila/meho#1", 0, `no approved approval requests for change ticket "gh:evoila/meho#1" (use --status all or remove --work-ref to see more)`},
+		{"all", "gh:evoila/meho#1", 2, `no approval requests for change ticket "gh:evoila/meho#1" after skipping 2 (this page is empty; use a smaller --offset)`},
 	}
 	for _, tc := range cases {
 		var buf bytes.Buffer
-		printListTable(&buf, nil, tc.status, tc.offset)
+		printListTable(&buf, nil, tc.status, tc.workRef, tc.offset)
 		got := strings.TrimSpace(buf.String())
 		if got != tc.want {
-			t.Errorf("status %q offset %d: got %q, want %q", tc.status, tc.offset, got, tc.want)
+			t.Errorf("status %q work-ref %q offset %d: got %q, want %q", tc.status, tc.workRef, tc.offset, got, tc.want)
 		}
-		if tc.offset > 0 && strings.Contains(got, "in this tenant") {
-			t.Errorf("status %q offset %d: empty page must not claim the tenant has no requests: %q", tc.status, tc.offset, got)
+		if (tc.offset > 0 || tc.workRef != "") && strings.Contains(got, "in this tenant") {
+			t.Errorf("status %q work-ref %q offset %d: a filtered empty list must not claim the tenant has no requests: %q",
+				tc.status, tc.workRef, tc.offset, got)
 		}
+	}
+}
+
+// TestListSendsWorkRef confirms --work-ref reaches the wire as
+// work_ref, so the server does the exact-match filter the empty message
+// then names.
+func TestListSendsWorkRef(t *testing.T) {
+	var seen url.Values
+	srv := mockBackplane(t, map[string]mockHandler{
+		"GET /api/v1/approvals": func(w http.ResponseWriter, r *http.Request) {
+			seen = r.URL.Query()
+			writeJSON(t, w, http.StatusOK, []api.ApprovalRequestView{})
+		},
+	})
+	defer srv.Close()
+
+	stderr, err := runListWithMock(t, srv, listOpts{StatusFilter: "all", WorkRef: "gh:evoila/meho#1"})
+	if err != nil {
+		t.Fatalf("runList: %v (stderr: %s)", err, stderr.String())
+	}
+	if got := seen.Get("work_ref"); got != "gh:evoila/meho#1" {
+		t.Errorf("expected work_ref=gh:evoila/meho#1 on the wire, got %q", got)
 	}
 }
 
@@ -703,7 +733,7 @@ func TestPrintListTableEmpty(t *testing.T) {
 func TestPrintListTableHappyPath(t *testing.T) {
 	items := []api.ApprovalRequestView{newApprovalView(t, "pending", "")}
 	var buf bytes.Buffer
-	printListTable(&buf, items, "", 0)
+	printListTable(&buf, items, "", "", 0)
 	out := buf.String()
 	for _, want := range []string{
 		"ID", "STATUS", "CONNECTOR", "OP", "PRINCIPAL", "CREATED",
@@ -773,14 +803,14 @@ func TestPrintListTableRendersDisplayName(t *testing.T) {
 	principalName := "Bob Requester"
 	named.PrincipalName = &principalName
 	var buf bytes.Buffer
-	printListTable(&buf, []api.ApprovalRequestView{named}, "", 0)
+	printListTable(&buf, []api.ApprovalRequestView{named}, "", "", 0)
 	if out := buf.String(); !strings.Contains(out, "Bob Requester") {
 		t.Errorf("printListTable missing resolved name in:\n%s", out)
 	}
 
 	anon := newApprovalView(t, "pending", "")
 	var buf2 bytes.Buffer
-	printListTable(&buf2, []api.ApprovalRequestView{anon}, "", 0)
+	printListTable(&buf2, []api.ApprovalRequestView{anon}, "", "", 0)
 	if out := buf2.String(); !strings.Contains(out, "user-abc") {
 		t.Errorf("printListTable fail-open to sub missing in:\n%s", out)
 	}
@@ -1157,7 +1187,7 @@ func TestPrintListTableRendersRunState(t *testing.T) {
 	ok.ResultState = &executed
 	items := []api.ApprovalRequestView{ok, failedRunView(t), newApprovalView(t, "pending", "")}
 	var buf bytes.Buffer
-	printListTable(&buf, items, "", 0)
+	printListTable(&buf, items, "", "", 0)
 	lines := strings.Split(buf.String(), "\n")
 	if !strings.Contains(lines[0], "RUN") {
 		t.Fatalf("header missing RUN column: %q", lines[0])

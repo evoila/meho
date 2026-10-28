@@ -138,7 +138,7 @@ func runList(cmd *cobra.Command, opts listOpts) error {
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), items)
 	}
-	printListTable(cmd.OutOrStdout(), items, opts.StatusFilter, opts.Offset)
+	printListTable(cmd.OutOrStdout(), items, opts.StatusFilter, opts.WorkRef, opts.Offset)
 	return nil
 }
 
@@ -196,12 +196,13 @@ func fetchList(
 // Columns: ID, STATUS, RUN, CONNECTOR, OP, PRINCIPAL, CREATED. RUN (#3543)
 // says whether an approved request ran and how it ended, so a run that
 // failed after the approval does not look like a plain "approved".
-// statusFilter and offset are the --status and --offset values; an empty
-// list names them, so an empty default (pending-only) list or an empty
+// statusFilter, workRef and offset are the --status, --work-ref and
+// --offset values; an empty list names them, so an empty default
+// (pending-only) list, an empty match for one change ticket, or an empty
 // page past the end is not read as "no requests at all".
-func printListTable(w io.Writer, items []api.ApprovalRequestView, statusFilter string, offset int) {
+func printListTable(w io.Writer, items []api.ApprovalRequestView, statusFilter, workRef string, offset int) {
 	if len(items) == 0 {
-		fmt.Fprintln(w, emptyListMessage(statusFilter, offset))
+		fmt.Fprintln(w, emptyListMessage(statusFilter, workRef, offset))
 		return
 	}
 	fmt.Fprintf(w, "%-36s %-9s %-11s %-24s %-32s %-20s %s\n",
@@ -220,11 +221,13 @@ func printListTable(w io.Writer, items []api.ApprovalRequestView, statusFilter s
 	fmt.Fprintf(w, "\nShowing %d.\n", len(items))
 }
 
-// emptyListMessage says which state filter and offset gave the empty
-// list and how to see more. The server lists only pending requests when
-// --status is not set. With an offset, the page is empty because the
-// offset skipped every match, so the hint is a smaller --offset.
-func emptyListMessage(statusFilter string, offset int) string {
+// emptyListMessage says which state filter, change ticket and offset
+// gave the empty list and how to see more. The server lists only pending
+// requests when --status is not set. With --work-ref, only requests for
+// that change ticket count, so the hint is to drop the filter. With an
+// offset, the page is empty because the offset skipped every match, so
+// the hint is a smaller --offset.
+func emptyListMessage(statusFilter, workRef string, offset int) string {
 	state := statusFilter + " "
 	switch statusFilter {
 	case "all":
@@ -232,10 +235,23 @@ func emptyListMessage(statusFilter string, offset int) string {
 	case "":
 		state = "pending "
 	}
+	ticket := ""
+	if workRef != "" {
+		ticket = fmt.Sprintf(" for change ticket %q", workRef)
+	}
 	if offset > 0 {
 		return fmt.Sprintf(
-			"no %sapproval requests after skipping %d (this page is empty; use a smaller --offset)",
-			state, offset,
+			"no %sapproval requests%s after skipping %d (this page is empty; use a smaller --offset)",
+			state, ticket, offset,
+		)
+	}
+	if workRef != "" {
+		if statusFilter == "all" {
+			return fmt.Sprintf("no approval requests%s (remove --work-ref to see every request)", ticket)
+		}
+		return fmt.Sprintf(
+			"no %sapproval requests%s (use --status all or remove --work-ref to see more)",
+			state, ticket,
 		)
 	}
 	if statusFilter == "all" {

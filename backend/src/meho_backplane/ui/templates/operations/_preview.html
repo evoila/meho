@@ -20,6 +20,13 @@
       fault surfaced inline (HTTP 200, not 4xx): the structured
       ``extras.error_code`` + the human ``error`` string.
 
+  On ``ok`` the fragment also shows the ``proposed_effect`` (what the call
+  will do, for a governed typed / composite op) and the ``preview_hash``.
+  The hash also rides a hidden ``preview_hash`` input: in the run window of
+  a destructive op this fragment lands inside the run form, so the Run sends
+  the hash (#5015). In the drawer the region sits outside any form, so the
+  input is inert there.
+
   The ``redacted_body`` is the would-be body run through the SAME
   connector-boundary redaction pipeline the response path uses. It is shown
   verbatim and never un-redacted -- it is not a new raw-secret surface.
@@ -83,6 +90,26 @@
         <pre class="max-h-64 overflow-auto rounded bg-base-300/40 px-2 py-1 text-xs" data-preview-body><code>{{ envelope.redacted_body | tojson(indent=2) }}</code></pre>
       {% endif %}
     </div>
+
+    {#- What the call will do: the same effect block the approver sees. Only
+        a governed typed / composite op carries it. -#}
+    {% if envelope.get("proposed_effect") %}
+      <div>
+        <div class="meho-overline mb-1">What it will do</div>
+        <pre class="max-h-64 overflow-auto rounded bg-base-300/40 px-2 py-1 text-xs" data-preview-effect><code>{{ envelope.proposed_effect | tojson(indent=2) }}</code></pre>
+      </div>
+    {% elif envelope.get("plan_note") %}
+      <p class="text-xs opacity-60" data-preview-plan-note>{{ envelope.plan_note }}</p>
+    {% endif %}
+
+    {#- The preview hash binds a destructive run to this exact preview. -#}
+    {% if envelope.get("preview_hash") %}
+      <div>
+        <div class="meho-overline mb-1">Preview hash</div>
+        <p class="font-mono text-xs [overflow-wrap:anywhere]" data-preview-hash>{{ envelope.preview_hash }}</p>
+        <input type="hidden" name="preview_hash" value="{{ envelope.preview_hash }}" />
+      </div>
+    {% endif %}
   </div>
 {% else %}
   {#- In-envelope fault (HTTP 200): status="error" / "unavailable". The op

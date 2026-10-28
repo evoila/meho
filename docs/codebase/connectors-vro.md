@@ -172,8 +172,9 @@ MEHO stores a long list behind a result handle; the agent reads it with
 ## Known issues
 
 - No reference exists for Orchestrator 8.18 or 9.1.1, so the reconcile
-  lane checks the paths against 9.0 and 9.1 only. A lab proof checks every
-  read on 8.18, 9.0, 9.1 and 9.1.1.
+  lane checks the paths against 9.0 and 9.1 only. No lab proof has run
+  yet. Until one runs, the reads on 8.18 and 9.1.1 are checked only by
+  unit tests with hand-written vendor answers.
 - The field names inside a list row (`categoryName`, `startDate`,
   `startedBy`, ...) come from the server's `attributes` list. The vendor
   reference shows only the `{name, value}` shape, not the names, so the

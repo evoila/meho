@@ -117,7 +117,10 @@ def _may_use_cache(operator: Operator) -> bool:
     return bool(operator.raw_jwt) and not is_system_operator(operator)
 
 
-class AzureConnector(HttpConnector):
+class AzureConnector(
+    # Family mixin classes first, one per line in alphabetical order; the HTTP base last.
+    HttpConnector,
+):
     """Azure Resource Manager connector. One target is one subscription.
 
     Registered as ``("azure", "2026.10", "azure-arm")``, so the connector ID is

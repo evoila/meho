@@ -788,11 +788,10 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         handler=datastore_file_list_composite,
         summary="List the files in one datastore folder, with size and last change.",
         description=(
-            "Lists the files and folders in one folder of a datastore "
-            "(HostDatastoreBrowser.SearchDatastore_Task), by datastore name and a path from "
-            "the root. pattern keeps matching file names. include_usage adds folder sizes "
-            "and the VMs that use each entry. Works on vCenter and on a standalone ESXi "
-            "host. Read-only."
+            "Lists the files and folders in one datastore folder (SearchDatastore_Task), by "
+            "datastore name and a path from the root. pattern keeps matching file names. "
+            "include_usage adds folder sizes and the VMs that use each entry. Works on "
+            "vCenter and on a standalone ESXi host. Read-only."
         ),
         parameter_schema=DATASTORE_FILE_LIST_PARAMETER_SCHEMA,
         response_schema=DATASTORE_FILE_LIST_RESPONSE_SCHEMA,

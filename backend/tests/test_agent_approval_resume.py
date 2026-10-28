@@ -945,8 +945,11 @@ async def test_deadline_reread_returns_late_durable_decision(
     request = await _park_request(requester=_make_operator())
     flip = asyncio.create_task(_set_status_later(request.id, ApprovalRequestStatus.REJECTED, 0.05))
 
+    # The write runs on a SQLite helper thread and must commit before the
+    # deadline read. A 2 s deadline leaves it ~1.95 s even on a loaded runner;
+    # 0.3 s left ~0.25 s and timed out once in CI.
     decision = await wait_for_approval_decision(
-        tenant_id=_TENANT_ID, approval_request_id=request.id, timeout_seconds=0.3
+        tenant_id=_TENANT_ID, approval_request_id=request.id, timeout_seconds=2.0
     )
     await flip
 

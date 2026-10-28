@@ -6,11 +6,13 @@
 Three small responsibilities the dispatcher (T5, #396) consults per
 call:
 
-* :func:`compute_params_hash` -- stable SHA-256 over canonicalised
-  params for the audit row's ``params_hash`` field. Two dispatches
-  with identical args produce identical hashes -- correlates retries,
-  composite sub-calls, and reruns without persisting the params
-  themselves to the audit row.
+* :func:`compute_audit_params_hash` / :func:`compute_params_hash` --
+  keyed hashes (HMAC-SHA256 with a server key) over canonicalised
+  params. The audit hash goes on audit records; it leaves secret-named
+  values out, so two calls with the same other values get the same
+  hash. The approval hash covers every value; an approval request
+  stores it and checks it again before the approved call runs.
+  :func:`params_hash_matches` does that check.
 * :func:`validate_params` -- jsonschema 2020-12 (OpenAPI 3.1
   compatible) validation. Returns a list of structured error dicts;
   empty list = valid.
@@ -26,6 +28,7 @@ call:
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from typing import Any, Final
 
@@ -36,10 +39,12 @@ from referencing.exceptions import Unresolvable
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import _more_restrictive, resolve_verdict
+from meho_backplane.broadcast.events import scrub_secret_named_values
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._param_errors import describe_violation
 from meho_backplane.sandbox_mode import sandbox_mode_active
+from meho_backplane.settings import get_settings
 
 # Read-class HTTP verbs — the same set the ingest layer pins as
 # ``READ_HTTP_METHODS`` (``operations/ingest/_internals.py``). Duplicated as
@@ -51,11 +56,23 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "InvalidOpSchemaError",
+    "compute_audit_digest_hash",
+    "compute_audit_params_hash",
     "compute_params_hash",
     "ingested_schema_for_validation",
+    "params_hash_candidates",
+    "params_hash_matches",
     "policy_gate",
     "validate_params",
 ]
+
+#: Label for the key derivation in :func:`_params_hash_key`. It keeps this
+#: key different from any other key made from the same secret.
+_PARAMS_HASH_KEY_LABEL: Final[bytes] = b"meho-params-hash-key-v1"
+
+#: Prefix for :func:`compute_audit_digest_hash`, so its output never equals a
+#: params hash of the same text.
+_DIGEST_HASH_PREFIX: Final[bytes] = b"meho-audit-digest-v1\x00"
 
 
 class InvalidOpSchemaError(Exception):
@@ -82,23 +99,118 @@ class InvalidOpSchemaError(Exception):
         super().__init__(f"stored parameter_schema contains an unresolvable $ref: {missing_ref}")
 
 
-def compute_params_hash(params: dict[str, Any]) -> str:
-    """Return a stable SHA-256 hex hash over the canonicalised *params*.
+def _canonical_params(params: Any) -> bytes:
+    """Return the canonical JSON bytes of *params* that every params hash covers.
 
-    Used by the dispatcher's audit row so two dispatches with the same
-    args land identical ``params_hash`` values -- correlates retries,
-    composite sub-calls, and reruns without leaking the params
-    themselves into the row (the full params live in the broadcast
-    payload for non-sensitive op classes and never appear on the audit
-    row in v0.2 -- see :class:`AuditLog`).
-
-    Canonicalisation: ``json.dumps(..., sort_keys=True, default=str,
-    separators=(",", ":"))``. ``default=str`` covers non-JSON natives
-    (e.g. :class:`datetime` or :class:`uuid.UUID`) the caller may slip in
-    without forcing every call site to pre-stringify them.
+    ``json.dumps(..., sort_keys=True, default=str, separators=(",", ":"))``.
+    ``default=str`` covers non-JSON natives (e.g. :class:`datetime` or
+    :class:`uuid.UUID`) the caller may slip in without forcing every call
+    site to pre-stringify them.
     """
-    canonical = json.dumps(params, sort_keys=True, default=str, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return json.dumps(params, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+
+
+def _params_hash_key() -> bytes:
+    """Return the server key for the params hashes.
+
+    The key is derived from ``DATABASE_URL``, the one secret every install
+    has: HMAC-SHA256 of it under :data:`_PARAMS_HASH_KEY_LABEL`. It is never
+    stored or sent anywhere. Every pod of an install gets the same key, so
+    hashes stay comparable inside the install. When ``DATABASE_URL`` changes
+    (for example a new database password), the key changes too, and new
+    hashes no longer match the older ones.
+    """
+    source = get_settings().database_url.encode("utf-8")
+    return hmac.new(_PARAMS_HASH_KEY_LABEL, source, hashlib.sha256).digest()
+
+
+def _keyed_params_hash(params: Any) -> str:
+    """HMAC-SHA256 hex digest of the canonical *params* under the server key."""
+    return hmac.new(_params_hash_key(), _canonical_params(params), hashlib.sha256).hexdigest()
+
+
+def compute_params_hash(params: dict[str, Any]) -> str:
+    """Return the keyed hash that ties an approval request to the exact call.
+
+    HMAC-SHA256 under the server key (:func:`_params_hash_key`) over the
+    canonical JSON of *params*, with every value included. The approval
+    queue stores it on the request and checks it again before the approved
+    call runs (:func:`params_hash_matches`), so a call that differs in any
+    value, a secret value too, does not match. Without the server key the
+    hash cannot be computed again from the params.
+
+    For a hash that is only written to an audit record, use
+    :func:`compute_audit_params_hash`.
+    """
+    return _keyed_params_hash(params)
+
+
+def compute_audit_params_hash(params: Any) -> str:
+    """Return the keyed hash written to audit records as ``params_hash``.
+
+    Like :func:`compute_params_hash`, but every secret-named value is
+    replaced with a fixed marker first. The name check and the value rule
+    are the ones the broadcast params scrub and the approval preview use
+    (:func:`~meho_backplane.broadcast.events.scrub_secret_named_values`):
+    ``password``, ``client_secret``, ``api_key`` and similar names. So the
+    hash covers the parameter names and the other values only: two calls
+    with the same other values get the same hash, whatever their secret
+    values are. For params without secret-named values it equals
+    :func:`compute_params_hash`.
+
+    Two dispatches with the same params land the same hash, which
+    correlates retries, composite sub-calls and reruns without storing the
+    params on the audit row.
+    """
+    masked, _secret_found = scrub_secret_named_values(params)
+    return _keyed_params_hash(masked)
+
+
+def compute_audit_digest_hash(value: str) -> str:
+    """Return the keyed hash an audit record stores in place of *value*.
+
+    For values that are computed from a call's params elsewhere, where the
+    params themselves are not at hand: the satellite runner's params digest,
+    its effect chain ``record_hash`` and the work item's signature. The audit
+    row stores HMAC-SHA256 under the server key (with its own prefix)
+    instead, so the stored value cannot be computed again from the params
+    without the server key. Equal values still give equal hashes inside one
+    install.
+    """
+    message = _DIGEST_HASH_PREFIX + value.encode("utf-8")
+    return hmac.new(_params_hash_key(), message, hashlib.sha256).hexdigest()
+
+
+def _unkeyed_params_hash(params: dict[str, Any]) -> str:
+    """The plain SHA-256 that approval requests stored before the keyed hash.
+
+    Only compared, never stored again: see :func:`params_hash_candidates`.
+    """
+    return hashlib.sha256(_canonical_params(params)).hexdigest()
+
+
+def params_hash_candidates(params: dict[str, Any]) -> tuple[str, str]:
+    """Return the hashes an approval request for *params* can carry.
+
+    The keyed :func:`compute_params_hash` first, then the plain SHA-256 that
+    earlier versions stored. A request that was already waiting for
+    approval when MEHO was upgraded carries the plain one; accepting it
+    keeps that request usable. Both cover every value, so the check is as
+    strict as before.
+    """
+    return compute_params_hash(params), _unkeyed_params_hash(params)
+
+
+def params_hash_matches(params: dict[str, Any], stored: str) -> bool:
+    """True when *stored* (an approval request's ``params_hash``) is a hash of *params*.
+
+    Accepts either value from :func:`params_hash_candidates`.
+    """
+    stored_bytes = stored.encode("utf-8")
+    return any(
+        hmac.compare_digest(stored_bytes, candidate.encode("utf-8"))
+        for candidate in params_hash_candidates(params)
+    )
 
 
 def validate_params(
@@ -332,6 +444,7 @@ async def _service_grant_verdict(
     target_id_str: str | None,
     preview_hash: str | None = None,
     params: dict[str, Any] | None = None,
+    decide_only: bool = False,
 ) -> tuple[PermissionVerdict | None, str | None]:
     """Consult a standing grant for a parking service-principal op (#3151 / #3349).
 
@@ -351,8 +464,9 @@ async def _service_grant_verdict(
         connector_id=connector_id,
         preview_hash=preview_hash,
         params=params,
+        record=not decide_only,
     )
-    if grant_id is not None:
+    if grant_id is not None and not decide_only:
         _log.info(
             "policy_gate_standing_grant_auto_approved",
             operator_sub=operator.sub,
@@ -363,6 +477,7 @@ async def _service_grant_verdict(
             target_id=target_id_str,
             grant_id=str(grant_id),
         )
+    if grant_id is not None:
         return PermissionVerdict.AUTO_EXECUTE, f"auto-granted by standing grant {grant_id}"
 
     hint = await _null_target_park_hint(
@@ -376,6 +491,51 @@ async def _service_grant_verdict(
     return None, gate_reason
 
 
+def _non_agent_park_reason(descriptor: EndpointDescriptor, *, is_service: bool) -> str | None:
+    """Why a non-agent call parks, or ``None`` when it runs at once.
+
+    * ``destructive`` (#3198): mandatory human approval for EVERY non-agent
+      principal — it parks regardless of ``requires_approval`` and of
+      principal kind. Without this branch a USER dispatching a destructive
+      op declared ``requires_approval=False`` would auto-execute (the
+      safety_level→park mapping lived only on the service branch),
+      bypassing the preview-hash + blast-radius gate entirely. No standing
+      grant can pre-clear it either: ``consult_and_record_grant`` refuses
+      the destructive tier (decision ``governed-delete-operations.md``
+      requirement 1).
+    * ``requires_approval`` (G11.7-T1): the approval queue.
+    * Service principals only: :func:`_service_safety_gate_reason` (#3152).
+    """
+    if descriptor.safety_level == "destructive":
+        reason = (
+            "safety_level=destructive; mandatory human approval — every "
+            "non-agent principal parks (routed to the approval queue), never "
+            "auto-executes, and no standing grant can pre-clear it (#3183)"
+        )
+        if is_service and sandbox_mode_active():
+            reason += _sandbox_delete_grant_note()
+        return reason
+    if descriptor.requires_approval:
+        return "requires_approval is True; routed to the approval queue (G11.7-T1)"
+    if is_service:
+        return _service_safety_gate_reason(descriptor)
+    return None
+
+
+async def _service_read_scope_denial(*, operator: Operator, target: Any) -> str | None:
+    """The #4992 read-scope refusal for a service principal, or ``None``.
+
+    Runs only for a call that would otherwise run at once. A person can
+    limit a service principal's reads to named targets; a call on a
+    target outside that list (or without a target, when the scope has no
+    "no target" entry) is denied. A principal without a scope is not
+    limited. Reads one row, writes nothing.
+    """
+    from meho_backplane.operations.service_read_scopes import read_scope_denial
+
+    return await read_scope_denial(operator=operator, target=target)
+
+
 async def _non_agent_verdict(
     *,
     operator: Operator,
@@ -384,6 +544,7 @@ async def _non_agent_verdict(
     connector_id: str | None,
     preview_hash: str | None = None,
     params: dict[str, Any] | None = None,
+    decide_only: bool = False,
 ) -> tuple[PermissionVerdict, str | None]:
     """Resolve the verdict for a human / service (non-agent) principal.
 
@@ -398,32 +559,30 @@ async def _non_agent_verdict(
     live matching **standing grant** (#3151) auto-approves it: the grant
     use is recorded on the approvals audit ledger and the gate clears to
     ``AUTO_EXECUTE``. Absent a grant the op parks for a human decision.
+
+    A call that would run at once for a service principal (a ``safe`` op,
+    or a read-only ``caution`` op) is first checked against the
+    principal's **read scope** (#4992): when a person has set one and it
+    does not cover the call's target, the verdict is ``DENY`` with a
+    ``read_scope_denied`` reason. This is the one ``DENY`` this branch
+    returns. Calls that park keep today's rules (grants or approval).
     """
     target_id_str = str(getattr(target, "id", None)) if target is not None else None
     is_service = operator.principal_kind is PrincipalKind.SERVICE
+    gate_reason = _non_agent_park_reason(descriptor, is_service=is_service)
 
-    gate_reason: str | None = None
-    if descriptor.safety_level == "destructive":
-        # #3198: the destructive tier is mandatory-human-approval for EVERY
-        # non-agent principal — it parks regardless of ``requires_approval``
-        # and regardless of principal kind. Without this branch a USER
-        # dispatching a destructive op declared ``requires_approval=False``
-        # would auto-execute below (the safety_level→park mapping lived only
-        # on the ``elif is_service`` branch), bypassing the preview-hash +
-        # blast-radius gate entirely. No standing grant can pre-clear it
-        # either: ``consult_and_record_grant`` refuses the destructive tier
-        # (decision ``governed-delete-operations.md`` requirement 1).
-        gate_reason = (
-            "safety_level=destructive; mandatory human approval — every "
-            "non-agent principal parks (routed to the approval queue), never "
-            "auto-executes, and no standing grant can pre-clear it (#3183)"
-        )
-        if is_service and sandbox_mode_active():
-            gate_reason += _sandbox_delete_grant_note()
-    elif descriptor.requires_approval:
-        gate_reason = "requires_approval is True; routed to the approval queue (G11.7-T1)"
-    elif is_service:
-        gate_reason = _service_safety_gate_reason(descriptor)
+    if gate_reason is None and is_service:
+        denial = await _service_read_scope_denial(operator=operator, target=target)
+        if denial is not None:
+            _log.info(
+                "policy_gate_read_scope_denied",
+                operator_sub=operator.sub,
+                tenant_id=str(operator.tenant_id),
+                op_id=descriptor.op_id,
+                safety_level=descriptor.safety_level,
+                target_id=target_id_str,
+            )
+            return PermissionVerdict.DENY, denial
 
     if gate_reason is None:
         _log.info(
@@ -449,6 +608,7 @@ async def _non_agent_verdict(
             target_id_str=target_id_str,
             preview_hash=preview_hash,
             params=params,
+            decide_only=decide_only,
         )
         if cleared is not None:
             return cleared, gate_reason
@@ -478,6 +638,7 @@ async def policy_gate(
     connector_id: str | None = None,
     preview_hash: str | None = None,
     params: dict[str, Any] | None = None,
+    decide_only: bool = False,
 ) -> tuple[PermissionVerdict, str | None]:
     """G11.2-T3 per-(principal, op, target) policy gate.
 
@@ -541,11 +702,12 @@ async def policy_gate(
     caller's :class:`~meho_backplane.db.models.AgentPermission` rows,
     mirroring the same pattern :func:`audit_safe` uses.
 
-    ``preview_hash`` and ``params`` (#4622) are read only by the
-    service-principal grant consult on an instance in sandbox mode: a
-    ``destructive`` delete under a delete grant must present the hash of
-    its own preview and a valid blast radius before the grant use is
-    recorded. Every other path ignores them.
+    ``preview_hash`` and ``params`` (#4622) matter only to the
+    service-principal grant consult in sandbox mode (a ``destructive``
+    delete must present its own preview hash and a valid blast radius
+    first). ``decide_only`` (#4923) returns the verdict and writes nothing:
+    a grant that would clear the call is reported but not used; the
+    preview relies on this.
     """
     actor_sub = resolve_actor_sub()
     if actor_sub is not None:
@@ -557,6 +719,7 @@ async def policy_gate(
             connector_id=connector_id,
             preview_hash=preview_hash,
             params=params,
+            decide_only=decide_only,
         )
     return await _caller_verdict(
         operator=operator,
@@ -565,6 +728,7 @@ async def policy_gate(
         connector_id=connector_id,
         preview_hash=preview_hash,
         params=params,
+        decide_only=decide_only,
     )
 
 
@@ -576,6 +740,7 @@ async def _caller_verdict(
     connector_id: str | None,
     preview_hash: str | None = None,
     params: dict[str, Any] | None = None,
+    decide_only: bool = False,
 ) -> tuple[PermissionVerdict, str | None]:
     """Verdict for the caller alone, by its principal kind."""
     if operator.principal_kind is PrincipalKind.AGENT:
@@ -587,6 +752,7 @@ async def _caller_verdict(
         connector_id=connector_id,
         preview_hash=preview_hash,
         params=params,
+        decide_only=decide_only,
     )
 
 
@@ -599,6 +765,7 @@ async def _direct_run_verdict(
     connector_id: str | None,
     preview_hash: str | None = None,
     params: dict[str, Any] | None = None,
+    decide_only: bool = False,
 ) -> tuple[PermissionVerdict, str | None]:
     """Verdict for a call made by a direct hosted-agent run (#4237).
 
@@ -613,8 +780,10 @@ async def _direct_run_verdict(
     hosted-agent deny is already the strictest verdict. When the hosted
     agent needs approval, only an agent-kind caller can still make it
     stricter (a deny grant); a human or service caller never gets deny
-    (:func:`_non_agent_verdict`), and working out its verdict could record
-    a standing grant as used for a call that then waits for approval.
+    for a call that parks (:func:`_non_agent_verdict` denies only a read
+    that would run at once, #4992), and working out its verdict could
+    record a standing grant as used for a call that then waits for
+    approval.
     """
     agent = operator.model_copy(
         update={"sub": actor_sub, "principal_kind": PrincipalKind.AGENT, "client_id": actor_sub}
@@ -637,6 +806,7 @@ async def _direct_run_verdict(
         connector_id=connector_id,
         preview_hash=preview_hash,
         params=params,
+        decide_only=decide_only,
     )
     if _more_restrictive(verdict, agent_verdict) is verdict:
         return verdict, reason

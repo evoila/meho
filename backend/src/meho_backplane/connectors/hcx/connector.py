@@ -28,16 +28,25 @@ Version
 ``{"action": "query", "filter": {"local": "true"}}``), the call the vendor
 upgrade guide names for "which version runs now". The first local
 appliance row carries ``version``. The same helper backs
-:meth:`fingerprint` and the ``hcx.api_file.get`` answer; a later Task
-offers it as the operation ``hcx.about``.
+:meth:`fingerprint` and the ``hcx.api_file.get`` answer; the operation
+``hcx.about`` reads the same call through :func:`parse_manager_version`.
 
 Operations
 ----------
 
-One typed read ships here: ``hcx.api_file.get`` (the body lives in
-:mod:`meho_backplane.connectors.hcx.api_file`). It reads the API
+``hcx.api_file.get`` (the body lives in
+:mod:`meho_backplane.connectors.hcx.api_file`) reads the API
 documentation that a running HCX Manager serves, so the vendor API files
-can be pinned. More reads build on this connector later.
+can be pinned. The other reads (``hcx.about``, site pairings, service
+meshes, appliances, the service mesh diagnostics, jobs, alerts and the
+inventory) live in :mod:`meho_backplane.connectors.hcx.typed_reads`.
+
+Traces
+------
+
+:meth:`trace_response_body` masks every secret-named field of a vendor
+answer (the same rule the reads use) before the flight recorder records
+it, so a stored trace never holds a pairing password or a token.
 """
 
 from __future__ import annotations
@@ -309,6 +318,131 @@ class HcxConnector(HttpConnector):
         from meho_backplane.connectors.hcx.api_file import hcx_api_file_get_impl
 
         return await hcx_api_file_get_impl(self, operator, target, params)
+
+    async def about(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.about`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import hcx_about_impl
+
+        return await hcx_about_impl(self, operator, target, params)
+
+    async def site_pairing_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.site_pairing.list`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import hcx_site_pairing_list_impl
+
+        return await hcx_site_pairing_list_impl(self, operator, target, params)
+
+    async def service_mesh_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.service_mesh.list`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import hcx_service_mesh_list_impl
+
+        return await hcx_service_mesh_list_impl(self, operator, target, params)
+
+    async def appliance_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.appliance.list`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import hcx_appliance_list_impl
+
+        return await hcx_appliance_list_impl(self, operator, target, params)
+
+    async def service_mesh_diagnose(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.service_mesh.diagnose`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import hcx_service_mesh_diagnose_impl
+
+        return await hcx_service_mesh_diagnose_impl(self, operator, target, params)
+
+    async def job_get(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.job.get`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import hcx_job_get_impl
+
+        return await hcx_job_get_impl(self, operator, target, params)
+
+    async def alert_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.alert.list`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import hcx_alert_list_impl
+
+        return await hcx_alert_list_impl(self, operator, target, params)
+
+    async def inventory_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.inventory.list`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import hcx_inventory_list_impl
+
+        return await hcx_inventory_list_impl(self, operator, target, params)
+
+    async def service_mesh_diagnostics_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.service_mesh.diagnostics.list`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import (
+            hcx_service_mesh_diagnostics_list_impl,
+        )
+
+        return await hcx_service_mesh_diagnostics_list_impl(self, operator, target, params)
+
+    async def service_mesh_diagnostics_get(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.service_mesh.diagnostics.get`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import (
+            hcx_service_mesh_diagnostics_get_impl,
+        )
+
+        return await hcx_service_mesh_diagnostics_get_impl(self, operator, target, params)
+
+    async def inventory_compute_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.inventory.compute.list`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import hcx_inventory_compute_list_impl
+
+        return await hcx_inventory_compute_list_impl(self, operator, target, params)
+
+    async def inventory_datastore_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.inventory.datastore.list`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import hcx_inventory_datastore_list_impl
+
+        return await hcx_inventory_datastore_list_impl(self, operator, target, params)
+
+    async def inventory_network_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.inventory.network.list`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import hcx_inventory_network_list_impl
+
+        return await hcx_inventory_network_list_impl(self, operator, target, params)
+
+    def trace_response_body(self, response: httpx.Response) -> Any:
+        """Mask the secret-named fields of a vendor answer before the trace records it.
+
+        The flight recorder's own rules know secrets by shape (a bearer
+        token, a key) and by op family (a login). A stored pairing password
+        in ``GET /hybridity/api/cloudConfigs`` is neither, so the connector
+        masks it here with the same rule the reads use. A body that is not
+        JSON is recorded as the shared engine sees fit.
+        """
+        from meho_backplane.connectors.hcx.typed_reads import redact_secrets
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        return redact_secrets(payload)
 
     async def aclose(self) -> None:
         """Clear cached session tokens, then tear down the httpx pool."""

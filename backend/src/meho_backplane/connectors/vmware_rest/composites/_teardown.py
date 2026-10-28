@@ -64,6 +64,7 @@ from meho_backplane.connectors.vmware_rest.composites._teardown_reads import (
 )
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _FOLDER_MO_TYPE,
+    _OP_CONTINUE_RETRIEVE_PROPERTIES,
     _OP_RETRIEVE_PROPERTIES,
     _VIRTUAL_MACHINE_MO_TYPE,
     _moref_value,
@@ -96,9 +97,11 @@ __all__ = [
 _OP_DESTROY_FOLDER_TASK: Final = "POST:/Folder/{moId}/Destroy_Task"
 
 #: vi-json sub-op manifest (``_VIM_SUB_OPS_*`` namespace, so the vcenter.yaml
-#: sweep skips it; the vi-json reconcile lane asserts every path exists).
+#: sweep skips it; the vi-json reconcile lane asserts every path exists). The
+#: name read of the blocking children follows continuation pages (#4862).
 _VIM_SUB_OPS_FOLDER_DELETE: Final[tuple[str, ...]] = (
     _OP_RETRIEVE_PROPERTIES,
+    _OP_CONTINUE_RETRIEVE_PROPERTIES,
     _OP_DESTROY_FOLDER_TASK,
 )
 

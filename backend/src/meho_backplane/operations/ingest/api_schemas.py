@@ -919,7 +919,11 @@ class ConnectorListItem(BaseModel):
     about what verb closes the workflow). It is a :class:`NextStep`
     object on ``state="registered"`` rows and ``None`` on
     ``state="ingested"`` rows (no operator action remains for an
-    ingested connector). The hint is computed against the curated
+    ingested connector) — with one exception: a tenant row stored under
+    a former product name (``vcf-logs`` rows for ``vrli-rest-9.0``,
+    #4889) can never be called, so it ships ``dispatchable=False`` plus
+    a ``next_step`` naming ``meho connector delete <id>`` as the
+    clean-up. For registered rows the hint is computed against the curated
     connector-spec catalog (#743): when the catalog carries an entry
     for the registry's ``(product, version)`` the verb points at
     ``meho connector ingest --catalog ...``; otherwise it points at
@@ -948,7 +952,9 @@ class ConnectorListItem(BaseModel):
     ``tenant_id``, but surfacing it directly lets a consumer key on it
     without re-deriving. ``shadowed_by_tenant_scope`` is the precedence
     marker: within a single response, a ``"builtin"`` row carries
-    ``True`` when a ``"tenant"`` row shares its ``connector_id`` — i.e.
+    ``True`` when a ``"tenant"`` row shares its ``connector_id`` **and**
+    ``product`` (the rule dispatch uses; a tenant row under a former
+    product name, #4889, shares the id but shadows nothing) — i.e.
     the built-in copy is *shadowed* by a tenant-scoped twin that
     :func:`~meho_backplane.operations._lookup.lookup_descriptor` resolves
     first (tenant-wins dispatch precedence). The two fields exist because
@@ -961,7 +967,10 @@ class ConnectorListItem(BaseModel):
     keep working; the listing sets ``scope`` explicitly per row and
     stamps ``shadowed_by_tenant_scope`` in a post-pass over the full
     response. Invariant: within one response no two rows share
-    ``(connector_id, scope)``. See :data:`ConnectorScope`.
+    ``(connector_id, scope)``, with one exception: a tenant row stored
+    under a former product name (#4889) sits next to the tenant's
+    current copy of the same id; ``product`` tells the two apart. See
+    :data:`ConnectorScope`.
     """
 
     model_config = ConfigDict(frozen=True)

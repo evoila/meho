@@ -701,7 +701,8 @@ async def test_host_vsan_health_over_legacy_mount_routes_to_rest(
     legacy path, and the ``VsanQueryVcClusterHealthSummary`` call must
     route through ``/rest`` via ``mount_op_path`` or it 404s — the
     modern+legacy mount coverage on the #2258 typed-op path, with zero
-    ingested descriptors.
+    ingested descriptors. The vSAN path keeps its ``/vsan`` part on every
+    mount (#4441).
     """
 
     async def _loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
@@ -709,7 +710,8 @@ async def test_host_vsan_health_over_legacy_mount_routes_to_rest(
 
     connector = VmwareRestConnector(session_loader=_loader)
     vsan_path = (
-        "/rest/VsanVcClusterHealthSystem/vsan-cluster-health-system/VsanQueryVcClusterHealthSummary"
+        "/rest/vsan/VsanVcClusterHealthSystem/vsan-cluster-health-system/"
+        "VsanQueryVcClusterHealthSummary"
     )
 
     async with respx.mock(
@@ -915,7 +917,8 @@ async def test_host_evacuate_recursion_over_modern_mount(
     ``dispatch_child`` call into ``vmware.composite.vm.migrate`` resolves the
     same connector and runs the inner DRS read + relocate write on the direct
     /api session, and host.evacuate then enters maintenance — all against the
-    real transport, zero ingested descriptors.
+    real transport, zero ingested descriptors. DRS is on but manual here, so
+    MEHO moves the VM itself with the cluster read from the host (#4895).
     """
     from meho_backplane.connectors.vmware_rest.composites._write import (
         host_evacuate_composite,
@@ -936,45 +939,23 @@ async def test_host_evacuate_recursion_over_modern_mount(
         from meho_backplane.connectors import OperationResult
 
         assert op_id == "vmware.composite.vm.migrate"
+        assert params == {"vm": "vm-a", "cluster": "domain-c1"}
         inner = await vm_migrate_composite(
             operator=operator, target=vcsim_target, params=params, connector=connector
         )
         return OperationResult(status="ok", op_id=op_id, result=inner, duration_ms=1.0)
 
-    def _vmomi_reads(request: httpx.Request) -> httpx.Response:
-        # One RetrievePropertiesEx route serves both the recursion's DRS
-        # read (ClusterComputeResource) and the maintenance Task.info poll.
-        body = json.loads(request.content)
-        spec = body["specSet"][0]
-        spec_type = spec["propSet"][0]["type"]
-        moid = spec["objectSet"][0]["obj"]["value"]
-        if spec_type == "ClusterComputeResource":
-            val: Any = [
+    recommendations: list[dict[str, Any]] = [
+        {
+            "migrationList": [
                 {
-                    "migrationList": [
-                        {
-                            "vm": {"type": "VirtualMachine", "value": "vm-a"},
-                            "destination": {"type": "HostSystem", "value": "host-target"},
-                        }
-                    ]
+                    "vm": {"type": "VirtualMachine", "value": "vm-a"},
+                    "destination": {"type": "HostSystem", "value": "host-target"},
                 }
             ]
-            prop = "drsRecommendation"
-        else:
-            assert spec_type == "Task", spec_type
-            val = {"state": "success"}
-            prop = "info"
-        return httpx.Response(
-            200,
-            json={
-                "objects": [
-                    {
-                        "obj": {"type": spec_type, "value": moid},
-                        "propSet": [{"name": prop, "val": val}],
-                    }
-                ]
-            },
-        )
+        }
+    ]
+    running_vm = _evacuate_vm_row("vm-a", "POWERED_ON")
 
     async with respx.mock(
         base_url=VCENTER_BASE_URL,
@@ -984,10 +965,20 @@ async def test_host_evacuate_recursion_over_modern_mount(
         mock.post("/api/session").respond(200, json=SESSION_TOKEN)
         # The vmomi calls derive their VI-JSON {release} from about.version (#2466).
         mock.get("/api/about").respond(200, json=ABOUT_PAYLOAD)
-        mock.get("/api/vcenter/vm").respond(200, json=[{"vm": "vm-a", "cluster": "domain-c1"}])
+        # Before the maintenance task: the running VM; after it: gone.
+        mock.get("/api/vcenter/vm").mock(
+            side_effect=[
+                httpx.Response(200, json=[running_vm]),
+                httpx.Response(200, json=[]),
+            ]
+        )
         mock.post(
             "/sdk/vim25/9.0.0.0/PropertyCollector/propertyCollector/RetrievePropertiesEx"
-        ).mock(side_effect=_vmomi_reads)
+        ).mock(
+            side_effect=_evacuate_vmomi_reads(
+                host="host-1", drs_behavior="manual", recommendations=recommendations
+            )
+        )
         relocate_route = mock.post("/api/vcenter/vm/vm-a").respond(200, json={})
         maintenance_route = mock.post(
             "/sdk/vim25/9.0.0.0/HostSystem/host-1/EnterMaintenanceMode_Task"
@@ -1006,6 +997,7 @@ async def test_host_evacuate_recursion_over_modern_mount(
 
     assert out["status"] == "evacuated"
     assert out["migrated_vms"] == ["vm-a"]
+    assert out["moved_by"] == "meho"
     assert out["maintenance_entered"] is True
     # The recursion's relocate write reached the /api session; the
     # maintenance-enter reached the VI-JSON mount (#2970).
@@ -1014,7 +1006,150 @@ async def test_host_evacuate_recursion_over_modern_mount(
     relocate_body = json.loads(relocate_route.calls.last.request.content)
     assert relocate_body["placement"]["host"] == "host-target"
     enter_body = json.loads(maintenance_route.calls.last.request.content)
-    assert enter_body == {"timeout": 0}
+    assert enter_body["timeout"] == 0
+    assert enter_body["maintenanceSpec"]["vsanMode"]["objectAction"] == "ensureObjectAccessibility"
+
+
+def _evacuate_vm_row(vm: str, power_state: str) -> dict[str, Any]:
+    """A ``GET /api/vcenter/vm`` row in the real ``Vcenter.VM.Summary`` shape (no cluster)."""
+    return {
+        "vm": vm,
+        "name": f"name-{vm}",
+        "power_state": power_state,
+        "cpu_count": 2,
+        "memory_size_mib": 2048,
+    }
+
+
+def _evacuate_vmomi_reads(
+    *,
+    host: str,
+    drs_behavior: str,
+    recommendations: list[dict[str, Any]] | None = None,
+) -> Any:
+    """One ``RetrievePropertiesEx`` handler for every read host.evacuate issues (#4895).
+
+    Serves the host's ``parent`` (the cluster), the cluster's
+    ``configurationEx`` (DRS on, *drs_behavior*) and ``drsRecommendation``
+    (the recursion's DRS read), and the maintenance ``Task.info`` poll.
+    """
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        spec = body["specSet"][0]
+        spec_type = spec["propSet"][0]["type"]
+        prop = spec["propSet"][0]["pathSet"][0]
+        moid = spec["objectSet"][0]["obj"]["value"]
+        val: Any
+        if spec_type == "HostSystem":
+            assert moid == host and prop == "parent"
+            val = {"type": "ClusterComputeResource", "value": "domain-c1"}
+        elif spec_type == "ClusterComputeResource" and prop == "configurationEx":
+            val = {"drsConfig": {"enabled": True, "defaultVmBehavior": drs_behavior}}
+        elif spec_type == "ClusterComputeResource":
+            assert prop == "drsRecommendation", prop
+            val = recommendations or []
+        else:
+            assert spec_type == "Task", spec_type
+            val = {"state": "success"}
+        return httpx.Response(
+            200,
+            json={
+                "objects": [
+                    {
+                        "obj": {"type": spec_type, "value": moid},
+                        "propSet": [{"name": prop, "val": val}],
+                    }
+                ]
+            },
+        )
+
+    return _handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("about_version", "release"),
+    [("9.0.0.0", "9.0.0.0"), ("8.0.3.0", "8.0.3.0")],
+    ids=["vcenter-9", "vcenter-8"],
+)
+async def test_host_evacuate_drs_fully_automated_lets_vcenter_move_the_vms(
+    vcsim_target: _VcsimTarget, about_version: str, release: str
+) -> None:
+    """DRS fully automated: no per-VM move, one maintenance request, both VMs moved (#4895).
+
+    Runs on the vCenter 8 and vCenter 9 VI-JSON paths. The maintenance body
+    carries the chosen vSAN data option as
+    ``maintenanceSpec.vsanMode.objectAction``.
+    """
+    from meho_backplane.connectors.vmware_rest.composites._write import (
+        host_evacuate_composite,
+    )
+
+    async def _loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
+        return {"username": "user", "password": "pass"}
+
+    async def _no_dispatch_child(
+        *, connector_id: str, op_id: str, params: dict[str, Any], target: Any = None
+    ) -> Any:
+        raise AssertionError(f"unexpected per-VM move {op_id} {params}")
+
+    connector = VmwareRestConnector(session_loader=_loader)
+    before = [_evacuate_vm_row("vm-a", "POWERED_ON"), _evacuate_vm_row("vm-b", "POWERED_ON")]
+
+    async with respx.mock(
+        base_url=VCENTER_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        mock.post("/api/session").respond(200, json=SESSION_TOKEN)
+        mock.get("/api/about").respond(200, json={**ABOUT_PAYLOAD, "version": about_version})
+        listing_route = mock.get("/api/vcenter/vm").mock(
+            side_effect=[
+                httpx.Response(200, json=before),
+                httpx.Response(200, json=[]),
+            ]
+        )
+        mock.post(
+            f"/sdk/vim25/{release}/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+        ).mock(side_effect=_evacuate_vmomi_reads(host="host-1", drs_behavior="fullyAutomated"))
+        relocate_route = mock.post("/api/vcenter/vm/vm-a").respond(200, json={})
+        maintenance_route = mock.post(
+            f"/sdk/vim25/{release}/HostSystem/host-1/EnterMaintenanceMode_Task"
+        ).respond(200, json={"type": "Task", "value": "t-enter-1"})
+        mock.delete("/api/session").respond(204)
+        try:
+            out = await host_evacuate_composite(
+                operator=_write_operator(),
+                target=vcsim_target,
+                params={"host": "host-1", "vsan_mode": "evacuateAllData"},
+                connector=connector,
+                dispatch_child=_no_dispatch_child,
+            )
+        finally:
+            await connector.aclose()
+
+    assert out["status"] == "evacuated"
+    assert out["maintenance_entered"] is True
+    assert out["migrated_vms"] == ["vm-a", "vm-b"]
+    assert out["failed_vms"] == []
+    assert out["remaining_vms"] == []
+    assert out["moved_by"] == "drs"
+    assert out["maintenance_task"] == "t-enter-1"
+    assert not relocate_route.called
+    assert listing_route.call_count == 2
+    assert maintenance_route.call_count == 1
+    enter_body = json.loads(maintenance_route.calls.last.request.content)
+    assert enter_body == {
+        "timeout": 0,
+        "maintenanceSpec": {
+            "_typeName": "HostMaintenanceSpec",
+            "vsanMode": {
+                "_typeName": "VsanHostDecommissionMode",
+                "objectAction": "evacuateAllData",
+            },
+        },
+    }
 
 
 # ---------------------------------------------------------------------------

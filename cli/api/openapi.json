@@ -4177,7 +4177,7 @@
           "operations"
         ],
         "summary": "Post Preview",
-        "description": "Resolve an op + params to the literal would-be HTTP request, without sending.\n\nDelegates to :func:`preview_operation` (#1683). The read-only diagnosis\nsibling of ``POST /api/v1/operations/call``: it resolves the same op +\ntarget + params and returns the literal request\n(``{method, resolved_path, query, redacted_body}``) for an\n``source_kind='ingested'`` op **instead of dispatching it**. Use it to\ndiagnose a write 4xx from the inside -- the audit row persists only a\nhashed ``params_hash``, so the wire shape is otherwise unrecoverable.\n\nReturns ``200`` with the structured envelope; operator-input faults\n(unknown op, invalid params, unresolvable connector) land inside the\nenvelope (``status=\"error\"`` / ``status=\"unavailable\"`` +\n``extras.error_code``) rather than as HTTP 4xx, the same contract as\n``/call``. Target-failure outcomes ride the envelope identically to\n``/call`` (#136, completed by #2110): ``target_required`` for a missing /\nempty / ``name``-less target, ``target_invalid_type`` for a ``target`` of\na wrong JSON type, ``no_target`` for a supplied-but-unresolvable name,\n``ambiguous_target`` for a name matching more than one target \u2014 all HTTP\n200, no target-failure 4xx remains. The body is redacted\nthrough the same connector-boundary pipeline the response path uses;\nnothing is written to the audit row.",
+        "description": "Resolve an op + params to the literal would-be HTTP request, without sending.\n\nDelegates to :func:`preview_operation` (#1683). The read-only diagnosis\nsibling of ``POST /api/v1/operations/call``: it resolves the same op +\ntarget + params and returns the literal request\n(``{method, resolved_path, query, redacted_body}``) for an\n``source_kind='ingested'`` op **instead of dispatching it**. Use it to\ndiagnose a write 4xx from the inside -- the audit row persists only a\nhashed ``params_hash``, so the wire shape is otherwise unrecoverable.\n\nReturns ``200`` with the structured envelope; operator-input faults\n(unknown op, invalid params, unresolvable connector) land inside the\nenvelope (``status=\"error\"`` / ``status=\"unavailable\"`` +\n``extras.error_code``) rather than as HTTP 4xx, the same contract as\n``/call``. Target-failure outcomes ride the envelope identically to\n``/call`` (#136, completed by #2110): ``target_required`` for a missing /\nempty / ``name``-less target, ``target_invalid_type`` for a ``target`` of\na wrong JSON type, ``no_target`` for a supplied-but-unresolvable name,\n``ambiguous_target`` for a name matching more than one target \u2014 all HTTP\n200, no target-failure 4xx remains. The body is redacted\nthrough the same connector-boundary pipeline the response path uses;\nnothing is written to the audit row.\n\nEvery envelope whose op resolved also carries the risk level and the\npolicy verdict for this caller and target (#4923): ``safety_level``,\n``requires_approval``, ``policy_verdict`` (``auto-execute`` /\n``needs-approval`` / ``deny`` \u2014 what ``/call`` would do with the same\narguments, decided by the same policy gate) and ``policy_reason``\n(the gate's reason, or ``null`` when it gives none). The envelope is\ntyped as :class:`PreviewOperationResponse` for OpenAPI and the generated\nclients; only the keys the envelope carries are serialised, so the wire\nshape of every preview status is unchanged.",
         "operationId": "post_preview_api_v1_operations_preview_post",
         "parameters": [
           {
@@ -4207,9 +4207,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Post Preview Api V1 Operations Preview Post"
+                  "$ref": "#/components/schemas/PreviewOperationResponse"
                 }
               }
             }
@@ -4594,7 +4592,7 @@
           "connectors"
         ],
         "summary": "Get Review Endpoint",
-        "description": "Return the full review payload for *connector_id*.\n\nOperator-level read: any operator can inspect a connector their\ntenant owns plus built-ins. Editing the payload requires\n``tenant_admin`` via the PATCH routes. Cross-tenant /\nnon-existent connector \u2192 404 (the deliberate conflation). A label\nthat resolves to a built-in-only row still returns 200 (the\nG0.13-T5 #1135 global fallback); a label that maps to **both** a\ntenant row and a built-in row \u2192 409 ``connector_scope_ambiguous``\nwith the candidate list (G0.26-T1 #1801), identical to the write\nsibling ``POST /{id}/enable-reads`` via the shared service resolver.\n\nThe optional ``prefer=tenant|builtin`` query param (G0.26-T? #2029)\nmakes that 409 actionable: it resolves directly to the named scope\nand skips the ambiguity probe, so an operator who has both rows can\ntarget the tenant-curated one (``prefer=tenant``) or the built-in\none (``prefer=builtin``). Omitted \u2192 the fail-loud default.",
+        "description": "Return the full review payload for *connector_id*.\n\nOperator-level read: any operator can inspect a connector their\ntenant owns plus built-ins. Editing the payload requires\n``tenant_admin`` via the PATCH routes. Cross-tenant /\nnon-existent connector \u2192 404 (the deliberate conflation). A label\nthat resolves to a built-in-only row still returns 200 (the\nG0.13-T5 #1135 global fallback); a label that maps to **both** a\ntenant row and a built-in row \u2192 409 ``connector_scope_ambiguous``\nwith the candidate list (G0.26-T1 #1801), identical to the write\nsibling ``POST /{id}/enable-reads`` via the shared service resolver.\n\nThe optional ``prefer=tenant|builtin`` query param (G0.26-T? #2029)\nmakes that 409 actionable: it resolves directly to the named scope\nand skips the ambiguity probe, so an operator who has both rows can\ntarget the tenant-curated one (``prefer=tenant``) or the built-in\none (``prefer=builtin``). ``prefer=legacy`` shows the tenant's old\ncopy stored under a former product name (#4889), the copy ``DELETE``\nremoves first. Omitted \u2192 the fail-loud default.",
         "operationId": "get_review_endpoint_api_v1_connectors__connector_id__review_get",
         "parameters": [
           {
@@ -4613,14 +4611,15 @@
             "schema": {
               "enum": [
                 "tenant",
-                "builtin"
+                "builtin",
+                "legacy"
               ],
               "type": "string",
               "nullable": true,
-              "description": "Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only). Omit for the default fail-loud 409 connector_scope_ambiguous response.",
+              "description": "Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only); 'legacy' the tenant's old copy stored under a former product name (the copy a delete removes first). Omit for the default fail-loud 409 connector_scope_ambiguous response.",
               "title": "Prefer"
             },
-            "description": "Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only). Omit for the default fail-loud 409 connector_scope_ambiguous response."
+            "description": "Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only); 'legacy' the tenant's old copy stored under a former product name (the copy a delete removes first). Omit for the default fail-loud 409 connector_scope_ambiguous response."
           },
           {
             "name": "authorization",
@@ -4868,14 +4867,15 @@
             "schema": {
               "enum": [
                 "tenant",
-                "builtin"
+                "builtin",
+                "legacy"
               ],
               "type": "string",
               "nullable": true,
-              "description": "Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only). Omit for the default fail-loud 409 connector_scope_ambiguous response.",
+              "description": "Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only); 'legacy' the tenant's old copy stored under a former product name (the copy a delete removes first). Omit for the default fail-loud 409 connector_scope_ambiguous response.",
               "title": "Prefer"
             },
-            "description": "Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only). Omit for the default fail-loud 409 connector_scope_ambiguous response."
+            "description": "Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only); 'legacy' the tenant's old copy stored under a former product name (the copy a delete removes first). Omit for the default fail-loud 409 connector_scope_ambiguous response."
           },
           {
             "name": "authorization",
@@ -6839,7 +6839,7 @@
           "audit"
         ],
         "summary": "My Recent",
-        "description": "Audit rows the calling operator produced within the *since* window.\n\nPrincipal is taken from ``operator.sub`` (the JWT subject); an\noperator cannot see another operator's recent activity through\nthis route \u2014 for that, the full POST surface filters on\n``principal``.\n\nReturns the unified ``{\"items\": [...], \"next_cursor\": ...}`` list\nenvelope per ``docs/codebase/api-shape-conventions.md`` \u00a72 (#2338\nbreaking pass \u2014 the response shape converged from the v0.8.0\n:class:`AuditQueryResult` ``{\"rows\": [...]}`` shape onto the\nreference envelope, renaming ``rows`` -> ``items``; the\n``?envelope=v2`` opt-in that bridged the migration was retired),\ncarrying the same forward-only cursor. The sibling audit-query\nendpoints (``/query`` / ``/who-touched`` / ``/by-work-ref``) keep\nthe :class:`AuditQueryResult` ``rows`` shape and are out of the \u00a72\nreference set.",
+        "description": "Audit rows the calling operator produced within the *since* window.\n\nThe user id is taken from ``operator.sub`` (the JWT subject) and\nmatched exactly, so an operator cannot see another operator's\nrecent activity through this route \u2014 for that, the full POST\nsurface filters on ``principal`` (user id or name, partial match).\n\nReturns the unified ``{\"items\": [...], \"next_cursor\": ...}`` list\nenvelope per ``docs/codebase/api-shape-conventions.md`` \u00a72 (#2338\nbreaking pass \u2014 the response shape converged from the v0.8.0\n:class:`AuditQueryResult` ``{\"rows\": [...]}`` shape onto the\nreference envelope, renaming ``rows`` -> ``items``; the\n``?envelope=v2`` opt-in that bridged the migration was retired),\ncarrying the same forward-only cursor. The sibling audit-query\nendpoints (``/query`` / ``/who-touched`` / ``/by-work-ref``) keep\nthe :class:`AuditQueryResult` ``rows`` shape and are out of the \u00a72\nreference set.",
         "operationId": "my_recent_api_v1_audit_my_recent_get",
         "parameters": [
           {
@@ -7014,7 +7014,7 @@
           "audit"
         ],
         "summary": "Replay",
-        "description": "Replay one agent session as a tenant-scoped parent/child tree.\n\n**RBAC (#1843): ``tenant_admin`` required.** This route takes an\n*arbitrary* ``session_id`` and reconstructs another principal's full\nsession trace \u2014 a privileged forensic act, not self-service. It\ntherefore gates at ``tenant_admin`` (``read_only`` / ``operator`` \u2192\n403), matching the MCP ``meho_audit_replay`` tool and\n``docs/cross-repo/audit-replay.md``. An operator replaying *their\nown* session uses the MCP ``query_audit`` ``shape=\"tree\"`` path\ninstead (operator-level, self-session-only). Cross-tenant isolation\nis unchanged and orthogonal to this gate (see below).\n\nDispatches through\n:func:`~meho_backplane.audit_query.replay_session`. ``tenant_id``\nis always ``operator.tenant_id`` from the JWT, never client input,\nso a session belonging to another tenant \u2014 or one that does not\nexist \u2014 yields ``root=[]`` / ``row_count=0`` (never 404; a foreign\nsession is indistinguishable from an empty one, the same\nnon-leakage posture :func:`show` takes).\n\nA session larger than :data:`_REPLAY_ROW_CAP` anchor rows returns\n413 from a count-first guard. The count runs *before*\n:func:`replay_session`, so a runaway session never materializes its\ntree just to be rejected \u2014 the recursive build is skipped entirely.\n\nThe 200 body also carries ``excluded_null_session_count`` (#2700):\nthe tenant-wide tally of ``method=MCP`` rows with a NULL\n``agent_session_id`` (clients that never negotiated a session).\nThose rows can never be part of any replay, so surfacing the count\nkeeps an empty forest (``row_count=0``) distinguishable from an\nempty history \u2014 see :func:`_count_excluded_null_session_rows`.",
+        "description": "Replay one agent session as a tenant-scoped parent/child tree.\n\n**RBAC (#1843): ``tenant_admin`` required.** This route takes an\n*arbitrary* ``session_id`` and reconstructs another principal's full\nsession trace \u2014 a privileged forensic act, not self-service. It\ntherefore gates at ``tenant_admin`` (``read_only`` / ``operator`` \u2192\n403), matching the MCP ``meho_audit_replay`` tool and\n``docs/cross-repo/audit-replay.md``. An operator replaying *their\nown* session uses the MCP ``query_audit`` ``shape=\"tree\"`` path\ninstead (operator-level, self-session-only). Cross-tenant isolation\nis unchanged and orthogonal to this gate (see below).\n\nDispatches through\n:func:`~meho_backplane.audit_query.replay_session`. ``tenant_id``\nis always ``operator.tenant_id`` from the JWT, never client input,\nso a session belonging to another tenant \u2014 or one that does not\nexist \u2014 yields ``root=[]`` / ``row_count=0`` (never 404; a foreign\nsession is indistinguishable from an empty one, the same\nnon-leakage posture :func:`show` takes).\n\nA session larger than :data:`_REPLAY_ROW_CAP` anchor rows returns\n413 from a count-first guard. The count runs *before*\n:func:`replay_session`, so a runaway session never materializes its\ntree just to be rejected \u2014 the recursive build is skipped entirely.\n\nThe 200 body also carries ``loose_row_count`` (#4670): the nodes in\nthe tree whose parent id names no row in the tenant \u2014 see\n:func:`~meho_backplane.audit_query.count_loose_rows_in_forest`.\n\nThe 200 body also carries ``excluded_null_session_count`` (#2700):\nthe tenant-wide tally of ``method=MCP`` rows with a NULL\n``agent_session_id`` (clients that never negotiated a session).\nThose rows can never be part of any replay, so surfacing the count\nkeeps an empty forest (``row_count=0``) distinguishable from an\nempty history \u2014 see :func:`_count_excluded_null_session_rows`.",
         "operationId": "replay_api_v1_audit_sessions__session_id__replay_get",
         "parameters": [
           {
@@ -8914,6 +8914,16 @@
               "nullable": true,
               "title": "Authorization"
             }
+          },
+          {
+            "name": "X-MEHO-Runner-Wire-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Wire-Version"
+            }
           }
         ],
         "responses": {
@@ -8969,6 +8979,16 @@
               "type": "string",
               "nullable": true,
               "title": "Authorization"
+            }
+          },
+          {
+            "name": "X-MEHO-Runner-Wire-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Wire-Version"
             }
           }
         ],
@@ -9076,7 +9096,7 @@
           "checks"
         ],
         "summary": "Get Assignment",
-        "description": "Return runner *runner*'s versioned assignment (runner-authenticated).\n\nA runner may fetch only its own assignment\n(:func:`assert_runner_scope`). ``known_version`` matching the current\ncontent digest yields ``304 Not Modified`` (empty body); the runner\nkeeps its cache.",
+        "description": "Return runner *runner*'s versioned assignment (runner-authenticated).\n\nA runner may fetch only its own assignment\n(:func:`assert_runner_scope`). A runner on another wire version gets a\n409 that names both versions. ``known_version`` matching the current\ncontent digest yields ``304 Not Modified`` (empty body); the runner\nkeeps its cache.",
         "operationId": "get_assignment_api_v1_checks_assignment_get",
         "parameters": [
           {
@@ -9107,6 +9127,16 @@
               "type": "string",
               "nullable": true,
               "title": "Authorization"
+            }
+          },
+          {
+            "name": "X-MEHO-Runner-Wire-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Wire-Version"
             }
           }
         ],
@@ -9151,6 +9181,16 @@
               "type": "string",
               "nullable": true,
               "title": "Authorization"
+            }
+          },
+          {
+            "name": "X-MEHO-Runner-Wire-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Wire-Version"
             }
           }
         ],
@@ -10005,7 +10045,7 @@
           "approvals"
         ],
         "summary": "List Approvals",
-        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired`` and by change ticket via\n``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first\n(``created_at DESC``).",
+        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired``, ``?status=all`` for every state (the same\nsentinel ``meho_approvals_list`` accepts), and by change ticket via\n``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first\n(``created_at DESC``). ``limit`` / ``offset`` page through the\nresult; no ``limit`` returns every match.",
         "operationId": "list_approvals_api_v1_approvals_get",
         "parameters": [
           {
@@ -10014,11 +10054,11 @@
             "required": false,
             "schema": {
               "type": "string",
-              "description": "Filter by status. One of: pending, approved, rejected, expired. Defaults to 'pending'.",
+              "description": "Filter by status. One of: pending, approved, rejected, expired, all. 'all' returns requests in every state. Defaults to 'pending'.",
               "default": "pending",
               "title": "Status"
             },
-            "description": "Filter by status. One of: pending, approved, rejected, expired. Defaults to 'pending'."
+            "description": "Filter by status. One of: pending, approved, rejected, expired, all. 'all' returns requests in every state. Defaults to 'pending'."
           },
           {
             "name": "work_ref",
@@ -10031,6 +10071,33 @@
               "title": "Work Ref"
             },
             "description": "Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#1' \u2014 the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "nullable": true,
+              "description": "Return at most this many requests (1..500). Omit for no limit.",
+              "title": "Limit"
+            },
+            "description": "Return at most this many requests (1..500). Omit for no limit."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Skip this many requests first (newest first). Defaults to 0.",
+              "default": 0,
+              "title": "Offset"
+            },
+            "description": "Skip this many requests first (newest first). Defaults to 0."
           },
           {
             "name": "authorization",
@@ -10604,6 +10671,176 @@
               "title": "Reason"
             },
             "description": "Optional reason for the revoke. Stored on the grant and the audit row."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/service-principals/read-scopes/{principal_sub}": {
+      "put": {
+        "tags": [
+          "service-principal-read-scopes"
+        ],
+        "summary": "Set Read Scope",
+        "description": "Set (replace) the read scope of one service principal.\n\nOnly a person may set it: a machine principal gets 403\n``human_principal_required`` before this runs. Returns 422 when\n``principal_sub`` carries a wildcard. Audited via the audit middleware,\nwith the stored entries on the audit row.",
+        "operationId": "set_read_scope_api_v1_service_principals_read_scopes__principal_sub__put",
+        "parameters": [
+          {
+            "name": "principal_sub",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "description": "JWT sub of the service principal.",
+              "title": "Principal Sub"
+            },
+            "description": "JWT sub of the service principal."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServiceReadScopeSet"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceReadScopeRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "service-principal-read-scopes"
+        ],
+        "summary": "Show Read Scope",
+        "description": "Return the read scope of one service principal; 404 when none is set.",
+        "operationId": "show_read_scope_api_v1_service_principals_read_scopes__principal_sub__get",
+        "parameters": [
+          {
+            "name": "principal_sub",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "description": "JWT sub of the service principal.",
+              "title": "Principal Sub"
+            },
+            "description": "JWT sub of the service principal."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceReadScopeRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "service-principal-read-scopes"
+        ],
+        "summary": "Clear Read Scope",
+        "description": "Clear the read scope of one service principal; it then reads every target again.\n\nOnly a person may clear it. Returns 204; 404 when no scope is set.\nAudited via the audit middleware.",
+        "operationId": "clear_read_scope_api_v1_service_principals_read_scopes__principal_sub__delete",
+        "parameters": [
+          {
+            "name": "principal_sub",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "description": "JWT sub of the service principal.",
+              "title": "Principal Sub"
+            },
+            "description": "JWT sub of the service principal."
           },
           {
             "name": "authorization",
@@ -20262,7 +20499,7 @@
           "ui-operations"
         ],
         "summary": "Operations Call",
-        "description": "Dispatch the chosen op in-process; render the ``OperationResult`` inline.\n\nThe highest-blast-radius action the console gains -- it executes a\nreal connector op against a live target. CSRF-gated (a ``POST`` under\n``/ui/``) and ``require_ui_session``-gated; calls\n:func:`~meho_backplane.operations.meta_tools.call_operation`\nin-process (the same BFF pattern the approvals decision POSTs use).\nThe structured envelope is surfaced verbatim\n(``ok`` / ``error`` / ``denied`` / ``awaiting_approval``); the one\n``ValueError`` the meta-tool raises (a missing target name) is mapped\nto an inline ``400`` form error so the operator stays in the modal.",
+        "description": "Dispatch the chosen op in-process; render the ``OperationResult`` inline.\n\nThe highest-blast-radius action the console gains -- it executes a\nreal connector op against a live target. CSRF-gated (a ``POST`` under\n``/ui/``) and ``require_ui_session``-gated; calls\n:func:`~meho_backplane.operations.meta_tools.call_operation`\nin-process (the same BFF pattern the approvals decision POSTs use).\nThe structured envelope is surfaced verbatim\n(``ok`` / ``error`` / ``denied`` / ``awaiting_approval``); the one\n``ValueError`` the meta-tool raises (a missing target name) is mapped\nto an inline ``400`` form error so the operator stays in the modal.\n\n``preview_hash`` comes from the run window's preview step. A\n``destructive`` op needs it, or MEHO refuses to store the approval\nrequest (#5015).",
         "operationId": "operations_call_ui_operations_call_post",
         "requestBody": {
           "content": {
@@ -21266,7 +21503,7 @@
           "ui-audit"
         ],
         "summary": "Ui Audit My Recent",
-        "description": "``GET /ui/audit/my-recent`` -- the my-recent quick-view fragment.\n\nReturns the calling operator's last-24h rows\n(``principal=session.operator_sub``) rendered through the same row\npartial as the T1 result list, so each row opens the T2 detail\ndrawer. ``OPERATOR``-self-scoped: a second operator's activity is\nnever reachable here. HTMX-only fragment (no full-page chrome).",
+        "description": "``GET /ui/audit/my-recent`` -- the my-recent quick-view fragment.\n\nReturns the calling operator's last-24h rows\n(``principal_sub=session.operator_sub``, exact match) rendered through the same row\npartial as the T1 result list, so each row opens the T2 detail\ndrawer. ``OPERATOR``-self-scoped: a second operator's activity is\nnever reachable here. HTMX-only fragment (no full-page chrome).",
         "operationId": "ui_audit_my_recent_ui_audit_my_recent_get",
         "responses": {
           "200": {
@@ -22787,9 +23024,10 @@
         "properties": {
           "input": {
             "type": "string",
+            "maxLength": 65536,
             "minLength": 1,
             "title": "Input",
-            "description": "The user prompt to run the agent on."
+            "description": "The user prompt to run the agent on. At most 65536 characters."
           },
           "async": {
             "type": "boolean",
@@ -23248,6 +23486,30 @@
         ],
         "title": "ApprovalResumeOutcomeView",
         "description": "What happened when an approved request ran (#3543).\n\nA summary read off the stored result envelope. The result body and the\nfree-text error stay on the owner-only ``/result`` read."
+      },
+      "ApprovalsStatus": {
+        "properties": {
+          "custody": {
+            "type": "string",
+            "title": "Custody"
+          },
+          "effective_posture": {
+            "type": "string",
+            "title": "Effective Posture"
+          },
+          "delegated_decision_posture": {
+            "type": "string",
+            "title": "Delegated Decision Posture"
+          }
+        },
+        "type": "object",
+        "required": [
+          "custody",
+          "effective_posture",
+          "delegated_decision_posture"
+        ],
+        "title": "ApprovalsStatus",
+        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value."
       },
       "ApproveRequestBody": {
         "properties": {
@@ -23805,6 +24067,11 @@
             "$ref": "#/components/schemas/AuditEventClass",
             "nullable": true
           },
+          "has_trace": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Has Trace"
+          },
           "limit": {
             "type": "integer",
             "maximum": 1000.0,
@@ -23873,6 +24140,10 @@
           "excluded_null_session_count": {
             "type": "integer",
             "title": "Excluded Null Session Count"
+          },
+          "loose_row_count": {
+            "type": "integer",
+            "title": "Loose Row Count"
           }
         },
         "type": "object",
@@ -23881,10 +24152,11 @@
           "session_id",
           "tenant_id",
           "row_count",
-          "excluded_null_session_count"
+          "excluded_null_session_count",
+          "loose_row_count"
         ],
         "title": "AuditReplayResult",
-        "description": "200 body for ``GET /api/v1/audit/sessions/{session_id}/replay``.\n\nWraps the substrate's :class:`ReplayNode` forest with the echoed\nrequest identity. ``tenant_id`` is always the operator's tenant\n(lifted from the JWT by the route), never client-supplied, so the\necho is a confirmation of the boundary the query ran under \u2014 not a\nvalue the caller chose.\n\n``row_count`` is the count of *anchor* rows in the session \u2014 rows\nwhose ``agent_session_id`` equals ``session_id`` within the\noperator's tenant. It is the same number the route's count-first\n413 guard evaluates, so a session that returns 200 reports a\n``row_count`` identical to what its over-cap sibling would report\nat 413. NULL-session lineage children pulled into ``root`` by the\nreplay closure (a composite ``dispatch_child`` whose own\n``agent_session_id`` is NULL but whose ``parent_audit_id`` links\ninto the session) are present in the tree but are not counted \u2014\n\"session rows\" are defined by the ``agent_session_id`` anchor, not\nby tree membership.\n\nAn unknown session id, or one belonging to another tenant, yields\n``root=[]`` / ``row_count=0`` \u2014 never a 404 \u2014 so a foreign session\nis indistinguishable from an empty one and existence never leaks\nacross tenants (the same non-leakage posture\n``GET /show/{audit_id}`` takes).\n\n``excluded_null_session_count`` (#2700) is the tenant-scoped tally\nof ``method=MCP`` audit rows whose ``agent_session_id`` is NULL \u2014\ncalls from clients that never negotiated a session via the\n``initialize`` handshake. Such rows can never anchor or be walked by\n*any* session replay, so a ``row_count=0`` response with a non-zero\n``excluded_null_session_count`` tells an investigator the empty\nforest is not the same as an empty history: there is un-negotiated\nMCP traffic this forensic surface structurally cannot see. It is a\ntenant-wide count, independent of ``session_id`` (the un-negotiated\nrows belong to no session), and mirrors the honest\n``when_negotiated`` capture label the deploy's ``/status`` reports.\n\nFrozen like the substrate models it carries."
+        "description": "200 body for ``GET /api/v1/audit/sessions/{session_id}/replay``.\n\nWraps the substrate's :class:`ReplayNode` forest with the echoed\nrequest identity. ``tenant_id`` is always the operator's tenant\n(lifted from the JWT by the route), never client-supplied, so the\necho is a confirmation of the boundary the query ran under \u2014 not a\nvalue the caller chose.\n\n``row_count`` is the count of *anchor* rows in the session \u2014 rows\nwhose ``agent_session_id`` equals ``session_id`` within the\noperator's tenant. It is the same number the route's count-first\n413 guard evaluates, so a session that returns 200 reports a\n``row_count`` identical to what its over-cap sibling would report\nat 413. NULL-session lineage children pulled into ``root`` by the\nreplay closure (a composite ``dispatch_child`` whose own\n``agent_session_id`` is NULL but whose ``parent_audit_id`` links\ninto the session) are present in the tree but are not counted \u2014\n\"session rows\" are defined by the ``agent_session_id`` anchor, not\nby tree membership.\n\nAn unknown session id, or one belonging to another tenant, yields\n``root=[]`` / ``row_count=0`` \u2014 never a 404 \u2014 so a foreign session\nis indistinguishable from an empty one and existence never leaks\nacross tenants (the same non-leakage posture\n``GET /show/{audit_id}`` takes).\n\n``excluded_null_session_count`` (#2700) is the tenant-scoped tally\nof ``method=MCP`` audit rows whose ``agent_session_id`` is NULL \u2014\ncalls from clients that never negotiated a session via the\n``initialize`` handshake. Such rows can never anchor or be walked by\n*any* session replay, so a ``row_count=0`` response with a non-zero\n``excluded_null_session_count`` tells an investigator the empty\nforest is not the same as an empty history: there is un-negotiated\nMCP traffic this forensic surface structurally cannot see. It is a\ntenant-wide count, independent of ``session_id`` (the un-negotiated\nrows belong to no session), and mirrors the honest\n``when_negotiated`` capture label the deploy's ``/status`` reports.\n\n``loose_row_count`` (#4670) is the number of nodes in ``root`` whose\n``parent_audit_id`` names a row that does not exist in the tenant. A\nmulti-step operation saves its own row last, so such a node belongs\nto an operation that is still running, or to one that stopped before\nthat save (``docs/decisions/composite-audit-when-a-step-waits.md``).\nSuch rows render as roots; this count tells them apart from real\nchain starts. A root whose parent lives in another session is not\ncounted.\n\nFrozen like the substrate models it carries."
       },
       "AuditTraceResult": {
         "properties": {
@@ -24723,6 +24995,12 @@
             "maxLength": 512,
             "title": "Work Ref",
             "default": ""
+          },
+          "preview_hash": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Preview Hash",
+            "default": ""
           }
         },
         "type": "object",
@@ -25492,12 +25770,12 @@
             "title": "Safety Level"
           },
           "requires_approval": {
-            "type": "boolean",
+            "type": "string",
             "nullable": true,
             "title": "Requires Approval"
           },
           "is_enabled": {
-            "type": "boolean",
+            "type": "string",
             "nullable": true,
             "title": "Is Enabled"
           },
@@ -26754,7 +27032,7 @@
           "enabled_operation_count"
         ],
         "title": "ConnectorListItem",
-        "description": "One row in the ``GET /api/v1/connectors`` response.\n\nProjects :class:`OperationGroup` aggregation. ``connector_id`` is\nthe operator-facing identifier (``\"<impl_id>-<version>\"``);\n``product`` / ``version`` / ``impl_id`` are the parsed triple.\n\n``tenant_id`` is ``None`` for built-in / global connectors and a\nUUID for tenant-curated ones. ``group_count`` totals the rows\nvisible to the caller; the three ``*_group_count`` fields split\nthat total by ``review_status`` so operators can spot\nreview-queue backlog at a glance.\n\n``operation_count`` is the sum of operations across all groups\nin scope; ``enabled_operation_count`` (G0.23-T5 / #1636) is the\nsubset of those rows whose per-op ``is_enabled`` flag is set --\nthe operations the dispatcher will actually resolve\n(dispatchable), vs ingested-but-disabled rows that only surface\nin review. The naming mirrors the ``*_group_count`` family above:\nthe unprefixed field is the total, the ``enabled_``-prefixed\nfield is the subset. Kept additive (rather than renaming the\ntotal to ``total_operation_count``) so existing consumers of\n``operation_count`` -- the CLI's ``listEntry`` decode shape and\nevery ``meho_connector_list`` client -- keep working unchanged.\nMind the axis difference between the two ``enabled_*`` fields:\n``enabled_group_count`` buckets groups by *review_status*, while\n``enabled_operation_count`` counts the per-op ``is_enabled`` bit\n(the dispatchability flag that survives connector-level\nenable/disable cycles via operator overrides). Useful for the\nCLI's ``meho connector list --status staged`` summary view and\nfor an LLM browsing the catalog: ``vmware-rest-9.0`` ingests\n~2,211 ops of which only a fraction are enabled, and before the\nsplit nothing on the row said which of the two numbers\n``operation_count`` was.\n\n``state`` (G0.9.1-T1 / #773) distinguishes *dispatchable* rows\n(``\"ingested\"`` \u2014 DB-backed, resolves through the dispatcher) from\n*registered-but-empty* rows (``\"registered\"`` \u2014 v2-registry entries\nwithout descriptor rows yet). Rows that wouldn't round-trip\nthrough the resolver at all (stale-impl_id DB rows, v2 entries\nwhose registry product disagrees with the parser's derived\nproduct) are filtered out before the response is built;\n``connector_id``s the listing emits are guaranteed to resolve\nthrough :func:`~meho_backplane.operations._lookup.connector_exists`\nwhen ``state == \"ingested\"``, and explicitly labelled\nnot-yet-dispatchable when ``state == \"registered\"``. Defaults to\n``\"ingested\"`` so existing call sites (tests, MCP fakes)\nconstruct rows without breakage.\n\n``next_step`` (G0.13-T3 / #1133) is the self-describing hint that\ncloses the workflow gap the v0.6.0 RDC dogfood surfaced (signal 11:\nhalf-registered connectors fail lookup with no in-product hint\nabout what verb closes the workflow). It is a :class:`NextStep`\nobject on ``state=\"registered\"`` rows and ``None`` on\n``state=\"ingested\"`` rows (no operator action remains for an\ningested connector). The hint is computed against the curated\nconnector-spec catalog (#743): when the catalog carries an entry\nfor the registry's ``(product, version)`` the verb points at\n``meho connector ingest --catalog ...``; otherwise it points at\nthe manual-mode flags. Defaults to ``None`` so existing\nconstruction call sites (tests, MCP fakes) continue to compile\nwithout explicit assignment.\n\n``kind`` (G0.28-T6 / #1979) is the authoring-mode discriminator \u2014\ntyped / ingested-shim / profiled / profiled-but-unreviewed \u2014 an\n**additive** sibling to ``state`` (which is deliberately left\nunchanged: it is the documented dispatch-resolution state machine\nwith its own consumers). ``dispatchable`` is the boolean roll-up of\nthe same projection: ``True`` for ``typed`` and ``profiled``,\n``False`` for ``ingested-shim`` and ``profiled-but-unreviewed``.\nTogether they let the operator console / CLI distinguish a working\nprofiled connector from a dead bare shim, which neither ``state``\nnor the count fields could express. Both default to the bare-shim\nreading (``kind=\"ingested-shim\"``, ``dispatchable=False``) so\nexisting construction call sites (tests, MCP fakes) keep working;\nthe listing always sets them explicitly. See\n:data:`ConnectorAuthoringKind`.\n\n``scope`` (#2474) is the named projection of ``tenant_id`` \u2014\n``\"builtin\"`` for ``tenant_id IS NULL`` rows, ``\"tenant\"`` for\ntenant-curated ones. It is additive and fully derivable from\n``tenant_id``, but surfacing it directly lets a consumer key on it\nwithout re-deriving. ``shadowed_by_tenant_scope`` is the precedence\nmarker: within a single response, a ``\"builtin\"`` row carries\n``True`` when a ``\"tenant\"`` row shares its ``connector_id`` \u2014 i.e.\nthe built-in copy is *shadowed* by a tenant-scoped twin that\n:func:`~meho_backplane.operations._lookup.lookup_descriptor` resolves\nfirst (tenant-wins dispatch precedence). The two fields exist because\n``connector_id`` encodes only ``(impl_id, version)``, so scope twins\nfrom the #2085 re-ingest trap render the same id twice; the marker\ntells an agent exactly which row ``call_operation`` dispatches to and\nlets it count unique connectors. Both default to the built-in,\nunshadowed reading (``scope=\"builtin\"``, ``shadowed_by_tenant_scope\n=False``) so existing construction call sites (tests, MCP fakes)\nkeep working; the listing sets ``scope`` explicitly per row and\nstamps ``shadowed_by_tenant_scope`` in a post-pass over the full\nresponse. Invariant: within one response no two rows share\n``(connector_id, scope)``. See :data:`ConnectorScope`."
+        "description": "One row in the ``GET /api/v1/connectors`` response.\n\nProjects :class:`OperationGroup` aggregation. ``connector_id`` is\nthe operator-facing identifier (``\"<impl_id>-<version>\"``);\n``product`` / ``version`` / ``impl_id`` are the parsed triple.\n\n``tenant_id`` is ``None`` for built-in / global connectors and a\nUUID for tenant-curated ones. ``group_count`` totals the rows\nvisible to the caller; the three ``*_group_count`` fields split\nthat total by ``review_status`` so operators can spot\nreview-queue backlog at a glance.\n\n``operation_count`` is the sum of operations across all groups\nin scope; ``enabled_operation_count`` (G0.23-T5 / #1636) is the\nsubset of those rows whose per-op ``is_enabled`` flag is set --\nthe operations the dispatcher will actually resolve\n(dispatchable), vs ingested-but-disabled rows that only surface\nin review. The naming mirrors the ``*_group_count`` family above:\nthe unprefixed field is the total, the ``enabled_``-prefixed\nfield is the subset. Kept additive (rather than renaming the\ntotal to ``total_operation_count``) so existing consumers of\n``operation_count`` -- the CLI's ``listEntry`` decode shape and\nevery ``meho_connector_list`` client -- keep working unchanged.\nMind the axis difference between the two ``enabled_*`` fields:\n``enabled_group_count`` buckets groups by *review_status*, while\n``enabled_operation_count`` counts the per-op ``is_enabled`` bit\n(the dispatchability flag that survives connector-level\nenable/disable cycles via operator overrides). Useful for the\nCLI's ``meho connector list --status staged`` summary view and\nfor an LLM browsing the catalog: ``vmware-rest-9.0`` ingests\n~2,211 ops of which only a fraction are enabled, and before the\nsplit nothing on the row said which of the two numbers\n``operation_count`` was.\n\n``state`` (G0.9.1-T1 / #773) distinguishes *dispatchable* rows\n(``\"ingested\"`` \u2014 DB-backed, resolves through the dispatcher) from\n*registered-but-empty* rows (``\"registered\"`` \u2014 v2-registry entries\nwithout descriptor rows yet). Rows that wouldn't round-trip\nthrough the resolver at all (stale-impl_id DB rows, v2 entries\nwhose registry product disagrees with the parser's derived\nproduct) are filtered out before the response is built;\n``connector_id``s the listing emits are guaranteed to resolve\nthrough :func:`~meho_backplane.operations._lookup.connector_exists`\nwhen ``state == \"ingested\"``, and explicitly labelled\nnot-yet-dispatchable when ``state == \"registered\"``. Defaults to\n``\"ingested\"`` so existing call sites (tests, MCP fakes)\nconstruct rows without breakage.\n\n``next_step`` (G0.13-T3 / #1133) is the self-describing hint that\ncloses the workflow gap the v0.6.0 RDC dogfood surfaced (signal 11:\nhalf-registered connectors fail lookup with no in-product hint\nabout what verb closes the workflow). It is a :class:`NextStep`\nobject on ``state=\"registered\"`` rows and ``None`` on\n``state=\"ingested\"`` rows (no operator action remains for an\ningested connector) \u2014 with one exception: a tenant row stored under\na former product name (``vcf-logs`` rows for ``vrli-rest-9.0``,\n#4889) can never be called, so it ships ``dispatchable=False`` plus\na ``next_step`` naming ``meho connector delete <id>`` as the\nclean-up. For registered rows the hint is computed against the curated\nconnector-spec catalog (#743): when the catalog carries an entry\nfor the registry's ``(product, version)`` the verb points at\n``meho connector ingest --catalog ...``; otherwise it points at\nthe manual-mode flags. Defaults to ``None`` so existing\nconstruction call sites (tests, MCP fakes) continue to compile\nwithout explicit assignment.\n\n``kind`` (G0.28-T6 / #1979) is the authoring-mode discriminator \u2014\ntyped / ingested-shim / profiled / profiled-but-unreviewed \u2014 an\n**additive** sibling to ``state`` (which is deliberately left\nunchanged: it is the documented dispatch-resolution state machine\nwith its own consumers). ``dispatchable`` is the boolean roll-up of\nthe same projection: ``True`` for ``typed`` and ``profiled``,\n``False`` for ``ingested-shim`` and ``profiled-but-unreviewed``.\nTogether they let the operator console / CLI distinguish a working\nprofiled connector from a dead bare shim, which neither ``state``\nnor the count fields could express. Both default to the bare-shim\nreading (``kind=\"ingested-shim\"``, ``dispatchable=False``) so\nexisting construction call sites (tests, MCP fakes) keep working;\nthe listing always sets them explicitly. See\n:data:`ConnectorAuthoringKind`.\n\n``scope`` (#2474) is the named projection of ``tenant_id`` \u2014\n``\"builtin\"`` for ``tenant_id IS NULL`` rows, ``\"tenant\"`` for\ntenant-curated ones. It is additive and fully derivable from\n``tenant_id``, but surfacing it directly lets a consumer key on it\nwithout re-deriving. ``shadowed_by_tenant_scope`` is the precedence\nmarker: within a single response, a ``\"builtin\"`` row carries\n``True`` when a ``\"tenant\"`` row shares its ``connector_id`` **and**\n``product`` (the rule dispatch uses; a tenant row under a former\nproduct name, #4889, shares the id but shadows nothing) \u2014 i.e.\nthe built-in copy is *shadowed* by a tenant-scoped twin that\n:func:`~meho_backplane.operations._lookup.lookup_descriptor` resolves\nfirst (tenant-wins dispatch precedence). The two fields exist because\n``connector_id`` encodes only ``(impl_id, version)``, so scope twins\nfrom the #2085 re-ingest trap render the same id twice; the marker\ntells an agent exactly which row ``call_operation`` dispatches to and\nlets it count unique connectors. Both default to the built-in,\nunshadowed reading (``scope=\"builtin\"``, ``shadowed_by_tenant_scope\n=False``) so existing construction call sites (tests, MCP fakes)\nkeep working; the listing sets ``scope`` explicitly per row and\nstamps ``shadowed_by_tenant_scope`` in a post-pass over the full\nresponse. Invariant: within one response no two rows share\n``(connector_id, scope)``, with one exception: a tenant row stored\nunder a former product name (#4889) sits next to the tenant's\ncurrent copy of the same id; ``product`` tells the two apart. See\n:data:`ConnectorScope`."
       },
       "ConnectorListResponse": {
         "properties": {
@@ -28028,6 +28306,21 @@
             "type": "boolean",
             "nullable": true,
             "title": "Migrated"
+          },
+          "revision": {
+            "type": "string",
+            "nullable": true,
+            "title": "Revision"
+          },
+          "head": {
+            "type": "string",
+            "nullable": true,
+            "title": "Head"
+          },
+          "detail": {
+            "type": "string",
+            "nullable": true,
+            "title": "Detail"
           }
         },
         "type": "object",
@@ -28035,7 +28328,7 @@
           "migrated"
         ],
         "title": "DbStatus",
-        "description": "Database migration status.\n\n``migrated`` is ``True`` when the DB-migration-state probe reports\nhealthy (current Alembic revision matches head), ``False`` when\nthe probe reports unhealthy for any reason (DB unreachable,\nrevision diverged, ``alembic_version`` table absent). v0.1 ships\nno opinions on retry / repair \u2014 operators see the probe's\n``detail`` string on the ``/ready`` payload (and downstream tooling\nin T29 enforces the migration-runner contract). The field stays\n``bool | None`` for forward compatibility with response decoders\nthat were generated against the chassis-stage shape, but the\nhandler now always populates it from the probe."
+        "description": "Database migration status.\n\n``migrated`` is ``True`` when the DB-migration-state probe reports\nhealthy (current Alembic revision matches head), ``False`` when\nthe probe reports unhealthy for any reason (DB unreachable,\nrevision diverged, ``alembic_version`` table absent). v0.1 ships\nno opinions on retry / repair \u2014 operators see the probe's\n``detail`` string on the ``/ready`` payload (and downstream tooling\nin T29 enforces the migration-runner contract). The field stays\n``bool | None`` for forward compatibility with response decoders\nthat were generated against the chassis-stage shape, but the\nhandler now always populates it from the probe.\n\n``revision``, ``head`` and ``detail`` (#4830) carry the probe's\nvalues, so an operator can confirm an upgrade from ``meho status``\nwithout a shell into the pod: ``revision`` is the revision stamped\nin the database, ``head`` the revision this build expects, and\n``detail`` the same text ``/ready`` shows for the ``db`` check.\n``revision`` is ``None`` when the database has no revision or could\nnot be read; ``head`` is ``None`` when the migration scripts could\nnot be loaded. After a rollback ``revision`` is newer than ``head``\nwhile ``migrated`` stays ``True`` (``docs/codebase/migrations.md``,\n\"Rollback contract\"). The defaults keep older response decoders\nworking."
       },
       "DecideRequestBody": {
         "properties": {
@@ -29485,6 +29778,33 @@
         "title": "EventSourceUpdate",
         "description": "PATCH body. Every field optional; ``name`` / ``slug`` are absent.\n\n``name`` and ``slug`` are immutable (rename or re-slug = delete +\nre-create) because ``slug`` is a live routing key external senders are\nalready pointed at. Sending ``secret`` rotates the Vault secret in\nplace at the source's existing ``secret_ref`` -- a new KV-v2 version at\nthe same path, so the ingest path reads the new value on its next\nlookup with no downtime (#2880 acceptance criterion 2). Omitting\n``secret`` leaves the stored secret untouched."
       },
+      "FeatureStatus": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "configured": {
+            "type": "boolean",
+            "title": "Configured"
+          },
+          "missing_env": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Missing Env",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "configured"
+        ],
+        "title": "FeatureStatus",
+        "description": "One gated feature from ``/ready``'s ``features`` block (#4830).\n\n``configured`` is the feature's state; ``missing_env`` lists the\nnames of the settings it still needs. Names only, never values."
+      },
       "FilterPredicate": {
         "properties": {
           "field": {
@@ -30003,6 +30323,22 @@
             "type": "string",
             "title": "Sandbox Mode",
             "default": "off"
+          },
+          "readiness": {
+            "$ref": "#/components/schemas/ReadinessStatus",
+            "nullable": true
+          },
+          "approvals": {
+            "$ref": "#/components/schemas/ApprovalsStatus",
+            "nullable": true
+          },
+          "features": {
+            "items": {
+              "$ref": "#/components/schemas/FeatureStatus"
+            },
+            "type": "array",
+            "title": "Features",
+            "default": []
           }
         },
         "type": "object",
@@ -30013,7 +30349,7 @@
           "mcp_session_id_capture"
         ],
         "title": "HealthResponse",
-        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET.\n\n``pairings`` (#3025) carries the tenant's active add-on pairings \u2014\neach add-on's negotiated contract version, whether it is still\ncontract-compatible with this backplane build, and its last liveness\nheartbeat. The list is empty when nothing is paired; the empty-default\nkeeps response decoders generated against the pre-#3025 shape working.\n\n``granted_scopes`` (#3666) lists the OAuth scope names on the caller's\ntoken, sorted. It carries scope names only, never token material.\n``surface_summary`` (#3666) compares the working-surface tools the\nserver registers with the ones this session lists\n(:class:`SurfaceSummary`). Both have empty defaults so older response\ndecoders keep working; the handler always fills them.\n\n``sandbox_mode`` (#4622) is ``\"on\"`` or ``\"off\"``: whether this\ninstance lets a standing grant made in the web console cover a delete\nby a service principal. ``meho status`` prints one line when it is on.\nThe default ``\"off\"`` keeps older response decoders working."
+        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET.\n\n``pairings`` (#3025) carries the tenant's active add-on pairings \u2014\neach add-on's negotiated contract version, whether it is still\ncontract-compatible with this backplane build, and its last liveness\nheartbeat. The list is empty when nothing is paired; the empty-default\nkeeps response decoders generated against the pre-#3025 shape working.\n\n``granted_scopes`` (#3666) lists the OAuth scope names on the caller's\ntoken, sorted. It carries scope names only, never token material.\n``surface_summary`` (#3666) compares the working-surface tools the\nserver registers with the ones this session lists\n(:class:`SurfaceSummary`). Both have empty defaults so older response\ndecoders keep working; the handler always fills them.\n\n``sandbox_mode`` (#4622) is ``\"on\"`` or ``\"off\"``: whether this\ninstance lets a standing grant made in the web console cover a delete\nby a service principal. ``meho status`` prints one line when it is on.\nThe default ``\"off\"`` keeps older response decoders working.\n\n``readiness``, ``approvals`` and ``features`` (#4830) let an operator\nconfirm an upgrade through MEHO: the same checks ``/ready`` returns\n(:class:`ReadinessStatus`), the approval settings in force\n(:class:`ApprovalsStatus`) and the gated features with the names of\nthe settings they still need (:class:`FeatureStatus`). The route is\nOPERATOR-gated, so unlike ``/ready`` no metrics token is needed.\n``None`` / empty defaults keep older response decoders working; the\nhandler always fills them."
       },
       "InCompare": {
         "properties": {
@@ -30650,7 +30986,7 @@
           "db"
         ],
         "title": "LivenessResponse",
-        "description": "``GET /api/v1/health/live`` response body.\n\nThe cheap, low-privilege liveness surface: operator identity (from\nthe already-validated JWT \u2014 zero extra cost) plus DB-migration\nliveness from\n:func:`~meho_backplane.db.migrations.db_migration_probe`. No Vault\nfield on purpose \u2014 this model must never grow one. The federation\nproof lives exclusively on the OPERATOR-gated\n:class:`HealthResponse` route so a low-privilege monitoring\nprincipal can never drive a per-operator Vault credential\nfederation from the liveness path.\n\n``sensor_runner`` (#2763) rides here as well as on the deep check:\nthe external prober that watches the evaluation loop is precisely\nthe ``read_only`` monitoring principal this route exists for, and\npolling the deep route instead would federate a Vault credential\nand write an audit row per poll. The facet honours this handler's\nconstraints \u2014 an in-memory clock read; no connector, no credential,\nno secret."
+        "description": "``GET /api/v1/health/live`` response body.\n\nThe cheap, low-privilege liveness surface: operator identity (from\nthe already-validated JWT \u2014 zero extra cost) plus DB-migration\nliveness from\n:func:`~meho_backplane.db.migrations.db_migration_probe`. No Vault\nfield on purpose \u2014 this model must never grow one. The federation\nproof lives exclusively on the OPERATOR-gated\n:class:`HealthResponse` route so a low-privilege monitoring\nprincipal can never drive a per-operator Vault credential\nfederation from the liveness path.\n\n``sensor_runner`` (#2763) rides here as well as on the deep check:\nthe external prober that watches the evaluation loop is precisely\nthe ``read_only`` monitoring principal this route exists for, and\npolling the deep route instead would federate a Vault credential\nand write an audit row per poll. The facet honours this handler's\nconstraints \u2014 an in-memory clock read; no connector, no credential,\nno secret.\n\n``db`` shares :class:`DbStatus` with the deep check, so it carries\nthe migration revision too (#4830). It still never touches Vault."
       },
       "ManualStep": {
         "properties": {
@@ -31817,6 +32153,130 @@
         "title": "PreviewOperationBody",
         "description": "Request body for the ``POST /api/v1/operations/preview`` route.\n\nSame field shape as :class:`CallOperationBody` (#1683) -- a preview\nresolves the *same* op + target + params a real ``call_operation``\nwould, then returns the literal would-be HTTP request instead of\nsending it. Keeping the body identical means an operator who hit a\nwrite 4xx can re-issue the exact arguments against ``/preview`` to see\nwhat was put on the wire (the audit row persists only a hashed\n``params_hash``, so the request shape is otherwise unrecoverable).\n\n``target`` accepts the same three shapes as ``call_operation`` (bare\nstring, dict ``{\"name\": ...}``, or ``None``); see\n:class:`CallOperationBody` for the convention. A wrong-JSON-typed\n``target`` rides the ``target_invalid_type`` envelope instead of a 422\n(#2110; see :data:`_TargetArg`), identical to ``/call``.\n``extra=\"forbid\"`` keeps a typo in ``connector_id`` failing loud rather\nthan silently previewing nothing."
       },
+      "PreviewOperationResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "error",
+              "unavailable",
+              "rate_limited"
+            ],
+            "title": "Status",
+            "description": "ok: the would-be request (or the synthetic preview) resolved. error: a structured fault, see `error` and `extras.error_code`. unavailable: a typed/composite op outside the approval tiers has no request to preview. rate_limited: over the per-minute dispatch cap for this principal."
+          },
+          "op_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Op Id",
+            "description": "Echo of the requested op id."
+          },
+          "connector_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Connector Id",
+            "description": "The connector the preview resolved against. May differ from the requested id when a sibling catalog serves the target."
+          },
+          "source_kind": {
+            "type": "string",
+            "nullable": true,
+            "title": "Source Kind",
+            "description": "`ingested`, `typed` or `composite`; absent when the op is unknown."
+          },
+          "method": {
+            "type": "string",
+            "nullable": true,
+            "title": "Method",
+            "description": "Resolved HTTP verb (status=ok); `COMPOSITE` for a synthetic preview."
+          },
+          "resolved_path": {
+            "type": "string",
+            "nullable": true,
+            "title": "Resolved Path",
+            "description": "Fully resolved request path, placeholders substituted and mount prefix applied (status=ok); the op id for a synthetic preview."
+          },
+          "query": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Query",
+            "description": "Query-string params, or null when there are none (status=ok)."
+          },
+          "redacted_body": {
+            "title": "Redacted Body",
+            "description": "The would-be request body after the connector-boundary redaction pipeline; null when the op declares no body (status=ok)."
+          },
+          "preview_hash": {
+            "type": "string",
+            "nullable": true,
+            "title": "Preview Hash",
+            "description": "Stable SHA-256 over the resolved request (status=ok). Present it as `preview_hash` on the governed call of a destructive-tier op."
+          },
+          "safety_level": {
+            "type": "string",
+            "nullable": true,
+            "title": "Safety Level",
+            "description": "The op's risk level: safe, caution, dangerous or destructive. Present on every preview whose op resolved (every status except unknown_op / unknown_connector)."
+          },
+          "requires_approval": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Requires Approval",
+            "description": "True when the op is marked as needing a human approval before it runs. Present whenever `safety_level` is."
+          },
+          "policy_verdict": {
+            "$ref": "#/components/schemas/PermissionVerdict",
+            "nullable": true,
+            "description": "What MEHO would do with this call for this caller and target: run it at once (auto-execute), wait for a second person's approval (needs-approval) or refuse it (deny). Decided the same way the call is decided; nothing is written. Present whenever `safety_level` is."
+          },
+          "policy_reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Policy Reason",
+            "description": "The policy gate's reason for the verdict; null when it gives none (a person's call that runs at once)."
+          },
+          "proposed_effect": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Proposed Effect",
+            "description": "The plan of what the op will change, the same block the approval request shows. Present only on a synthetic preview whose plan can be built without contacting the target."
+          },
+          "plan_shown": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Plan Shown",
+            "description": "Synthetic preview only: true when `proposed_effect` is present. False means the plan needs the target and is shown on the approval request."
+          },
+          "plan_note": {
+            "type": "string",
+            "nullable": true,
+            "title": "Plan Note",
+            "description": "Plain reason the plan is not shown (when `plan_shown` is false)."
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "title": "Error",
+            "description": "Human-readable fault (status=error / unavailable / rate_limited)."
+          },
+          "extras": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Extras",
+            "description": "Structured fault details, for example `error_code` or `validation_errors`."
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "PreviewOperationResponse",
+        "description": "Response envelope of ``POST /api/v1/operations/preview`` (#4923).\n\nTypes the envelope :func:`preview_operation` returns so the OpenAPI\ndocument and the generated clients know its fields. The route serialises\nonly the keys the envelope carries (``response_model_exclude_unset``):\nan ``error`` envelope has no ``method``, an ingested ``ok`` preview has no\n``plan_shown``, and so on. ``extra=\"allow\"`` keeps the keys a\ntarget-resolution or rate-limit envelope adds (``duration_ms``,\n``retry_after_seconds``, ...) on the wire unchanged."
+      },
       "PrincipalKind": {
         "type": "string",
         "enum": [
@@ -32013,6 +32473,89 @@
         ],
         "title": "ReadDocsRequest",
         "description": "POST body for ``/api/v1/read_docs``, the same fields as the MCP tool.\n\n``collection`` is typed optional so a missing value gets the docs\nsurfaces' own 422 naming the mandatory scope. ``product`` / ``version``\nare needed only on a collection whose scope gates send hard filters: the\nhandle is bound to the filters of the hit's search. So a caller passes\nthem only for a hit from a single-collection search that used them, and\nleaves them out for a hit from a cross-collection search, which ignores\nthem. ``extra=\"forbid\"`` rejects unknown fields."
+      },
+      "ReadScopeEntry": {
+        "properties": {
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Target Id",
+            "description": "Allow reads on exactly this target."
+          },
+          "target_product": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Target Product",
+            "description": "Selector: allow reads on every target whose product equals this value."
+          },
+          "target_name_pattern": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Target Name Pattern",
+            "description": "Selector: allow reads on every target whose name matches this fnmatch glob."
+          },
+          "no_target": {
+            "type": "boolean",
+            "title": "No Target",
+            "description": "Allow safe calls that have no target. Not set: such calls are refused.",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ReadScopeEntry",
+        "description": "One entry of a read scope. Exactly one shape per entry.\n\n* ``target_id`` -- exactly that target.\n* ``target_product`` and/or ``target_name_pattern`` -- a selector:\n  ``product`` exact, ``name`` an ``fnmatch`` glob. It is checked at\n  call time, so a target registered after the scope was set can match.\n* ``no_target: true`` -- allow ``safe`` calls that have no target."
+      },
+      "ReadinessCheck": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "ok"
+        ],
+        "title": "ReadinessCheck",
+        "description": "One readiness check, as ``/ready`` reports it (#4830)."
+      },
+      "ReadinessStatus": {
+        "properties": {
+          "ready": {
+            "type": "boolean",
+            "title": "Ready"
+          },
+          "checks": {
+            "items": {
+              "$ref": "#/components/schemas/ReadinessCheck"
+            },
+            "type": "array",
+            "title": "Checks",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "ready"
+        ],
+        "title": "ReadinessStatus",
+        "description": "The ``/ready`` verdict and its checks (#4830).\n\nBuilt from :func:`meho_backplane.health.readiness_snapshot`, the\nhelper the web console's dashboard already uses, so ``meho status``\nand ``meho_status`` show the same checks as ``/ready`` \u2014 which a\ndeployment may block at its ingress, and which hides its\n``features`` block from callers without the metrics token."
       },
       "ReassignRunRequest": {
         "properties": {
@@ -32553,16 +33096,14 @@
           },
           "limit": {
             "type": "integer",
-            "maximum": 500.0,
             "minimum": 1.0,
             "title": "Limit",
-            "description": "Page size (paging mode). Default 50; max 500. Matches the `result_query` MCP tool's upper bound.",
-            "default": 50
+            "description": "Page size. Rows, and the items of an array value read by `path`: default 50, at most 500 (a bigger value is refused). Characters of a text value read by `path`: default as many as fit the output budget; a bigger part is cut to fit. Matches the `result_query` MCP tool."
           },
           "query": {
             "$ref": "#/components/schemas/ResultQuerySpec",
             "nullable": true,
-            "description": "Optional structured query. When present, the handle is queried server-side (filter / select / group_by / aggregate / order_by / limit) as one bounded read-only SELECT and `offset` / `limit` are ignored. Every referenced field must be a column on the handle; there is no raw-SQL argument. For a document handle, or for the fields a rows handle left out of its inline summary, send only `path` (an RFC 6901 JSON Pointer); an array value then pages with `offset` / `limit`."
+            "description": "Optional structured query. When present, the handle is queried server-side (filter / select / group_by / aggregate / order_by / limit) as one bounded read-only SELECT and `offset` / `limit` are ignored. Every referenced field must be a column on the handle; there is no raw-SQL argument. For a document handle, or for the fields a rows handle left out of its inline summary, send only `path` (an RFC 6901 JSON Pointer); an array value then pages with `offset` / `limit`, and a text value comes back in parts of `limit` characters from character `offset`."
           }
         },
         "additionalProperties": false,
@@ -32571,7 +33112,7 @@
           "handle_id"
         ],
         "title": "ResultQueryBody",
-        "description": "POST body for ``/api/v1/operations/result-query`` (#3179).\n\nThe REST twin of the MCP ``result_query`` tool's ``inputSchema``:\n``handle_id`` is the UUID minted onto a reduced ``/call`` response's\n``result.handle.handle_id`` / ``fetch_more.drill_in.example_call``, and\n``offset`` / ``limit`` window the spilled set. The bounds mirror the MCP\nschema (``offset >= 0``; ``1 <= limit <= MAX_LIMIT``) so the two surfaces\nvalidate identically. ``extra=\"forbid\"`` rejects unknown body fields with\na 422, matching the sibling ``CallOperationBody`` posture.\n\n``query`` (#3366) is the optional structured query: when present, the\nhandle is queried server-side as one bounded read-only ``SELECT``\n(filter / project / group / aggregate) and ``offset`` / ``limit`` are\nignored. It mirrors the MCP tool's ``query`` argument exactly (the same\n:class:`~meho_backplane.jsonflux.query.contract.ResultQuerySpec`), so the\ntwo surfaces stay in lockstep; there is deliberately no raw-SQL argument\non either."
+        "description": "POST body for ``/api/v1/operations/result-query`` (#3179).\n\nThe REST twin of the MCP ``result_query`` tool's ``inputSchema``:\n``handle_id`` is the UUID minted onto a reduced ``/call`` response's\n``result.handle.handle_id`` / ``fetch_more.drill_in.example_call``, and\n``offset`` / ``limit`` window the spilled set. The bounds mirror the MCP\nschema (``offset >= 0``; ``limit >= 1``) so the two surfaces validate\nidentically; the row cap (``MAX_LIMIT``) is checked by the shared core,\nbecause a text value read by ``path`` counts characters and one part\nmay hold more (#4994). ``extra=\"forbid\"`` rejects unknown body fields\nwith a 422, matching the sibling ``CallOperationBody`` posture.\n\n``query`` (#3366) is the optional structured query: when present, the\nhandle is queried server-side as one bounded read-only ``SELECT``\n(filter / project / group / aggregate) and ``offset`` / ``limit`` are\nignored. It mirrors the MCP tool's ``query`` argument exactly (the same\n:class:`~meho_backplane.jsonflux.query.contract.ResultQuerySpec`), so the\ntwo surfaces stay in lockstep; there is deliberately no raw-SQL argument\non either."
       },
       "ResultQuerySpec": {
         "properties": {
@@ -33298,6 +33839,11 @@
             "format": "date-time",
             "nullable": true,
             "title": "Last Seen At"
+          },
+          "wire_version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Wire Version"
           }
         },
         "type": "object",
@@ -34592,6 +35138,65 @@
         "title": "ServiceGrantRead",
         "description": "Row shape every accessor returns.\n\n``from_attributes=True`` allows direct construction from an ORM row.\nExposes ``revoked_at`` / ``revoked_by_sub`` / ``revoked_reason`` so\ncallers can tell a live grant from a revoked one in the history, and why\nit was revoked.\n\n``orphaned`` / ``orphan_remediation`` are filled in by the service when\nit reads the grant (see\n:func:`~meho_backplane.operations.service_grants.classify_orphaned_grants`);\nbuilding the shape straight from an ORM row leaves them at the\nnot-orphaned default."
       },
+      "ServiceReadScopeRead": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "principal_sub": {
+            "type": "string",
+            "title": "Principal Sub"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/ReadScopeEntry"
+            },
+            "type": "array",
+            "title": "Entries"
+          },
+          "set_by_sub": {
+            "type": "string",
+            "title": "Set By Sub"
+          },
+          "set_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Set At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "principal_sub",
+          "entries",
+          "set_by_sub",
+          "set_at"
+        ],
+        "title": "ServiceReadScopeRead",
+        "description": "The stored read scope of one service principal."
+      },
+      "ServiceReadScopeSet": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/ReadScopeEntry"
+            },
+            "type": "array",
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Entries"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "title": "ServiceReadScopeSet",
+        "description": "Body for ``PUT /api/v1/service-principals/read-scopes/{principal_sub}``.\n\nReplaces the whole scope. At least one entry: a scope with no entry\nwould refuse every read, which is a job for revoking the principal."
+      },
       "ShowTemplateResponse": {
         "properties": {
           "slug": {
@@ -35332,6 +35937,7 @@
             "title": "Product",
             "enum": [
               "argocd",
+              "azure",
               "bind9",
               "fleet",
               "gcloud",
@@ -35356,13 +35962,17 @@
               "proxmox",
               "rabbitmq",
               "rke2",
+              "salt",
               "sddc",
+              "srm",
               "tempo",
               "vault",
               "vcd",
               "vcfa",
               "vmware",
+              "vr",
               "vrli",
+              "vro",
               "vrops",
               "windns",
               "winsrv",
@@ -37100,6 +37710,10 @@
     },
     {
       "name": "service-principal-grants",
+      "x-maturity": "ga"
+    },
+    {
+      "name": "service-principal-read-scopes",
       "x-maturity": "ga"
     },
     {

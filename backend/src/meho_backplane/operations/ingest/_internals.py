@@ -64,6 +64,7 @@ __all__ = [
     "bulk_enable_read_ops",
     "cascade_is_enabled",
     "enable_time_auto_shim_warnings",
+    "legacy_tenant_products",
     "load_group",
     "load_groups",
     "load_op",
@@ -290,6 +291,42 @@ async def scope_has_rows(
     stmt = stmt.limit(1)
     result = await session.execute(stmt)
     return result.scalar_one_or_none() is not None
+
+
+async def legacy_tenant_products(
+    session: AsyncSession,
+    scope: ConnectorScope,
+) -> list[str]:
+    """Return the former product names the tenant's rows for this id are stored under.
+
+    A ``connector_id`` fixes ``(version, impl_id)``; the product is read
+    from the id's first segment. Rows a tenant ingested before a product
+    rename (``vcf-logs`` rows for ``vrli-rest-9.0``, now ``vrli``) share
+    the id but not the product, so every product-scoped probe misses
+    them (#4889). This probe keys on ``(tenant_id, version, impl_id)``
+    only and returns the distinct products that differ from
+    ``scope.product``, sorted, across both tables. Empty for the
+    built-in scope (``tenant_id is None``): built-in rows were moved to
+    the current product by migrations, and the built-in copy is shared,
+    so no "old copy" reading applies to it.
+    """
+    if scope.tenant_id is None:
+        return []
+    products: set[str] = set()
+    for model in (EndpointDescriptor, OperationGroup):
+        stmt = (
+            select(model.product)
+            .where(
+                model.tenant_id == scope.tenant_id,
+                model.version == scope.version,
+                model.impl_id == scope.impl_id,
+                model.product != scope.product,
+            )
+            .distinct()
+        )
+        result = await session.execute(stmt)
+        products.update(str(value) for value in result.scalars().all())
+    return sorted(products)
 
 
 async def load_group(

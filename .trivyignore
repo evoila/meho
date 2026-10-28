@@ -1,0 +1,9 @@
+# Dated exceptions for the image security scan (trivy).
+# The image workflow (.github/workflows/image.yml) reads this file.
+# Each line is one finding id and the day its exception ends:
+#   <finding id> exp:<YYYY-MM-DD>
+# On that day trivy stops ignoring the finding by itself. If the finding
+# is still in the image, the scan fails again.
+#
+# No exceptions at the moment. Every CRITICAL or HIGH finding with a fix
+# fails the scan.

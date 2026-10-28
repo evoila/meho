@@ -54,7 +54,12 @@ func newStatusCmd() *cobra.Command {
 		Long: "status calls the backplane's authenticated health endpoint " +
 			"(/api/v1/health) with the bearer token stored by `meho login` " +
 			"and prints a summary of the federation chain (operator identity, " +
-			"Vault reachability, DB migration state).\n\n" +
+			"Vault reachability, DB migration state with the database revision " +
+			"and the revision this version expects), the readiness checks the " +
+			"backplane's /ready endpoint reports, the approval settings in " +
+			"force (who must approve, approval key state) and the gated " +
+			"features that still need a setting. After an upgrade this is " +
+			"how to confirm the database reached the new revision.\n\n" +
 			"With --watch the command subscribes to /api/v1/feed and streams " +
 			"one rendered line per broadcast event until the operator hits " +
 			"Ctrl-C. Filters (--op-class, --principal, --target) forward to " +

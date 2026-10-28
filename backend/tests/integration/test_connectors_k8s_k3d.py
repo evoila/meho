@@ -500,6 +500,24 @@ async def test_deployment_list_against_k3s_kube_system(
 
 
 @pytest.mark.asyncio
+async def test_job_list_against_k3s_all_namespaces(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``k8s.job.list --all-namespaces`` reaches ``BatchV1Api`` on a real cluster.
+
+    A fresh k3s cluster has no Jobs, so the assertion is on the envelope
+    shape, not on a row count: the call must succeed and return the
+    ``rows`` + ``total`` pair every list op emits.
+    """
+    connector, target = k3s_connector
+    result = await connector.k8s_job_list(_make_k3d_operator(), target, {"all_namespaces": True})
+    assert isinstance(result["rows"], list)
+    assert result["total"] == len(result["rows"])
+    for row in result["rows"]:
+        assert row["state"] in {"running", "complete", "failed", "suspended"}
+
+
+@pytest.mark.asyncio
 async def test_deployment_info_against_k3s_returns_full_detail(
     k3s_connector: tuple[KubernetesConnector, _K3sTarget],
 ) -> None:
@@ -1137,3 +1155,211 @@ async def test_cordon_uncordon_node_against_k3s(
     finally:
         uncordoned = await connector.k8s_cordon(op, target, {"name": node_name, "uncordon": True})
         assert uncordoned["unschedulable"] is False
+
+
+# ---------------------------------------------------------------------------
+# k8s.job.info -- live k3s exercise: a Job that fails after its retries
+# and a Job that succeeds, read back through the connector.
+# ---------------------------------------------------------------------------
+
+
+def _busybox_image() -> str:
+    """Return a busybox image the k3s node can pull.
+
+    ``MEHO_TEST_BUSYBOX_IMAGE`` wins. Otherwise, when ``MEHO_TEST_K3S_IMAGE``
+    points at a registry mirror (``<mirror>/rancher/k3s:<tag>``), the
+    busybox image k3s itself ships is taken from the same mirror: a
+    cluster that cannot reach Docker Hub can usually reach that mirror.
+    Without either, Docker Hub's ``busybox:1.36`` is used.
+    """
+    explicit = os.environ.get("MEHO_TEST_BUSYBOX_IMAGE")
+    if explicit:
+        return explicit
+    mirror, found, _ = os.environ.get("MEHO_TEST_K3S_IMAGE", "").partition("/rancher/k3s")
+    if found and mirror:
+        return f"{mirror}/rancher/mirrored-library-busybox:1.36.1"
+    return "busybox:1.36"
+
+
+async def _newest_pod_reasons(
+    connector: KubernetesConnector, target: _K3sTarget, info: dict[str, Any]
+) -> list[str | None]:
+    """Return the container waiting / terminated reasons of the Job's newest pod."""
+    if not info["pods"]:
+        return []
+    detail = await connector.k8s_pod_info(
+        _make_k3d_operator(),
+        target,
+        {"pod_name": info["pods"][0]["name"], "namespace": "default"},
+    )
+    return [cs["reason"] for cs in detail["container_statuses"]]
+
+
+async def _wait_for_job_to_finish(
+    connector: KubernetesConnector, target: _K3sTarget, job_name: str
+) -> dict[str, Any]:
+    """Poll ``k8s.job.info`` until the Job is complete or failed (or skip).
+
+    The skip message names the newest pod's container reason (for example
+    ``ImagePullBackOff``) so a skipped run in CI says why.
+    """
+    import asyncio as _asyncio
+
+    for _ in range(90):
+        info = await connector.k8s_job_info(
+            _make_k3d_operator(), target, {"job_name": job_name, "namespace": "default"}
+        )
+        if info["state"] in {"complete", "failed"}:
+            return info
+        await _asyncio.sleep(2.0)
+    reasons = await _newest_pod_reasons(connector, target, info)
+    pytest.skip(
+        f"Job {job_name} did not finish within 180s; state={info['state']!r}, "
+        f"pods={len(info['pods'])}, newest pod container reasons={reasons!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_job_info_against_k3s_reports_failed_and_complete_jobs(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """A Job that exits 1 with ``backoffLimit: 1`` reads as failed with
+    ``BackoffLimitExceeded`` and two failed pods; a Job that runs ``true``
+    reads as complete with a ``completion_time``.
+    """
+    from kubernetes_asyncio import client as _client
+
+    connector, target = k3s_connector
+    api_client = await connector._get_api_client(target, _make_k3d_operator())
+    batch_v1 = _client.BatchV1Api(api_client)
+    image = _busybox_image()
+    suffix = uuid4().hex[:6]
+    failing = f"meho-job-fail-{suffix}"
+    succeeding = f"meho-job-ok-{suffix}"
+    manifests = {
+        failing: (["sh", "-c", "exit 1"], 1),
+        succeeding: (["true"], 0),
+    }
+    for name, (command, backoff_limit) in manifests.items():
+        body = {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {"name": name, "namespace": "default"},
+            "spec": {
+                "backoffLimit": backoff_limit,
+                "template": {
+                    "spec": {
+                        "restartPolicy": "Never",
+                        "containers": [{"name": "run", "image": image, "command": command}],
+                    }
+                },
+            },
+        }
+        await batch_v1.create_namespaced_job(namespace="default", body=body)
+
+    try:
+        failed = await _wait_for_job_to_finish(connector, target, failing)
+        assert failed["state"] == "failed"
+        reasons = {c["reason"] for c in failed["conditions"] if c["type"] == "Failed"}
+        assert "BackoffLimitExceeded" in reasons, failed["conditions"]
+        assert failed["pods_failed"] == 2
+        assert len(failed["pods"]) == 2
+        assert failed["pods_truncated"] is False
+        assert failed["completion_time"] is None
+
+        complete = await _wait_for_job_to_finish(connector, target, succeeding)
+        assert complete["state"] == "complete"
+        assert complete["completion_time"] is not None
+        assert complete["pods_succeeded"] == 1
+
+        listing = await connector.k8s_job_list(
+            _make_k3d_operator(), target, {"namespace": "default"}
+        )
+        states = {row["name"]: row["state"] for row in listing["rows"]}
+        assert states[failing] == "failed"
+        assert states[succeeding] == "complete"
+    finally:
+        for name in manifests:
+            with contextlib.suppress(Exception):
+                await batch_v1.delete_namespaced_job(
+                    name=name,
+                    namespace="default",
+                    body=_client.V1DeleteOptions(propagation_policy="Background"),
+                )
+
+
+# ---------------------------------------------------------------------------
+# k8s.cronjob.run -- live k3s exercise: a Job made from a CronJob's template
+# finishes, and the CronJob owns it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cronjob_run_against_k3s_creates_a_job_owned_by_the_cronjob(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``k8s.cronjob.run`` on a suspended CronJob that runs ``true`` makes a
+    Job; ``k8s.job.info`` then reads it as complete and its owner is the
+    CronJob. The CronJob is suspended so its schedule never starts a second
+    Job during the test.
+    """
+    from kubernetes_asyncio import client as _client
+
+    connector, target = k3s_connector
+    api_client = await connector._get_api_client(target, _make_k3d_operator())
+    batch_v1 = _client.BatchV1Api(api_client)
+    cronjob_name = f"meho-cronjob-{uuid4().hex[:6]}"
+    body = {
+        "apiVersion": "batch/v1",
+        "kind": "CronJob",
+        "metadata": {"name": cronjob_name, "namespace": "default"},
+        "spec": {
+            "schedule": "0 0 1 1 *",
+            "suspend": True,
+            "jobTemplate": {
+                "metadata": {"labels": {"app": "meho-cronjob-test"}},
+                "spec": {
+                    "backoffLimit": 0,
+                    "template": {
+                        "spec": {
+                            "restartPolicy": "Never",
+                            "containers": [
+                                {"name": "run", "image": _busybox_image(), "command": ["true"]}
+                            ],
+                        }
+                    },
+                },
+            },
+        },
+    }
+    created_cronjob = await batch_v1.create_namespaced_cron_job(namespace="default", body=body)
+
+    try:
+        result = await connector.k8s_cronjob_run(
+            _make_k3d_operator(), target, {"cronjob": cronjob_name, "namespace": "default"}
+        )
+        assert result["created"] is True
+        assert result["cronjob"] == cronjob_name
+        job_name = result["job_name"]
+        assert job_name.startswith(f"{cronjob_name}-manual-")
+
+        info = await _wait_for_job_to_finish(connector, target, job_name)
+        assert info["state"] == "complete"
+        assert info["pods_succeeded"] == 1
+
+        job = await batch_v1.read_namespaced_job(name=job_name, namespace="default")
+        assert job.metadata.labels["app"] == "meho-cronjob-test"
+        assert job.metadata.annotations["cronjob.kubernetes.io/instantiate"] == "manual"
+        (owner,) = job.metadata.owner_references
+        assert owner.kind == "CronJob"
+        assert owner.name == cronjob_name
+        assert owner.uid == created_cronjob.metadata.uid
+        assert owner.controller is True
+    finally:
+        # Deleting the CronJob with a Background cascade reaps the owned Job.
+        with contextlib.suppress(Exception):
+            await batch_v1.delete_namespaced_cron_job(
+                name=cronjob_name,
+                namespace="default",
+                body=_client.V1DeleteOptions(propagation_policy="Background"),
+            )

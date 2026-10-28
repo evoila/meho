@@ -61,6 +61,9 @@ from tests.test_connectors_vmware_rest_composites_write_e2e import (
     _FakeVmwareTarget,
     _make_operator,
     _RecordingVmwareConnector,
+    _vm_listing_row,
+    _vmomi_cluster_drs,
+    _vmomi_host_parent,
     _vmomi_retrieve_result,
     _vmomi_task_moref,
 )
@@ -296,17 +299,19 @@ def _guest_program_exit_unknown(mp: pytest.MonkeyPatch) -> Any:
 def _host_evacuate_aborted(mp: pytest.MonkeyPatch) -> Any:
     del mp
     recorder = _RecordingVmwareConnector()
-    # The VM row carries no cluster, so it cannot be migrated.
-    recorder.responses["/vcenter/vm"] = {"value": [{"vm": "vm-1"}]}
+    # DRS is manual and has no suggestion for the running VM, so MEHO cannot
+    # move it (no_recommendation) and stops before maintenance mode (#4895).
+    recorder.responses["/vcenter/vm"] = {"value": [_vm_listing_row("vm-1")]}
+    recorder.vmomi_responses["HostSystem"] = _vmomi_host_parent("host-1", "domain-c1")
+    recorder.vmomi_responses["ClusterComputeResource"] = _vmomi_cluster_drs("domain-c1", "manual")
     return recorder
 
 
 def _host_evacuate_partial(mp: pytest.MonkeyPatch) -> Any:
-    del mp
-    recorder = _RecordingVmwareConnector()
-    # The VM row carries no cluster. With partial failure allowed, the host
-    # still enters maintenance and the VM is reported as left behind.
-    recorder.responses["/vcenter/vm"] = {"value": [{"vm": "vm-1"}]}
+    # Same no_recommendation, with partial failure allowed: the host enters
+    # maintenance, the listing after the task still shows the running VM, so
+    # it is reported as left behind.
+    recorder = _host_evacuate_aborted(mp)
     recorder.vmomi_responses["/HostSystem/host-1/EnterMaintenanceMode_Task"] = _vmomi_task_moref(
         "t-1"
     )
@@ -651,6 +656,38 @@ def _no_reads(mp: pytest.MonkeyPatch) -> Any:
     return _RecordingVmwareConnector()
 
 
+def _host_runtime(connection_state: str, in_maintenance: bool) -> dict[str, Any]:
+    """A ``HostSystem`` runtime read with the two leaves the exit handler checks first."""
+    return {
+        "objects": [
+            {
+                "obj": {"type": "HostSystem", "value": "host-1"},
+                "propSet": [
+                    {"name": "runtime.connectionState", "val": connection_state},
+                    {"name": "runtime.inMaintenanceMode", "val": in_maintenance},
+                ],
+            }
+        ]
+    }
+
+
+def _host_not_in_maintenance(mp: pytest.MonkeyPatch) -> Any:
+    # host.maintenance.exit (#4967): a host that is not in maintenance mode
+    # answers ``unchanged``; nothing is sent.
+    del mp
+    recorder = _RecordingVmwareConnector()
+    recorder.vmomi_responses["HostSystem"] = _host_runtime("connected", False)
+    return recorder
+
+
+def _host_not_connected(mp: pytest.MonkeyPatch) -> Any:
+    # A host vCenter cannot reach is refused before any change.
+    del mp
+    recorder = _RecordingVmwareConnector()
+    recorder.vmomi_responses["HostSystem"] = _host_runtime("notResponding", True)
+    return recorder
+
+
 _SOFT_REFUSALS: list[tuple[str, dict[str, Any], Setup, str]] = [
     ("vmware.composite.cluster.drs_rule.create", _DRS_RULE_PARAMS, _drs_rule_exists, "rule_exists"),
     ("vmware.composite.vm.resize", {"vm": "vm-1", "cpu_count": 1}, _vm_resize_reads, "no_change"),
@@ -665,6 +702,18 @@ _SOFT_REFUSALS: list[tuple[str, dict[str, Any], Setup, str]] = [
         {"vm": "vm-1", "snapshot_name": "missing"},
         _vm_snapshot_revert_timeout,
         "not_found",
+    ),
+    (
+        "vmware.composite.host.maintenance.exit",
+        {"host": "host-1"},
+        _host_not_in_maintenance,
+        "unchanged",
+    ),
+    (
+        "vmware.composite.host.maintenance.exit",
+        {"host": "host-1"},
+        _host_not_connected,
+        "not_connected",
     ),
 ]
 

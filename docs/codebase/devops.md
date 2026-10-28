@@ -193,6 +193,16 @@ deployment path. Consumers mirroring through a private registry override
 `image.repository` to point at their mirror and (if needed) populate
 `imagePullSecrets`.
 
+For an install with no internet, two global settings reach every pod of
+the chart and its subcharts, the `helm test` pods too (#4100):
+`global.imageRegistry` replaces the registry host of every image, and
+`global.imagePullSecrets` is added to every pod (with the parent's own
+`imagePullSecrets`). Every image line uses the helper `meho.core.image`
+and every pod uses `meho.core.imagePullSecrets` (both in
+`templates/_core-postgres-helpers.tpl`); a new pod must use both, or
+`backend/tests/test_chart_image_registry.py` fails. The recipe is in
+[`../deploying.md`](../deploying.md#install-with-no-internet).
+
 ### Probes
 
 The Deployment renders `startupProbe`, `livenessProbe`, and
@@ -261,7 +271,10 @@ egress rules to:
 
 - Postgres — `tcp/5432` to `networkPolicy.postgresCIDR`
 - Vault — `tcp/8200` to `networkPolicy.vaultCIDR`
-- Keycloak — `tcp/443` to `networkPolicy.keycloakCIDR`
+- Keycloak — `tcp/443` to `networkPolicy.keycloakCIDR`; with the built-in
+  Keycloak (`coreKeycloak.enabled`) instead `tcp/8080` to a `podSelector`
+  matching its pod (`app.kubernetes.io/name: keycloak` and the release),
+  and `keycloakCIDR` is not used (#4591)
 - Broadcast subchart — `tcp/<broadcast.service.port>` (default 6379) to a
   `podSelector` matching the in-cluster broadcast subchart's selector
   labels (`app.kubernetes.io/name: broadcast`); the rule is conditional
@@ -689,8 +702,9 @@ While the built-in Keycloak is on, leave
 `checkRunner.clientSecret.secretName` empty (or set them to the core name):
 the subchart cannot read these parent keys, so with another name the
 secrets Job would check that Secret, not make the core one, and the
-Keycloak pod would wait for it forever. The render-time check for this
-lands with #4591. The pod does not start until all five exist.
+Keycloak pod would wait for it forever. The render stops with one sentence
+that names the key and the expected Secret (#4591). The pod does not start
+until all five exist.
 
 **What it renders.**
 
@@ -795,13 +809,123 @@ built-in client scopes (`basic`, `profile`, `roles`, …) even though the
 file lists its own `mcp:*` scopes; this attribute needs Keycloak 26.6 or
 newer.
 
+#### How the backplane uses it (#4591)
+
+With `coreKeycloak.enabled` on, the chart sets every Keycloak setting of the
+backplane itself (helper `meho.keycloakSettings` in
+`templates/_core-keycloak.tpl`). The values come from the subchart and the
+realm file, not from `config.*` or `keycloakAdmin.*`:
+
+| Setting | Value |
+| --- | --- |
+| `KEYCLOAK_ISSUER_URL` | `https://<coreKeycloak.hostname>/auth/realms/meho`, the `iss` of every token |
+| `KEYCLOAK_DISCOVERY_URL` | `http://<release>-keycloak:8080/auth/realms/meho`, the Service |
+| `KEYCLOAK_AUDIENCE` | `meho-backplane` |
+| `KEYCLOAK_CLI_CLIENT_ID` | `meho-cli` |
+| `UI_KEYCLOAK_CLIENT_ID` | `meho-web` |
+| `KEYCLOAK_ADMIN_URL` | `http://<release>-keycloak:8080/auth/admin/realms/meho` |
+| `KEYCLOAK_ADMIN_CLIENT_ID` | `meho-admin` |
+| `KEYCLOAK_ADMIN_CLIENT_SECRET` | Secret `<release>-core-keycloak-admin`, key `client_secret` |
+
+The `KEYCLOAK_ADMIN_*` settings render whether or not
+`keycloakAdmin.enabled` is set. `KEYCLOAK_DISCOVERY_URL` is the realm base
+URL for the backplane's own calls: the discovery document (keys, readiness
+probe, web console endpoints) and the token endpoint (admin client, check
+runner, agent runs). The discovery document fetched there names the public
+issuer and authorization endpoint and Service-URL keys and token endpoints,
+so tokens keep the public `iss`, browsers keep the public login pages, and
+no pod calls the public address. The issuer check, `/api/v1/auth-config`
+and `/.well-known/oauth-protected-resource` keep the public issuer. With
+the built-in Keycloak off, none of this renders: `KEYCLOAK_DISCOVERY_URL`
+is absent and every other setting comes from values as before, so a
+bring-your-own render is byte for byte the same
+(`backend/tests/test_chart_bring_your_own_render.py`).
+
+The render fails with one sentence when the values contradict the built-in
+Keycloak:
+
+- `config.keycloakIssuerUrl` or `keycloak.issuer` is set (the chart sets
+  the issuer);
+- `corePostgres.existingSecrets.keycloak`,
+  `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` or
+  `checkRunner.clientSecret.secretName` names a Secret other than the
+  matching `<release>-core-…` one, for example
+  `uiConsole.secretName must be empty or "meho-core-ui-auth" while
+  coreKeycloak.enabled is on: the built-in Keycloak reads only that
+  Secret.`
+
+The schema needs `keycloak.issuer`, `config.keycloakIssuerUrl` and
+`config.keycloakAudience` only while the built-in Keycloak is off.
+
+**HTTPS inside the cluster.** The realm keeps `sslRequired: external`, and
+pods still call the Service over plain HTTP. That works for every pod
+address: Keycloak's check (`TokenEndpoint.checkSsl`, Keycloak 26.8.1) looks
+at the scheme of the frontend address, which `KC_HOSTNAME=https://<host>/auth`
+fixes to https. Without `KC_HOSTNAME` the request's own scheme and source
+address decide, and a plain HTTP call from a non-private address would get
+"HTTPS required". Both cases are tested against a real Keycloak in
+`backend/tests/integration/test_core_keycloak_realm_import.py`
+(`sslRequired: all` still passes with the fixed address and fails without
+it). Browsers and the CLI come through the ingress, which ends TLS.
+
+**Trust inside the cluster.** With the built-in Keycloak, every call from a
+pod to Keycloak is plain HTTP. Nothing on this path is encrypted:
+
+- the signing keys the backplane uses to check every token;
+- the client secrets of `meho-admin`, the agents and the check runner, and
+  the tokens Keycloak sends back;
+- the web console's login code exchange and the user tokens it returns;
+- the realm setup Job's bootstrap client secret.
+
+This matters for two reasons:
+
+- `meho-admin` can manage the realm's clients and users. Anyone who reads
+  its secret can make any person a MEHO admin.
+- Anyone who can serve fake signing keys to the backplane can sign tokens
+  that the backplane accepts, for any tenant and any role.
+
+`sslRequired` does not protect this path (see above).
+
+What protects it today:
+
+- The backplane's own NetworkPolicy (`networkPolicy.enabled`, on by
+  default) lets the backplane connect only to this release's Keycloak pods,
+  on 8080. So a pod elsewhere in the cluster cannot pose as Keycloak. This
+  needs a network plugin that enforces NetworkPolicy. Someone who can
+  create pods in this namespace can still pose as Keycloak, but that person
+  can already read the namespace's Secrets.
+- Nothing else yet. The Keycloak subchart's own NetworkPolicy
+  (`coreKeycloak.networkPolicy.enabled`) is off by default. While it is
+  off, any pod in the cluster can reach Keycloak on 8080, including its
+  Admin REST API. The ingress hides the admin paths only from callers
+  outside the cluster.
+
+What an operator can do now:
+
+- Turn on the Keycloak NetworkPolicy, and allow the ingress controller in
+  `extraFrom`, or browser and CLI logins stop. For example, with Traefik in
+  `kube-system`:
+
+  ```yaml
+  coreKeycloak:
+    networkPolicy:
+      enabled: true
+      extraFrom:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+  ```
+
+- Run a service mesh that encrypts traffic between pods (mutual TLS).
+
+A NetworkPolicy controls who can connect. It does not encrypt. Only
+encryption helps against someone who can read traffic on the cluster
+network, for example from a taken-over node. #4050 turns the Keycloak rule
+on by default, and it decides whether Keycloak's port 8080 gets TLS, along
+with OpenBao's port 8200.
+
 **Known limits.**
 
-- The backplane still fetches the discovery document from
-  `KEYCLOAK_ISSUER_URL` (the public URL). Pointing it at the Service URL
-  needs the `KEYCLOAK_DISCOVERY_URL` setting, which comes with #4591. The
-  readiness probe code is green against the
-  Service URL (checked on kind).
 - The admin console does not work through `kubectl port-forward`: its
   login page uses the public address, and `/auth/realms/master` is not
   routed unless `exposeAdmin` is true. The Admin REST API works through
@@ -817,14 +941,14 @@ The `vault:` block stays for a Vault you bring yourself. MEHO's names stay
 not the product.
 
 **Not yet:** the setup Job `vault-init-<hash>` (the first start, the key
-and login setup, the policies) and the unlock after a restart (#4046).
-Until they land, the server runs empty and locked.
+and login setup, the policies). Until it lands, the server runs empty and
+locked, and nothing makes the Secret `<release>-core-vault-unseal`.
 
 **What it renders.**
 
 | Object | Shape |
 | --- | --- |
-| StatefulSet `<release>-vault` | one pod, `quay.io/openbao/openbao-ubi:2.7.1` pinned by digest, the image's start script with `server` and `SKIP_CHOWN=true`; a 10Gi disk (`persistence.size`) at `/openbao/data` |
+| StatefulSet `<release>-vault` | one pod, `quay.io/openbao/openbao-ubi:2.7.1` pinned by digest, the image's start script with `server` and `SKIP_CHOWN=true`; a 10Gi disk (`persistence.size`) at `/openbao/data`; a second container `unseal` (below) |
 | ConfigMap `<release>-vault-config` | `server.hcl` at `/openbao/config`: raft storage, a plain-HTTP listener on 8200 (`tls_disable`), `ui = false`, the `file` audit device with `file_path = "stdout"`. A changed config restarts the pod (checksum annotation) |
 | Service `<release>-vault` | port 8200; `publishNotReadyAddresses: true` |
 | Service `<release>-vault-internal` | headless, ports 8200 and 8201; `publishNotReadyAddresses: true`. It gives the pod its DNS name, which sets `BAO_API_ADDR` and `BAO_CLUSTER_ADDR` |
@@ -841,6 +965,36 @@ waits until the pod is ready before it rolls out a change, so a locked pod
 would keep the old version and be replaced, locked again, right after
 someone unlocks it. Keep the line: the field cannot be changed after the
 first install.
+
+**Unseal after a restart (#4046).** The `unseal` container (same image,
+same security settings, `coreVault.unseal.resources`) checks `bao status`
+every 5 seconds. When the server is sealed and `/unseal/key` exists, it runs
+`tr -d '[:space:]' </unseal/key | bao write sys/unseal key=-` against
+`127.0.0.1:8200`. The key file is the Secret `<release>-core-vault-unseal`,
+mounted only in this container, `optional: true` and without `subPath`.
+The Secret's `key` value is the key alone. White space around it (such as
+the line break `echo` adds) is dropped, so the setup Job (#4044 part 2),
+the installers and an operator restoring by hand can write it either way;
+without the `tr`, a key with a line break never unseals.
+
+- The mode is whether the Secret exists; there is no mode value. Secret
+  present: self-unseal. Secret absent: "keyholder at boot", the pod stays
+  not ready and `/ready` says `vault: sealed`.
+- The key goes from the file through a pipe into `bao` on every pass, and
+  the call's output is thrown away. The key is never on a command line, in a shell variable or
+  in a log, and nothing keeps it: a deleted Secret takes effect on the next
+  pass once the kubelet removes the file (about one to two minutes on a
+  running pod).
+- The log has fixed lines only, printed when the state changes
+  (`unseal: unsealed`, `unseal: sealed, no unseal key in /unseal ...`).
+- No RBAC, no CronJob. NOTES print the `kubectl get secret` command for the
+  key, never the key.
+- Switching modes, the trade-off and recovery mode: the operator page
+  `docs-site/install/openbao-unseal-key.md`.
+- Cluster check: `scripts/ci/check-openbao-unseal.sh <namespace> <release>`
+  (pod restart, keyholder mode, server process restart without the Secret,
+  and a search for the key in pod logs and `helm get`). Checked on RKE2
+  v1.37.1 with the CIS profile, after install and after an upgrade.
 
 **Audit.** OpenBao refuses audit devices made through the API, so the
 device is in the config file. The lines go to the container log, which the
@@ -970,10 +1124,10 @@ values overlay:
 | `ingress.tls.secretName` | Per-environment Secret name (cert-manager-managed or pre-provisioned). Required only when both `ingress.enabled` and `ingress.tls.enabled` are true |
 | `postgres.credentialsSecret` | Per-environment Secret holding `DATABASE_URL` (ESO-synced from Vault in production) |
 | `vault.address` | Per-environment Vault endpoint. Required only when `config.credentialBackend: vault` (the default) — a `gsm` install leaves it blank (#2231) |
-| `keycloak.issuer` | Per-environment Keycloak issuer URL |
+| `keycloak.issuer` | Per-environment Keycloak issuer URL. Not set with the built-in Keycloak (`coreKeycloak.enabled`): the chart derives the issuer and the render fails if one is set |
 | `config.keycloakIssuerUrl` / `config.keycloakAudience` / `config.vaultAddr` | ConfigMap env-var mirrors of the above (`backend/src/meho_backplane/settings.py` contract). `config.vaultAddr` is required-when-`credentialBackend: vault`, like `vault.address` |
 | `config.backplaneUrl` / `config.mcpResourceUri` | G0.8-T4 (#633). Blank by design: for the common ingress-fronted deploy the chart derives `BACKPLANE_URL=https://<ingress.host>` (scheme follows `ingress.tls.enabled`) and `MCP_RESOURCE_URI=${BACKPLANE_URL}/mcp` via the `meho.backplaneUrl` / `meho.mcpResourceUri` helpers, so the `/mcp` audience resolves without operator action. Set explicitly only when the public URL differs from the Ingress host, or for a non-default MCP mount. When neither resolves (no ingress / empty host, nothing set) the chart `fail`s at `helm template` / `helm install` time with an actionable message naming `config.backplaneUrl` / `config.mcpResourceUri` / `ingress.host` (#2394, in `templates/configmap.yaml`) instead of rendering an empty audience and letting the pod crash-loop at startup on `audience_not_configured` (`_assert_mcp_resource_uri_configured` in `main.py`, still the runtime backstop). There is no `allowNoMcpResourceUri` escape hatch — for a deliberate MCP-less bring-up before ingress/DNS exists, set a placeholder `config.backplaneUrl`; `/mcp` stays per-request fail-closed regardless. The operator must still add a matching Keycloak `oidc-audience-mapper` — see `docs/cross-repo/mcp-client-setup.md` Step 1 |
-| `networkPolicy.{postgres,vault,keycloak}CIDR` | Per-environment subnet for each upstream. Required only when `networkPolicy.enabled: true` (the default) — relaxed when networkPolicy is disabled |
+| `networkPolicy.{postgres,vault,keycloak}CIDR` | Per-environment subnet for each upstream. Required only when `networkPolicy.enabled: true` (the default) — relaxed when networkPolicy is disabled. `keycloakCIDR` is not used with the built-in Keycloak |
 
 A blank field falls into the typed-schema contract immediately — `helm
 install` fails before a single Kubernetes resource is created. The
@@ -1001,16 +1155,16 @@ them).
 | `ingress.tls.secretName` | string | TLS Secret (cert-manager-managed or pre-provisioned). Required only when both `ingress.enabled` and `ingress.tls.enabled` are true. |
 | `postgres.credentialsSecret` | string | Kubernetes Secret holding `DATABASE_URL` at key `url`. |
 | `vault.address` | string (`uri`) | Vault endpoint, e.g. `https://vault.example.org`. Required only when `config.credentialBackend: vault` (the default); a `gsm` install leaves it blank (#2231). |
-| `keycloak.issuer` | string (`uri`) | Keycloak issuer URL (used for `iss` validation + JWKS discovery). |
-| `config.keycloakIssuerUrl` | string | ConfigMap mirror of the above; consumed by the backplane env. |
-| `config.keycloakAudience` | string | Keycloak client ID fronting the backplane. |
+| `keycloak.issuer` | string (`uri`) | Keycloak issuer URL (used for `iss` validation + JWKS discovery). Must stay empty with the built-in Keycloak, which sets it. |
+| `config.keycloakIssuerUrl` | string | ConfigMap mirror of the above; consumed by the backplane env. Must stay empty with the built-in Keycloak. |
+| `config.keycloakAudience` | string | Keycloak client ID fronting the backplane. Not needed with the built-in Keycloak (`meho-backplane`). |
 | `config.vaultAddr` | string (`uri`) | ConfigMap mirror of `vault.address`. Required-when-`credentialBackend: vault`, like `vault.address`. |
 | `config.credentialBackend` | enum `vault` \| `gsm` | Credential backend a schemeless target `secret_ref` and the `/api/v1/health` federation proof resolve through (#2227). Default `vault` (rendered `CREDENTIAL_BACKEND`). `vault` requires `vault.address` + `config.vaultAddr`; `gsm` requires `gsm.enabled: true` + `gsm.project` (root-level `allOf` conditional). |
 | `gsm.enabled` / `gsm.project` | boolean / string | GSM credential backend (#2227). Required (`enabled: true` + non-empty `project`) only when `config.credentialBackend: gsm`; inert on a Vault install. Runtime values the backplane reads are `config.gsmProject` (`GSM_PROJECT`) + optional `config.gsmImpersonateSa` (`GSM_IMPERSONATE_SA`). The `gsm.workloadIdentityFederation.*` keys render as `GSM_WIF_*` (#2642 — inert stubs before that); a non-empty `audience` switches credential reads onto the calling operator's identity, which makes *background* dispatch (Sensors, the topology-refresh scheduler, runbook verify dispatch — the callers that dispatch with no operator JWT at all) need an identity of its own — an ambient pod identity or `checkRunner.*`. Connector `probe()` / `fingerprint()` are **not** covered by either: they carry a non-empty placeholder JWT, so they take the WIF branch and fail the exchange regardless. See `docs/deploying.md` § GSM / Vault-free, `deploy/values-examples/values-gsm-example.yaml` (SA-direct), and `deploy/values-examples/values-gsm-wif-example.yaml` (per-operator WIF). |
 | `checkRunner.enabled` / `.clientId` / `.clientSecret.*` | boolean / string / object | In-process check-runner service principal (#2642). `enabled: true` requires a non-empty `clientId` + `clientSecret.secretName`, and wires `CHECK_RUNNER_CLIENT_ID` (plain env) + `CHECK_RUNNER_CLIENT_SECRET` (`secretKeyRef` only). Default `false` renders nothing: background dispatch carries no bearer token and a Sensor whose target needs an operator-context credential read evaluates `unknown`. |
 | `networkPolicy.postgresCIDR` | CIDR (IPv4) | Egress CIDR; pattern-validated. Required only when `networkPolicy.enabled: true` (default). |
 | `networkPolicy.vaultCIDR` | CIDR (IPv4) | Same. |
-| `networkPolicy.keycloakCIDR` | CIDR (IPv4) | Same. |
+| `networkPolicy.keycloakCIDR` | CIDR (IPv4) | Same, but not used (and not required) with the built-in Keycloak, which the backplane reaches by podSelector. |
 
 **Common operator overrides** (safe defaults provided; tune as needed):
 
@@ -1332,7 +1486,7 @@ incidents #634 / #697.
 Since #3251 the required unit lane is **sharded**: the required context
 `Python (ruff + mypy + pytest)` no longer maps to one monolithic job but
 to a **fan-in** (`python-unit-lane`) over a lint job (`python-lint`) and a
-4-way pytest stride matrix (`python-unit-shard`). The required-context
+4-way pytest matrix (`python-unit-shard`). The required-context
 _string_ is unchanged, so branch protection / the ruleset are untouched —
 see [Sharded unit lane (#3251)](#sharded-unit-lane-3251) below.
 
@@ -1493,7 +1647,7 @@ workflow files, this doc, and the changelog.
 | Job | Surface | Steps |
 | --- | --- | --- |
 | `python-lint` (`Python lint + typecheck (ruff + mypy)`) | `backend/src/` + `backend/tests/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict`. Non-required; whole-tree, unshardable-by-file, runs once on a GitHub-hosted runner (#3251, #4626). |
-| `python-unit-shard` (`Python unit shard N/4`) | `backend/` unit + acceptance subtree, split 4 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file-stride slice (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). |
+| `python-unit-shard` (`Python unit shard N/4`) | `backend/` unit + acceptance subtree, split 4 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). |
 | `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252). |
 | `python-integration` (`Python (integration testcontainers)`) | `backend/tests/integration/` | `uv sync --locked --all-groups` -> `pytest tests/integration/` against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. **Required merge gate (#698)** so the lane that exercises real connector dispatch can no longer ship red. |
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
@@ -1502,7 +1656,7 @@ workflow files, this doc, and the changelog.
 The four `python-unit-shard` legs run on `meho-runners-ci-heavy`
 (dedicated ARC scale set, 6000m requests=limits, max 5 pods — #761 /
 rdc-gitops#55; four shards fit the 5-pod ceiling). `python-integration`,
-`python-migration-tests` and the push-only `python-coverage-combine` run
+`python-migration-tests` and the nightly `python-coverage-combine` run
 on the dense `meho-runners-ci` pool (4-core): they pull their test images
 from the internal image mirror or read the private vendor spec shelf.
 
@@ -1533,9 +1687,10 @@ Each `python-unit-shard` carries a 20-minute
 `timeout-minutes` (hang backstop only — the expected shard job wall is
 ~8 min: ~2 min setup + ~6 min pytest, down from the pre-#3251
 monolithic lane's ~15-18 min serial pytest wall); a per-shard
-perf-budget-guard step (`budget_s=660`, scaled from the old 1320 s
-whole-suite budget) is the PR-level early-warning gate that fires well
-below the cap. `python-lint` and the fan-in carry 10 and 5 minutes.
+perf-budget-guard step (`budget_s=900`; 660 s until 2026-10-24, scaled
+from the old 1320 s whole-suite budget) is the PR-level early-warning
+gate that fires well below the cap. `python-lint` and the fan-in carry
+10 and 5 minutes.
 `go-lint-test` and `helm-lint-template` carry 10 minutes;
 `python-integration` carries 60 minutes for the container-pull + DinD
 spin-up + testcontainers sweep (xdist loadgroup parallelisation tracked
@@ -1550,29 +1705,57 @@ The required unit lane was a single `python-lint-test` job running ruff +
 ruff format + mypy + the whole ~13k-test unit sweep serially (~19-min
 wall) — the biggest single contributor to PR wall-time. #3251 split it
 into three cooperating jobs, mirroring the #3172/#3177 coverage-sweep
-shape (deterministic file-stride matrix + fan-in):
+shape (deterministic file-level matrix + fan-in):
 
 - **`python-lint`** — ruff check + ruff format --check + mypy. Whole-tree
   checks that cannot be split by test file and cost ~1-2 min, so they run
   **once** on the light pool rather than N times per shard. Only pytest
   fans out.
-- **`python-unit-shard`** — the pytest sweep as a **4-way stride matrix**.
-  Each shard runs `find tests -name 'test_*.py' -not -path
-  'tests/integration/*' -not -path 'tests/migrations/*' | sort | awk 'NR %
-  4 == shard - 1'` — the sorted test-file list, every fourth file. The
-  stride (not contiguous blocks) spreads heavyweight suites across shards,
-  and the four residues partition the file set **exactly** (union == full,
-  pairwise disjoint). #3251 started with 3 shards. #4655 raised the count
-  to 4 when the slowest shard reached the 660 s per-shard budget (579 s
-  as a middle value and up to 605 s on `main`; 663 s on a pull request).
-  The budget stayed at 660 s:
-  the rule in `ci.yml` is to measure, then add shards, not to raise the
-  budget. To change the count again, edit the matrix and `TOTAL` in the
-  pytest step together. File-level sharding is strictly coarser than what
-  xdist `--dist loadscope` already does across workers (whole modules stay
-  together, conftest semantics identical to a full run), so an xdist-safe
-  suite is shard-safe — proven live by the `python-coverage` sweep, which
-  runs the identical split over a superset of these files. `fail-fast:
+- **`python-unit-shard`** — the pytest sweep as a **4-way matrix split by
+  measured file time**. Each shard lists the test files with `find tests
+  -name 'test_*.py' -not -path 'tests/integration/*' -not -path
+  'tests/migrations/*' | sort` and pipes the list into
+  `tests/_unit_shard_split.py --shard N --total 4`. The splitter reads the
+  measured seconds per test file from `tests/_unit_shard_durations.json`,
+  sorts the files slowest first, and gives each file to the shard with
+  the least time so far (a file without a measurement counts as the
+  median; every file also carries a small fixed cost for import and
+  collection, so files whose tests all skip still spread out). The same
+  list always gives the same split, and the four shards partition the
+  file set **exactly** (union == full, pairwise disjoint;
+  `tests/test_unit_shard_split.py` pins both). The splitter prints the
+  file count and the predicted seconds per shard on stderr, so the shard
+  log shows when the measurements drift from the real wall. Each shard
+  writes its per-test times with `-o junit_family=xunit1 --junitxml` and
+  uploads them as the artifact `python-unit-shard-junit-<N>`. To refresh
+  the measurements, download the four artifacts of one green run and
+  pass them to `tests/_unit_shard_split.py --measure`; the module
+  docstring has the exact commands. Take the numbers from CI, not from a
+  laptop: tests that need Docker or the spec shelf skip locally but run
+  in CI, and a local measurement put all of them into one shard (584 s
+  against 443 s for the lightest). #3251 started with 3 shards and gave
+  every N-th file of
+  the sorted list to one shard. #4655 raised the count to 4 when the
+  slowest shard reached the 660 s per-shard budget (579 s as a middle
+  value and up to 605 s on `main`; 663 s on a pull request). #4809
+  replaced the every-N-th-file rule with the measured split when shard 4
+  ran 613 s as a middle value against 465 s for shard 2, and the merge
+  queue dropped pull requests whose tests had all passed. The budget
+  stayed at 660 s: the rule in `ci.yml` is to measure, then rebalance or
+  add shards, not to raise the budget. On 2026-10-24 the budget went to
+  900 s. From the measured split until that day, the slowest good shard
+  took 625 s, even when every heavy runner was busy (2 jobs per node).
+  That afternoon every heavy runner was busy again. Four shards that
+  passed every test took 674-710 s, and the merge queue dropped good pull
+  requests. With few runners busy, the four shards of one run took
+  448-515 s. So the extra time came from the busy runners, not from
+  slower tests. To change the count, edit the
+  matrix and `TOTAL` in the pytest step together. File-level sharding is
+  strictly coarser than what xdist `--dist loadscope` already does across
+  workers (whole modules stay together, conftest semantics identical to a
+  full run), so an xdist-safe suite is shard-safe — proven live by the
+  `python-coverage` sweep, which runs a file-level split (every N-th
+  file) over a superset of these files. `fail-fast:
   false` so one red shard does not cancel the others; each shard keeps
   `--maxfail=1` for fast per-shard feedback. Each shard also arms a
   per-test hang guard, `--timeout=180 --timeout-method=signal` (#4270):
@@ -1610,8 +1793,8 @@ Because the required context string is unchanged and stays on a job, the
 edit** — the required name simply moved from the monolithic job onto the
 fan-in (the `python-coverage-combine` technique that kept quality-gate.yml
 byte-identical). No escape-hatch label (the coverage lane's
-`ci-coverage-validate`) is needed: the coverage lane is push-only and must
-be *forced* onto a PR, whereas the unit lane runs on every PR by default,
+`ci-coverage-validate`) is needed: the coverage lane runs once a night and
+must be *forced* onto a PR, whereas the unit lane runs on every PR by default,
 so a sharding PR self-validates through its own `pull_request` run.
 
 ### Docs-only fast path (#3252)
@@ -1759,9 +1942,11 @@ reason.
 
 `ci.yml` deliberately does **not** build the backplane container image.
 [`image.yml`](../../.github/workflows/image.yml) runs on PRs that touch
-`backend/**` or `.github/workflows/image.yml` (path-filtered, see
-`image.yml`'s `on.pull_request.paths`) with `push: false` — the
-Dockerfile + dep-resolution gate. PRs that don't touch the backend
+`backend/**`, `.github/workflows/image.yml` or `.trivyignore`
+(path-filtered, see `image.yml`'s `on.pull_request.paths`) with
+`push: false` — the Dockerfile + dep-resolution gate — plus a trivy scan
+of `backend/uv.lock` on a hosted runner (the `lock-scan` job; see
+`docs/codebase/backend.md`). PRs that don't touch the backend
 (chart-only, CLI-only, docs-only) skip the image build by design,
 because the gate's inputs haven't changed and rebuilding would add zero
 signal. Repeating the build in `ci.yml` would double the cost for
@@ -1778,31 +1963,46 @@ fails the central CI check, but it does not duplicate the publish
 path. Migration backward-compat (`migration-compat.yml`), dependency
 license scan (`dependency-license-check.yml`), secret scan
 (`secret-scan.yml`), and the SAST stack (`security-scan.yml`) all stay
-in their dedicated workflows.
+in their dedicated workflows. There, the `Semgrep SAST` job sends every
+finding of its four rule packs (error, warning and info) to the GitHub
+Security tab and shows new ones as annotations on pull requests, but it
+fails only on a finding from an error-level rule.
 
 ### Coverage handoff to SonarCloud
 
-On pushes to `main`, the Python job runs
-`COVERAGE_CORE=sysmon uv run pytest ... --cov=meho_backplane --cov-report=xml tests/`
-and uploads `backend/coverage.xml` as the `python-coverage` artefact.
+Coverage runs **once a night**, not after every merge (#4910). `ci.yml`
+has a `schedule` trigger (`cron: '17 6 * * *'`, UTC). That run is a full
+CI run on `main`. The 8 `python-coverage` shards and the
+`python-coverage-combine` job run only in that run, or on a PR that
+carries the `ci-coverage-validate` label; their `if:` conditions allow
+`schedule` and the label, never `push` or `merge_group`. The combine job
+uploads `backend/coverage.xml` as the `python-coverage` artefact.
 [`quality-gate.yml`](../../.github/workflows/quality-gate.yml) listens
-on `workflow_run: workflows: ["CI"]`, downloads that exact artefact
-name via `actions/download-artifact@v4`, and feeds the XML into the
-SonarCloud scan. The workflow name (`CI`) and the artefact name
-(`python-coverage`) are the load-bearing contract between the two
-workflows — changing either side without the other would silently lose
-coverage reporting in SonarCloud.
+on `workflow_run: workflows: ["CI"]`, runs only when the CI run's event
+is `schedule` and its conclusion is `success`, downloads that exact
+artefact name, and feeds the XML into the SonarCloud scan. The workflow
+name (`CI`), the artefact name (`python-coverage`) and the event filter
+are the load-bearing contract between the two workflows — changing one
+side without the other would silently lose coverage reporting in
+SonarCloud, or make SonarCloud import 0% backend coverage from a run
+that never produced the file.
 
-`--cov` runs on **both push and PR** as of the post-#799 state. #726
-originally gated `--cov` to push-only on the belief that pytest-cov
+Why nightly: a push run on `main` used to start 8 coverage shards next
+to the 4 unit shards, so every merge filled the 12-runner heavy pool.
+Coverage took about 3,000 heavy-runner minutes a day, and the next merge
+cancelled most of it. Meanwhile the merge queue's unit shards waited for
+a runner or ran over their time budget. Coverage is not a required
+check, so one analysis a day is enough. The nightly run has its own
+concurrency group, so a merge does not cancel it.
+
+History: #726 gated `--cov` to push-only on the belief that pytest-cov
 was the unit job's dominant cost; the #771 diagnostic (#793) disproved
 that — the real cost was per-test descriptor re-embedding (fixed in
-#799), not coverage instrumentation. With the embedding re-fetch
-eliminated and sysmon's overhead, `--cov` adds only ~1 min (pytest
-~8m33s with cov vs ~7m35s without; run 26245676016), so the unit job
-stays ~9.3 min — under the Goal #11 10-min budget — while PRs gain
-SonarCloud Clean-as-You-Code new-code-coverage decoration on every PR
-instead of updating one merge late. The `quality-gate.yml` whole-job
+#799) — and `--cov` ran on every PR for a while. #1982 then took
+coverage out of the required unit lane for good (the OOM story in
+[`sonarcloud.md`](sonarcloud.md)), #1987 gave it its own non-required,
+push-only job, #3172 sharded that job, and #4910 moved it to the nightly
+run. The `quality-gate.yml` whole-job
 `continue-on-error` means a missing or late artefact never blocks a
 merge. `COVERAGE_CORE=sysmon` (#739) swaps coverage.py's default C
 tracer for the PEP 669 `sys.monitoring` backend (Python 3.12+,
@@ -1923,7 +2123,7 @@ their isolation posture:
 | Workflow | Runs untrusted PR code? | Isolation mechanism |
 | --- | --- | --- |
 | `ci.yml` | yes (build/test/lint) | fork guard on every job (skip on fork PR) |
-| `image.yml` | yes (Docker build) | fork guard (skip on fork PR) |
+| `image.yml` | yes (Docker build) | fork guard (skip on fork PR) on the `build` job; the `lock-scan` job runs on GitHub-hosted `ubuntu-latest` and only reads `backend/uv.lock` |
 | `chart.yml` | yes (helm template) | fork guard on the internal-pool PR job; publish/verify jobs are `push`-only |
 | `pr-smoke.yml` | yes (`pull_request_target`) | fork guard + `environment: rke2-ci` + PR-head-SHA checkout + isolated `pr-smoke` cache scope |
 | `migration-compat.yml` | yes (runs `check_migration_compat.py`) | **route**: fork PR → disposable GitHub-hosted runner |
@@ -1998,11 +2198,14 @@ GitHub settings, which a PR cannot edit. Effective settings recorded
 ### Signing, deployment and cache separation
 
 Untrusted PR jobs carry no signing or deployment identity: cosign
-signing lives in `image.yml` (fork-guarded) and the `chart.yml` publish
-job (`push`-only), and `pr-smoke.yml` exports its buildx cache to an
-isolated `pr-smoke` scope so an unmerged PR-head build can never seed the
-default cache the cosign-signed `image.yml` release build restores from
-(#3475). The CI cluster is recorded as separate from the automation
+signing lives in `image.yml` (fork-guarded), the `chart.yml` publish
+job (`push`-only), `cli-release.yml` (tag-only) and the `publish` job of
+`linux-download.yml` (tag-only, called by `cli-release.yml`; it signs the
+form-2 download's `SHA256SUMS-linux`, see
+[linux-server-download.md](linux-server-download.md)), and `pr-smoke.yml`
+exports its buildx cache to an isolated `pr-smoke` scope so an unmerged
+PR-head build can never seed the default cache the cosign-signed
+`image.yml` release build restores from (#3475). The CI cluster is recorded as separate from the automation
 cluster; verifying the firewall/routing that a compromised CI runner
 could traverse is an infra check, tracked outside this repo.
 
@@ -2247,6 +2450,28 @@ isolation keeps an unmerged PR-head build from writing the default cache
 scope the cosign-signed `image.yml` release build restores from; the
 release image's trust chain never depends on cache produced by unmerged
 code, while the per-PR build keeps its warm-cache read.
+
+## Dependabot waits 7 days before it takes a new version
+
+Every entry in `.github/dependabot.yml` has a `cooldown` block with
+`default-days: 7`. Dependabot opens a version-update pull request for a
+new release (a GitHub Action, a Python package in `backend/uv.lock`, or
+a base image in a Dockerfile) only when that release is at least 7 days
+old.
+
+- **Why.** A new release can carry harmful code, for example when an
+  attacker takes over a maintainer's account. Such releases are usually
+  found and removed within a few days. The wait skips them.
+- **Security updates are not delayed.** Dependabot's `cooldown` applies
+  to version updates only. A security update still comes at once.
+- **Without the block, Dependabot already waits 3 days** on github.com.
+  The block makes the wait visible in the file and sets it to 7 days.
+- **A manual upgrade does not wait.** `uv lock --upgrade` or a hand
+  edit of a Dockerfile digest can still take a release that is younger
+  than 7 days. The matching uv setting (`exclude-newer` in
+  `backend/pyproject.toml`) is not set yet; it needs a lock file in
+  which every locked version is already 7 days old, otherwise
+  `uv lock` moves packages back.
 
 ## Dependencies
 

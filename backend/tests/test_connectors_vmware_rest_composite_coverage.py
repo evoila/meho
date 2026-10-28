@@ -13,6 +13,7 @@ from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
     _GOVERNED_SUBOP_MANIFEST,
 )
 from meho_backplane.connectors.vmware_rest.composites._register import _COMPOSITES
+from meho_backplane.operations._preview import _PREVIEW_BUILDERS
 
 # These writes deliberately do not park a proposed-effect preview. The exception
 # set names policy, while the registry remains the source for every op-id set.
@@ -54,6 +55,8 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.vm.disk.attach",
         "vmware.composite.vm.clone_from_template",
         "vmware.composite.host.evacuate",
+        # ``.exit`` is not a classifier suffix -> ``other`` (#4967).
+        "vmware.composite.host.maintenance.exit",
         "vmware.composite.host.detach_from_vds",
         "vmware.composite.network.portgroup.security.set",
         # vlan.set ends in ``.set`` (not a write suffix) -> the classifier's
@@ -62,6 +65,7 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.vm.resize",
         "vmware.composite.vm.nic.repoint",
         "vmware.composite.vm.device.cdrom",
+        "vmware.composite.vm.tools.installer.unmount",
         # #3880: ``.show`` / ``.set`` are not classifier suffixes -> ``other``.
         "vmware.composite.vm.resource_allocation.show",
         "vmware.composite.vm.resource_allocation.set",
@@ -81,6 +85,10 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.namespace.status",
         "vmware.composite.content_library.subscribed.sync",
         "vmware.composite.content_library.subscribed.status",
+        # #4383: ``.acknowledge`` / ``.reset`` are not classifier suffixes ->
+        # ``other``, like ``host.service_control``.
+        "vmware.composite.alarm.acknowledge",
+        "vmware.composite.alarm.reset",
     }
 )
 
@@ -94,10 +102,16 @@ def _assert_composite_coverage(
 ) -> None:
     """Fail closed when a registry entry is absent from a required map."""
     approval_ids = {spec.op_id for spec in _COMPOSITES if spec.requires_approval}
+    # An op that can wait for approval: every requires_approval op, plus a
+    # caution or riskier op, which waits for an agent's call (#4850 — the
+    # caution read vm.guest.file.read). Each needs a preview builder.
+    parkable_ids = {
+        spec.op_id for spec in _COMPOSITES if spec.requires_approval or spec.safety_level != "safe"
+    }
     assert set(typed_metadata) == registry_ids
     assert _NO_PREVIEW <= approval_ids <= registry_ids
     assert _NO_GOVERNED_SUBOPS <= approval_ids <= registry_ids
-    assert set(preview_builders) | _NO_PREVIEW == approval_ids
+    assert set(preview_builders) | _NO_PREVIEW == parkable_ids
     assert set(governed_subops) | _NO_GOVERNED_SUBOPS == approval_ids
     assert set(preview_builders).isdisjoint(_NO_PREVIEW)
     assert set(governed_subops).isdisjoint(_NO_GOVERNED_SUBOPS)
@@ -112,10 +126,17 @@ def test_registry_coverage_is_derived_from_composites() -> None:
     _assert_composite_coverage(
         registry_ids,
         {spec.op_id: spec for spec in _COMPOSITES},
-        dict(_write_preview._WRITE_PREVIEW_BUILDERS),
+        _registered_preview_builders(registry_ids),
         dict(_GOVERNED_SUBOP_MANIFEST),
         {op_id: classify_op(op_id) for op_id in registry_ids},
     )
+
+
+def _registered_preview_builders(registry_ids: set[str]) -> dict[str, object]:
+    """Every preview builder of a composite: the shared map, and the ones a module registers."""
+    found = {op_id: b for op_id, b in _PREVIEW_BUILDERS.items() if op_id in registry_ids}
+    assert set(_write_preview._WRITE_PREVIEW_BUILDERS) <= set(found)
+    return found
 
 
 def test_deliberately_unmapped_composite_fails_closed() -> None:

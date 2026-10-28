@@ -20,6 +20,9 @@ Initiative #2416 (parent goal #221), Task #2506. Covers:
 * **Investigator prompt (#2721)** -- ``investigator_prompt`` defaults NULL
   (the pre-#2721 briefing), round-trips operator prose verbatim, and carries
   no DB CHECK: the bound is the wire schema's, by decision.
+* **Member memo (#5068)** -- ``check_dashboard_sensors.last_member_state``
+  defaults NULL ("not counted yet"), and the model constant, the ``0116``
+  migration's frozen literal, and the two CHECK bodies agree.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ from meho_backplane.db.models import (
     _CHECK_DASHBOARD_NOTIFY_MIN_STATES,
     _CHECK_DASHBOARD_ROLLUP_STATES,
     CheckDashboard,
+    CheckDashboardSensor,
     Tenant,
 )
 from meho_backplane.settings import get_settings
@@ -184,10 +188,19 @@ def _load_notify_migration() -> object:
     return _load_migration_file("0068_add_check_dashboard_notify.py", "_migration_0068")
 
 
-def _orm_check_body(name: str = "ck_check_dashboards_last_rollup_state") -> str:
+def _load_member_state_migration() -> object:
+    return _load_migration_file(
+        "0116_add_check_dashboard_sensor_member_state.py", "_migration_0116"
+    )
+
+
+def _orm_check_body(
+    name: str = "ck_check_dashboards_last_rollup_state",
+    table: type[CheckDashboard] | type[CheckDashboardSensor] = CheckDashboard,
+) -> str:
     from sqlalchemy import CheckConstraint
 
-    for c in CheckDashboard.__table__.constraints:
+    for c in table.__table__.constraints:
         if isinstance(c, CheckConstraint) and c.name == name:
             return str(c.sqltext)
     raise AssertionError(f"{name} not found on the ORM table")
@@ -361,3 +374,89 @@ def test_investigator_prompt_is_unconstrained_at_the_database() -> None:
         if isinstance(c, CheckConstraint)
     ]
     assert not any("investigator_prompt" in body for body in bodies)
+
+
+# ---------------------------------------------------------------------------
+# Member memo on the link row (#5068)
+# ---------------------------------------------------------------------------
+
+
+def test_member_state_migration_literal_matches_checkstate() -> None:
+    """The 0116 migration's frozen ``_MEMBER_STATES`` is a snapshot of ``CheckState``."""
+    migration = _load_member_state_migration()
+    assert set(migration._MEMBER_STATES) == set(get_args(CheckState))  # type: ignore[attr-defined]
+
+
+def test_member_state_migration_check_body_equals_orm() -> None:
+    """The 0116 migration's rendered CHECK body equals the live ORM constraint's."""
+    migration = _load_member_state_migration()
+    rendered = migration._check_in(  # type: ignore[attr-defined]
+        "last_member_state",
+        migration._MEMBER_STATES,  # type: ignore[attr-defined]
+    )
+    assert (
+        _orm_check_body("ck_check_dashboard_sensors_last_member_state", CheckDashboardSensor)
+        == rendered
+    )
+
+
+@pytest.mark.asyncio
+async def test_member_state_defaults_to_not_counted_yet() -> None:
+    """A link row inserted without a memo reads back NULL and accepts a state."""
+    await _seed_tenant()
+    dashboard_id = uuid.uuid4()
+    sensor_id = uuid.uuid4()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            CheckDashboard(
+                id=dashboard_id,
+                tenant_id=_TENANT,
+                name="member-memo",
+                created_by_sub="op-admin",
+            )
+        )
+        # SQLite does not enforce the sensor FK by default, so no Sensor row
+        # is needed to exercise the link row's own column.
+        session.add(CheckDashboardSensor(dashboard_id=dashboard_id, sensor_id=sensor_id))
+        await session.commit()
+
+    async with sessionmaker() as session:
+        link = await session.get(CheckDashboardSensor, (dashboard_id, sensor_id))
+        assert link is not None
+        assert link.last_member_state is None
+        link.last_member_state = "critical"
+        await session.commit()
+
+    async with sessionmaker() as session:
+        link = await session.get(CheckDashboardSensor, (dashboard_id, sensor_id))
+        assert link is not None
+        assert link.last_member_state == "critical"
+
+
+@pytest.mark.asyncio
+async def test_member_state_check_rejects_unknown() -> None:
+    """An out-of-vocabulary ``last_member_state`` is rejected by the CHECK."""
+    await _seed_tenant()
+    dashboard_id = uuid.uuid4()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            CheckDashboard(
+                id=dashboard_id,
+                tenant_id=_TENANT,
+                name="member-memo-bogus",
+                created_by_sub="op-admin",
+            )
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        session.add(
+            CheckDashboardSensor(
+                dashboard_id=dashboard_id,
+                sensor_id=uuid.uuid4(),
+                last_member_state="bogus",
+            )
+        )
+        with pytest.raises(IntegrityError):
+            await session.commit()

@@ -197,8 +197,14 @@ UNEXECUTABLE_RUNBOOK_CLASS = "unexecutable_runbook_reference"
 #: boundary guard, not a parser: a phrasing it misses degrades to today's
 #: behaviour, a phrasing it catches turns a hallucinated success into an
 #: honest typed failure.
+#:
+#: The spaces after the verb and after the article are matched with
+#: ``\s++`` (possessive: spaces once taken are never given back). What comes
+#: next never starts with a space, so the hits are the same as with ``\s+``,
+#: but a long run of spaces is read once instead of being tried again for
+#: every space in it.
 _RUNBOOK_INSTRUCTION_RE: re.Pattern[str] = re.compile(
-    r"\b(?:use|run|execute|follow|start|apply|perform|invoke)\s+(?:(?:the|a|an)\s+)?"
+    r"\b(?:use|run|execute|follow|start|apply|perform|invoke)\s++(?:(?:the|a|an)\s++)?"
     r"(?:"
     r"runbook\b(?:\s+template\b)?"
     r"(?:(?:\s*:\s*|\s+)(?P<q1>[`'\"]?)(?P<slug>[a-z](?:[a-z0-9.\-]*[a-z0-9])?)(?P=q1))?"
@@ -243,7 +249,15 @@ _THIRD_PERSON_SUBJECTS = frozenset({"operators", "users", "we", "they", "people"
 #: The last word of the clause fragment preceding a candidate's verb (only
 #: when the fragment actually ends in a word — a trailing punctuation mark
 #: means the verb opens its own clause and has no subject token).
-_PRECEDING_WORD_RE: re.Pattern[str] = re.compile(r"([a-z]+)\s*$", re.IGNORECASE)
+#:
+#: It is matched on the *reversed* text, because Python's ``re`` only reads
+#: forwards: it skips the spaces before the verb, then takes up to ten
+#: letters. The caller stops the match at the clause start. Ten is one more
+#: than the longest word in :data:`_THIRD_PERSON_SUBJECTS`, so a longer word
+#: never counts as one.
+#: Reading back from the verb takes time in line with the few characters it
+#: reads, however long the clause before it is.
+_REVERSED_WORD_BEFORE_RE: re.Pattern[str] = re.compile(r"\s*+([a-z]{1,10})", re.IGNORECASE)
 
 #: A bare (unquoted, non-slug-structured) word right after ``runbook``
 #: usually makes it a noun compound headed by that word ("runbook
@@ -256,28 +270,33 @@ _CLAUSE_CONTINUATIONS = frozenset(
     {"to", "and", "then", "now", "first", "please", "when", "if", "before", "after"}
 )
 
+#: The check reads at most this many characters (16 KiB) of each text: the
+#: system prompt and the run input are each cut to this length first. Real
+#: prompts are much shorter. A longer text is checked on its first 16,384
+#: characters only, and a hit that the cut reaches is not used (see
+#: :data:`_HIT_TAIL_RE`). Together with a scan whose time grows in line with
+#: the text length, this keeps the check within a few milliseconds for any
+#: prompt. It runs at the start of every agent run.
+_MAX_SCANNED_CHARS = 16 * 1024
 
-def _clause_fragment_before(text: str, start: int) -> str:
-    """The fragment of *text*'s clause that precedes offset *start*."""
-    fragment = text[:start]
-    cut = max(fragment.rfind(boundary) for boundary in _CLAUSE_BOUNDARIES)
-    return fragment[cut + 1 :]
+#: What the instruction pattern may still read after a hit ends: spaces, an
+#: optional ``:`` and more spaces, an optional quote, and one run of slug
+#: characters (the next word). When a text was cut and this part reaches the
+#: cut, the words after the cut could change the hit: "use the runbooks
+#: page" cut to "use the runbook", or "use runbook templates" cut before
+#: "templates". So such a hit is not used, and the run is not refused for it.
+_HIT_TAIL_RE: re.Pattern[str] = re.compile(r"\s*+(?::\s*+)?[`'\"]?[a-z0-9.\-]*+", re.IGNORECASE)
 
 
-def _instructed_runbook(text: str, match: re.Match[str]) -> str | None:
-    """Disposition one raw regex hit against the false-positive guards.
+def _named_runbook(match: re.Match[str]) -> str | None:
+    """Classify one raw regex hit by the words around ``runbook``.
 
     Returns the named slug (lowercased), ``""`` for a genuine but unnamed
-    execution instruction, or ``None`` when the hit is prose (negated,
-    third-person, or a runbook-headed noun compound) and must not refuse
-    the run.
+    execution instruction, or ``None`` when the hit is a runbook-headed
+    noun compound and must not refuse the run. The clause guards
+    (negation, third-person subject) are applied by
+    :func:`_first_instructed_runbook`.
     """
-    clause = _clause_fragment_before(text, match.start())
-    if _NEGATION_RE.search(clause):
-        return None
-    subject = _PRECEDING_WORD_RE.search(clause)
-    if subject is not None and subject.group(1).lower() in _THIRD_PERSON_SUBJECTS:
-        return None
     pre_slug = match.group("pre_slug")
     if pre_slug is not None:
         # "<verb> [the] <word> runbook" — ``runbook`` is the head noun, so
@@ -298,13 +317,66 @@ def _instructed_runbook(text: str, match: re.Match[str]) -> str | None:
     return None
 
 
+def _first_instructed_runbook(text: str, *, cut: bool) -> str | None:
+    """Return the first raw hit in *text* that passes every guard, or ``None``.
+
+    A hit is prose, not an instruction, when it is a runbook-headed noun
+    compound (:func:`_named_runbook`), when a negation comes before its
+    verb in the same clause, or when a third-person subject comes right
+    before its verb.
+
+    The hits come in text order, so the clause guards remember what they
+    have read: each part of the text is searched for clause boundaries
+    and negations only once, and the subject is read back from the verb.
+    So the time grows in line with the length of *text*, even when it
+    holds thousands of hits.
+
+    *cut* means *text* is only the first part of a longer text. Then the
+    scan stops at a hit that the cut reaches (:data:`_HIT_TAIL_RE`): what
+    the hit means is not known, and no later hit can come after it.
+    """
+    size = len(text)
+    reversed_text = ""  # made on first use, for the subject guard
+    clause_start = 0  # offset where the clause of the current hit starts
+    checked = 0  # boundaries and negations before this offset are known
+    negated = False  # a negation comes earlier in the current clause
+    for match in _RUNBOOK_INSTRUCTION_RE.finditer(text):
+        if cut and _HIT_TAIL_RE.fullmatch(text, match.end()):
+            return None
+        found = _named_runbook(match)
+        if found is None:
+            continue
+        start = match.start()
+        last_boundary = max(text.rfind(boundary, checked, start) for boundary in _CLAUSE_BOUNDARIES)
+        if last_boundary >= 0:
+            # The hit is in a new clause, which starts after the boundary.
+            clause_start = last_boundary + 1
+            checked = clause_start
+            negated = False
+        if not negated:
+            negated = _NEGATION_RE.search(text, checked, start) is not None
+        checked = start
+        if negated:
+            continue
+        if not reversed_text:
+            reversed_text = text[::-1]
+        # From offset ``size - start``, *reversed_text* reads *text*
+        # backwards from the character just before the verb. The end
+        # offset ``size - clause_start`` stops it at the clause start.
+        word = _REVERSED_WORD_BEFORE_RE.match(reversed_text, size - start, size - clause_start)
+        if word is not None and word.group(1)[::-1].lower() in _THIRD_PERSON_SUBJECTS:
+            continue
+        return found
+    return None
+
+
 def find_runbook_instruction(*texts: str) -> str | None:
     """Return the runbook a prompt instructs the agent to execute, if any.
 
     Scans each of *texts* (the definition's system prompt and the run's
     user inputs) for an instruct-shaped runbook reference — see
     :data:`_RUNBOOK_INSTRUCTION_RE` for the covered phrase shapes and
-    :func:`_instructed_runbook` for the guards that keep negated,
+    :func:`_first_instructed_runbook` for the guards that keep negated,
     third-person, and noun-compound mentions from refusing the run.
     Returns the referenced slug (lowercased), ``""`` when the instruction
     names no specific runbook ("follow the runbook"), or ``None`` when no
@@ -315,6 +387,13 @@ def find_runbook_instruction(*texts: str) -> str | None:
     cannot mask a real later instruction ("... then use runbook
     disk-cleanup-1").
 
+    Only the first :data:`_MAX_SCANNED_CHARS` characters of each text are
+    read, and the time grows in line with the length read. So the check
+    stays within a few milliseconds for any prompt. It runs at the start
+    of every run. When a text is cut, a hit that the cut reaches is not
+    used, so the cut can make the check miss an instruction but never
+    refuse a run that the full text allows.
+
     Detection is deliberately independent of whether the referenced
     runbook *exists*: the failure being guarded (#2077) is "the agent has
     no tool that can execute any runbook", which holds for present and
@@ -323,10 +402,10 @@ def find_runbook_instruction(*texts: str) -> str | None:
     before refusing the run.
     """
     for text in texts:
-        for match in _RUNBOOK_INSTRUCTION_RE.finditer(text):
-            found = _instructed_runbook(text, match)
-            if found is not None:
-                return found
+        cut = len(text) > _MAX_SCANNED_CHARS
+        found = _first_instructed_runbook(text[:_MAX_SCANNED_CHARS], cut=cut)
+        if found is not None:
+            return found
     return None
 
 

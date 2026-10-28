@@ -31,17 +31,21 @@ from __future__ import annotations
 from typing import Final
 
 from meho_backplane.connectors.vmware_rest.composites import (
+    _alarm,
     _datastore_files,
     _drs_rule_delete,
     _host,
     _library,
     _library_delete,
+    _license,
     _namespace,
+    _snapshot,
     _storage_policy,
     _supervisor,
     _teardown,
     _teardown_network,
     _vm_allocation,
+    _vm_cdrom_tools,
     _write,
 )
 
@@ -63,6 +67,10 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
         _write._SUB_OPS_VM_IMPORT_FROM_LIBRARY + _write._VIM_SUB_OPS_VM_IMPORT_FROM_LIBRARY
     ),
     "vmware.composite.vm.snapshot.revert": _write._VIM_SUB_OPS_VM_SNAPSHOT_REVERT,
+    "vmware.composite.vm.snapshot.create": _snapshot._VIM_SUB_OPS_VM_SNAPSHOT_CREATE,
+    # The RemoveSnapshot_Task child is delete-shaped, so the discovery surface
+    # flags it un-grantable -- a human always decides.
+    "vmware.composite.vm.snapshot.delete": _snapshot._VIM_SUB_OPS_VM_SNAPSHOT_DELETE,
     "vmware.composite.vm.destroy": _write._SUB_OPS_VM_DESTROY + _write._VIM_SUB_OPS_VM_DESTROY,
     "vmware.composite.vm.migrate": _write._SUB_OPS_VM_MIGRATE + _write._VIM_SUB_OPS_VM_MIGRATE,
     "vmware.composite.vm.power.bulk": _write._SUB_OPS_VM_POWER_BULK,
@@ -76,6 +84,7 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.host.evacuate": (
         _write._SUB_OPS_HOST_EVACUATE + _write._VIM_SUB_OPS_HOST_EVACUATE
     ),
+    "vmware.composite.host.maintenance.exit": _write._VIM_SUB_OPS_HOST_MAINTENANCE_EXIT,
     "vmware.composite.host.detach_from_vds": (
         _write._SUB_OPS_HOST_DETACH_FROM_VDS + _write._VIM_SUB_OPS_HOST_DETACH_FROM_VDS
     ),
@@ -105,6 +114,10 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.vm.resize": _write._SUB_OPS_VM_RESIZE,
     "vmware.composite.vm.nic.repoint": _write._SUB_OPS_VM_NIC_REPOINT,
     "vmware.composite.vm.device.cdrom": _write._SUB_OPS_VM_DEVICE_CDROM,
+    "vmware.composite.vm.cdrom.add": _vm_cdrom_tools.SUB_OPS_VM_CDROM_ADD,
+    "vmware.composite.vm.tools.installer.unmount": (
+        _vm_cdrom_tools.SUB_OPS_VM_TOOLS_INSTALLER_UNMOUNT
+    ),
     "vmware.composite.guest.customization_spec.create": (
         _write._SUB_OPS_GUEST_CUSTOMIZATION_SPEC_CREATE
     ),
@@ -149,6 +162,10 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
         _library_delete._SUB_OPS_CONTENT_LIBRARY_ITEM_DELETE
         + _library_delete._VIM_SUB_OPS_CONTENT_LIBRARY_MEDIA_CHECK
     ),
+    "vmware.composite.license.assign": _license._VIM_SUB_OPS_LICENSE_ASSIGN,
+    # #4383 alarm changes: one AlarmManager write each, after two reads.
+    "vmware.composite.alarm.acknowledge": _alarm._VIM_SUB_OPS_ALARM_ACKNOWLEDGE,
+    "vmware.composite.alarm.reset": _alarm._VIM_SUB_OPS_ALARM_RESET,
 }
 
 

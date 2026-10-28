@@ -660,6 +660,81 @@ in CI.
 The lane passed against the pinned files before this change was opened
 (10 tests, none skipped).
 
+### Extension: vcf-automation-9.0-reference, vcf-automation-9.1 and vcf-automation-9.1.1 (#4604)
+
+This change checks out three more shelf folders. The VCF Automation
+reconcile lane now checks that the region list path MEHO picks for each
+version is in that version's list of provider operations. The same
+secret-gated checkout and the same rules apply (read-only, the runner is
+deleted when the job ends, never committed, never in artifacts or logs, no
+secret for fork PRs or Dependabot).
+
+| Shelf folder | File the verify step requires | Lane that reads it |
+|---|---|---|
+| `vcf-automation-9.0-reference` | `vcf-automation-9.0-reference/vcf-automation-9.0-provider-infrastructure-apis-reference-operations.tsv` | `backend/tests/test_connectors_vcf_automation_spec_reconcile.py` (`test_region_path_is_in_the_reference_list_of_each_version`) |
+| `vcf-automation-9.1` | `vcf-automation-9.1/vcf-automation-9.1-provider-infrastructure-apis-reference-operations.tsv` | same test |
+| `vcf-automation-9.1.1` | `vcf-automation-9.1.1/vcf-automation-9.1.1-provider-infrastructure-apis-reference-operations.tsv` | same test |
+
+- **Size:** about 0.4 MB per folder.
+- **What the files are:** each TSV file is a list of operations (method and
+  path, one per line). It was made from the vendor's public Provider
+  Infrastructure API reference pages for that version. Provenance note of
+  record: each folder's `MANIFEST.md` on the shelf.
+- **Licence:** these lists come from vendor documentation pages with no
+  explicit open licence, pinned on the operator's shelf for a reconcile
+  lane. So this extension records a reference to the **wave-3 blanket
+  determination** in the NSX section above
+  (<https://github.com/evoila/meho/issues/2981#issuecomment-5329188426>),
+  the same way the `vks-9.0` entry does. No new attestation is needed.
+
+The lane passed against the pinned files before this change was opened (one
+test per version, none skipped).
+
+### Extension: vcf-installer-9.0 (#4467)
+
+This change checks out one more shelf folder, `vcf-installer-9.0`. The
+installer reconcile lane now also checks every path MEHO calls against the
+9.0 installer file. The verify step requires that file, so the 9.0 case of the
+lane cannot skip in CI.
+
+| Shelf folder | File the verify step requires | Lane that reads it |
+|---|---|---|
+| `vcf-installer-9.0` | `vcf-installer-9.0/vcf-installer-openapi.json` | `backend/tests/test_connectors_vcf_installer_spec_reconcile.py` |
+
+- **`vcf-installer-9.0`** (~0.3 MB). The VCF Installer 9.0 OpenAPI 3.0.1 file
+  from the **public, Apache-2.0**
+  [`vmware/vcf-api-specs`](https://github.com/vmware/vcf-api-specs) repo
+  (tag `9.0.0.0`, pinned at `85151f6b`). Byte for byte the vendor file.
+  Provenance and sha256: the `installer-9.0` entry of
+  `docs/compatibility/vcf-api-contract-manifest.yaml` and the shelf's
+  `vcf-installer-9.0/MANIFEST.md`. No attestation is needed.
+- The same rules apply: read-only checkout, the runner is deleted when the
+  job ends, never committed, never in artifacts or logs, no secret for fork
+  PRs or Dependabot.
+
+The lane passed against both pinned installer files before this change was
+opened (5 tests, none skipped).
+
+### Extension: azure / azure-arm-2026.10 (#5081)
+
+The same secret-gated checkout also fetches the shelf's
+`docs/azure-arm-2026.10/` directory (~9.8 MB: 38 Swagger 2.0 files plus
+`LICENSE` and `MANIFEST.md`) for the Azure spec path check
+(`backend/tests/test_connectors_azure_spec_reconcile.py`), under the same
+ephemeral-use conditions recorded above (sparse read-only checkout,
+workspace destroyed at job end, never committed, never in artifacts or
+logs, secret withheld from fork PRs and the Dependabot store). No
+vendor-license attestation is needed: the files come from Microsoft's
+**public, MIT-licensed**
+[`Azure/azure-rest-api-specs`](https://github.com/Azure/azure-rest-api-specs)
+repo (pinned at `2455f14a`, retrieved 2026-10-27), and the upstream
+`LICENSE` is kept next to them. The provenance note of record is the
+shelf's `azure-arm-2026.10/MANIFEST.md`, per the OSS-licensed-spec form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics. **Sequencing:** the files land through a pull request
+in the shelf repo, which must merge before this repo's widened verify step
+can pass.
+
 ## Consequences
 
 - The five real-spec lanes light up together the moment the secret exists;

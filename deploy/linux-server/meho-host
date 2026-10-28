@@ -1,0 +1,827 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# meho-host: the host command of install form 2. install.sh puts it at
+# /usr/local/sbin/meho-host. It is the customer's tool for the work on the
+# machine after the install, so the customer never needs kubectl (ADR 0007
+# decision 2; form-2 design, section 5, in meho-internal
+# docs/design/2026-10-10-install-forms/).
+#
+# Commands in this version:
+#   check [--json]    a red/green list of the built-in Kubernetes (RKE2)
+#   support-bundle    one file for evoila support, with no passwords in it
+#   admin-network     the addresses that may use SSH, in the MEHO firewall
+#   uninstall         remove MEHO and RKE2; the MEHO firewall stays on
+#
+# Later Tasks add the hardening lines to check (#4638) and the commands
+# certificate, keyholder and unseal (#4738).
+#
+# Exit codes:
+#   0  check: every line is ok or a warning; the other commands: done
+#   1  check: a line is red. Otherwise: the command failed, and the [FAIL]
+#      line says what to fix; or the admin answered a question with no
+#   2  wrong usage: an unknown command or option
+#
+# The tests in tests/ run this script against a fake machine. See
+# docs/codebase/linux-server-meho-host.md.
+
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "meho-host: run it with bash, for example: sudo meho-host check" >&2
+    exit 2
+fi
+
+set -Eeuo pipefail
+
+# Tests set MEHO_TEST_ROOT to a temporary folder, the same seam as install.sh.
+# Every path on the machine is then read and written below that folder. On a
+# real machine the variable is not set.
+HOST_ROOT="${MEHO_TEST_ROOT:-}"
+
+readonly MEHO_STATE_DIR=/var/lib/meho
+readonly MEHO_SUPPORT_DIR=/var/lib/meho/support
+readonly MEHO_FIRST_LOGIN_FILE=/var/lib/meho/first-login-passwords
+readonly MEHO_UNSEAL_KEY_FILE=/var/lib/meho/unseal-key
+readonly MEHO_INSTALL_RECORD=/etc/meho/install.json
+readonly MEHO_ETC_DIR=/etc/meho
+# The two commands install.sh puts on the machine (lib/common.sh).
+readonly MEHO_CLI_PATH=/usr/local/bin/meho
+readonly MEHO_HOST_PATH=/usr/local/sbin/meho-host
+# The MEHO host firewall of lib/firewall.sh (#4635): one nftables file, its
+# boot unit, and the drop-in that lets RKE2 start only while it is loaded.
+readonly MEHO_FIREWALL_FILE=/etc/meho/firewall.nft
+readonly MEHO_FIREWALL_UNIT=meho-firewall.service
+readonly MEHO_FIREWALL_UNIT_FILE=/etc/systemd/system/meho-firewall.service
+readonly RKE2_FIREWALL_DROPIN=/etc/systemd/system/rke2-server.service.d/meho-firewall.conf
+# uninstall leaves the firewall in place (ADR 0009). This removes it.
+readonly FIREWALL_REMOVE_COMMAND="systemctl disable $MEHO_FIREWALL_UNIT && rm -r $MEHO_FIREWALL_UNIT_FILE $MEHO_ETC_DIR && systemctl daemon-reload && nft delete table inet meho"
+# RKE2's own uninstall script of a tarball install
+# (https://docs.rke2.io/install/uninstall). It removes RKE2, its units and
+# the cluster data, and itself.
+readonly RKE2_UNINSTALL=/usr/local/bin/rke2-uninstall.sh
+# The IPv4 patterns of lib/net.sh, which is not on the machine.
+readonly IPV4_OCTET_RE='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+readonly IPV4_RE="^(${IPV4_OCTET_RE}\\.){3}${IPV4_OCTET_RE}\$"
+readonly PREFIX_RE='^([0-9]|[12][0-9]|3[0-2])$'
+readonly RKE2_DATA_DIR=/var/lib/rancher
+readonly RKE2_KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+readonly RKE2_KUBECTL=/var/lib/rancher/rke2/bin/kubectl
+# RKE2's installer puts rke2 here. sudo's PATH on RHEL does not hold it.
+readonly RKE2_BINARY=/usr/local/bin/rke2
+readonly RKE2_LOG_COMMAND="journalctl -u rke2-server -e"
+readonly RKE2_RESTART_COMMAND="systemctl restart rke2-server"
+readonly SUPPORT_HINT="run 'meho-host support-bundle' and send the file to support."
+readonly MEHO_NAMESPACE=meho
+# The namespaces whose pods must run: the core, RKE2's own parts (Canal,
+# CoreDNS, Traefik, metrics) and the storage provisioner.
+readonly CHECK_NAMESPACES=(meho kube-system local-path-storage)
+readonly DISK_PATHS=("$RKE2_DATA_DIR" "$MEHO_STATE_DIR")
+readonly DISK_WARN_PERCENT=20
+readonly DISK_FAIL_PERCENT=15
+readonly CERT_WARN_DAYS=30
+readonly JOURNAL_SINCE=-24h
+# One line per pod: namespace, name, phase, the Ready condition and the
+# reason, with "|" between them, so an empty field keeps its place.
+readonly POD_TEMPLATE='{range .items[*]}{.metadata.namespace}{"|"}{.metadata.name}{"|"}{.status.phase}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.status.reason}{"\n"}{end}'
+# kubectl prints the values of every Secret of a namespace with this
+# template, decoded, one key=value per line. Helm's release records
+# (type helm.sh/release.v1, one per revision) are left out: each holds the
+# whole gzipped release as one line of hundreds of KB, which never appears
+# in a log and would cost sed hundreds of MB of memory as a rule. The
+# $-names are the template's own, not shell variables.
+# shellcheck disable=SC2016
+readonly SECRET_VALUES_TEMPLATE='{{range .items}}{{if ne .type "helm.sh/release.v1"}}{{range $key, $value := .data}}{{$key}}={{base64decode $value}}{{"\n"}}{{end}}{{end}}{{end}}'
+# EXPIRES in the table of "rke2 certificate check", for example
+# "Jun 12, 2026 11:12 UTC" (the Go layout "Jan 02, 2006 15:04 MST"). A row
+# is read by this date and by its STATUS at the end, so a space in SUBJECT or
+# USAGES cannot break it.
+readonly CERT_EXPIRES_RE='[A-Z][a-z][a-z] [0-9][0-9], [0-9]{4} [0-9][0-9]:[0-9][0-9] [A-Z]+'
+readonly CERT_ROW_RE="^([^[:space:]]+)[[:space:]]+.*[[:space:]](${CERT_EXPIRES_RE})[[:space:]]+.*[[:space:]](OK|WARNING|EXPIRED|NOT YET VALID)[[:space:]]*$"
+
+COMMAND=""
+BUNDLE_WORK=""
+BUNDLE_SECRETS=""
+BUNDLE_SCRIPT=""
+CHECK_NAMES=()
+CHECK_STATUSES=()
+CHECK_DETAILS=()
+CHECK_HINTS=()
+
+usage() {
+    cat <<'HELP'
+meho-host: the host command of MEHO on this Linux server (install form 2).
+
+Run it as root:
+  sudo meho-host check
+  sudo meho-host support-bundle
+  sudo meho-host admin-network 10.0.50.0/24
+  sudo meho-host uninstall
+
+Commands:
+  check [--json]    Check the built-in Kubernetes (RKE2) and print a
+                    red/green list: the node, the pods, the disk and RKE2's
+                    certificates. Every line that is not ok says what to do.
+                    --json prints the list as JSON, for meho doctor.
+  support-bundle    Write one file for evoila support to
+                    /var/lib/meho/support/, for root only, and print its
+                    path. It holds the check list, the logs of MEHO and of
+                    Traefik, the state of the built-in Kubernetes, RKE2's log
+                    of the last 24 hours and facts about the operating
+                    system. Passwords, tokens and keys are removed from it.
+                    Send the file to support, then delete it.
+  admin-network <range>
+  admin-network none
+                    Set the addresses that may use SSH, in the MEHO
+                    firewall file /etc/meho/firewall.nft: one IPv4 range
+                    such as 10.0.50.0/24, or one address. none closes SSH
+                    from every address, so only the console works. Only
+                    the SSH rule changes; every other rule stays. Over
+                    SSH, it asks first when the new range does not hold
+                    your own address.
+  uninstall         Remove MEHO and the built-in Kubernetes from this
+                    machine, with all their data. It asks twice. The MEHO
+                    firewall stays on, and the last line names the
+                    command that removes it.
+  -h, --help        Show this help and stop.
+
+Exit codes:
+  0  check: every line is ok or a warning; the other commands: done
+  1  check: a line is red. Otherwise: the command failed, and the [FAIL]
+     line says what to fix; or you answered a question with no
+  2  wrong usage: an unknown command or option
+HELP
+}
+
+ok() { printf '[ok]   %s\n' "$*"; }
+
+warn() { printf '[WARN] %s\n' "$*" >&2; }
+
+# fail <problem> <fix>: one [FAIL] line that says what is wrong and what to
+# do about it, then stop with exit code 1.
+fail() {
+    printf '[FAIL] %s Fix: %s\n' "$1" "$2" >&2
+    exit 1
+}
+
+# usage_error <message>: wrong command or options; stop with exit code 2.
+usage_error() {
+    printf 'meho-host: %s\n' "$1" >&2
+    printf "Run 'meho-host --help' to see the commands.\n" >&2
+    exit 2
+}
+
+# on_error <exit code> <line> <file>: the ERR trap. A command substitution
+# inherits the trap (set -E), so a failure inside one would be reported twice.
+# The subshell only passes its exit code on, and the main shell reports once.
+on_error() {
+    if ((BASHPID != $$)); then
+        exit "$1"
+    fi
+    printf '[FAIL] meho-host stopped at %s line %s: a command failed with exit code %s. Fix: read the lines above and correct the cause.\n' \
+        "$3" "$2" "$1" >&2
+    exit 1
+}
+
+# join_by <separator> <item>...: print the items with the separator between them.
+join_by() {
+    local separator=$1 joined
+    shift
+    joined=${1-}
+    shift || true
+    local item
+    for item in "$@"; do
+        joined+="${separator}${item}"
+    done
+    printf '%s' "$joined"
+}
+
+# in_list <item> <item of the list>...: true when the item is in the list.
+in_list() {
+    local item=$1 candidate
+    shift
+    for candidate in "$@"; do
+        if [[ $candidate == "$item" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+check_root() {
+    [[ $(id -u) == 0 ]] ||
+        fail "meho-host does not run as root." "run it with sudo: sudo meho-host $COMMAND"
+}
+
+# ask <question>: print the question and read one line. True only for "yes",
+# so a closed standard input (a script, a service) counts as no.
+ask() {
+    local answer=""
+    printf '%s Type yes to go on: ' "$1"
+    read -r answer || true
+    [[ $answer == yes ]]
+}
+
+stop_unchanged() {
+    printf 'Stopped. Nothing was changed.\n'
+    exit 1
+}
+
+# RKE2's own kubectl with RKE2's own access file. False when RKE2 is not
+# installed or does not answer.
+rke2_kubectl() {
+    local kubectl="${HOST_ROOT}${RKE2_KUBECTL}"
+    [[ -x $kubectl ]] || return 1
+    "$kubectl" --kubeconfig "${HOST_ROOT}${RKE2_KUBECONFIG}" --request-timeout=10s "$@"
+}
+
+# result <name> <ok|warn|fail> <detail> [fix]: one line of the check list.
+result() {
+    CHECK_NAMES+=("$1")
+    CHECK_STATUSES+=("$2")
+    CHECK_DETAILS+=("$3")
+    CHECK_HINTS+=("${4-}")
+}
+
+check_node() {
+    local statuses
+    if ! statuses=$(rke2_kubectl get nodes \
+        -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null); then
+        result node fail "RKE2 does not answer." \
+            "check that RKE2 runs: systemctl status rke2-server; see RKE2's log: $RKE2_LOG_COMMAND"
+    elif [[ $statuses =~ ^True( True)*$ ]]; then
+        result node ok "Ready"
+    else
+        result node fail "not Ready." "see RKE2's log: $RKE2_LOG_COMMAND"
+    fi
+}
+
+check_pods() {
+    local pods namespace name phase ready reason counted=0 in_meho=0 bad=() evicted=()
+    if ! pods=$(rke2_kubectl get pods -A -o jsonpath="$POD_TEMPLATE" 2>/dev/null); then
+        result pods fail "RKE2 does not answer." "$SUPPORT_HINT"
+        return 0
+    fi
+    while IFS='|' read -r namespace name phase ready reason; do
+        [[ -n $name ]] || continue
+        in_list "$namespace" "${CHECK_NAMESPACES[@]}" || continue
+        counted=$((counted + 1))
+        if [[ $namespace == "$MEHO_NAMESPACE" ]]; then
+            in_meho=1
+        fi
+        # The pod of a finished Job (RKE2's helm-install Jobs, the core's
+        # bootstrap Job) is Succeeded and never Ready. That is fine. A pod
+        # the kubelet evicted when the disk was full stays in the list as
+        # Failed after its replacement runs, so it is a warning, not red.
+        case $phase in
+            Succeeded) ;;
+            Running) [[ $ready == True ]] || bad+=("$namespace/$name is not Ready") ;;
+            Failed)
+                if [[ $reason == Evicted ]]; then
+                    evicted+=("$namespace/$name")
+                else
+                    bad+=("$namespace/$name is $phase")
+                fi
+                ;;
+            *) bad+=("$namespace/$name is $phase") ;;
+        esac
+    done <<<"$pods"
+    if ((in_meho == 0)); then
+        result pods fail "no pod in namespace $MEHO_NAMESPACE, so the MEHO core is not installed." \
+            "$SUPPORT_HINT"
+    elif ((${#bad[@]} > 0)); then
+        result pods fail "$(join_by ', ' "${bad[@]}")." "$SUPPORT_HINT"
+    elif ((${#evicted[@]} > 0)); then
+        result pods warn "evicted by the kubelet when the disk was full: $(join_by ', ' "${evicted[@]}"); the other pods run." \
+            "check the disk line. An evicted entry does no harm, and support removes it."
+    else
+        result pods ok "all $counted pods in $(join_by ', ' "${CHECK_NAMESPACES[@]}") run"
+    fi
+}
+
+# disk_free <machine path>: "<percent free> <GB free>" of the file system
+# that holds the path. Empty when df cannot read it.
+disk_free() {
+    df -P -k "${HOST_ROOT}$1" 2>/dev/null |
+        awk 'NR == 2 && $2 > 0 { printf "%d %.0f\n", $4 * 100 / $2, $4 * 1024 / 1e9 }'
+}
+
+check_disk() {
+    local path values percent gb lowest=100 details=()
+    for path in "${DISK_PATHS[@]}"; do
+        values=$(disk_free "$path") || values=""
+        if [[ -z $values ]]; then
+            result disk fail "$path cannot be read." "check that the disk is mounted: df -h $path"
+            return 0
+        fi
+        read -r percent gb <<<"$values"
+        details+=("$path has $gb GB free ($percent%)")
+        if ((percent < lowest)); then
+            lowest=$percent
+        fi
+    done
+    if ((lowest < DISK_FAIL_PERCENT)); then
+        result disk fail "$(join_by '; ' "${details[@]}")." \
+            "free space on the disk or make it larger. Below $DISK_FAIL_PERCENT% the built-in Kubernetes stops pods to protect the disk."
+    elif ((lowest < DISK_WARN_PERCENT)); then
+        result disk warn "$(join_by '; ' "${details[@]}")." \
+            "free space on the disk or make it larger, before it falls below $DISK_FAIL_PERCENT%."
+    else
+        result disk ok "$(join_by '; ' "${details[@]}")"
+    fi
+}
+
+# RKE2 renews a certificate at its start when it has expired or has less than
+# 120 days left (https://docs.rke2.io/security/certificates). So a
+# certificate with less than 30 days left means RKE2 has not restarted for a
+# long time, and a restart is the fix.
+check_certificates() {
+    local table now line filename expires status seconds days count=0 expired=() soon=() early=()
+    if ! table=$("${HOST_ROOT}${RKE2_BINARY}" certificate check --output table 2>/dev/null); then
+        result certificates fail "'rke2 certificate check' did not run." \
+            "check that RKE2 is installed: ls -l /usr/local/bin/rke2. Then $SUPPORT_HINT"
+        return 0
+    fi
+    now=$(date -u +%s)
+    while IFS= read -r line; do
+        [[ $line =~ $CERT_ROW_RE ]] || continue
+        filename=${BASH_REMATCH[1]}
+        expires=${BASH_REMATCH[2]}
+        status=${BASH_REMATCH[3]}
+        count=$((count + 1))
+        if ! seconds=$(date -u -d "${expires/,/}" +%s 2>/dev/null); then
+            result certificates fail "the expiry date '$expires' of $filename could not be read." "$SUPPORT_HINT"
+            return 0
+        fi
+        days=$(((seconds - now) / 86400))
+        # For NOT YET VALID, the EXPIRES column holds the start date instead.
+        if [[ $status == "NOT YET VALID" ]]; then
+            early+=("$filename")
+        elif [[ $status == EXPIRED ]] || ((seconds <= now)); then
+            expired+=("$filename")
+        elif ((days < CERT_WARN_DAYS)); then
+            soon+=("$filename ($days days)")
+        fi
+    done <<<"$table"
+    if ((count == 0)); then
+        result certificates fail "'rke2 certificate check' listed no certificate." "$SUPPORT_HINT"
+    elif ((${#expired[@]} > 0)); then
+        result certificates fail "expired: $(join_by ', ' "${expired[@]}")." \
+            "restart RKE2, which renews them: $RKE2_RESTART_COMMAND. Then run the check again."
+    elif ((${#early[@]} > 0)); then
+        result certificates fail "not yet valid: $(join_by ', ' "${early[@]}")." \
+            "the clock of this machine or the certificate is wrong. Check the time: timedatectl. Then $SUPPORT_HINT"
+    elif ((${#soon[@]} > 0)); then
+        result certificates warn "less than $CERT_WARN_DAYS days left: $(join_by ', ' "${soon[@]}")." \
+            "restart RKE2, which renews a certificate with less than 120 days left: $RKE2_RESTART_COMMAND."
+    else
+        result certificates ok "all $count RKE2 certificates are valid for at least $CERT_WARN_DAYS days"
+    fi
+}
+
+run_checks() {
+    check_node
+    check_pods
+    check_disk
+    check_certificates
+}
+
+print_checks() {
+    local i label line
+    for i in "${!CHECK_NAMES[@]}"; do
+        case ${CHECK_STATUSES[i]} in
+            ok) label='[ok]  ' ;;
+            warn) label='[WARN]' ;;
+            *) label='[FAIL]' ;;
+        esac
+        line="$label ${CHECK_NAMES[i]}: ${CHECK_DETAILS[i]}"
+        if [[ -n ${CHECK_HINTS[i]} ]]; then
+            line+=" Fix: ${CHECK_HINTS[i]}"
+        fi
+        printf '%s\n' "$line"
+    done
+}
+
+# json_string <text>: the text as a JSON string. The texts are this script's
+# own words and names from Kubernetes, so only quotes, backslashes, tabs
+# and line breaks need escaping.
+json_string() {
+    local text=$1
+    text=${text//\\/\\\\}
+    text=${text//\"/\\\"}
+    text=${text//$'\n'/\\n}
+    text=${text//$'\t'/\\t}
+    printf '"%s"' "$text"
+}
+
+# The shape that meho doctor reads (#4740).
+print_checks_json() {
+    local i separator=""
+    printf '{"checks":['
+    for i in "${!CHECK_NAMES[@]}"; do
+        printf '%s{"name":%s,"status":%s,"detail":%s,"hint":%s}' "$separator" \
+            "$(json_string "${CHECK_NAMES[i]}")" "$(json_string "${CHECK_STATUSES[i]}")" \
+            "$(json_string "${CHECK_DETAILS[i]}")" "$(json_string "${CHECK_HINTS[i]}")"
+        separator=,
+    done
+    printf ']}\n'
+}
+
+command_check() {
+    local json=0
+    while (($# > 0)); do
+        case $1 in
+            --json) json=1 ;;
+            *) usage_error "unknown option of check: $1" ;;
+        esac
+        shift
+    done
+    check_root
+    run_checks
+    if ((json)); then
+        print_checks_json
+    else
+        print_checks
+    fi
+    if in_list fail "${CHECK_STATUSES[@]}"; then
+        exit 1
+    fi
+}
+
+# collect <file> <command>...: the command's output and error messages go
+# into the file. When the command fails, the file says so, and the bundle
+# is still written: support needs it most when something is down.
+collect() {
+    local file=$1
+    shift
+    "$@" >"$file" 2>&1 || printf '\n(this command failed with exit code %s)\n' "$?" >>"$file"
+}
+
+# pod_names <namespace> <name pattern>: the pods of the namespace whose name
+# matches the pattern, one per line. An empty pattern gives every pod.
+pod_names() {
+    rke2_kubectl -n "$1" get pods -o name 2>/dev/null | sed 's#^pod/##' | grep -E -- "$2" || true
+}
+
+# pod_logs <namespace> <pod> <folder>: the logs of every container of the
+# pod, and of the previous run of its containers when there was one.
+pod_logs() {
+    local namespace=$1 pod=$2 file="$3/$1.$2"
+    collect "$file.log" rke2_kubectl -n "$namespace" logs "$pod" --all-containers --timestamps
+    if ! rke2_kubectl -n "$namespace" logs "$pod" --all-containers --timestamps --previous \
+        >"$file.previous.log" 2>/dev/null; then
+        rm -f "$file.previous.log"
+    fi
+}
+
+# logs_of_pods <namespace> <name pattern> <folder>
+logs_of_pods() {
+    local pod
+    while IFS= read -r pod; do
+        [[ -n $pod ]] || continue
+        pod_logs "$1" "$pod" "$3"
+    done < <(pod_names "$1" "$2")
+}
+
+# collect_bundle <folder>: every part of the bundle goes into the folder.
+collect_bundle() {
+    local work=$1 namespace
+    mkdir -p "$work/pods" "$work/objects" "$work/os"
+    run_checks
+    print_checks_json >"$work/check.json"
+    logs_of_pods "$MEHO_NAMESPACE" "" "$work/pods"
+    # RKE2 deploys Traefik from its rke2-traefik chart into kube-system. The
+    # pattern leaves out the helm-install-rke2-traefik Job pod.
+    logs_of_pods kube-system '^rke2-traefik-' "$work/pods"
+    for namespace in "${CHECK_NAMESPACES[@]}"; do
+        collect "$work/objects/$namespace.txt" \
+            rke2_kubectl -n "$namespace" get all,ingress,pvc,configmap,networkpolicy -o wide
+        # The table of Secrets shows names, types and the number of keys,
+        # never a value.
+        collect "$work/objects/$namespace.secrets.txt" rke2_kubectl -n "$namespace" get secrets
+    done
+    collect "$work/events.txt" rke2_kubectl get events -A --sort-by=.metadata.creationTimestamp
+    collect "$work/node.txt" rke2_kubectl describe node
+    collect "$work/rke2-server.journal.txt" \
+        journalctl -u rke2-server --since "$JOURNAL_SINCE" --no-pager -o short-iso
+    collect "$work/os/os-release.txt" cat "${HOST_ROOT}/etc/os-release"
+    collect "$work/os/uname.txt" uname -a
+    collect "$work/os/free.txt" free -m
+    collect "$work/os/df.txt" df -h
+    collect "$work/os/ip-addr.txt" ip addr
+    collect "$work/os/ip-route.txt" ip route
+    collect "$work/os/timedatectl.txt" timedatectl
+    if [[ -f ${HOST_ROOT}${MEHO_INSTALL_RECORD} ]]; then
+        cp "${HOST_ROOT}${MEHO_INSTALL_RECORD}" "$work/install.json"
+    fi
+}
+
+# any_case <word>: a pattern that matches the word in upper or lower case,
+# for example [Kk][Ee][Yy]. Ubuntu's awk (mawk) and sed have no portable
+# case-insensitive flag.
+any_case() {
+    local word=$1 pattern="" letter i
+    for ((i = 0; i < ${#word}; i++)); do
+        letter=${word:i:1}
+        pattern+="[${letter^^}${letter,,}]"
+    done
+    printf '%s' "$pattern"
+}
+
+# regex_literal <text>: the text with every special character of an extended
+# regular expression escaped, so sed matches it as it is.
+regex_literal() {
+    printf '%s' "$1" | sed -e 's/[][\.*^$/(){}+?|]/\\&/g'
+}
+
+# write_secret_values <file>: the values of the core's Secrets in namespace
+# meho go from kubectl straight into the file, decoded, one key=value per
+# line, for root only. No value touches a command line. The file stays
+# empty when RKE2 does not answer.
+write_secret_values() {
+    rke2_kubectl -n "$MEHO_NAMESPACE" get secrets -o go-template="$SECRET_VALUES_TEMPLATE" >"$1" 2>/dev/null || true
+}
+
+# secret_values <secrets file>: every value to remove, one per line: the
+# unseal key, the *_password lines of the first-login file, and the values
+# of the core's Secrets. The guide tells the customer to delete the two
+# one-time files after the first login, so the Secrets are the source that
+# stays. Keys with "user" in the name hold plain names such as admin, and
+# values shorter than 8 characters are words, not secrets: both stay in the
+# bundle. A value on more than one line, such as a certificate, gives only
+# its first line.
+secret_values() {
+    local secrets_file=$1 file="${HOST_ROOT}${MEHO_UNSEAL_KEY_FILE}"
+    if [[ -r $file ]]; then
+        cat "$file"
+    fi
+    file="${HOST_ROOT}${MEHO_FIRST_LOGIN_FILE}"
+    if [[ -r $file ]]; then
+        sed -n 's/^[^=]*_password=//p' "$file"
+    fi
+    awk -F= 'NF >= 2 && tolower($1) !~ /user/ {
+        value = substr($0, length($1) + 2)
+        if (length(value) >= 8) print value
+    }' "$secrets_file"
+}
+
+# scrub_bundle <folder> <secrets file> <sed script>: no password leaves the
+# machine. Every file loses the value of any variable whose name holds
+# PASSWORD, TOKEN, SECRET or KEY, written as NAME=value, NAME: value (with
+# or without the space) or as the JSON pair "name": "value" (MEHO's own
+# logs are JSON lines), and every value of secret_values, wherever it
+# appears. The rules go into a sed script file for root only, never on
+# sed's command line: every user on the machine can read the arguments of
+# a running process.
+scrub_bundle() {
+    local work=$1 secrets_file=$2 script=$3 names key name value
+    names="$(any_case password)|$(any_case token)|$(any_case secret)"
+    # "key" counts when it ends the name or when a digit, "_", "." or "-"
+    # follows it (api_key, apiKey, unseal-key, KEY_ID), so that keycloak is
+    # not a key name: support needs Keycloak's addresses.
+    key=$(any_case key)
+    name="([A-Za-z0-9_.-]*(${names})[A-Za-z0-9_.-]*|[A-Za-z0-9_.-]*${key}([0-9_.-][A-Za-z0-9_.-]*)?)"
+    {
+        printf '%s\n' "s/(\"${name}\"[[:space:]]*:[[:space:]]*)\"[^\"]*\"/\\1\"[removed]\"/g"
+        printf '%s\n' "s/(${name}[[:space:]]*(=|:)[[:space:]]*)(\"[^\"]*\"|[^[:space:]\",}]+)/\\1[removed]/g"
+        while IFS= read -r value; do
+            [[ -n $value ]] || continue
+            printf 's/%s/[removed]/g\n' "$(regex_literal "$value")"
+        done < <(secret_values "$secrets_file")
+    } >"$script"
+    find "$work" -type f -exec sed -E -i -f "$script" {} +
+}
+
+# remove_bundle_files: the EXIT trap of support-bundle. The work folder, the
+# file with the Secret values and the sed script never outlive the command.
+remove_bundle_files() {
+    local path
+    for path in "$BUNDLE_WORK" "$BUNDLE_SECRETS" "$BUNDLE_SCRIPT"; do
+        if [[ -n $path ]]; then
+            rm -rf "$path"
+        fi
+    done
+}
+
+command_support_bundle() {
+    (($# == 0)) || usage_error "support-bundle takes no option: $1"
+    check_root
+    local host stamp name support_dir
+    host=$(hostname -f 2>/dev/null || hostname)
+    stamp=$(date -u +%Y%m%dT%H%M%SZ)
+    name="meho-support-${host,,}-$stamp.tar.gz"
+    support_dir="${HOST_ROOT}${MEHO_SUPPORT_DIR}"
+    mkdir -p "$support_dir"
+    chmod 0700 "$support_dir"
+    # The three temporary paths are outside the work folder, so they never
+    # go into the archive. mktemp makes them for root only.
+    BUNDLE_WORK=$(mktemp -d "$support_dir/.build.XXXXXX")
+    BUNDLE_SECRETS=$(mktemp "$support_dir/.secrets.XXXXXX")
+    BUNDLE_SCRIPT=$(mktemp "$support_dir/.sed.XXXXXX")
+    trap remove_bundle_files EXIT
+    collect_bundle "$BUNDLE_WORK"
+    write_secret_values "$BUNDLE_SECRETS"
+    scrub_bundle "$BUNDLE_WORK" "$BUNDLE_SECRETS" "$BUNDLE_SCRIPT"
+    (umask 077 && tar -czf "$support_dir/$name" -C "$BUNDLE_WORK" .)
+    chmod 0600 "$support_dir/$name"
+    printf '%s\n' "$MEHO_SUPPORT_DIR/$name"
+    printf 'Send it to evoila support, then delete it: it holds the logs and the state of this machine.\n'
+}
+
+is_ipv4() {
+    [[ $1 =~ $IPV4_RE ]]
+}
+
+# is_ipv4_range <text>: one address such as 10.0.0.5, or a range such as
+# 10.0.50.0/24.
+is_ipv4_range() {
+    if [[ $1 == */* ]]; then
+        is_ipv4 "${1%/*}" && [[ ${1#*/} =~ $PREFIX_RE ]]
+    else
+        is_ipv4 "$1"
+    fi
+}
+
+ipv4_to_int() {
+    local a b c d
+    IFS=. read -r a b c d <<<"$1"
+    printf '%d' "$(((10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d))"
+}
+
+# is_ipv4_network <range> of lib/net.sh: true for a range that starts at its
+# first address, such as 10.0.50.0/24. 10.0.50.7/24 does not name where the
+# range starts, so install.sh refuses it, and so does this command.
+is_ipv4_network() {
+    local prefix=${1#*/} address mask
+    mask=$((prefix == 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF))
+    address=$(ipv4_to_int "${1%/*}")
+    (((address & mask) == address))
+}
+
+# range_holds <address or range> <address>: true when the range holds the
+# address. An address without a prefix is a range of one address.
+range_holds() {
+    local range=$1 address prefix mask
+    [[ $range == */* ]] || range+=/32
+    prefix=${range#*/}
+    mask=$((prefix == 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF))
+    address=$(ipv4_to_int "$2")
+    (((address & mask) == ($(ipv4_to_int "${range%/*}") & mask)))
+}
+
+# ssh_client_address: the address of the SSH session that runs meho-host,
+# or nothing on the machine's console. sudo removes SSH_CLIENT and
+# SSH_CONNECTION from the environment, so the function also reads the
+# environment of the processes above this one, up to the shell of the SSH
+# login, the way install.sh does.
+ssh_client_address() {
+    local value="${SSH_CLIENT:-${SSH_CONNECTION:-}}" pid=$PPID depth=0 entry
+    while [[ -z $value ]] && ((depth++ < 32 && pid > 1)); do
+        if [[ -r ${HOST_ROOT}/proc/$pid/environ ]]; then
+            while IFS= read -r -d '' entry; do
+                case $entry in
+                    SSH_CLIENT=* | SSH_CONNECTION=*)
+                        value=${entry#*=}
+                        break
+                        ;;
+                esac
+            done <"${HOST_ROOT}/proc/$pid/environ"
+        fi
+        pid=$(awk '$1 == "PPid:" { print $2; exit }' "${HOST_ROOT}/proc/$pid/status" 2>/dev/null) || pid=0
+        [[ $pid =~ ^[0-9]+$ ]] || pid=0
+    done
+    value=${value%% *}
+    printf '%s\n' "${value#::ffff:}"
+}
+
+# rules_with_admin_network <rules file> <range, or "" for nobody>: print
+# the MEHO firewall file with only the set admin_network changed: its
+# elements line, and the note above the set. Every other line stays as
+# it is, so a customer's own rules survive.
+rules_with_admin_network() {
+    awk -v elements="$2" '
+        /^    # The addresses that may use SSH/ {
+            print
+            if ((getline line) > 0) {
+                if (line ~ /^    # /) line = "    # Set with meho-host admin-network."
+                print line
+            }
+            next
+        }
+        /^    set admin_network \{/ { in_set = 1 }
+        in_set && /^        elements = / { next }
+        in_set && /^        flags interval$/ {
+            print
+            if (elements != "") print "        elements = { " elements " }"
+            next
+        }
+        in_set && /^    \}/ { in_set = 0 }
+        { print }
+    ' "$1"
+}
+
+command_admin_network() {
+    (($# == 1)) || usage_error "admin-network takes one value: an IPv4 range such as 10.0.50.0/24, one address, or none."
+    local wanted=$1 range="" rules client new_file expected output
+    if [[ $wanted != none ]]; then
+        is_ipv4_range "$wanted" ||
+            usage_error "admin-network: '$wanted' is not an IPv4 range such as 10.0.50.0/24, one address, or none."
+        [[ $wanted != */* ]] || is_ipv4_network "$wanted" ||
+            usage_error "admin-network: $wanted does not start at the first address of its range. Give the first address, for example 10.0.50.0/24, or one address without a prefix."
+        range=$wanted
+    fi
+    check_root
+    rules="${HOST_ROOT}${MEHO_FIREWALL_FILE}"
+    grep -qx '    set admin_network {' "$rules" 2>/dev/null ||
+        fail "$MEHO_FIREWALL_FILE has no set admin_network, so meho-host cannot find the SSH rule." \
+            "check that the file is the one install.sh wrote. Then $SUPPORT_HINT"
+    client=$(ssh_client_address)
+    if [[ -z $range && -n $client ]]; then
+        warn "admin-network none closes SSH for every address. This session stays open, but no new SSH login works after it ends: only the console does."
+        ask "Close SSH anyway?" || stop_unchanged
+    elif [[ -n $range && -n $client ]] && ! { is_ipv4 "$client" && range_holds "$range" "$client"; }; then
+        warn "This SSH session comes from $client, which is outside $range. This session stays open, but a new SSH login from $client would get no answer."
+        ask "Change the SSH rule anyway?" || stop_unchanged
+    fi
+    if [[ $range == */0 ]]; then
+        warn "admin-network $range allows SSH from every address."
+    fi
+    # The new file is checked before it takes the old one's place, so a
+    # file nft refuses changes nothing.
+    new_file=$(mktemp "${rules}.XXXXXX")
+    rules_with_admin_network "$rules" "$range" >"$new_file"
+    # The rewrite finds the set by the lines install.sh writes. After a hand
+    # edit it can leave the set unchanged or empty, and nft accepts both. So
+    # the new set must be exactly the one asked for.
+    expected=$'    set admin_network {\n        type ipv4_addr\n        flags interval\n'
+    [[ -z $range ]] || expected+="        elements = { $range }"$'\n'
+    expected+='    }'
+    if [[ $(awk '/^    set admin_network \{/ { s = 1 } s { print } s && /^    \}/ { exit }' "$new_file") != "$expected" ]]; then
+        rm -f "$new_file"
+        fail "the set admin_network in $MEHO_FIREWALL_FILE is not in the form install.sh writes, so meho-host cannot change it. Nothing was changed." \
+            "change the set by hand, then run: systemctl reload $MEHO_FIREWALL_UNIT"
+    fi
+    if ! output=$(nft -c -f "$new_file" 2>&1); then
+        rm -f "$new_file"
+        printf '%s\n' "$output" >&2
+        fail "nft does not accept the new firewall file, so $MEHO_FIREWALL_FILE was not changed." \
+            "read nft's message above. Then $SUPPORT_HINT"
+    fi
+    mv -f "$new_file" "$rules"
+    nft -f "$rules" ||
+        fail "nft could not load $MEHO_FIREWALL_FILE. The file holds the new SSH rule, but the old rules are still loaded." \
+            "run: systemctl reload $MEHO_FIREWALL_UNIT. Then $SUPPORT_HINT"
+    if [[ -n $range ]]; then
+        ok "SSH is allowed from $range"
+    else
+        ok "SSH is closed for every address; only the console works"
+    fi
+}
+
+command_uninstall() {
+    (($# == 0)) || usage_error "uninstall takes no option: $1"
+    check_root
+    local uninstall="${HOST_ROOT}${RKE2_UNINSTALL}" etc_dir="${HOST_ROOT}${MEHO_ETC_DIR}"
+    printf 'This removes MEHO and the built-in Kubernetes (RKE2) from this machine, with all their data: %s, %s and the cluster data in %s. There is no way back without a backup.\n' \
+        "$MEHO_STATE_DIR" "$MEHO_ETC_DIR" "$RKE2_DATA_DIR"
+    ask "Remove MEHO from this machine?" || stop_unchanged
+    ask "Last question: the data is gone afterwards. Remove MEHO?" || stop_unchanged
+    if [[ -x $uninstall ]]; then
+        "$uninstall" ||
+            fail "RKE2's uninstall script $RKE2_UNINSTALL failed, and the MEHO files were not removed yet." \
+                "read its message above, then run meho-host uninstall again."
+        ok "removed RKE2 and the cluster data with $RKE2_UNINSTALL"
+    else
+        printf '[note] %s is not on this machine, so RKE2 is already gone.\n' "$RKE2_UNINSTALL"
+    fi
+    rm -rf "${HOST_ROOT}${MEHO_STATE_DIR}"
+    if [[ -d $etc_dir ]]; then
+        find "$etc_dir" -mindepth 1 -maxdepth 1 ! -name "${MEHO_FIREWALL_FILE##*/}" -exec rm -rf {} +
+    fi
+    # The drop-in would stop a later RKE2 install once the firewall is gone.
+    # RKE2's script leaves its folder, which holds nothing else.
+    rm -f "${HOST_ROOT}${RKE2_FIREWALL_DROPIN}"
+    rmdir "${HOST_ROOT}${RKE2_FIREWALL_DROPIN%/*}" 2>/dev/null || true
+    systemctl daemon-reload
+    # bash keeps the running script open, so meho-host can remove itself.
+    rm -f "${HOST_ROOT}${MEHO_CLI_PATH}" "${HOST_ROOT}${MEHO_HOST_PATH}"
+    ok "removed $MEHO_STATE_DIR and $MEHO_ETC_DIR, except the firewall file, and the commands $MEHO_CLI_PATH and $MEHO_HOST_PATH"
+    printf 'The MEHO firewall stays on, so this machine is never without one. When your own firewall is ready, remove it with: %s\n' \
+        "$FIREWALL_REMOVE_COMMAND"
+}
+
+main() {
+    (($# > 0)) || usage_error "no command given."
+    COMMAND=$1
+    shift
+    trap 'on_error "$?" "$LINENO" "${BASH_SOURCE[0]##*/}"' ERR
+    case $COMMAND in
+        -h | --help) usage ;;
+        check) command_check "$@" ;;
+        support-bundle) command_support_bundle "$@" ;;
+        admin-network) command_admin_network "$@" ;;
+        uninstall) command_uninstall "$@" ;;
+        *) usage_error "unknown command: $COMMAND" ;;
+    esac
+}
+
+main "$@"

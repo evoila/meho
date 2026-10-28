@@ -58,6 +58,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     _CLUSTER_CONFIG_SPEC_EX_TYPE,
     _CLUSTER_RULE_SPEC_TYPE,
     _CLUSTER_VM_HOST_RULE_INFO_TYPE,
+    _OP_CONTINUE_RETRIEVE_PROPERTIES,
     _OP_RECONFIGURE_COMPUTE_RESOURCE_TASK,
     _OP_RETRIEVE_PROPERTIES,
     _PROP_CONFIGURATION_EX,
@@ -84,8 +85,10 @@ __all__ = [
 #: vi-json sub-op manifest (``_VIM_SUB_OPS_*`` namespace, so the vcenter.yaml
 #: sweep skips it; the vi-json reconcile lane checks every path exists). The
 #: same pair as ``cluster.drs_rule.create``: read the rules, then reconfigure.
+#: The VM name read for the approval card follows continuation pages (#4862).
 _VIM_SUB_OPS_CLUSTER_DRS_RULE_DELETE: Final[tuple[str, ...]] = (
     _OP_RETRIEVE_PROPERTIES,
+    _OP_CONTINUE_RETRIEVE_PROPERTIES,
     _OP_RECONFIGURE_COMPUTE_RESOURCE_TASK,
 )
 

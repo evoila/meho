@@ -156,7 +156,7 @@ Follows the modern `sddc_manager` layout:
 - **`connector.py`** — the connector class + auth helpers + 7 bound-method shims.
 
 **Operation contracts.** The 7 typed ops meet the VMware operation-contract
-check (`backend/tests/test_vmware_operation_contracts.py`):
+check (`backend/tests/test_operation_contracts.py`):
 
 - Each `response_schema` names the main fields of the vendor answer
   (`PageOf<X>` → `elements[]` + `pageMetadata`). Broadcom publishes no API file

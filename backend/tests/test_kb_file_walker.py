@@ -20,15 +20,22 @@ Coverage matrix:
 * Invalid slug from front-matter override surfaces as InvalidKbSlugError.
 * Malformed YAML in front-matter surfaces as KbFileParseError chained
   from the underlying yaml.YAMLError.
+* Only regular files inside the root are read: a linked file, a linked
+  folder, a pipe and a socket are skipped, and so is a file whose real
+  location is outside the root. A linked ``.kb-ignore`` is not read.
 """
 
 from __future__ import annotations
 
 import errno
+import os
+import socket
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
+from meho_backplane.kb import file_walker
 from meho_backplane.kb.file_walker import (
     KB_IGNORE_FILENAME,
     KbFileParseError,
@@ -248,6 +255,112 @@ def test_unreadable_file_error_uses_relative_path(
     with pytest.raises(PermissionError) as exc_info:
         list(walk_kb_directory(tmp_path))
     assert str(tmp_path.resolve()) not in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Regular files inside the root only
+# ---------------------------------------------------------------------------
+
+
+def _make_special_files(folder: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Create a pipe and a socket named ``*.md`` in *folder* where the platform allows.
+
+    Returns the names it created. The socket is bound by a short
+    relative name, because socket paths have a small length limit.
+    """
+    made: list[str] = []
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(folder / "pipe.md")
+        made.append("pipe.md")
+    if hasattr(socket, "AF_UNIX"):
+        monkeypatch.chdir(folder)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.bind("socket.md")
+        made.append("socket.md")
+    return made
+
+
+def _skipped(logs: list[dict[str, object]]) -> dict[object, object]:
+    """Map path to reason for every ``kb_file_skipped`` log line."""
+    return {entry["path"]: entry["reason"] for entry in logs if entry["event"] == "kb_file_skipped"}
+
+
+def test_only_regular_files_inside_the_root_are_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A linked file, a linked folder, a pipe and a socket are skipped, not read."""
+    root = tmp_path / "kb"
+    elsewhere = tmp_path / "elsewhere"
+    _write(root / "regular.md", "Regular.")
+    _write(elsewhere / "note.md", "Outside the root.")
+    _write(elsewhere / "folder" / "deep.md", "Outside the root, in a folder.")
+    (root / "linked-file.md").symlink_to(elsewhere / "note.md")
+    (root / "linked-folder").symlink_to(elsewhere / "folder", target_is_directory=True)
+    special = _make_special_files(root, monkeypatch)
+
+    errors: list[str] = []
+    with capture_logs() as logs:
+        records = list(walk_kb_directory(root, errors=errors))
+
+    assert [record.relative_path for record in records] == ["regular.md"]
+    assert records[0].body == "Regular."
+    assert errors == []
+    # The linked folder is never entered, so it gets no log line.
+    assert _skipped(logs) == {
+        "linked-file.md": "link",
+        **dict.fromkeys(special, "not a regular file"),
+    }
+
+
+def test_linked_file_pointing_inside_the_root_is_skipped(tmp_path: Path) -> None:
+    """A link is skipped even when it points at a file inside the root."""
+    _write(tmp_path / "regular.md", "Regular.")
+    (tmp_path / "alias.md").symlink_to(tmp_path / "regular.md")
+    assert _slugs(tmp_path) == ["regular"]
+
+
+def test_file_whose_real_path_is_outside_the_root_is_not_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A regular file whose real location is outside the root is not read.
+
+    The walk does not enter linked folders, so this test replaces the
+    listing to hand the walker a path through one, as if the folder had
+    turned into a link after it was listed. The file at the end of that
+    path is a regular file, so only the real-location check stops it.
+    """
+    root = tmp_path / "kb"
+    _write(root / "regular.md", "Regular.")
+    _write(tmp_path / "elsewhere" / "note.md", "Outside the root.")
+    (root / "folder").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    real_root = root.resolve()
+    through_link = real_root / "folder" / "note.md"
+    assert through_link.is_file()
+    listed = [("folder/note.md", through_link), ("regular.md", real_root / "regular.md")]
+    monkeypatch.setattr(file_walker, "_list_markdown_files", lambda _root: listed)
+
+    errors: list[str] = []
+    with capture_logs() as logs:
+        records = list(walk_kb_directory(root, errors=errors))
+
+    assert [record.relative_path for record in records] == ["regular.md"]
+    assert errors == []
+    assert _skipped(logs) == {"folder/note.md": "outside the root"}
+
+
+def test_linked_kb_ignore_is_not_read(tmp_path: Path) -> None:
+    """A ``.kb-ignore`` that is a link is skipped, so its patterns do not apply."""
+    root = tmp_path / "kb"
+    _write(root / "kept.md", "Kept.")
+    _write(root / "drafts" / "draft-one.md", "Draft.")
+    _write(tmp_path / "patterns.txt", "drafts\n")
+    (root / KB_IGNORE_FILENAME).symlink_to(tmp_path / "patterns.txt")
+
+    with capture_logs() as logs:
+        slugs = _slugs(root)
+
+    assert slugs == ["draft-one", "kept"]
+    assert _skipped(logs) == {KB_IGNORE_FILENAME: "link"}
 
 
 # ---------------------------------------------------------------------------

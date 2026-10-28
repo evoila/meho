@@ -128,6 +128,15 @@ production traffic cannot reach that branch.
 | `ipv6` | Full + compressed RFC 5952 forms |
 | `fqdn` | ≥2 labels with non-numeric TLD start |
 
+The `api_key` rule skips a value that already is a complete
+`[REDACTED:...]` placeholder (`password: [REDACTED:param_name]`), so an
+earlier pass (the engine itself, or the shared API file check of
+`connectors-shared-api-file-secrets.md`) is not redacted a second time
+and loses its label. Only a complete placeholder is skipped: a name
+between `[REDACTED:` and `]`, and the value ends there. A value that
+only starts like one (`[REDACTED:made-up`) or goes on after the `]`
+(`[REDACTED:x]made-up`) is redacted whole.
+
 The secret-*value* part of `authorization_header`, `bearer_token`,
 and `api_key` consumes any non-whitespace, non-quote byte
 (`patterns.py::_VALUE_CHARS`, bounded by `_VALUE_MAX`): the value is
@@ -434,7 +443,7 @@ as "the gate is broken" -- the meta-tests rule out the second case.
 **Where the gate runs.** The harness is a standard pytest file
 under `backend/tests/`, so it is picked up by the required unit
 sweep in `.github/workflows/ci.yml` — since #3251 the
-`python-unit-shard` matrix (whichever stride slice its file lands
+`python-unit-shard` matrix (whichever shard its file lands
 in), reported through the `python-unit-lane` fan-in that carries
 the branch-protection required context. That check is in the
 required-status-checks set, so a round-trip mismatch blocks merge
@@ -818,6 +827,17 @@ which commonly carry appliance credentials under a vendor-specific `id` no
 key-name heuristic or shape net can place — keeping the `id` and every
 non-secret field (network mappings, name, placement) intact.
 
+A connector can also mask a body itself before the span is recorded.
+`HttpConnector.trace_response_body(response)` returns the body the trace
+records in place of the raw bytes, or `None` for the raw bytes (the
+default). The shared engine still runs on what it returns. This is for a
+vendor answer that carries a secret in a field the shape net cannot place
+and the op family does not exclude: the HCX connector masks every
+secret-named field (`password`, `vcPassword`, `token`, ...) of every
+answer this way, so a stored pairing password never reaches the trace
+(`docs/codebase/connectors-hcx.md`). The hook runs only while a trace is
+being captured.
+
 **F2.3 — hard-excluded op families** (`families.py`). Some op families
 carry secrets *as their body* — credential reads, session mints, token
 issuance, password resets, key material — so their bodies are **never
@@ -850,7 +870,7 @@ exhaust; under-exclusion leaks.
 | --- | --- | --- |
 | secret-bearing (credential-read / -mint / -write) | **single-sourced** with `broadcast.events.classify_op` (`_CREDENTIAL_*_OPS`) | never |
 | secret-bearing (generic / tag-declared) | broadening `SECRET_FAMILY_PATTERNS` globs + token-split `SECRET_FAMILY_TAGS` | never |
-| destructive / delete-shaped | **single-sourced** with the grant guard's `Settings.service_grant_delete_shaped_patterns` + HTTP `DELETE` + `destructive` tag + a vendor delete action name (`Destroy`, `Delete`, `Remove`, `Unregister`; the ingest parser's word list in `meho_backplane/delete_names.py`, #4632) | never |
+| destructive / delete-shaped | **single-sourced** with the grant guard's `Settings.service_grant_delete_shaped_patterns` + HTTP `DELETE` + `destructive` tag + a vendor delete action name (`Destroy`, `Delete`, `Remove`, `Unregister`, also after a vSAN prefix, or an `action=delete` query; the ingest parser's word list in `meho_backplane/delete_names.py`, #4632) | never |
 | everything else | — | yes (subject to F2.2) |
 
 The destructive family is **single-sourced** with the delete-shaped
@@ -869,6 +889,22 @@ decisions" section — the destructive family joins the hard-exclusion set
 now; the reciprocal pointer back from that doc is the deferred edit. When
 the `destructive` safety tier ([#3196](https://github.com/evoila/meho/issues/3196))
 lands, the classifier already covers it via the tag it promotes.
+
+Deployment specs and depot credentials are kept out of trace bodies like
+credential writes: the operations that send a domain spec, an SddcSpec or the
+depot password (`sddc.domain.validate` / `create`,
+`installer.sddc.spec.validate`, `installer.sddc.bringup.start` / `retry`,
+`installer.composite.sddc.bringup`, `installer.system.depot.set`) carry the
+tag `credential`, a secret tag word (`SECRET_FAMILY_TAGS`).
+
+The dispatcher's error path uses the same secret check (#4854). For an
+operation that `classify_op` pins as `credential_write`, or whose tags
+have a word from `SECRET_FAMILY_TAGS`, the vendor's text in an error
+result is replaced with one fixed text before the audit row is written
+(`operations/_vendor_text.py`, through the shared
+`families.secret_tag_tokens`). So the error result and the audit row of
+such an operation keep no vendor text either. The details are in
+`docs/codebase/error-message-shape.md` ("The info-leak boundary").
 
 **F2 uncertainty (the F5 degrade)**. Any state the engine cannot *prove*
 fully redacted returns `uncertain=True`, which the caller must map to

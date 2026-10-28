@@ -1,0 +1,587 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""The local accounts of the vCenter appliance: read them, set a password, set the expiry rules.
+
+A local account is an operating-system account of the vCenter appliance
+itself, for example ``root``. ``root`` is the login for the appliance
+console, for SSH and for the management page on port 5480. When its
+password expires, these logins stop working until someone sets a new one.
+
+The four typed operations (their metadata is in
+:mod:`.typed_ops_appliance_local_accounts`) call the appliance REST API on
+the connector's own session, so they need no spec ingest:
+
+* ``GET /appliance/local-accounts`` -- the user names;
+* ``GET /appliance/local-accounts/{username}`` -- one account;
+* ``PATCH /appliance/local-accounts/{username}`` -- a change. The body is
+  the vendor ``UpdateConfig`` at the top level (no ``config`` wrapper), as
+  the pinned 8.0 and 9.0 ``vcenter.yaml`` files declare it for ``/api``.
+
+The new password is never an operation parameter; how it stays secret is in
+:mod:`.appliance_local_account_password`. Every vCenter error answer to the
+two changes goes through
+:func:`~.appliance_local_account_password.change_error` before it leaves the
+handler, so no raw vendor bytes reach the result, the audit row or a log line.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+from collections.abc import Awaitable, Callable, Mapping
+from datetime import UTC, datetime, timedelta
+from functools import partial
+from typing import TYPE_CHECKING, Any, Final
+from urllib.parse import quote
+
+import httpx
+import structlog
+
+from meho_backplane.connectors.base import ConnectorResourceNotFoundError
+from meho_backplane.connectors.vmware_rest.appliance_local_account_password import (
+    PASSWORD_SET_OP_ID,
+    LocalAccountRefusedError,
+    change_error,
+    read_new_password,
+    safe_vendor_text,
+)
+
+if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
+    from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
+    from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
+
+__all__ = [
+    "ACCOUNT_FIELDS",
+    "DAYS_MAX",
+    "DAYS_MIN",
+    "GET_OP_ID",
+    "LIST_OP_ID",
+    "PASSWORD_SET_OP_ID",
+    "POLICY_DAY_FIELDS",
+    "POLICY_FIELDS",
+    "POLICY_FLAG_FIELDS",
+    "POLICY_SET_OP_ID",
+    "USERNAME_MAX_LENGTH",
+    "USERNAME_PATTERN",
+    "VENDOR_OP_IDS",
+    "account_row",
+    "expiry_status",
+    "local_account_get_impl",
+    "local_account_list_impl",
+    "local_account_password_set_impl",
+    "local_account_policy_set_impl",
+    "policy_body",
+]
+
+_log = structlog.get_logger(__name__)
+
+LIST_OP_ID: Final = "vmware.appliance.local_account.list"
+GET_OP_ID: Final = "vmware.appliance.local_account.get"
+POLICY_SET_OP_ID: Final = "vmware.appliance.local_account.policy.set"
+
+_LIST_PATH: Final = "/appliance/local-accounts"
+_ACCOUNT_PATH: Final = "/appliance/local-accounts/{username}"
+
+#: The vendor calls, in the ``METHOD:/path`` form the reconcile lane checks.
+VENDOR_OP_IDS: Final[frozenset[str]] = frozenset(
+    {f"GET:{_LIST_PATH}", f"GET:{_ACCOUNT_PATH}", f"PATCH:{_ACCOUNT_PATH}"}
+)
+
+#: The vendor message id of the HTTP 500 that one account read can get when
+#: the caller is not allowed to read local accounts.
+_FAILED_FETCH_USER_ID: Final = "com.vmware.appliance.failed_fetch_user"
+_GROUP_TEXT: Final = (
+    "the appliance super administrator level: membership in the SSO group "
+    "SystemConfiguration.BashShellAdministrators. After a group change, MEHO's next login "
+    "to vCenter (by default within 20 minutes) carries the new group."
+)
+#: Added to a read error for HTTP 403.
+_REFUSED_HINT: Final = f"vCenter refused the read. The service account needs {_GROUP_TEXT}"
+#: Added to a read error for the HTTP 500 with :data:`_FAILED_FETCH_USER_ID`.
+_MAY_LACK_HINT: Final = f"The service account may lack {_GROUP_TEXT}"
+
+#: Letters, digits, ``.``, ``@`` and ``-``, starting and ending with a letter or
+#: a digit: the rule vCenter uses for local user names. It also keeps ``.`` and
+#: ``..`` out of the URL path.
+USERNAME_PATTERN: Final = r"^[A-Za-z0-9](?:[A-Za-z0-9.@-]*[A-Za-z0-9])?$"
+USERNAME_MAX_LENGTH: Final = 64
+_USERNAME_RE: Final = re.compile(USERNAME_PATTERN)
+
+#: The expiry fields of the vendor ``UpdateConfig``. The parameters have the
+#: vendor names, so the body is the parameters that the call sets.
+POLICY_FLAG_FIELDS: Final = ("password_expires", "inactive_after_password_expiration")
+POLICY_DAY_FIELDS: Final = (
+    "max_days_between_password_change",
+    "min_days_between_password_change",
+    "warn_days_before_password_expiration",
+    "days_after_password_expiration",
+)
+POLICY_FIELDS: Final = POLICY_FLAG_FIELDS + POLICY_DAY_FIELDS
+
+#: The day range vCenter accepts in its password policy: -1 to 99999.
+DAYS_MIN: Final = -1
+DAYS_MAX: Final = 99999
+
+_DAY_FIELDS_READ: Final = (
+    "max_days_between_password_change",
+    "min_days_between_password_change",
+    "warn_days_before_password_expiration",
+)
+
+#: The fields of one account, in output order (list rows add ``read_note``).
+ACCOUNT_FIELDS: Final = (
+    "username",
+    "roles",
+    "enabled",
+    "has_password",
+    "last_password_change",
+    "password_expires_at",
+    "password_expired",
+    "days_until_password_expires",
+    *_DAY_FIELDS_READ,
+    "inactive_at",
+)
+
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+
+def _now() -> datetime:
+    """The current time in UTC. Tests replace it."""
+    return datetime.now(UTC)
+
+
+def _unwrap(payload: Any) -> Any:
+    """The inner ``value`` of a legacy ``/rest`` answer, else the answer itself."""
+    if isinstance(payload, dict) and set(payload) == {"value"}:
+        return payload["value"]
+    return payload
+
+
+def _text_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _checked_username(params: Mapping[str, Any]) -> str:
+    """Return ``params["username"]`` when it is a valid local user name.
+
+    The parameter schema already refuses other names. This second check runs
+    before any request, so no other text can reach the URL path.
+    """
+    username = params.get("username")
+    if (
+        not isinstance(username, str)
+        or len(username) > USERNAME_MAX_LENGTH
+        or _USERNAME_RE.fullmatch(username) is None
+    ):
+        raise ValueError(
+            "username must be 1 to 64 letters, digits, '.', '@' or '-', and start and "
+            "end with a letter or a digit"
+        )
+    return username
+
+
+def _account_path(username: str) -> str:
+    return _ACCOUNT_PATH.format(username=quote(username, safe="@"))
+
+
+async def _vendor_call(
+    call: Awaitable[Any], on_error: Callable[[httpx.HTTPStatusError], Exception]
+) -> Any:
+    """Await one vendor call; on an HTTP error answer, raise ``on_error(error)`` instead.
+
+    The new error is raised after the ``except`` block, so it does not keep the
+    original error (its raw response and its request) as its context.
+    """
+    try:
+        return await call
+    except httpx.HTTPStatusError as exc:
+        error = on_error(exc)
+    raise error
+
+
+def _message_ids(response: httpx.Response) -> set[str]:
+    """The vendor message ids of an error answer, in the ``/api`` or the legacy ``/rest`` shape."""
+    try:
+        body = response.json()
+    except (ValueError, httpx.StreamError):
+        return set()
+    if not isinstance(body, dict):
+        return set()
+    value = body.get("value")
+    messages = (value if isinstance(value, dict) else body).get("messages")
+    return {
+        message["id"]
+        for message in (messages if isinstance(messages, list) else [])
+        if isinstance(message, dict) and isinstance(message.get("id"), str)
+    }
+
+
+def _group_hint(response: httpx.Response) -> str | None:
+    """The SSO group hint for a refused read, or None when the answer is not a refusal.
+
+    A 403 is a refusal. A 500 with :data:`_FAILED_FETCH_USER_ID` is what one
+    account read gets without the group, so its hint says "may".
+    """
+    status = response.status_code
+    if status == 403:
+        return _REFUSED_HINT
+    if status == 500 and _FAILED_FETCH_USER_ID in _message_ids(response):
+        return _MAY_LACK_HINT
+    return None
+
+
+def _refused_read_error(
+    exc: httpx.HTTPStatusError, *, op_id: str, action: str
+) -> LocalAccountRefusedError | None:
+    """A read error that names the SSO group, or None when the answer is not a refusal.
+
+    Keeps the HTTP status and the vAPI error type and messages.
+    """
+    hint = _group_hint(exc.response)
+    if hint is None:
+        return None
+    status = exc.response.status_code
+    error_type, messages = safe_vendor_text(exc.response)
+    detail = "; ".join(part for part in (error_type, *messages) if part) or None
+    return LocalAccountRefusedError(
+        f"{op_id}: vCenter answered HTTP {status} when MEHO tried to {action}. {hint}",
+        http_status=status,
+        upstream_message=detail,
+        remediation=hint,
+    )
+
+
+def _read_error(
+    username: str, *, op_id: str | None = None
+) -> Callable[[httpx.HTTPStatusError], Exception]:
+    """The read rule: a 404 is ``not_found``.
+
+    With *op_id*, a refusal (see :func:`_group_hint`) becomes an error that
+    names the SSO group. Any other error answer, a 401 too, is raised as it
+    is, so the dispatcher still logs in again on a 401.
+    """
+
+    def convert(exc: httpx.HTTPStatusError) -> Exception:
+        if exc.response.status_code == 404:
+            return ConnectorResourceNotFoundError(
+                [username], f"vCenter has no local account named {username!r}"
+            )
+        if op_id is not None:
+            refused = _refused_read_error(
+                exc, op_id=op_id, action=f"read the local account {username!r}"
+            )
+            if refused is not None:
+                return refused
+        return exc
+
+    return convert
+
+
+def _failure_text(exc: Exception, secrets: tuple[str, ...] = ()) -> str:
+    """A short reason for a failed account read, for ``read_note``; it holds no secret."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        error_type, _ = safe_vendor_text(exc.response, secrets)
+        suffix = f" ({error_type})" if error_type else ""
+        return f"HTTP {exc.response.status_code}{suffix}"
+    if isinstance(exc, ConnectorResourceNotFoundError):
+        return "vCenter does not have this account"
+    return type(exc).__name__
+
+
+# ---------------------------------------------------------------------------
+# Account rows
+# ---------------------------------------------------------------------------
+
+
+def _parse_time(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def expiry_status(password_expires_at: str | None, now: datetime) -> dict[str, Any]:
+    """Return ``password_expired`` and ``days_until_password_expires`` for one account.
+
+    vCenter sends no expiry date when the password never expires: then
+    ``password_expired`` is false and the day count is null. A date that does
+    not parse gives null for both. The day count is whole days from *now*; it
+    is negative after the expiry date.
+    """
+    if password_expires_at is None:
+        return {"password_expired": False, "days_until_password_expires": None}
+    expires_at = _parse_time(password_expires_at)
+    if expires_at is None:
+        return {"password_expired": None, "days_until_password_expires": None}
+    days = math.floor((expires_at - now) / timedelta(days=1))
+    return {"password_expired": expires_at <= now, "days_until_password_expires": days}
+
+
+def account_row(username: str, info: Any, *, now: datetime) -> dict[str, Any]:
+    """Project the vendor ``LocalAccounts.Info`` onto one account row.
+
+    The vendor answer carries no password, only ``has_password``. Missing or
+    malformed fields become null.
+    """
+    data = _unwrap(info)
+    if not isinstance(data, Mapping):
+        data = {}
+    raw_roles = data.get("roles")
+    roles = [r for r in raw_roles if isinstance(r, str)] if isinstance(raw_roles, list) else []
+    expires_at = _text_or_none(data.get("password_expires_at"))
+    row: dict[str, Any] = {
+        "username": username,
+        "roles": roles,
+        "enabled": _bool_or_none(data.get("enabled")),
+        "has_password": _bool_or_none(data.get("has_password")),
+        "last_password_change": _text_or_none(data.get("last_password_change")),
+        "password_expires_at": expires_at,
+        **expiry_status(expires_at, now),
+    }
+    for field in _DAY_FIELDS_READ:
+        row[field] = _int_or_none(data.get(field))
+    row["inactive_at"] = _text_or_none(data.get("inactive_at"))
+    return row
+
+
+def _unread_row(username: str, note: str) -> dict[str, Any]:
+    """A list row for an account whose read failed: every field null but the name."""
+    row: dict[str, Any] = dict.fromkeys(ACCOUNT_FIELDS)
+    row["username"] = username
+    row["roles"] = []
+    row["read_note"] = note
+    return row
+
+
+# ---------------------------------------------------------------------------
+# Reads
+# ---------------------------------------------------------------------------
+
+
+async def _read_account(
+    connector: VmwareRestConnector,
+    operator: Operator,
+    target: VsphereTargetLike,
+    username: str,
+    *,
+    on_error: Callable[[httpx.HTTPStatusError], Exception] | None = None,
+) -> dict[str, Any]:
+    """``GET /appliance/local-accounts/{username}`` as one account row.
+
+    *on_error* turns an error answer into the error to raise; the default is the
+    read rule (:func:`_read_error`: a 404 is ``not_found``).
+    """
+    path = await connector.mount_op_path(target, _account_path(username), operator)
+    info = await _vendor_call(
+        connector._get_json(target, path, operator=operator),
+        on_error or _read_error(username),
+    )
+    return account_row(username, info, now=_now())
+
+
+async def _read_after(
+    connector: VmwareRestConnector,
+    operator: Operator,
+    target: VsphereTargetLike,
+    username: str,
+    *,
+    secrets: tuple[str, ...] = (),
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Read the account after a change. Best effort: the change is already done."""
+    try:
+        return await _read_account(connector, operator, target, username), None
+    except (httpx.HTTPError, ConnectorResourceNotFoundError) as exc:
+        return None, (
+            "the change is done, but the read after it failed: "
+            f"{_failure_text(exc, secrets)}. Read the account with {GET_OP_ID}."
+        )
+
+
+async def local_account_list_impl(
+    connector: VmwareRestConnector,
+    operator: Operator,
+    target: VsphereTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``vmware.appliance.local_account.list``: every local account, one row each.
+
+    ``GET /appliance/local-accounts`` gives the user names only, so each name
+    is read with ``GET /appliance/local-accounts/{username}``. A failed list
+    read raises; a 403 raises an error that names the SSO group. A failed
+    account read gives a row with null fields and a ``read_note`` (with the
+    SSO group hint for a refusal).
+    """
+    del params  # the list takes no parameters
+    path = await connector.mount_op_path(target, _LIST_PATH, operator)
+    names = _unwrap(
+        await _vendor_call(
+            connector._get_json(target, path, operator=operator),
+            lambda exc: (
+                _refused_read_error(exc, op_id=LIST_OP_ID, action="list the local accounts") or exc
+            ),
+        )
+    )
+    if not isinstance(names, list):
+        raise RuntimeError(
+            f"{LIST_OP_ID}: expected a list of user names from GET {_LIST_PATH}, "
+            f"got {type(names).__name__}"
+        )
+    accounts: list[dict[str, Any]] = []
+    for username in sorted({name for name in names if isinstance(name, str) and name}):
+        try:
+            row = await _read_account(connector, operator, target, username)
+        except (httpx.HTTPError, ConnectorResourceNotFoundError) as exc:
+            note = f"the read failed: {_failure_text(exc)}"
+            hint = _group_hint(exc.response) if isinstance(exc, httpx.HTTPStatusError) else None
+            accounts.append(_unread_row(username, f"{note}. {hint}" if hint else note))
+            continue
+        row["read_note"] = None
+        accounts.append(row)
+    _log.info("vmware_appliance_local_accounts_read", target=target.name, count=len(accounts))
+    return {"accounts": accounts}
+
+
+async def local_account_get_impl(
+    connector: VmwareRestConnector,
+    operator: Operator,
+    target: VsphereTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``vmware.appliance.local_account.get``: one account row; a missing account is not_found.
+
+    A refusal raises an error that names the SSO group (see :func:`_read_error`).
+    """
+    username = _checked_username(params)
+    return await _read_account(
+        connector, operator, target, username, on_error=_read_error(username, op_id=GET_OP_ID)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Changes
+# ---------------------------------------------------------------------------
+
+
+async def local_account_password_set_impl(
+    connector: VmwareRestConnector,
+    operator: Operator,
+    target: VsphereTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``vmware.appliance.local_account.password.set``: one ``PATCH`` with the new password.
+
+    Reads the password from Vault first, so a missing secret stops the call
+    before vCenter is reached. After the change, one best-effort read gives the
+    new expiry date. An error answer goes through ``change_error``: a 401 (the
+    vCenter session ended) stays a 401, so the dispatcher logs in again and
+    retries once, but without the vendor text or the request.
+    """
+    username = _checked_username(params)
+    password = await read_new_password(operator, target, params)
+    secrets = (password,)
+    path = await connector.mount_op_path(target, _account_path(username), operator)
+    await _vendor_call(
+        connector._post_json(
+            target, path, operator=operator, verb="PATCH", json={"password": password}
+        ),
+        partial(
+            change_error,
+            op_id=PASSWORD_SET_OP_ID,
+            action="set the new password",
+            username=username,
+            secrets=secrets,
+        ),
+    )
+    after, note = await _read_after(connector, operator, target, username, secrets=secrets)
+    _log.info("vmware_appliance_local_account_password_set", target=target.name, username=username)
+    return {
+        "username": username,
+        "password_set": True,
+        "password_expires_at": after["password_expires_at"] if after else None,
+        "read_note": note,
+    }
+
+
+def policy_body(params: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``UpdateConfig`` body: the expiry fields the call sets, and nothing else."""
+    body: dict[str, Any] = {}
+    for field in POLICY_FLAG_FIELDS:
+        flag = params.get(field)
+        if isinstance(flag, bool):
+            body[field] = flag
+    for field in POLICY_DAY_FIELDS:
+        days = params.get(field)
+        if isinstance(days, int) and not isinstance(days, bool):
+            if not DAYS_MIN <= days <= DAYS_MAX:
+                raise ValueError(f"{field} must be between {DAYS_MIN} and {DAYS_MAX}")
+            body[field] = days
+    if not body:
+        raise ValueError(f"{POLICY_SET_OP_ID}: set at least one of {', '.join(POLICY_FIELDS)}")
+    return body
+
+
+async def local_account_policy_set_impl(
+    connector: VmwareRestConnector,
+    operator: Operator,
+    target: VsphereTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``vmware.appliance.local_account.policy.set``: read, ``PATCH`` the expiry fields, read.
+
+    The first read finds a missing account (``not_found``) before any change
+    and gives the values before. Only the fields the call sets are sent. An
+    error answer to the first read or to the change goes through
+    ``change_error``, as for the password change.
+    """
+    username = _checked_username(params)
+    body = policy_body(params)
+    on_error = partial(change_error, op_id=POLICY_SET_OP_ID, username=username)
+    before = await _read_account(
+        connector,
+        operator,
+        target,
+        username,
+        on_error=partial(on_error, action="read the account before the change"),
+    )
+    path = await connector.mount_op_path(target, _account_path(username), operator)
+    await _vendor_call(
+        connector._post_json(target, path, operator=operator, verb="PATCH", json=body),
+        partial(on_error, action="change the expiry rules"),
+    )
+    after, note = await _read_after(connector, operator, target, username)
+    _log.info(
+        "vmware_appliance_local_account_policy_set",
+        target=target.name,
+        username=username,
+        fields=sorted(body),
+    )
+    return {
+        "username": username,
+        "requested": body,
+        "before": before,
+        "after": after,
+        "read_note": note,
+    }

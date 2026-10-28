@@ -8,17 +8,18 @@ Re-shipped from the former ``vmware.composite.host.vsan_health`` read: a
 queries ``VsanQueryVcClusterHealthSummary`` on the
 ``vsan-cluster-health-system`` singleton directly on the connector
 session (no ``dispatch_child``, no ingested descriptor), so it works on a
-fresh boot with zero catalog ingest.
+fresh boot with zero catalog ingest. #4922 added ``from_cache`` (vSAN's
+``fetchFromCache``), ``checked_at`` / ``from_cache`` in the answer, and the
+fallback to the stored result when a fresh check ends with a read timeout.
 
 The handler logic is exercised against a fake connector that records
-:meth:`mount_op_path` / :meth:`_post_json` calls, so the assertion
-targets are the call-shape contract (single cluster-scoped query,
-mounted, best-effort) and the parse/aggregation contract, without a live
-httpx transport. The end-to-end transport + modern/legacy mount routing
-is covered by the respx integration test in
-``tests/integration/test_connectors_vmware_rest_vcsim.py``. Output parity
-against the composite version is preserved byte-for-byte by these
-assertions (they mirror the pre-#2258 composite-read coverage).
+the :meth:`_post_vsan` calls, so the assertion targets are the call-shape
+contract (one cluster-scoped query on the vSAN health method, errors not
+hidden) and the parse/aggregation contract, without a live httpx
+transport. The real transport (VI-JSON on vCenter 9.x, SOAP on 8.0) is
+covered by ``tests/test_connectors_vmware_rest_vsan_transport.py``; the
+legacy ``/rest`` mount by the respx integration test in
+``tests/integration/test_connectors_vmware_rest_vcsim.py``.
 """
 
 from __future__ import annotations
@@ -31,16 +32,26 @@ import httpx
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.vmware_rest._mount import VsanMethod
 from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest.typed_ops import VMWARE_TYPED_OPS
 from meho_backplane.connectors.vmware_rest.typed_ops_host_vsan_health import (
+    FRESH_CHECK_TIMED_OUT,
     HOST_VSAN_HEALTH_GROUP_KEY,
     VMWARE_HOST_VSAN_HEALTH_OP,
+    VSAN_QUERY_HEALTH_SUMMARY,
     build_vsan_query_health_params,
+    fresh_check_timeout_text,
     host_vsan_health_impl,
 )
+from meho_backplane.operations._errors import result_connector_timeout
 
-_VSAN_PATH = "/VsanVcClusterHealthSystem/vsan-cluster-health-system/VsanQueryVcClusterHealthSummary"
+_CLUSTER_MOREF = {
+    "_typeName": "ManagedObjectReference",
+    "type": "ClusterComputeResource",
+    "value": "domain-c123",
+}
+_CHECKED_AT = "2026-10-25T18:30:12.345Z"
 
 # ---------------------------------------------------------------------------
 # Fixtures / doubles
@@ -69,10 +80,11 @@ class _Target:
 
 
 class _FakeConnector:
-    """Records the transport calls ``host_vsan_health_impl`` makes.
+    """Records the vSAN calls ``host_vsan_health_impl`` makes.
 
-    Serves one canned ``VsanClusterHealthSummary`` on :meth:`_post_json`
-    (or raises ``post_error`` to exercise the best-effort path).
+    Serves one canned ``VsanClusterHealthSummary`` on :meth:`_post_vsan`
+    (or raises ``post_error``). ``answers`` instead gives one answer per
+    call, in order; an exception in the list is raised for that call.
     """
 
     def __init__(
@@ -80,41 +92,48 @@ class _FakeConnector:
         *,
         summary: Any = None,
         post_error: Exception | None = None,
-        mount_prefix: str = "/api",
+        answers: list[Any] | None = None,
     ) -> None:
         self._summary = summary
         self._post_error = post_error
-        self._mount_prefix = mount_prefix
-        self.mount_calls: list[str] = []
-        self.post_calls: list[tuple[str, dict[str, Any]]] = []
+        self._answers = list(answers) if answers is not None else None
+        self.post_calls: list[tuple[VsanMethod, dict[str, Any]]] = []
 
-    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
-        del target, operator
-        self.mount_calls.append(path)
-        return f"{self._mount_prefix}{path}"
-
-    async def _post_vmomi_json(
+    async def _post_vsan(
         self,
         target: Any,
-        path: str,
+        vsan_method: VsanMethod,
         *,
         operator: Operator,
-        json: dict[str, Any] | None = None,
+        json: dict[str, Any],
     ) -> Any:
-        # vmomi VsanQueryVcClusterHealthSummary read via the vmomi seam;
-        # the handler passes the spec-relative path (the /sdk/vim25 mount
-        # is the connector's job, #2466).
+        # The connector picks the transport (VI-JSON on 9.x, SOAP on 8.0);
+        # the handler only names the vSAN method and the arguments (#4441).
         del target, operator
-        assert json is not None
-        self.post_calls.append((path, json))
+        self.post_calls.append((vsan_method, json))
+        if self._answers is not None:
+            answer = self._answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
         if self._post_error is not None:
             raise self._post_error
         return self._summary
 
 
+def _read_timeout(seconds: float | None = 30.0) -> httpx.ReadTimeout:
+    """A read timeout as the shared HTTP client raises it, with its timeout map."""
+    request = httpx.Request(
+        "POST",
+        "https://vc.test.invalid/sdk/vim25/9.1.0.0/vsan/x",
+        extensions={"timeout": {"connect": 5.0, "read": seconds, "write": 30.0, "pool": 5.0}},
+    )
+    return httpx.ReadTimeout("read timed out", request=request)
+
+
 def _vsan_summary(overall: str, groups: list[Any]) -> dict[str, Any]:
     """Build a ``VsanClusterHealthSummary`` payload for one cluster."""
-    return {"overallHealth": overall, "groups": groups}
+    return {"overallHealth": overall, "groups": groups, "timestamp": _CHECKED_AT}
 
 
 # ---------------------------------------------------------------------------
@@ -123,15 +142,25 @@ def _vsan_summary(overall: str, groups: list[Any]) -> dict[str, Any]:
 
 
 def test_build_query_params_scopes_to_cluster_moref() -> None:
-    """Pins the exact ``_typeName``-annotated MoRef body (#3103)."""
+    """Pins the ``_typeName``-annotated MoRef body (#3103); no ``fetchFromCache`` by default."""
     body = build_vsan_query_health_params("domain-c123")
-    assert body == {
-        "cluster": {
-            "_typeName": "ManagedObjectReference",
-            "type": "ClusterComputeResource",
-            "value": "domain-c123",
-        }
-    }
+    assert body == {"cluster": _CLUSTER_MOREF}
+    assert build_vsan_query_health_params("domain-c123", from_cache=False) == body
+
+
+def test_build_query_params_from_cache_adds_fetch_from_cache_after_cluster() -> None:
+    """#4922: ``fetchFromCache: true`` follows ``cluster``, the order the method defines."""
+    body = build_vsan_query_health_params("domain-c123", from_cache=True)
+    assert body == {"cluster": _CLUSTER_MOREF, "fetchFromCache": True}
+    assert list(body) == ["cluster", "fetchFromCache"]
+
+
+def test_fresh_check_timeout_text_names_the_limit() -> None:
+    assert fresh_check_timeout_text(30.0) == (
+        "The fresh vSAN check did not finish within 30 seconds. "
+        "A host of the cluster may be down or in maintenance mode."
+    )
+    assert "within MEHO's time limit." in fresh_check_timeout_text(None)
 
 
 # ---------------------------------------------------------------------------
@@ -139,8 +168,16 @@ def test_build_query_params_scopes_to_cluster_moref() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_health_method_is_the_vsan_health_summary_on_the_health_system() -> None:
+    """The method, its vSAN object and the object's fixed id (vendor sample ``vsanapiutils.py``)."""
+    assert isinstance(VSAN_QUERY_HEALTH_SUMMARY, VsanMethod)
+    assert VSAN_QUERY_HEALTH_SUMMARY.mo_type == "VsanVcClusterHealthSystem"
+    assert VSAN_QUERY_HEALTH_SUMMARY.moid == "vsan-cluster-health-system"
+    assert VSAN_QUERY_HEALTH_SUMMARY.method == "VsanQueryVcClusterHealthSummary"
+
+
 @pytest.mark.asyncio
-async def test_queries_health_summary_for_cluster_mounted() -> None:
+async def test_queries_health_summary_for_cluster() -> None:
     """One health-service query fires, scoped to the cluster; groups + tests flatten."""
     summary = _vsan_summary(
         overall="green",
@@ -170,23 +207,18 @@ async def test_queries_health_summary_for_cluster_mounted() -> None:
 
     out = await host_vsan_health_impl(conn, _make_operator(), _Target(), {"cluster": "domain-c123"})
 
-    # The vmomi read routes through _post_vmomi_json (not mount_op_path);
-    # the singleton moId rides the spec-relative path, the cluster MoRef is
-    # the body arg (#2466).
-    assert conn.mount_calls == []
+    # One call on the vSAN transport; the cluster MoRef is the body arg.
     assert len(conn.post_calls) == 1
-    path, body = conn.post_calls[0]
-    assert path == _VSAN_PATH
-    assert body == {
-        "cluster": {
-            "_typeName": "ManagedObjectReference",
-            "type": "ClusterComputeResource",
-            "value": "domain-c123",
-        }
-    }
+    vsan_method, body = conn.post_calls[0]
+    assert vsan_method == VSAN_QUERY_HEALTH_SUMMARY
+    assert body == {"cluster": _CLUSTER_MOREF}
 
     assert out["cluster"] == "domain-c123"
     assert out["overall_health"] == "green"
+    assert out["checked_at"] == _CHECKED_AT
+    assert out["from_cache"] is False
+    assert "fresh_check" not in out
+    assert "note" not in out
     assert out["groups"] == [
         {
             "group_id": "com.vmware.vsan.health.test.network",
@@ -212,22 +244,164 @@ async def test_queries_health_summary_for_cluster_mounted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_read_is_best_effort_on_error() -> None:
-    """A failed health-service read nulls groups/overall + records a ``read_note``."""
-    conn = _FakeConnector(
-        post_error=httpx.HTTPStatusError(
-            "boom",
-            request=httpx.Request("POST", "https://vc/vsanHealth"),
-            response=httpx.Response(400),
-        )
+async def test_from_cache_sends_fetch_from_cache_and_marks_the_answer() -> None:
+    """#4922: ``from_cache: true`` asks vSAN for its stored result; the answer says so."""
+    conn = _FakeConnector(summary=_vsan_summary(overall="green", groups=[]))
+
+    out = await host_vsan_health_impl(
+        conn, _make_operator(), _Target(), {"cluster": "domain-c123", "from_cache": True}
     )
 
-    out = await host_vsan_health_impl(conn, _make_operator(), _Target(), {"cluster": "domain-c404"})
+    assert conn.post_calls == [
+        (VSAN_QUERY_HEALTH_SUMMARY, {"cluster": _CLUSTER_MOREF, "fetchFromCache": True})
+    ]
+    assert out["from_cache"] is True
+    assert out["checked_at"] == _CHECKED_AT
+    assert out["overall_health"] == "green"
+    # Nothing timed out, so the answer has no fresh_check note.
+    assert "fresh_check" not in out
+    assert "note" not in out
 
-    assert out["cluster"] == "domain-c404"
-    assert out["overall_health"] is None
-    assert out["groups"] is None
-    assert "VsanQueryVcClusterHealthSummary" in out["read_note"]
+
+@pytest.mark.asyncio
+async def test_fresh_check_read_timeout_falls_back_to_the_stored_result_once() -> None:
+    """#4922: a read timeout of the fresh check is followed by exactly one cached read."""
+    conn = _FakeConnector(answers=[_read_timeout(30.0), _vsan_summary(overall="yellow", groups=[])])
+
+    out = await host_vsan_health_impl(conn, _make_operator(), _Target(), {"cluster": "domain-c123"})
+
+    assert [body for _method, body in conn.post_calls] == [
+        {"cluster": _CLUSTER_MOREF},
+        {"cluster": _CLUSTER_MOREF, "fetchFromCache": True},
+    ]
+    assert out["overall_health"] == "yellow"
+    assert out["checked_at"] == _CHECKED_AT
+    assert out["from_cache"] is True
+    assert out["fresh_check"] == FRESH_CHECK_TIMED_OUT
+    assert out["note"] == (
+        "The fresh vSAN check did not finish within 30 seconds. A host of the cluster may be "
+        "down or in maintenance mode. This is the last stored result."
+    )
+
+
+@pytest.mark.asyncio
+async def test_stored_result_failing_too_raises_the_timeout_with_the_plain_text() -> None:
+    """#4922: when the cached read fails as well, the caller gets the read timeout, explained."""
+    timeout = _read_timeout(30.0)
+    cache_error = httpx.HTTPStatusError(
+        "vSAN fault",
+        request=httpx.Request("POST", "https://vc.test.invalid/sdk/vim25/9.1.0.0/vsan/x"),
+        response=httpx.Response(500, json={"_typeName": "VsanFault"}),
+    )
+    conn = _FakeConnector(answers=[timeout, cache_error])
+
+    with pytest.raises(httpx.ReadTimeout) as raised:
+        await host_vsan_health_impl(conn, _make_operator(), _Target(), {"cluster": "domain-c123"})
+
+    assert len(conn.post_calls) == 2
+    assert raised.value.__cause__ is cache_error
+    # The request of the first timeout stays on the error, so the dispatcher
+    # still reports the configured read limit.
+    assert raised.value.request is timeout.request
+    result = result_connector_timeout("vmware.host.vsan_health", raised.value, 1.0)
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_timeout"
+    assert result.extras["phase"] == "read"
+    assert result.extras["configured_timeout"] == 30.0
+    assert result.extras["exception_message"] == (
+        "The fresh vSAN check did not finish within 30 seconds. A host of the cluster may be "
+        "down or in maintenance mode. The last stored result could not be read either."
+    )
+
+
+@pytest.mark.asyncio
+async def test_from_cache_read_timeout_is_not_retried() -> None:
+    """A timed-out cached read has no faster fallback; it is raised as it is."""
+    timeout = _read_timeout(30.0)
+    conn = _FakeConnector(answers=[timeout])
+
+    with pytest.raises(httpx.ReadTimeout) as raised:
+        await host_vsan_health_impl(
+            conn, _make_operator(), _Target(), {"cluster": "domain-c123", "from_cache": True}
+        )
+
+    assert raised.value is timeout
+    assert len(conn.post_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_timeout_without_a_request_still_explains_itself() -> None:
+    """A timeout that carries no request (no timeout map) gets the text without a number."""
+    conn = _FakeConnector(answers=[httpx.ReadTimeout("read timed out"), _vsan_summary("green", [])])
+
+    out = await host_vsan_health_impl(conn, _make_operator(), _Target(), {"cluster": "domain-c123"})
+
+    assert out["fresh_check"] == FRESH_CHECK_TIMED_OUT
+    assert out["note"].startswith("The fresh vSAN check did not finish within MEHO's time limit.")
+
+
+@pytest.mark.asyncio
+async def test_failed_vsan_call_raises_instead_of_empty_health() -> None:
+    """#4441: a failed vSAN call is not turned into empty health with a note."""
+    error = httpx.HTTPStatusError(
+        "vSAN fault",
+        request=httpx.Request("POST", "https://vc.test.invalid/sdk/vim25/9.1.0.0/vsan/x"),
+        response=httpx.Response(500, json={"_typeName": "VsanFault"}),
+    )
+    conn = _FakeConnector(post_error=error)
+
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        await host_vsan_health_impl(conn, _make_operator(), _Target(), {"cluster": "domain-c404"})
+
+    assert raised.value is error
+
+
+@pytest.mark.asyncio
+async def test_answer_without_a_summary_raises() -> None:
+    """No health summary in the answer is an error, never an empty healthy-looking result."""
+    conn = _FakeConnector(summary=None)
+
+    with pytest.raises(RuntimeError, match="no health summary"):
+        await host_vsan_health_impl(conn, _make_operator(), _Target(), {"cluster": "domain-c1"})
+
+
+@pytest.mark.asyncio
+async def test_single_group_and_test_become_lists() -> None:
+    """SOAP (vCenter 8.0) sends a list with one entry as a single dict; the op still lists it."""
+    conn = _FakeConnector(
+        summary={
+            "overallHealth": "yellow",
+            "groups": {
+                "groupId": "com.vmware.vsan.health.test.data",
+                "groupName": "Data",
+                "groupHealth": "yellow",
+                "groupTests": {
+                    "testId": "com.vmware.vsan.health.test.objecthealth",
+                    "testName": "vSAN object health",
+                    "testHealth": "yellow",
+                    "testShortDescription": "Checks the health of vSAN objects.",
+                },
+            },
+        }
+    )
+
+    out = await host_vsan_health_impl(conn, _make_operator(), _Target(), {"cluster": "domain-c1"})
+
+    assert out["groups"] == [
+        {
+            "group_id": "com.vmware.vsan.health.test.data",
+            "group_name": "Data",
+            "group_health": "yellow",
+            "tests": [
+                {
+                    "test_id": "com.vmware.vsan.health.test.objecthealth",
+                    "test_name": "vSAN object health",
+                    "test_health": "yellow",
+                    "test_short_description": "Checks the health of vSAN objects.",
+                }
+            ],
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -249,6 +423,7 @@ async def test_tolerates_missing_groups_key() -> None:
 
     assert out["overall_health"] == "green"
     assert out["groups"] == []
+    assert out["checked_at"] is None
 
 
 @pytest.mark.asyncio
@@ -276,6 +451,38 @@ def test_op_is_a_registered_typed_op() -> None:
     assert VMWARE_HOST_VSAN_HEALTH_OP.safety_level == "safe"
     assert VMWARE_HOST_VSAN_HEALTH_OP.requires_approval is False
     assert VMWARE_HOST_VSAN_HEALTH_OP.group_key == HOST_VSAN_HEALTH_GROUP_KEY
+
+
+def test_contract_has_no_read_note_any_more() -> None:
+    """#4441: failures are errors, so the answer has no ``read_note`` and always a group list."""
+    schema = VMWARE_HOST_VSAN_HEALTH_OP.response_schema or {}
+    assert "read_note" not in schema["properties"]
+    assert schema["properties"]["groups"]["type"] == "array"
+    assert schema["required"] == ["cluster", "overall_health", "groups", "checked_at", "from_cache"]
+    guidance = VMWARE_HOST_VSAN_HEALTH_OP.llm_instructions or {}
+    assert "read_note" not in guidance["output_shape"]
+    assert "read_note" not in VMWARE_HOST_VSAN_HEALTH_OP.description
+
+
+def test_contract_describes_from_cache_and_checked_at() -> None:
+    """#4922: the texts tell the caller about the stored result and the time of the check."""
+    params = VMWARE_HOST_VSAN_HEALTH_OP.parameter_schema["properties"]
+    assert params["from_cache"]["type"] == "boolean"
+    assert params["from_cache"]["default"] is False
+    assert VMWARE_HOST_VSAN_HEALTH_OP.parameter_schema["required"] == ["cluster"]
+    response = VMWARE_HOST_VSAN_HEALTH_OP.response_schema or {}
+    assert response["properties"]["from_cache"]["type"] == "boolean"
+    assert response["properties"]["checked_at"]["type"] == ["string", "null"]
+    assert response["properties"]["fresh_check"]["enum"] == [FRESH_CHECK_TIMED_OUT]
+    assert "note" in response["properties"]
+    guidance = VMWARE_HOST_VSAN_HEALTH_OP.llm_instructions or {}
+    assert "from_cache: true" in guidance["when_to_call"]
+    assert "from_cache" in guidance["parameter_hints"]
+    assert "checked_at" in guidance["output_shape"]
+    assert "from_cache: true" in VMWARE_HOST_VSAN_HEALTH_OP.description
+    # Still a plain read: no approval, safe.
+    assert VMWARE_HOST_VSAN_HEALTH_OP.safety_level == "safe"
+    assert VMWARE_HOST_VSAN_HEALTH_OP.requires_approval is False
 
 
 def test_handler_attr_resolves_to_a_connector_bound_method() -> None:

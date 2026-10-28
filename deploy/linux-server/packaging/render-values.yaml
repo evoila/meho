@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Values for `helm template` when build-download.sh and check-download.sh
+# list the images of the chart. chart/values-single-node.yaml of the
+# download comes after this file and turns the built-in parts on. This file
+# holds only the placeholders the chart's schema requires, in the shape of
+# the place values install.sh writes (/etc/meho/values-place.yaml). They
+# change no image.
+ingress:
+  host: meho.invalid
+coreKeycloak:
+  hostname: meho.invalid
+  firstTenantId: 3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c
+networkPolicy:
+  postgresCIDR: 10.42.0.0/16
+  vaultCIDR: 10.42.0.0/16

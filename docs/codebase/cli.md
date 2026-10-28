@@ -40,7 +40,7 @@ names.
   (`groups`, `search`, `call`).
 - `meho connector ...` (G0.7-T5 #405) — spec-ingestion + review
   workflow (`ingest`, `list`, `review`, `edit-group`, `edit-op`,
-  `enable`, `disable`).
+  `enable`, `disable`, `delete`).
 - `meho audit ...` (G8.1-T3 #467) — audit-log query surface
   (`query`, `recent`, `show`, `who-touched`, `my-recent`) wrapping
   the four `/api/v1/audit/*` routes shipped by G8.1-T2 (#466). G8.2-T5
@@ -48,6 +48,11 @@ names.
   tree over `GET /api/v1/audit/sessions/{id}/replay` (`--json`,
   `--max-depth`; a 413 `session_too_large` redirects to
   `query --session-id`) — plus a `--session-id` filter on `query`.
+  #4855 adds `trace list` (the operation runs that still have a stored
+  flight-recorder trace, via `query` with `has_trace=true`, audit id
+  first) and `trace show <audit-id>` (one trace over
+  `GET /api/v1/audit/{audit_id}/trace`; headers and bodies only in
+  `--json`).
 - `meho kb ...` (G4.1-T4 #418) — knowledge-base operator surface
   (`ingest`, `search`, `list`, `show`, `add`, `delete`) wrapping
   the five `/api/v1/kb*` routes shipped by G4.1-T2 (#416) plus the
@@ -165,6 +170,7 @@ cli/
     ├── api/
     │   ├── client.gen.go      # generated typed client (oapi-codegen v2.5).
     │   ├── client.go          # auth-aware wrapper; NewAuthedClient + GetHealth.
+    │   ├── validation_error.go # HTTPValidationError.UnmarshalJSON: a 422 `detail` may be a string or a list (#5134).
     │   ├── workref.go         # Meho-Work-Ref header + MEHO_WORK_REF env names, work-ref shape check, context helpers (#3804).
     │   └── refresh.go         # lazy 401-retry refresh via x/oauth2.
     ├── auth/
@@ -197,10 +203,14 @@ cli/
     │   │   ├── who_touched.go    # `meho audit who-touched <target>` (GET /api/v1/audit/who-touched/{target}).
     │   │   ├── my_recent.go      # `meho audit my-recent` (GET /api/v1/audit/my-recent).
     │   │   ├── replay.go         # `meho audit replay <session-id>` (GET /api/v1/audit/sessions/{id}/replay) — ASCII tree + 413 redirect.
+    │   │   ├── trace.go          # `meho audit trace` group + `trace list` (#4855; POST /api/v1/audit/query with has_trace=true, audit id first).
+    │   │   ├── trace_show.go     # `meho audit trace show <audit-id>` (GET /api/v1/audit/{id}/trace) — header + one line per span; no header/body values.
     │   │   ├── audit_test.go     # helper + URL-normalisation + register-all-verbs tests.
     │   │   ├── query_test.go     # body-marshal + render + 400-passthrough + --session-id tests.
     │   │   ├── show_test.go      # path-escape + 404 / 422 surface + summary render tests.
     │   │   ├── replay_test.go    # tree render + --json + --max-depth fold + 413 redirect tests.
+    │   │   ├── trace_test.go     # has_trace body + audit-id-first table + --json + 403 tests.
+    │   │   ├── trace_show_test.go # span lines without header/body values + --json unchanged + no-trace exit 0 + 404 / 403 tests.
     │   │   ├── who_touched_test.go # query-param emit + table render tests.
     │   │   ├── my_recent_test.go # JWT-only-principal contract tests.
     │   │   └── recent_test.go    # since=24h binding + --json passthrough tests.
@@ -241,12 +251,14 @@ cli/
     │   │   ├── ingest.go         # `meho connector ingest` (POST /api/v1/connectors/ingest). 202-aware since G0.22-T4 #1609: polls GET /ingest/jobs/{job_id} to a terminal status by default, `--no-wait` exits 0 with the job handle; 200 stays the legacy sync render. Owns the shared pollIngestJob loop + renderIngestTerminal lifecycle switch (succeeded/failed/degraded/undocumented) that ingest_status.go reuses. `--tenant-id` (#2209) selects the write scope: omitted leaves the body's tenant_id unset (built-in/global, the #2085 omit-equals-global contract); the operator's own tenant UUID makes the ingest tenant-curated.
     │   │   ├── ingest_status.go  # `meho connector ingest-status <job-id> [--wait] [--json]` (#1621) — post-`--no-wait` poll/inspect verb. Snapshot by default (running → identity+lifecycle echo, exit 0), `--wait` polls to terminal; terminal render + poll loop reuse ingest.go's renderIngestTerminal / pollIngestJob (no duplicated switch). Closes the PR #1618 loop the `--no-wait` hint now names.
     │   │   ├── list.go           # `meho connector list` (GET  /api/v1/connectors). List endpoint returns dict[str, list[dict]] (no response_model on the backend; per-row UUID serialisation), so a package-private listEntry decode lives here.
-    │   │   ├── review.go         # `meho connector review <id>` (GET  /api/v1/connectors/{id}/review). `--prefer tenant|builtin` (#3799) is sent as `?prefer=` to pick a row when the id matches both a built-in and a tenant connector; omitted, the 409 stays the default.
+    │   │   ├── review.go         # `meho connector review <id>` (GET  /api/v1/connectors/{id}/review). `--prefer tenant|builtin|legacy` (#3799, #4889) is sent as `?prefer=` to pick a row when the id matches both a built-in and a tenant connector (`legacy` picks the tenant's old copy under a former product name); omitted, the 409 stays the default.
     │   │   ├── edit_group.go     # `meho connector edit-group <id> <key>` (PATCH groups/{key}).
     │   │   ├── edit_op.go        # `meho connector edit-op <id> <op>` (PATCH operations/{op}).
-    │   │   ├── enable.go         # `meho connector enable <id>`  + shared transition factory + `disable`.
-    │   │   ├── enable_reads.go   # `meho connector enable-reads <id>` (POST /enable-reads, G0.25-T7 #1749) — bulk-enable GET/HEAD ingested ops; writes stay default-deny. Renders the ops_enabled count; idempotent. Takes the same `--prefer tenant|builtin` flag as `review` (#3799).
+    │   │   ├── enable.go         # `meho connector enable <id>`  + shared transition factory + `disable` + `delete`.
+    │   │   ├── enable_reads.go   # `meho connector enable-reads <id>` (POST /enable-reads, G0.25-T7 #1749) — bulk-enable GET/HEAD ingested ops; writes stay default-deny. Renders the ops_enabled count; idempotent. Takes the same `--prefer tenant|builtin|legacy` flag as `review` (#3799, #4889).
     │   │   ├── disable.go        # `meho connector disable <id>` (constructor only; logic in enable.go).
+    │   │   ├── delete.go         # `meho connector delete <id>` (DELETE /api/v1/connectors/{id}, #4889) — removes the connector's operations and groups from the operator's own tenant; the built-in copy stays. Constructor only; logic in enable.go. The verb the list `next_step` and the `connector_legacy_tenant_copy` message name.
+    │   │   ├── delete_test.go    # `delete` wiring, 204 --json envelope, 404 render.
     │   │   ├── connector_test.go # pure-function + typed-client mocked HTTP contract tests.
     │   │   └── prefer_test.go    # `--prefer` on review / enable-reads + the 409 connector_scope_ambiguous CLI error (#3799).
     │   ├── operation/         # G0.6-T13 #481 — `meho operation …` meta-tool surface.
@@ -502,14 +514,66 @@ Authorization Grant (RFC 8628). End-to-end shape:
    deferred to a future Task per the v0.1 scope.) Under `--print-token`
    this prompt is written to stderr instead, so stdout stays reserved
    for the token — see step 7.
-5. **Polling.** `Config.DeviceAccessToken` polls the token endpoint
-   at the IdP-supplied `interval`, honouring RFC 8628's
-   `authorization_pending` and `slow_down` semantics. The polling
-   loop returns when the IdP issues a token, the device code
-   expires (`expires_in`, enforced inside the oauth2 package), the
-   operator denies the grant (`access_denied`), or the polling
-   context is cancelled. The outer timeout is 10 minutes
+5. **Polling.** `auth.pollDeviceToken` (our own loop, not the oauth2
+   package's `DeviceAccessToken`) asks the token endpoint again and
+   again whether the person has approved. Each check is **one** form
+   POST with `grant_type`, `device_code` and `client_id` in the body
+   and no `Authorization` header (RFC 8628 §3.4; the CLI is a public
+   client). The loop returns when the IdP issues a token, the code's
+   lifetime ends, the operator denies the grant (`access_denied`), or
+   the polling context is cancelled. The outer timeout is 10 minutes
    (`auth.PollTimeout`).
+
+   The wait between checks follows RFC 8628 §3.5 and starts when an
+   answer has arrived, so two checks never reach the server closer
+   together than the wait:
+
+   * The first wait is the IdP's `interval` (5 seconds when it sends
+     none, §3.2). `authorization_pending` → check again after the wait.
+   * `slow_down` → the wait grows by 5 seconds, for this check and all
+     later ones. It never grows past 30 seconds (or past the IdP's own
+     `interval`, if that is longer). The cap only stops an IdP that
+     keeps answering `slow_down` from stretching the wait without end.
+   * **Last check before the end.** The final check is meant to run
+     2 seconds before the code's life (`expires_in`) ends. The regular
+     cadence goes on only while another full wait still fits between
+     the next check and that moment; otherwise the next check is the
+     final one. The final check keeps the full wait to the check before
+     it, even if that puts it inside the last 2 seconds: Keycloak
+     answers `slow_down` to a check that comes sooner than `interval`
+     after the previous one, and that answer would hide an approval.
+     (The very first check has no such limit; the IdP has seen no
+     request yet.) If the final check is still pending, or no check
+     fits before the end any more, the login stops with "device code
+     expired before authorisation", not with the 10-minute timeout
+     message. Without `expires_in` the regular cadence continues until
+     `PollTimeout`.
+   * **The code's end is a deadline.** The sleeps and the token
+     requests run on a context that ends with the code (as in the
+     oauth2 package's own loop). An answer that stalls past the end
+     stops the login with the "device code expired" message, not with
+     the 10-minute one.
+   * The "Waiting for authorisation…" line in step 4 also says how long
+     the code is valid and until when (local time), when the IdP sent
+     `expires_in`.
+
+   Why our own loop (#4892), in two parts:
+
+   1. Our `oauth2.Config` left `Endpoint.AuthStyle` at zero
+      ("auto-detect"). The package then sent every token request twice —
+      first with the client id in an `Authorization` header, then in the
+      form body — and only remembered the working style after a success.
+      Before the approval every answer is an error, so each check was two
+      requests, the second one landed inside the IdP's `interval` and
+      drew `slow_down`, the wait grew by 5 seconds at every check, and
+      the code's last ~75 seconds were never checked. Pinning
+      `oauth2.AuthStyleInParams` alone fixes this part; the refresh path
+      (`api/refresh.go`) had the same cause and does exactly that.
+   2. The package's `DeviceAccessToken` loop cannot make a last check
+      just before the code's end, and it has no upper limit for the wait.
+      Those two need our own loop. Do not go back to `DeviceAccessToken`
+      with a pinned auth style: the double request would be gone, but
+      the last check would be lost again.
 
    **Detached from ambient deadlines.** The interactive approval
    wait runs on a context built by `auth.NewDeviceFlowContext`,
@@ -716,6 +780,42 @@ via JWT/OIDC federation, reads a sentinel secret, probes the DB
 migration state, and returns a structured response. The CLI
 renders that response in one of two formats.
 
+### What the human format prints (#4830)
+
+One line per subsystem, in this order. The first three lines are the
+v0.1 contract; the rest appear only when the backplane sends the
+field, so a response from an older backplane prints as it always did.
+
+| Line | Source field | Example |
+|---|---|---|
+| `Logged in as …` | `operator` | `Logged in as alice@example.com (sub: …)` |
+| `Vault: …` | `vault` | `Vault: reachable, read OK (version=42)` |
+| `DB: …` | `db` | `DB: migrated, revision 0115` |
+| `Readiness: …` | `readiness` | `Readiness: ready (keycloak, vault, db, broadcast, docs_backends ok)` |
+| `Approvals: …` | `approvals` | `Approvals: a second person must approve; decisions on someone else's instruction are refused; approval key configured` |
+| `Features: …` | `features` | `Features: all configured` or `Features: not configured: agent_runtime (needs KEYCLOAK_ADMIN_CLIENT_ID)` |
+| `Sandbox mode: on …` | `sandbox_mode` | printed only when the mode is on (#4622) |
+
+The DB line (`formatDB` in `internal/output/format.go`) uses the
+database revision and the revision this version expects, which the
+backplane sends as values since #4830 (`db.revision`, `db.head`):
+
+- `DB: migrated, revision 0115` — the database is at the expected revision.
+- `DB: not migrated (database at 0114, this version expects 0115)` — the
+  migration did not run.
+- `DB: migrated, revision 0116 (newer than this version, which expects
+  0115; normal after a rollback)` — the database is ahead; see
+  `docs/codebase/migrations.md`, "Rollback contract".
+- `DB: not migrated (check_failed: OperationalError)` — the probe could
+  not read the database; the detail is the text `/ready` shows.
+
+When readiness fails, the line becomes a header followed by one indented
+line per failing check with its detail, and one `ok: …` line naming the
+checks that passed. This is how an operator confirms an upgrade through
+MEHO instead of a shell into the pod: the database revision, the
+readiness checks and the approval key state all come from one
+`meho status` call, and `--json` carries the same fields.
+
 ### Pipeline
 
 1. **Resolve the backplane URL.** Override (`--backplane <url>`)
@@ -870,7 +970,11 @@ treatment: `dispatch.UnknownStatusError` (used by `dispatch.Render`,
 probably newer than the CLI, that the operation may have run or be
 waiting for approval, and points at `meho status`. The exit code stays
 `4` (`unexpected_response`) because the CLI cannot tell whether the
-operation worked.
+operation worked. The known statuses are `ok`, `error`, `denied`,
+`rate_limited`, `not_found` and `awaiting_approval`; the last three
+are the shared constants `dispatch.StatusRateLimited`,
+`dispatch.StatusNotFound` and `dispatch.StatusAwaitingApproval`, and
+all three lists name them so a new status is added in one place.
 
 ## Global work-ref (`--work-ref`, `MEHO_WORK_REF`, #3804)
 
@@ -1295,9 +1399,41 @@ narrow-waist contract.
   `--preview-hash` from a prior preview of the identical
   `(connector_id, op_id, target, params)`. Without this verb the CLI
   had no way to obtain the hash, so the destructive tier was
-  MCP-only. The verb exits 1 on a non-ok envelope (`status="error"`
-  for input faults, `status="unavailable"` for a typed/composite op
-  with no literal HTTP request to preview).
+  MCP-only. Whenever the op resolved, the human output also prints one
+  plain line with the risk level and what MEHO would do with this call
+  for this caller and target (#3973 / #4923) — for example "Risk level:
+  dangerous. This call waits for approval." — and `--json` carries
+  `safety_level`, `requires_approval`, `policy_verdict` and
+  `policy_reason`. The verb exits 1 on a non-ok
+  envelope (`status="error"` for input faults, `status="unavailable"` for
+  a typed/composite op with no literal HTTP request to preview).
+- `meho operation result-query <handle_id> [--offset N] [--limit N] | [--where ...] [--select ...] [--group-by ...] [--aggregate ...] [--order-by ...] [--query-limit N] | [--path <pointer>]`
+  — calls `POST /api/v1/operations/result-query`, the REST twin of the
+  MCP `result_query` tool. It reads a stored result back by its handle
+  id, in one of three modes (`cli/internal/cmd/operation/resultquery.go`):
+  paging a rows handle (`--offset` / `--limit`), one relational query
+  over a rows handle (`--where`, `--select`, `--group-by`, `--aggregate`,
+  `--order-by`, `--query-limit`; #3366), or a path read (`--path`,
+  #4888). `--path` takes an RFC 6901 JSON Pointer and sets `query.path`:
+  `""` is the whole document, `/a/0/b` goes one step per `/`. It reads
+  one value of a document handle, or a top-level field a rows handle
+  left out of its inline summary (`omitted_scalar_count`). An array
+  value pages with `--offset` / `--limit`. A text value comes back in
+  parts (#4994): `--offset` and `--limit` count characters, and without
+  `--limit` a part is as much text as fits the output budget. The CLI
+  sends `limit` only when `--limit` was given, so the backplane picks
+  the default for what is read. The CLI refuses `--path`
+  together with any query flag before the call. The reply carries
+  `path`, `value_type` and `value` (raw JSON) next to the paging fields,
+  plus `returned_chars` and `total_chars` for a text value; the human
+  render is one header line (handle, path, type) and the pretty-printed
+  value, the item lines with the window for an array, or, for a text
+  part, a header with the character window and the total, a note with
+  the `--offset` to continue with when more follows, and the part as
+  plain text.
+  Paging a document handle without `--path` is a server 422; the CLI
+  shows the server's message and adds the `--path` form that works
+  (`resultquery_path.go`).
 
 ### Reserved flags (same shape across all three verbs)
 
@@ -1379,11 +1515,21 @@ scenarios.
 
 - `0` — verb ran cleanly; for `call`, `status == "ok"`.
 - `1` — `call` only: dispatcher returned `status == "error"`,
-  `status == "denied"` or `status == "rate_limited"` (connector raised,
-  schema validation rejected, policy denied, or the caller is over its
-  rate or concurrency limit). The envelope is printed first; a
-  `rate_limited` one shows `extras.retry_after_seconds`. Surfaced via
-  the `errOpError` sentinel.
+  `status == "denied"`, `status == "rate_limited"` or
+  `status == "not_found"` (connector raised, schema validation
+  rejected, policy denied, the caller is over its rate or concurrency
+  limit, or the connector confirmed the object does not exist). The
+  envelope is printed first; a `rate_limited` one shows
+  `extras.retry_after_seconds`; a `not_found` one adds a
+  `not found: <id>` line from `extras.resource_ids` (#4986). When the
+  backplane committed an audit row, the text output ends with
+  `audit receipt: <id>` on every status, not only on `ok` (#4833) —
+  a failed call's row is the one that says why it failed; read it
+  with `meho audit show <id>`. A null `audit_id` prints no line. A
+  parked call (`awaiting_approval`, exit 0) shows the receipt too, after
+  the parked hint: a multi-step operation that stops for approval
+  already has its own audit row.
+  Surfaced via the `errOpError` sentinel.
 - `2` — `auth_expired` (no stored credentials, or refresh failed).
 - `3` — `unreachable` (network / transport failure).
 - `4` — `unexpected_response` (parse error, malformed JSON, or an
@@ -1669,9 +1815,18 @@ unqualified names. After G0.12-T16 #1274 the 15 vendor dirs (`vault`,
 `vcf-logs`, `vcf-operations`) share **one** transport implementation
 instead of byte-near-identical `doAuthedRequest` / `sendRequest` /
 `httpError` trios. Exit codes: `0` status=ok, `1`
-status=error/denied/rate_limited (via the `errOpError` sentinel re-exported from
+status=error/denied/rate_limited/not_found (via the `errOpError` sentinel re-exported from
 `dispatch.ErrOpError`), `2` auth_expired, `3` unreachable,
 `4` unexpected_response.
+
+The failure render is shared too: every vendor package's
+`printErrorTrailer` delegates to `dispatch.WriteErrorTrailer`, which
+prints the connector error, the `extras` blob, then
+`audit receipt: <id>` when the envelope carried an `audit_id` (#4833).
+`dispatch.CallResult` keeps `audit_id` for that, so a vendor verb's
+`--json` output carries the key as well (null when the backplane
+committed no row). The vendor `CallResult` still drops `handle` and
+`delivery`; restoring those is #4659.
 
 ### Typed op_id repoint contract (typed connectors, #2942)
 
@@ -2244,9 +2399,10 @@ Direct:
 * `github.com/zalando/go-keyring` — cross-platform OS keyring,
   chosen over `99designs/keyring` (which ADR 0004 rejected on
   maintenance-cadence grounds — last release December 2022).
-* `golang.org/x/oauth2` — supplies `Config.DeviceAuth` and
-  `Config.DeviceAccessToken` for the RFC 8628 device-code flow,
-  plus `Config.TokenSource` for the T3 refresh path. Pinned at
+* `golang.org/x/oauth2` — supplies `Config.DeviceAuth` to start the
+  RFC 8628 device-code flow (the token polling is our own loop, see
+  "Login flow" step 5), plus `Config.TokenSource` for the T3 refresh
+  path. Pinned at
   `v0.27.0`; the Go 1.22 minimum constraint that previously blocked
   upgrades is lifted now that the module requires Go 1.26.10.
 * `github.com/oapi-codegen/runtime` — runtime helpers the generated

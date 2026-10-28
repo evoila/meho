@@ -65,6 +65,7 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.operations._preview import PreviewContext
 from meho_backplane.settings import get_settings
+from tests._vim_pages import PagedVim
 
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000031a6")
 
@@ -201,7 +202,7 @@ def _duplicate_name_error() -> httpx.HTTPStatusError:
     return httpx.HTTPStatusError("500 Server Error", request=request, response=response)
 
 
-class _HostRecordingConnector:
+class _HostRecordingConnector(PagedVim):
     """Recording connector double for the host-domain composite tests.
 
     Serves the ``GET:/vcenter/host`` resolution listing (keyed off the
@@ -220,6 +221,7 @@ class _HostRecordingConnector:
         datastores: list[dict[str, Any]] | None = None,
         create_nas_race: dict[str, Any] | None = None,
     ) -> None:
+        super().__init__()
         self.hosts = hosts if hosts is not None else [{"host": "host-15", "name": "esxi-01"}]
         # None → the default all-resolvable map; {} → nothing resolves (unreadable).
         self.config_managers = (
@@ -262,10 +264,22 @@ class _HostRecordingConnector:
         return list(self.hosts)
 
     async def _post_vmomi_json(
-        self, target: Any, path: str, *, operator: Operator, json: Any = None
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        json: Any = None,
+        promote_managed_object_not_found: bool = False,
+        session_used: Any = None,
+        session_token: str | None = None,
     ) -> Any:
+        del promote_managed_object_not_found
+        self._record_session(session_used)
         if path.endswith("/RetrievePropertiesEx"):
             return self._serve_retrieve(json)
+        if path.endswith("/ContinueRetrievePropertiesEx"):
+            return self._continue(json["token"], session_token)
         self.writes.append({"path": path, "json": json})
         if path.endswith("/CreateNasDatastore"):
             if self._create_nas_race is not None:
@@ -375,7 +389,7 @@ class _HostRecordingConnector:
                     "propSet": [{"name": "info", "val": info}],
                 }
             )
-        return {"objects": objects}
+        return self._serve_objects(objects)
 
 
 # ===========================================================================
@@ -687,12 +701,14 @@ async def test_datastore_mount_nfs_race_reraises_non_duplicate_fault(gate: _Gate
     """A non-already-exists write fault keeps today's behaviour (re-raises)."""
 
     class _FaultingConnector(_HostRecordingConnector):
-        async def _post_vmomi_json(self, target, path, *, operator, json=None):  # type: ignore[no-untyped-def]
+        async def _post_vmomi_json(self, target, path, *, operator, json=None, **kwargs):  # type: ignore[no-untyped-def]
             if path.endswith("/CreateNasDatastore"):
                 raise RuntimeError(
                     "vmware vim CreateNasDatastore failed: vim fault HostConfigFault"
                 )
-            return await super()._post_vmomi_json(target, path, operator=operator, json=json)
+            return await super()._post_vmomi_json(
+                target, path, operator=operator, json=json, **kwargs
+            )
 
     conn = _FaultingConnector(datastores=[])
     with pytest.raises(RuntimeError, match="HostConfigFault"):
@@ -1283,3 +1299,67 @@ async def test_host_previews_decline_on_unsupported_target() -> None:
         _preview_ctx(unsupported, {"host": "h", "service": "TSM-SSH", "action": "start"})
     )
     assert mount is None and flash is None and svc is None
+
+
+# ===========================================================================
+# datastore_mount_nfs — the pre-check reads every page (#4862)
+# ===========================================================================
+
+_NFS_BASE_EXPORT = {
+    "moid": "datastore-77",
+    "name": "ds-nfs-base",
+    "remote_host": "nfs-01.example.internal",
+    "remote_path": "/export/base",
+    "type": "NFS",
+}
+_VMFS_LOCAL = {"moid": "datastore-11", "name": "local-vmfs"}
+_MOUNT_BASE_PARAMS = {
+    "host": "esxi-01",
+    "nfs_server": "nfs-01.example.internal",
+    "remote_path": "/export/base",
+    "datastore_name": "ds-nfs-base",
+}
+
+
+async def _mount_base(conn: _HostRecordingConnector) -> Any:
+    return await datastore_mount_nfs_composite(
+        operator=_operator(),
+        target=None,
+        params=dict(_MOUNT_BASE_PARAMS),
+        connector=conn,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.asyncio
+async def test_datastore_mount_nfs_sees_a_mount_on_a_later_page(gate: _GateRecorder) -> None:
+    """The export already mounted, listed on page two of the Datastore.info read, is found."""
+    conn = _HostRecordingConnector(datastores=[_VMFS_LOCAL, _NFS_BASE_EXPORT])
+    conn.page_size = 1
+
+    out = await _mount_base(conn)
+
+    assert isinstance(out, dict)
+    assert out["status"] == "already_mounted"
+    assert out["datastore"] == "datastore-77"
+    # No mount was sent, and the gate was never reached.
+    assert conn.writes == []
+    assert gate.calls == []
+    # One continuation call, with the first page's token, on the first call's session.
+    assert conn.continue_calls == [("<token-1>", "<session-1>")]
+    assert conn._pending == {}
+
+
+@pytest.mark.asyncio
+async def test_datastore_mount_nfs_failed_page_fails_before_the_mount(
+    gate: _GateRecorder,
+) -> None:
+    """A lost page fails the pre-check; the mount is not sent on a short list."""
+    conn = _HostRecordingConnector(datastores=[_VMFS_LOCAL, _NFS_BASE_EXPORT])
+    conn.page_size = 1
+    conn.fail_continue = httpx.ConnectError("page lost")
+
+    with pytest.raises(httpx.ConnectError):
+        await _mount_base(conn)
+
+    assert conn.writes == []
+    assert gate.calls == []

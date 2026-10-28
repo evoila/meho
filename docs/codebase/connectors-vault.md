@@ -130,7 +130,7 @@ target registration) is documented in
   `credential_read` (decision #3 — aggregate-only broadcast).
 - **`sys` op group** (`ops_sys.py`, G3.3-T2 #546; policy ops
   G3.15-T2 #1410; bootstrap ops G3.15-T5 #1413) —
-  `register_vault_sys_typed_operations()` registers four read-only
+  `register_vault_sys_typed_operations()` registers six read-only
   diagnostics ops, the four ACL-policy ops, and the four bootstrap
   enable/tune ops under group key `sys`. The diagnostics ops are all
   `safety_level='safe'`,
@@ -144,12 +144,66 @@ target registration) is documented in
     signature but is unused.
   - `vault.sys.seal_status` — `GET /v1/sys/seal-status`. Returns the
     raw seal-status object.
+
+    `health` and `seal_status` answer for the **one node** behind the
+    target's address. In a cluster with integrated storage (raft) that
+    address reaches the active node, so both say `sealed: false` even
+    when a standby node came back sealed after a restart. Their
+    descriptions and `llm_instructions` say so and point to the two
+    cluster-wide reads below.
+  - `vault.sys.ha_status` — `GET /v1/sys/ha-status`. Returns
+    `{nodes: [...]}`, one row per node the active node has heard from
+    (`hostname`, `api_address`, `cluster_address`, `active_node`,
+    `last_echo`, `version`, `clock_skew_ms`, `echo_duration_ms`).
+    Vault puts the list under `data.Nodes` (capital N); the handler
+    also accepts a lower-case key. Enterprise-only fields are dropped.
+  - `vault.sys.raft.autopilot_state` —
+    `GET /v1/sys/storage/raft/autopilot/state`. Returns `healthy`,
+    `failure_tolerance` (how many more nodes may fail before Vault
+    stops), `leader`, and `{servers: [...]}` with one row per raft
+    server sorted by id (`id`, `name`, `address`, `status`,
+    `node_status`, `node_type`, `healthy`, `last_contact`, `last_index`,
+    `last_term`, `stable_since`, `version`). Vault returns `servers` as
+    a map keyed by raft id; the handler turns it into a list so the
+    answer is set-shaped. Vault's `voters` id list is left out on
+    purpose: a second top-level list would stop the result reduction
+    from finding the server rows, and each row's `status` already says
+    whether the server is the leader, a voter or a non-voter. The
+    `result_scalars` hint keeps `healthy`, `failure_tolerance` and
+    `leader` next to the reduced rows. Only clusters with raft storage
+    answer; a Vault on another storage backend returns an error, which
+    surfaces as `connector_error`.
+
+    Both live in `ops_sys_cluster.py` (split out to keep `ops_sys.py`
+    small) and are registered from
+    `register_vault_sys_typed_operations()`. hvac 2.4.0 has no helper
+    for either endpoint, so they call `client.adapter.get(<api path>)`
+    through the operator client. A 403 raises
+    `hvac.exceptions.Forbidden`, which the dispatcher turns into the
+    normal `connector_vault_forbidden` error.
+
+    **Vault policy the two reads need.** Both paths need the `read`
+    capability. Neither is sudo-protected (Vault's root-protected
+    endpoint list does not name them). The autopilot read must run in
+    the root namespace. Add this to the policy of MEHO's Vault role
+    (the role the operator JWT logs in to, `VAULT_OIDC_ROLE`):
+
+    ```hcl
+    path "sys/ha-status" {
+      capabilities = ["read"]
+    }
+    path "sys/storage/raft/autopilot/state" {
+      capabilities = ["read"]
+    }
+    ```
+
+    Without the grant the ops return `connector_vault_forbidden`.
   - `vault.sys.mounts.list` — `GET /v1/sys/mounts`. Returns the
     envelope's `data` under a `mounts` key.
   - `vault.sys.auth.list` — `GET /v1/sys/auth`. Returns the envelope's
     `data` under an `auth_methods` key.
 
-  The three authenticated ops forward the operator JWT via
+  The five authenticated ops forward the operator JWT via
   `vault_client_for_operator` and offload the blocking `hvac` call with
   `asyncio.to_thread`.
 
@@ -300,6 +354,9 @@ target registration) is documented in
   | `vault.token.revoke_accessor` | `auth.token.revoke_accessor` | dangerous | True | `other` |
   | `vault.token.list_accessors` | `auth.token.list_accessors` | safe | False | `other` |
   | `vault.token.lookup_accessor` | `auth.token.lookup_accessor` | safe | False | `other` |
+  | `vault.token.role.write` | `adapter.post` on `/v1/auth/token/roles/<role_name>` | dangerous | True | `write` |
+  | `vault.token.role.read` | `auth.token.read_role` | safe | False | `other` |
+  | `vault.token.role.list` | `auth.token.list_roles` | safe | False | `read` |
 
   `token.create` mints a client token in its **response** →
   `credential_mint` (aggregate-only broadcast; the token reaches only the
@@ -328,8 +385,35 @@ target registration) is documented in
   legitimately-empty case, so an unknown accessor's `404` surfaces as the
   underlying `hvac.exceptions.InvalidPath` rather than being swallowed.
 
-  Both groups register from `ops_identity.py` / `ops_token.py` spec
-  tables, composed by the thin
+  **Token roles** (`ops_token_role.py` / `ops_token_role_schemas.py`)
+  are saved sets of rules in Vault for making tokens: which policies a
+  token may get (`allowed_policies` / `disallowed_policies`), whether it
+  has a parent token (`orphan`), whether it can be renewed (`renewable`),
+  and how long it lives between renewals (`token_period`,
+  `token_explicit_max_ttl`). They live on the core `token` backend under
+  `auth/token/roles/<role_name>` and hold no secret, so nothing is
+  redacted. `role.write` sends **only the fields the caller gives**:
+  Vault's token-role write changes just the fields in the request body
+  and keeps the others, but hvac's `auth.token.create_or_update_role`
+  always sends `orphan` and `renewable` (they have defaults), so a change
+  to one field would silently reset those two. The handler therefore
+  posts the body itself through `client.adapter.post` on the same API
+  path hvac uses, and returns `{role_name, written, settings}` where
+  `settings` is exactly what was sent. The `role_name` schema accepts the
+  name shape Vault itself accepts (letters, digits, `_`, `-`, `.`), so a
+  name can never carry a `/` that points the call at another Vault path.
+  `role.read` unwraps Vault's `data` envelope (durations come back as
+  seconds); an unknown role surfaces the underlying
+  `hvac.exceptions.InvalidPath` like `lookup_accessor`. `role.list`
+  normalises the empty-store `404` to `{"keys": []}` like
+  `list_accessors`. `role.write` registers a park-time permission
+  preflight on `auth/token/roles/<role_name>` (see the preflight section
+  below). All three log in through `vault_client_for_target`, so the
+  target's `extras["vault_role"]` decides which Vault role makes the
+  change.
+
+  Both groups register from `ops_identity.py` / `ops_token.py` /
+  `ops_token_role.py` spec tables, composed by the thin
   `register_vault_identity_token_operations()` registrar
   (`ops_identity_token.py`), which is queued from the package `__init__`
   as its own lifespan registrar entry (independent of the KV / sys / auth
@@ -545,14 +629,17 @@ exercised by calling it directly in the unit suite. The policy reads
 
 The identity write ops (`identity.entity.write` / `entity_alias.write` /
 `group.write` / `group.delete`) and the token write ops
-(`token.create` / `token.revoke_accessor`) (G3.15-T4 #1412) likewise
+(`token.create` / `token.revoke_accessor`, and `token.role.write`, whose
+`allowed_policies` decide what a token made from the role can do)
+(G3.15-T4 #1412) likewise
 register `requires_approval=True` — each is a privilege assignment,
 privilege-plumbing membership change, irreversible removal, or a secret
 mint. `requires_approval` / `safety_level` are carried per-op in the
-`IDENTITY_OP_SPECS` / `TOKEN_OP_SPECS` rows. The identity reads
-(`entity.read` / `group.read` / `list`) and `token.list_accessors` stay
-`requires_approval=False`, registered `safe` so create-if-absent flows
-do not stall. The integration tests drive the gated writes via the
+`IDENTITY_OP_SPECS` / `TOKEN_OP_SPECS` / `TOKEN_ROLE_OP_SPECS` rows. The
+identity reads (`entity.read` / `group.read` / `list`),
+`token.list_accessors` and the token-role reads (`token.role.read` /
+`token.role.list`) stay `requires_approval=False`, registered `safe` so
+create-if-absent flows do not stall. The integration tests drive the gated writes via the
 approvals-API resume path (`dispatch(..., _approved=True)`), the same
 path that runs once a human approves.
 
@@ -580,10 +667,13 @@ and Vault authorizes it with `update` on that **`/delete/`** path — not the
 data path (#3274; probing `/data/` for a delete gave a false pass).
 `vault.kv.metadata.delete` renders `<mount>/metadata/<path>` (#3424). It
 compares the granted capabilities against the per-op requirement in
-`VAULT_KV_WRITE_CAPABILITIES` (`put`/`patch` need `create`+`update` on the
-data path; `delete` needs `update` on the delete path; `metadata.delete`
-needs `read`+`delete` on the metadata path, because it reads the path before
-and after the delete) and returns a redaction-safe summary:
+`VAULT_KV_WRITE_CAPABILITIES` (`put` needs `create`+`update` on the data
+path; `patch` needs `read`+`update` there, because hvac reads the current
+version first and then writes to a secret that already exists, so it never
+needs `create` (#4831, #3897); `delete` needs `update` on the delete path;
+`metadata.delete` needs `read`+`delete` on the metadata path, because it
+reads the path before and after the delete) and returns a redaction-safe
+summary:
 
 ```python
 {"check": "vault.capabilities-self", "path": "secret/data/...",
@@ -631,6 +721,20 @@ proceeds); a non-write op short-circuits to `None`. Unit + dispatcher
 integration coverage in `test_connectors_vault.py`,
 `test_operations_preview.py`, and `test_operations_dispatcher.py`.
 
+The probe itself is the shared `vault_capability_preflight(operator,
+op_id, auth_path, required, target)` in `ops.py`;
+`vault_kv_write_capability_preflight` only picks the KV path and
+requirement and calls it. **`vault.token.role.write`** registers a second
+preflight on the same hook (`ops_token_role.py`, wired at import time
+like the KV preview builders): it probes `auth/token/roles/<role_name>`
+under the target's role for `create` + `update` (Vault asks for `create`
+when the role is new and `update` when it exists). When either is
+missing, the call is refused with `write_capability_denied` before any
+approval request is written, exactly like a KV write. The policy lines a
+deployment adds are in
+[`docs/cross-repo/connector-vault-policy.md`](../cross-repo/connector-vault-policy.md)
+§6.4. Coverage in `test_connectors_vault_token_role.py`.
+
 ## JSONFlux result-handle path (`vault.kv.list`)
 
 `vault.kv.list` is the only set-shaped op on the v0.2 Vault surface
@@ -668,7 +772,8 @@ raw >50-key list once a handle is produced.
    KV-v2 group and then calls `register_vault_auth_operations` (auth
    read) + `register_vault_auth_write_operations` (auth write).
    `register_vault_identity_token_operations` composes the `identity` +
-   `token` groups from their per-module spec tables.
+   `token` groups from their per-module spec tables (`ops_identity.py`,
+   `ops_token.py`, `ops_token_role.py`).
 2. At FastAPI lifespan startup, `run_typed_op_registrars()` invokes
    all registrars, which upsert the `endpoint_descriptor` rows. Upsert
    is idempotent: a restart against unchanged descriptions is a no-op
@@ -681,11 +786,12 @@ raw >50-key list once a handle is produced.
    broadcast event, and reduces the result (JSONFlux).
 4. `op_class` for audit/broadcast is **derived from the op-id suffix**
    by `broadcast.events.classify_op`, not passed at registration. The
-   four `sys` ops classify as `read` — `.list` was already a read
-   suffix; `.health` and `.seal_status` were added to the read-suffix
-   tuple by #546 (no secret content, so they broadcast at the same
-   sensitivity as `.list`/`.get` rather than falling through to the
-   full-detail `other` class).
+   six `sys` diagnostics ops classify as `read` — `.list` was already a
+   read suffix; `.health` and `.seal_status` were added to the
+   read-suffix tuple by #546, and `.ha_status` / `.autopilot_state` for
+   the cluster-wide reads (no secret content, so they broadcast at the
+   same sensitivity as `.list`/`.get` rather than falling through to
+   the full-detail `other` class).
 
 ## Error handling
 
@@ -785,6 +891,11 @@ and a real Postgres audit store (reusing the integration conftest's
   call. Acceptable under v0.2 dogfood load (per-request login is
   already the v0.1/v0.2 model); revisit if a per-operator token cache
   lands.
+- `vault.sys.health` and `vault.sys.seal_status` see only the node
+  behind the target's address. Use `vault.sys.ha_status` or
+  `vault.sys.raft.autopilot_state` for the whole cluster. There is no
+  per-node seal read yet (that would need a per-node address on the
+  target).
 - `sys` policy writes (`policy.write` / `policy.delete`) landed in
   G3.15-T2 (#1410), approval-gated; the sys bootstrap writes
   (`auth.enable` / `auth.tune` / `mounts.enable` / `mounts.tune`)

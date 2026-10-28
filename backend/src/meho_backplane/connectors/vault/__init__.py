@@ -49,7 +49,11 @@ from meho_backplane.connectors.registry import register_connector_v2
 # Importing kv_write_preview runs its register_preview_builder calls (the
 # import side-effect that wires the park-time proposed_effect previews for
 # vault.kv.put / patch / delete — #2332 — and metadata.delete — #3424).
-from meho_backplane.connectors.vault import kv_write_preview  # noqa: F401
+# Same side-effect for the userpass password writes (#4850).
+from meho_backplane.connectors.vault import (
+    kv_write_preview,  # noqa: F401
+    userpass_write_preview,  # noqa: F401
+)
 from meho_backplane.connectors.vault.connector import VaultConnector
 from meho_backplane.connectors.vault.ops import (
     register_vault_typed_operations,
@@ -104,10 +108,13 @@ register_typed_op_registrar(register_vault_typed_operations)
 # handler state, distinct endpoint_descriptor rows.
 register_typed_op_registrar(register_vault_sys_typed_operations)
 # The identity (entity/group/alias) + token (create/revoke_accessor/
-# list_accessors/lookup_accessor) op groups (G3.15-T4 #1412, #2844) ship
-# their own registrar so they register independently of the KV / sys /
-# auth surfaces. Writes are requires_approval=True; vault.token.create's
+# list_accessors/lookup_accessor, and the token roles role.write/
+# role.read/role.list) op groups (G3.15-T4 #1412, #2844) ship their own
+# registrar so they register independently of the KV / sys / auth
+# surfaces. Writes are requires_approval=True; vault.token.create's
 # response token is redacted via the credential_mint op-class allowlist.
+# Importing the registrar also imports ops_token_role, which registers
+# the park-time permission preflight for vault.token.role.write.
 register_typed_op_registrar(register_vault_identity_token_operations)
 
 __all__ = [

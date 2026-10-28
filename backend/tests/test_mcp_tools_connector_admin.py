@@ -58,6 +58,7 @@ from meho_backplane.operations.ingest import (
     DeleteConnectorResult,
     DeleteConnectorWarning,
     EditOpWarning,
+    LegacyTenantConnectorCopyError,
 )
 from tests.mcp_test_fixtures import (
     build_operator,
@@ -136,6 +137,12 @@ class _FakeReviewService:
     #: handlers. Default ``None`` keeps the clean path.
     raise_forbidden: ClassVar[BuiltinConnectorWriteForbiddenError | None] = None
 
+    #: When set, every ``connector_id``-taking method except
+    #: :meth:`delete_connector` raises this instead of returning — the
+    #: #4889 old-tenant-copy refusal (delete is the way out, so it never
+    #: raises it). Default ``None`` keeps the clean path.
+    raise_legacy_copy: ClassVar[LegacyTenantConnectorCopyError | None] = None
+
     def __init__(self, operator: Operator) -> None:
         self.operator = operator
         self.review_calls: list[tuple[str, Any]] = []
@@ -155,6 +162,8 @@ class _FakeReviewService:
     ) -> ConnectorReviewPayload:
         self.review_calls.append((connector_id, tenant_id))
         self.review_kwargs.append(kwargs)
+        if self.raise_legacy_copy is not None:
+            raise self.raise_legacy_copy
         if self.raise_not_found is not None:
             raise self.raise_not_found
         if self.raise_on_resolve is not None:
@@ -189,6 +198,8 @@ class _FakeReviewService:
         )
         if self.raise_forbidden is not None:
             raise self.raise_forbidden
+        if self.raise_legacy_copy is not None:
+            raise self.raise_legacy_copy
         if self.raise_not_found is not None:
             raise self.raise_not_found
         if self.raise_value_error is not None:
@@ -205,6 +216,8 @@ class _FakeReviewService:
         )
         if self.raise_forbidden is not None:
             raise self.raise_forbidden
+        if self.raise_legacy_copy is not None:
+            raise self.raise_legacy_copy
         if self.raise_not_found is not None:
             raise self.raise_not_found
         if self.raise_value_error is not None:
@@ -215,6 +228,8 @@ class _FakeReviewService:
         self.enable_calls.append(connector_id)
         if self.raise_forbidden is not None:
             raise self.raise_forbidden
+        if self.raise_legacy_copy is not None:
+            raise self.raise_legacy_copy
         if self.raise_not_found is not None:
             raise self.raise_not_found
 
@@ -222,6 +237,8 @@ class _FakeReviewService:
         self.enable_reads_calls.append({"connector_id": connector_id, **kwargs})
         if self.raise_forbidden is not None:
             raise self.raise_forbidden
+        if self.raise_legacy_copy is not None:
+            raise self.raise_legacy_copy
         if self.raise_not_found is not None:
             raise self.raise_not_found
         if self.raise_on_resolve is not None:
@@ -232,6 +249,8 @@ class _FakeReviewService:
         self.disable_calls.append(connector_id)
         if self.raise_forbidden is not None:
             raise self.raise_forbidden
+        if self.raise_legacy_copy is not None:
+            raise self.raise_legacy_copy
         if self.raise_not_found is not None:
             raise self.raise_not_found
 
@@ -480,7 +499,10 @@ def test_call_meho_connector_list_dispatches_to_list_ingested_connectors(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     stubbed_services: dict[str, Any],
 ) -> None:
-    """``tools/call meho_connector_list`` returns the stubbed connector list."""
+    """``tools/call meho_connector_list`` returns the stubbed connector list.
+
+    ``detail="full"`` keeps every ``ConnectorListItem`` field (#4121).
+    """
     client, op = client_with_operator
     response = post_mcp(
         client,
@@ -490,7 +512,7 @@ def test_call_meho_connector_list_dispatches_to_list_ingested_connectors(
             "method": "tools/call",
             "params": {
                 "name": "meho_connector_list",
-                "arguments": {"status": "staged"},
+                "arguments": {"status": "staged", "detail": "full"},
             },
         },
     )
@@ -522,9 +544,9 @@ def test_call_meho_connector_list_surfaces_scope_twin_fields(
 ) -> None:
     """``meho_connector_list`` passes ``scope`` + ``shadowed_by_tenant_scope`` through.
 
-    #2474: the tool serialises each row via ``model_dump(mode="json")``,
-    so the two additive scope-twin fields ride the MCP surface identically
-    to REST. Seeds a built-in + tenant twin pair (same ``connector_id``)
+    #2474: with ``detail="full"`` the tool serialises each row via
+    ``model_dump(mode="json")``, so the two additive scope-twin fields ride
+    the MCP surface identically to REST. Seeds a built-in + tenant twin pair (same ``connector_id``)
     where the built-in copy is shadowed by the tenant-scoped one that
     dispatch resolves first.
     """
@@ -573,7 +595,7 @@ def test_call_meho_connector_list_surfaces_scope_twin_fields(
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": {"name": "meho_connector_list", "arguments": {}},
+            "params": {"name": "meho_connector_list", "arguments": {"detail": "full"}},
         },
     )
     assert response.status_code == 200
@@ -992,7 +1014,9 @@ def test_review_tool_schema_advertises_prefer() -> None:
 
     The closed-set selector is part of the tool contract an agent reads
     off ``tools/list``; assert both scope-resolving tools advertise the
-    ``prefer`` property with the closed ``tenant``/``builtin`` vocabulary.
+    ``prefer`` property with the closed ``tenant``/``builtin``/``legacy``
+    vocabulary (``legacy`` selects the tenant's old copy under a former
+    product name, #4889).
     """
     import meho_backplane.mcp.tools.connector_admin  # noqa: F401  (ensure registration)
     from meho_backplane.mcp.registry import get_tool
@@ -1002,7 +1026,7 @@ def test_review_tool_schema_advertises_prefer() -> None:
         assert registered is not None, tool_name
         definition, _handler = registered
         prefer = definition.inputSchema["properties"]["prefer"]
-        assert prefer["enum"] == ["tenant", "builtin", None]
+        assert prefer["enum"] == ["tenant", "builtin", "legacy", None]
         assert definition.inputSchema["additionalProperties"] is False
 
 
@@ -1786,3 +1810,76 @@ def test_call_edit_group_no_field_returns_invalid_params_over_the_wire(
     assert "requires at least one" in body["error"]["message"]
     assert body["error"].get("data") is None
     assert "ValueError" not in json.dumps(body)
+
+
+# ---------------------------------------------------------------------------
+# LegacyTenantConnectorCopyError → structured -32602 (#4889)
+#
+# The operator's tenant has rows for the connector_id only under a former
+# product name. The six review / mutate tools must surface the service's
+# refusal as a JSON-RPC -32602 carrying the connector_legacy_tenant_copy
+# data envelope the REST 409 ships, with the message that names the old
+# copy and the way out. Delete is the way out and never raises it.
+# ---------------------------------------------------------------------------
+
+
+def _legacy_copy_error() -> LegacyTenantConnectorCopyError:
+    return LegacyTenantConnectorCopyError(
+        connector_id="vrli-rest-9.0",
+        legacy_product="vcf-logs",
+        product="vrli",
+        tenant_id=build_operator().tenant_id,
+    )
+
+
+_LEGACY_COPY_HANDLER_CASES: list[tuple[str, dict[str, Any], TenantRole]] = [
+    ("_review_handler", {"connector_id": "vrli-rest-9.0"}, TenantRole.OPERATOR),
+    (
+        "_edit_group_handler",
+        {"connector_id": "vrli-rest-9.0", "group_key": "g", "when_to_use": "x"},
+        TenantRole.TENANT_ADMIN,
+    ),
+    (
+        "_edit_op_handler",
+        {"connector_id": "vrli-rest-9.0", "op_id": "GET:/x", "is_enabled": True},
+        TenantRole.TENANT_ADMIN,
+    ),
+    ("_enable_handler", {"connector_id": "vrli-rest-9.0"}, TenantRole.TENANT_ADMIN),
+    ("_enable_reads_handler", {"connector_id": "vrli-rest-9.0"}, TenantRole.TENANT_ADMIN),
+    ("_disable_handler", {"connector_id": "vrli-rest-9.0"}, TenantRole.TENANT_ADMIN),
+]
+
+
+@pytest.mark.parametrize(
+    ("handler_name", "arguments", "role"),
+    _LEGACY_COPY_HANDLER_CASES,
+    ids=[case[0] for case in _LEGACY_COPY_HANDLER_CASES],
+)
+async def test_connector_handler_maps_legacy_tenant_copy_to_invalid_params(
+    handler_name: str,
+    arguments: dict[str, Any],
+    role: TenantRole,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
+
+    monkeypatch.setattr(_FakeReviewService, "raise_legacy_copy", _legacy_copy_error())
+    monkeypatch.setattr(ca_mod, "ReviewService", _FakeReviewService)
+    handler = getattr(ca_mod, handler_name)
+    op = build_operator(role)
+
+    with pytest.raises(McpInvalidParamsError) as caught:
+        await handler(op, arguments)
+
+    message = str(caught.value)
+    assert "vcf-logs" in message
+    assert "meho connector delete vrli-rest-9.0" in message
+    assert "not yet ingested" not in message
+    assert "connector ingest" not in message
+    assert "LegacyTenantConnectorCopyError" not in message
+    data = caught.value.data
+    assert data is not None
+    assert data["detail"] == "connector_legacy_tenant_copy"
+    assert data["connector_id"] == "vrli-rest-9.0"
+    assert data["legacy_product"] == "vcf-logs"
+    assert data["product"] == "vrli"

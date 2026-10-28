@@ -550,6 +550,7 @@ func TestRenderStatusMapping(t *testing.T) {
 		{"error", ErrOpError},
 		{"denied", ErrOpError},
 		{StatusRateLimited, ErrOpError},
+		{StatusNotFound, ErrOpError},
 	}
 	for _, tc := range cases {
 		cmd := &cobra.Command{}
@@ -632,6 +633,52 @@ func TestRenderAwaitingApprovalJSON(t *testing.T) {
 	}
 }
 
+// TestRenderAwaitingApprovalRendersAuditReceipt — a multi-step operation
+// that stops for approval already has an audit row. The parked text
+// render shows its id after the parked hint and still exits 0 (#4833).
+func TestRenderAwaitingApprovalRendersAuditReceipt(t *testing.T) {
+	const auditID = "66666666-6666-6666-6666-666666666666"
+	id := auditID
+	c := New("argocd-api-3.x")
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	r := &CallResult{
+		Status: StatusAwaitingApproval, OpID: "argocd.app.sync", AuditID: &id,
+		Extras: json.RawMessage(`{"approval_request_id":"ar-render-2"}`),
+	}
+	if err := c.Render(cmd, "argocd.app.sync", r, false, nil); err != nil {
+		t.Fatalf("parked dispatch must return nil (exit 0); got %v", err)
+	}
+	if !strings.HasSuffix(out.String(), "audit receipt: "+auditID+"\n") {
+		t.Errorf("parked render must end with the audit receipt:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "meho approvals show ar-render-2") {
+		t.Errorf("parked hint must still be present:\n%s", out.String())
+	}
+}
+
+// TestRenderAwaitingApprovalNullReceiptPrintsNoLine — a parked call with
+// audit_id null prints no receipt line and still exits 0.
+func TestRenderAwaitingApprovalNullReceiptPrintsNoLine(t *testing.T) {
+	c := New("argocd-api-3.x")
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	r := &CallResult{
+		Status: StatusAwaitingApproval, OpID: "argocd.app.sync",
+		Extras: json.RawMessage(`{"approval_request_id":"ar-render-3"}`),
+	}
+	if err := c.Render(cmd, "argocd.app.sync", r, false, nil); err != nil {
+		t.Fatalf("parked dispatch must return nil (exit 0); got %v", err)
+	}
+	if strings.Contains(out.String(), "audit receipt:") {
+		t.Errorf("null audit_id must not render a receipt:\n%s", out.String())
+	}
+}
+
 func TestRenderInvalidStatusReturnsRenderError(t *testing.T) {
 	c := New("c")
 	cmd := &cobra.Command{}
@@ -709,5 +756,212 @@ func TestPrettyJSON(t *testing.T) {
 	}
 	if _, err := PrettyJSON(json.RawMessage(`{bad`)); err == nil {
 		t.Fatalf("expected error on malformed JSON")
+	}
+}
+
+// TestCallDecodesAuditID — the backplane sends audit_id on every
+// envelope it committed a row for (#4230, #4801). The shared CallResult
+// must keep it, so the vendor verbs can show it (#4833).
+func TestCallDecodesAuditID(t *testing.T) {
+	const auditID = "77777777-7777-7777-7777-777777777777"
+	withFake(t, &fakeOperationsClient{
+		callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: []byte(
+				`{"status":"error","op_id":"vault.kv.read","result":null,` +
+					`"error":"connection refused","audit_id":"` + auditID + `","duration_ms":3}`)},
+		},
+	})
+	c := New("vault-1.x")
+	r, err := c.Call(context.Background(), "https://bp", "vault.kv.read", "test-target", nil)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if r.AuditID == nil || *r.AuditID != auditID {
+		t.Fatalf("audit_id not decoded: %+v", r.AuditID)
+	}
+}
+
+// TestPrintGenericFailureRendersAuditReceipt — a failed, refused or
+// rate-limited call shows its audit id in the text output, so the
+// operator can read the row that says why it failed (#4833).
+func TestPrintGenericFailureRendersAuditReceipt(t *testing.T) {
+	const auditID = "88888888-8888-8888-8888-888888888888"
+	errMsg := "connection refused"
+	for _, status := range []string{"error", "denied", StatusRateLimited, StatusNotFound} {
+		t.Run(status, func(t *testing.T) {
+			c := New("vault-1.x")
+			var buf bytes.Buffer
+			id := auditID
+			c.PrintGeneric(&buf, "vault.kv.read", &CallResult{
+				Status: status, Error: &errMsg, AuditID: &id,
+				Extras: json.RawMessage(`{"error_code":"connector_error"}`), DurationMs: 3,
+			})
+			out := buf.String()
+			for _, want := range []string{
+				"status=" + status,
+				"meho: connector error: connection refused",
+				"extras:",
+				"audit receipt: " + auditID + "\n",
+			} {
+				if !strings.Contains(out, want) {
+					t.Errorf("status=%s render missing %q:\n%s", status, want, out)
+				}
+			}
+			if !strings.HasSuffix(out, "audit receipt: "+auditID+"\n") {
+				t.Errorf("audit receipt must be the last line:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestPrintGenericFailureNullReceiptPrintsNoLine — an old backplane, or a
+// call without a committed row, sends audit_id null. No line is invented.
+func TestPrintGenericFailureNullReceiptPrintsNoLine(t *testing.T) {
+	c := New("vault-1.x")
+	errMsg := "policy refused"
+	var buf bytes.Buffer
+	c.PrintGeneric(&buf, "vault.kv.read", &CallResult{Status: "denied", Error: &errMsg})
+	if strings.Contains(buf.String(), "audit receipt:") {
+		t.Fatalf("null audit_id must not render a receipt:\n%s", buf.String())
+	}
+}
+
+// TestWriteAuditReceiptSkipsEmpty — nil and "" both print nothing.
+func TestWriteAuditReceiptSkipsEmpty(t *testing.T) {
+	empty := ""
+	for name, id := range map[string]*string{"nil": nil, "empty": &empty} {
+		var buf bytes.Buffer
+		WriteAuditReceipt(&buf, id)
+		if buf.Len() != 0 {
+			t.Errorf("%s audit id must print nothing, got %q", name, buf.String())
+		}
+	}
+}
+
+// TestRenderJSONCarriesAuditID — --json on a vendor verb now carries the
+// audit_id key the backplane sent (null stays null), matching the
+// `meho operation call` envelope.
+func TestRenderJSONCarriesAuditID(t *testing.T) {
+	const auditID = "99999999-9999-9999-9999-999999999999"
+	c := New("vault-1.x")
+	for _, tc := range []struct {
+		name string
+		id   *string
+		want any
+	}{
+		{name: "present", id: func() *string { s := auditID; return &s }(), want: auditID},
+		{name: "null", id: nil, want: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&bytes.Buffer{})
+			errMsg := "connection refused"
+			err := c.Render(cmd, "vault.kv.read", &CallResult{
+				Status: "error", OpID: "vault.kv.read", Error: &errMsg, AuditID: tc.id,
+			}, true, nil)
+			if !errors.Is(err, ErrOpError) {
+				t.Fatalf("status=error must keep exit 1: %v", err)
+			}
+			var envelope map[string]any
+			if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+				t.Fatalf("decode --json output: %v; output=%q", err, out.String())
+			}
+			got, ok := envelope["audit_id"]
+			if !ok {
+				t.Fatalf("--json dropped the audit_id key: %q", out.String())
+			}
+			if got != tc.want {
+				t.Errorf("audit_id: got %#v want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRenderNotFoundNamesResourceIDs — status=not_found is a known
+// result (#3591, #4986): the connector confirmed the object does not
+// exist. Render prints the envelope, names the ids from
+// extras.resource_ids in plain words, exits 1 via ErrOpError, and never
+// tells the operator to upgrade the CLI.
+func TestRenderNotFoundNamesResourceIDs(t *testing.T) {
+	errText := "not_found: VirtualMachine vm-123 does not exist"
+	for _, jsonOut := range []bool{false, true} {
+		c := New("vmware-rest-9.0")
+		cmd := &cobra.Command{}
+		var out, errBuf bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errBuf)
+		r := &CallResult{
+			Status: StatusNotFound, OpID: "vmware.object.collect", Error: &errText,
+			Extras: json.RawMessage(`{"error_code":"not_found","resource_ids":["vm-123"],"resource_id":"vm-123"}`),
+		}
+		err := c.Render(cmd, "vmware.object.collect", r, jsonOut, nil)
+		if !errors.Is(err, ErrOpError) {
+			t.Fatalf("json=%v: not_found must exit 1 via ErrOpError; got %v", jsonOut, err)
+		}
+		if errBuf.Len() != 0 {
+			t.Errorf("json=%v: stderr must stay empty; got %q", jsonOut, errBuf.String())
+		}
+		if jsonOut {
+			var decoded map[string]any
+			if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+				t.Fatalf("decode --json output: %v; got %q", err, out.String())
+			}
+			if decoded["status"] != StatusNotFound {
+				t.Errorf("--json status: got %v want %q", decoded["status"], StatusNotFound)
+			}
+			continue
+		}
+		for _, want := range []string{
+			"status=not_found",
+			"meho: connector error: not_found: VirtualMachine vm-123 does not exist",
+			"not found: vm-123\n",
+		} {
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("human render missing %q:\n%s", want, out.String())
+			}
+		}
+	}
+}
+
+// TestWriteNotFoundIDs — the ids line joins several ids and is skipped
+// when the extras blob carries none (absent, null, or malformed).
+func TestWriteNotFoundIDs(t *testing.T) {
+	cases := []struct {
+		name   string
+		extras json.RawMessage
+		want   string
+	}{
+		{"one id", json.RawMessage(`{"resource_ids":["vm-1"]}`), "not found: vm-1\n"},
+		{"several ids", json.RawMessage(`{"resource_ids":["vm-1","vm-2"]}`), "not found: vm-1, vm-2\n"},
+		{"no ids", json.RawMessage(`{"error_code":"not_found"}`), ""},
+		{"empty list", json.RawMessage(`{"resource_ids":[]}`), ""},
+		{"null extras", json.RawMessage(`null`), ""},
+		{"absent extras", nil, ""},
+		{"malformed extras", json.RawMessage(`{"resource_ids":`), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			WriteNotFoundIDs(&buf, tc.extras)
+			if buf.String() != tc.want {
+				t.Errorf("got %q want %q", buf.String(), tc.want)
+			}
+		})
+	}
+}
+
+// TestWriteErrorTrailerNamesIDsOnlyForNotFound — a status=error envelope
+// that happens to carry resource_ids does not get the not-found line.
+func TestWriteErrorTrailerNamesIDsOnlyForNotFound(t *testing.T) {
+	errText := "boom"
+	var buf bytes.Buffer
+	WriteErrorTrailer(&buf, &CallResult{
+		Status: "error", Error: &errText,
+		Extras: json.RawMessage(`{"resource_ids":["vm-1"]}`),
+	})
+	if strings.Contains(buf.String(), "not found:") {
+		t.Errorf("status=error must not print the not-found line:\n%s", buf.String())
 	}
 }

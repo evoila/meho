@@ -82,6 +82,20 @@ class WrongUsageTests(InstallTestCase):
             with self.subTest(args=args):
                 self.assert_usage_error(self.machine.run(*args), message)
 
+    def test_bad_admin_networks_exit_2(self) -> None:
+        cases = {
+            "admin-net": "--admin-network must be an IPv4 range such as 10.0.50.0/24",
+            "10.0.50.0/33": "--admin-network must be an IPv4 range such as 10.0.50.0/24",
+            "2001:db8::/64": "--admin-network must be an IPv4 range such as 10.0.50.0/24",
+            "NONE": "--admin-network must be an IPv4 range such as 10.0.50.0/24",
+            "10.0.50.7/24": (
+                "--admin-network 10.0.50.7/24 does not start at the first address of its range."
+            ),
+        }
+        for value, message in cases.items():
+            with self.subTest(admin_network=value):
+                self.assert_usage_error(self.machine.run("--admin-network", value), message)
+
 
 if __name__ == "__main__":
     unittest.main()

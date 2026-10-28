@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Temporary placeholder. This is not a real Python project.
+#
+# The only Python project in this repository is backend/. This file and
+# the uv.lock next to it exist for one reason: GitHub's dependency graph
+# still holds a root uv.lock from the code before the repository history
+# was replaced on 2026-05-09. That stale record creates Dependabot alerts
+# for packages MEHO does not use. The graph only forgets the path when a
+# graph job reads the root again, and Dependabot's uv reader needs a
+# pyproject.toml next to the uv.lock to do that.
+#
+# Step 1 of 2 for evoila/meho#4808: merge these files, wait until the SBOM
+# no longer lists the old packages. Step 2 (a follow-up pull request)
+# deletes both files and the matching temporary block in
+# .github/dependabot.yml.
+[project]
+name = "meho-root-placeholder"
+version = "0.0.0"
+requires-python = ">=3.14"

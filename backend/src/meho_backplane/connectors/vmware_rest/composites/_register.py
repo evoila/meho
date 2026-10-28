@@ -6,7 +6,7 @@
 # this change (~1490 lines); splitting the metadata table is out of scope for
 # the #3349 governed-subop wiring.
 
-"""``register_vmware_composite_operations`` -- registrar for the 66 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 71 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -40,7 +40,7 @@ login), so it auto-parks for agent / service principals while a human
 seat still executes it immediately; see its caution row below. (The
 former ``host.network_uplinks`` and ``host.vsan_health`` reads were
 re-shipped as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 50 write
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 55 write
 composites (T6 / #509, single-VM ``vm.power`` / #2301, the guest-ops
 write ``vm.guest.file.write`` / #3100, the mutating
 VI-JSON ``vm.disk.grow`` / #2893, the folder-template
@@ -54,26 +54,31 @@ OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909 +
 three host-domain writes ``host.datastore_mount_nfs`` /
 ``host.disk_mark_flash`` / ``host.service_control`` / #3182, and the
 later Supervisor / #3281, storage-policy, content-library / #3495 and
-resource-pool / #3505 write families, the #3339 teardown deletes, and the
-DRS rule delete ``cluster.drs_rule.delete``) are
-all ``requires_approval=True``.
-32 pin ``safety_level="dangerous"`` (T4's default, passed explicitly for
-clarity at the call site; the helper would default to it anyway). 8 pin
-``safety_level="caution"`` -- the datastore directory create
+resource-pool / #3505 write families, the #3339 teardown deletes, the
+DRS rule delete ``cluster.drs_rule.delete``, the VM snapshot create +
+delete ``vm.snapshot.create`` / ``vm.snapshot.delete``, the licence assign
+``license.assign``, and the two alarm changes ``alarm.acknowledge`` /
+``alarm.reset`` / #4383) are all ``requires_approval=True``.
+33 pin ``safety_level="dangerous"`` (T4's default, passed explicitly for
+clarity at the call site; the helper would default to it anyway). 11 pin
+``safety_level="caution"`` -- the VM snapshot create ``vm.snapshot.create``,
+the two alarm changes ``alarm.acknowledge`` / ``alarm.reset`` / #4383 (they
+change only the state of alarms), the datastore directory create
 ``datastore.dir.create`` / #3339, the reversible VM allocation write
 ``vm.resource_allocation.set`` / #3880, the #3505 governed-allocation writes
 ``resource_pool.create`` + the VM-Host affinity
 ``cluster.drs_vm_host_rule.create``, plus ``namespace.create`` /
 ``storage_policy.create`` / ``content_library.subscribed.create`` /
 ``content_library.subscribed.sync`` (``resource_pool.delete`` is a
-``dangerous`` reparent, not a destroy). 10 pin
+``dangerous`` reparent, not a destroy). 11 pin
 ``safety_level="destructive"`` -- ``vm.destroy`` / #3198 (the first
 destructive op -- the governed-delete tier, decision
 ``docs/decisions/governed-delete-operations.md``), ``namespace.delete``,
 ``storage_policy.delete``, the six #3339 teardown deletes
 (``network.portgroup.delete``, ``host.standard_portgroup.delete``,
 ``folder.delete``, ``datastore.file.delete``, ``content_library.delete``,
-``content_library.item.delete``) and ``cluster.drs_rule.delete``. (The
+``content_library.item.delete``), ``cluster.drs_rule.delete`` and the VM
+snapshot delete ``vm.snapshot.delete``. (The
 ``caution`` tier is not writes-only:
 ``vm.guest.file.read`` above is a ``caution`` read / #3720.)
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
@@ -87,6 +92,22 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Literal, NamedTuple
 
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.alarm_state import (
+    ALARMS_GROUP_KEY,
+    ALARMS_WHEN_TO_USE,
+)
+from meho_backplane.connectors.vmware_rest.composites._alarm import (
+    alarm_acknowledge_composite,
+    alarm_reset_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._alarm_schemas import (
+    ALARM_ACKNOWLEDGE_LLM_INSTRUCTIONS,
+    ALARM_ACKNOWLEDGE_PARAMETER_SCHEMA,
+    ALARM_ACKNOWLEDGE_RESPONSE_SCHEMA,
+    ALARM_RESET_LLM_INSTRUCTIONS,
+    ALARM_RESET_PARAMETER_SCHEMA,
+    ALARM_RESET_RESPONSE_SCHEMA,
+)
 from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
     datastore_dir_create_composite,
     datastore_file_delete_composite,
@@ -126,6 +147,12 @@ from meho_backplane.connectors.vmware_rest.composites._library_delete import (
     content_library_delete_composite,
     content_library_item_delete_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._license import (
+    LICENSE_ASSIGN_LLM_INSTRUCTIONS,
+    LICENSE_ASSIGN_PARAMETER_SCHEMA,
+    LICENSE_ASSIGN_RESPONSE_SCHEMA,
+    license_assign_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._namespace import (
     namespace_create_composite,
     namespace_delete_composite,
@@ -138,6 +165,10 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     event_tail_composite,
     network_portgroup_audit_composite,
     performance_summary_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._snapshot import (
+    vm_snapshot_create_composite,
+    vm_snapshot_delete_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._storage_network_llm_instructions import (
     STORAGE_NETWORK_LLM_INSTRUCTIONS,
@@ -164,6 +195,9 @@ from meho_backplane.connectors.vmware_rest.composites._vm_allocation import (
     vm_resource_allocation_set_composite,
     vm_resource_allocation_show_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_tools import (
+    VM_CDROM_TOOLS_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._vm_llm_instructions import (
     VM_LLM_INSTRUCTIONS,
 )
@@ -175,6 +209,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     guest_customization_spec_create_composite,
     host_detach_from_vds_composite,
     host_evacuate_composite,
+    host_maintenance_exit_composite,
     network_portgroup_create_composite,
     network_portgroup_security_set_composite,
     network_portgroup_vlan_set_composite,
@@ -256,6 +291,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     HOST_DISK_MARK_FLASH_RESPONSE_SCHEMA,
     HOST_EVACUATE_PARAMETER_SCHEMA,
     HOST_EVACUATE_RESPONSE_SCHEMA,
+    HOST_MAINTENANCE_EXIT_PARAMETER_SCHEMA,
+    HOST_MAINTENANCE_EXIT_RESPONSE_SCHEMA,
     HOST_SERVICE_CONTROL_PARAMETER_SCHEMA,
     HOST_SERVICE_CONTROL_RESPONSE_SCHEMA,
     HOST_STANDARD_PORTGROUP_DELETE_PARAMETER_SCHEMA,
@@ -328,8 +365,17 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_RESOURCE_ALLOCATION_SET_RESPONSE_SCHEMA,
     VM_RESOURCE_ALLOCATION_SHOW_PARAMETER_SCHEMA,
     VM_RESOURCE_ALLOCATION_SHOW_RESPONSE_SCHEMA,
+    VM_SNAPSHOT_CREATE_PARAMETER_SCHEMA,
+    VM_SNAPSHOT_CREATE_RESPONSE_SCHEMA,
+    VM_SNAPSHOT_DELETE_PARAMETER_SCHEMA,
+    VM_SNAPSHOT_DELETE_RESPONSE_SCHEMA,
     VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA,
     VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA,
+)
+from meho_backplane.connectors.vmware_rest.license_common import (
+    LICENSE_GROUP_KEY,
+    LICENSE_KEY_TAG,
+    LICENSE_WHEN_TO_USE,
 )
 from meho_backplane.operations.typed_register import register_composite_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
@@ -469,8 +515,11 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "optional inline guest customization), deploy an OVF/OVA "
         "content-library item to a new VM (deploy_from_library — "
         "OVF-network→portgroup mappings, ambiguity-rejecting name "
-        "lookup, structured deploy-report statuses), revert to a named "
-        "snapshot (ambiguity-rejecting), "
+        "lookup, structured deploy-report statuses), VM snapshots (take "
+        "one with vm.snapshot.create -- caution, needs approval; revert to "
+        "one by name or id; delete one with vm.snapshot.delete -- "
+        "destructive, always needs approval; list them with the typed read "
+        "vmware.snapshot.list), "
         "migrate via DRS or explicit host, bulk power across a "
         "filter, or a single-VM power verb (on/off/reset plus a "
         "Tools-mediated guest_shutdown/guest_reboot for one-off "
@@ -592,6 +641,11 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "delete_items=true) or one item of a local library "
         "(content_library.item.delete)."
     ),
+    # Shared with the two typed licence reads: the same key and text.
+    LICENSE_GROUP_KEY: LICENSE_WHEN_TO_USE,
+    # #4383: shared with the typed read vmware.alarm.triggered.list, which
+    # registers under the same group key with the same text.
+    ALARMS_GROUP_KEY: ALARMS_WHEN_TO_USE,
 }
 
 
@@ -818,11 +872,11 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.vm.snapshot.revert",
         handler=vm_snapshot_revert_composite,
-        summary="Revert a VM to a named snapshot; reject on name ambiguity.",
+        summary="Revert a VM to a snapshot, by name or id; reject on name ambiguity.",
         description=(
-            "Puts a VM back to the snapshot with the given name. Everything since "
+            "Puts a VM back to a snapshot, given by name or by id. Everything since "
             "that snapshot is lost. If two snapshots share the name, nothing "
-            "changes. Like 'govc snapshot.revert'."
+            "changes; pass the id. Like 'govc snapshot.revert'."
         ),
         parameter_schema=VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA,
         response_schema=VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA,
@@ -831,6 +885,41 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.snapshot.revert"],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.snapshot.create",
+        handler=vm_snapshot_create_composite,
+        summary="Take a snapshot of one VM: name, description, with memory or not, quiesce or not.",
+        description=(
+            "Takes a snapshot of one VM and waits for the vCenter task. Returns the new "
+            "snapshot id. Disks only unless memory is set. When the VM already has a "
+            "snapshot with that name, nothing is created. Like 'govc snapshot.create'."
+        ),
+        parameter_schema=VM_SNAPSHOT_CREATE_PARAMETER_SCHEMA,
+        response_schema=VM_SNAPSHOT_CREATE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "snapshot", "vi-json"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.snapshot.create"],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.snapshot.delete",
+        handler=vm_snapshot_delete_composite,
+        summary="Delete one VM snapshot by id; its child snapshots stay unless asked.",
+        description=(
+            "Deletes one snapshot of a VM, by id. The VM keeps its present state; the "
+            "restore point is gone for good. Child snapshots stay unless remove_children "
+            "is set. A second person always approves, after a preview. Like 'govc "
+            "snapshot.remove'."
+        ),
+        parameter_schema=VM_SNAPSHOT_DELETE_PARAMETER_SCHEMA,
+        response_schema=VM_SNAPSHOT_DELETE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "snapshot", "vi-json"],
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.snapshot.delete"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.vm.destroy",
@@ -957,11 +1046,12 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.host.evacuate",
         handler=host_evacuate_composite,
-        summary="Move every VM off a host with DRS, then put the host into maintenance mode.",
+        summary="Move every running VM off a host, then put the host into maintenance mode.",
         description=(
-            "Moves each VM on the host to where DRS recommends (vm.migrate), then puts the host "
-            "into maintenance mode. If a VM cannot move, it stops before maintenance mode, unless "
-            "tolerate_partial_failure is set."
+            "With DRS fully automated, vCenter moves the running VMs as part of the "
+            "maintenance-mode request. Otherwise MEHO moves each running VM where DRS recommends "
+            "(vm.migrate) and stops before maintenance mode if one cannot move, unless "
+            "tolerate_partial_failure is set. vsan_mode sets the vSAN data option."
         ),
         parameter_schema=HOST_EVACUATE_PARAMETER_SCHEMA,
         response_schema=HOST_EVACUATE_RESPONSE_SCHEMA,
@@ -970,6 +1060,24 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.evacuate"],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.host.maintenance.exit",
+        handler=host_maintenance_exit_composite,
+        summary="Take a host out of maintenance mode, after a second person approves.",
+        description=(
+            "Reads the host first: a host that is not connected is refused, and a host that "
+            "is not in maintenance mode answers unchanged with nothing sent. Then sends the "
+            "exit request and waits for its task. Returns the host's maintenance state, "
+            "connection state and vSphere HA state afterwards."
+        ),
+        parameter_schema=HOST_MAINTENANCE_EXIT_PARAMETER_SCHEMA,
+        response_schema=HOST_MAINTENANCE_EXIT_RESPONSE_SCHEMA,
+        group_key="host",
+        tags=["composite", "write", "host", "maintenance", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.maintenance.exit"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.host.detach_from_vds",
@@ -1904,6 +2012,70 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "vmware.composite.content_library.item.delete"
         ],
     ),
+    # Add a CD drive and unmount the VMware Tools installer; the rows live in
+    # their own module.
+    *(_CompositeSpec(**row) for row in VM_CDROM_TOOLS_COMPOSITES),
+    # ----------------------------------------------------------------
+    # Licence write -- dangerous / approval. The full key never leaves
+    # the handler; the license-key tag keeps the vCenter bodies out of
+    # the flight recorder.
+    # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id="vmware.composite.license.assign",
+        handler=license_assign_composite,
+        summary="Assign a licence from the vCenter's licence inventory to one host or the vCenter.",
+        description=(
+            "Assigns one licence, named by its name or the last 5 characters of its key, "
+            "to one asset: a host or the vCenter. MEHO looks up the full key itself and "
+            "never shows it. Waits until a second person approves."
+        ),
+        parameter_schema=LICENSE_ASSIGN_PARAMETER_SCHEMA,
+        response_schema=LICENSE_ASSIGN_RESPONSE_SCHEMA,
+        group_key=LICENSE_GROUP_KEY,
+        tags=["composite", "write", "license", LICENSE_KEY_TAG, "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=LICENSE_ASSIGN_LLM_INSTRUCTIONS,
+    ),
+    # ----------------------------------------------------------------
+    # Alarm changes (#4383) -- caution / approval
+    # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id="vmware.composite.alarm.acknowledge",
+        handler=alarm_acknowledge_composite,
+        summary="Acknowledge one triggered vCenter alarm on one object, so its actions stop.",
+        description=(
+            "Acknowledges one triggered alarm on one object (AlarmManager.AcknowledgeAlarm). "
+            "The alarm stays red or yellow, but its actions do not fire again until it was "
+            "green once. Reads the alarm before and after. An acknowledged alarm gives "
+            "unchanged."
+        ),
+        parameter_schema=ALARM_ACKNOWLEDGE_PARAMETER_SCHEMA,
+        response_schema=ALARM_ACKNOWLEDGE_RESPONSE_SCHEMA,
+        group_key=ALARMS_GROUP_KEY,
+        tags=["composite", "write", "alarms", "vi-json"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=ALARM_ACKNOWLEDGE_LLM_INSTRUCTIONS,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.alarm.reset",
+        handler=alarm_reset_composite,
+        summary="Reset triggered vCenter alarms to green after their cause is fixed.",
+        description=(
+            "Resets to green every triggered alarm in the vCenter with the given status, "
+            "object kind and trigger kind (ClearTriggeredAlarms); vCenter cannot reset one "
+            "alarm alone. This hides a problem until the alarm fires again: fix the cause "
+            "first. The answer lists what was cleared."
+        ),
+        parameter_schema=ALARM_RESET_PARAMETER_SCHEMA,
+        response_schema=ALARM_RESET_RESPONSE_SCHEMA,
+        group_key=ALARMS_GROUP_KEY,
+        tags=["composite", "write", "alarms", "vi-json"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=ALARM_RESET_LLM_INSTRUCTIONS,
+    ),
 )
 
 
@@ -1920,12 +2092,15 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 66 composites total -- 16 read (T5 / #508 + the datastore
+    Scope: 71 composites total -- 16 read (T5 / #508 + the datastore
     cache-refresh read datastore.refresh / #3789 + the VM allocation read
     vm.resource_allocation.show / #3880 + the 4 guest-ops
     reads / #3100 + the supervisor status + the vSphere Namespace status
     (#3502) / storage-policy list / two SUBSCRIBED content-library reads) +
-    50 write (the seven #3339 teardown composites -- six destructive deletes
+    55 write (the two caution alarm changes ``alarm.acknowledge`` /
+    ``alarm.reset`` / #4383 + the licence assign ``license.assign``, the VM
+    snapshot create (caution) + delete (destructive), the seven #3339 teardown
+    composites -- six destructive deletes
     + the caution ``datastore.dir.create`` -- + the destructive DRS rule delete
     ``cluster.drs_rule.delete`` + T6 / #509 + the caution VM
     allocation write

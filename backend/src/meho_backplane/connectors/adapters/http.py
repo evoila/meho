@@ -655,6 +655,13 @@ class HttpConnector(Connector):
     (``fingerprint``, ``probe``, ``execute``).
     """
 
+    #: The ``httpx`` client class :meth:`_build_http_client` builds, or
+    #: ``None`` for the shared :class:`_SameOriginRedirectClient`, which
+    #: follows redirects on the same origin only. A connector whose vendor
+    #: never redirects (Azure) sets a class that follows none, so a redirect
+    #: on the same host can never carry a token to another path.
+    _client_class: type[httpx.AsyncClient] | None = None
+
     def __init__(self) -> None:
         # Keyed on the tenant-unique ``(tenant_id, id)`` tuple
         # (``target_cache_key``) plus ``extra_cache_dimensions`` (the
@@ -833,7 +840,8 @@ class HttpConnector(Connector):
         # ``_pin_target_addresses``, reaching the dispatcher's
         # ``ConnectError`` arm and staying out of the retry policy.
         transport = build_pinned_async_transport(_pin_target_addresses, verify=verify_arg)
-        return _SameOriginRedirectClient(
+        client_class = self._client_class or _SameOriginRedirectClient
+        return client_class(
             base_url=self._base_url(target),
             timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=5.0),
             # Same-origin-only redirect following (see
@@ -937,6 +945,27 @@ class HttpConnector(Connector):
             f"target {target.name!r} uses {target.auth_model}"
         )
 
+    def trace_response_body(self, response: httpx.Response) -> Any:
+        """Return the response body the flight recorder records, or ``None``.
+
+        ``None`` (the default) records the raw response bytes, redacted by
+        the shared engine (header allowlist, credential-shape scrub, secret
+        op families). A connector whose vendor answers can carry a secret in
+        a field the shared engine does not know by shape -- for example a
+        stored pairing password in a list of site pairings -- parses the
+        body here and masks those fields, so the secret never reaches the
+        stored trace. The returned value is recorded in place of the raw
+        bytes and still passes the shared redaction. Must not raise.
+        """
+        del response
+        return None
+
+    def _trace_response_body(self, start: Any, response: httpx.Response) -> Any:
+        """Call :meth:`trace_response_body` only while a trace is being captured."""
+        if start is None:
+            return None
+        return self.trace_response_body(response)
+
     @retry(
         stop=stop_after_attempt(4),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=2.0),
@@ -1008,6 +1037,7 @@ class HttpConnector(Connector):
             response=resp,
             request_body=json,
             request_content_type="application/json" if json is not None else None,
+            response_body=self._trace_response_body(_fr_start, resp),
         )
         resp.raise_for_status()
         return json_payload_or_empty(resp)
@@ -1122,6 +1152,7 @@ class HttpConnector(Connector):
             response=resp,
             request_body=json if json is not None else data,
             request_content_type=_post_body_content_type(json, data),
+            response_body=self._trace_response_body(_fr_start, resp),
         )
         resp.raise_for_status()
         return json_payload_or_empty(resp)

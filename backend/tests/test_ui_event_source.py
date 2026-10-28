@@ -205,6 +205,87 @@ def test_list_operator_hides_write_affordances() -> None:
     assert "New event source" not in resp.text
 
 
+def _form_markup(body: str) -> str:
+    """Return just the `<form>` element from a rendered page.
+
+    ``form.html`` extends ``base.html``, so the response carries the
+    whole app shell -- which contributes its own ``w-full`` and
+    ``disabled`` occurrences. Counting page-wide would couple these
+    assertions to unrelated nav markup, so scope them to the form.
+    """
+    start = body.index('<form method="post"')
+    return body[start : body.index("</form>", start)]
+
+
+def _named_control_tag(body: str, needle: str) -> str:
+    """Return the opening tag of the control matched by *needle*."""
+    at = body.index(needle)
+    return body[body.rindex("<", 0, at) : body.index(">", at)]
+
+
+def test_new_form_renders_editable_fields() -> None:
+    """The New page renders the form with the v5 markup (#383).
+
+    The suite covered the list, the POST paths, CSRF and RBAC but never
+    rendered this page, so the template's markup was unguarded.
+    """
+    _seed_tenant()
+    session_id, jwks = _role_session(TenantRole.TENANT_ADMIN)
+    client, mock = _client(session_id, jwks)
+    try:
+        resp = client.get("/ui/event-sources/new")
+    finally:
+        mock.stop()
+    assert resp.status_code == 200, resp.text
+    body = resp.text
+    assert "New event source" in body
+    # #383: daisyUI v5 removed `form-control` / `label-text` (zero
+    # compiled rules), collapsing every label onto its control.
+    assert "form-control" not in body
+    assert "label-text" not in body
+    # Seven controls render per page; Name and Slug have separate
+    # create/edit variants in the template but only one shows at a time.
+    form = _form_markup(body)
+    assert form.count("w-full") == 7
+    assert "grid gap-3 md:grid-cols-3" in form
+    # The plain-POST CSRF field is this form's only CSRF mechanism.
+    assert 'name="csrf_token"' in body
+    # mode == "create": the natural keys are editable.
+    assert "disabled" not in _named_control_tag(body, 'name="name"')
+    assert "disabled" not in _named_control_tag(body, 'name="slug"')
+
+
+def test_edit_form_renders_immutable_keys_disabled() -> None:
+    """The Edit page renders the same template with its mode branches (#383).
+
+    Both pages render ``form.html``; the difference is that ``mode ==
+    "edit"`` swaps Name and Slug for disabled inputs, so that branch is
+    what this pins alongside the markup guard.
+    """
+    _seed_tenant()
+    _seed_event_source(slug="prod-am")
+    session_id, jwks = _role_session(TenantRole.TENANT_ADMIN)
+    client, mock = _client(session_id, jwks)
+    try:
+        resp = client.get("/ui/event-sources/prod-am/edit")
+    finally:
+        mock.stop()
+    assert resp.status_code == 200, resp.text
+    body = resp.text
+    assert "Edit event source" in body
+    assert "form-control" not in body
+    assert "label-text" not in body
+    form = _form_markup(body)
+    assert form.count("w-full") == 7
+    assert 'name="csrf_token"' in form
+    # mode == "edit": Name and Slug are immutable, so they render as
+    # disabled inputs that drop their `name` attribute entirely -- which
+    # is also why they are never submitted.
+    assert form.count("disabled") == 2
+    assert 'name="slug"' not in form
+    assert 'name="name"' not in form
+
+
 def test_create_persists_and_redirects_with_secret_custody(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, str]] = []
 
@@ -263,6 +344,175 @@ def test_create_duplicate_slug_rerenders_error_no_redirect() -> None:
     assert resp.status_code == 200
     assert "location" not in resp.headers
     assert "data-write-error" in resp.text
+
+
+def test_new_form_renders_clean_with_no_field_errors() -> None:
+    """The New page renders when nothing has failed yet (#384).
+
+    The `error_for` / `error_class` macros read `errors` from the render
+    context, so a context that omits it raises `UndefinedError` and 500s
+    the page *before* any validation runs. The edit-mode test alone would
+    not have caught a create-only regression, so both GETs are pinned.
+    """
+    _seed_tenant()
+    session_id, jwks = _role_session(TenantRole.TENANT_ADMIN)
+    client, mock = _client(session_id, jwks)
+    try:
+        resp = client.get("/ui/event-sources/new")
+    finally:
+        mock.stop()
+    assert resp.status_code == 200, resp.text
+    body = resp.text
+    assert "New event source" in body
+    # A clean render carries neither the banner nor any field error.
+    assert "data-write-error" not in body
+    assert "data-error-for" not in body
+
+
+def test_create_bad_extras_json_names_the_extras_field() -> None:
+    """Malformed Extras JSON is attributed to Extras, not just the banner (#384)."""
+    _seed_tenant()
+    session_id, jwks = _role_session(TenantRole.TENANT_ADMIN)
+    client, mock = _client(session_id, jwks)
+    try:
+        resp = client.post(
+            "/ui/event-sources",
+            data={
+                "name": "Broken Extras",
+                "slug": "broken-extras",
+                "kind": "grafana",
+                "auth_strategy": "basic",
+                "status": "active",
+                "extras": "{not json",
+                "secret": "",
+            },
+            **_csrf(session_id),
+        )
+    finally:
+        mock.stop()
+    assert resp.status_code == 200
+    assert "location" not in resp.headers
+    body = resp.text
+    assert 'data-error-for="extras"' in body
+    # The operator's input survives the re-render -- retyping a rejected
+    # JSON blob because the form cleared it is its own failure mode.
+    assert "{not json" in body
+    # The page-level banner still fires so the failure is visible above
+    # the fold, but it no longer carries the whole message alone.
+    assert "data-write-error" in body
+
+
+def test_create_bad_enum_names_the_offending_select() -> None:
+    """A value outside a closed enum is attributed to that select (#384)."""
+    _seed_tenant()
+    session_id, jwks = _role_session(TenantRole.TENANT_ADMIN)
+    client, mock = _client(session_id, jwks)
+    try:
+        resp = client.post(
+            "/ui/event-sources",
+            data={
+                "name": "Bad Kind",
+                "slug": "bad-kind",
+                "kind": "not-a-real-kind",
+                "auth_strategy": "basic",
+                "status": "active",
+                "extras": "",
+                "secret": "",
+            },
+            **_csrf(session_id),
+        )
+    finally:
+        mock.stop()
+    assert resp.status_code == 200
+    body = resp.text
+    assert 'data-error-for="kind"' in body
+    # Only the offending field is flagged.
+    assert 'data-error-for="auth_strategy"' not in body
+    assert 'data-error-for="status"' not in body
+
+
+def test_create_slug_pattern_violation_names_the_slug_field() -> None:
+    """A Pydantic rejection lands on the field its ``loc`` names (#384).
+
+    ``EventSourceCreate.slug`` carries a regex constraint, so this is the
+    path through ``_field_errors_from_validation`` -- distinct from the
+    enum/JSON coercion that runs before the model is built.
+    """
+    _seed_tenant()
+    session_id, jwks = _role_session(TenantRole.TENANT_ADMIN)
+    client, mock = _client(session_id, jwks)
+    try:
+        resp = client.post(
+            "/ui/event-sources",
+            data={
+                "name": "Bad Slug",
+                "slug": "Not A Valid Slug",
+                "kind": "grafana",
+                "auth_strategy": "basic",
+                "status": "active",
+                "extras": "",
+                "secret": "",
+            },
+            **_csrf(session_id),
+        )
+    finally:
+        mock.stop()
+    assert resp.status_code == 200
+    body = resp.text
+    assert 'data-error-for="slug"' in body
+    assert 'data-error-for="name"' not in body
+
+
+def test_create_conflict_names_both_uniqueness_fields() -> None:
+    """A 409 flags Name and Slug -- the API cannot tell which collided (#384).
+
+    ``create_event_source`` raises one ``IntegrityError``-backed 409
+    covering the per-tenant ``name`` and the global ``slug`` constraints,
+    so attributing it to ``slug`` alone would be a guess.
+    """
+    _seed_tenant()
+    _seed_event_source(slug="prod-am")
+    session_id, jwks = _role_session(TenantRole.TENANT_ADMIN)
+    client, mock = _client(session_id, jwks)
+    try:
+        resp = client.post(
+            "/ui/event-sources",
+            data={
+                "name": "Another",
+                "slug": "prod-am",
+                "kind": "grafana",
+                "auth_strategy": "basic",
+                "status": "active",
+                "extras": "",
+                "secret": "",
+            },
+            **_csrf(session_id),
+        )
+    finally:
+        mock.stop()
+    assert resp.status_code == 200
+    body = resp.text
+    assert 'data-error-for="slug"' in body
+    assert 'data-error-for="name"' in body
+    assert "data-write-error" in body
+
+
+def test_edit_form_explains_the_immutable_fields() -> None:
+    """Edit mode says *why* Name and Slug are greyed out (#384)."""
+    _seed_tenant()
+    _seed_event_source(slug="prod-am")
+    session_id, jwks = _role_session(TenantRole.TENANT_ADMIN)
+    client, mock = _client(session_id, jwks)
+    try:
+        resp = client.get("/ui/event-sources/prod-am/edit")
+    finally:
+        mock.stop()
+    assert resp.status_code == 200, resp.text
+    body = resp.text
+    assert 'aria-describedby="event-source-name-immutable"' in body
+    assert 'aria-describedby="event-source-slug-immutable"' in body
+    assert 'id="event-source-name-immutable"' in body
+    assert 'id="event-source-slug-immutable"' in body
 
 
 def test_create_non_admin_gets_403() -> None:

@@ -711,6 +711,7 @@ def test_vm_deploy_from_library_vi_json_sub_op_manifest_is_expected() -> None:
         "POST:/VirtualApp/{moId}/Rename_Task",
         "POST:/VirtualApp/{moId}/Destroy_Task",
         "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
     }
 
 
@@ -956,6 +957,11 @@ _EXPECTED_2970_VIM_MANIFESTS: dict[str, set[str]] = {
     "_VIM_SUB_OPS_HOST_EVACUATE": {
         "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
         "POST:/HostSystem/{moId}/EnterMaintenanceMode_Task",
+    },
+    # host.maintenance.exit (#4967): the host runtime reads + the exit.
+    "_VIM_SUB_OPS_HOST_MAINTENANCE_EXIT": {
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/HostSystem/{moId}/ExitMaintenanceMode_Task",
     },
     "_VIM_SUB_OPS_CLUSTER_PATCH": {
         "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
@@ -1235,6 +1241,7 @@ def test_host_vi_json_sub_op_manifests_are_the_expected_sets() -> None:
     """Pin the host-domain vi-json manifests so a drift can't shrink the reconcile."""
     assert set(_host._VIM_SUB_OPS_HOST_DATASTORE_MOUNT_NFS) == {
         "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
         "POST:/HostDatastoreSystem/{moId}/CreateNasDatastore",
     }
     assert set(_host._VIM_SUB_OPS_HOST_DISK_MARK_FLASH) == {
@@ -1318,6 +1325,7 @@ from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
     _datastore_files,
     _drs_rule_delete,
     _library_delete,
+    _snapshot,
     _teardown,
     _teardown_network,
 )
@@ -1327,6 +1335,7 @@ _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
         _teardown_network,
         {
             "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
             "POST:/DistributedVirtualSwitch/{moId}/FetchDVPorts",
             "POST:/DistributedVirtualPortgroup/{moId}/Destroy_Task",
         },
@@ -1335,6 +1344,7 @@ _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
         _teardown_network,
         {
             "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
             "POST:/HostNetworkSystem/{moId}/RemovePortGroup",
         },
     ),
@@ -1342,6 +1352,7 @@ _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
         _teardown,
         {
             "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
             "POST:/Folder/{moId}/Destroy_Task",
         },
     ),
@@ -1374,7 +1385,23 @@ _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
         _drs_rule_delete,
         {
             "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
             "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task",
+        },
+    ),
+    # The VM snapshot create and delete: the snapshot-tree read, then one task.
+    "_VIM_SUB_OPS_VM_SNAPSHOT_CREATE": (
+        _snapshot,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualMachine/{moId}/CreateSnapshotEx_Task",
+        },
+    ),
+    "_VIM_SUB_OPS_VM_SNAPSHOT_DELETE": (
+        _snapshot,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualMachineSnapshot/{moId}/RemoveSnapshot_Task",
         },
     ),
 }

@@ -63,6 +63,20 @@ spec:
       ports:
         - port: 8200
           protocol: TCP
+    {{- if .Values.coreKeycloak.enabled }}
+    # Built-in Keycloak (#4591): the backplane calls its Service for
+    # discovery, keys, tokens and the Admin REST API. A NetworkPolicy
+    # matches the pod's port, which is always 8080 (the Service's
+    # `targetPort: http`). Selectors match `coreKeycloak.selectorLabels`.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: keycloak
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - port: 8080
+          protocol: TCP
+    {{- else }}
     # Keycloak — typically reached over HTTPS through the cluster ingress
     # or an external load balancer; CIDR is operator-supplied.
     - to:
@@ -71,6 +85,7 @@ spec:
       ports:
         - port: 443
           protocol: TCP
+    {{- end }}
     {{- if .Values.broadcast.enabled }}
     # Activity-broadcast subchart (`charts/broadcast/` — Valkey per ADR
     # 0005). Selectors match the broadcast subchart's `_helpers.tpl`

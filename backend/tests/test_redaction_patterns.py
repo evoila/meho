@@ -377,6 +377,40 @@ def test_get_pattern_unknown_raises() -> None:
             "the token machine is broken",
             False,
         ),
+        # api_key: a value that already is a placeholder is not redacted
+        # again (the label would go with it)
+        (
+            "api_key",
+            "password: [REDACTED:param_name]",
+            False,
+        ),
+        (
+            "api_key",
+            'password="[REDACTED:param_name]"',
+            False,
+        ),
+        (
+            "api_key",
+            "api_key=[REDACTED:api_key]",
+            False,
+        ),
+        # api_key: only a complete placeholder is skipped; a value that
+        # only starts like one, or goes on after the ``]``, is redacted
+        (
+            "api_key",
+            "password=[REDACTED:madeup-value",
+            True,
+        ),
+        (
+            "api_key",
+            "password=[REDACTED:param_name]madeup-value",
+            True,
+        ),
+        (
+            "api_key",
+            'password="[REDACTED:param_name]madeup-value"',
+            True,
+        ),
         # kubeconfig: requires the apiVersion + kind preamble
         (
             "kubeconfig",
@@ -580,3 +614,30 @@ def test_punctuated_secret_value_fully_redacted(
     assert redacted.endswith(" during login")
     assert len(result.manifest) == 1
     assert result.manifest[0].pattern == "api_key"
+
+
+@pytest.mark.parametrize(
+    "sample",
+    [
+        pytest.param("password=[REDACTED:madeup-value", id="unfinished"),
+        pytest.param("password=[REDACTED:param_name]madeup-value", id="appended"),
+        pytest.param("password='[REDACTED:param_name]madeup-value'", id="appended-quoted"),
+    ],
+)
+def test_placeholder_look_alike_is_redacted_whole(sample: str) -> None:
+    """A value that only looks like a placeholder is a value: nothing of it survives."""
+    payload = "dispatch failed for " + sample + " during login"
+    result = redact(payload, _API_KEY_ONLY_POLICY)
+    redacted = result.redacted
+    assert isinstance(redacted, str)
+    assert "madeup-value" not in redacted
+    assert "[REDACTED:api_key]" in redacted
+    assert redacted.startswith("dispatch failed for ")
+    assert redacted.endswith(" during login")
+
+
+def test_complete_placeholder_keeps_its_label() -> None:
+    payload = "password=[REDACTED:param_name] token='[REDACTED:presidio:PERSON]' end"
+    result = redact(payload, _API_KEY_ONLY_POLICY)
+    assert result.redacted == payload
+    assert not result.manifest

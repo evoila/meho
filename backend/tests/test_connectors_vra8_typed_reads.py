@@ -16,9 +16,10 @@ migration-inventory read end-to-end on a fresh boot. Coverage:
   and sending it as ``Authorization: Bearer`` with ``Accept: application/json``.
 * **Data-path 401 self-heal.** A 401 on the data read re-mints via the dispatcher's
   ``invalidate_session`` arm and retries once (the load-bearing #2067 proof).
-* **Registration-shape invariants.** All 6 reads persist as ``source_kind="typed"``,
+* **Registration-shape invariants.** All 7 reads (the 6-read core plus
+  ``vcfa.vra8.api_file.get``) persist as ``source_kind="typed"``,
   ``is_enabled=True``, ``safe`` / ungated / ``read-only``, with a canonical-key
-  ``llm_instructions`` blob; their 2 groups land ``review_status="enabled"``; no
+  ``llm_instructions`` blob; their 3 groups land ``review_status="enabled"``; no
   write op is registered.
 
 Mirrors :mod:`tests.test_connectors_vcd_typed_reads`.
@@ -26,6 +27,7 @@ Mirrors :mod:`tests.test_connectors_vcd_typed_reads`.
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
@@ -72,9 +74,16 @@ _EXPECTED_OP_IDS = {
     "vcfa.vra8.blueprint.list",
     "vcfa.vra8.catalog-item.list",
     "vcfa.vra8.about",
+    "vcfa.vra8.api_file.get",
 }
 
-_EXPECTED_GROUPS = {"vcfa-vra8-inventory", "vcfa-vra8-content"}
+_EXPECTED_GROUPS = {"vcfa-vra8-inventory", "vcfa-vra8-content", "vcfa-vra8-api-files"}
+
+#: The reads that declare one required parameter.
+_REQUIRED_PARAMS = {
+    "vcfa.vra8.deployment.get": ["deployment_id"],
+    "vcfa.vra8.api_file.get": ["path"],
+}
 
 
 @pytest.fixture(autouse=True)
@@ -245,6 +254,132 @@ async def test_each_typed_op_dispatches_zero_catalog(
 
 
 @pytest.mark.asyncio
+async def test_api_file_get_dispatches_zero_catalog_and_remints_on_401(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """``vcfa.vra8.api_file.get`` dispatches typed, and a 401 on the file re-logs in.
+
+    The file read raises the 401 instead of reporting it, so the dispatcher's
+    session-recovery arm drops the stale bearer, runs the two-step login again and
+    retries once; the file then comes back whole with the version and build.
+    """
+    await _register_and_resolve()
+    body = b'{"swagger":"2.0","paths":{}}'
+
+    async with respx.mock(base_url=_VRA_BASE_URL) as mock:
+        csp = mock.post(_CSP_LOGIN_PATH).respond(200, json={"refresh_token": "rt"})
+        iaas = mock.post(_IAAS_LOGIN_PATH).mock(
+            side_effect=[
+                httpx.Response(200, json={"token": "bt-stale"}),
+                httpx.Response(200, json={"token": "bt-fresh"}),
+            ]
+        )
+        swagger = mock.get("/iaas/api/swagger").mock(
+            side_effect=[
+                httpx.Response(401),
+                httpx.Response(200, content=body, headers={"Content-Type": "application/json"}),
+            ]
+        )
+        mock.get("/vco/api/about").respond(
+            200, json={"version": "8.18.0.00000", "build-number": "22222222"}
+        )
+        mock.get("/iaas/api/about").respond(200, json={"latestApiVersion": "2021-07-15"})
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=VRA8_CONNECTOR_ID,
+            op_id="vcfa.vra8.api_file.get",
+            target=_Vra8ReadTarget(),
+            params={"path": "/iaas/api/swagger"},
+        )
+
+    assert result.status == "ok", result.error
+    assert csp.call_count == 2 and iaas.call_count == 2
+    assert swagger.call_count == 2
+    assert swagger.calls[0].request.headers["Authorization"] == "Bearer bt-stale"
+    assert swagger.calls[1].request.headers["Authorization"] == "Bearer bt-fresh"
+    answer = result.result
+    assert answer["status"] == 200
+    assert answer["size"] == len(body)
+    assert answer["text_parts"] == [{"index": 0, "text": body.decode()}]
+    assert answer["build"] == "22222222"
+    assert answer["iaas_api_version"] == "2021-07-15"
+
+
+@pytest.mark.parametrize(
+    ("body", "content_type"),
+    [
+        ('{"error":"expired","password":"made-up-401-secret"}', "application/json"),
+        ('{"detail":"Authorization:\\nBasic made-up-401-secret"}', "application/json"),
+        ('{"password": "made-up-401-secret"', "text/plain"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_api_file_get_401_body_never_reaches_the_error_result(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    body: str,
+    content_type: str,
+) -> None:
+    """Two 401 answers: the login retry runs, and the error result holds no part of the body.
+
+    The dispatcher copies the body of the last 401 into the error result. The read
+    raises it with a checked body (a secret-named value replaced, and the general
+    redaction rules run on every other text value) or with no body when the body
+    cannot be checked. The second case is a credential inside a text value under a
+    key that is not a secret name, with a line break the error-message helper does
+    not cross in the raw JSON.
+    """
+    await _register_and_resolve()
+
+    async with respx.mock(base_url=_VRA_BASE_URL) as mock:
+        csp = mock.post(_CSP_LOGIN_PATH).respond(200, json={"refresh_token": "rt"})
+        iaas = mock.post(_IAAS_LOGIN_PATH).respond(200, json={"token": "bt"})
+        swagger = mock.get("/iaas/api/swagger").respond(
+            401, text=body, headers={"Content-Type": content_type}
+        )
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=VRA8_CONNECTOR_ID,
+            op_id="vcfa.vra8.api_file.get",
+            target=_Vra8ReadTarget(),
+            params={"path": "/iaas/api/swagger"},
+        )
+
+    assert result.status == "error"
+    assert csp.call_count == 2 and iaas.call_count == 2
+    assert swagger.call_count == 2
+    rendered = (
+        (result.error or "") + json.dumps(result.result) + json.dumps(result.extras, default=str)
+    )
+    assert "made-up-401-secret" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_api_file_get_refuses_a_bad_path_before_the_handler(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """The path rule is the parameter's ``pattern``: a data path is ``invalid_params``."""
+    await _register_and_resolve()
+
+    async with respx.mock(base_url=_VRA_BASE_URL, assert_all_called=False) as mock:
+        catch_all = mock.route().respond(200, json={})
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=VRA8_CONNECTOR_ID,
+            op_id="vcfa.vra8.api_file.get",
+            target=_Vra8ReadTarget(),
+            params={"path": "/iaas/api/projects"},
+        )
+
+    assert result.status == "error"
+    assert result.error is not None and result.error.startswith("invalid_params:")
+    assert result.extras["error_code"] == "invalid_params"
+    assert catch_all.call_count == 0
+
+
+@pytest.mark.asyncio
 async def test_data_path_401_remints_via_dispatcher(
     _stub_embedding: AsyncMock,
     session: AsyncSession,
@@ -310,7 +445,7 @@ async def test_registered_ops_are_typed_and_enabled(
     _stub_embedding: AsyncMock,
     session: AsyncSession,
 ) -> None:
-    """The 6 reads persist as source_kind='typed', is_enabled=True (live on fresh boot)."""
+    """The 7 reads persist as source_kind='typed', is_enabled=True (live on fresh boot)."""
     await register_vra8_typed_operations()
 
     rows = (
@@ -386,7 +521,7 @@ async def test_registered_ops_are_visible_to_search_operations(
 
 def test_typed_ops_table_is_exactly_the_read_core() -> None:
     assert {op.op_id for op in VRA8_TYPED_OPS} == _EXPECTED_OP_IDS
-    assert len(VRA8_TYPED_OPS) == 6
+    assert len(VRA8_TYPED_OPS) == 7
 
 
 def test_every_group_key_has_a_when_to_use() -> None:
@@ -418,13 +553,11 @@ def test_each_op_parameter_schema_disallows_additional_properties(op_id: str) ->
     assert op.parameter_schema.get("additionalProperties") is False
 
 
-def test_deployment_get_requires_deployment_id() -> None:
-    """The only by-id read declares deployment_id required; the rest take no required param."""
-    get_op = next(o for o in VRA8_TYPED_OPS if o.op_id == "vcfa.vra8.deployment.get")
-    assert get_op.parameter_schema.get("required") == ["deployment_id"]
+def test_only_the_by_id_and_file_reads_require_a_parameter() -> None:
+    """deployment.get needs deployment_id, api_file.get needs path; the rest need nothing."""
     for op in VRA8_TYPED_OPS:
-        if op.op_id != "vcfa.vra8.deployment.get":
-            assert "required" not in op.parameter_schema or op.parameter_schema["required"] == []
+        required = op.parameter_schema.get("required") or []
+        assert required == _REQUIRED_PARAMS.get(op.op_id, []), op.op_id
 
 
 def test_no_write_or_mutating_op_is_registered() -> None:

@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Three MCP tools backing the G0.6 operation meta-tool surface.
+"""Four MCP tools backing the G0.6 operation meta-tool surface.
 
-G0.6-T8 (#399) of Initiative #388. Registers three MCP tools against
+G0.6-T8 (#399) of Initiative #388. Registers four MCP tools against
 the G0.5 tool registry:
 
 * ``list_operation_groups`` -- enumerate enabled operation groups for a
@@ -14,12 +14,14 @@ the G0.5 tool registry:
   ``required_role=OPERATOR``.
 * ``call_operation`` -- invoke the dispatcher for a resolved op_id.
   ``required_role=OPERATOR``.
+* ``preview_operation`` -- resolve the same op + target + params a
+  ``call_operation`` would, and return the literal would-be HTTP
+  request (for ingested HTTP operations) without dispatching it. ``required_role=OPERATOR``.
 
 Tool descriptions are load-bearing
 ==================================
 
-Per :doc:`../../../../../.claude/skills/implement-issue/ai_engineering_best_practices`
-and the G0.5-T4 ``meho_status`` reference impl, the ``description``
+Per the G0.5-T4 ``meho_status`` reference impl, the ``description``
 field is the agent's prompt for *when to call this tool*. Imprecise
 descriptions get tools called incorrectly or never invoked at all.
 Each description below names:
@@ -32,8 +34,9 @@ Each description below names:
    passing ``limit=1`` and then complaining about miss rates, etc.).
 
 These descriptions are part of the contract; rewording them is a
-behavioural change that requires re-evaluating against the agent
-recipe-completion bench (post-G6).
+behavioural change. Measure a description change on the #4067 job
+list with the runner that #4253 builds -- the same rule the tool-text
+tasks #4111 and #4112 follow.
 
 inputSchema / outputSchema
 ==========================
@@ -558,10 +561,11 @@ register_mcp_tool(
             "`extras.validation_errors` and fix the params shape first. "
             "Arguments: `connector_id` (required), `op_id` (required), "
             "`target` (optional, accepts EITHER a bare string "
-            '`"rdc-vcenter"` -- preferred forward shape, matches '
+            '`"<target-name>"` -- preferred forward shape, matches '
             "`query_topology` / `query_audit` -- OR a dict "
-            '`{"name": "rdc-vcenter"}`; required for ops that act on a '
-            "target), `params` (operation-specific). Returns the full "
+            '`{"name": "<target-name>"}`; required for ops that act on a '
+            "target; use a `name` returned by `list_targets`, do not "
+            "guess), `params` (operation-specific). Returns the full "
             "OperationResult shape. For a long call (a deploy or another "
             "multi-step operation that can take minutes) pass `async: true`: "
             'you get `status="pending"` and `extras.run_id` at once, and the '
@@ -585,14 +589,15 @@ register_mcp_tool(
                 "target": {
                     "type": ["string", "object", "null"],
                     "description": (
-                        "Target reference. Two shapes are accepted; "
-                        "either reduces to the same dispatch:\n"
-                        '  * Bare string -- e.g. `"rdc-vcenter"`. '
+                        "Target reference. Use a `name` returned by "
+                        "`list_targets`. Do not guess. Two shapes are "
+                        "accepted; either reduces to the same dispatch:\n"
+                        '  * Bare string -- e.g. `"<target-name>"`. '
                         "The forward-preferred shape; matches "
                         "`query_topology` / `query_audit` so a target "
                         "name carried across read and write surfaces "
                         "needs no reshape.\n"
-                        '  * Dict -- e.g. `{"name": "rdc-vcenter"}`. '
+                        '  * Dict -- e.g. `{"name": "<target-name>"}`. '
                         "The original shape; supports the optional "
                         "`fqdn` field below for per-call vhost "
                         "override. Use this form when you need the "
@@ -845,11 +850,20 @@ register_mcp_tool(
             "is shown on the approval request instead. An approval-gated op "
             "that writes a credential (for example `vault.kv.put`) is NOT "
             'previewable and stays `status="unavailable"`, so its secret '
-            "params never surface. Arguments mirror "
+            "params never surface. Every preview whose op resolves (ok, "
+            "unavailable, and the error statuses after the op lookup) also "
+            "says the risk level and whether this call will wait for "
+            "approval: `safety_level`, `requires_approval`, and "
+            "`policy_verdict` (what MEHO would do with the call for THIS "
+            "caller and target: `auto-execute`, `needs-approval` or `deny`, "
+            "with `policy_reason` when it is not auto-execute). The verdict "
+            "is decided the same way `call_operation` decides it, but "
+            "nothing is written. Arguments mirror "
             "`call_operation`: "
             "`connector_id` (required), `op_id` (required), `target` "
-            '(optional; bare string `"rdc-vcenter"` or dict '
-            '`{"name": "rdc-vcenter"}`), `params` (operation-specific).'
+            '(optional; bare string `"<target-name>"` or dict '
+            '`{"name": "<target-name>"}`; use a `name` returned by '
+            "`list_targets`, do not guess), `params` (operation-specific)."
         ),
         inputSchema={
             "type": "object",
@@ -867,9 +881,10 @@ register_mcp_tool(
                 "target": {
                     "type": ["string", "object", "null"],
                     "description": (
-                        "Target reference. Same two shapes as "
-                        '`call_operation`: a bare string `"rdc-vcenter"` '
-                        'or a dict `{"name": "rdc-vcenter"}` (with an '
+                        "Target reference. Use a `name` returned by "
+                        "`list_targets`. Do not guess. Same two shapes as "
+                        '`call_operation`: a bare string `"<target-name>"` '
+                        'or a dict `{"name": "<target-name>"}` (with an '
                         "optional `fqdn` override). Pass null for ops that "
                         "do not act on a target. Resolving the target lets "
                         "the preview reflect the same connector + mount "
@@ -943,6 +958,42 @@ register_mcp_tool(
                         "stable SHA-256 over the resolved request. Present it "
                         "as `call_operation`'s `preview_hash` arg to govern a "
                         "destructive-tier delete."
+                    ),
+                },
+                "safety_level": {
+                    "type": "string",
+                    "description": (
+                        "The op's risk level: safe, caution, dangerous, or "
+                        "destructive. Present on every preview whose op "
+                        "resolved (every status except unknown_op / "
+                        "unknown_connector)."
+                    ),
+                },
+                "requires_approval": {
+                    "type": "boolean",
+                    "description": (
+                        "True when the op is marked as needing a human "
+                        "approval before it runs. Present whenever "
+                        "`safety_level` is."
+                    ),
+                },
+                "policy_verdict": {
+                    "type": "string",
+                    "enum": ["auto-execute", "needs-approval", "deny"],
+                    "description": (
+                        "What MEHO would do with this call for this caller "
+                        "and target: run it at once (auto-execute), wait for "
+                        "a second person's approval (needs-approval), or "
+                        "refuse it (deny). Decided the same way "
+                        "`call_operation` decides it; nothing is written. "
+                        "Present whenever `safety_level` is."
+                    ),
+                },
+                "policy_reason": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "The policy gate's reason for the verdict; null when "
+                        "it gives none (a person's call that runs at once)."
                     ),
                 },
                 "proposed_effect": {

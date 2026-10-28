@@ -64,6 +64,7 @@ from meho_backplane.connectors.vmware_rest.composites._guest_perf_response_schem
     PERF_ENTITY_METRIC_SCHEMA,
     PERF_METRIC_ID_SCHEMA,
 )
+from meho_backplane.connectors.vmware_rest.snapshot_tree import SNAPSHOT_ROW_SCHEMA
 
 __all__ = [
     "CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA",
@@ -121,6 +122,8 @@ __all__ = [
     "HOST_DISK_MARK_FLASH_RESPONSE_SCHEMA",
     "HOST_EVACUATE_PARAMETER_SCHEMA",
     "HOST_EVACUATE_RESPONSE_SCHEMA",
+    "HOST_MAINTENANCE_EXIT_PARAMETER_SCHEMA",
+    "HOST_MAINTENANCE_EXIT_RESPONSE_SCHEMA",
     "HOST_MOID_PATTERN",
     "HOST_SERVICE_CONTROL_PARAMETER_SCHEMA",
     "HOST_SERVICE_CONTROL_RESPONSE_SCHEMA",
@@ -173,6 +176,11 @@ __all__ = [
     "VM_RESOURCE_ALLOCATION_SET_RESPONSE_SCHEMA",
     "VM_RESOURCE_ALLOCATION_SHOW_PARAMETER_SCHEMA",
     "VM_RESOURCE_ALLOCATION_SHOW_RESPONSE_SCHEMA",
+    "VM_SNAPSHOT_CREATE_PARAMETER_SCHEMA",
+    "VM_SNAPSHOT_CREATE_RESPONSE_SCHEMA",
+    "VM_SNAPSHOT_DELETE_PARAMETER_SCHEMA",
+    "VM_SNAPSHOT_DELETE_RESPONSE_SCHEMA",
+    "VM_SNAPSHOT_MOID_PATTERN",
     "VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA",
     "VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA",
 ]
@@ -1522,10 +1530,16 @@ VM_CLONE_FROM_TEMPLATE_PARAMETER_SCHEMA: dict[str, Any] = {
 }
 
 
+#: vCenter snapshot moid shape, e.g. ``snapshot-12``.
+VM_SNAPSHOT_MOID_PATTERN: str = r"^snapshot-[0-9]+$"
+
+
 #: ``vmware.composite.vm.snapshot.revert`` parameter schema.
 #:
-#: Idempotent revert by snapshot name. Ambiguity (multiple snapshots
-#: share the name) returns ``status='ambiguous'`` rather than guessing.
+#: Idempotent revert by snapshot name or by snapshot id (exactly one).
+#: Ambiguity (multiple snapshots share the name) returns
+#: ``status='ambiguous'`` rather than guessing; an id that is not in the
+#: VM's snapshot tree returns ``status='not_found'``.
 VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -1538,15 +1552,28 @@ VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Display name of the snapshot to revert to. Multiple "
-                "snapshots with the same name return "
-                "``status='ambiguous'`` so the caller can pick by id."
+                "Display name of the snapshot to revert to. Give snapshot_name or "
+                "snapshot_id, not both. Multiple snapshots with the same name return "
+                "``status='ambiguous'``; then pass snapshot_id."
+            ),
+        },
+        "snapshot_id": {
+            "type": "string",
+            "pattern": VM_SNAPSHOT_MOID_PATTERN,
+            "description": (
+                "Moid of the snapshot to revert to, e.g. 'snapshot-12' (from "
+                "vmware.snapshot.list). Give snapshot_name or snapshot_id, not both. It "
+                "must be a snapshot of this VM."
             ),
         },
     },
-    "required": ["vm", "snapshot_name"],
+    "required": ["vm"],
+    "oneOf": [{"required": ["snapshot_name"]}, {"required": ["snapshot_id"]}],
     "additionalProperties": False,
-    "examples": [{"vm": "vm-42", "snapshot_name": "<snapshot-name>"}],
+    "examples": [
+        {"vm": "vm-42", "snapshot_name": "<snapshot-name>"},
+        {"vm": "vm-42", "snapshot_id": "snapshot-12"},
+    ],
 }
 
 
@@ -1752,6 +1779,16 @@ VM_POWER_PARAMETER_SCHEMA: dict[str, Any] = {
 #: Lists VMs on host, recursively dispatches ``vmware.composite.vm.migrate``
 #: per VM, then enters maintenance. ``tolerate_partial_failure=True``
 #: allows maintenance-enter with VMs left on host.
+#: ``HostMaintenanceSpec.vsanMode.objectAction`` values
+#: (``VsanHostDecommissionModeObjectAction_enum`` in the pinned
+#: ``vi-json.yaml``). Shared by every maintenance-mode operation that takes
+#: the vSAN data option.
+VSAN_MAINTENANCE_MODES: Final[list[str]] = [
+    "ensureObjectAccessibility",
+    "evacuateAllData",
+    "noAction",
+]
+
 HOST_EVACUATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -1764,10 +1801,44 @@ HOST_EVACUATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "default": False,
             "description": (
-                "When true, enter maintenance even if some VMs failed "
-                "to migrate (those VMs stay on the host). Default "
-                "false aborts before maintenance-enter on any failure."
+                "When true, the host enters maintenance mode even if some "
+                "running VMs could not be moved (those VMs stay on the host). "
+                "Default false stops before maintenance mode on the first VM "
+                "that cannot be moved. Has no effect when DRS is fully "
+                "automated: vCenter then moves the VMs itself."
             ),
+        },
+        "vsan_mode": {
+            "type": "string",
+            "enum": VSAN_MAINTENANCE_MODES,
+            "default": "ensureObjectAccessibility",
+            "description": (
+                "What vSAN does with the host's data when the host enters "
+                "maintenance mode. ensureObjectAccessibility (the default, "
+                "also vCenter's own default): keep every object reachable and "
+                "move only the data that needs it. evacuateAllData: move all "
+                "data off the host. noAction: leave the data where it is. "
+                "Ignored on a host without vSAN."
+            ),
+        },
+    },
+    "required": ["host"],
+    "additionalProperties": False,
+    "examples": [{"host": "host-21", "vsan_mode": "ensureObjectAccessibility"}],
+}
+
+
+#: ``vmware.composite.host.maintenance.exit`` parameter schema (#4967).
+#:
+#: One input: the host. The handler reads the host first and sends the
+#: exit only when the host is connected and in maintenance mode.
+HOST_MAINTENANCE_EXIT_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "host": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Host moid to take out of maintenance mode.",
         },
     },
     "required": ["host"],
@@ -3034,13 +3105,17 @@ HOST_EVACUATE_RESPONSE_SCHEMA: dict[str, Any] = {
         "issues": _HARD_FAILURE_ISSUES_PROPERTY,
         "status": {
             "type": "string",
-            "enum": ["evacuated", "partial", "aborted"],
+            "enum": ["evacuated", "partial", "aborted", "timeout", "not_in_cluster"],
             "description": (
-                "``'evacuated'`` -- every VM migrated + host in "
-                "maintenance; ``'partial'`` -- some VMs left behind "
-                "(``tolerate_partial_failure=True``); ``'aborted'`` "
-                "-- migration failure stopped the loop before "
-                "maintenance-enter."
+                "``evacuated``: the host is in maintenance mode and no "
+                "running VM stayed on it (powered-off VMs may stay). "
+                "``partial``: the host is in maintenance mode but some "
+                "running VMs stayed (``tolerate_partial_failure``). "
+                "``aborted``: a VM could not be moved, so the host did not "
+                "enter maintenance mode. ``timeout``: MEHO stopped waiting "
+                "while the maintenance-mode task still runs; the call did "
+                "not fail. ``not_in_cluster``: the host is not in a cluster; "
+                "nothing was changed."
             ),
         },
         "host": {
@@ -3050,7 +3125,10 @@ HOST_EVACUATE_RESPONSE_SCHEMA: dict[str, Any] = {
         "migrated_vms": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "VM moids that migrated successfully.",
+            "description": (
+                "Moids of the VMs that left the host, moved by MEHO or by "
+                "vCenter's DRS (see ``moved_by``)."
+            ),
         },
         "failed_vms": {
             "type": "array",
@@ -3062,14 +3140,64 @@ HOST_EVACUATE_RESPONSE_SCHEMA: dict[str, Any] = {
                 },
                 "required": ["vm", "error"],
             },
-            "description": "VM moids whose migration failed, with reason.",
+            "description": (
+                "VMs MEHO tried to move and could not, with the reason "
+                "(for example ``no_recommendation``). A VM that left the "
+                "host anyway is not listed here."
+            ),
+        },
+        "remaining_vms": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "vm": {"type": "string"},
+                    "name": {"type": ["string", "null"]},
+                    "power_state": {"type": ["string", "null"]},
+                    "reason": {
+                        "type": "string",
+                        "description": (
+                            "Why the VM stayed: ``powered_off`` / ``suspended`` "
+                            "(only running VMs are moved), the move error, "
+                            "``still_listed_after_move`` (vm.migrate reported the "
+                            "move as done, but the host still lists the VM), "
+                            "``not_moved`` (vCenter left it on the host) or "
+                            "``not_attempted`` (the operation stopped before "
+                            "reaching it)."
+                        ),
+                    },
+                },
+                "required": ["vm", "reason"],
+            },
+            "description": "VMs still on the host after the operation, each with its reason.",
         },
         "maintenance_entered": {
             "type": "boolean",
             "description": (
-                "Whether the host entered maintenance mode -- true on "
-                "``evacuated``/``partial``, false on ``aborted``."
+                "Whether the host is in maintenance mode: true on "
+                "``evacuated`` / ``partial``, false otherwise."
             ),
+        },
+        "maintenance_task": {
+            "type": ["string", "null"],
+            "description": (
+                "The vCenter task id of the maintenance-mode request; on "
+                "``timeout`` the task still runs under this id."
+            ),
+        },
+        "moved_by": {
+            "type": "string",
+            "enum": ["drs", "meho", "none"],
+            "description": (
+                "``drs``: DRS is fully automated, so vCenter moved the VMs as "
+                "part of the maintenance-mode task. ``meho``: MEHO moved each "
+                "running VM where DRS recommended (vm.migrate). ``none``: no "
+                "VM was moved (``not_in_cluster``)."
+            ),
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": "What to do next, on ``timeout`` and ``not_in_cluster``.",
         },
     },
     "required": [
@@ -3077,8 +3205,72 @@ HOST_EVACUATE_RESPONSE_SCHEMA: dict[str, Any] = {
         "host",
         "migrated_vms",
         "failed_vms",
+        "remaining_vms",
         "maintenance_entered",
+        "moved_by",
     ],
+}
+
+HOST_MAINTENANCE_EXIT_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
+        "status": {
+            "type": "string",
+            "enum": ["exited", "unchanged", "not_connected", "timeout"],
+            "description": (
+                "``exited``: the host left maintenance mode. ``unchanged``: "
+                "the host was not in maintenance mode; nothing was sent. "
+                "``not_connected``: the host is not connected to vCenter; "
+                "nothing was sent. ``timeout``: MEHO stopped waiting while "
+                "the exit task still runs; the call did not fail."
+            ),
+        },
+        "host": {
+            "type": "string",
+            "description": "Host moid the operator targeted.",
+        },
+        "name": {
+            "type": ["string", "null"],
+            "description": "The host's display name, as vCenter reports it.",
+        },
+        "connection_state": {
+            "type": ["string", "null"],
+            "description": (
+                "The host's connection state after the call (``connected`` / "
+                "``notResponding`` / ``disconnected``); on ``unchanged`` and "
+                "``not_connected`` the state read before the call."
+            ),
+        },
+        "in_maintenance_mode": {
+            "type": ["boolean", "null"],
+            "description": (
+                "Whether the host is in maintenance mode after the call "
+                "(false on ``exited``); on ``timeout`` the state while the "
+                "task still runs."
+            ),
+        },
+        "ha_state": {
+            "type": ["string", "null"],
+            "description": (
+                "The vSphere HA state of the host (``master``, "
+                "``connectedToMaster``, ``election``, ...). Null on a host "
+                "outside an HA cluster."
+            ),
+        },
+        "maintenance_task": {
+            "type": ["string", "null"],
+            "description": (
+                "The vCenter task id of the exit request; on ``timeout`` the "
+                "task still runs under this id. Null when nothing was sent."
+            ),
+        },
+        "guidance": {
+            "type": "string",
+            "description": "What to do next, on every status except ``exited``.",
+        },
+    },
+    "required": ["status", "host"],
 }
 
 
@@ -4201,13 +4393,14 @@ VM_DEVICE_CDROM_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "status": {
             "type": "string",
-            "enum": ["removed", "updated", "disconnected", "invalid_request"],
+            "enum": ["removed", "updated", "disconnected", "invalid_request", "result_unknown"],
             "description": (
                 "``'removed'`` -- the device was deleted; ``'updated'`` -- "
                 "its backing was PATCHed; ``'disconnected'`` -- the device "
                 "was disconnected in-guest; ``'invalid_request'`` -- "
                 "``action='update'`` without a ``backing`` object (no write "
-                "issued)."
+                "issued); ``'result_unknown'`` -- the change timed out and "
+                "may still run (see ``running_tasks`` and ``vm_question``)."
             ),
         },
         "vm": {"type": "string", "description": "VM moid owning the CD-ROM."},
@@ -4256,7 +4449,41 @@ VM_DEVICE_CDROM_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "guidance": {
             "type": ["string", "null"],
-            "description": "Hint on ``invalid_request``; ``null`` otherwise.",
+            "description": "Hint on ``invalid_request`` / ``result_unknown``, else ``null``.",
+        },
+        "running_tasks": {
+            "type": "array",
+            "description": "On ``result_unknown``: the queued or running vCenter tasks on the VM.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Task moid."},
+                    "operation": {"type": ["string", "null"], "description": "What it does."},
+                    "state": {"type": ["string", "null"], "description": "queued / running."},
+                    "progress": {"type": ["integer", "null"], "description": "Percent."},
+                    "start_time": {"type": ["string", "null"], "description": "Start time."},
+                },
+            },
+        },
+        "tasks_error": {
+            "type": ["string", "null"],
+            "description": (
+                "On ``result_unknown``: why the running tasks could not be read, else "
+                "``null``. ``vm_question`` is still valid when only the task read failed."
+            ),
+        },
+        "vm_question": {
+            "type": ["object", "null"],
+            "description": (
+                "On ``result_unknown``: the question the VM waits on (``id``, ``text``, "
+                "``choices``, ``default_choice``, ``messages``), or ``null``. Answer it "
+                "with ``vmware.vm.question.answer``."
+            ),
+        },
+        "issues": {
+            "type": "array",
+            "description": "On ``result_unknown``: one ``error`` entry.",
+            "items": {"type": "object"},
         },
     },
     "required": ["status", "vm", "cdrom", "action"],
@@ -4761,6 +4988,21 @@ VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
                 "values."
             ),
         },
+        "deployment_option": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional OVF deployment option key, for example the size profile "
+                "of an appliance. Sent as ``selected_key`` of a "
+                "``DeploymentOptionParams`` entry in "
+                "``ResourcePoolDeploymentSpec.additional_parameters``. MEHO first "
+                "reads the OVF summary (``?action=filter``) and checks the key "
+                "against the ``deployment_options`` it lists. A key the item does "
+                "not offer is refused with ``status='invalid_reference'`` before "
+                "any deploy, and ``candidates`` lists the offered keys. Omit it to "
+                "deploy the OVF's default option."
+            ),
+        },
         "accept_all_eula": {
             "type": "boolean",
             "description": (
@@ -4832,7 +5074,9 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
                 "structured message with the vCenter status carried in ``issues`` "
                 "rather than a raw vendor error. ``'resolve_error'`` and "
                 "``'invalid_reference'`` also cover the OVF summary read that "
-                "supplies the default VM name when ``name`` is omitted. "
+                "supplies the default VM name when ``name`` is omitted or checks "
+                "``deployment_option``; ``'invalid_reference'`` also means the "
+                "``deployment_option`` key is not one the OVF item offers. "
                 "Every non-``deployed`` status is reached before or without a "
                 "successful mutation: when a failed deploy leaves a partial VM "
                 "or vApp behind, the composite tries to remove it and reports the "
@@ -4892,7 +5136,9 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": (
                 "Candidate ids on ``ambiguous_item`` (library-item ids) or "
-                "``ambiguous_library`` (library ids); ``null`` otherwise."
+                "``ambiguous_library`` (library ids); on ``invalid_reference`` for "
+                "a ``deployment_option`` the item does not offer, the keys it does "
+                "offer; ``null`` otherwise."
             ),
         },
     },
@@ -5563,6 +5809,26 @@ HOST_SERVICE_CONTROL_RESPONSE_SCHEMA: dict[str, Any] = {
 # are the ``dangerous`` / ``requires_approval`` writes.
 
 
+#: Optional per-call guest credential reference shared by the five guest ops
+#: that log into the guest OS (#3364). A reference string only -- the value is
+#: read in-process under the operator's identity and never enters params.
+_GUEST_SECRET_REF_PROPERTY: dict[str, Any] = {
+    "type": "string",
+    "minLength": 1,
+    "description": (
+        "Optional reference to the secret holding this VM's guest login "
+        "(guest_username / guest_password), in the same form as a target's "
+        "secret_ref (e.g. 'targets/app-vm-01', 'vault:targets/app-vm-01', "
+        "'gsm:<project>/<secret>'). Omit to use the vCenter target's own "
+        "secret. The reference must fall under the target's allowed "
+        "guest-secret prefix (by default the namespace of the target's "
+        "secret_ref, or extras.guest_secret_prefix); any other reference "
+        "is rejected before any secret is read. Only the reference travels "
+        "in params; the credential value never does."
+    ),
+}
+
+
 #: ``vmware.composite.vm.guest.process.list`` parameter schema.
 GUEST_PROCESS_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -5595,6 +5861,7 @@ GUEST_PROCESS_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
                 "Override only if a deployment names the singleton differently."
             ),
         },
+        "guest_secret_ref": _GUEST_SECRET_REF_PROPERTY,
     },
     "required": ["vm"],
     "additionalProperties": False,
@@ -5628,6 +5895,7 @@ GUEST_ENV_READ_PARAMETER_SCHEMA: dict[str, Any] = {
                 "MoId of the top-level GuestOperationsManager singleton (see process.list)."
             ),
         },
+        "guest_secret_ref": _GUEST_SECRET_REF_PROPERTY,
     },
     "required": ["vm"],
     "additionalProperties": False,
@@ -5706,6 +5974,7 @@ GUEST_FILE_READ_PARAMETER_SCHEMA: dict[str, Any] = {
                 "Ignored when fetch_content is false."
             ),
         },
+        "guest_secret_ref": _GUEST_SECRET_REF_PROPERTY,
     },
     "required": ["vm", "guest_path"],
     "additionalProperties": False,
@@ -5755,6 +6024,7 @@ GUEST_FILE_WRITE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "MoId of the top-level GuestOperationsManager singleton (see process.list)."
             ),
         },
+        "guest_secret_ref": _GUEST_SECRET_REF_PROPERTY,
     },
     "required": ["vm", "guest_path", "content"],
     "additionalProperties": False,
@@ -6064,6 +6334,7 @@ GUEST_PROGRAM_RUN_PARAMETER_SCHEMA: dict[str, Any] = {
                 "MoId of the top-level GuestOperationsManager singleton (see process.list)."
             ),
         },
+        "guest_secret_ref": _GUEST_SECRET_REF_PROPERTY,
     },
     "required": ["vm", "program_path"],
     "additionalProperties": False,
@@ -8347,6 +8618,170 @@ CONTENT_LIBRARY_ITEM_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response
             "type": "array",
             "items": {"type": "string"},
             "description": "Item files the VM has in a CD-ROM or floppy drive.",
+        },
+    },
+)
+
+
+#: ``vmware.composite.vm.snapshot.create`` parameter schema.
+VM_SNAPSHOT_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "pattern": VM_MOID_PATTERN,
+            "description": (
+                "Moid of the VM, e.g. 'vm-42'. Not the VM name: vmware.vm.info finds the "
+                "moid from the name."
+            ),
+        },
+        "snapshot_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Name of the new snapshot. When the VM already has a snapshot with this "
+                "name, nothing is created (status 'unchanged')."
+            ),
+        },
+        "description": {
+            "type": "string",
+            "description": "Optional text stored with the snapshot, for example why it was taken.",
+        },
+        "memory": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Also save the memory of the running VM, so a revert brings it back running. "
+                "Slower and uses more disk space. Default false: disks only, and a revert "
+                "leaves the VM powered off."
+            ),
+        },
+        "quiesce": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Ask VMware Tools in the guest to flush its file systems first, for a "
+                "consistent disk state. vCenter ignores it when the VM is off or has no "
+                "VMware Tools. Default false."
+            ),
+        },
+    },
+    "required": ["vm", "snapshot_name"],
+    "additionalProperties": False,
+    "examples": [{"vm": "vm-42", "snapshot_name": "<snapshot-name>", "description": "<reason>"}],
+}
+
+#: ``vmware.composite.vm.snapshot.create`` response schema.
+VM_SNAPSHOT_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
+        "status": {
+            "type": "string",
+            "enum": ["created", "unchanged", "not_found", "invalid_request", "timeout"],
+            "description": (
+                "``'created'`` -- the task ended and the snapshot was taken; "
+                "``'unchanged'`` -- the VM already has a snapshot with this name, nothing "
+                "was written; ``'not_found'`` -- no VM with this moid; "
+                "``'invalid_request'`` -- the VM moid has the wrong shape; ``'timeout'`` -- "
+                "CreateSnapshotEx_Task outran the poll bound, it may still finish. A vSphere "
+                "fault is not a status: it raises (``connector_error``, audited as failed)."
+            ),
+        },
+        "vm": {"type": "string", "description": "VM moid."},
+        "vm_name": {"type": ["string", "null"], "description": "VM name."},
+        "snapshot_id": {
+            "type": ["string", "null"],
+            "description": (
+                "Moid of the new snapshot (created), or of the snapshot that already has this "
+                "name (unchanged)."
+            ),
+        },
+        "snapshot": {
+            **SNAPSHOT_ROW_SCHEMA,
+            "type": ["object", "null"],
+            "description": (
+                "The snapshot as vmware.snapshot.list shows it, read again after the task; "
+                "null when it does not read back."
+            ),
+        },
+        "task": {"type": ["string", "null"], "description": "vCenter task moid, when one ran."},
+        "task_state": {
+            "type": ["string", "null"],
+            "description": "Final task state (success or timeout), when a task ran.",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": "What to do next, when the snapshot was not created as asked.",
+        },
+    },
+    "required": ["status", "vm"],
+}
+
+#: ``vmware.composite.vm.snapshot.delete`` parameter schema.
+VM_SNAPSHOT_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "pattern": VM_MOID_PATTERN,
+            "description": "Moid of the VM the snapshot belongs to, e.g. 'vm-42'.",
+        },
+        "snapshot_id": {
+            "type": "string",
+            "pattern": VM_SNAPSHOT_MOID_PATTERN,
+            "description": (
+                "Moid of the snapshot to delete, e.g. 'snapshot-12' (from "
+                "vmware.snapshot.list). It must be a snapshot of this VM."
+            ),
+        },
+        "remove_children": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Also delete every snapshot below this one. Default false: the child "
+                "snapshots stay, and only this restore point goes."
+            ),
+        },
+    },
+    "required": ["vm", "snapshot_id"],
+    "additionalProperties": False,
+    "examples": [{"vm": "vm-42", "snapshot_id": "snapshot-12"}],
+}
+
+#: ``vmware.composite.vm.snapshot.delete`` response schema.
+VM_SNAPSHOT_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
+    ["deleted", "unchanged", "invalid_request", "still_present", "timeout"],
+    "``'deleted'`` -- the delete ran and the snapshot no longer reads back; "
+    "``'unchanged'`` -- the VM has no snapshot with this id, nothing was written; "
+    "``'invalid_request'`` -- no VM with this moid, or a moid has the wrong shape; "
+    "``'still_present'`` -- the task ended but the snapshot still reads back; "
+    "``'timeout'`` -- RemoveSnapshot_Task outran the poll bound, it may still finish. A "
+    "vSphere fault on the delete is not a status: it raises (``connector_error``, audited "
+    "as failed).",
+    object_properties={
+        "kind": {"type": "string", "description": "Always ``vm_snapshot``."},
+        "vm": {"type": "string", "description": "VM moid."},
+        "vm_name": {"type": ["string", "null"], "description": "VM name."},
+        "snapshot_id": {"type": "string", "description": "Snapshot moid."},
+        "remove_children": {
+            "type": "boolean",
+            "description": "Whether the snapshots below this one are deleted too.",
+        },
+        "name": {"type": ["string", "null"], "description": "Snapshot name."},
+        "description": {"type": ["string", "null"], "description": "Snapshot description."},
+        "created": {"type": ["string", "null"], "description": "When the snapshot was taken."},
+        "power_state": {
+            "type": ["string", "null"],
+            "description": "The VM power state saved in the snapshot.",
+        },
+        "current": {
+            "type": "boolean",
+            "description": "Whether it is vCenter's current snapshot of the VM.",
+        },
+        "child_count": {
+            "type": "integer",
+            "description": "Number of snapshots below this one (children and their children).",
         },
     },
 )

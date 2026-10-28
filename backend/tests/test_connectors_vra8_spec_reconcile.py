@@ -40,12 +40,19 @@ Dispatch-fidelity of each path is proven live-mocked in
 from __future__ import annotations
 
 from meho_backplane.connectors.vra8 import _paths as _paths_module
+from meho_backplane.connectors.vra8 import api_file as _api_file
 from meho_backplane.connectors.vra8 import connector as _connector
 
 #: HTTP method per hand-coded path constant. The two login endpoints are POSTed
 #: (``._auth.vra8_login``); every read path (the ``/iaas/api/about`` fingerprint
-#: probe + the five migration-inventory reads) is GET. A new ``*_PATH`` constant not
-#: listed here fails the sweep loudly so its method is mapped consciously.
+#: probe, the five migration-inventory reads and the Orchestrator ``/vco/api/about``
+#: version read) is GET. A new ``*_PATH`` constant not listed here fails the sweep
+#: loudly so its method is mapped consciously.
+#:
+#: ``GET /vco/api/about`` is checked against the vendor's Orchestrator API reference
+#: (the 8.x reference on the vendor's site, and the Orchestrator 9.0 reference on the
+#: spec shelf): ``{version, build-number, build-date, api-version}``. No 8.18 API
+#: file exists, so the row is a manifest pin like the others.
 _METHOD_BY_CONSTANT = {
     "_CSP_LOGIN_PATH": "POST",
     "_IAAS_LOGIN_PATH": "POST",
@@ -55,6 +62,20 @@ _METHOD_BY_CONSTANT = {
     "_DEPLOYMENT_DETAIL_PATH": "GET",
     "_BLUEPRINTS_PATH": "GET",
     "_CATALOG_ITEMS_PATH": "GET",
+    "_VCO_ABOUT_PATH": "GET",
+}
+
+#: Documentation paths, not in the API file: the pages and folders that
+#: ``vcfa.vra8.api_file.get`` reads with ``GET``. An API file never lists the path
+#: that serves it, so no vendor spec can serve as a reconcile authority for them;
+#: the vendor's 8.18 API Programming Guide names the two landing pages, the vendor's
+#: Orchestrator page names ``/vco/api/docs/``, and the per-service Swagger folder
+#: comes from VMware's own ``vra-sdk-go`` build file (not proven on 8.18).
+_EXPECTED_DOCUMENTATION_ONLY = {
+    "GET:/automation/api-docs",
+    "GET:/automation-ui/api-docs",
+    "GET:/vco/api/docs",
+    "GET:/{service}/api/swagger",
 }
 
 
@@ -103,6 +124,7 @@ def test_path_constant_names_are_pinned() -> None:
         "_DEPLOYMENT_DETAIL_PATH",
         "_IAAS_LOGIN_PATH",
         "_PROJECTS_PATH",
+        "_VCO_ABOUT_PATH",
     ]
 
 
@@ -124,7 +146,30 @@ def test_vra8_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/deployment/api/deployments/{deployment_id}",
         "GET:/blueprint/api/blueprints",
         "GET:/catalog/api/admin/items",
+        "GET:/vco/api/about",
     }
+
+
+def test_api_file_documentation_paths_are_pinned() -> None:
+    """Pin the documentation paths ``vcfa.vra8.api_file.get`` reads (all ``GET``).
+
+    These are documentation paths, not in the API file, so they are listed apart
+    from the manifest above. Every fixed page the read accepts is also a folder
+    (``/`` after it covers every path under it), and the per-service Swagger folder
+    is the template the path rule expands.
+    """
+    documentation = {f"GET:{path}" for path in _api_file.DOCUMENTATION_PATHS}
+    documentation.add(f"GET:{_api_file.SERVICE_SWAGGER_FOLDER}")
+    assert documentation == _EXPECTED_DOCUMENTATION_ONLY
+    # No documentation path doubles as a data path of the read core.
+    data_paths = {op_id.partition(":")[2] for op_id in _declared_op_ids()}
+    assert not {path.partition(":")[2] for path in documentation} & data_paths
+    # The version read of the same op is a data path, pinned in the manifest.
+    assert f"GET:{_paths_module._VCO_ABOUT_PATH}" in _declared_op_ids()
+    assert f"GET:{_paths_module._ABOUT_PATH}" in _declared_op_ids()
+    for path in _api_file.DOCUMENTATION_PATHS:
+        assert _api_file.check_api_file_path(path) == path
+        assert _api_file.check_api_file_path(path + "/") == path + "/"
 
 
 def test_probe_constant_links_to_about_path() -> None:

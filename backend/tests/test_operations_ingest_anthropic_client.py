@@ -21,6 +21,7 @@ tests point the SDK at a ``.invalid`` host and replace only its
 from __future__ import annotations
 
 import json
+import ssl
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,7 +30,6 @@ from unittest.mock import AsyncMock, MagicMock
 import anthropic
 import httpx2
 import pytest
-import truststore
 from anthropic.types import TextBlock
 
 from meho_backplane.operations.ingest import (
@@ -369,14 +369,17 @@ def test_real_sdk_client_trusts_ssl_cert_file(
     """With ``SSL_CERT_FILE`` set, the SDK client trusts that CA file.
 
     ``httpx2`` reads the variable when the SDK builds its client. Without
-    it, the client uses the system store (a ``truststore`` context).
+    it, the client still checks certificates, against the system store
+    only, so the test CA is not trusted.
     """
     ca_file = write_test_ca(tmp_path, common_name="MEHO ingest test CA")
     monkeypatch.delenv("SSL_CERT_DIR", raising=False)
 
     monkeypatch.delenv("SSL_CERT_FILE", raising=False)
     sdk_client = _build_real_client(monkeypatch)._client
-    assert isinstance(client_ssl_context(sdk_client._client), truststore.SSLContext)
+    ssl_context = client_ssl_context(sdk_client._client)
+    assert ssl_context.verify_mode == ssl.CERT_REQUIRED
+    assert "MEHO ingest test CA" not in ca_common_names(ssl_context)
 
     monkeypatch.setenv("SSL_CERT_FILE", str(ca_file))
     sdk_client = _build_real_client(monkeypatch)._client

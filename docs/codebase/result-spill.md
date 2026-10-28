@@ -21,7 +21,8 @@ threshold (>50 rows or >4 KB by default), the caller gets back:
   so the summary stays smaller than the 4 KB threshold that caused the
   reduction. The skipped values are not lost: they are stored with the
   rows, and `result_query` reads one back with `query={"path":
-  "/<field name>"}` (or all of them with `path: ""`). The drill-in
+  "/<field name>"}` (or all of them with `path: ""`); the CLI form is
+  `meho operation result-query <handle_id> --path /<field name>`. The drill-in
   rationale names that read when the count is above zero and the store
   kept the fields. When they leave no room for the rows under the
   per-record cap, the store drops them, keeps the rows, and reports
@@ -30,7 +31,9 @@ threshold (>50 rows or >4 KB by default), the caller gets back:
   Credential-class ops do not get this default copy;
   they keep only the scalars their `result_scalars` hint lists (#3084).
   Lists and objects are never copied by default (objects need the
-  bounded `result_objects` hint); and
+  bounded `result_objects` hint). An object that hint names is stored
+  whole next to the omitted scalars, so a `path` read returns what the
+  bounded inline projection left out; and
 - a `ResultHandle` on `OperationResult.handle` carrying `summary_md`,
   `schema_`, `total_rows`, `sample_rows`, and the self-documenting
   `fetch_more` envelope. `schema_` comes from the result field catalog
@@ -325,7 +328,9 @@ the reducer keeps it **whole** as a document record under a handle:
   inline envelope (`delivery: "unavailable"`) rather than ship it whole.
 
 Read it with `result_query` and `query={"path": "<RFC 6901 JSON
-Pointer>"}`. The pointer rules follow RFC 6901: `""` is the whole
+Pointer>"}`, or from the CLI with `meho operation result-query <handle_id>
+--path "<RFC 6901 JSON Pointer>"` (#4888; `--offset` / `--limit` page an
+array value). The pointer rules follow RFC 6901: `""` is the whole
 document, each `/` starts one step, and in a step `~1` means `/` and `~0`
 means `~` (in that order, so `/a~1b~0c` reads the key `a/b~c`). An array
 index has no leading zero, and `-` never resolves. On a rows handle, the
@@ -336,13 +341,50 @@ the omitted scalars to make room for the rows, there is no document at
 all. `path` cannot be combined with any relational field (a
 `ValidationError` at spec construction). An array value pages with the
 call's `offset` / `limit` (items that are not objects come back as
-`{"value": item}`); any other value comes back whole in `value`, with
+`{"value": item}`). A text value comes back in parts (#4994, see
+below). Any other value comes back whole in `value`, with
 `value_type` naming its JSON type. A pointer that does not resolve
 (missing member, `-`, a leading-zero or out-of-range index) is a
 recoverable `QueryContractError`. So is a `path` read on a rows handle
 that kept no fields beside its rows, or paging / a relational query on a
 document handle. The same output
 byte budget applies, and so does the terminal wire check (#3641).
+
+### A text value is read in parts (#4994)
+
+Some operations return one big text value: a firewall configuration
+export of about 500,000 characters, a log, a zone file. Before #4994 a
+`path` read returned a string whole, and one over the output budget was
+refused, so the value could not be read through MEHO at all. Now a
+string node is read as a window:
+
+- `offset` and `limit` count characters (Unicode code points), the
+  same way they count items for an array node. `value` holds the part.
+- Without a `limit` the part is as much text as fits the output budget
+  (`RESULT_QUERY_MAX_OUTPUT_BYTES`), so a text that fits still comes
+  back whole, as before. The budget measures JSON text, so a part full
+  of escaped characters holds fewer characters than bytes.
+- A part is always inside the budget. When the asked window is too
+  big, it is cut shorter (a binary search over the prefix length, so a
+  few encodes at most) instead of refused. Only a budget too small for
+  one character is an `output_too_large` refusal.
+- The answer carries `returned_chars` (the length of `value`),
+  `total_chars` (the full length) and `truncated` (`true` when more
+  follows). The next part starts at `offset + returned_chars`. An
+  `offset` past the end gives an empty part with `truncated: false`.
+
+Because a text part may hold far more than 500 characters, the `limit`
+argument has no static maximum on the MCP tool or the REST body any
+more. The core checks the 500 cap itself (`_page_limit`) for rows and
+array items, so that contract is unchanged: a bigger `limit` on a rows
+read is a recoverable `QueryContractError`, and a missing `limit` is
+50. The CLI sends `--limit` only when it was given, and prints a text
+part as plain text under a header that names the window, the total and
+the `--offset` to continue with.
+
+Tests: `backend/tests/test_result_document_path.py` (the `#4994`
+section), `test_mcp_tool_result_query.py`, `test_api_v1_operations.py`,
+`cli/internal/cmd/operation/resultquery_path_test.go`.
 
 ## Completed-operation receipt (`audit_id`, #3636)
 
@@ -390,6 +432,7 @@ is how to read the rows; the receipt is how to prove the call ran.
 | `POST /api/v1/operations/result-query` | `backend/src/meho_backplane/api/v1/operations.py` | REST read surface; misses surface as a `404` with `reason=handle_not_found` (#3179) |
 | `_reduce_or_error` | `backend/src/meho_backplane/operations/dispatcher.py` | Builds `reducer_context` (`tenant_id`, `operator_sub`, `op_id`, hints) from the authenticated `Operator` |
 | `handle_owner_sub_var` | `backend/src/meho_backplane/operations/reducer.py` | Optional handle owner `sub`; the approval resume binds the parking principal so it owns the spill (#3548) |
+| `FullResultCapture` / `full_result_capture_var` | `backend/src/meho_backplane/operations/reducer.py` | Optional capture of the full redacted payload before the reduce; the sensor runner sets it so its rule sees every row (#4117) |
 
 ## Control flow (dispatch path)
 
@@ -403,6 +446,14 @@ is how to read the rows; the receipt is how to prove the call ran.
    the parker's `sub`, so the parker can read the handle that
    `GET /api/v1/approvals/{id}/result` gives it (#3548). See
    [`approvals.md`](approvals.md).
+   A second seam, `full_result_capture_var`, lets one caller read the
+   full redacted payload beside the shortened result (#4117). When it is
+   set, `_reduce_or_error` copies the payload reference into the
+   `FullResultCapture` before the reduce and then reduces as usual, so
+   the wire result, the handle, and the spill do not change. Only the
+   sensor runner sets it (`checks/runner.py`): a sensor rule runs over
+   every row, not over the summary. See
+   [`sensor.md`](sensor.md#the-rule-runs-over-the-full-result-4117).
 2. The reducer validates the captured payload and derives schema, summary,
    and preview directly from raw rows, then `_spill()`:
    - an admission-limit breach returns an unprofiled handle with no spill,
@@ -434,6 +485,32 @@ handler builds the reducer context itself (the caller's `tenant_id` and
 page spills and reads back through `result_query` like a dispatched
 result. The spill is keyed to the caller even for a cross-tenant
 `platform_admin` listing. See [`targets.md`](targets.md).
+
+### `meho_connector_list` (#4121)
+
+`meho_connector_list` works the same way. Its handler in
+`mcp/tools/connector_admin.py` has two steps:
+
+- `list_connector_rows` reads the connectors and builds the rows. By
+  default each row is short: `connector_id`, `product`, `version`,
+  `status`, `dispatchable`, `scope`. `detail="full"` gives every
+  `ConnectorListItem` field. `product` keeps one product only; empty
+  text means no filter.
+- `reduce_connector_list` runs the rows through `JsonFluxReducer` with
+  `op_id="meho_connector_list"`, the caller's `tenant_id` and
+  `operator_sub`, and a `pagination_hint` that says to narrow with
+  `product`. Over 50 rows or 4 KB, the answer is the summary plus a
+  `handle`.
+
+The short `status` uses the words of the `status` filter (`staged`,
+`enabled`, `disabled`), plus `registered` for a connector with no
+operations yet and `mixed` for one whose groups are partly enabled and
+partly disabled.
+
+A hosted agent run uses the two steps apart: the toolset first drops the
+connectors outside the agent's allow-list, then reduces. So a handle
+never holds a connector the agent may not see. See
+[`agent-runtime.md`](agent-runtime.md).
 
 ## Diagnosis: the RDC cycle-8 `k8s.logs tail=300` finding (#1629)
 
@@ -648,6 +725,7 @@ expected value on purpose and say why in the commit.
 - #3631 — the result field catalog built from every captured row.
 - #3633 — document records and RFC 6901 `path` reads.
 - #3635 — catalog-checked queries and raw-row output.
+- #4117 — the sensor runner checks its rule against the full result.
 - #3636 — the `audit_id` receipt on a completed operation.
 - RFC 6901 (JSON Pointer): https://www.rfc-editor.org/rfc/rfc6901
 - `docs/architecture/jsonflux.md` — engine provenance + full reducer

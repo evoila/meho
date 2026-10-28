@@ -230,6 +230,10 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         "vault.kv.put",
         "vault.kv.patch",
         "k8s.secret.create",
+        # The values of an existing Secret ride in the same params shape as
+        # k8s.secret.create (inline maps or store refs), so the same pin
+        # keeps them off the approval row and the broadcast.
+        "k8s.secret.update",
         "k8s.job.create",
         # G3.13-T4 #1406 — Keycloak user-credential write ops. Both source
         # the password from Vault (it is never an inline param), so the
@@ -381,6 +385,17 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # would otherwise fall through to ``other`` and broadcast in full).
         # Same posture as its ``vcfa.provider.api_token.create`` sibling.
         "vcfa.provider.api_token.revoke",
+        # The vCenter appliance local-account password change. Like
+        # ``keycloak.user.reset_password``, its params carry only a Vault
+        # *path* (``password_secret_ref``); the new password is read
+        # in-process and sent only in the ``PATCH
+        # /api/appliance/local-accounts/{username}`` request BODY. The pin
+        # sets body_recorded=false for its flight-recorder spans, collapses
+        # the broadcast to aggregate-only, and keeps a waiting approval's
+        # params in the encrypted handoff store. Its sibling
+        # ``vmware.appliance.local_account.policy.set`` sends only expiry
+        # numbers and flags, so it is NOT pinned.
+        "vmware.appliance.local_account.password.set",
     }
 )
 
@@ -573,7 +588,11 @@ _WRITE_OPS: Final[frozenset[str]] = frozenset(
 #: the ``vmware.composite.performance.summary`` metrics composite from
 #: ``other`` to ``read`` — the correct class for a non-mutating read;
 #: neither class is sensitive (:data:`~meho_backplane.broadcast.overrides._SENSITIVE_OP_CLASSES`),
-#: so the broadcast detail level is unchanged for it.
+#: so the broadcast detail level is unchanged for it. ``.ha_status`` and
+#: ``.autopilot_state`` are the Vault cluster-wide node reads
+#: (``vault.sys.ha_status`` / ``vault.sys.raft.autopilot_state``): like
+#: ``.health`` / ``.seal_status`` they carry no secret content and no
+#: params, so they broadcast as ``read``.
 _READ_SUFFIXES: Final[tuple[str, ...]] = (
     ".list",
     ".info",
@@ -582,6 +601,8 @@ _READ_SUFFIXES: Final[tuple[str, ...]] = (
     ".ls",
     ".health",
     ".seal_status",
+    ".ha_status",
+    ".autopilot_state",
     ".versions",
     ".vulnerabilities",
     ".summary",
@@ -1123,13 +1144,16 @@ _SECRET_NAME_TOKENS_FINAL: Final[frozenset[str]] = frozenset(
 #: Adjacent token pairs that mark a key as secret-bearing when the
 #: positional rules above don't (``api_key``, ``private_key``,
 #: ``secret_id`` -- the Vault AppRole SecretID is secret material
-#: even though ``secret`` is non-final there).
+#: even though ``secret`` is non-final there; ``license_key`` -- a
+#: product licence is a credential a vendor file may show in clear).
 _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
     {
         ("api", "key"),
         ("access", "key"),
         ("private", "key"),
         ("encryption", "key"),
+        ("license", "key"),
+        ("licence", "key"),
         ("secret", "id"),
         ("secret", "value"),
         ("secret", "data"),
@@ -1181,6 +1205,41 @@ def is_secret_param_name(name: str) -> bool:
     broadcast scrub cannot disagree on what a secret-named param is.
     """
     return _is_secret_param_name(name)
+
+
+#: Each adjacent pair written as one word, for a name whose case is lost.
+_SECRET_NAME_PAIRS_JOINED: Final[frozenset[str]] = frozenset(
+    first + second for first, second in _SECRET_NAME_TOKEN_PAIRS
+)
+
+
+def is_secret_param_name_lowercased(name: str) -> bool:
+    """True when *name* can be a secret-shaped name once its case is lost.
+
+    An HTML parser lowercases element and attribute names, so
+    ``licenseKey`` arrives as ``licensekey`` and the camelCase boundary
+    that :func:`is_secret_param_name` splits on is gone. This check asks
+    whether any placement of such boundaries makes the name secret: a
+    token that contains a secret word anywhere, a last token that ends in
+    a final-position word, or two pair words that touch, inside one
+    token or across two. It matches more names than the exact rule
+    (``passwordless`` counts); that replaces a value more, never less.
+    """
+    flat = name.replace("-", "_").replace(".", "_").lower()
+    tokens = [token for token in flat.split("_") if token]
+    if not tokens:
+        return False
+    if any(word in token for token in tokens for word in _SECRET_NAME_TOKENS_ANYWHERE):
+        return True
+    if any(tokens[-1].endswith(word) for word in _SECRET_NAME_TOKENS_FINAL):
+        return True
+    if any(pair in token for token in tokens for pair in _SECRET_NAME_PAIRS_JOINED):
+        return True
+    return any(
+        left.endswith(first) and right.startswith(second)
+        for left, right in itertools.pairwise(tokens)
+        for first, second in _SECRET_NAME_TOKEN_PAIRS
+    )
 
 
 def _scrub_secret_named_keys(node: Any) -> tuple[Any, bool]:

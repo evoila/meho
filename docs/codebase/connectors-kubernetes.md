@@ -337,6 +337,8 @@ real operator through the same loader.
 | `k8s.pod.info`         | safe   | Full pod detail; exact name or unique prefix.                     |
 | `k8s.deployment.list`  | safe   | Deployments with live replica counts + image + strategy.          |
 | `k8s.deployment.info`  | safe   | Full deployment detail; exact name or unique prefix.              |
+| `k8s.job.list`         | safe   | `BatchV1Api.list_namespaced_job()` / `list_job_for_all_namespaces()` -- one row per Job with a one-word `state`, pod counts, `completions`, start / completion times. Same selectors + paging as `k8s.pod.list`. (`ops_job.py`) |
+| `k8s.job.info`         | safe   | One Job by exact name or unique prefix: the row fields plus conditions (reason + message), `backoff_limit`, `active_deadline_seconds`, template containers, `pod_selector` and up to 50 of its pods, newest first. (`ops_job.py`) |
 | `k8s.service.list`     | safe   | `CoreV1Api.list_namespaced_service()` / `list_service_for_all_namespaces()` -- type / cluster_ip / ports / selector / lb_ingress (LoadBalancer VIP from `status.loadBalancer.ingress`, `[]` otherwise) + `label_selector`. |
 | `k8s.ingress.list`     | safe   | `NetworkingV1Api.list_namespaced_ingress()` / `list_ingress_for_all_namespaces()` -- class / hosts / TLS / rules + `label_selector`. |
 | `k8s.configmap.list`   | safe   | `CoreV1Api.list_namespaced_config_map()` / `list_config_map_for_all_namespaces()` -- **keys only, NO values** + `label_selector`. |
@@ -415,12 +417,16 @@ The single-call write ops live in `ops_write.py` (caution-class
 handlers + the annotate/label kind dispatch table),
 `ops_write_dangerous.py` (dangerous-class handlers + the delete dispatch
 table), and `ops_write_meta.py` (the JSON-Schema parameter shapes +
-`KubernetesOp` registration rows for **all** write ops, split out so each
+`KubernetesOp` registration rows for the write ops above, split out so each
 handler file stays under the 600-line code-quality cap and the
-operator-facing surface reads in one place). Handlers are bound-method
+operator-facing surface reads in one place). The two Secret change ops
+(`k8s.secret.update` / `k8s.secret.delete`) keep their handlers, schemas
+and rows together in `ops_secret_write.py`, with their previews in
+`ops_secret_write_preview.py`. Handlers are bound-method
 shims on `KubernetesConnector` forwarding to module-level functions --
 the same pattern `ops_workload.py` / `ops_logs.py` use. Every op is
-`safety_level` caution|dangerous and `requires_approval=True`.
+`safety_level` caution|dangerous (`k8s.secret.delete`: destructive) and
+`requires_approval=True`.
 
 | op_id                  | safety    | k8s call                                                          |
 | ---------------------- | --------- | ---------------------------------------------------------------- |
@@ -434,6 +440,25 @@ the same pattern `ops_workload.py` / `ops_logs.py` use. Every op is
 | `k8s.delete`           | dangerous | Kind dispatch **scoped to pod/job/replicaset in v1** (namespace/PVC/PV rejected); explicit `propagation_policy` / `grace_period_seconds`. |
 | `k8s.secret.create`    | dangerous | `CoreV1Api.create_namespaced_secret`; values written but never echoed (response is key-names only). Values may be inline (`string_data` / `data`) or ref-sourced (`string_data_secret_ref` / `data_secret_ref`, resolved server-side through the credential-backend seam). |
 | `k8s.job.create`       | dangerous | `BatchV1Api.create_namespaced_job` from a spec body; response is identity only. |
+| `k8s.cronjob.run`      | caution   | `BatchV1Api.read_namespaced_cron_job`, then `BatchV1Api.create_namespaced_job`: one Job from the CronJob's job template, now (`ops_cronjob.py`). |
+| `k8s.secret.update`    | dangerous | `CoreV1Api.patch_namespaced_secret` (mode `patch`, keeps other keys) or `read_namespaced_secret` + `replace_namespaced_secret` (mode `replace`, keeps only the given keys). Same value inputs as `k8s.secret.create`; response is key names only. `ops_secret_write.py`. |
+| `k8s.secret.delete`    | **destructive** | `CoreV1Api.delete_namespaced_secret`. Preview first, then call with the `preview_hash`; a second person must approve; an agent cannot run it. `ops_secret_write.py`. |
+
+**`k8s.cronjob.run` (`ops_cronjob.py`).** Starts a CronJob's job without
+waiting for its schedule, the way `kubectl create job <name>
+--from=cronjob/<cronjob>` does. The Job gets the annotation
+`cronjob.kubernetes.io/instantiate: manual`, the job template's labels and
+annotations, one owner reference to the CronJob (`controller: true`,
+`blockOwnerDeletion` unset because that needs a right on
+`cronjobs/finalizers`) and a copy of `spec.jobTemplate.spec`. Without
+`job_name` the Job uses `generateName: <cronjob>-manual-` and the result
+carries the name the API server chose. A missing CronJob raises
+`WorkloadNotFoundError` before anything is created; a suspended CronJob
+still runs. The params and the result hold only names, so the op is not
+pinned `credential_write`. Its approval preview (`ops_write_preview.py`)
+reads the CronJob and shows the schedule, `suspend`, `concurrencyPolicy`,
+the names of its Jobs that still run and each container's name, image,
+env var names and command size, never an env value or the command text.
 
 **Secret redaction reuses the shipped `credential_write` op-class
 (#1401), not a new mechanism.** `k8s.secret.create` was already in
@@ -513,6 +538,78 @@ raises from aiohttp). The discovery reads that
 `DynamicClient` makes before the apply go through the same unchecked
 path, but a denied discovery read still ends in an error (usually
 `ResourceNotFoundError`), not a false success.
+
+### Change or delete an existing Secret -- `k8s.secret.update` / `k8s.secret.delete`
+
+`k8s.secret.create` only creates (a second create answers 409), and
+`k8s.delete` accepts only pod / job / replicaset. So a credential change
+(a new token or password in a Secret a workload already reads) and the
+removal of a Secret had no governed path. `ops_secret_write.py` adds the
+two ops in the `config` group, next to `k8s.secret.create`.
+
+**`k8s.secret.update` (dangerous, `requires_approval=True`).**
+
+- Takes `name`, `namespace`, `mode` and the same value inputs as
+  `k8s.secret.create`: `string_data`, `data`, `string_data_secret_ref`,
+  `data_secret_ref` and the two `*_secret_mount` fields. At least one value
+  input is required. The ref maps are resolved through the same
+  `_resolve_secret_refs` helper (its error message now names the calling
+  op). The guidance tells the agent to prefer the `*_secret_ref` inputs, so
+  the value never passes through the caller.
+- It reads the Secret first. A missing Secret raises
+  `KubernetesSecretNotFoundError` naming `k8s.secret.create`; an
+  `immutable: true` Secret raises `KubernetesSecretImmutableError` ("delete
+  it and create it again"). It never creates.
+- `mode: patch` (default) sends only the given keys as a strategic merge
+  patch (`patch_namespaced_secret` with a dict body), so every other key,
+  the type, labels and annotations stay.
+- `mode: replace` sends the read object back through
+  `replace_namespaced_secret` with the new `data` / `stringData` maps. The
+  type, labels, annotations and `resourceVersion` ride along, so the Secret
+  ends with exactly the given keys, and a change by someone else between the
+  read and the write makes the API server answer 409
+  (`KubernetesSecretConflictError`, a `ConnectorUpstreamError`). Nothing is
+  lost without notice.
+- The op sends a secret, so the dispatcher withholds the message of a raised
+  error from the result (#4854, `_vendor_text.py`). Each of the three error
+  classes above also sets `remediation` to its own text (the Secret's name
+  and what to do next, never a value). `result_connector_error` copies that
+  attribute into `extras.remediation`, which the withholding keeps. So the
+  caller, the audit row and the stored approval result still say "use
+  `k8s.secret.create`", "delete it and create it again" or "nothing was
+  written, run it again".
+- Result: `{name, namespace, type, mode, data_keys, keys_set, keys_removed,
+  updated}`. Key names only, never a value.
+- The op is pinned in `_CREDENTIAL_WRITE_OPS` like `k8s.secret.create`.
+  While it waits for approval its params live in the approval hand-off
+  store, not on the approval row, and the broadcast is aggregate-only.
+- Its preview (`_secret_update_preview`) shows `name`, `namespace`, `mode`,
+  the key names that are set, the `*_secret_ref` paths and mounts, the key
+  names the Secret has now and, in `replace` mode, the key names that will
+  be removed. It reads the Secret for the current key names, never a value.
+  Without a connector it shows the params-derived part only.
+
+**`k8s.secret.delete` (destructive, `requires_approval=True`).**
+
+- Takes `name` and `namespace`. Result: `{name, namespace, deleted}`.
+- Destructive means: the caller runs `preview_operation`, then
+  `call_operation` with the returned `preview_hash`; a person's call waits
+  until a second person approves; an agent's call is refused (see
+  `approvals.md`).
+- Its preview (`_secret_delete_preview`) reads the Secret and fills the
+  `blast_radius` block: `object` is the Secret (namespace, name, type and
+  key names); `children` lists what uses the Secret in the same namespace:
+  Pods, and the pod templates of Deployments, StatefulSets, DaemonSets and
+  CronJobs. A pod spec uses a Secret through a volume (also a projected
+  volume), `env` with `secretKeyRef`, `envFrom` with `secretRef`, or
+  `imagePullSecrets`, in containers and init containers
+  (`secret_uses_in_pod_spec`). `irreversibility` is `permanent`: the values
+  are gone and Kubernetes keeps no copy.
+- A missing Secret makes the preview fail with a clear message, so the
+  destructive gate refuses to park the call (`blast_radius_required`) and
+  nothing waits for approval.
+
+Tests: `tests/test_connectors_k8s_secret_write.py`.
 
 ### Governed guest-cluster kubeconfig read -- `k8s.secret.read_to_ref` (#3496)
 
@@ -600,7 +697,7 @@ and nothing is written to Vault on failure.
 ### Shared list-op request shape (`ops_listparams.py`)
 
 Every namespaced list op on this connector
-(`k8s.pod.list`, `k8s.deployment.list`, `k8s.event.list`,
+(`k8s.pod.list`, `k8s.deployment.list`, `k8s.job.list`, `k8s.event.list`,
 `k8s.service.list`, `k8s.ingress.list`, `k8s.configmap.list`) shares
 the same input-parameter shape via the building blocks in
 [`ops_listparams.py`](../../backend/src/meho_backplane/connectors/kubernetes/ops_listparams.py):
@@ -613,7 +710,7 @@ the same input-parameter shape via the building blocks in
 - `label_selector` -- forwarded server-side; same K8s selector syntax
   for every op.
 
-Pod / deployment list additionally use the full base via
+Pod / deployment / job list additionally use the full base via
 `LIST_BASE_PROPERTIES`, which adds `field_selector` + `limit` +
 `continue_token`. The operator passes `limit=N` plus optional
 `continue_token=<cursor>` on each call; the response carries
@@ -640,10 +737,11 @@ See [`docs/codebase/api-shape-conventions.md`](api-shape-conventions.md)
 list-op request-shape parity); the rule applies across connectors
 once siblings adopt the pattern.
 
-### Workload-op prefix resolution (`k8s.pod.info` / `k8s.deployment.info`)
+### Workload-op prefix resolution (`k8s.pod.info` / `k8s.deployment.info` / `k8s.job.info`)
 
-Both `info` ops accept an exact name or a unique prefix within the
-namespace. Resolution shape (`_resolve_from_items` in `ops_workload.py`):
+All three `info` ops accept an exact name or a unique prefix within the
+namespace. Resolution shape (`_resolve_from_items` in `ops_workload.py`,
+reused by `resolve_job_name` in `ops_job.py`):
 
 1. Exact match wins -- `foo-bar` resolves to the literal `foo-bar`
    pod even when `foo-bar-x` also exists.
@@ -656,12 +754,100 @@ namespace. Resolution shape (`_resolve_from_items` in `ops_workload.py`):
    hint without parsing the error string.
 
 The resolver pages via `list_namespaced_pod` /
-`list_namespaced_deployment` without server-side pagination -- the
+`list_namespaced_deployment` / `list_namespaced_job` without server-side pagination -- the
 operator-facing namespaces are typically O(10..100) objects which
 fits in one unpaginated response. Heavy-tenancy namespaces with
 hundreds of workload objects are not the prefix-resolver's target
 audience; the agent typically reaches them via the list path with
 explicit pagination.
+
+### Container status detail in `k8s.pod.info` (#4828)
+
+Each entry of `container_statuses` and `init_container_statuses` is
+built by `container_status_row()` in `ops_workload.py`:
+
+| field | source | meaning |
+| --- | --- | --- |
+| `name`, `image`, `ready`, `restart_count` | top-level `V1ContainerStatus` | `image` is the image the pod asked for. |
+| `image_id` | `imageID` | Digest of the image the container really runs (`repo@sha256:...`). Empty until the image is pulled. Compare it with the pinned digest after an upgrade. |
+| `state`, `last_state` | populated branch of the `V1ContainerState` union | One word: `running`, `waiting` or `terminated`; `None` when absent. |
+| `reason`, `message` | `state.waiting` or `state.terminated` | Why the container waits (`ImagePullBackOff`, `ErrImagePull`, `CrashLoopBackOff`, `CreateContainerConfigError`) or stopped (`OOMKilled`, `Error`), with the error text. `None` while running. |
+| `exit_code` | `state.terminated.exitCode` | Set only when the current state is `terminated`. |
+| `last_reason`, `last_exit_code` | `last_state` | Why the container stopped the last time. For a `CrashLoopBackOff` container this is the real cause (e.g. `OOMKilled` / 137). |
+
+The reason fields matter because `k8s.event.list` is the only other
+place the reason shows up, and Kubernetes drops events after one
+hour by default. The container status keeps the reason for as long as
+the pod exists. The change is additive: `state` and `last_state` keep
+their one-word shape.
+
+### Environment variable sources in `k8s.pod.info` and `k8s.deployment.info` (#4890)
+
+A variable that takes its value from a Secret or a ConfigMap has no
+literal value in the pod definition. Before #4890 both ops showed it
+as `{"name": ..., "value": null}`, the same as an empty variable. Now
+each `containers[].env` and `init_containers[].env` entry built by
+`_env_var_row()` in `ops_workload.py` keeps `name` and `value`, and
+adds `value_from` when the entry has a source:
+
+| `value_from` key | source in the pod spec | fields shown |
+| --- | --- | --- |
+| `secret_key_ref` | `valueFrom.secretKeyRef` | `name` (the Secret), `key`, `optional` |
+| `config_map_key_ref` | `valueFrom.configMapKeyRef` | `name` (the ConfigMap), `key`, `optional` |
+| `field_ref` | `valueFrom.fieldRef` | `field_path` (for example `status.podIP`) |
+| `resource_field_ref` | `valueFrom.resourceFieldRef` | `container_name`, `resource` (for example `limits.memory`) |
+| `file_key_ref` | `valueFrom.fileKeyRef` | `volume_name`, `path`, `key`, `optional` |
+
+A literal entry has no `value_from` key, so its shape is unchanged.
+
+Each container also gets `env_from` (`_env_from_row()`): one row per
+`envFrom` source with `kind` (`secret_ref` or `config_map_ref`), the
+object `name`, `optional` and `prefix`. `envFrom` loads every key of
+the object as a variable, so the row names the object only.
+
+MEHO does not read the Secret or the ConfigMap for this. The ops still
+make one `list_namespaced_pod` / `list_namespaced_deployment` call and
+copy the names, keys and field paths already written in the pod
+definition. No secret value can appear in the result. The main use is
+a container waiting with `CreateContainerConfigError`: the status row
+says the container cannot start, and `value_from` / `env_from` say
+which Secret and key it asks for.
+
+### Job reads (`ops_job.py`)
+
+`k8s.job.list` and `k8s.job.info` answer "did the Job finish, and did it
+work?" for migration, backup and one-off batch Jobs. Both are safe reads
+in the `workload` group over `BatchV1Api`.
+
+- `state` is one word from the Job's conditions, in this order: `failed`
+  when the `Failed` condition is true, `complete` when `Complete` is
+  true, `suspended` when `Suspended` is true, else `running`. `failed`
+  wins so a Job that failed after a partial success reads as failed.
+- `pods_active` / `pods_succeeded` / `pods_failed` come from `status`;
+  `completions` from `spec` (`null` = any one success completes the
+  Job). `start_time` and `completion_time` are UTC ISO 8601 strings;
+  `completion_time` is set only when the Job succeeded.
+- `k8s.job.info` adds `conditions` (`type` / `status` / `reason` /
+  `message` / `last_transition_time` -- a failed Job says
+  `BackoffLimitExceeded` or `DeadlineExceeded` here), `backoff_limit`,
+  `active_deadline_seconds`, the template `containers` (name + image),
+  `pod_selector` and `pods`.
+- `pod_selector` is the Job's own `spec.selector` rendered as a selector
+  string (`label_selector_string`). The API server sets that field on
+  every stored Job; when it is missing the Job-name label
+  `batch.kubernetes.io/job-name=<name>` is the fallback, so `pods` is
+  never silently empty.
+- `pods` are found with one `CoreV1Api.list_namespaced_pod` call using
+  that selector, projected through `pod_row` (the `k8s.pod.list` row
+  shape), ordered newest first and cut at `JOB_INFO_MAX_PODS` (50).
+  `pods_truncated: true` says the list was cut; `k8s.pod.list` with
+  `label_selector=<pod_selector>` returns all of them.
+- The op declares `llm_instructions.result_scalars` so the state and
+  the counts stay inline if the JSONFlux reducer ever spills the pod
+  list to a handle.
+
+Not covered: CronJob reads, and `k8s.ls /<namespace>` does not count
+Jobs yet (`K8S_NAMESPACED_KIND_LISTERS` is unchanged).
 
 ### ConfigMap privacy split
 

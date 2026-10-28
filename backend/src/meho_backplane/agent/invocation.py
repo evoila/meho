@@ -128,6 +128,7 @@ from meho_backplane.operations.identity_budget import TokenUsage
 from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
+    "RUN_INPUT_MAX_CHARS",
     "AgentDisabledError",
     "AgentInvocationError",
     "AgentInvoker",
@@ -143,6 +144,13 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
+
+#: Upper bound on a direct run's ``input`` text, in characters. The REST
+#: body model, the MCP tool schema and the Go CLI all name this one number,
+#: so a caller sees the same limit on every front. It is the same size as
+#: the knowledge-base and memory body caps (``64 * 1024``); real run inputs
+#: are a few sentences, so the bound stops no normal use.
+RUN_INPUT_MAX_CHARS: Final[int] = 64 * 1024
 
 
 class AgentInvocationError(Exception):
@@ -1036,7 +1044,7 @@ class AgentInvoker:
         # Request the audience we then verify, so the token carries it even on
         # realms without a default audience mapper.
         token = await get_client_credentials_token(
-            issuer_url=str(settings.keycloak_issuer_url),
+            issuer_url=settings.keycloak_discovery_base,
             client_id=agent_client_id,
             client_secret=agent_client_secret.get_secret_value(),
             audience=settings.keycloak_audience,

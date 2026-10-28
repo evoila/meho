@@ -1604,3 +1604,97 @@ async def test_token_list_and_revoke_accessor_against_dev_vault(
     # The accessor is gone from a fresh listing.
     after = _root_client(addr).auth.token.list_accessors()
     assert accessor not in (after["data"]["keys"] if after else [])
+
+
+# ---------------------------------------------------------------------------
+# token group — token roles
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_token_role_write_read_list_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+) -> None:
+    """role.write stores an orphan periodic role; role.read and role.list see it.
+
+    A second write that gives only ``renewable`` leaves ``orphan`` and the
+    period as they were, which is why the handler posts only the given
+    fields. The audit rows carry ``write`` for the write (its ``.write``
+    suffix), ``other`` for the single read and ``read`` for the list.
+    """
+    target, addr = vault_e2e
+    written = await dispatch(
+        operator=_make_operator(sub="op-token-role-write"),
+        connector_id="vault-1.x",
+        op_id="vault.token.role.write",
+        target=target,
+        params={
+            "role_name": "e2e-runner",
+            "allowed_policies": ["default"],
+            "orphan": True,
+            "token_period": "1h",
+        },
+        _approved=True,
+    )
+    assert written.status == "ok", written.error
+    assert written.result == {
+        "role_name": "e2e-runner",
+        "written": True,
+        "settings": {"allowed_policies": ["default"], "orphan": True, "token_period": "1h"},
+    }
+    stored = _root_client(addr).auth.token.read_role(role_name="e2e-runner")["data"]
+    assert stored["orphan"] is True
+    assert stored["token_period"] == 3600
+    await _assert_audited(
+        "vault.token.role.write",
+        operator_sub="op-token-role-write",
+        expected_op_class="write",
+    )
+
+    read = await dispatch(
+        operator=_make_operator(sub="op-token-role-read"),
+        connector_id="vault-1.x",
+        op_id="vault.token.role.read",
+        target=target,
+        params={"role_name": "e2e-runner"},
+    )
+    assert read.status == "ok", read.error
+    assert read.result["name"] == "e2e-runner"
+    assert read.result["orphan"] is True
+    assert read.result["token_period"] == 3600
+    assert "default" in read.result["allowed_policies"]
+    await _assert_audited(
+        "vault.token.role.read",
+        operator_sub="op-token-role-read",
+        expected_op_class="other",
+    )
+
+    listing = await dispatch(
+        operator=_make_operator(sub="op-token-role-list"),
+        connector_id="vault-1.x",
+        op_id="vault.token.role.list",
+        target=target,
+        params={},
+    )
+    assert listing.status == "ok", listing.error
+    assert "e2e-runner" in listing.result["keys"]
+    await _assert_audited(
+        "vault.token.role.list",
+        operator_sub="op-token-role-list",
+        expected_op_class="read",
+    )
+
+    # Change one field: the fields not sent keep their value in Vault.
+    changed = await dispatch(
+        operator=_make_operator(sub="op-token-role-change"),
+        connector_id="vault-1.x",
+        op_id="vault.token.role.write",
+        target=target,
+        params={"role_name": "e2e-runner", "renewable": False},
+        _approved=True,
+    )
+    assert changed.status == "ok", changed.error
+    after = _root_client(addr).auth.token.read_role(role_name="e2e-runner")["data"]
+    assert after["renewable"] is False
+    assert after["orphan"] is True
+    assert after["token_period"] == 3600

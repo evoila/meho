@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""MCP-specific audit-row writer + payload-hash helper (G0.5-T5).
+"""MCP-specific audit-row writer (G0.5-T5).
 
 The chassis :class:`~meho_backplane.audit.AuditMiddleware` writes one
 row per authenticated HTTP request. The MCP transport is JSON-RPC over
@@ -41,11 +41,10 @@ Field semantics (matched against
   outcome onto familiar HTTP semantics (400 / 403 / 404 / 500 / 200).
 * ``payload`` — for ``tools/call``: ``{op_id, params_hash, op_class}``.
   For ``resources/read``: ``{uri, op_class: "read"}``. ``params_hash``
-  is SHA-256 of canonical JSON so G8 can answer "find all calls with
-  these arguments" without persisting the arguments themselves —
-  important for privacy-sensitive tool inputs (a future
-  ``vault.kv.read`` tool's ``arguments`` would carry secret-path
-  references).
+  is :func:`~meho_backplane.operations._validate.compute_audit_params_hash`
+  of the arguments (a keyed hash with secret-named values left out), so
+  G8 can answer "find all calls with these arguments" without persisting
+  the arguments themselves.
 
 Fail-closed contract: the helper raises on commit failure. The
 caller's ``finally`` block surfaces the audit failure as a JSON-RPC
@@ -56,8 +55,6 @@ unsuccessful — the same fail-closed posture the chassis
 
 from __future__ import annotations
 
-import hashlib
-import json
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -73,25 +70,7 @@ from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.request_usage.collector import note_request_status
 
-__all__ = ["compute_params_hash", "write_mcp_audit_row"]
-
-
-def compute_params_hash(params: dict[str, Any]) -> str:
-    """SHA-256 hex digest of *params*, canonicalised for cross-call stability.
-
-    Canonical JSON via ``sort_keys=True`` + ``separators=(",", ":")``.
-    The hash is the content-addressable token G8's audit queries use to
-    answer "find all calls with these arguments" without persisting
-    the (potentially sensitive) arguments themselves. Determinism is
-    the load-bearing contract: same dict → same hex digest across
-    Python versions, dict insertion order, and key-presence variations
-    that JSON canonicalisation absorbs.
-
-    Empty dict resolves to the canonical empty-object hash
-    ``b04d…78a4`` (regression-locked by :mod:`tests.test_mcp_audit`).
-    """
-    canonical = json.dumps(params, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+__all__ = ["write_mcp_audit_row"]
 
 
 def _resolve_uuid_contextvar(name: str) -> uuid.UUID | None:

@@ -24,11 +24,14 @@ Filter coverage
 ===============
 
 * Column-mapped filters are SQL-side: ``audit_id`` (exact), ``principal``
-  (``operator_sub ILIKE`` partial match — LIKE metacharacters escaped so
-  ``%`` / ``_`` in the operator-supplied value match literally),
-  ``since`` / ``until`` (range on ``occurred_at``), ``target`` (name match
-  against ``targets`` in the same tenant — alias resolution is the T2
-  router's job).
+  (partial match on the user id **or** the name: ``operator_sub ILIKE``
+  OR ``payload['principal_name'] ILIKE`` — LIKE metacharacters escaped so
+  ``%`` / ``_`` in the operator-supplied value match literally; #4668),
+  ``principal_sub`` (exact match on ``operator_sub`` only — the "my
+  recent" views use it so a caller sees their own rows and nobody
+  else's), ``since`` / ``until`` (range on ``occurred_at``), ``target``
+  (name match against ``targets`` in the same tenant — alias resolution
+  is the T2 router's job).
 * ``op_id`` (glob with ``*`` ↔ ``%``) and ``op_class`` (exact) match either
   the value stored in ``payload`` JSON (MCP-written rows carry ``op_id`` /
   ``op_class`` in ``payload`` per ``mcp/handlers.py:214-221``) **OR** the
@@ -56,6 +59,13 @@ Filter coverage
   closed vocabulary. With no filter every class is returned, so old callers
   see the same rows. Rows written before the column existed carry
   ``legacy_request``.
+* ``has_trace`` (#4855) is an ``EXISTS`` check on ``dispatch_trace`` for the
+  same ``audit_id`` and ``tenant_id``, combined with
+  ``event_class = operation_execution`` -- the same two conditions the trace
+  route (``GET /api/v1/audit/{audit_id}/trace``) needs before it returns a
+  trace. ``True`` keeps the rows with a stored trace, ``False`` the other
+  rows, ``None`` applies no filter. The unique index
+  ``dispatch_trace_audit_id_idx`` makes the check cheap.
 * ``parent_audit_id`` is a real column too (G0.6-T7 #398, migration ``0006``,
   indexed by ``audit_log_parent_audit_id_idx``). The filter narrows to
   ``audit_log.parent_audit_id = :parent_audit_id`` — exact match, so it
@@ -75,7 +85,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.broadcast.events import classify_op
-from meho_backplane.db.models import AuditEventClass, AuditLog, Target
+from meho_backplane.db.models import AuditEventClass, AuditLog, DispatchTrace, Target
 
 from .cursor import CursorPosition, decode_cursor, encode_cursor
 from .schemas import AuditEntry, AuditQueryFilters, AuditQueryResult, EventClassCounts
@@ -259,11 +269,22 @@ def _apply_filters(
     if filters.event_class is not None:
         stmt = stmt.where(AuditLog.event_class == filters.event_class.value)
 
+    if filters.has_trace is not None:
+        has_trace = _has_trace_predicate(tenant_id=tenant_id)
+        stmt = stmt.where(has_trace if filters.has_trace else sa.not_(has_trace))
+
     if filters.principal is not None:
-        escaped = _escape_like_literal(filters.principal)
+        pattern = f"%{_escape_like_literal(filters.principal)}%"
+        payload_principal_name = AuditLog.payload["principal_name"].as_string()
         stmt = stmt.where(
-            AuditLog.operator_sub.ilike(f"%{escaped}%", escape=_LIKE_ESCAPE),
+            sa.or_(
+                AuditLog.operator_sub.ilike(pattern, escape=_LIKE_ESCAPE),
+                payload_principal_name.ilike(pattern, escape=_LIKE_ESCAPE),
+            ),
         )
+
+    if filters.principal_sub is not None:
+        stmt = stmt.where(AuditLog.operator_sub == filters.principal_sub)
 
     if filters.since is not None:
         stmt = stmt.where(AuditLog.occurred_at >= filters.since)
@@ -309,6 +330,28 @@ def _apply_filters(
         )
 
     return stmt
+
+
+def _has_trace_predicate(*, tenant_id: uuid.UUID) -> sa.ColumnElement[bool]:
+    """``TRUE`` for a row the trace route returns a stored trace for (#4855).
+
+    Two conditions, the same ones the route applies: the row is an
+    ``operation_execution`` row, and a ``dispatch_trace`` header exists for
+    its id in the caller's tenant. The ``tenant_id`` match mirrors the
+    defence-in-depth filter in :func:`~meho_backplane.flight_recorder.load_trace`.
+    """
+    trace_exists = (
+        sa.select(DispatchTrace.id)
+        .where(
+            DispatchTrace.audit_id == AuditLog.id,
+            DispatchTrace.tenant_id == tenant_id,
+        )
+        .exists()
+    )
+    return sa.and_(
+        AuditLog.event_class == AuditEventClass.OPERATION_EXECUTION.value,
+        trace_exists,
+    )
 
 
 def _result_status_predicate(result_status: str) -> sa.ColumnElement[bool]:

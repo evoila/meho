@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
@@ -190,6 +190,52 @@ def _vmomi_task_moref(value: str) -> dict[str, str]:
     return {"type": "Task", "value": value}
 
 
+def _vmomi_host_parent(host_moid: str, cluster_moid: str) -> dict[str, Any]:
+    """``HostSystem.parent`` read: the host is in *cluster_moid* (#4895)."""
+    return _vmomi_retrieve_result(
+        "HostSystem",
+        host_moid,
+        "parent",
+        {"type": "ClusterComputeResource", "value": cluster_moid},
+    )
+
+
+def _vmomi_cluster_drs(
+    cluster_moid: str, behavior: str, recommendations: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """``ClusterComputeResource`` read serving ``configurationEx`` (DRS on, *behavior*).
+
+    The recorders key ``RetrievePropertiesEx`` by object type, so the one
+    canned result also carries ``drsRecommendation`` for the vm.migrate
+    recursion's DRS read (#4895).
+    """
+    return {
+        "objects": [
+            {
+                "obj": {"type": "ClusterComputeResource", "value": cluster_moid},
+                "propSet": [
+                    {
+                        "name": "configurationEx",
+                        "val": {"drsConfig": {"enabled": True, "defaultVmBehavior": behavior}},
+                    },
+                    {"name": "drsRecommendation", "val": recommendations or []},
+                ],
+            }
+        ]
+    }
+
+
+def _vm_listing_row(vm: str, power_state: str = "POWERED_ON") -> dict[str, Any]:
+    """One ``GET:/vcenter/vm`` row in the real ``Vcenter.VM.Summary`` shape (no cluster field)."""
+    return {
+        "vm": vm,
+        "name": f"name-{vm}",
+        "power_state": power_state,
+        "cpu_count": 1,
+        "memory_size_mib": 1024,
+    }
+
+
 def _http_error(status: int, url: str) -> httpx.HTTPStatusError:
     request = httpx.Request("POST", url)
     response = httpx.Response(status, request=request)
@@ -242,7 +288,9 @@ class _RecordingVmwareConnector:
     ) -> Any:
         spec = self._spec(path)
         self.calls.append(("GET", spec))
-        return self.responses.get(spec, {"value": {}})
+        response = self.responses.get(spec, {"value": {}})
+        # An iterator answers one GET after the other (a listing that changes).
+        return next(response) if isinstance(response, Iterator) else response
 
     async def _post_json(
         self,
@@ -276,7 +324,10 @@ class _RecordingVmwareConnector:
         if path.endswith("/RetrievePropertiesEx"):
             spec_type = json["specSet"][0]["propSet"][0]["type"]
             if spec_type in self.vmomi_responses:
-                return self.vmomi_responses[spec_type]
+                response = self.vmomi_responses[spec_type]
+                # An iterator answers one read after the other (a host whose
+                # state changes between the read before and after a write).
+                return next(response) if isinstance(response, Iterator) else response
             if spec_type == "Task":
                 task_moid = json["specSet"][0]["objectSet"][0]["obj"]["value"]
                 return _vmomi_retrieve_result("Task", task_moid, "info", {"state": "success"})
@@ -512,7 +563,11 @@ def _benign_vmomi_for(composite_op_id: str) -> dict[str, Any]:
                 "ClusterComputeResource", "domain-c1", "drsRecommendation", []
             ),
         },
+        # host.evacuate (#4895): the host's cluster + its DRS config are vim
+        # reads; with DRS fully automated vCenter moves the VMs itself.
         "vmware.composite.host.evacuate": {
+            "HostSystem": _vmomi_host_parent("host-1", "domain-c1"),
+            "ClusterComputeResource": _vmomi_cluster_drs("domain-c1", "fullyAutomated"),
             "/HostSystem/host-1/EnterMaintenanceMode_Task": _vmomi_task_moref("t-enter-benign"),
         },
         # #3697: the deployed VM is renamed from its unique deploy name.
@@ -865,15 +920,18 @@ async def test_host_evacuate_recursive_sub_op_sequence(
     recorder = _RecordingVmwareConnector()
     recorder.responses.update(
         {
-            "/vcenter/vm": {"value": [{"vm": "vm-a", "cluster": "domain-c1"}]},
+            # Before the maintenance task the host runs vm-a; after it, nothing.
+            "/vcenter/vm": iter([{"value": [_vm_listing_row("vm-a")]}, {"value": []}]),
         }
     )
     recorder.vmomi_responses.update(
         {
-            "ClusterComputeResource": _vmomi_retrieve_result(
-                "ClusterComputeResource",
+            # The cluster comes from the host's ``parent`` (#4895); DRS is on
+            # but manual, so MEHO moves the VM where DRS recommends.
+            "HostSystem": _vmomi_host_parent("host-1", "domain-c1"),
+            "ClusterComputeResource": _vmomi_cluster_drs(
                 "domain-c1",
-                "drsRecommendation",
+                "manual",
                 [
                     {
                         "migrationList": [
@@ -905,11 +963,14 @@ async def test_host_evacuate_recursive_sub_op_sequence(
     assert result.result["status"] == "evacuated"
     assert result.result["maintenance_entered"] is True
     assert result.result["migrated_vms"] == ["vm-a"]
-    # The DRS read + maintenance-enter are vim (#2970); the REST calls are
-    # the listing + the recursion's relocate.
+    assert result.result["moved_by"] == "meho"
+    # The host / cluster / DRS reads + maintenance-enter are vim (#2970,
+    # #4895); the REST calls are the listing, the recursion's relocate and
+    # the listing after the maintenance task.
     assert recorder.calls == [
         ("GET", "/vcenter/vm"),
         ("POST", "/vcenter/vm/vm-a?action=relocate"),
+        ("GET", "/vcenter/vm"),
     ]
     assert [p for p, _ in recorder.vmomi_calls if p.endswith("/EnterMaintenanceMode_Task")] == [
         "/HostSystem/host-1/EnterMaintenanceMode_Task"
@@ -1134,6 +1195,190 @@ async def test_vm_create_full_queue_approve_resume_execute(
     assert result2.result["status"] == "created"
     assert result2.result["vm_id"] == "vm-789"
     assert recorder.calls == [("GET", "/vcenter/folder"), ("POST", "/vcenter/vm")]
+
+
+# ===========================================================================
+# One approval is enough: the raised generic exit does not park again (#4967)
+# ===========================================================================
+
+
+def _host_runtime_in_maintenance(host_moid: str, in_maintenance: bool) -> dict[str, Any]:
+    """A ``HostSystem`` runtime read: connected, in maintenance mode or not."""
+    return {
+        "objects": [
+            {
+                "obj": {"type": "HostSystem", "value": host_moid},
+                "propSet": [
+                    {"name": "name", "val": "esx-01"},
+                    {"name": "runtime.connectionState", "val": "connected"},
+                    {"name": "runtime.inMaintenanceMode", "val": in_maintenance},
+                ],
+            }
+        ]
+    }
+
+
+async def _insert_generic_exit_descriptor() -> None:
+    """Seed the generic exit the way the VMware floor stores it: dangerous, with approval."""
+    op_id = "POST:/HostSystem/{moId}/ExitMaintenanceMode_Task"
+    async with get_sessionmaker()() as s:
+        s.add(
+            EndpointDescriptor(
+                id=uuid.uuid4(),
+                tenant_id=None,
+                product="vmware",
+                version="9.0",
+                impl_id="vmware-rest",
+                op_id=op_id,
+                source_kind="ingested",
+                method="POST",
+                path=op_id.split(":", 1)[1],
+                handler_ref=None,
+                summary="Exit maintenance mode.",
+                description=None,
+                tags=[],
+                parameter_schema={"type": "object", "properties": {}},
+                response_schema=None,
+                llm_instructions=None,
+                safety_level="dangerous",
+                requires_approval=True,
+                is_enabled=True,
+                embedding=[0.1] * 384,
+                custom_description=None,
+                custom_notes=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await s.commit()
+
+
+def _maintenance_exit_recorder() -> _RecordingVmwareConnector:
+    recorder = _RecordingVmwareConnector()
+    # Three host reads: the park-time preview, the handler's read before the
+    # exit, and its read after the task ended.
+    recorder.vmomi_responses["HostSystem"] = iter(
+        [
+            _host_runtime_in_maintenance("host-1", True),
+            _host_runtime_in_maintenance("host-1", True),
+            _host_runtime_in_maintenance("host-1", False),
+        ]
+    )
+    recorder.vmomi_responses["/HostSystem/host-1/ExitMaintenanceMode_Task"] = _vmomi_task_moref(
+        "t-exit-1"
+    )
+    return recorder
+
+
+def _cluster_patch_recorder() -> _RecordingVmwareConnector:
+    recorder = _RecordingVmwareConnector()
+    recorder.responses.update(
+        {
+            "/vcenter/host": {"value": [{"host": "host-1"}]},
+            "/esx/settings/hosts/host-1/software?action=apply&vmw-task=true": {
+                "value": "task-apply-1"
+            },
+            "/cis/tasks/task-apply-1": {"value": {"status": "SUCCEEDED"}},
+        }
+    )
+    recorder.vmomi_responses.update(
+        {
+            "/HostSystem/host-1/EnterMaintenanceMode_Task": _vmomi_task_moref("t-enter-1"),
+            "/HostSystem/host-1/ExitMaintenanceMode_Task": _vmomi_task_moref("t-exit-1"),
+        }
+    )
+    return recorder
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("op_id", "params", "make_recorder", "expected_status"),
+    [
+        (
+            "vmware.composite.host.maintenance.exit",
+            {"host": "host-1"},
+            _maintenance_exit_recorder,
+            "exited",
+        ),
+        (
+            "vmware.composite.cluster.patch",
+            {"cluster": "domain-c1"},
+            _cluster_patch_recorder,
+            "completed",
+        ),
+    ],
+    ids=["host.maintenance.exit", "cluster.patch"],
+)
+async def test_exit_sub_step_does_not_wait_for_a_second_approval(
+    op_id: str,
+    params: dict[str, Any],
+    make_recorder: Callable[[], _RecordingVmwareConnector],
+    expected_status: str,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """One approval finishes the call, even though the generic exit row needs approval.
+
+    The VMware floor stores ``POST:/HostSystem/{moId}/ExitMaintenanceMode_Task``
+    as ``dangerous`` with ``requires_approval=True`` (#4967). The composites
+    send that vim call as a governed sub-step with the shared sub-op posture
+    (``requires_approval=False``), so the approved resume runs it at once:
+    the exit reaches the wire, and no second approval row is written.
+    """
+    recorder = make_recorder()
+    await _bootstrap(recorder, stub_embedding_service)
+    await _insert_generic_exit_descriptor()
+
+    target_id = uuid.uuid4()
+    async with get_sessionmaker()() as s:
+        s.add(
+            TargetORM(
+                id=target_id,
+                tenant_id=_TENANT_ID,
+                name="prod-vcenter",
+                product="vmware",
+                host="vcenter.prod.invalid",
+                aliases=[],
+            )
+        )
+        await s.commit()
+    requester = _make_operator(sub="ops-human", principal_kind=PrincipalKind.USER)
+    target = _FakeVmwareTarget(target_id=target_id)
+
+    # Step 1: a person's call waits for approval; nothing is sent.
+    result1 = await dispatch(
+        operator=requester, connector_id=_CONNECTOR_ID, op_id=op_id, target=target, params=params
+    )
+    assert result1.status == "awaiting_approval", result1.error
+    assert [p for p, _ in recorder.vmomi_calls if "MaintenanceMode_Task" in p] == []
+    approval_request_id = UUID(result1.extras["approval_request_id"])
+
+    # Step 2: a second person approves.
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    async with get_sessionmaker()() as s:
+        row = await approve_request(s, approval_request_id, operator=reviewer, params=params)
+        await s.commit()
+    assert row.status == ApprovalRequestStatus.APPROVED.value
+
+    # Step 3: the approved resume finishes the call; the exit is on the wire.
+    result2 = await dispatch(
+        operator=reviewer,
+        connector_id=_CONNECTOR_ID,
+        op_id=op_id,
+        target=target,
+        params=params,
+        _approved=True,
+    )
+    assert result2.status == "ok", result2.error
+    assert result2.result["status"] == expected_status
+    assert [p for p, _ in recorder.vmomi_calls if p.endswith("/ExitMaintenanceMode_Task")] == [
+        "/HostSystem/host-1/ExitMaintenanceMode_Task"
+    ]
+    async with get_sessionmaker()() as s:
+        approval_rows = (
+            await s.execute(select(func.count()).select_from(ApprovalRequest))
+        ).scalar()
+    assert approval_rows == 1, "the exit sub-step must not wait for a second approval"
 
 
 # ===========================================================================
@@ -1658,6 +1903,7 @@ async def test_deploy_from_library_queue_approve_resume_with_2681_envelope(
         "network_mappings": {"nat": "dvportgroup-9"},
         "storage_provisioning": None,
         "ovf_property_keys": [],
+        "deployment_option": None,
         "power_on": False,
     }
 
@@ -2489,6 +2735,107 @@ async def test_import_power_on_park_approve_resume_only_powers_on(
     assert imports == ["import"], "the import did not run again"
     assert recorder.calls == [("POST", "/vcenter/vm/vm-imp-1/power?action=start")]
     assert await _approval_row_count() == 1
+
+
+#: The params of a ``vm.create`` that touches every write step of the happy
+#: path: create, NIC attach, power-on (``test_vm_create_happy_path_sub_op_sequence``).
+_VM_CREATE_UNATTENDED_PARAMS: dict[str, Any] = {
+    "folder_name": "prod",
+    "name": "vm-new",
+    "guest_os": "UBUNTU_64",
+    "nics": [{"network": "net-1"}],
+    "power_on_after_create": True,
+}
+
+#: The write steps that run for ``_VM_CREATE_UNATTENDED_PARAMS``; each needs
+#: its own standing grant (``enforce_subop_policy`` reads no parent grant).
+_VM_CREATE_WRITE_STEPS = (
+    "POST:/vcenter/vm",
+    "POST:/vcenter/vm/{vm}/hardware/ethernet",
+    "POST:/vcenter/vm/{vm}/power?action=start",
+)
+
+
+async def _service_vm_create_unattended(
+    stub_embedding_service: AsyncMock, *, grant_composite: bool
+) -> tuple[_RecordingVmwareConnector, Any]:
+    """Run ``vm.create`` as a service principal with grants on every write step.
+
+    *grant_composite* adds the grant on the composite op id itself — the
+    grant the dispatcher's top-level gate reads before the handler runs.
+    """
+    recorder = _RecordingVmwareConnector()
+    recorder.responses.update(
+        {
+            "/vcenter/folder": {"value": [{"folder": "group-v1"}]},
+            "/vcenter/vm": {"value": "vm-123"},
+        }
+    )
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    op_ids = list(_VM_CREATE_WRITE_STEPS)
+    if grant_composite:
+        op_ids.append("vmware.composite.vm.create")
+    for op_id in op_ids:
+        await _seed_service_grant(op_id=op_id, target_id=target_id)
+    svc = _make_operator(sub="svc-blueprint", principal_kind=PrincipalKind.SERVICE)
+    result = await dispatch(
+        operator=svc,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.create",
+        target=_FakeVmwareTarget(target_id=target_id),
+        params=_VM_CREATE_UNATTENDED_PARAMS,
+    )
+    return recorder, result
+
+
+@pytest.mark.asyncio
+async def test_vm_create_service_with_composite_and_step_grants_runs_unattended(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """Grants on ``vm.create`` and on each write step: the call runs with no approval (#5063).
+
+    The composite's own gate clears on the composite grant; each write step
+    clears on its own grant. No approval request is created.
+    """
+    recorder, result = await _service_vm_create_unattended(
+        stub_embedding_service, grant_composite=True
+    )
+
+    assert result.status == "ok", result.error
+    assert result.result["status"] == "created"
+    assert result.result["vm_id"] == "vm-123"
+    assert recorder.calls == [
+        ("GET", "/vcenter/folder"),
+        ("POST", "/vcenter/vm"),
+        ("POST", "/vcenter/vm/vm-123/hardware/ethernet"),
+        ("POST", "/vcenter/vm/vm-123/power?action=start"),
+    ]
+    assert await _approval_row_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_vm_create_service_with_step_grants_only_waits_for_approval(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """Step grants alone are not enough: without the composite grant the call waits (#5063).
+
+    The top-level gate checks the composite's own op id before the handler
+    runs and never reads the step grants, so the whole call parks and no
+    write reaches vCenter.
+    """
+    recorder, result = await _service_vm_create_unattended(
+        stub_embedding_service, grant_composite=False
+    )
+
+    assert result.status == "awaiting_approval", result.error
+    async with get_sessionmaker()() as s:
+        pending = (await s.scalars(select(ApprovalRequest))).one()
+    assert pending.op_id == "vmware.composite.vm.create"
+    assert pending.status == ApprovalRequestStatus.PENDING.value
+    assert all(verb == "GET" for verb, _ in recorder.calls), recorder.calls
 
 
 # ===========================================================================

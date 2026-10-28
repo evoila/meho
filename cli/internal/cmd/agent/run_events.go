@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -57,7 +58,8 @@ func newRunEventsCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&input, "input", "",
-		"the user prompt to run the agent on (required)")
+		fmt.Sprintf("the user prompt to run the agent on (required; at most %d characters)",
+			runInputMaxChars))
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit one raw JSON object per event instead of a compact human line")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -80,6 +82,11 @@ func runRunEvents(cmd *cobra.Command, opts runEventsOptions) error {
 	if opts.Input == "" {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected("run-events requires a non-empty --input"), opts.JSONOut)
+	}
+	if utf8.RuneCountInString(opts.Input) > runInputMaxChars {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("--input is longer than %d characters", runInputMaxChars)),
+			opts.JSONOut)
 	}
 	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {

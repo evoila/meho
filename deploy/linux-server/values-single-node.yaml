@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Helm values for MEHO on one Linux server with RKE2 (install form 2). The
+# download ships this file as chart/values-single-node.yaml, and install.sh
+# passes it to Helm before /etc/meho/values-place.yaml, the answers of the
+# place (form-2 design, sections 5 and 6).
+#
+# RKE2 runs Traefik in kube-system. The storage class stays empty in every
+# built-in part, so the volumes use the default class (local-path).
+ingress:
+  className: traefik
+  tls:
+    # The self-signed certificate the install makes for the host name.
+    # `meho-host certificate` replaces it with the customer's own.
+    secretName: meho-core-tls
+networkPolicy:
+  ingressControllerNamespace: kube-system
+corePostgres:
+  enabled: true
+coreKeycloak:
+  enabled: true
+coreVault:
+  enabled: true
+# shortcut: the chart does not yet derive these from its built-in parts
+# (#4047). Until it does, name the Secret the install makes and the
+# built-in OpenBao's address. Delete these three keys when #4047 lands.
+postgres:
+  credentialsSecret: meho-core-postgres-meho
+vault:
+  address: http://meho-vault:8200
+config:
+  vaultAddr: http://meho-vault:8200

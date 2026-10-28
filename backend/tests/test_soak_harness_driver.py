@@ -18,6 +18,7 @@ rather than vacuously green.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -113,3 +114,58 @@ def test_missing_required_arg_exits_two(tmp_path: Path) -> None:
         check=False,
     )
     assert proc.returncode == 2
+
+
+@pytest.mark.parametrize("broken_python", [False, True])
+def test_missing_prepared_environment_does_not_install(tmp_path: Path, broken_python: bool) -> None:
+    repo = tmp_path / "checkout"
+    driver = repo / "scripts" / "soak" / "soak-harness.sh"
+    driver.parent.mkdir(parents=True)
+    shutil.copy(_DRIVER, driver)
+    backend = repo / "backend"
+    backend.mkdir()
+    if broken_python:
+        python = backend / ".venv" / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.symlink_to(tmp_path / "missing-python")
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    marker = tmp_path / "installer-ran"
+    uv = tools / "uv"
+    uv.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 99\n")
+    uv.chmod(0o755)
+    proc = subprocess.run(
+        [
+            "bash",
+            str(driver),
+            "--op",
+            "k8s.scale",
+            "--connector",
+            "k8s-1.x",
+            "--evidence-dir",
+            str(_seed(tmp_path)),
+        ],
+        env={**os.environ, "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 2
+    assert "prepared backend environment missing" in proc.stderr
+    assert not marker.exists()
+    assert not (backend / ".venv").exists() or broken_python
+
+
+def test_prepared_environment_does_not_run_installer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    marker = tmp_path / "installer-ran"
+    uv = tools / "uv"
+    uv.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 99\n")
+    uv.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}{os.pathsep}{os.environ['PATH']}")
+    proc = _run(_seed(tmp_path))
+    assert proc.returncode == 0, proc.stderr
+    assert not marker.exists()

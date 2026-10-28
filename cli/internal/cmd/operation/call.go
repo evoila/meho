@@ -62,7 +62,7 @@ type CallResult struct {
 // for the structured-failure case — dispatcher errors come back in
 // the `error` / `extras` envelope, not as transport failures):
 //   - 0   operation invoked + status == "ok"
-//   - 1   operation invoked but status == "error", "denied" or "rate_limited"
+//   - 1   operation invoked but status == "error", "denied", "rate_limited" or "not_found"
 //   - 2   auth_expired
 //   - 3   unreachable
 //   - 4   unexpected response shape (incl. unknown / missing status)
@@ -181,13 +181,16 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 		fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n",
 			opts.ConnectorID, opts.OpID, result.Status, result.DurationMs)
 		dispatch.WriteParkedHint(w, result.Extras)
+		// A multi-step operation that stops for approval already has
+		// its own audit row; show its id like every other status (#4833).
+		dispatch.WriteAuditReceipt(w, result.AuditID)
 		return nil // parked, not failed — exit 0.
 	}
 	// Classify status BEFORE rendering. The backend
 	// `Connector.execute` contract (see
 	// `backend/src/meho_backplane/connectors/schemas.py`) defines
-	// "ok" / "error" / "denied" / "rate_limited" (awaiting_approval is
-	// handled above).
+	// "ok" / "error" / "denied" / "rate_limited" / "not_found"
+	// (awaiting_approval is handled above).
 	// Anything else is a status this CLI does not know — most likely
 	// the backplane is newer — so surface it as unexpected_response
 	// (exit 4) with a message that names the version gap, without
@@ -197,7 +200,7 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 	// and (b) produced two JSON objects on stdout in --json mode,
 	// breaking pipe-into-jq usage.
 	switch result.Status {
-	case "ok", "error", "denied", dispatch.StatusRateLimited:
+	case "ok", "error", "denied", dispatch.StatusRateLimited, dispatch.StatusNotFound:
 		// fall through to rendering + exit-code branching below.
 	default:
 		return output.RenderError(cmd.ErrOrStderr(), dispatch.UnknownStatusError(result.Status), opts.JSONOut)
@@ -209,8 +212,9 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 	} else {
 		printCallResult(cmd.OutOrStdout(), opts.ConnectorID, opts.OpID, result)
 	}
-	// "ok" → success (exit 0). "error" / "denied" / "rate_limited" → exit 1 via
-	// errOpError so shell pipelines see the gate-failed signal.
+	// "ok" → success (exit 0). "error" / "denied" / "rate_limited" /
+	// "not_found" → exit 1 via errOpError so shell pipelines see the
+	// gate-failed signal.
 	if result.Status == "ok" {
 		return nil
 	}
@@ -218,8 +222,8 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 }
 
 // errOpError is the sentinel returned when the dispatcher reported
-// a structured-failure result (status == "error", "denied" or
-// "rate_limited"). main translates non-nil RunE errors into a non-zero
+// a structured-failure result (status == "error", "denied",
+// "rate_limited" or "not_found"). main translates non-nil RunE errors into a non-zero
 // exit; cobra's SilenceErrors is true on the command so the error
 // string isn't double-printed. Same shape as retrieval/eval.go's
 // errEvalGate.
@@ -320,9 +324,7 @@ func printCallResult(w io.Writer, connectorID, opID string, r *CallResult) {
 				fmt.Fprintln(w, string(r.Handle))
 			}
 		}
-		if r.AuditID != nil {
-			fmt.Fprintf(w, "audit receipt: %s\n", *r.AuditID)
-		}
+		dispatch.WriteAuditReceipt(w, r.AuditID)
 		if r.Delivery != nil {
 			fmt.Fprintf(w, "delivery: %s\n", *r.Delivery)
 		}
@@ -341,21 +343,14 @@ func printCallResult(w io.Writer, connectorID, opID string, r *CallResult) {
 		}
 		return
 	}
-	// status == "error" (or any non-ok dispatcher envelope).
-	if r.Error != nil && *r.Error != "" {
-		fmt.Fprintf(w, "meho: connector error: %s\n", *r.Error)
-	} else {
-		fmt.Fprintf(w, "meho: connector status=%s\n", r.Status)
-	}
-	if len(r.Extras) > 0 && string(r.Extras) != "null" {
-		fmt.Fprintln(w, "extras:")
-		pretty, err := prettyJSON(r.Extras)
-		if err == nil {
-			fmt.Fprintln(w, pretty)
-		} else {
-			fmt.Fprintln(w, string(r.Extras))
-		}
-	}
+	// status == "error" (or any non-ok dispatcher envelope). The shared
+	// trailer prints the connector error, the ids a not_found envelope
+	// names, the extras blob and the audit receipt: a failed call has an
+	// audit row that records why it failed (#4833).
+	dispatch.WriteErrorTrailer(w, &dispatch.CallResult{
+		Status: r.Status, OpID: r.OpID, Error: r.Error,
+		Extras: r.Extras, AuditID: r.AuditID,
+	})
 }
 
 func prettyJSON(raw json.RawMessage) (string, error) {

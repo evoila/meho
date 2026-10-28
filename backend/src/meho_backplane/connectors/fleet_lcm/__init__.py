@@ -11,9 +11,9 @@ typed ``fleet-rest`` impl
 (:mod:`meho_backplane.connectors.vcf_fleet`). This is the first real
 two-impl case in the codebase; the two are resolved per target by
 fingerprint (:func:`~meho_backplane.connectors.resolver.resolve_connector`):
-a 9.0 target resolves ``fleet-lcm`` by its narrower ``>=9.0,<10.0`` band
-(most-specific-version tie-break), an 8.x target resolves ``fleet-rest``
-(the only in-range candidate after #3037's ``>=8.0,<10.0`` re-band). The
+a 9.1 or newer target resolves ``fleet-lcm`` (``>=9.1,<10.0``, where the
+``/fleet-lcm/v1`` API first ships), an 8.x or 9.0 target resolves
+``fleet-rest`` (``>=8.0,<9.1``, the legacy ``/lcm/*`` API). The
 decision of record is ``versioned-connector-dual-impl`` (initiative
 `evoila/meho#3033 <https://github.com/evoila/meho/issues/3033>`_).
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Read-only ``gh.composite.*`` handler functions (1 composite at T4).
+"""Read-only ``gh.composite.*`` handler functions: ``pr_status_summary`` and ``repo_view``.
 
 T4 (#1224) ships the first L1 composite for the gh-rest connector:
 ``gh.composite.pr_status_summary``. The pattern mirrors the vmware-rest
@@ -81,7 +81,7 @@ from meho_backplane.auth.operator import Operator
 if TYPE_CHECKING:
     from meho_backplane.connectors.github.connector import GitHubRestConnector
 
-__all__ = ["pr_status_summary_composite"]
+__all__ = ["pr_status_summary_composite", "repo_view_composite"]
 
 _log = structlog.get_logger(__name__)
 
@@ -394,3 +394,79 @@ async def pr_status_summary_composite(
         _optional_get(connector, target, reviews_path, operator),
     )
     return _assemble_envelope(pr_payload, checks_payload, reviews_payload)
+
+
+_REPO_PATH = "/repos/{owner}/{repo}"
+
+
+def _project_permissions(raw: Any) -> dict[str, bool] | None:
+    """Map GitHub's ``permissions`` object to read / write / admin, or ``None``."""
+    if not isinstance(raw, dict):
+        return None
+    return {
+        "read": bool(raw.get("pull")),
+        "write": bool(raw.get("push")),
+        "admin": bool(raw.get("admin")),
+    }
+
+
+def _project_repo(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the summary fields of a repository payload."""
+    raw_owner = payload.get("owner")
+    owner: dict[str, Any] = raw_owner if isinstance(raw_owner, dict) else {}
+    topics = payload.get("topics")
+    return {
+        "name": payload.get("name"),
+        "full_name": payload.get("full_name"),
+        "owner": owner.get("login"),
+        "owner_type": owner.get("type"),
+        "visibility": payload.get("visibility"),
+        "default_branch": payload.get("default_branch"),
+        "archived": bool(payload.get("archived")),
+        "topics": [topic for topic in topics if isinstance(topic, str)]
+        if isinstance(topics, list)
+        else [],
+        "open_issues_count": payload.get("open_issues_count"),
+        "pushed_at": payload.get("pushed_at"),
+        "permissions": _project_permissions(payload.get("permissions")),
+    }
+
+
+async def repo_view_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: GitHubRestConnector,
+) -> dict[str, Any]:
+    """Read one repository and return a short summary of it.
+
+    Op-id: ``gh.composite.repo_view``. One read,
+    ``GET /repos/{owner}/{repo}``, through the connector's own session.
+    The answer keeps only the summary fields (see
+    :data:`schemas.REPO_VIEW_RESPONSE_SCHEMA`), so the result stays
+    small. ``permissions`` maps GitHub's ``pull`` / ``push`` / ``admin``
+    flags to ``read`` / ``write`` / ``admin`` and is ``None`` when
+    GitHub does not report them.
+
+    Raises
+    ------
+    httpx.HTTPStatusError
+        GitHub answered with a non-2xx status (404 for a repository the
+        identity cannot see). The dispatcher maps it to a structured
+        error result.
+    RuntimeError
+        The payload was not a JSON object.
+    """
+    owner = params["owner"]
+    repo = params["repo"]
+    path = await connector.mount_op_path(
+        target, _REPO_PATH.format(owner=owner, repo=repo), operator
+    )
+    payload = await connector._get_json(target, path, operator=operator)
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            f"repo_view: payload from {path!r} for {owner}/{repo} is not an object; "
+            f"got {type(payload).__name__}"
+        )
+    return _project_repo(payload)

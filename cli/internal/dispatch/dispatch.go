@@ -41,6 +41,12 @@ import (
 // reduced to a JSONFlux handle envelope + sample by the dispatcher,
 // so they render verbatim here with the handle hint intact.
 //
+// AuditID is the id of the committed audit row, or nil when the
+// backplane did not commit one (an old backplane, or a call that
+// waits for approval; #3884). The backend sends it for a completed
+// call, a failed call and a refused call (#4230, #4801), so the
+// human render shows it on every status (#4833).
+//
 // Kept hand-typed rather than generator-backed because the FastAPI
 // surface types `/api/v1/operations/call`'s response as
 // `dict[str, Any]`, so the oapi-codegen generator emits the response
@@ -54,6 +60,7 @@ type CallResult struct {
 	Status     string          `json:"status"`
 	OpID       string          `json:"op_id"`
 	Result     json.RawMessage `json:"result"`
+	AuditID    *string         `json:"audit_id"`
 	Error      *string         `json:"error"`
 	Extras     json.RawMessage `json:"extras,omitempty"`
 	DurationMs float64         `json:"duration_ms"`
@@ -108,8 +115,9 @@ type SearchResponse struct {
 }
 
 // ErrOpError is the sentinel returned when the dispatcher reported a
-// structured failure (status == "error", "denied" or "rate_limited"). main translates
-// a non-nil RunE error into a non-zero exit; SilenceErrors=true on
+// structured failure (status == "error", "denied", "rate_limited" or
+// "not_found"). main translates a non-nil RunE error into a non-zero
+// exit; SilenceErrors=true on
 // each command keeps cobra from double-printing the error string.
 var ErrOpError = errors.New("operation status not ok")
 
@@ -125,6 +133,13 @@ const StatusAwaitingApproval = "awaiting_approval"
 // run. The envelope carries extras.retry_after_seconds; the CLI renders
 // it like "error" / "denied" and exits 1. It never retries by itself.
 const StatusRateLimited = "rate_limited"
+
+// StatusNotFound is the result the dispatcher returns when the connector
+// confirmed that the object of the operation does not exist (#3591). The
+// operation ran and found nothing. The envelope carries
+// extras.resource_ids with the ids that were looked up; the CLI renders
+// it like "error", names the ids, and exits 1.
+const StatusNotFound = "not_found"
 
 // ParkedHint is the operator-facing one-liner Render prints under the
 // status header when a dispatch parks. Exported so the parallel
@@ -560,8 +575,8 @@ func isSpace(b byte) bool {
 
 // Render runs the unified post-dispatch path every verb uses: validate
 // the status enum, render the envelope (JSON or human), then map
-// "error" / "denied" / "rate_limited" to ErrOpError. When prettyPrinter is nil the
-// generic envelope is used.
+// "error" / "denied" / "rate_limited" / "not_found" to ErrOpError. When
+// prettyPrinter is nil the generic envelope is used.
 //
 // awaiting_approval (parked) is intercepted here — ahead of the
 // per-verb prettyPrinter — so the park is a first-class non-error
@@ -585,10 +600,13 @@ func (c Connector) Render(
 		w := cmd.OutOrStdout()
 		fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", c.ID, opID, r.Status, r.DurationMs)
 		WriteParkedHint(w, r.Extras)
+		// A multi-step operation that stops for approval already has
+		// its own audit row; show its id like every other status (#4833).
+		WriteAuditReceipt(w, r.AuditID)
 		return nil // parked, not failed — exit 0.
 	}
 	switch r.Status {
-	case "ok", "error", "denied", StatusRateLimited:
+	case "ok", "error", "denied", StatusRateLimited, StatusNotFound:
 		// fall through.
 	default:
 		return output.RenderError(cmd.ErrOrStderr(), UnknownStatusError(r.Status), jsonOut)
@@ -610,8 +628,9 @@ func (c Connector) Render(
 
 // PrintGeneric renders a CallResult in the generic envelope shape: a
 // status line, then the pretty-printed Result on success or the
-// connector error + extras on failure. Used as the default
-// pretty-printer when a verb passes none.
+// connector error + extras + audit receipt on failure (see
+// WriteErrorTrailer). Used as the default pretty-printer when a verb
+// passes none.
 func (c Connector) PrintGeneric(w io.Writer, opID string, r *CallResult) {
 	fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", c.ID, opID, r.Status, r.DurationMs)
 	if r.Status == "ok" {
@@ -625,10 +644,25 @@ func (c Connector) PrintGeneric(w io.Writer, opID string, r *CallResult) {
 		}
 		return
 	}
+	WriteErrorTrailer(w, r)
+}
+
+// WriteErrorTrailer writes the human render of a non-ok envelope
+// (status error, denied, rate_limited or not_found): the connector
+// error, the ids a not_found envelope names, the extras blob, then the
+// audit receipt when the backplane committed one. Every vendor
+// package's printErrorTrailer and the operation/call.go render path
+// delegate here, so a failed call shows its audit id on every render
+// path (#4833). The receipt is the row that says why the call failed,
+// so it matters most on this branch.
+func WriteErrorTrailer(w io.Writer, r *CallResult) {
 	if r.Error != nil && *r.Error != "" {
 		fmt.Fprintf(w, "meho: connector error: %s\n", *r.Error)
 	} else {
 		fmt.Fprintf(w, "meho: connector status=%s\n", r.Status)
+	}
+	if r.Status == StatusNotFound {
+		WriteNotFoundIDs(w, r.Extras)
 	}
 	if len(r.Extras) > 0 && string(r.Extras) != "null" {
 		fmt.Fprintln(w, "extras:")
@@ -639,6 +673,51 @@ func (c Connector) PrintGeneric(w io.Writer, opID string, r *CallResult) {
 			fmt.Fprintln(w, string(r.Extras))
 		}
 	}
+	WriteAuditReceipt(w, r.AuditID)
+}
+
+// NotFoundResourceIDs returns the ids a not_found envelope names in
+// extras.resource_ids, or nil when the blob is absent, null, or does
+// not carry the field. Best-effort like ParkedApprovalID: the ids are a
+// convenience on the human render path, and --json carries the full
+// extras verbatim.
+func NotFoundResourceIDs(extras json.RawMessage) []string {
+	if len(extras) == 0 || string(extras) == "null" {
+		return nil
+	}
+	var e struct {
+		ResourceIDs []string `json:"resource_ids"`
+	}
+	if err := json.Unmarshal(extras, &e); err != nil {
+		return nil
+	}
+	return e.ResourceIDs
+}
+
+// WriteNotFoundIDs writes the `not found: <id>[, <id>...]` line that
+// names the missing object in plain words, or nothing when the extras
+// blob carries no resource_ids.
+func WriteNotFoundIDs(w io.Writer, extras json.RawMessage) {
+	ids := NotFoundResourceIDs(extras)
+	if len(ids) == 0 {
+		return
+	}
+	line := "not found: " + ids[0]
+	for _, id := range ids[1:] {
+		line += ", " + id
+	}
+	fmt.Fprintln(w, line)
+}
+
+// WriteAuditReceipt writes the `audit receipt: <id>` line, or nothing
+// when auditID is nil. Shared by WriteErrorTrailer and the parallel
+// operation/call.go render path so the line stays byte-identical
+// everywhere.
+func WriteAuditReceipt(w io.Writer, auditID *string) {
+	if auditID == nil || *auditID == "" {
+		return
+	}
+	fmt.Fprintf(w, "audit receipt: %s\n", *auditID)
 }
 
 // PrettyJSON pretty-prints a json.RawMessage with 2-space indent.

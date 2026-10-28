@@ -34,7 +34,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import (
@@ -49,7 +49,7 @@ from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import Tenant
+from meho_backplane.db.models import AuditLog, Tenant
 from meho_backplane.operations import (
     dispatch,
     register_typed_operation,
@@ -400,6 +400,16 @@ async def test_dispatch_rejected_when_gate_enabled_and_no_claim(
     assert result.status == "denied"
     assert result.extras["error_code"] == "announce_required"
     assert "meho_broadcast_announce" in result.error
+    # #4669: the refused call answers with the id of its own denied row.
+    async with get_sessionmaker()() as fresh:
+        rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "vault.kv.delete")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].payload["result_status"] == "denied"
+    assert result.audit_id == rows[0].id
 
 
 async def test_dispatch_executes_when_gate_disabled(

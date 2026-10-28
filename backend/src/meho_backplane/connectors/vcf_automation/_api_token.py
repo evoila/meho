@@ -497,6 +497,19 @@ class _VaultStoreError(RuntimeError):
     """The minted token could not be written to Vault (message names no value)."""
 
 
+class _TokenNotStoredError(RuntimeError):
+    """The minted token was not stored; ``remediation`` says what MEHO did and what to do.
+
+    This operation holds a secret, so the dispatcher withholds the error's
+    message from the result (#4854). ``remediation`` is MEHO's own text and
+    names no secret, so the result keeps it.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.remediation = message
+
+
 async def _mint_and_store(
     session: _UserSession,
     operator: Operator,
@@ -532,7 +545,7 @@ async def _mint_and_store(
                     f"{params['token_name']!r}, username={params['username']!r}"
                 )
             )
-            raise RuntimeError(
+            raise _TokenNotStoredError(
                 f"vcfa.provider.api_token.create: {outcome}; the minted token could not be "
                 f"written to Vault at {mount}/{store_path} through Vault target "
                 f"{vault_target.name!r} ({exc}) -- check that target's Vault role grants "

@@ -15,6 +15,10 @@ mounted):
 * ``vault.token.lookup_accessor`` reads one token's TTL / policies /
   expiry by its accessor (``safety_level="safe"``).
 
+Token roles (``vault.token.role.write`` / ``.read`` / ``.list``) live in
+the sibling :mod:`meho_backplane.connectors.vault.ops_token_role` and
+share this group.
+
 There is **no bulk-revoke op** by design -- never revoke broadly to
 recover from one leak (the vault skill's loudest Don't-rule). There is
 likewise no bulk full-detail lookup: an agent that needs many tokens'
@@ -216,6 +220,11 @@ TOKEN_WHEN_TO_USE: str = (
     "list active token accessors (vault.token.list_accessors -- safe), "
     "and look up one token's TTL/policies/expiry by its accessor "
     "(vault.token.lookup_accessor -- safe). "
+    "Token roles are saved sets of rules for making tokens (allowed "
+    "policies, orphan, renewable, period): create or change one with "
+    "vault.token.role.write (requires approval), read one with "
+    "vault.token.role.read and list the names with vault.token.role.list "
+    "(both safe). "
     "There is intentionally NO bulk-revoke op: never revoke broadly to "
     "recover from one leak. Accessors are non-secret reference handles. "
     "Route entity/group/policy questions to the 'identity' group."

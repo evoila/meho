@@ -113,6 +113,10 @@ jobs:
     # short-circuits on `github.event_name != 'pull_request'` before reading
     # this output — so we just emit `true` to satisfy their `needs`. That
     # makes a queue admission validate the merge result at full depth.
+    #
+    # The two values files of the form-2 download count as chart changes:
+    # the `validate` job renders the chart with them, as the download build
+    # does (#4820).
     permissions:
       contents: read
       pull-requests: read
@@ -134,7 +138,7 @@ jobs:
           files=$(gh api --paginate \
             "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
             --jq '.[].filename')
-          if grep -qE '^(deploy/charts/meho/|\.github/workflows/chart\.yml$)' <<<"$files"; then
+          if grep -qE '^(deploy/charts/meho/|deploy/linux-server/packaging/render-values\.yaml$|deploy/linux-server/values-single-node\.yaml$|\.github/workflows/chart\.yml$)' <<<"$files"; then
             echo "chart=true" >> "$GITHUB_OUTPUT"
           else
             echo "chart=false" >> "$GITHUB_OUTPUT"
@@ -287,13 +291,9 @@ jobs:
             --set ingress.tls.secretName=test-core-tls \
             --set postgres.credentialsSecret=test-core-postgres-meho \
             --set vault.address=https://vault.test \
-            --set keycloak.issuer=https://keycloak.test/realms/meho \
-            --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
-            --set config.keycloakAudience=meho-backplane \
             --set config.vaultAddr=https://vault.test \
             --set networkPolicy.postgresCIDR=10.0.1.0/24 \
             --set networkPolicy.vaultCIDR=10.0.2.0/24 \
-            --set networkPolicy.keycloakCIDR=10.0.3.0/24 \
             --set corePostgres.enabled=true \
             --set coreKeycloak.enabled=true \
             --set coreKeycloak.hostname=meho.test \
@@ -311,9 +311,34 @@ jobs:
           # The built-in Keycloak subchart (#4040) renders in the same pass.
           grep -q 'name: test-keycloak$' /tmp/rendered-core.yaml \
             || { echo "::error::built-in Keycloak StatefulSet did not render with coreKeycloak on"; exit 1; }
+          # The backplane gets its Keycloak settings from the built-in
+          # Keycloak (#4591): public issuer, in-cluster discovery address.
+          grep -Eq '^[[:space:]]*KEYCLOAK_ISSUER_URL:[[:space:]]*"https://meho\.test/auth/realms/meho"[[:space:]]*$' /tmp/rendered-core.yaml \
+            || { echo "::error::KEYCLOAK_ISSUER_URL not derived from the built-in Keycloak (#4591)"; exit 1; }
+          grep -Eq '^[[:space:]]*KEYCLOAK_DISCOVERY_URL:[[:space:]]*"http://test-keycloak:8080/auth/realms/meho"[[:space:]]*$' /tmp/rendered-core.yaml \
+            || { echo "::error::KEYCLOAK_DISCOVERY_URL not derived from the built-in Keycloak (#4591)"; exit 1; }
           # The built-in OpenBao subchart (#4044) renders in the same pass.
           grep -q 'name: test-vault$' /tmp/rendered-core.yaml \
             || { echo "::error::built-in OpenBao (test-vault) did not render with coreVault on"; exit 1; }
+
+      - name: Render the chart the way the form-2 download build does (#4820)
+        # build-download.sh and check-download.sh render the chart with
+        # these two values files and nothing else, to list the images they
+        # pack and check (chart_image_refs in
+        # deploy/linux-server/packaging/parts.sh). This step runs the same
+        # render, so a chart rule or a values change that breaks it fails on
+        # the pull request, not on the next release tag. Keep the release
+        # name, the namespace and the flags the same as chart_image_refs.
+        # The build also stops when the render does not name the MEHO image.
+        run: |
+          set -euo pipefail
+          helm template meho deploy/charts/meho/ --namespace meho \
+            -f deploy/linux-server/packaging/render-values.yaml \
+            -f deploy/linux-server/values-single-node.yaml \
+            --set image.tag=test \
+            > /tmp/rendered-linux-download.yaml
+          grep -Eq '^[[:space:]]*(-[[:space:]]+)?image:[[:space:]]*"?ghcr\.io/evoila/meho:test"?[[:space:]]*$' /tmp/rendered-linux-download.yaml \
+            || { echo "::error::the form-2 download render does not name the MEHO image ghcr.io/evoila/meho:test"; exit 1; }
 
       - name: Assert agent-runtime credentials wire via secretKeyRef (#1363)
         # G0.18-T10 (#1363): when an operator opts into the G11.1 agent

@@ -101,6 +101,7 @@ __all__ = [
     "holodeck_instance_status",
     "holodeck_router_patch",
     "map_instance_status_envelope",
+    "merge_remove_record",
     "target_hr_version",
     "validate_config_apply_params",
 ]
@@ -387,6 +388,10 @@ async def holodeck_instance_status(
     ``notes`` entry with ``status="completed"``, **not** a failure, so a
     verify/Sensor built on this op does not read a fully-deployed 5.2.x lab as
     broken.
+
+    With an ``instance_id``, the op also reads the progress file that
+    ``holodeck.instance.remove`` writes, and adds ``leftover_vms`` and
+    ``removal`` (see :func:`merge_remove_record`).
     """
     instance_id = params.get("instance_id")
     if instance_id:
@@ -395,12 +400,65 @@ async def holodeck_instance_status(
         select = "Get-HoloDeckInstance"
     script = f"{select} | ConvertTo-Json -Depth 6 -Compress"
 
+    envelope: dict[str, Any]
     try:
         payload = await pwsh_run(self, target, script, operator=operator)
     except PwshRunError as exc:
-        return {"status": "unknown", "error": str(exc), "notes": []}
+        envelope = {"status": "unknown", "error": str(exc), "notes": []}
+    else:
+        envelope = map_instance_status_envelope(payload, hr_version=target_hr_version(target))
 
-    return map_instance_status_envelope(payload, hr_version=target_hr_version(target))
+    if instance_id:
+        from meho_backplane.connectors.holodeck.ops_remove import read_remove_record
+
+        record = await read_remove_record(self, target, str(instance_id), operator)
+        if record is not None:
+            merge_remove_record(envelope, record)
+    return envelope
+
+
+def merge_remove_record(envelope: dict[str, Any], record: dict[str, Any]) -> None:
+    """Add the progress of a ``holodeck.instance.remove`` to a status envelope.
+
+    ``leftover_vms`` lists the VMs whose name still starts with the instance
+    id (``None`` when the remove could not check). A remove that finished
+    without an error sets ``status`` to ``removed``. A remove that is still
+    ``running`` may also have been cut short by a router reboot; a note says so.
+    """
+    leftover = record.get("leftover_vms")
+    if leftover is not None and not isinstance(leftover, list):
+        leftover = [leftover]
+    envelope["leftover_vms"] = [str(vm) for vm in leftover] if leftover is not None else None
+    moved = record.get("moved_files")
+    envelope["removal"] = {
+        "state": str(record.get("state") or "unknown"),
+        "started_at": record.get("started_at"),
+        "finished_at": record.get("finished_at"),
+        "reset_router": bool(record.get("reset_router")),
+        "error": record.get("error"),
+        "leftover_error": record.get("leftover_error"),
+        "moved_to": record.get("moved_to"),
+        "moved_files": [
+            str(f) for f in (moved if isinstance(moved, list) else [moved] if moved else [])
+        ],
+    }
+    notes = envelope.setdefault("notes", [])
+    state = envelope["removal"]["state"]
+    if state == "done":
+        envelope["status"] = "removed"
+        envelope.pop("error", None)
+        if leftover:
+            notes.append(
+                "the instance was removed, but some VMs are left; delete them with "
+                "vmware.composite.vm.destroy"
+            )
+    elif state == "failed":
+        notes.append(f"the last remove failed: {record.get('error')}")
+    elif state == "running":
+        notes.append(
+            "a remove is running, or the HoloRouter rebooted (reset_router) before "
+            "it finished; then check the VMs in vCenter"
+        )
 
 
 async def holodeck_router_patch(
@@ -1201,12 +1259,18 @@ DEPLOY_OPS: tuple[HolodeckOp, ...] = (
                 "with a note. " + SSH_TRANSPORT_NOTE
             ),
             "parameter_hints": {
-                "instance_id": "Optional; leave it out to read the instance of the appliance.",
+                "instance_id": (
+                    "Optional; leave it out to read the instance of the appliance. "
+                    "Needed for leftover_vms after a remove."
+                ),
             },
             "output_shape": (
                 "{status, current_step, started_at, updated_at, instance_id, "
-                "notes[]}. 'status' is running, completed, failed or unknown. "
-                "'error' is set when the cmdlet failed (status unknown)."
+                "notes[], leftover_vms?, removal?}. 'status' is running, completed, "
+                "failed, unknown, or removed after holodeck.instance.remove finished. "
+                "'error' is set when the cmdlet failed (status unknown). With "
+                "instance_id, after a remove: leftover_vms lists the VMs whose name "
+                "still starts with the instance id."
             ),
             "next_step": (
                 "While running, call again later. When failed, read the deploy "

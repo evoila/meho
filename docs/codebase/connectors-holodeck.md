@@ -32,7 +32,8 @@ appends `holodeck.backups.list` — a safe per-file inventory of
 taking the read surface to **10 ops** (13 total, including the 3
 approval-gated write ops). #2908 (Initiative #2907) appends the 4
 deploy-lifecycle ops (`config.apply`, `instance.start`, `instance.status`,
-`router.patch`) — **17 ops total**.
+`router.patch`). `holodeck.instance.remove` deletes an instance again
+(see "Delete an instance" below) — **18 ops total**.
 
 Source: `backend/src/meho_backplane/connectors/holodeck/`.
 
@@ -104,14 +105,14 @@ Source: `backend/src/meho_backplane/connectors/holodeck/`.
   `HOLODECK_OPS` tuple. T1 shipped the single `holodeck.about` canary; T2
   (#854) extends the tuple via `_holodeck_ops()` which splats `READ_OPS`
   (the 7 read ops defined in `ops_read.py`) onto the canary, and later tasks
-  append `WRITE_OPS` (`ops_write.py`, #2154) and `DEPLOY_OPS` (`ops_deploy.py`,
-  #2908) — **17 ops total**. The pattern mirrors bind9's `_bind9_ops()` and
+  append `WRITE_OPS` (`ops_write.py`, #2154), `DEPLOY_OPS` (`ops_deploy.py`,
+  #2908) and `REMOVE_OPS` (`ops_remove.py`) — **18 ops total**. The pattern mirrors bind9's `_bind9_ops()` and
   pfSense's `_pfsense_ops()`.
 
 - **Response schemas** (`_response_schemas.py`) — `HOLODECK_RESPONSE_SCHEMAS`,
   one schema per op id, split out so the op tables stay readable.
 
-**Operation contracts.** The 17 ops meet the VMware operation-contract check
+**Operation contracts.** The 18 ops meet the VMware operation-contract check
 (`backend/tests/test_operation_contracts.py`); none is on its gap list.
 
 - Each `response_schema` names the fields the handler returns, with a
@@ -123,9 +124,10 @@ Source: `backend/src/meho_backplane/connectors/holodeck/`.
   one example call under `examples`. The parameter rules themselves (types,
   enums, patterns, the 5.2.x depot refusal) are unchanged.
 - `llm_instructions` carries `when_to_call` (with the SSH-only transport
-  note), `output_shape` and `next_step`; the seven changes (`k8s.exec`,
+  note), `output_shape` and `next_step`; the eight changes (`k8s.exec`,
   `k8s.pods.gc`, `backups.prune`, `images.import`, `config.apply`,
-  `instance.start`, `router.patch`) also carry `preconditions`.
+  `instance.start`, `router.patch`, `instance.remove`) also carry
+  `preconditions`.
 - The texts say what MEHO really sends. `holodeck.config.apply` sends only
   `description` and `external_ip` to `New-HoloDeckConfig`; `master_cidr`,
   `vlan_range`, `placement`, `depot` and `instance_id` are checked and echoed
@@ -513,6 +515,70 @@ broadcast surfaces.
   pinned into `_CREDENTIAL_WRITE_OPS` (broadcast defence-in-depth) per the
   `rke2.node.config.update` precedent.
 
+### Delete an instance
+
+`ops_remove.py` adds **`holodeck.instance.remove`** (group `deploy-remove`,
+`destructive`, a person must approve each call). It deletes one nested lab
+that `holodeck.instance.start` built: the nested ESX hosts and the VCF
+Installer or Cloud Builder VM. Before, a teardown deleted each nested VM by
+hand.
+
+Parameters: `instance_id` (same pattern as `holodeck.instance.start`: 1 to 8
+letters or digits), `reset_router` (default `false`), `move_state_files`
+(default `true`) and an optional `config_id`.
+
+How a call runs:
+
+1. **Check (read-only).** One PowerShell script checks that
+   `Remove-HoloDeckInstance` has `-InstanceID` (Holodeck 9.0.1 and later)
+   and, when asked, `-ResetHoloRouter`; that `Get-HoloDeckInstance` exists
+   (9.0.2 and later); reads `Get-HoloDeckInstance -InstanceID <id>`; and
+   lists the instance's files under `/holodeck-runtime/config`, `output` and
+   `state` (the file name holds the id, or the file text holds `"<id>"`).
+2. **Decide.**
+   - A toolkit without the cmdlet, the parameter or the switch: `refused`,
+     with a version message. MEHO does not guess.
+   - An instance that `Get-HoloDeckInstance` does not list: `unchanged`.
+     Nothing is deleted.
+   - A failing `Get-HoloDeckInstance`: `refused`, with its error text. A
+     failed read is never taken as "not there".
+   - The config to load: `config_id` when given, else the one config file
+     that names the instance. None or several: `refused`, pass `config_id`.
+3. **Run in the background.** Like `holodeck.instance.start`, the delete
+   runs in a `tmux` session (`holodeck-remove-<id>`, output in
+   `/holodeck-runtime/logs/<id>-remove.log`), and the call returns
+   `started`. The script loads the config (`Import-HoloDeckConfig`), runs
+   `Remove-HoloDeckInstance -InstanceID <id>` (plus `-ResetHoloRouter`),
+   lists the VMs whose name still starts with `<id>-` (`Get-VM`), and, only
+   when the delete did not fail, moves the listed files into
+   `/holodeck-runtime/removed/<id>-<yyyyMMdd-HHmmss>/`. The vendor cmdlet
+   removes only the current VMs of the instance and does not clean the
+   config files, so these two steps close that gap.
+4. **Progress file.** The script writes
+   `/holodeck-runtime/logs/<id>-remove.json` at the start and at the end
+   (`state` running / done / failed, `error`, `leftover_vms`, `moved_to`,
+   `moved_files`). `holodeck.instance.status` with `instance_id` reads it:
+   it adds `removal` and `leftover_vms`, and sets `status` to `removed` when
+   the delete finished without an error. The caller deletes each leftover VM
+   with `vmware.composite.vm.destroy`.
+
+**Approval preview.** The preview builder (registered in `ops_remove.py`)
+runs the same read-only check. Its `blast_radius` names the instance
+(`object`), lists each VM and where it runs, the router reset and each file
+that moves (`children`), and says `permanent`. An old toolkit or a failed
+check makes the builder raise, so the call does not wait for approval and
+the caller reads why. An unknown instance waits with an empty list: the call
+will change nothing.
+
+**No secrets.** No parameter is a password. The script reads the vCenter
+login from the loaded config on the appliance, by variable name only. The
+`Get-HoloDeckInstance` answer is never passed on: MEHO keeps only VM names
+and where they run (`instance_vms`).
+
+**Limit.** With `reset_router` the HoloRouter reboots at the end of the
+cmdlet. The reboot can stop the later steps (leftover VMs, file move); the
+progress file then stays at `running`, and the status op says so in a note.
+
 ### `execute(target, op_id, params)`
 
 Same dispatcher shim shape as bind9 and pfSense:
@@ -591,6 +657,12 @@ External (pinned in `backend/pyproject.toml`):
   v0.2 — it belongs in a Runbooks Initiative once the runbook engine ships
   (Goal G11 per the v0.1 spec sequencing). The standalone wrapper stays in
   place; G3.8 provides the inspection ops a runbook would compose against.
+- **`Get-HoloDeckInstance` has no published answer shape.** The remove
+  preview finds VMs by walking the answer for names that start with
+  `<instance-id>-`, and finds the instance's config by looking for
+  `"<instance-id>"` in the config files. When that finds no config, or
+  several, the call is refused and asks for `config_id`. Check both against
+  a real HoloRouter answer when one is recorded.
 
 ## References
 

@@ -60,12 +60,22 @@ _QUOTED_PAIRS: Final[tuple[re.Pattern[str], ...]] = (
 )
 
 #: A value some earlier step already masked: ``[REDACTED:...]``, the trace
-#: markers ``[MEHO-REDACTED:...]`` / ``[MEHO-OMITTED:...]``, ``[redacted]``,
-#: and a connector's own ``***`` or ``***REDACTED***``. It stays, so the
-#: reader still sees which step masked it.
+#: markers ``[MEHO-REDACTED:...]`` / ``[MEHO-OMITTED:...]`` and ``[redacted]``.
+#: A connector's own ``***`` or ``***REDACTED***`` is checked in
+#: :func:`_is_placeholder`. A masked value stays, so the reader still sees
+#: which step masked it.
 _PLACEHOLDER: Final[re.Pattern[str]] = re.compile(
-    r"\[(?:MEHO-)?(?:REDACTED|OMITTED):[^\[\]\s'\"]+\]|\[redacted\]|\*{2,}|\*+REDACTED\*+"
+    r"\[(?:MEHO-)?(?:REDACTED|OMITTED):[^\[\]\s'\"]+\]|\[redacted\]"
 )
+
+
+def _is_placeholder(value: str) -> bool:
+    core = value.strip("*")
+    if core == "":
+        return len(value) >= 2
+    if core == "REDACTED":
+        return value.startswith("*") and value.endswith("*")
+    return _PLACEHOLDER.fullmatch(value) is not None
 
 
 def _is_secret_name(name: str) -> bool:
@@ -78,7 +88,7 @@ def _is_secret_name(name: str) -> bool:
 
 def _replace_value(match: re.Match[str]) -> str:
     value = match.group("value")
-    if not _is_secret_name(match.group("name")) or _PLACEHOLDER.fullmatch(value):
+    if not _is_secret_name(match.group("name")) or _is_placeholder(value):
         return match.group(0)
     start, end = match.span("value")
     offset = match.start()
@@ -118,5 +128,5 @@ def scrub_secret_fields(node: Any) -> Any:
 
 def _can_hold_secret(value: Any) -> bool:
     if isinstance(value, str):
-        return _PLACEHOLDER.fullmatch(value) is None
+        return not _is_placeholder(value)
     return isinstance(value, (Mapping, Sequence)) and not isinstance(value, (bytes, bytearray))

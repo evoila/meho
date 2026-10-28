@@ -1398,6 +1398,13 @@ resultCache:
 # Failed Jobs are NOT garbage-collected by the hook delete policy so the
 # operator can inspect logs; the k8s-side `ttlSecondsAfterFinished` is
 # the backstop.
+#
+# With `corePostgres.enabled: true` the Job is not rendered: Helm would run
+# it before it creates the built-in database. The same runner then runs as
+# the `migrate` init container of the backplane Deployment, with
+# `resources` from this block (#5233). `backoffLimit` and
+# `ttlSecondsAfterFinished` apply to the Job only; the kubelet restarts a
+# failed init container, and the pod is not Ready until it succeeds.
 migrationJob:
   # -- Number of times Kubernetes retries the migration Job on non-zero
   # exit. Alembic migrations are idempotent; the retries catch transient

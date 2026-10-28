@@ -507,10 +507,13 @@ into the pod's environment and re-deploy.
 
 **Contract** (#1607, hardened after the 2026-06-08 outage):
 `helm rollback` / `--atomic` reverts **manifests only** — the
-`pre-install,pre-upgrade` migration Job's schema commit survives the
-rollback (Helm does not track hook side effects). Pods rolled back
-across a migration therefore run against a *newer* schema than their
-code expects. Two enforced invariants make that safe:
+migration's schema commit survives the rollback. The migration runs in
+the `pre-install,pre-upgrade` hook Job when the install brings its own
+PostgreSQL, and in the `migrate` init container of each new backplane
+pod with the built-in PostgreSQL (#5233); Helm tracks neither side
+effect. Pods rolled back across a migration therefore run against a
+*newer* schema than their code expects. Two enforced invariants make
+that safe:
 
 1. **Additive-only `upgrade()`** — `scripts/ci/check_migration_compat.py`
    (CI: `migration-compat.yml`) rejects destructive DDL, so an older
@@ -524,6 +527,11 @@ code expects. Two enforced invariants make that safe:
    [`docs/codebase/migrations.md`](codebase/migrations.md) § "Rollback
    contract".
 
+With the built-in PostgreSQL, every pod of the rolled-back release runs
+the migration runner again when it starts. The runner sees a database
+revision its image does not know, prints `migration_skipped`, and exits
+`0`, so the older pods start (same check as the `db` probe).
+
 Never run `alembic downgrade` as part of a deploy or rollback;
 `downgrade()` bodies are the manual escape hatch only. **Caveat:** the
 tolerance lives in the image being rolled back **to** — rolling back
@@ -532,7 +540,11 @@ migration still bricks readiness; recover those by rolling forward.
 
 **Failure-injection drill** — run on a sandbox (kind/minikube or the
 staging namespace, never prod) when the release carries a migration,
-and whenever the migration Job or the `db` probe changes:
+and whenever the migration Job, the `migrate` init container, the
+migration runner or the `db` probe changes. Run it in the mode the
+release targets; with the built-in PostgreSQL, also delete one
+rolled-back pod after step 4 and check that the new pod's `migrate`
+init container logs `migration_skipped` and the pod gets Ready:
 
 - [ ] 1. Install the prior release `v(n)` (DB at migration `00NN`);
   wait Ready. Per the caveat above, `v(n)` must already carry the
@@ -557,7 +569,8 @@ and whenever the migration Job or the `db` probe changes:
   db_ahead=true`.
 - [ ] 5. Clean up by rolling **forward**: re-run the upgrade with
   readiness intact. The DB is already at `00NN+1`; the migration Job
-  re-runs as a no-op (`alembic upgrade head` is idempotent).
+  (or the new pods' `migrate` init container) re-runs as a no-op
+  (`alembic upgrade head` is idempotent).
 
 ### 7. Post-release
 
@@ -764,8 +777,9 @@ Step 6 as written, against `rke2-infra`, with the rc pins:
 - [ ] 6b rollback drill when the series carries a migration: the rc
   is the natural `v(n+1)` for the drill, with `v(n)` = the last
   **final** release (`PREV` from R1). Run it on the first rc that
-  carries the migration and re-run only if the migration Job or the
-  `db` probe changes in a later rc.
+  carries the migration and re-run only if the migration Job, the
+  `migrate` init container, the migration runner or the `db` probe
+  changes in a later rc.
 
 ### R6 — Acceptance round 2 against the rc (#3379)
 

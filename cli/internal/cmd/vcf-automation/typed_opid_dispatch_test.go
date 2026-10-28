@@ -93,6 +93,10 @@ var typedOpCLICoverage = map[string]string{
 	"vcfa.tenant.blueprint_request.create": "",
 	"vcfa.tenant.blueprint_request.get":    "",
 	"vcfa.tenant.deployment.delete":        "",
+	// Feature flags: agent-surface-only, reached through
+	// `meho operation call` / MCP call_operation.
+	"vcfa.provider.feature_flag.list": "",
+	"vcfa.provider.feature_flag.set":  "",
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed VCFA

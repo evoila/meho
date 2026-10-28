@@ -280,8 +280,8 @@ approval preview in `_images.py`, all on the tenant plane, in the group
 `register_typed_operations` (a classmethod on the connector, queued onto
 the lifespan registrar list via `register_vcfa_typed_operations` in
 `__init__.py`) upserts the seven read descriptors, the nine
-provisioning descriptors, the four image descriptors and the nine network and
-deploy descriptors on startup — the same argocd / bind9 / Kubernetes
+provisioning descriptors, the four image descriptors, the nine network and
+deploy descriptors and the two feature-flag descriptors on startup — the same argocd / bind9 / Kubernetes
 typed-registrar shape.
 
 **A project's own network and its first deployment.** With an org, a
@@ -343,6 +343,41 @@ true).
 - **Spec check.** The reconcile lane checks the new paths against
   `vra-iaas.json`, `vra-blueprint.json` and `vra-catalog-deployment.json`
   of the pinned `vra-sdk-go` v0.6.5 shelf.
+
+**Feature flags (#3893).** VCF Automation 9.1 refuses a VM Apps (classic
+tenant) org while the appliance feature flag `CLASSIC_TENANT_CREATION`
+("Classic Tenant Creation") is off: the org create answers HTTP 400. Two
+provider-plane ops let the tenant set-up read and change the flags through
+MEHO, with approval and audit. Metadata is in `feature_flag_ops.py`; the
+handlers, the org-create check and the park-time preview are in
+`_feature_flags.py`. Wire facts follow `go-vcloud-director` v3
+`govcd/feture_flag.go` (flag ids look like
+`urn:vcloud:featureflag:<NAME>`).
+
+| op_id | risk level / approval | wire |
+|---|---|---|
+| `vcfa.provider.feature_flag.list` | safe | `GET /cloudapi/1.0.0/featureFlags` |
+| `vcfa.provider.feature_flag.set` | caution, approval | `GET …/featureFlags` (find by name), `GET …/featureFlags/{id}` (state + `ETag`), then `PUT …/featureFlags/{id}` with `If-Match` |
+
+- **Safe to run twice.** `set` finds the flag by id, name or display name
+  (case does not matter) before any write; no match answers
+  `invalid_request`. A flag already in the requested state answers
+  `unchanged` and sends no `PUT`; otherwise it answers `changed` with
+  `previous_enabled`. The `PUT` body is the flag as read, with `enabled`
+  replaced. `If-Match` is sent only when the read returned an `ETag`.
+- **Response headers.** `_send_with_retry` on the connector returns the
+  raw `httpx.Response` (same 401 retry-once as the JSON helpers), so the
+  handler can read the `ETag` header.
+- **Org-create check.** For `org_type=vm_apps` (the default),
+  `vcfa.provider.org.create` reads `CLASSIC_TENANT_CREATION` after the name
+  check and before the `POST`. When the flag is there and off, it answers
+  `invalid_request` with guidance naming `vcfa.provider.feature_flag.set`,
+  and writes nothing. A missing flag or a failed read lets the create go
+  ahead, so the appliance answers for itself. `all_apps` does not read it.
+- **Preview.** The park card for `set` shows the flag name, its id and
+  display name, `current_enabled`, `requested_enabled` and `would`
+  (`change` / `unchanged` / `invalid_request`). Without a connector it shows
+  `would: set_if_different` and no current state.
 
 Source: `backend/src/meho_backplane/connectors/vcf_automation/`.
 
@@ -406,6 +441,9 @@ domains.
   surfacing as a misrouted 401.
 - **`VCFA_IMAGE_OPS`** (`image_ops.py`) — the four image ops (see **Image
   ops** above), validated by the same `validate_typed_ops()`.
+- **`VCFA_FEATURE_FLAG_OPS`** (`feature_flag_ops.py`) — the two
+  feature-flag ops (see **Feature flags** above), validated by the same
+  `validate_typed_ops()`.
 - **`VCFA_PRODUCT` / `VCFA_VERSION` / `VCFA_IMPL_ID` /
   `VCFA_CONNECTOR_ID`** (`__init__.py`) — DB-side keys. Since #1814 the
   registry key `VcfAutomationConnector.product` was unified to `"vcfa"`,
@@ -434,7 +472,8 @@ domains.
    upserts the seven `typed_ops.VCFA_TYPED_OPS` descriptors, the nine
    `provisioning_ops.VCFA_PROVISIONING_OPS` (#3890), the four
    `image_ops.VCFA_IMAGE_OPS` and the nine
-   `VCFA_NETWORK_OPS` + `VCFA_DEPLOY_OPS` — no ingest needed, so
+   `VCFA_NETWORK_OPS` + `VCFA_DEPLOY_OPS` and the two
+   `VCFA_FEATURE_FLAG_OPS` — no ingest needed, so
    the audited read surface and the provisioning writes work on a fresh
    boot.
 
@@ -560,7 +599,8 @@ the consumer repo, validated 2026-05-17):
 ### 401 → re-login + retry-once (per plane, independent)
 
 `VcfAutomationConnector._request_json` (idempotent verbs) and
-`_post_json` (POST) share a common `_do_request_with_retry` helper:
+`_post_json` (POST) share a common `_do_request_with_retry` helper, which
+parses the body of the response `_send_with_retry` returns:
 
 1. Build headers via `auth_headers(..., path=path)` (lazy login on first use).
 2. Fire the request through the per-target `AsyncClient`.

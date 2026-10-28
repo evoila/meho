@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from meho_backplane.connectors.azure import arc
 from meho_backplane.connectors.azure._llm_instructions import AZURE_READ_LLM_INSTRUCTIONS
 from meho_backplane.connectors.azure._model import NO_PARAMS, TEXT_OR_NULL, AzureTypedOp
 
@@ -322,6 +323,7 @@ _ACCOUNT_OPS: tuple[AzureTypedOp, ...] = (
 AZURE_TYPED_OPS: tuple[AzureTypedOp, ...] = (
     # Each family module adds one line here, in alphabetical order: *<family>.OPS,
     *_ACCOUNT_OPS,
+    *arc.OPS,
 )
 
 #: The text of each group. The AI reads it through ``list_operation_groups``
@@ -329,6 +331,7 @@ AZURE_TYPED_OPS: tuple[AzureTypedOp, ...] = (
 AZURE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # Each family module adds one line here, in alphabetical order: **<family>.WHEN_TO_USE,
     **_ACCOUNT_WHEN_TO_USE,
+    **arc.WHEN_TO_USE,
 }
 
 

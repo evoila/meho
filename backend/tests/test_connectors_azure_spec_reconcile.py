@@ -67,6 +67,10 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     "SUBSCRIPTION_PATH": (("GET",), "SUBSCRIPTIONS_API_VERSION"),
     "LOCATIONS_PATH": (("GET",), "SUBSCRIPTIONS_API_VERSION"),
     "RESOURCE_GRAPH_PATH": (("POST",), "RESOURCE_GRAPH_API_VERSION"),
+    "ARC_MACHINES_PATH": (("GET",), "ARC_API_VERSION"),
+    "ARC_MACHINE_PATH": (("GET",), "ARC_API_VERSION"),
+    "ARC_ASSESS_PATCHES_PATH": (("POST",), "ARC_API_VERSION"),
+    "VM_ASSESS_PATCHES_PATH": (("POST",), "VM_ASSESS_API_VERSION"),
 }
 
 _PARAMETER = re.compile(r"\{[^}]*\}")
@@ -142,8 +146,15 @@ def test_the_checked_paths_are_pinned() -> None:
     """The list of checked paths, so a change to it is always on purpose."""
     assert sorted(_declared_op_ids()) == [
         "GET:/subscriptions/{}/locations@2022-12-01",
+        "GET:/subscriptions/{}/providers/microsoft.hybridcompute/machines@2026-09-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.hybridcompute/machines/{}"
+        + "@2026-09-01",
         "GET:/subscriptions/{}@2022-12-01",
         "POST:/providers/microsoft.resourcegraph/resources@2024-04-01",
+        "POST:/subscriptions/{}/resourcegroups/{}/providers/microsoft.compute/virtualmachines/{}"
+        + "/assesspatches@2026-04-01",
+        "POST:/subscriptions/{}/resourcegroups/{}/providers/microsoft.hybridcompute/machines/{}"
+        + "/assesspatches@2026-09-01",
     ]
 
 

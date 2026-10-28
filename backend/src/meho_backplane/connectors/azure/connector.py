@@ -55,6 +55,7 @@ from meho_backplane.connectors.adapters.http import HttpConnector, json_payload_
 from meho_backplane.connectors.azure._errors import AzureApiError, AzureNotFoundError
 from meho_backplane.connectors.azure._http import NoRedirectClient, send
 from meho_backplane.connectors.azure._paths import SUBSCRIPTIONS_API_VERSION, subscription_path
+from meho_backplane.connectors.azure.arc import ArcOps
 from meho_backplane.connectors.azure.session import (
     AzureCredentials,
     AzureCredentialsLoader,
@@ -119,6 +120,7 @@ def _may_use_cache(operator: Operator) -> bool:
 
 class AzureConnector(
     # Family mixin classes first, one per line in alphabetical order; the HTTP base last.
+    ArcOps,
     HttpConnector,
 ):
     """Azure Resource Manager connector. One target is one subscription.

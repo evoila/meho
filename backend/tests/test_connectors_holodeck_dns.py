@@ -276,7 +276,12 @@ class _FakeRouter:
         assert [step["op"] for step in payload] == ["test", "replace"]
         assert all(step["path"] == "/data/hosts" for step in payload)
         if payload[0]["value"] != self.data["hosts"]:
-            return "", "The request is invalid: test operation failed", 1
+            # The API server answers a failed "test" step with its generic
+            # 422 text only.
+            return "", (
+                "The request is invalid: the server rejected our request due to "
+                "an error in our request\n"
+            ), 1
         self.data["hosts"] = payload[1]["value"]
         return "configmap/dnsmasq patched\n", "", 0
 
@@ -429,11 +434,24 @@ async def test_add_never_overwrites_a_change_made_in_between() -> None:
     router = _FakeRouter()
     router.change_before_patch = _HOSTS + "192.0.2.20 someone-else.example.test\n"
     result = await _call(router, "dns_host_add", _NEW)
-    assert result["error"].startswith("write:")
+    assert result["error"] == (
+        "conflict: the hosts list changed since MEHO read it; nothing was written; "
+        "run the op again"
+    )
     assert result["changed"] is False
     assert result["restarted"] is False
     assert "someone-else" in router.data["hosts"]
     assert "appliance01" not in router.data["hosts"]
+
+
+@pytest.mark.asyncio
+async def test_add_keeps_the_router_text_when_the_patch_fails_otherwise() -> None:
+    router = _FakeRouter()
+    router.raise_on["kubectl patch"] = ConnectionError("connection lost")
+    result = await _call(router, "dns_host_add", _NEW)
+    assert result["error"] == "write: connection lost"
+    assert result["changed"] is False
+    assert router.data["hosts"] == _HOSTS
 
 
 @pytest.mark.asyncio

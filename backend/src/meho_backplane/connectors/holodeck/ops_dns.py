@@ -205,6 +205,15 @@ async def _check_all(
     return [await _check_pod(router, p, entry, expect_present) for p in pods]
 
 
+async def _hosts_changed(router: _Router, hosts: str) -> bool:
+    """Return True when the live ``hosts`` value is no longer *hosts*."""
+    try:
+        now = await router.read_configmap()
+    except HolodeckDnsError:
+        return False
+    return bool(now["hosts"] != hosts)
+
+
 async def _write_hosts(
     router: _Router, before: dict[str, Any], new_hosts: str, result: dict[str, Any]
 ) -> None:
@@ -223,10 +232,21 @@ async def _write_hosts(
             {"op": "replace", "path": "/data/hosts", "value": new_hosts},
         ]
     )
-    await router.step(
-        f"kubectl patch configmap dnsmasq -n default --type json -p {shlex.quote(patch)}",
-        "write",
-    )
+    try:
+        await router.step(
+            f"kubectl patch configmap dnsmasq -n default --type json -p {shlex.quote(patch)}",
+            "write",
+        )
+    except HolodeckDnsError as exc:
+        # A failed JSON Patch "test" step only gives the API server's generic
+        # 422 text, so read again to tell the caller what happened.
+        if await _hosts_changed(router, before["hosts"]):
+            raise HolodeckDnsError(
+                "conflict",
+                "the hosts list changed since MEHO read it; nothing was written; "
+                "run the op again",
+            ) from exc
+        raise
     result["changed"] = True
     after = await router.read_configmap()
     result["lines_after"] = len(parse_hosts(after["hosts"]))

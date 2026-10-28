@@ -554,7 +554,11 @@ Each write runs these steps and stops at the first failure (the answer's
 4. `write` — `kubectl patch configmap dnsmasq -n default --type json -p
    <patch>`. The JSON Patch has two steps: `test` that `/data/hosts` still
    holds the value MEHO read, then `replace` it. A change made by someone else
-   in between makes the patch fail; nothing is overwritten. The patch is
+   in between makes the patch fail; nothing is overwritten. The API server
+   answers a failed `test` step with a generic 422 text only, so on a failed
+   patch MEHO reads the ConfigMap again. When `hosts` changed, the error is
+   `conflict: the hosts list changed since MEHO read it; nothing was written;
+   run the op again`. Otherwise the router's text is kept. The patch is
    built with `json.dumps` and passed as one `shlex.quote`-d argument. It
    carries the whole `hosts` value, so a very large file would hit the
    command-line length limit.

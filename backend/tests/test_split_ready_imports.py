@@ -45,9 +45,17 @@ LEAVING_FOLDERS: frozenset[str] = frozenset(
     }
 )
 
+#: Shared VMware folders that leave with the connector folders. They are
+#: new, so they may not exist yet, and ``test_leaving_folders_exist`` does
+#: not check them. The scan skips them like the folders above.
+LEAVING_SHARED_FOLDERS: frozenset[str] = frozenset({"vmware_shared"})
+
+_ALL_LEAVING: frozenset[str] = LEAVING_FOLDERS | LEAVING_SHARED_FOLDERS
+
 #: Public modules that still import a leaving folder today, as paths under
 #: ``meho_backplane/``. The Task that moves the VMware-only modules out of
-#: ``connectors/_shared/`` (#5273) empties this list.
+#: ``connectors/_shared/`` (#5273) moves this file away. Once both changes
+#: are on main, empty this list.
 KNOWN_EXCEPTIONS: frozenset[str] = frozenset(
     {
         "connectors/_shared/vcfa_session.py",
@@ -97,7 +105,7 @@ def _leaving_folder(module: str) -> str | None:
     """The leaving folder *module* belongs to, else ``None``."""
     parts = module.split(".")
     if len(parts) >= 3 and parts[0] == _PACKAGE_NAME and parts[1] == "connectors":
-        return parts[2] if parts[2] in LEAVING_FOLDERS else None
+        return parts[2] if parts[2] in _ALL_LEAVING else None
     return None
 
 
@@ -117,7 +125,7 @@ def _public_modules() -> list[Path]:
     modules = []
     for path in sorted(_PACKAGE_ROOT.rglob("*.py")):
         rel = path.relative_to(_PACKAGE_ROOT).parts
-        if len(rel) >= 2 and rel[0] == "connectors" and rel[1] in LEAVING_FOLDERS:
+        if len(rel) >= 2 and rel[0] == "connectors" and rel[1] in _ALL_LEAVING:
             continue
         modules.append(path)
     return modules
@@ -176,6 +184,7 @@ def test_guard_catches_each_import_form() -> None:
         "from meho_backplane.connectors import salt": True,
         "from ..connectors.nsx import connector": True,
         "def f():\n    from meho_backplane.connectors.vro import x\n": True,
+        "from meho_backplane.connectors.vmware_shared.vcfa_session import x": True,
         "from meho_backplane.connectors._shared.soap_fault import parse_soap_fault": False,
         "from meho_backplane.connectors import vault": False,
         "from meho_backplane.connectors.vrops_like import x": False,

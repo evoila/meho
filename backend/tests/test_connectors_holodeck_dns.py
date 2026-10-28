@@ -479,6 +479,20 @@ async def test_add_reports_not_verified_when_dig_is_missing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_add_keeps_the_answer_when_ssh_fails_during_the_checks() -> None:
+    router = _FakeRouter()
+    router.raise_on["dig "] = ConnectionError("connection lost")
+    result = await _call(router, "dns_host_add", _NEW)
+    assert result["error"] is None, result
+    assert result["state"] == "added"
+    assert result["changed"] is True
+    assert result["backup_path"] in router.files
+    assert result["verified"] is False
+    assert result["checks"][0]["ok"] is False
+    assert result["checks"][0]["error"] == "dig could not run: connection lost"
+
+
+@pytest.mark.asyncio
 async def test_remove_then_remove_again_is_absent() -> None:
     router = _FakeRouter(_HOSTS + "192.0.2.10 appliance01.example.test\n")
     result = await _call(router, "dns_host_remove", _NEW)

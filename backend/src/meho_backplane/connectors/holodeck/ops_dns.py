@@ -185,8 +185,12 @@ async def _check_pod(
         return {**result, "ok": False, "error": "pod has no IP address yet"}
     rtype = "AAAA" if ":" in address else "A"
     base = f"dig +short +time=2 +tries=1 @{shlex.quote(server)}"
-    forward = await router.run(f"{base} {shlex.quote(name)} {rtype}")
-    reverse = await router.run(f"{base} -x {shlex.quote(address)}")
+    try:
+        forward = await router.run(f"{base} {shlex.quote(name)} {rtype}")
+        reverse = await router.run(f"{base} -x {shlex.quote(address)}")
+    except Exception as exc:
+        # The change is already made; keep the answer and report the check.
+        return {**result, "ok": False, "error": f"dig could not run: {_run_failure(exc)}"}
     result["forward"] = dig_answers(forward["stdout"])
     result["reverse"] = [a.rstrip(".").lower() for a in dig_answers(reverse["stdout"])]
     if forward["exit_status"] != 0 or reverse["exit_status"] != 0:

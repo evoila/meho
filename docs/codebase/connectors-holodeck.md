@@ -581,8 +581,9 @@ Each write runs these steps and stops at the first failure (the answer's
    `dig +short @<pod ip> <name> A|AAAA` and `dig +short @<pod ip> -x
    <address>`. `verified` is true when every pod answers as expected (the
    pair present after an add, absent after a remove). `dig` must be on the
-   router; when it is missing or fails, `verified` is false and the change
-   stays.
+   router; when it is missing or fails, or the SSH call for it fails,
+   `verified` is false, the check's `error` says why, and the change stays.
+   The answer still carries `state` and `backup_path`.
 
 `holodeck.k8s.exec` stays read-only; these ops do not widen it.
 

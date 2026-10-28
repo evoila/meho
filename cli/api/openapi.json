@@ -8914,6 +8914,16 @@
               "nullable": true,
               "title": "Authorization"
             }
+          },
+          {
+            "name": "X-MEHO-Runner-Wire-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Wire-Version"
+            }
           }
         ],
         "responses": {
@@ -8969,6 +8979,16 @@
               "type": "string",
               "nullable": true,
               "title": "Authorization"
+            }
+          },
+          {
+            "name": "X-MEHO-Runner-Wire-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Wire-Version"
             }
           }
         ],
@@ -9076,7 +9096,7 @@
           "checks"
         ],
         "summary": "Get Assignment",
-        "description": "Return runner *runner*'s versioned assignment (runner-authenticated).\n\nA runner may fetch only its own assignment\n(:func:`assert_runner_scope`). ``known_version`` matching the current\ncontent digest yields ``304 Not Modified`` (empty body); the runner\nkeeps its cache.",
+        "description": "Return runner *runner*'s versioned assignment (runner-authenticated).\n\nA runner may fetch only its own assignment\n(:func:`assert_runner_scope`). A runner on another wire version gets a\n409 that names both versions. ``known_version`` matching the current\ncontent digest yields ``304 Not Modified`` (empty body); the runner\nkeeps its cache.",
         "operationId": "get_assignment_api_v1_checks_assignment_get",
         "parameters": [
           {
@@ -9107,6 +9127,16 @@
               "type": "string",
               "nullable": true,
               "title": "Authorization"
+            }
+          },
+          {
+            "name": "X-MEHO-Runner-Wire-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Wire-Version"
             }
           }
         ],
@@ -9151,6 +9181,16 @@
               "type": "string",
               "nullable": true,
               "title": "Authorization"
+            }
+          },
+          {
+            "name": "X-MEHO-Runner-Wire-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Wire-Version"
             }
           }
         ],
@@ -33799,6 +33839,11 @@
             "format": "date-time",
             "nullable": true,
             "title": "Last Seen At"
+          },
+          "wire_version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Wire Version"
           }
         },
         "type": "object",

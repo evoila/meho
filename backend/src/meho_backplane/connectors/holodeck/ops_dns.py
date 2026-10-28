@@ -256,8 +256,7 @@ async def _write_hosts(
         if await _hosts_changed(router, before["hosts"]):
             raise HolodeckDnsError(
                 "conflict",
-                "the hosts list changed since MEHO read it; nothing was written; "
-                "run the op again",
+                "the hosts list changed since MEHO read it; nothing was written; run the op again",
             ) from exc
         raise
     result["changed"] = True

@@ -279,10 +279,14 @@ class _FakeRouter:
         if payload[0]["value"] != self.data["hosts"]:
             # The API server answers a failed "test" step with its generic
             # 422 text only.
-            return "", (
-                "The request is invalid: the server rejected our request due to "
-                "an error in our request\n"
-            ), 1
+            return (
+                "",
+                (
+                    "The request is invalid: the server rejected our request due to "
+                    "an error in our request\n"
+                ),
+                1,
+            )
         self.data["hosts"] = payload[1]["value"]
         return "configmap/dnsmasq patched\n", "", 0
 
@@ -436,8 +440,7 @@ async def test_add_never_overwrites_a_change_made_in_between() -> None:
     router.change_before_patch = _HOSTS + "192.0.2.20 someone-else.example.test\n"
     result = await _call(router, "dns_host_add", _NEW)
     assert result["error"] == (
-        "conflict: the hosts list changed since MEHO read it; nothing was written; "
-        "run the op again"
+        "conflict: the hosts list changed since MEHO read it; nothing was written; run the op again"
     )
     assert result["changed"] is False
     assert result["restarted"] is False

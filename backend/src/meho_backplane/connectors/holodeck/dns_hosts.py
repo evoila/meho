@@ -53,10 +53,11 @@ def bound_dns_entry(params: dict[str, Any]) -> tuple[str, str]:
     """Return ``(address, name)`` in canonical form, or raise.
 
     ``address`` must be an IPv4 or IPv6 address (not unspecified, not
-    multicast, no IPv6 zone id such as ``%eth0``); it is returned in :mod:`ipaddress` canonical form. ``name``
-    must be a DNS name of letters, digits and ``-`` labels joined by
-    ``.``, at most 253 characters, no trailing dot; it is returned in lower
-    case (dnsmasq compares names without case).
+    multicast, no IPv6 zone id such as ``%eth0``); it is returned in
+    :mod:`ipaddress` canonical form. ``name`` must be a DNS name of letters,
+    digits and ``-`` labels joined by ``.``, at most 253 characters, no
+    trailing dot; it is returned in lower case (dnsmasq compares names
+    without case).
     """
     raw_address = params.get("address")
     raw_name = params.get("name")

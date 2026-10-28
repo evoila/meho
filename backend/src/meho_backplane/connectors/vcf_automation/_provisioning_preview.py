@@ -25,8 +25,11 @@ generic params echo, so the bespoke builder is their only preview;
 
 ``vcfa.tenant.deployment.delete`` also has a builder here: it reads the
 deployment once so the approver sees its name and project, not only an id.
-``vcfa.provider.role.delete`` reads the role once so the approver sees
-``would: "delete"`` or ``would: "unchanged"`` (no such role).
+``vcfa.provider.role.delete`` reads the role once, with the same rules as
+the call, so the approver sees ``would: "delete"``, ``"unchanged"`` (no
+such role), ``"refuse_built_in"`` (a ``readOnly`` role) or
+``"refuse_ambiguous_name"`` (several roles match the name only
+case-insensitively).
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ import httpx
 
 from meho_backplane.connectors.vcf_automation._lookups import (
     find_global_role,
+    find_global_role_to_delete,
     find_org,
     find_org_user,
     find_project,
@@ -102,14 +106,36 @@ async def _role_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
 
 
 async def _role_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Read the role the way the call does, so the card and the call agree."""
     name = ctx.params.get("name")
     if not isinstance(name, str):
         return None
-    # The existence read answers "create" when the role is missing, which for a
-    # delete means nothing will happen.
-    found = await _existence(ctx, lambda c: find_global_role(c, ctx.target, ctx.operator, name))
-    would = {"create": "unchanged", "unchanged": "delete"}.get(found["would"], "delete_if_present")
-    return {"action": "delete_global_role", "name": name, **found, "would": would}
+    preview: dict[str, Any] = {
+        "action": "delete_global_role",
+        "name": name,
+        "would": "delete_if_present",
+        "exists": None,
+        "existing_id": None,
+    }
+    connector: Any = ctx.connector_instance
+    if connector is None:
+        return preview
+    try:
+        role, problem = await find_global_role_to_delete(connector, ctx.target, ctx.operator, name)
+    except (httpx.HTTPError, RuntimeError, ValueError, KeyError):
+        return preview
+    if problem is not None:
+        return {**preview, "would": "refuse_ambiguous_name", "reason": problem}
+    if role is None:
+        return {**preview, "would": "unchanged", "exists": False}
+    preview = {**preview, "exists": True, "existing_id": role.get("id")}
+    if role.get("readOnly") is True:
+        return {
+            **preview,
+            "would": "refuse_built_in",
+            "reason": f"global role {name!r} is built in and cannot be deleted",
+        }
+    return {**preview, "would": "delete"}
 
 
 async def _user_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:

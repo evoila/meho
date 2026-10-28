@@ -11,7 +11,8 @@ respx-mocked appliance and pin:
 * ``vcfa.provider.role.create`` answers ``invalid_request`` for a VM Apps
   org before any write, and names the org's own roles;
 * ``vcfa.provider.role.delete`` answers ``deleted`` / ``unchanged`` /
-  ``invalid_request`` (built-in role) and maps an upstream 4xx;
+  ``invalid_request`` (built-in role, or a name several roles match only
+  by case) and maps an upstream 4xx, and its approval preview agrees;
 * ``vcfa.provider.role.list`` with ``org`` returns a VM Apps org's own roles.
 
 All names are synthetic.
@@ -269,6 +270,83 @@ async def test_role_delete_preview_reads_the_role(vcfa: VcfAutomationConnector) 
     }
     assert (missing["would"], missing["exists"]) == ("unchanged", False)
     assert (offline["would"], offline["exists"]) == ("delete_if_present", None)
+
+
+async def test_role_delete_preview_refuses_a_built_in_role(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    builder = _PREVIEW_BUILDERS["vcfa.provider.role.delete"]
+    target = await resolved_target()
+    built_in = {
+        "id": "urn:vcloud:globalRole:base",
+        "name": "Organization Administrator",
+        "readOnly": True,
+    }
+    ctx = SimpleNamespace(
+        connector_instance=vcfa,
+        operator=OPERATOR,
+        target=target,
+        params={"name": "Organization Administrator"},
+    )
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(_GLOBAL_ROLES).mock(
+            side_effect=by_filter({"name==Organization Administrator": [built_in]})
+        )
+        preview = await builder(ctx)
+    assert preview["would"] == "refuse_built_in", preview
+    assert preview["exists"] is True
+    assert preview["existing_id"] == built_in["id"]
+    assert "built in" in preview["reason"]
+
+
+#: Two roles whose names differ only by case.
+_CASE_TWINS = [
+    _CUSTOM_ROLE,
+    {"id": "urn:vcloud:globalRole:d", "name": "custom org admin", "readOnly": False},
+]
+
+
+async def test_role_delete_picks_the_exact_name_match(vcfa: VcfAutomationConnector) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(_GLOBAL_ROLES).mock(side_effect=by_filter({"name==custom org admin": _CASE_TWINS}))
+        exact = mock.delete(url__regex=r".*/globalRoles/urn%3Avcloud%3AglobalRole%3Ad$").respond(
+            204
+        )
+        other = mock.delete(f"{_GLOBAL_ROLES}/{_CUSTOM_SEG}").respond(204)
+        result = await run("vcfa.provider.role.delete", {"name": "custom org admin"})
+    out = result["result"]
+    assert out["status"] == "deleted", out
+    assert out["role"]["id"] == "urn:vcloud:globalRole:d"
+    assert exact.called
+    assert not other.called
+
+
+async def test_role_delete_refuses_a_name_with_no_single_exact_match(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    builder = _PREVIEW_BUILDERS["vcfa.provider.role.delete"]
+    target = await resolved_target()
+    ctx = SimpleNamespace(
+        connector_instance=vcfa,
+        operator=OPERATOR,
+        target=target,
+        params={"name": "CUSTOM ORG ADMIN"},
+    )
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(_GLOBAL_ROLES).mock(side_effect=by_filter({"name==CUSTOM ORG ADMIN": _CASE_TWINS}))
+        delete = mock.delete(url__regex=r".*/globalRoles/.*").respond(204)
+        result = await run("vcfa.provider.role.delete", {"name": "CUSTOM ORG ADMIN"})
+        preview = await builder(ctx)
+    out = result["result"]
+    assert out["status"] == "invalid_request", out
+    assert out["role"] is None
+    assert "2 global roles" in out["guidance"]
+    assert not delete.called
+    assert preview["would"] == "refuse_ambiguous_name", preview
+    assert preview["reason"] == out["guidance"]
 
 
 # ---------------------------------------------------------------------------

@@ -562,7 +562,8 @@ _ROLE_DELETE = VcfaTypedOp(
     description=(
         "Finds the global role by name and deletes it with DELETE "
         "/cloudapi/1.0.0/globalRoles/{id}. A role that does not exist answers "
-        "'unchanged'. A built-in role is refused and nothing is sent."
+        "'unchanged'. A built-in role is refused and nothing is sent. When several "
+        "roles match the name only by case, the call is refused; use the exact name."
     ),
     parameter_schema={
         "type": "object",

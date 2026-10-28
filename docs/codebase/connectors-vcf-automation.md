@@ -171,8 +171,11 @@ lookups in `_lookups.py`, paths in `_paths.py`, and park-time previews in
   takes one of them. `role.delete` removes a global role nobody needs: a
   missing role (or a `404` on the delete) is `unchanged`, a built-in
   (`readOnly`) role is `invalid_request` with nothing sent, and a refused
-  delete (for example a role users still hold) is a `connector_error`. Its
-  approval card reads the role once (`would: delete | unchanged`).
+  delete (for example a role users still hold) is a `connector_error`. An
+  exact name match wins; when several roles match the name only
+  case-insensitively, the call is `invalid_request` with nothing sent. Its
+  approval card reads the role once with the same rules
+  (`would: delete | unchanged | refuse_built_in | refuse_ambiguous_name`).
 - **Errors.** Upstream 4xx/5xx raise and
   the dispatcher maps them (`connector_error` / `connector_http_403` with
   `upstream_message`); a rejected login is `connector_auth_failed`.

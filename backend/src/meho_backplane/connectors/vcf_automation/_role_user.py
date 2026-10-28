@@ -35,6 +35,7 @@ from meho_backplane.connectors.vcf_automation._lookups import (
     entity_ref,
     find_by_field,
     find_global_role,
+    find_global_role_to_delete,
     find_org,
     find_org_user,
     list_all,
@@ -399,7 +400,9 @@ async def provider_role_delete(
 ) -> dict[str, Any]:
     """``vcfa.provider.role.delete`` — ``DELETE /cloudapi/1.0.0/globalRoles/{id}``.
 
-    Resolves the role by name first. A missing role (or a ``404`` on the
+    Resolves the role by name first. An exact name match wins; when
+    several roles match the name only case-insensitively, the call answers
+    ``invalid_request`` and nothing is sent. A missing role (or a ``404`` on the
     delete) answers ``unchanged``, so a second run is safe. A built-in
     (``readOnly``) role answers ``invalid_request`` and nothing is sent. A
     role the appliance will not delete (for example one that users still
@@ -407,7 +410,9 @@ async def provider_role_delete(
     ``connector_error``.
     """
     name = params["name"]
-    role = await find_global_role(connector, target, operator, name)
+    role, problem = await find_global_role_to_delete(connector, target, operator, name)
+    if problem is not None:
+        return {"status": "invalid_request", "role": None, "guidance": problem}
     unchanged = {
         "status": "unchanged",
         "role": None,

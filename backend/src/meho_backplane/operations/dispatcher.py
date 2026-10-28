@@ -2345,6 +2345,25 @@ def _result_digest_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, 
     return None
 
 
+def _result_document_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, Any] | None:
+    """Extract ``result_document`` from a descriptor's ``llm_instructions``.
+
+    An op whose whole result other operations load by its handle (the
+    migration inventory reads) attaches ``{"always": true}`` under
+    ``llm_instructions.result_document``; the reducer then keeps the payload
+    as a document record whatever its size. A plain dict is returned, as for
+    the other hints; the reducer validates it. ``None`` when the op did not
+    register the hint.
+    """
+    instructions = descriptor.llm_instructions
+    if not isinstance(instructions, dict):
+        return None
+    raw = instructions.get("result_document")
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
 async def _unavailable_delivery_result(
     *,
     op_id: str,
@@ -2554,6 +2573,9 @@ def _build_reducer_context(
     result_digest = _result_digest_from_descriptor(descriptor)
     if result_digest is not None:
         reducer_context["result_digest"] = result_digest
+    result_document = _result_document_from_descriptor(descriptor)
+    if result_document is not None:
+        reducer_context["result_document"] = result_document
     return reducer_context
 
 

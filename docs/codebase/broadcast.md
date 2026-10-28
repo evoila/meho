@@ -326,10 +326,21 @@ fail-loud for the same reason — a Valkey wobble must not silently let a
 principal bypass the cap. See `broadcast/rate_limit.py`.
 
 The four-step broadcast discipline (check `meho_broadcast_recent` →
-announce `start` → `update` → `completion`) is seeded into every MCP
+announce `start` → `update` → `completion`) is seeded into the MCP
 session preamble as a static band (`BROADCAST_DISCIPLINE_BAND` in
 `conventions/preamble.py`, #2546) so agents receive it without relying
 on the optional consumer onboarding template.
+
+The band goes only to a session that can use it (#4113).
+`_session_instructions` in `mcp/server.py` checks the session's tool
+list with `all_tools_for` (the same filter `tools/list` uses). If
+`meho_broadcast_announce` is not on it, the assembler is called with
+`include_broadcast=False` and the band is left out. The broadcast tools
+need the `operator` role, so a `read_only` session gets no broadcast
+band. The band also tells the agent to skip a step when its client does
+not offer the tool, because MEHO cannot see tools the client hides. The
+conventions write path keeps the default (`include_broadcast=True`), so
+its result does not change.
 
 ### Read path (SSE and UI history)
 

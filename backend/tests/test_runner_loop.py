@@ -147,3 +147,83 @@ async def test_wire_version_refusal_runs_nothing_and_logs_both_versions(tmp_path
     assert event["error"] == refusal
     assert f"runner wire version {wire.SCHEMA_VERSION}" in event["error"]
     assert "central MEHO needs 2" in event["error"]
+
+
+async def test_wire_version_refusal_while_draining_spool_keeps_results_and_runs_nothing(
+    tmp_path: Path,
+) -> None:
+    """A refused spool re-post ends the tick: the file stays, the cache is dropped (#5020)."""
+    calls: list[str] = []
+    refusal = wire.wire_version_mismatch_message(wire.SCHEMA_VERSION, "2")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(409, json={"detail": refusal})
+
+    spool = ResultSpool(tmp_path, max_files=100)
+    spool.write_batch(wire.RunnerResultBatch(runner_id="r1", results=[]))
+    state = RunnerState(
+        assignment=_assignment(9, version="cached-v"), assignment_version="cached-v"
+    )
+    with capture_logs() as logs:
+        await _run_tick(handler, spool, state)
+
+    # The refused re-post was the only call: no fetch, and the cached work did not run.
+    assert calls == ["/api/v1/checks/results"]
+    assert len(spool.load_oldest_first()) == 1
+    assert state.assignment is None
+    assert state.assignment_version is None
+    (event,) = [e for e in logs if e["event"] == "runner_wire_version_mismatch"]
+    assert event["error"] == refusal
+
+
+async def test_wire_version_refusal_on_result_post_spools_and_drops_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused result post keeps the results in the spool and drops the cache (#5020).
+
+    On the next tick the uplink is down for the fetch. Before the fix the
+    runner would have run the cached work then; now it runs nothing.
+    """
+    monkeypatch.setenv("MEHO_NETDIAG_PROBE_ALLOWLIST", "127.0.0.1")
+    calls: list[str] = []
+    refusal = wire.wire_version_mismatch_message(wire.SCHEMA_VERSION, "2")
+    spool = ResultSpool(tmp_path, max_files=100)
+    state = RunnerState()
+
+    async with _loopback_listener() as port:
+        assignment_json = _assignment(port, version="v1").model_dump(mode="json")
+
+        def first_tick(request: httpx.Request) -> httpx.Response:
+            calls.append(request.url.path)
+            if request.url.path.endswith("/assignment"):
+                return httpx.Response(200, json=assignment_json)
+            return httpx.Response(409, json={"detail": refusal})
+
+        with capture_logs() as logs:
+            await _run_tick(first_tick, spool, state)
+
+    assert calls == ["/api/v1/checks/assignment", "/api/v1/checks/results"]
+    spooled = spool.load_oldest_first()
+    assert len(spooled) == 1
+    assert spooled[0][1].results[0].status == "ok"
+    assert state.assignment is None
+    assert state.assignment_version is None
+    assert [e["event"] for e in logs if "wire_version" in e["event"]] == [
+        "runner_wire_version_mismatch"
+    ]
+
+    calls.clear()
+
+    def second_tick(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path.endswith("/assignment"):
+            raise httpx.ConnectError("uplink down")
+        return httpx.Response(409, json={"detail": refusal})
+
+    await _run_tick(second_tick, spool, state)
+
+    # Only the refused spool re-post: no fetch, nothing executed, results kept.
+    assert calls == ["/api/v1/checks/results"]
+    assert len(spool.load_oldest_first()) == 1
+    assert state.assignment is None

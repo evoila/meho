@@ -13,12 +13,15 @@ dispatch used the old credential until the login expired. These tests pin:
   failing hook does not stop the others;
 * ``PATCH /api/v1/targets/{name}`` runs the drop when a connection field is
   sent, and not otherwise;
+* the drop runs once more after the transaction commits, so a login kept
+  between the PATCH and the commit is dropped too;
 * end to end: after a PATCH to a narrower credential, the next GitHub call
   uses the new credential.
 """
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -29,12 +32,18 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from meho_backplane.api.v1.targets import (
+    _AFTER_COMMIT_DROP_TASKS,
+    _drop_kept_logins_on_connection_change,
+)
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.github import GitHubPATCredentials, GitHubRestConnector
 from meho_backplane.connectors.keycloak.connector import KeycloakConnector, _CachedToken
 from meho_backplane.connectors.vcf_automation.connector import VcfAutomationConnector
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations._handler_resolve import (
     _CONNECTOR_INSTANCE_CACHE,
     forget_target_in_connectors,
@@ -270,6 +279,28 @@ async def test_patch_of_notes_only_keeps_the_login(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert recorder.calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_drop_runs_again_after_the_commit() -> None:
+    """A login kept between the change and the commit is dropped after the commit."""
+    row = await _insert_target(name="gh", product="github", secret_ref=_WIDE_REF)
+    conn = GitHubRestConnector()
+    _CONNECTOR_INSTANCE_CACHE[GitHubRestConnector] = conn
+    key = target_cache_key(row)
+
+    async with get_sessionmaker()() as session:
+        t = await session.get(TargetORM, row.id)
+        assert t is not None
+        t.secret_ref = _NARROW_REF
+        await _drop_kept_logins_on_connection_change(session, t, {"secret_ref": _NARROW_REF})
+        # A dispatch that read the old row before the commit keeps a login
+        # made with the old secret.
+        conn._pat_tokens[key] = "pat-wide-scope"
+        await session.commit()
+
+    await asyncio.gather(*_AFTER_COMMIT_DROP_TASKS)
+    assert key not in conn._pat_tokens
 
 
 @pytest.mark.asyncio

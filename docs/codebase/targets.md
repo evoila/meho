@@ -65,11 +65,15 @@ Limits:
 - The kept logins live in each backplane process. The drop runs only
   in the process that served the PATCH. Other replicas, and satellite
   runners, keep their logins until they expire.
-- The drop runs before the request's transaction commits. The handler
-  does not commit on its own, because the UI import calls it for many
-  targets in one transaction. A dispatch that reads the target in that
-  short time, or one that was already logging in, can still keep a
-  login made with the old values.
+- The handler does not commit on its own: the request's session
+  commits after the response is sent, and the UI import calls it for
+  many targets in one transaction. So the drop runs twice: once in the
+  handler, and once more after the commit, from a one-time SQLAlchemy
+  `after_commit` listener on `session.sync_session`
+  (`_drop_again_after_commit`). The second drop catches a login kept by
+  a dispatch that read the old row before the commit. A login that
+  started before the change and finishes after the second drop can
+  still be kept.
 - A connector with no hook keeps its login until it expires. The
   pooled HTTP client is not affected: its key already includes the
   host, port, scheme and TLS settings.

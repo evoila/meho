@@ -1295,6 +1295,16 @@ class Target(Base):
     # backfill. The dispatch path that consumes it lives in
     # :mod:`meho_backplane.connectors.adapters.http`.
     tls_server_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Per-target secret field names (#3711): ``{connector_field: source_field}``.
+    # When a connector reads field ``X`` from the target's secret, the
+    # credential reader returns the secret's ``map.get(X, X)`` field instead.
+    # Field names only, never a value. ``NULL`` means no map. Added by
+    # migration ``0118``; nullable, so no backfill.
+    secret_field_map: Mapped[dict[str, str] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
     extras: Mapped[dict[str, object]] = mapped_column(
         _PORTABLE_JSON,
         nullable=False,

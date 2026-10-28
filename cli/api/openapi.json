@@ -33003,6 +33003,13 @@
             "nullable": true,
             "title": "Tls Server Name"
           },
+          "secret_field_map": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Secret Field Map"
+          },
           "extras": {
             "additionalProperties": true,
             "type": "object",
@@ -35804,6 +35811,13 @@
             "nullable": true,
             "title": "Tls Server Name"
           },
+          "secret_field_map": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Secret Field Map"
+          },
           "extras": {
             "additionalProperties": true,
             "type": "object",
@@ -35989,6 +36003,20 @@
             "nullable": true,
             "title": "Tls Server Name"
           },
+          "secret_field_map": {
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "propertyNames": {
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "type": "object",
+            "maxProperties": 50,
+            "title": "Secret Field Map"
+          },
           "extras": {
             "additionalProperties": true,
             "type": "object",
@@ -36116,6 +36144,13 @@
             "nullable": true,
             "title": "Tls Server Name"
           },
+          "secret_field_map": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Secret Field Map"
+          },
           "fingerprint": {
             "additionalProperties": true,
             "type": "object",
@@ -36240,6 +36275,22 @@
             "maxLength": 512,
             "nullable": true,
             "title": "Tls Server Name"
+          },
+          "secret_field_map": {
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1,
+              "nullable": true
+            },
+            "propertyNames": {
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "type": "object",
+            "maxProperties": 50,
+            "nullable": true,
+            "title": "Secret Field Map"
           },
           "extras": {
             "additionalProperties": true,

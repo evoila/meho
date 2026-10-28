@@ -47,10 +47,17 @@ from __future__ import annotations
 import ssl
 from collections.abc import Mapping
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.targets.ssrf_guard import assert_public_destination
@@ -59,7 +66,9 @@ if TYPE_CHECKING:
     from meho_backplane.db.models import Target as TargetORM
 
 __all__ = [
+    "SECRET_FIELD_MAP_MAX_ENTRIES",
     "AuthModel",
+    "SecretFieldName",
     "Target",
     "TargetCreate",
     "TargetListResponse",
@@ -68,6 +77,16 @@ __all__ = [
     "project_target_to_summary",
     "validate_ca_pin_pem",
 ]
+
+#: One field name in a ``secret_field_map`` (#3711): a key in the target's
+#: secret. Names only, never a value.
+SecretFieldName = Annotated[
+    str, StringConstraints(min_length=1, max_length=200, strip_whitespace=True)
+]
+
+#: Most entries one ``secret_field_map`` may hold. A connector reads a
+#: handful of fields, so this is a sanity bound, not a real limit.
+SECRET_FIELD_MAP_MAX_ENTRIES = 50
 
 
 def validate_ca_pin_pem(value: str | None) -> str | None:
@@ -173,6 +192,9 @@ class TargetSummary(BaseModel):
     # production projections pass it through
     # :func:`project_target_to_summary`.
     tls_server_name: str | None = None
+    # #3711. Secret field names map (see :class:`Target`); listed so the list
+    # row doesn't silently mask the detail field (api-shape-conventions §5).
+    secret_field_map: Mapping[str, str] = Field(default_factory=dict)
     fingerprint: Mapping[str, Any] | None
     preferred_impl_id: str | None
     # #3272. Per-target capture tri-state (see :class:`Target`); listed so the
@@ -283,6 +305,11 @@ class Target(BaseModel):
     # Defaults to ``None`` so legacy hand-constructed instances stay
     # valid; production read paths go through :func:`_to_full`.
     tls_server_name: str | None = None
+    # #3711. ``{connector_field: source_field}``: when a connector reads field
+    # ``X`` from the target's secret, the credential reader returns the
+    # secret's ``map.get(X, X)`` field. Field names only, never a value.
+    # Empty = no map (read every field by its own name, as before).
+    secret_field_map: Mapping[str, str] = Field(default_factory=dict)
     extras: Mapping[str, Any]
     notes: str | None
     fingerprint: Mapping[str, Any] | None
@@ -364,6 +391,12 @@ class TargetCreate(BaseModel):
     # ``host`` (a hostname/FQDN, not a URL). No mutual-exclusion validator
     # -- it composes cleanly with ``verify_tls`` / ``tls_ca_pin``.
     tls_server_name: str | None = Field(default=None, max_length=512)
+    # #3711. Optional ``{connector_field: source_field}`` map so an existing
+    # secret whose keys differ from the ones the connector reads can back
+    # the target. Field names only.
+    secret_field_map: dict[SecretFieldName, SecretFieldName] = Field(
+        default_factory=dict, max_length=SECRET_FIELD_MAP_MAX_ENTRIES
+    )
     extras: dict[str, Any] = Field(default_factory=dict)
     notes: str | None = None
     preferred_impl_id: str | None = Field(default=None, max_length=200)
@@ -497,6 +530,12 @@ class TargetUpdate(BaseModel):
     # mutual-exclusion validator -- orthogonal to ``verify_tls`` /
     # ``tls_ca_pin``.
     tls_server_name: str | None = Field(default=None, max_length=512)
+    # #3711. Entries are merged into the stored map: a string value adds or
+    # replaces that entry, a ``null`` value removes it. An explicit
+    # ``{"secret_field_map": null}`` clears the whole map. Absent = untouched.
+    secret_field_map: dict[SecretFieldName, SecretFieldName | None] | None = Field(
+        default=None, max_length=SECRET_FIELD_MAP_MAX_ENTRIES
+    )
     extras: dict[str, Any] | None = None
     notes: str | None = None
     preferred_impl_id: str | None = Field(default=None, max_length=200)
@@ -590,6 +629,7 @@ def project_target_to_summary(t: TargetORM) -> TargetSummary:
         verify_tls=t.verify_tls,
         tls_ca_pin=t.tls_ca_pin,
         tls_server_name=t.tls_server_name,
+        secret_field_map=t.secret_field_map or {},
         fingerprint=t.fingerprint,
         preferred_impl_id=t.preferred_impl_id,
         flight_recorder_capture=t.flight_recorder_capture,

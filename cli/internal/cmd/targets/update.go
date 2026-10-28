@@ -30,6 +30,7 @@ var clearableFields = map[string]string{
 	"tls-server-name": "tls_server_name",
 	"preferred-impl":  "preferred_impl_id",
 	"note":            "notes",
+	"secret-field":    "secret_field_map",
 }
 
 // emptyableFields maps the `--clear` values for the two collection
@@ -61,6 +62,7 @@ type updateFlags struct {
 	preferredImpl string
 	note          string
 	extras        []string
+	secretFields  []string
 	clear         []string
 }
 
@@ -73,6 +75,7 @@ type updateFlags struct {
 //	  [--secret-ref <ref>] [--auth-model <m>] [--verify-tls=false] \
 //	  [--tls-ca-pin <pin>] [--tls-server-name <sni>] \
 //	  [--preferred-impl <id>] [--note <n>] [--extra key=value ...] \
+//	  [--secret-field <connector_field>=<source_field> ...] \
 //	  [--clear <field> ...] [--json] [--backplane <url>]
 //
 // It sends one PATCH /api/v1/targets/{name} (TargetUpdate). Only the
@@ -105,6 +108,11 @@ func newUpdateCmd() *cobra.Command {
 			"`--clear secret-ref --extra scheme=http` turns a target into " +
 			"a plain-HTTP target with no credential, and `--clear alias` " +
 			"removes every alias.\n\n" +
+			"`--secret-field <connector_field>=<source_field>` (repeatable) " +
+			"adds or replaces one entry of the target's secret field map and " +
+			"keeps the other entries. `--secret-field <connector_field>=` " +
+			"(nothing after `=`) removes that entry, and `--clear " +
+			"secret-field` removes the whole map.\n\n" +
 			"All validation is server-side; a 422 body is printed as is. " +
 			"On success the updated target is shown in the same shape as " +
 			"`meho targets describe` (use `--json` for the raw Target).",
@@ -149,6 +157,8 @@ func registerUpdateFlags(cmd *cobra.Command, f *updateFlags) {
 	fs.StringVar(&f.note, "note", "", "free-form operator note stored on the target")
 	fs.StringArrayVar(&f.extras, "extra", nil,
 		"key=value for the target's extras map, e.g. scheme=http (repeatable; replaces the whole map)")
+	fs.StringArrayVar(&f.secretFields, "secret-field", nil,
+		"connector_field=source_field to add or replace in the secret field map; connector_field= removes it (repeatable)")
 	fs.StringArrayVar(&f.clear, "clear", nil,
 		"field to remove (repeatable; sends null, or an empty list for alias and an empty map for extra): "+
 			strings.Join(clearableFieldNames(), ", "))
@@ -188,6 +198,13 @@ func buildUpdateBody(cmd *cobra.Command, f *updateFlags) (map[string]any, *outpu
 			return nil, perr
 		}
 		body["extras"] = parsed
+	}
+	if fs.Changed("secret-field") {
+		parsed, perr := parseSecretFieldFlags(f.secretFields, true)
+		if perr != nil {
+			return nil, perr
+		}
+		body["secret_field_map"] = parsed
 	}
 	for _, name := range f.clear {
 		field, value, ok := clearValue(name)

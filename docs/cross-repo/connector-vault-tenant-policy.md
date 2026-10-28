@@ -86,6 +86,12 @@ Notes:
   Vault forbids it, and it is what keeps one tenant's rendered path from
   matching another's
   ([policy templating constraints](https://developer.hashicorp.com/vault/docs/concepts/policies)).
+- **`k8s.secret.read_to_ref` writes to the tenant subtree.** The op writes a
+  kubeconfig to `secret/data/tenants/<id>/<register_as>`. Of the three
+  policies, only `meho-tenant-admin` grants `create` + `update` there.
+  The person who calls the op and the person who approves it both need
+  the grant
+  ([`connector-vault-policy.md`](./connector-vault-policy.md) §6.5).
 
 ## 2. The three policy bodies
 

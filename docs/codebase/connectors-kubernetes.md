@@ -681,6 +681,15 @@ Vault role. If the identity lacks `create` + `update`, MEHO refuses the
 park with `write_capability_denied` (#3542) and nobody approves a write
 that would fail.
 
+**Vault grant it needs (#3843).** The write path is fixed. It must stay
+`tenants/<tenant_id>/<register_as>`: the tenant-scope guard refuses a
+write outside the tenant subtree, and `targets create` without a
+`secret_ref` reads this path. Of the per-tenant policies, only
+`meho-tenant-admin` grants `create` + `update` there. The caller and the
+approver both need it. The deploy steps are in
+[`connector-vault-policy.md`](../cross-repo/connector-vault-policy.md)
+§6.5.
+
 **Supervisor case: no server rewrite (corpus-verified).** A VKS guest
 kubeconfig's `clusters[].cluster.server` already points at the guest
 cluster's own LoadBalancer API-server VIP and is used as-is, so **no**

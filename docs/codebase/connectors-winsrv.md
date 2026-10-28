@@ -34,7 +34,7 @@ marks the cmdlet surface (stable across Windows Server 2019 → 2025).
 
 Source: `backend/src/meho_backplane/connectors/winsrv/`.
 
-## Op surface (23 ops across six groups)
+## Op surface (25 ops across seven groups)
 
 Safety tier is a reach decision per the Initiative #3259 satellite table: reads
 = `safe` (ride satellite runners); recoverable writes = `caution` (satellite-
@@ -67,6 +67,21 @@ central-dial / on-site only).
 | `winsrv.storage.iscsi.list` | safe | no | `Get-IscsiTarget` |
 | `winsrv.storage.iscsi.connect` | caution | no | `Connect-IscsiTarget` |
 | `winsrv.storage.disk.format` | caution | no | `Initialize-Disk` + `New-Partition` + `Format-Volume` |
+| `winsrv.time.get` | safe | no | W32Time registry (`NtpServer`, `Type`, `AnnounceFlags`) + `w32tm /query /source` |
+| `winsrv.time.set` | caution | **yes** | `w32tm /config /manualpeerlist:<peers> /syncfromflags:manual [/reliable:yes\|no] /update` |
+
+### Time source (`time` group)
+
+`winsrv.time.set` sets the NTP servers a server takes its time from. On the
+first domain controller of a forest this is the time source of the whole
+domain, so a build sets it, usually with `reliable: true`. The call waits for a
+person to approve it and is safe to run twice. Each peer must be a host name or
+IPv4 address with an optional `,0x<flags>` suffix (for example `,0x8`), so no
+peer can hold a space, a quote or a PowerShell sign. `w32tm` is a program, not
+a cmdlet: the script checks `$LASTEXITCODE` and throws when it is not 0. Both
+ops return the settings read from the registry, the peers as a list, a
+`reliable` flag (AnnounceFlags bit `0x4`) and the current source. The source
+can take a minute to change after a set.
 
 The four `dangerous` ops (`power.reboot`, `power.shutdown`, `localuser.delete`,
 `feature.remove`) are `requires_approval=True` — a dispatch parks at

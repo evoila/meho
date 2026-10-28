@@ -158,7 +158,7 @@ def test_connector_id_triple_round_trips() -> None:
 
 def test_op_surface_ids_and_safety_tiers() -> None:
     by_id = {op.op_id: op for op in WINSRV_OPS}
-    assert len(by_id) == 23
+    assert len(by_id) == 25
     safe = {k for k, v in by_id.items() if v.safety_level == "safe"}
     caution = {k for k, v in by_id.items() if v.safety_level == "caution"}
     dangerous = {k for k, v in by_id.items() if v.safety_level == "dangerous"}
@@ -171,8 +171,10 @@ def test_op_surface_ids_and_safety_tiers() -> None:
         # blast-radius preview is required at this tier).
         "winsrv.feature.remove",
     }
-    # Every dangerous op requires approval; nothing else does.
-    assert {k for k, v in by_id.items() if v.requires_approval} == dangerous
+    # Every dangerous op requires approval, and so does the time-source change.
+    assert {k for k, v in by_id.items() if v.requires_approval} == dangerous | {"winsrv.time.set"}
+    assert "winsrv.time.set" in caution
+    assert "winsrv.time.get" in safe
     assert "winsrv.feature.install" in caution
     assert "winsrv.feature.remove" not in caution
     assert "winsrv.storage.disk.format" in caution
@@ -181,7 +183,15 @@ def test_op_surface_ids_and_safety_tiers() -> None:
 
 def test_every_group_has_a_curated_when_to_use() -> None:
     groups = {op.group_key for op in WINSRV_OPS}
-    assert groups == {"system", "services", "features", "power", "localusers", "storage"}
+    assert groups == {
+        "system",
+        "services",
+        "features",
+        "power",
+        "localusers",
+        "storage",
+        "time",
+    }
     assert groups <= set(WINSRV_WHEN_TO_USE_BY_GROUP)
 
 

@@ -173,7 +173,7 @@ def _company_realm(password: str, broker_secret: str) -> dict[str, Any]:
             {
                 "username": _PERSON,
                 "enabled": True,
-                "email": "jane@company.example.test",
+                "email": "jane@example.com",
                 "emailVerified": True,
                 "firstName": "Jane",
                 "lastName": "Doe",

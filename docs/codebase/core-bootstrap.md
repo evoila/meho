@@ -1,4 +1,4 @@
-# Core bootstrap Job — the realm stage finishes the built-in Keycloak (#4043)
+# Core bootstrap Job — the realm stage finishes the built-in Keycloak (#4043, #4592)
 
 ## Overview
 
@@ -22,6 +22,8 @@ today, the realm stage, finishes the Keycloak realm `meho`:
   account. Every later run logs in as `meho-admin`.
 - When `coreKeycloak.ci.enabled` is on, it also makes a login for automated
   install proofs.
+- When `coreKeycloak.companyLogin.enabled` is on, it puts the company login
+  system in front of Keycloak (see "The company login" below).
 
 What is true after the Job ran:
 
@@ -82,6 +84,80 @@ log in with (`meho-cli`, `meho-mcp`, `meho-web`), the same way as the
 
 Turn it on only on a test install: it is a login with fixed admin claims.
 
+## The company login (off by default)
+
+A site connects its company login system (an OpenID Connect server such as
+authentik, Entra ID, Okta or ADFS) with the values in
+`coreKeycloak.companyLogin`. People then log in on the company login page,
+with its own second login step, and come back with a MEHO token from
+Keycloak. MEHO still trusts only Keycloak, so the backplane needs no change.
+Service accounts stay in Keycloak.
+
+Keycloak's identity broker does the work. The company login sends people
+back to `https://<host>/auth/realms/meho/broker/<alias>/endpoint`; the
+install notes print this address. On every install and upgrade the realm
+stage (`core/company_login.py`, `ensure_company_login`) does this, in order:
+
+1. **Groups.** Every MEHO group named in `groupMap` must exist; otherwise
+   the Job stops before it changes anything.
+2. **Provider.** Keycloak reads the discovery document itself
+   (`POST identity-provider/import-config` with `fromUrl`), so it uses its
+   own trusted CAs, including `caBundle`. The stage refuses a company login
+   that publishes no signing keys (`jwks_uri`). It then creates or updates
+   one OpenID Connect provider: PKCE S256, signature check with the
+   published keys, sync mode FORCE, "trust email" off, the first-login flow
+   `first broker login` (Keycloak's default, so a company user is never
+   linked to a local account without proof), the scopes from `scopes`, and
+   the client secret in `client_secret_post` form. Keycloak never returns
+   the secret, so the stage sends it on every run; a new value in the
+   Secret reaches Keycloak at the next `helm upgrade`. If the discovery
+   document cannot be read but the provider exists with the same discovery
+   address, the saved addresses stay, so an upgrade that turns
+   `autoRedirect` off works while the company login is down.
+3. **Group rules.** One "Advanced Claim to Group" mapper
+   (`oidc-advanced-group-idp-mapper`, sync mode FORCE) per `groupMap` line,
+   named `meho-group-<company group>`. It puts the person into the MEHO
+   group when the `groupsClaim` field holds the company group. With FORCE,
+   Keycloak checks again at every company login and takes the person out of
+   a group that no longer matches. A changed line updates its mapper; a
+   mapper with the `meho-group-` prefix that is no longer listed is
+   removed. Other mappers stay.
+4. **Auto-redirect.** With `autoRedirect: true`, the "Identity Provider
+   Redirector" step of the realm's browser login flow gets the company
+   login as its default (config alias `meho-company-login-redirect`), so
+   Keycloak never shows its own login page. With `false`, that default is
+   removed and the Keycloak login form shows again: the way in with the
+   local accounts when the company login is down.
+
+What is not done:
+
+- Turning `companyLogin.enabled` off does not remove the provider. The
+  stage then does not touch the company login at all.
+- A removal from a company group takes effect at the person's next company
+  login. A running login, and an offline login, keep working until they
+  end or an admin signs the person out in Keycloak.
+- A person in two role groups gets an unpredictable role; keep one company
+  group per person.
+
+The client secret comes into the Job as `MEHO_COMPANY_LOGIN_CLIENT_SECRET`
+by `secretKeyRef` from `companyLogin.clientSecret`. It is never in the plan,
+the chart or the output. `companyLogin.caBundle` mounts a ConfigMap into the
+Keycloak pod and sets `KC_TRUSTSTORE_PATHS`; Keycloak keeps trusting the
+usual public CAs too. The Keycloak NetworkPolicy limits only incoming
+traffic, so Keycloak can call the company login.
+
+**Rights.** Setting up the provider needs `manage-identity-providers`; the
+redirect step needs `manage-realm`. The realm file gives both to
+`meho-admin`'s service account, because Keycloak does not let an account
+give itself a role it does not have. This also means the backplane, which
+uses `meho-admin`, can change login settings of realm `meho`; it could
+already change people and groups with `manage-users`. An install made with
+an older realm file lacks the two roles; with the company login on, its Job
+stops with a sentence that names them. Add them once to the service account
+of `meho-admin` (realm-management client roles), with a Keycloak admin
+login or a temporary one from Keycloak's `bootstrap-admin` recovery
+command, then run `helm upgrade` again.
+
 ## Key types and files
 
 - `backend/src/meho_backplane/core/bootstrap.py` — the entry point,
@@ -102,6 +178,9 @@ Turn it on only on a test install: it is a login with fixed admin claims.
   stage uses (tests run it against a fake); `RealmStageError`.
   - `KubernetesSecretStore.read_data` (in `core/secrets.py`) — reads the
     values of a `<release>-core-*` Secret.
+- `backend/src/meho_backplane/core/company_login.py` — the company login:
+  `CompanyLoginPlan` (the `company_login` part of the plan, only rendered
+  when on) and `ensure_company_login`.
 - `deploy/charts/meho/templates/core-bootstrap-job.yaml` — the Job.
 - `deploy/charts/meho/templates/_core-bootstrap.tpl` — the plan.
 - `deploy/charts/meho/charts/keycloak/files/meho-realm.json` — the realm
@@ -132,6 +211,7 @@ Steps of the realm stage, in order:
    one. Nothing is deleted, and an existing group, mapper or scope is not
    changed.
 4. **CI login**, when on.
+   Then the **company login**, when on (see "The company login").
 5. **First login.** Read `<release>-core-first-login`; make it when missing
    (create only; "already exists" means another run won). Make each person
    that does not exist. The person and their group memberships are one
@@ -143,8 +223,9 @@ Steps of the realm stage, in order:
    account's client in realm `master`. If `meho-admin` cannot log in, the
    first-start account stays and the Job stops.
 
-Rights: `meho-admin` has `manage-clients` and `manage-users` on realm
-`meho` (from the realm file), which covers steps 3 to 5. Only the
+Rights: `meho-admin` has `manage-clients`, `manage-users`,
+`manage-identity-providers` and `manage-realm` on realm `meho` (from the
+realm file), which covers steps 3 to 5. Only the
 first-start account can do step 6, and only it is needed there.
 
 ### Network rules
@@ -201,7 +282,11 @@ when nothing is missing. The Secrets it makes carry only the label
 - A fresh install on kind that proves `meho login` end to end is the CI
   job of #4051, which does not exist yet. The realm stage is tested
   against a real Keycloak in
-  `backend/tests/integration/test_core_bootstrap_keycloak.py`.
+  `backend/tests/integration/test_core_bootstrap_keycloak.py`. The company
+  login is tested there too, in
+  `backend/tests/integration/test_core_company_login_keycloak.py`: a second
+  realm in the same Keycloak plays the company login, and a browser login
+  through it gives the right token fields.
 
 ## References
 
@@ -213,3 +298,7 @@ when nothing is missing. The Secrets it makes carry only the label
 - Keycloak bootstrap admin accounts:
   https://www.keycloak.org/server/bootstrap-admin-recovery
 - Keycloak Admin REST API: https://www.keycloak.org/docs-api/latest/rest-api/index.html
+- Keycloak identity brokering, sync mode, Identity Provider Redirector:
+  https://www.keycloak.org/docs/latest/server_admin/index.html
+- Keycloak trusted CAs (`truststore-paths`):
+  https://www.keycloak.org/server/keycloak-truststore

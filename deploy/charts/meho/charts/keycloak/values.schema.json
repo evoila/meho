@@ -211,6 +211,68 @@
         }
       }
     },
+    "companyLogin": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The company login in front of Keycloak, off by default. The parent chart's bootstrap Job sets it up; the subchart mounts `caBundle` when it is set.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "alias": {
+          "type": "string"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "discoveryUrl": {
+          "type": "string"
+        },
+        "clientId": {
+          "type": "string"
+        },
+        "clientSecret": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "secretName": {
+              "type": "string"
+            },
+            "secretKey": {
+              "type": "string"
+            }
+          }
+        },
+        "scopes": {
+          "type": "string"
+        },
+        "groupsClaim": {
+          "type": "string"
+        },
+        "groupMap": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "autoRedirect": {
+          "type": "boolean"
+        },
+        "caBundle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "configMapName": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
     "ingress": {
       "type": "object",
       "additionalProperties": false,

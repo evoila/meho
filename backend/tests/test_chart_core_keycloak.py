@@ -538,3 +538,60 @@ def test_issuer_audience_and_cidr_stay_required_for_bring_your_own() -> None:
     # settings, and the NetworkPolicy reaches the pod by its labels.
     blank = [arg for key in keys[2:] for arg in ("--set", f"{key}=")]
     assert _run(*_ON, *blank).returncode == 0
+
+
+# --- The company login's private CA (#4592) ---------------------------------
+
+_COMPANY_ON = [
+    "--set",
+    "coreKeycloak.companyLogin.enabled=true",
+    "--set",
+    "coreKeycloak.companyLogin.discoveryUrl=https://idp.test/.well-known/openid-configuration",
+    "--set",
+    "coreKeycloak.companyLogin.clientId=meho-keycloak",
+    "--set",
+    "coreKeycloak.companyLogin.clientSecret.secretName=company-login",
+]
+
+
+def test_company_login_ca_bundle_is_mounted_as_the_truststore() -> None:
+    pod = _pod(
+        _keycloak_docs(
+            *_COMPANY_ON,
+            "--set",
+            "coreKeycloak.companyLogin.caBundle.configMapName=company-ca",
+            "--set",
+            "coreKeycloak.companyLogin.caBundle.key=root.pem",
+        )
+    )
+    (container,) = pod["containers"]
+    assert _env(container)["KC_TRUSTSTORE_PATHS"]["value"] == (
+        "/opt/keycloak/conf/company-login-ca/root.pem"
+    )
+    mount = next(m for m in container["volumeMounts"] if m["name"] == "company-login-ca")
+    assert mount == {
+        "name": "company-login-ca",
+        "mountPath": "/opt/keycloak/conf/company-login-ca",
+        "readOnly": True,
+    }
+    volume = next(v for v in pod["volumes"] if v["name"] == "company-login-ca")
+    assert volume["configMap"] == {
+        "name": "company-ca",
+        "items": [{"key": "root.pem", "path": "root.pem"}],
+    }
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        [],
+        _COMPANY_ON,
+        ["--set", "coreKeycloak.companyLogin.caBundle.configMapName=company-ca"],
+    ],
+    ids=["off", "on-without-ca", "ca-but-off"],
+)
+def test_no_truststore_without_a_ca_bundle_or_with_the_login_off(extra: list[str]) -> None:
+    pod = _pod(_keycloak_docs(*extra))
+    (container,) = pod["containers"]
+    assert "KC_TRUSTSTORE_PATHS" not in _env(container)
+    assert [v["name"] for v in pod["volumes"]] == ["realm"]

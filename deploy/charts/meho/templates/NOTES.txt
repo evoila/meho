@@ -88,6 +88,17 @@ First login (built-in Keycloak):
   (keys: admin_username, admin_password, approver_username, approver_password)
   Then log in with `meho login https://{{ .Values.coreKeycloak.hostname }}` or open https://{{ .Values.coreKeycloak.hostname }}/ui/.
   Keycloak asks for a new password, a name and an email at the first login.
+{{- if .Values.coreKeycloak.companyLogin.enabled }}
+
+Company login (built-in Keycloak):
+  In the company login system, set this redirect address on the client {{ .Values.coreKeycloak.companyLogin.clientId }}:
+       https://{{ .Values.coreKeycloak.hostname }}/auth/realms/meho/broker/{{ .Values.coreKeycloak.companyLogin.alias }}/endpoint
+  People in a company group listed in coreKeycloak.companyLogin.groupMap get that MEHO group at every company login.
+{{- if .Values.coreKeycloak.companyLogin.autoRedirect }}
+  Keycloak sends everyone straight to the company login. To use the local accounts above
+  (for example when the company login is down), set coreKeycloak.companyLogin.autoRedirect=false and run helm upgrade.
+{{- end }}
+{{- end }}
 {{- end }}
 {{- if and .Values.checkRunner.enabled (eq .Values.config.credentialBackend "vault") }}
 

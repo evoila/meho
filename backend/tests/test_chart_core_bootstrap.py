@@ -306,3 +306,98 @@ def test_bad_values_fail_at_render(extra: list[str], message: str) -> None:
     result = _run(*_CORE_ON, *extra)
     assert result.returncode != 0
     assert message in result.stderr, result.stderr
+
+
+# --- The company login (#4592) -----------------------------------------------
+
+_DISCOVERY = "https://idp.test/application/o/meho/.well-known/openid-configuration"
+_COMPANY_ON = [
+    "--set",
+    "coreKeycloak.companyLogin.enabled=true",
+    "--set",
+    f"coreKeycloak.companyLogin.discoveryUrl={_DISCOVERY}",
+    "--set",
+    "coreKeycloak.companyLogin.clientId=meho-keycloak",
+    "--set",
+    "coreKeycloak.companyLogin.clientSecret.secretName=company-login",
+]
+
+
+def test_company_login_off_adds_nothing_to_the_job() -> None:
+    job = _job(_render(*_CORE_ON))
+    assert job is not None
+    env = _env(job)
+    assert "MEHO_COMPANY_LOGIN_CLIENT_SECRET" not in env
+    raw = env["MEHO_CORE_KEYCLOAK_PLAN"]["value"]
+    assert "company_login" not in raw
+    assert Plan.model_validate_json(raw).company_login.enabled is False
+
+
+def test_company_login_plan_and_secret_by_reference() -> None:
+    job = _job(
+        _render(
+            *_CORE_ON,
+            *_COMPANY_ON,
+            "--set",
+            "coreKeycloak.companyLogin.clientSecret.secretKey=secret",
+            "--set",
+            "coreKeycloak.companyLogin.groupMap.Ops=MEHO-Operators",
+            "--set",
+            "coreKeycloak.companyLogin.groupMap.Readers=MEHO-Readers",
+            "--set",
+            "coreKeycloak.companyLogin.autoRedirect=false",
+        )
+    )
+    assert job is not None
+    env = _env(job)
+    assert env["MEHO_COMPANY_LOGIN_CLIENT_SECRET"] == {
+        "name": "MEHO_COMPANY_LOGIN_CLIENT_SECRET",
+        "valueFrom": {"secretKeyRef": {"name": "company-login", "key": "secret"}},
+    }
+    plan = Plan.model_validate_json(env["MEHO_CORE_KEYCLOAK_PLAN"]["value"]).company_login
+    assert plan.enabled is True
+    assert plan.alias == "company"
+    assert plan.display_name == "Company login"
+    assert plan.discovery_url == _DISCOVERY
+    assert plan.client_id == "meho-keycloak"
+    assert plan.scopes == "openid profile email"
+    assert plan.groups_claim == "groups"
+    assert plan.group_map == {"Ops": "MEHO-Operators", "Readers": "MEHO-Readers"}
+    assert plan.auto_redirect is False
+
+
+def test_notes_print_the_redirect_address_for_the_company_login() -> None:
+    notes = (_CHART_DIR / "templates" / "NOTES.txt").read_text(encoding="utf-8")
+    block = notes[notes.index("Company login (built-in Keycloak)") :]
+    assert (
+        "https://{{ .Values.coreKeycloak.hostname }}/auth/realms/meho/broker/"
+        "{{ .Values.coreKeycloak.companyLogin.alias }}/endpoint"
+    ) in block
+    assert "autoRedirect=false" in block
+    head = notes[: notes.index("Company login (built-in Keycloak)")]
+    assert head.rstrip().endswith("{{- if .Values.coreKeycloak.companyLogin.enabled }}")
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (["--set", "coreKeycloak.companyLogin.enabled=true"], "discoveryUrl"),
+        (
+            [*_COMPANY_ON, "--set", "coreKeycloak.companyLogin.clientSecret.secretName="],
+            "secretName",
+        ),
+        ([*_COMPANY_ON, "--set", "coreKeycloak.companyLogin.clientId="], "clientId"),
+        (
+            [*_COMPANY_ON, "--set", "coreKeycloak.companyLogin.discoveryUrl=http://idp.test/x"],
+            "discoveryUrl",
+        ),
+        ([*_COMPANY_ON, "--set", "coreKeycloak.companyLogin.alias=a b"], "alias"),
+        ([*_COMPANY_ON, "--set", "coreKeycloak.companyLogin.scopes=profile email"], "scopes"),
+        ([*_COMPANY_ON, "--set", "coreKeycloak.companyLogin.other=x"], "other"),
+    ],
+    ids=["needs-url", "needs-secret", "needs-client", "https-only", "alias", "openid", "unknown"],
+)
+def test_bad_company_login_values_fail_at_render(extra: list[str], message: str) -> None:
+    result = _run(*_CORE_ON, *extra)
+    assert result.returncode != 0
+    assert message in result.stderr, result.stderr

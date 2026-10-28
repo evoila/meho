@@ -79,6 +79,16 @@ spec:
                 secretKeyRef:
                   name: {{ printf "%s-core-check-runner" .Release.Name }}
                   key: client_secret
+            {{- with .Values.coreKeycloak.companyLogin }}
+            {{- if .enabled }}
+            # The company login's client secret (#4592), set on the provider.
+            - name: MEHO_COMPANY_LOGIN_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .clientSecret.secretName }}
+                  key: {{ .clientSecret.secretKey }}
+            {{- end }}
+            {{- end }}
             # The first-start account. Optional: once it is removed, the
             # Job logs in as meho-admin, and the Secret may go.
             - name: MEHO_CORE_BOOTSTRAP_CLIENT_ID

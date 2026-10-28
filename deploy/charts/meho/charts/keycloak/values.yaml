@@ -119,6 +119,27 @@ ci:
   # -- The second tenant's id (a UUID). Required when `enabled` is true.
   tenantId: ""
 
+# -- The company login in front of Keycloak. Set it under the parent's
+# `coreKeycloak.companyLogin` block, where every key is described. The
+# parent chart's bootstrap Job sets up the login; this subchart only mounts
+# `caBundle` into Keycloak (`KC_TRUSTSTORE_PATHS`) when it is set.
+companyLogin:
+  enabled: false
+  alias: company
+  displayName: Company login
+  discoveryUrl: ""
+  clientId: ""
+  clientSecret:
+    secretName: ""
+    secretKey: client_secret
+  scopes: openid profile email
+  groupsClaim: groups
+  groupMap: {}
+  autoRedirect: true
+  caBundle:
+    configMapName: ""
+    key: ca.crt
+
 ingress:
   # -- The parent chart's Ingress routes only `/auth/realms/meho` and
   # `/auth/resources` on the MEHO host to Keycloak. Set true to also route

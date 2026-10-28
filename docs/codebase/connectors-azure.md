@@ -554,7 +554,8 @@ Files: `automation.py` (group text, guidance for the AI, operation table, and
 `AutomationOps`, a class whose methods `AzureConnector` takes over as one of
 its base classes), `automation_reads.py` (name checks, row shapes and the
 operation bodies), `automation_schemas.py` (name rules, parameter and
-response schemas). The paths are in the `automation` section of `_paths.py`.
+response schemas), `automation_trace.py` (what the trace keeps of an
+answer). The paths are in the `automation` section of `_paths.py`.
 
 ### Operations
 
@@ -595,6 +596,13 @@ secrets. No operation reads them:
 - Azure's job list has no error text or output (`exception` and
   `statusDetails` are only in the answer for one job), so
   `azure.automation.job.list` has none either.
+- The trace (the flight recorder's record of each call) leaves these fields
+  out too. Its shared filter finds secrets by their shape only, and a
+  parameter value or a signed link can have any shape. So every Automation
+  list is read through `TraceMaskingCaller` (`automation_trace.py`): the
+  trace gets Azure's answer with `parameters`, `publishContentLink` and
+  `draft` in each row replaced by a fixed text. A test switches the recorder
+  on and checks the spans.
 
 Names, descriptions, `last_modified_by` and `started_by` are text from Azure.
 MEHO copies them as data and never puts them into a path or a filter. The
@@ -644,11 +652,12 @@ Every read returns:
  "omissions": {"count": 0, "items": [{"what": "...", "reason": "...", "detail": "..."}]}}
 ```
 
-The job list also returns `window` and `status_filter`. `reason` is a
-paging limit (`page_limit`, `time_limit`, `row_limit`) or, for the schedule
-links, an error (`no_permission`, `not_found`, `provider_not_registered`,
-`throttled`, `read_failed`). `detail` is MEHO's own text; Azure's message is
-never copied into it.
+The job list also returns `window` and `status_filter`. `truncated` is
+true when something is missing from the answer: rows, or the runbook links
+of the schedules. `reason` is a paging limit (`page_limit`, `time_limit`,
+`row_limit`) or, for the schedule links, an error (`no_permission`,
+`not_found`, `provider_not_registered`, `throttled`, `read_failed`).
+`detail` is MEHO's own text; Azure's message is never copied into it.
 
 A list over 50 rows or 4 KB comes back as a link to the stored result. The
 reducer keeps scalar values such as `truncated` next to the link, but not

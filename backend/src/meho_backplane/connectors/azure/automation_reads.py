@@ -24,8 +24,11 @@ limits.
 Only the fields of the rows below are copied from Azure's answers. Runbook
 content links, runbook and job schedule parameters, job output and the
 account's hybrid worker URL are never read, because they can hold secrets.
-Names and descriptions from Azure are copied as data; they never go into a
-path or a filter.
+Every list is read through
+:class:`~meho_backplane.connectors.azure.automation_trace.TraceMaskingCaller`,
+so the flight recorder's trace leaves those fields out too. Names and
+descriptions from Azure are copied as data; they never go into a path or a
+filter.
 """
 
 from __future__ import annotations
@@ -33,7 +36,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import httpx
 
@@ -62,6 +65,7 @@ from meho_backplane.connectors.azure.automation_schemas import (
     MAX_JOB_DAYS,
     RESOURCE_GROUP_PATTERN,
 )
+from meho_backplane.connectors.azure.automation_trace import TraceMaskingCaller
 from meho_backplane.connectors.azure.session import AzureTargetLike, resolve_target_config
 
 if TYPE_CHECKING:
@@ -373,7 +377,8 @@ class _Reader:
     def __init__(
         self, connector: AzureConnector, operator: Operator, target: AzureTargetLike
     ) -> None:
-        self.connector = connector
+        # send() sees the connector through the caller, so the trace masks secrets.
+        self.caller = cast("AzureConnector", TraceMaskingCaller(connector))
         self.operator = operator
         self.target = target
         self.subscription_id = resolve_target_config(target).subscription_id
@@ -388,7 +393,7 @@ class _Reader:
     ) -> list[Mapping[str, Any]]:
         """Every row of one list. A paging limit becomes an omission; an error is raised."""
         paged = await list_all_pages(
-            self.connector,
+            self.caller,
             self.target,
             path,
             operator=self.operator,

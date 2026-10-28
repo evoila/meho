@@ -171,7 +171,10 @@ _OMISSIONS: Final[dict[str, Any]] = {
 
 _TRUNCATED: Final[dict[str, Any]] = {
     "type": "boolean",
-    "description": "True when rows are missing; omissions says which and why.",
+    "description": (
+        "True when something is missing from the answer (rows, or the runbook links "
+        "of the schedules); omissions says what and why."
+    ),
 }
 
 

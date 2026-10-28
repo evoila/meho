@@ -12,6 +12,7 @@ result reduction with the real result store on a fake Valkey.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta, timezone
@@ -39,6 +40,7 @@ from meho_backplane.connectors.azure.automation_reads import (
     AutomationParameterError,
     account_names,
     job_filter,
+    job_list_impl,
     runbooks_by_schedule,
     schedule_row,
 )
@@ -48,10 +50,12 @@ from meho_backplane.connectors.azure.automation_schemas import (
     RUNBOOK_LIST_RESPONSE,
     SCHEDULE_LIST_RESPONSE,
 )
+from meho_backplane.connectors.azure.automation_trace import LEFT_OUT, masked_answer
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
+from meho_backplane.flight_recorder import capture
 from meho_backplane.jsonflux.query.contract import ResultQuerySpec
 from meho_backplane.operations import dispatch, reset_dispatcher_caches, set_default_reducer
 from meho_backplane.operations._handler_resolve import (
@@ -394,6 +398,59 @@ def test_a_schedule_row_reads_the_days_it_runs_on() -> None:
         "monthly_occurrences": [],
         "runbooks": [],
     }
+
+
+def test_the_trace_answer_leaves_out_every_secret_bearing_field() -> None:
+    answer = httpx.Response(
+        200,
+        json={
+            "value": [
+                _runbook("rb-restart"),
+                _job_schedule(1, "Nightly", "rb-restart"),
+                "not-an-object",
+                {"properties": "not-an-object"},
+            ]
+        },
+    )
+
+    masked = masked_answer(answer)
+
+    text = json.dumps(masked)
+    assert "content-link-must-not-leave" not in text
+    assert DEFAULT_VALUE not in text
+    assert SCHEDULE_PARAMETER not in text
+    runbook, job_schedule = masked["value"][:2]
+    assert runbook["name"] == "rb-restart"
+    assert runbook["properties"]["state"] == "Published"
+    for field in ("parameters", "publishContentLink", "draft"):
+        assert runbook["properties"][field] == LEFT_OUT
+    assert job_schedule["properties"]["parameters"] == LEFT_OUT
+    assert job_schedule["properties"]["schedule"] == {"name": "Nightly"}
+    error = {"error": {"code": "AuthorizationFailed", "message": "Example message."}}
+    assert masked_answer(httpx.Response(403, json=error)) == error
+    assert masked_answer(httpx.Response(502, text="<html>Bad gateway</html>")) is None
+
+
+@pytest.mark.parametrize(
+    "extra", [{"days": 31}, {"days": True}, {"status": "Failed' or 'x' eq 'x"}]
+)
+@pytest.mark.asyncio
+async def test_the_job_body_refuses_a_bad_window_or_status_without_the_schema(
+    extra: dict[str, Any],
+) -> None:
+    """The body checks again, so a caller that skips the schema cannot change the filter."""
+    loader = CountingLoader()
+    connector = AzureConnector(credentials_loader=loader)
+
+    with respx.mock(assert_all_called=False) as mock:
+        login = _login(mock)
+        with pytest.raises(AutomationParameterError):
+            await job_list_impl(
+                connector, operator(), AzureTargetStub(), {**ACCOUNT_PARAMS, **extra}
+            )
+
+    assert not login.called
+    assert loader.calls == 0
 
 
 # ----------------------------------------------------------------------
@@ -801,6 +858,45 @@ async def test_one_login_serves_several_reads(_dispatch_env: ResultHandleStore) 
     assert second.status == "ok", second.error
     assert login.call_count == 1
     assert loader.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_the_trace_keeps_the_answers_without_their_secrets(
+    _dispatch_env: ResultHandleStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the flight recorder on, its spans hold the masked answers, not the secrets."""
+    spans: list[Any] = []
+
+    async def _record_trace(**kwargs: Any) -> None:
+        spans.extend(kwargs["spans"])
+
+    monkeypatch.setattr(capture, "should_capture", AsyncMock(return_value=True))
+    monkeypatch.setattr(capture, "record_trace", _record_trace)
+    await _registered()
+
+    with respx.mock() as mock:
+        _login(mock)
+        _route(mock, f"{ACCOUNT_PATH}/runbooks").mock(return_value=_ok([_runbook("rb-restart")]))
+        _route(mock, f"{ACCOUNT_PATH}/schedules").mock(return_value=_ok([_schedule("Nightly")]))
+        _route(mock, f"{ACCOUNT_PATH}/jobSchedules").mock(
+            return_value=_ok([_job_schedule(1, "Nightly", "rb-restart")])
+        )
+        runbooks = await _dispatch("azure.automation.runbook.list", ACCOUNT_PARAMS)
+        schedules = await _dispatch("azure.automation.schedule.list", ACCOUNT_PARAMS)
+
+    assert runbooks.status == "ok", runbooks.error
+    assert schedules.status == "ok", schedules.error
+    vendor_calls = [span for span in spans if span.span_kind == "vendor_call"]
+    for path in ("/runbooks", "/schedules", "/jobSchedules"):
+        (call,) = [span for span in vendor_calls if span.name.split("?")[0].endswith(path)]
+        assert call.attributes["body_recorded"] is True, path
+    traced = json.dumps([dataclasses.asdict(span) for span in spans], default=str)
+    assert "content-link-must-not-leave" not in traced
+    assert DEFAULT_VALUE not in traced
+    assert SCHEDULE_PARAMETER not in traced
+    assert LEFT_OUT in traced
+    assert "rb-restart" in traced
+    assert "Nightly" in traced
 
 
 def _sixty_rows(mock: respx.MockRouter, op_id: str) -> dict[str, Any]:

@@ -7,7 +7,8 @@ A hosted agent must be able to find out what it may use without being told a
 ``connector_id`` in its prompt. These tests cover:
 
 * ``meho_connector_list`` keeps only the rows in the definition's
-  ``connectors`` allow-list, and keeps every row when there is no list;
+  ``connectors`` allow-list, and keeps every row when there is no list. It
+  drops the other rows before a long list goes behind a handle (#4121);
 * the hosted ``meho_status`` tool returns the MCP health payload without the
   fields that only describe an MCP session, and needs the OPERATOR role;
 * an agent run whose prompt names no connector lists the connectors, finds
@@ -40,10 +41,13 @@ from pydantic_ai.usage import RunUsage
 
 import meho_backplane.api.v1.health as health_api
 import meho_backplane.mcp.tools.connector_admin as connector_admin
+import meho_backplane.operations.jsonflux_reducer as jsonflux_reducer_module
 import meho_backplane.operations.meta_tools as meta_tools
 from meho_backplane.agent import AgentDefinition, PydanticAgentRun
 from meho_backplane.agent.toolset import resolve_agent_tools, resolve_agent_toolset
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.result_handle_store import ResultHandleStore
+from meho_backplane.operations.ingest import ConnectorListItem
 from meho_backplane.settings import get_settings
 
 _TENANT = UUID("11111111-1111-1111-1111-111111111111")
@@ -52,14 +56,36 @@ _LINUX = "linux-ssh-1.x"
 _VAULT = "vault-1.x"
 
 
-class _Row:
-    """Stands in for a ``ConnectorListItem``; the handler only calls ``model_dump``."""
+def _row(connector_id: str) -> ConnectorListItem:
+    product = connector_id.split("-", 1)[0]
+    return ConnectorListItem(
+        connector_id=connector_id,
+        product=product,
+        version="1.x",
+        impl_id=connector_id.removesuffix("-1.x"),
+        tenant_id=None,
+        group_count=1,
+        staged_group_count=0,
+        enabled_group_count=1,
+        disabled_group_count=0,
+        operation_count=3,
+        enabled_operation_count=3,
+        dispatchable=True,
+    )
 
-    def __init__(self, connector_id: str) -> None:
-        self._data = {"connector_id": connector_id, "enabled_operation_count": 3}
 
-    def model_dump(self, *, mode: str) -> dict[str, Any]:
-        return dict(self._data)
+class _MemoryValkey:
+    """Minimal async Valkey shape the :class:`ResultHandleStore` reads and writes."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+
+    async def set(self, name: str, value: Any, ex: int | None = None) -> None:
+        del ex
+        self.values[name] = value if isinstance(value, bytes) else str(value).encode()
+
+    async def get(self, name: str) -> bytes | None:
+        return self.values.get(name)
 
 
 class _Health:
@@ -98,8 +124,8 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 @pytest.fixture
 def _two_connectors(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fake_list(*, operator: Operator, status: Any = None) -> list[_Row]:
-        return [_Row(_LINUX), _Row(_VAULT)]
+    async def _fake_list(*, operator: Operator, status: Any = None) -> list[ConnectorListItem]:
+        return [_row(_LINUX), _row(_VAULT)]
 
     monkeypatch.setattr(connector_admin, "list_ingested_connectors", _fake_list)
 
@@ -143,6 +169,39 @@ async def test_connector_list_with_empty_allow_list_shows_nothing() -> None:
     tool = _single_tool({"meta_tools": ["meho_connector_list"], "connectors": []})
     result = await tool.function(_ctx(_operator()))
     assert result["connectors"] == []
+
+
+async def test_connector_list_filters_before_it_reduces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """60 connectors with one allowed come back inline: the filter runs first (#4121)."""
+    many = [f"svc{i:02d}-1.x" for i in range(60)]
+
+    async def _fake_list(*, operator: Operator, status: Any = None) -> list[ConnectorListItem]:
+        return [_row(connector_id) for connector_id in many]
+
+    monkeypatch.setattr(connector_admin, "list_ingested_connectors", _fake_list)
+    tool = _single_tool({"meta_tools": ["meho_connector_list"], "connectors": [many[7]]})
+    result = await tool.function(_ctx(_operator()))
+    assert "handle" not in result
+    assert [row["connector_id"] for row in result["connectors"]] == [many[7]]
+
+
+async def test_connector_list_without_allow_list_reduces_a_long_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """60 connectors and no allow-list: the hosted tool returns a handle like MCP (#4121)."""
+    store = ResultHandleStore(_MemoryValkey())  # type: ignore[arg-type]
+    monkeypatch.setattr(jsonflux_reducer_module, "get_result_handle_store", lambda: store)
+
+    async def _fake_list(*, operator: Operator, status: Any = None) -> list[ConnectorListItem]:
+        return [_row(f"svc{i:02d}-1.x") for i in range(60)]
+
+    monkeypatch.setattr(connector_admin, "list_ingested_connectors", _fake_list)
+    tool = _single_tool({"meta_tools": ["meho_connector_list"]})
+    result = await tool.function(_ctx(_operator()))
+    assert "connectors" not in result
+    assert result["handle"]["total_rows"] == 60
 
 
 async def test_status_drops_mcp_session_fields(monkeypatch: pytest.MonkeyPatch) -> None:

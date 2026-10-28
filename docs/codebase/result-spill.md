@@ -486,6 +486,32 @@ page spills and reads back through `result_query` like a dispatched
 result. The spill is keyed to the caller even for a cross-tenant
 `platform_admin` listing. See [`targets.md`](targets.md).
 
+### `meho_connector_list` (#4121)
+
+`meho_connector_list` works the same way. Its handler in
+`mcp/tools/connector_admin.py` has two steps:
+
+- `list_connector_rows` reads the connectors and builds the rows. By
+  default each row is short: `connector_id`, `product`, `version`,
+  `status`, `dispatchable`, `scope`. `detail="full"` gives every
+  `ConnectorListItem` field. `product` keeps one product only; empty
+  text means no filter.
+- `reduce_connector_list` runs the rows through `JsonFluxReducer` with
+  `op_id="meho_connector_list"`, the caller's `tenant_id` and
+  `operator_sub`, and a `pagination_hint` that says to narrow with
+  `product`. Over 50 rows or 4 KB, the answer is the summary plus a
+  `handle`.
+
+The short `status` uses the words of the `status` filter (`staged`,
+`enabled`, `disabled`), plus `registered` for a connector with no
+operations yet and `mixed` for one whose groups are partly enabled and
+partly disabled.
+
+A hosted agent run uses the two steps apart: the toolset first drops the
+connectors outside the agent's allow-list, then reduces. So a handle
+never holds a connector the agent may not see. See
+[`agent-runtime.md`](agent-runtime.md).
+
 ## Diagnosis: the RDC cycle-8 `k8s.logs tail=300` finding (#1629)
 
 The consumer reported `k8s.logs tail=300` returning `row_count=300,

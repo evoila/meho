@@ -31,9 +31,11 @@ client polls land in #2499; the long-poll command plane in #2498.
 
 ## Key types
 
-- **`runner.wire`** — the versioned pydantic models shared verbatim with
-  the central endpoints (#2499 imports these; it may widen them here, and
-  must not fork a parallel copy — one codebase, one schema):
+- **`runner.wire`** — the pydantic models shared verbatim with the
+  central endpoints (#2499 imports these; it may widen them here, and
+  must not fork a parallel copy — one codebase, one schema). Their
+  version is `SCHEMA_VERSION` (the wire version); see "Wire version
+  check" below for how both sides use it:
   - `RunnerAssignment` — `assignment_version` (an opaque content digest
     the runner uses only as a cache key; the digest contract is #2499's)
     plus `items`.
@@ -57,9 +59,12 @@ client polls land in #2499; the long-poll command plane in #2498.
   via `get_runner_settings()`; a missing/malformed required var raises
   `RunnerConfigError` naming the variable.
 - **`RunnerClient`** (`runner.client`) — an `httpx.AsyncClient` wrapper
-  for the two calls (`fetch_assignment`, `post_results`). Both raise a
-  single `RunnerClientError` on any transport or non-success status; a
-  `304` fetch returns the `ASSIGNMENT_UNCHANGED` sentinel.
+  for the two calls (`fetch_assignment`, `post_results`). Every request
+  carries the wire version in the `X-MEHO-Runner-Wire-Version` header.
+  Both calls raise `RunnerClientError` on any transport or non-success
+  status, and its subclass `RunnerWireVersionMismatchError` when central
+  refuses the wire version; a `304` fetch returns the
+  `ASSIGNMENT_UNCHANGED` sentinel.
 - **`ResultSpool`** (`runner.spool`) — a directory of un-posted result
   batches, one atomic JSON file per batch, drained oldest-first, bounded
   by `spool_max_files`.
@@ -97,6 +102,14 @@ Each tick (`run_one_tick`):
    uplink is down.
 3. **Execute** each work item through `execute_work_item`.
 4. **Post** the result batch; on POST failure, write it to the spool.
+
+A wire version refusal on any of these calls is different from a down
+uplink: the runner logs `runner_wire_version_mismatch` with both versions,
+drops the cached assignment, and ends the tick. So no cached work runs on
+a later tick while central refuses this runner, even when that later fetch
+fails for another reason. Results not yet sent stay in the spool: a refused
+re-post leaves its file in place, and a refused fresh batch is spooled
+before the tick ends.
 
 `execute_work_item` is fail-closed defence in depth (the real
 authorization boundary is central minting, #2500):
@@ -468,6 +481,44 @@ catches transit tampering and dropped records (chain gaps), **not** a lying edge
 that residual is bounded only by the composition (allowlist × credential TTL) and
 by the un-reported-mint alarm, never by the effect record alone.
 
+## Wire version check (#5020)
+
+The runner is updated on its own schedule, so it can run another MEHO
+version than the central instance. The wire version makes such a gap
+visible instead of letting one side misread the other's messages.
+
+- **What is sent.** The runner sends `runner.wire.SCHEMA_VERSION` on every
+  call in the `X-MEHO-Runner-Wire-Version` request header.
+- **What central checks.** All four runner-plane routes read and check
+  the header through the `auth/runner_guard.py::runner_wire_version`
+  dependency. It runs after the runner token check and **before** FastAPI
+  validates the request body. This order matters: when the other wire
+  version changed a required result field, the body would otherwise fail
+  as an HTTP 422 that names no version, and the runner would never learn
+  why. A missing header counts as version `1` (every runner built before
+  the header existed). A value that is not a short whole number gets
+  HTTP 400 `runner_wire_version_invalid`.
+- **On a mismatch.** The dependency stores the version on the row of the
+  token's own `runner_id` (`runner_principal.wire_version`) and answers
+  HTTP 409. The text names both versions and the side to update, for
+  example `runner_wire_version_mismatch: runner wire version 1, central
+  MEHO needs 2: update the runner`. It does **not** stamp `last_seen_at`,
+  so a runner that cannot do its work does not look alive and the dead-man
+  switch flips its checks to unknown. On a match, `assert_runner_scope`
+  stores the version together with the heartbeat.
+- **On the runner.** `RunnerClient` turns that 409 into
+  `RunnerWireVersionMismatchError` on every call. The tick loop logs it,
+  drops the cached assignment and runs no work, whichever call was refused
+  (see "Each tick" above); results not yet sent stay in the spool.
+- **Where an operator sees it.** `runner_principal.wire_version` (migration
+  `0118`) is the version the runner sent last. `GET
+  /api/v1/runner-principals`, `meho runner-principal list` (column `WIRE`)
+  and the `/ui/runners` page show it; the page marks a version that differs
+  from central's.
+- **Limit.** The check compares only the version number. The models still
+  drop unknown fields without a message (the pydantic default), so any
+  change a runner must not silently ignore needs a `SCHEMA_VERSION` bump.
+
 ## Dead-man switch + mandatory heartbeat (#2501)
 
 A runner that dies, wedges, or loses its network path must not leave its
@@ -542,7 +593,9 @@ badge vocabulary), or `live` — plus a relative `last_seen_at`. It reads
 the same in-process `RunnerPrincipalService.list_` the Bearer
 `GET /api/v1/runner-principals` route uses, joined to the per-runner
 `stale_at` via `gateway/repository.py::get_stale_markers`; liveness is
-rendered from persisted state, never recomputed client-side. To carry the
+rendered from persisted state, never recomputed client-side. A "Wire
+version" column shows the version each runner sent last and marks one
+that differs from central's (#5020). To carry the
 liveness signal off the row, `RunnerPrincipalRead` gained an additive
 `last_seen_at` field (#2589) — every accessor already projects it from the
 ORM row via `from_attributes`, so the CLI `runner-principal list` /

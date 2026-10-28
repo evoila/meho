@@ -110,9 +110,18 @@ func printListTable(w io.Writer, r *api.RunnerPrincipalListResponse) {
 		fmt.Fprintln(w, "no runner principals registered in this tenant")
 		return
 	}
-	fmt.Fprintf(w, "%-32s %-8s %-20s %s\n", "NAME", "REVOKED", "OWNER", "KEYCLOAK CLIENT ID")
+	fmt.Fprintf(w, "%-32s %-8s %-20s %-6s %s\n", "NAME", "REVOKED", "OWNER", "WIRE", "KEYCLOAK CLIENT ID")
 	for _, e := range r.Principals {
-		fmt.Fprintf(w, "%-32s %-8v %-20s %s\n",
-			e.Name, e.Revoked, e.OwnerSub, e.KeycloakClientId)
+		fmt.Fprintf(w, "%-32s %-8v %-20s %-6s %s\n",
+			e.Name, e.Revoked, e.OwnerSub, wireVersionText(e.WireVersion), e.KeycloakClientId)
 	}
+}
+
+// wireVersionText renders the wire version the runner sent last, or "-"
+// when it has not called since the server started to record it.
+func wireVersionText(v *string) string {
+	if v == nil || *v == "" {
+		return "-"
+	}
+	return *v
 }

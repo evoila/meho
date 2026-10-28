@@ -301,6 +301,13 @@ _RESULT_OBJECTS_CONTEXT_KEY = "result_objects"
 #: so a failure never requires a drill-in (the #3084 drivability lesson).
 _RESULT_DIGEST_CONTEXT_KEY = "result_digest"
 
+#: ``context`` key carrying the op's document hint (a plain dict the dispatcher
+#: lifts from ``llm_instructions.result_document``). ``{"always": true}`` keeps
+#: the whole payload as a document record whatever its size, so an op whose
+#: result other operations load by its handle (a migration inventory) always
+#: returns one. Without the hint, a small payload passes through inline.
+_RESULT_DOCUMENT_CONTEXT_KEY = "result_document"
+
 #: Summary keys the reducer itself owns. A hinted scalar key colliding with
 #: one of these is skipped (with a warning) — the reduction bookkeeping is
 #: load-bearing for every consumer and must never be shadowed by a vendor
@@ -471,6 +478,11 @@ class JsonFluxReducer:
         """
         del schema  # schema is inferred from captured rows
 
+        if _always_document(context):
+            # The op asked for a stored document whatever the size: no
+            # collection detection, no inline pass-through of a small payload.
+            return await self._reduce_document(payload, context, always=True)
+
         # Resolve the digest hint once (#3122) so both the collection detection
         # and the row-digest read the same validated spec — a single warning on
         # a malformed hint, not one per consumer.
@@ -521,16 +533,19 @@ class JsonFluxReducer:
         return summary, handle
 
     async def _reduce_document(
-        self, payload: Any, context: dict[str, Any] | None
+        self, payload: Any, context: dict[str, Any] | None, *, always: bool = False
     ) -> tuple[Any, ResultHandle | None]:
         """Keep an oversized non-collection payload whole under a handle (#3633).
 
         Small payloads (at or under the byte threshold) pass through
-        unchanged, as before. Credential-class ops and reduces without an
-        ``op_id`` also pass through unchanged: their payload is never copied
-        into the read-back store by this path. A payload over the admission
-        work limit gets a handle with drill-in unavailable and no copy, the
-        same as an over-limit collection.
+        unchanged, as before, unless *always* is set (the op's
+        ``result_document`` hint): then a small payload is stored too, and
+        passes through inline only when the store did not keep it.
+        Credential-class ops and reduces without an ``op_id`` also pass
+        through unchanged: their payload is never copied into the read-back
+        store by this path. A payload over the admission work limit gets a
+        handle with drill-in unavailable and no copy, the same as an
+        over-limit collection.
 
         Otherwise the whole payload is stored as a document record and the
         caller gets a bounded inline summary: the root type, the serialized
@@ -561,12 +576,16 @@ class JsonFluxReducer:
             return summary, handle
 
         document_bytes = len(_serialize(payload))
-        if document_bytes <= self._byte_threshold:
+        small = document_bytes <= self._byte_threshold
+        if small and not always:
             return payload, None
 
         outline = document_outline(payload)
         field_count = len(payload) if isinstance(payload, dict) else 0
         spill_outcome = await self._spill_document(handle_id, payload, document_bytes, context)
+        if small and spill_outcome.skip_reason is not None:
+            # The store did not keep it; a small result still reaches the caller whole.
+            return payload, None
         summary = {}
         if isinstance(payload, dict):
             summary, omitted = _default_scalar_siblings(payload, None)
@@ -1579,6 +1598,32 @@ def _coerce_state_list(value: Any, context: dict[str, Any] | None, field: str) -
         received_type=type(value).__name__,
     )
     return frozenset()
+
+
+def _always_document(context: dict[str, Any] | None) -> bool:
+    """True when ``context['result_document']`` asks for a document record at any size.
+
+    The connector author registers ``llm_instructions["result_document"] =
+    {"always": true}`` on an op whose whole result other operations load by
+    its handle; the dispatcher forwards it verbatim under
+    :data:`_RESULT_DOCUMENT_CONTEXT_KEY`. A malformed hint logs once and is
+    ignored (the size rule applies), matching the never-raise discipline of
+    the other hints.
+    """
+    if not context:
+        return False
+    raw = context.get(_RESULT_DOCUMENT_CONTEXT_KEY)
+    if raw is None:
+        return False
+    always = raw.get("always") if isinstance(raw, dict) else None
+    if not isinstance(always, bool):
+        _log.warning(
+            "jsonflux_result_document_invalid_shape",
+            op_id=context.get("op_id"),
+            received_type=type(raw).__name__,
+        )
+        return False
+    return always
 
 
 def _resolve_digest_hint(context: dict[str, Any] | None) -> _RowDigestSpec | None:

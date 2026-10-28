@@ -170,6 +170,7 @@ cli/
     ├── api/
     │   ├── client.gen.go      # generated typed client (oapi-codegen v2.5).
     │   ├── client.go          # auth-aware wrapper; NewAuthedClient + GetHealth.
+    │   ├── validation_error.go # HTTPValidationError.UnmarshalJSON: a 422 `detail` may be a string or a list (#5134).
     │   ├── workref.go         # Meho-Work-Ref header + MEHO_WORK_REF env names, work-ref shape check, context helpers (#3804).
     │   └── refresh.go         # lazy 401-retry refresh via x/oauth2.
     ├── auth/
@@ -2729,8 +2730,8 @@ output), `--backplane` (override the configured backplane URL).
 - **Known top-level columns** map 1:1 to the API's `TargetCreate` /
   `TargetUpdate` body fields: `name`, `aliases`, `product`, `host`,
   `port`, `fqdn`, `secret_ref`, `auth_model`, `vpn_required`,
-  `notes`, `preferred_impl_id`, `verify_tls`, `tls_ca_pin`,
-  `tls_server_name`. The list in
+  `notes`, `version`, `preferred_impl_id`, `verify_tls`, `tls_ca_pin`,
+  `tls_server_name`, `flight_recorder_capture`. The list in
   `knownTopLevel` is the canonical reference; the
   Python-side mirror lives in
   `backend/tests/test_api_v1_targets_import.py:_KNOWN_TOP_LEVEL`,
@@ -2756,9 +2757,22 @@ output), `--backplane` (override the configured backplane URL).
   specifically surfaces as `connector_tls_verify_failed` /
   "IP address mismatch" on an appliance reached by IP whose leaf cert
   carries an FQDN-only SAN (#2643).
-- **Every other key** spills into the `extras` JSONB column.
-  Explicit `extras:` blocks in the YAML merge with spilled keys
-  rather than overwriting them.
+- **`version`** is the operator-asserted product version, the same
+  column `meho targets add --version` writes (#3649). It goes at the
+  body root on CREATE and PATCH. The resolver reads it before the
+  first probe, and a versioned, profile-backed connector registers no
+  wildcard entry, so a target without it can neither run an operation
+  nor be probed. `parseTargetsYAML` rejects a non-string value
+  (YAML reads an unquoted `8.0` as the number 8), so the file must
+  quote it.
+- **Every other key** spills into the `extras` JSONB column, and
+  the import prints a warning for each one (`unknown field "<key>":
+  not a target column, stored in extras`). Warnings show in the
+  dry-run plan, in the `--json` plan's `warnings` list, and on stderr
+  before a human-mode apply. Explicit `extras:` blocks in the YAML
+  merge with spilled keys rather than overwriting them, and keys
+  inside them get no warning — that is the way to store a free-form
+  field on purpose.
 
 **Idempotency.** The plan-build phase fetches
 `GET /api/v1/targets` (paginated) and partitions every YAML entry

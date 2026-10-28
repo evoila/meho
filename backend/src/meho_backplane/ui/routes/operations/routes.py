@@ -266,6 +266,11 @@ _MAX_PARAMS_LENGTH: Final[int] = 64 * 1024
 #: meta-tool treats it as an opaque string (no validation, #1657).
 _MAX_WORK_REF_LENGTH: Final[int] = 512
 
+#: Maximum ``preview_hash`` length accepted on the run form. The hash is a
+#: SHA-256 hex string (64 characters) from a prior preview of the same call;
+#: a destructive op needs it to wait for approval (#5015).
+_MAX_PREVIEW_HASH_LENGTH: Final[int] = 128
+
 #: Module-level ``Depends`` closures -- built once (rather than inline) to
 #: satisfy ruff B008, matching the approvals / kb / connectors routers.
 _require_session = Depends(require_ui_session)
@@ -487,6 +492,7 @@ def build_operations_router() -> APIRouter:
         target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
         params: str = Form(default="", max_length=_MAX_PARAMS_LENGTH),
         work_ref: str = Form(default="", max_length=_MAX_WORK_REF_LENGTH),
+        preview_hash: str = Form(default="", max_length=_MAX_PREVIEW_HASH_LENGTH),
     ) -> HTMLResponse:
         """Dispatch the chosen op in-process; render the ``OperationResult`` inline.
 
@@ -499,9 +505,13 @@ def build_operations_router() -> APIRouter:
         (``ok`` / ``error`` / ``denied`` / ``awaiting_approval``); the one
         ``ValueError`` the meta-tool raises (a missing target name) is mapped
         to an inline ``400`` form error so the operator stays in the modal.
+
+        ``preview_hash`` comes from the run window's preview step. A
+        ``destructive`` op needs it, or MEHO refuses to store the approval
+        request (#5015).
         """
         return await _render_call_result(
-            request, session, connector_id, op_id, target, params, work_ref
+            request, session, connector_id, op_id, target, params, work_ref, preview_hash
         )
 
     @router.get("/ui/operations", response_class=HTMLResponse)
@@ -632,9 +642,10 @@ async def _render_drawer(
     #1754). The ``connector_id`` (``<impl_id>-<version>``) is reconstructed
     from the descriptor's natural key so the preview form can post it
     without the operator re-typing it; preview is offered only for an
-    ``source_kind="ingested"`` op (a typed / composite op has no single
-    literal HTTP request to preview, so its envelope would be
-    ``status="unavailable"`` -- the template hides the form for those).
+    ``source_kind="ingested"`` op or a ``destructive`` op. Other typed /
+    composite ops have no single literal HTTP request to preview, so their
+    envelope would be ``status="unavailable"`` -- the template hides the form
+    for those. A destructive typed op gets a synthetic preview (#3198).
     """
     operator = await _resolve_operator(session)
     descriptor = await describe_descriptor(operator, descriptor_id)
@@ -654,8 +665,11 @@ async def _render_drawer(
         # The dispatchable connector id the preview form posts back. The
         # descriptor's natural key round-trips ``parse_connector_id``.
         "connector_id": f"{descriptor.impl_id}-{descriptor.version}",
-        # Preview is meaningful only for an HTTP-ingested op.
-        "previewable": descriptor.source_kind == "ingested",
+        # Preview is meaningful for an HTTP-ingested op and for a
+        # destructive op (the backend builds a synthetic preview for it).
+        "previewable": (
+            descriptor.source_kind == "ingested" or descriptor.safety_level == "destructive"
+        ),
         "csrf_token": csrf_token,
     }
     response = get_templates().TemplateResponse(request, "operations/_drawer.html", context)
@@ -831,7 +845,7 @@ async def _render_run_modal(
 
     The confirm step is UNMISSABLE for any state-changing op: the template
     renders a prominent ``safety_level`` / ``requires_approval`` banner. A
-    ``safety_level != "safe"`` op (caution / dangerous) or a
+    ``safety_level != "safe"`` op (caution / dangerous / destructive) or a
     ``requires_approval`` op gets the warning treatment; the run is still
     OPERATOR-tier (no tenant_admin step), and the policy gate -- not RBAC --
     is what escalates a ``requires_approval`` op to ``awaiting_approval``.
@@ -844,7 +858,7 @@ async def _render_run_modal(
             detail="operation_descriptor_not_found",
         )
     csrf_token = mint_csrf_token(str(session.session_id))
-    # A non-"safe" op (caution / dangerous) OR an op the policy gate would
+    # A non-"safe" op (caution / dangerous / destructive) OR an op the policy gate would
     # route to approval needs the loud confirm treatment. Computed here so
     # the template's banner branch is a single boolean.
     requires_confirmation = descriptor.safety_level != "safe" or descriptor.requires_approval
@@ -869,6 +883,7 @@ async def _render_call_result(
     target: str,
     params: str,
     work_ref: str,
+    preview_hash: str = "",
 ) -> HTMLResponse:
     """Dispatch the op in-process and render the ``OperationResult`` inline (T3).
 
@@ -906,6 +921,12 @@ async def _render_call_result(
     work_ref_value = work_ref.strip()
     if work_ref_value:
         arguments["work_ref"] = work_ref_value
+    # The hash of the preview the run window showed. A destructive op needs it
+    # to wait for approval; the dispatcher checks that it matches this exact
+    # call (#3197). Bound only when set, so other runs stay unchanged.
+    preview_hash_value = preview_hash.strip()
+    if preview_hash_value:
+        arguments["preview_hash"] = preview_hash_value
 
     envelope = await call_operation(operator, arguments)
     # #136: target-resolution failures ride the envelope (``target_required`` /

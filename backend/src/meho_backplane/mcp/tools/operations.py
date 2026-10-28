@@ -561,10 +561,11 @@ register_mcp_tool(
             "`extras.validation_errors` and fix the params shape first. "
             "Arguments: `connector_id` (required), `op_id` (required), "
             "`target` (optional, accepts EITHER a bare string "
-            '`"rdc-vcenter"` -- preferred forward shape, matches '
+            '`"<target-name>"` -- preferred forward shape, matches '
             "`query_topology` / `query_audit` -- OR a dict "
-            '`{"name": "rdc-vcenter"}`; required for ops that act on a '
-            "target), `params` (operation-specific). Returns the full "
+            '`{"name": "<target-name>"}`; required for ops that act on a '
+            "target; use a `name` returned by `list_targets`, do not "
+            "guess), `params` (operation-specific). Returns the full "
             "OperationResult shape. For a long call (a deploy or another "
             "multi-step operation that can take minutes) pass `async: true`: "
             'you get `status="pending"` and `extras.run_id` at once, and the '
@@ -588,14 +589,15 @@ register_mcp_tool(
                 "target": {
                     "type": ["string", "object", "null"],
                     "description": (
-                        "Target reference. Two shapes are accepted; "
-                        "either reduces to the same dispatch:\n"
-                        '  * Bare string -- e.g. `"rdc-vcenter"`. '
+                        "Target reference. Use a `name` returned by "
+                        "`list_targets`. Do not guess. Two shapes are "
+                        "accepted; either reduces to the same dispatch:\n"
+                        '  * Bare string -- e.g. `"<target-name>"`. '
                         "The forward-preferred shape; matches "
                         "`query_topology` / `query_audit` so a target "
                         "name carried across read and write surfaces "
                         "needs no reshape.\n"
-                        '  * Dict -- e.g. `{"name": "rdc-vcenter"}`. '
+                        '  * Dict -- e.g. `{"name": "<target-name>"}`. '
                         "The original shape; supports the optional "
                         "`fqdn` field below for per-call vhost "
                         "override. Use this form when you need the "
@@ -859,8 +861,9 @@ register_mcp_tool(
             "nothing is written. Arguments mirror "
             "`call_operation`: "
             "`connector_id` (required), `op_id` (required), `target` "
-            '(optional; bare string `"rdc-vcenter"` or dict '
-            '`{"name": "rdc-vcenter"}`), `params` (operation-specific).'
+            '(optional; bare string `"<target-name>"` or dict '
+            '`{"name": "<target-name>"}`; use a `name` returned by '
+            "`list_targets`, do not guess), `params` (operation-specific)."
         ),
         inputSchema={
             "type": "object",
@@ -878,9 +881,10 @@ register_mcp_tool(
                 "target": {
                     "type": ["string", "object", "null"],
                     "description": (
-                        "Target reference. Same two shapes as "
-                        '`call_operation`: a bare string `"rdc-vcenter"` '
-                        'or a dict `{"name": "rdc-vcenter"}` (with an '
+                        "Target reference. Use a `name` returned by "
+                        "`list_targets`. Do not guess. Same two shapes as "
+                        '`call_operation`: a bare string `"<target-name>"` '
+                        'or a dict `{"name": "<target-name>"}` (with an '
                         "optional `fqdn` override). Pass null for ops that "
                         "do not act on a target. Resolving the target lets "
                         "the preview reflect the same connector + mount "

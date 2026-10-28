@@ -566,7 +566,9 @@ Each write runs these steps and stops at the first failure (the answer's
    file only at start), then poll `kubectl get pods -n default -o json` until
    all the deployment's pods share one `pod-template-hash` and none is
    shutting down. `rollout status` alone returns while an old pod can still
-   answer with the old file.
+   answer with the old file. The SSH call for `rollout status` gets a 200 s
+   timeout, longer than its own 180 s wait (other steps keep the 30 s SSH
+   default). When the router does not answer in time, `error` says so.
 7. `check` — ask every running dnsmasq pod, by its pod IP, with
    `dig +short @<pod ip> <name> A|AAAA` and `dig +short @<pod ip> -x
    <address>`. `verified` is true when every pod answers as expected (the

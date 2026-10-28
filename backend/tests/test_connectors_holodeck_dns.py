@@ -233,6 +233,10 @@ class _FakeRouter:
         self.commands: list[str] = []
         self.has_dig = has_dig
         self.change_before_patch: str | None = None
+        #: SSH timeout passed per command (None: the SSH layer's default).
+        self.timeouts: dict[str, float | None] = {}
+        #: Command prefix -> exception the SSH call raises instead of running.
+        self.raise_on: dict[str, Exception] = {}
         self._rev = 0
         self.pods: list[dict[str, Any]] = [self._pod()]
 
@@ -314,7 +318,14 @@ class _FakeRouter:
         return "", f"unknown command: {cmd}", 127
 
     def as_run_command(self) -> AsyncMock:
-        async def _run(_target: Any, cmd: str, operator: Any = None) -> Any:
+        async def _run(
+            _target: Any, cmd: str, operator: Any = None, timeout: float | None = None
+        ) -> Any:
+            self.timeouts[cmd] = timeout
+            for prefix, exc in self.raise_on.items():
+                if cmd.startswith(prefix):
+                    self.commands.append(cmd)
+                    raise exc
             stdout, stderr, status = self.handle(cmd)
             proc = MagicMock()
             proc.stdout, proc.stderr, proc.exit_status = stdout, stderr, status
@@ -471,6 +482,32 @@ async def test_wait_fails_when_old_pods_stay() -> None:
     result = await _call(router, "dns_host_add", _NEW)
     assert result["error"].startswith("wait:")
     assert result["changed"] is True
+    assert result["backup_path"]
+
+
+_ROLLOUT_STATUS_PREFIX = "kubectl rollout status"
+
+
+@pytest.mark.asyncio
+async def test_rollout_status_gets_a_timeout_longer_than_its_wait() -> None:
+    router = _FakeRouter()
+    await _call(router, "dns_host_add", _NEW)
+    status_cmd = next(c for c in router.timeouts if c.startswith(_ROLLOUT_STATUS_PREFIX))
+    assert "--timeout=180s" in status_cmd
+    timeout = router.timeouts[status_cmd]
+    assert timeout is not None and timeout > 180
+
+
+@pytest.mark.asyncio
+async def test_rollout_status_timeout_gives_a_clear_error() -> None:
+    router = _FakeRouter()
+    router.raise_on[_ROLLOUT_STATUS_PREFIX] = TimeoutError()
+    result = await _call(router, "dns_host_add", _NEW)
+    assert result["error"] == (
+        "restart: the router did not answer in time; the step may still be running there"
+    )
+    assert result["changed"] is True
+    assert result["restarted"] is False
     assert result["backup_path"]
 
 

@@ -90,6 +90,9 @@ _ROLLOUT_RESTART = f"kubectl rollout restart deployment/{DEPLOYMENT} -n default"
 _ROLLOUT_STATUS = f"kubectl rollout status deployment/{DEPLOYMENT} -n default --timeout=180s"
 _GET_PODS_JSON = "kubectl get pods -n default -o json"
 
+#: SSH timeout for ``rollout status``: longer than its own 180 s wait.
+_ROLLOUT_STATUS_TIMEOUT_S: float = 200.0
+
 #: How long to wait for the old dnsmasq pods to go after the rollout.
 _POD_WAIT_INTERVAL_S: float = 2.0
 _POD_WAIT_ATTEMPTS: int = 45
@@ -100,6 +103,13 @@ _POD_WAIT_ATTEMPTS: int = 45
 # ---------------------------------------------------------------------------
 
 
+def _run_failure(exc: Exception) -> str:
+    """Return a readable text for an SSH call that raised *exc*."""
+    if isinstance(exc, TimeoutError):
+        return "the router did not answer in time; the step may still be running there"
+    return str(exc) or type(exc).__name__
+
+
 @dataclass(frozen=True)
 class _Router:
     """The connector, target and operator one op call runs against."""
@@ -108,16 +118,16 @@ class _Router:
     target: Any
     operator: Operator | None
 
-    async def run(self, cmd: str) -> dict[str, Any]:
+    async def run(self, cmd: str, timeout: float | None = None) -> dict[str, Any]:
         """Run *cmd*; return ``{stdout, stderr, exit_status}``."""
-        return await _run_text(self.connector, self.target, cmd, self.operator)
+        return await _run_text(self.connector, self.target, cmd, self.operator, timeout)
 
-    async def step(self, cmd: str, step: str) -> str:
+    async def step(self, cmd: str, step: str, timeout: float | None = None) -> str:
         """Run *cmd*; return stdout, or raise :class:`HolodeckDnsError` on failure."""
         try:
-            outcome = await self.run(cmd)
+            outcome = await self.run(cmd, timeout)
         except Exception as exc:
-            raise HolodeckDnsError(step, str(exc)) from exc
+            raise HolodeckDnsError(step, _run_failure(exc)) from exc
         if outcome["exit_status"] != 0:
             detail = outcome["stderr"].strip()[:500] or f"exit status {outcome['exit_status']}"
             raise HolodeckDnsError(step, detail)
@@ -225,7 +235,7 @@ async def _write_hosts(
     if after["hosts"] != new_hosts or others_before != others_after:
         raise HolodeckDnsError("verify", "the ConfigMap after the write is not what MEHO wrote")
     await router.step(_ROLLOUT_RESTART, "restart")
-    await router.step(_ROLLOUT_STATUS, "restart")
+    await router.step(_ROLLOUT_STATUS, "restart", _ROLLOUT_STATUS_TIMEOUT_S)
     result["restarted"] = True
     await _wait_for_new_pods(router)
 

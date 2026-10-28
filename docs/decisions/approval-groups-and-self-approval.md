@@ -63,10 +63,13 @@ The groups come from the login ([login-role-groups.md](login-role-groups.md)).
 
 ### Service principals keep today's rule
 
-- `safe` runs at once.
-- `caution` and `dangerous` run when a standing grant covers them. Otherwise they wait for approval.
+- `safe` operations run at once. So do `caution` operations that only read. A person may limit which targets a service principal may read (a read scope).
+- `caution` operations that write, and `dangerous` operations, run when a standing grant covers them. Otherwise they wait for approval.
+- Operations marked `requires_approval` also run when a standing grant covers them. Otherwise they wait for approval.
 - `destructive` always waits for a person. A standing grant never covers it (except on a sandbox instance, [sandbox-mode.md](sandbox-mode.md)).
 - The token rule above does not apply to them.
+
+**Read or write:** MEHO counts an operation as a read when its HTTP method is `GET` or `HEAD`. A hand-written operation has no HTTP method, so MEHO counts it as a write unless it is `safe`.
 
 **Why:** a service principal is fixed automation. It does the same steps each time. A standing grant is a person's deliberate approval, given in advance.
 
@@ -120,7 +123,7 @@ This record changes no code. The code Tasks under #3325 implement it.
 
 - **Who may approve:** `_check_self_approval` and `_NO_SELF_APPROVAL_TIERS` in `backend/src/meho_backplane/operations/approval_queue.py`. Today nobody may approve their own `dangerous` or `destructive` change ([#3328](https://github.com/evoila/meho/issues/3328) changes this).
 - **The group flag:** `Operator.approver` in `backend/src/meho_backplane/auth/operator.py` is the model for a MEHO-SA-Operators flag ([#3327](https://github.com/evoila/meho/issues/3327)).
-- **What waits for a person or a service principal:** `_non_agent_verdict` and `_non_agent_park_reason` in `backend/src/meho_backplane/operations/_validate.py`. Today only `destructive` and `requires_approval` changes wait for a person; `caution` and `dangerous` run at once on every path ([#3980](https://github.com/evoila/meho/issues/3980) changes this).
+- **What waits for a person or a service principal:** `_non_agent_verdict` and `_non_agent_park_reason` in `backend/src/meho_backplane/operations/_validate.py`. Today a person's `caution` and `dangerous` changes run at once, on every path; only `destructive` and `requires_approval` changes wait ([#3980](https://github.com/evoila/meho/issues/3980) changes this). A service principal already waits for `caution` writes and `dangerous` changes, unless a standing grant covers them (`_service_safety_gate_reason`; this record keeps that rule).
 - **What agents get:** `_SAFETY_DEFAULT` and `_SAFETY_CEILING` in `backend/src/meho_backplane/auth/permissions.py`. Today `caution` waits, `dangerous` is refused unless a grant covers it, and `destructive` is refused ([#3980](https://github.com/evoila/meho/issues/3980) changes this).
 - **Fresh sign-in or one-time code:** [#3979](https://github.com/evoila/meho/issues/3979).
 
@@ -130,7 +133,7 @@ This record changes no code. The code Tasks under #3325 implement it.
 2. The new waiting rules ([#3980](https://github.com/evoila/meho/issues/3980)) ship after it. In the other order, every `dangerous` change would need a second person until #3328 ships.
 3. Self-approval on the command line ships with the fresh sign-in check ([#3979](https://github.com/evoila/meho/issues/3979)), or after it.
 
-**Upgrade note:** before a site upgrades to the version with these rules, it needs at least one member in MEHO-SA-Operators. Otherwise nobody can approve `dangerous` or `destructive` changes. The upgrade notes and the docs say this ([#3330](https://github.com/evoila/meho/issues/3330)).
+**Upgrade note:** before a site upgrades to the version with these rules, it needs at least one member in MEHO-SA-Operators. Otherwise nobody can approve their own `dangerous` or `destructive` change, and only a MEHO-Admin can approve such a change for someone else. On a site with only one admin, the admin's own `dangerous` and `destructive` changes would wait, and nobody could approve them. The upgrade notes and the docs say this ([#3330](https://github.com/evoila/meho/issues/3330)).
 
 ## References
 

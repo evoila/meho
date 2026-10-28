@@ -136,12 +136,8 @@ STUBS = {
     "sleep": "",
 }
 
-# The install.sh of the download: notes the join token it was handed, then
-# exits as the test says.
-INSTALL_STUB = textwrap.dedent("""\
-    [ -f "$MEHO_TEST_ROOT/run/meho-join-token" ] && cp "$MEHO_TEST_ROOT/run/meho-join-token" "$MEHO_FAKE/join_token_seen"
-    exit "$(cat "$MEHO_FAKE/install_rc")"
-    """)
+# The install.sh of the download: exits as the test says.
+INSTALL_STUB = 'exit "$(cat "$MEHO_FAKE/install_rc")"\n'
 
 
 def ovf_env(fields: dict[str, str]) -> str:

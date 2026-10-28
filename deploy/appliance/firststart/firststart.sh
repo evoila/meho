@@ -27,7 +27,7 @@
 # to run twice, in case the power fails in the middle of one.
 #
 # The wizard values stay in this process's memory. None of them is written
-# to a log; the join token goes to a root-only file in /run for install.sh.
+# to a log.
 #
 # Exit codes:
 #   0  first start is done
@@ -51,7 +51,6 @@ readonly NETPLAN_FILE=/etc/netplan/50-meho.yaml
 readonly TIMESYNCD_FILE=/etc/systemd/timesyncd.conf.d/50-meho.conf
 readonly GRUB_PASSWORD_SCRIPT=/etc/grub.d/01_meho-password
 readonly GRUB_LINUX_SCRIPT=/etc/grub.d/10_linux
-readonly JOIN_TOKEN_FILE=/run/meho-join-token
 readonly CONSOLE=/dev/tty1
 readonly ADMIN_USER=admin
 readonly MIN_PASSWORD_LENGTH=14
@@ -91,7 +90,17 @@ on_error() {
         exit "$1"
     fi
     fail "firststart.sh stopped at line $2: a command failed with exit code $1." \
-        "read the lines above on the console or with: journalctl -u meho-firststart. Correct the cause and restart the appliance (sudo reboot); first start goes on from this step."
+        "read the lines above on the console or with: journalctl -u meho-firststart. Correct the cause and $(how_to_restart); first start goes on from this step."
+}
+
+# how_to_restart: before step 3 makes the admin account, nobody can log in
+# to run sudo reboot.
+how_to_restart() {
+    if getent passwd "$ADMIN_USER" >/dev/null; then
+        printf 'restart the appliance (sudo reboot)'
+    else
+        printf 'power the VM off and on in vCenter'
+    fi
 }
 
 # write_root_file <path on the machine> <mode>: write stdin to the file in
@@ -136,7 +145,7 @@ grow_root_file_system() {
     # growpart exits 1 with NOCHANGE when the partition already fills the disk.
     ((rc == 0 || rc == 1)) ||
         fail "growpart could not grow $source (exit code $rc)." \
-            "read growpart's message above, then restart the appliance (sudo reboot)."
+            "read growpart's message above, then $(how_to_restart)."
     resize2fs "$source"
     ok "the root file system fills the disk"
 }
@@ -258,9 +267,10 @@ check_wizard_fields() {
         fail "The admin SSH public key is missing or is not one public key in OpenSSH form (for example ssh-ed25519 AAAA... name)." "$VAPP_FIX"
     fi
 
+    # install.sh --from-disk does not copy a join token, so RKE2 could not join.
     if [[ -n $(field cluster.join.address) || -n $(field cluster.join.token) ]]; then
-        [[ -n $(field cluster.join.address) && -n $(field cluster.join.token) ]] ||
-            fail "Only one of the join address and the join token is given. Give both, or neither for a single appliance." "$VAPP_FIX"
+        fail "A join address or a join token is given. This version runs as a single appliance and cannot join a cluster." \
+            "power the VM off, empty both join fields in the VM's vApp options in vCenter (Configure, vApp Options), and power it on."
     fi
     ok "the wizard fields are valid"
 }
@@ -336,21 +346,13 @@ wait_for_clock() {
 # --- Step 5 ----------------------------------------------------------------
 
 install_core() {
-    local hostname args
+    local hostname
     # The host name as the machine has it now: step 3 set it, and a fix the
     # admin made on the console after a failed step stays.
     hostname=$(<"${HOST_ROOT}/etc/hostname")
-    args=(--from-disk --hostname "$hostname")
-    # After a reboot, step 3 is done and did not read the fields again.
-    ((${#FIELD[@]} > 0)) || read_wizard_fields
-    if [[ -n $(field cluster.join.address) ]]; then
-        printf '%s\n' "$(field cluster.join.token)" | write_root_file "$JOIN_TOKEN_FILE" 0600
-        args+=(--join-address "$(field cluster.join.address)" --join-token-file "$JOIN_TOKEN_FILE")
-    fi
-    "${HOST_ROOT}${DOWNLOAD_DIR}/install.sh" "${args[@]}" ||
+    "${HOST_ROOT}${DOWNLOAD_DIR}/install.sh" --from-disk --hostname "$hostname" ||
         fail "install.sh stopped; its [FAIL] line above says why." \
             "correct the cause and restart the appliance (sudo reboot); first start runs install.sh again."
-    rm -f "${HOST_ROOT}${JOIN_TOKEN_FILE}"
 }
 
 # --- Step 6 ----------------------------------------------------------------

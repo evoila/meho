@@ -139,7 +139,8 @@ class FirstStartTests(FirstStartTestCase):
             "admin.ssh_key empty": ({"admin.ssh_key": ""}, "SSH public key"),
             "admin.ssh_key two lines": ({"admin.ssh_key": f"{SSH_KEY}\n{SSH_KEY}"}, "SSH public key"),
             "admin.password line break": ({"admin.password": "fourteen-chars\nmore"}, "line break"),
-            "cluster.join half": ({"cluster.join.address": "10.0.0.20"}, "Give both"),
+            "cluster.join.address": ({"cluster.join.address": "10.0.0.20"}, "cannot join a cluster"),
+            "cluster.join.token": ({"cluster.join.token": JOIN_TOKEN}, "cannot join a cluster"),
         }
         for name, (changes, fragment) in wrong.items():
             with self.subTest(field=name):
@@ -153,24 +154,18 @@ class FirstStartTests(FirstStartTestCase):
                 self.assertEqual([], self.vm.calls("netplan"))
                 self.assertEqual([], self.vm.calls("chpasswd"))
 
-    def test_the_join_fields_go_to_install_sh_and_the_token_file_goes_away(self) -> None:
+    def test_the_join_fields_are_refused_before_anything_changes(self) -> None:
         self.vm.wizard({"cluster.join.address": "10.0.0.20", "cluster.join.token": JOIN_TOKEN})
 
-        self.assert_succeeds(self.vm.run())
+        result = self.vm.run()
 
-        self.assertEqual(
-            [
-                "install.sh --from-disk --hostname meho.example.com "
-                "--join-address 10.0.0.20 --join-token-file /run/meho-join-token"
-            ],
-            self.vm.calls("install.sh"),
-        )
-        self.assertEqual(f"{JOIN_TOKEN}\n", (self.vm.fake / "join_token_seen").read_text())
-        self.assertFalse(self.vm.host_path("/run/meho-join-token").exists())
+        self.assert_fails_once(result, "Step 3 (wizard-fields)", "cannot join a cluster", "empty both join fields")
+        self.assertEqual("ubuntu\n", self.vm.read("/etc/hostname"))
+        self.assertEqual([], self.vm.calls("chpasswd"))
+        self.assertEqual([], self.vm.calls("install.sh"))
+        self.assertNotIn(JOIN_TOKEN, self.output(result))
 
     def test_no_secret_reaches_the_output_the_console_or_a_command_line(self) -> None:
-        self.vm.wizard({"cluster.join.address": "10.0.0.20", "cluster.join.token": JOIN_TOKEN})
-
         result = self.vm.run()
 
         self.assert_succeeds(result)
@@ -181,7 +176,7 @@ class FirstStartTests(FirstStartTestCase):
             "command lines": (self.vm.fake / "calls.log").read_text(),
         }
         for place, text in places.items():
-            for secret in (PASSWORD, "Wizard&amp;Pass", JOIN_TOKEN, bootloader_password):
+            for secret in (PASSWORD, "Wizard&amp;Pass", bootloader_password):
                 with self.subTest(place=place, secret=secret[:6]):
                     self.assertNotIn(secret, text)
 
@@ -229,6 +224,13 @@ class FirstStartTests(FirstStartTestCase):
                     self.assert_succeeds(result)
                 else:
                     self.assert_fails_once(result, "Step 2 (disk)", "growpart")
+
+    def test_a_failure_before_the_admin_account_exists_says_to_restart_from_vcenter(self) -> None:
+        self.vm.answer("growpart_rc", "2")
+
+        line = self.assert_fails_once(self.vm.run(), "Step 2 (disk)", "power the VM off and on in vCenter")
+
+        self.assertNotIn("sudo reboot", line)
 
     def test_a_clock_that_does_not_synchronise_stops_step_4(self) -> None:
         self.vm.answer("ntp_synchronized", "no\n")
@@ -310,6 +312,14 @@ class BannerTests(FirstStartTestCase):
         self.assertIn("First start stopped:\n", banner)
         self.assertIn(line, banner)
         self.assertNotIn("Console:", banner)
+        self.assertNotIn("Log in as admin", banner)
+        self.assertIn("The admin account does not exist yet.", banner)
+
+    def test_a_failed_step_after_the_admin_account_exists_says_to_log_in(self) -> None:
+        self.vm.answer("install_rc", "1")
+        self.assert_fails_once(self.vm.run(), "Step 5 (core)")
+
+        self.assertIn("Log in as admin to fix it", self.vm.banner())
 
     def test_a_backslash_in_the_fail_line_is_not_an_escape(self) -> None:
         self.vm.host_file(f"{STATE}/failed", "[FAIL] Step 3 (wizard-fields): The host name 'a\\4' is wrong.\n")

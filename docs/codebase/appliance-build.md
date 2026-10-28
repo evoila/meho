@@ -188,7 +188,8 @@ The properties of the form-1 design, section 2, in the wizard's order:
 (a password field, `MinLen(14)`), `admin.ssh_key`, `cluster.join.address`,
 `cluster.join.token` (a password field) and `cluster.vip`. The first-start
 service reads them ([appliance-firststart.md](appliance-firststart.md)).
-`cluster.vip` is not used yet.
+`cluster.vip` is not used yet, and first start refuses the two join fields:
+this version runs as a single appliance.
 
 ## The workflow
 

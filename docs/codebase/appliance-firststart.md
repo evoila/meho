@@ -67,7 +67,9 @@ cloud image's kernel line ends with `console=ttyS0`.
    `<Property oe:key oe:value>` elements, so escaped characters come out
    right. All fields are checked before anything changes; a wrong one stops
    the step with the fix "change the field in the VM's vApp options and
-   power the VM on again". Then:
+   power the VM on again". The join fields must be empty: this version runs
+   as a single appliance, and `install.sh --from-disk` does not copy a join
+   token, so RKE2 could not join. Then:
    - `hostnamectl hostname <name>`. The name does not go into `/etc/hosts`,
      so the first-start list asks the site's DNS.
    - `/etc/netplan/50-meho.yaml` (0600, as netplan wants), matching the
@@ -86,11 +88,8 @@ cloud image's kernel line ends with `console=ttyS0`.
    is synchronised, the check `install.sh` makes too.
 5. **The core.** `install.sh --from-disk --hostname <name>`, with the host
    name the machine has now (so a fix made on the console after a failed
-   step counts). The join fields, when given, go to `--join-address` and
-   `--join-token-file`; the token is written to `/run/meho-join-token`
-   (0600, a RAM disk) and removed afterwards. `install.sh` starts RKE2 (and
-   enables it at boot), installs the core and writes the two one-time
-   files.
+   step counts). `install.sh` starts RKE2 (and enables it at boot),
+   installs the core and writes the two one-time files.
 6. **The bootloader password.** 24 random letters and digits (no `y` or
    `z`, which swap places between a US and a German keyboard; the boot
    menu has a US one) go to `/var/lib/meho/bootloader-password` (0600)
@@ -115,7 +114,7 @@ The wizard values stay in the script's memory. The password reaches
 `chpasswd` and the bootloader password reaches `grub-mkpasswd-pbkdf2`
 through a pipe from `printf`, a shell builtin, so they are in no command
 line. No [FAIL] line holds a secret value. The tests check the output, the
-console and every command line for the passwords and the join token.
+console and every command line for the passwords.
 
 The wizard password is still readable in the VM's vApp options in vCenter
 and through `vmtoolsd` inside the guest; the OVF standard passes password
@@ -128,7 +127,10 @@ Writes `/etc/issue` (0644) in one step:
 
 - the version from the download's `VERSION` file;
 - with `firststart/failed`: that line (backslashes doubled, because agetty
-  reads `\` as an escape) and where to read more;
+  reads `\` as an escape) and where to read more. Before step 3 makes the
+  `admin` account nobody can log in, so the banner then says to follow the
+  fix from vCenter, and the fix of a failed step 1 or 2 says to power the VM
+  off and on there instead of `sudo reboot`;
 - before `firststart.done`: that first start has not finished;
 - after it: `https://<hostname>/ui/`, `\4` (agetty prints the IPv4 address,
   so a DHCP address shows), each one-time file that still exists, and a
@@ -154,8 +156,9 @@ On the appliance, all in the Ubuntu 24.04 cloud image: `vmtoolsd`
   #4042, inside `install.sh`. The banner shows no list until then.
 - **No wizard fields** stops step 3 with a message. The console setup that
   asks for the fields instead is #4813.
-- **The join fields** go to `install.sh`, but `install.sh --from-disk` does
-  not copy the join token. Joining is not part of the single-node form.
+- **The join fields** are refused at step 3. `install.sh --from-disk` does
+  not copy a join token, and joining is not part of the single-node form.
+  The fields stay in the product section for the HA work.
 - **10_linux** is a conffile of Ubuntu's GRUB package. A package update that
   replaces it drops `--unrestricted`, and then the boot menu asks for the
   password at every boot. The update path (#4814) must keep the line.
@@ -169,7 +172,7 @@ environment the way vCenter does, with escaped values, and serves it
 through the `vmtoolsd` stub or the CD-ROM (`mount` stub). The tests cover
 every field and its check, static and DHCP, both transports, a missing
 environment, the order of the steps, the markers, a run after a failed
-step, the join fields, the bootloader password, and the banner.
+step, the refused join fields, the bootloader password, and the banner.
 
 On macOS run them in Docker, as `deploy/appliance/README.md` says.
 

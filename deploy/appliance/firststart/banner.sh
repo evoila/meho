@@ -47,7 +47,12 @@ banner() {
         printf 'First start stopped:\n'
         # agetty reads a backslash as the start of an escape.
         sed 's/\\/\\\\/g' "${HOST_ROOT}${FAILED_FILE}"
-        printf '\nLog in as %s to fix it, or see: journalctl -u meho-firststart\n\n' "$ADMIN_USER"
+        # Step 3 makes the account; before that, nobody can log in.
+        if getent passwd "$ADMIN_USER" >/dev/null; then
+            printf '\nLog in as %s to fix it, or see: journalctl -u meho-firststart\n\n' "$ADMIN_USER"
+        else
+            printf '\nThe %s account does not exist yet. Follow the fix above from vCenter.\n\n' "$ADMIN_USER"
+        fi
         return 0
     fi
     if [[ ! -f ${HOST_ROOT}${DONE_FILE} ]]; then

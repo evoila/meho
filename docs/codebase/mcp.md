@@ -538,7 +538,11 @@ fix its call at once. It does not have to read the whole
   (`difflib`, ratio 0.6 or more). Case is ignored. The closest come first.
 - **Who sees what.** Only built-in connectors and the caller's own
   tenant, the same rule as `connector_exists`. A connector of another
-  tenant is never named.
+  tenant is never named. A hand-coded connector class with no operation
+  rows yet is built-in and is named too. The class that ingest registers
+  (an auto-shim or a profiled class) is not read from the registry: a
+  tenant-scoped ingest registers one as well, so that connector counts
+  only through its rows, which the tenant rule filters.
 - **Where.** The message says "Did you mean: vmware-rest-9.0,
   vmware-rest-8.0?". With no close id it says "Call `meho_connector_list`
   to see the ids." The ids are also in `data.did_you_mean` (the `-32602`
@@ -547,9 +551,9 @@ fix its call at once. It does not have to read the whole
   `call_operation` and `preview_operation`).
 - **`list_targets`.** When the `connector_id` filter finds no target and
   no connector the caller can see has that product
-  (`connector_product_known`), the answer is the same unknown-connector
-  `-32602`, not an empty list. A known product with no targets still
-  returns an empty list.
+  (`connector_product_known`, same visibility rule as above), the answer
+  is the same unknown-connector `-32602`, not an empty list. A known
+  product with no targets still returns an empty list.
 
 The lookups run only on the error path. Tests:
 `tests/test_unknown_connector_did_you_mean.py`.

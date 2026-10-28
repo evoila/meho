@@ -45,6 +45,7 @@ from uuid import UUID
 from sqlalchemy import ColumnElement, SQLColumnExpression, and_, select
 from sqlalchemy.orm import aliased
 
+from meho_backplane.connectors.base import shim_kind
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
@@ -387,6 +388,26 @@ async def _visible_connector_triples(tenant_id: UUID) -> set[tuple[str, str, str
     return triples
 
 
+def _builtin_registered_triples() -> set[tuple[str, str, str]]:
+    """Return the parsed *(product, version, impl_id)* of every hand-coded connector class.
+
+    Only a hand-coded class (``shim_kind == "none"``) counts as built-in.
+    Ingest also registers a class, a bare auto-shim or a profiled class,
+    and it does so for a tenant-scoped ingest too. Such a connector is
+    known through its rows, which :func:`_visible_connector_triples`
+    filters by tenant. Naming it from the registry would tell a caller
+    of another tenant that it exists. The v1-compat ``(product, "", "")``
+    entries are skipped, and each entry is rendered and parsed back, the
+    same round trip :func:`connector_class_registered` uses.
+    """
+    triples: set[tuple[str, str, str]] = set()
+    for (_product, version, impl_id), cls in all_connectors_v2().items():
+        if not version or not impl_id or shim_kind(cls) != "none":
+            continue
+        triples.add(parse_connector_id(f"{impl_id}-{version}"))
+    return triples
+
+
 #: Most ids one "did you mean" answer names (#4136).
 _DID_YOU_MEAN_CAP: int = 5
 
@@ -403,12 +424,15 @@ async def close_connector_ids(*, tenant_id: UUID, connector_id: str) -> list[str
     match ignores case. Closest ids come first.
 
     Only ids the caller can see are named: built-in connectors and the
-    caller's own tenant, the same rule as :func:`connector_exists`.
+    caller's own tenant, the same rule as :func:`connector_exists`. A
+    hand-coded connector class with no rows yet is built-in and is
+    named too (:func:`_builtin_registered_triples`).
     """
     needle = connector_id.strip().lower()
     if not needle:
         return []
-    rendered = {_render_connector_id(*t) for t in await _visible_connector_triples(tenant_id)}
+    triples = await _visible_connector_triples(tenant_id) | _builtin_registered_triples()
+    rendered = {_render_connector_id(*t) for t in triples}
     known = {cid.lower(): cid for cid in rendered if cid is not None}
     candidates = {key for key in known if key.startswith(needle)}
     candidates.update(
@@ -428,12 +452,12 @@ async def connector_product_known(*, tenant_id: UUID, product: str) -> bool:
 
     ``list_targets`` uses this when its ``connector_id`` filter finds no
     target (#4136): a product no connector has means the id is wrong, not
-    that the tenant has no targets of that kind. A connector class that
-    is registered but not yet ingested also counts.
+    that the tenant has no targets of that kind. A hand-coded connector
+    class with no rows yet also counts. A class that ingest registered
+    counts only through its rows, so a connector of another tenant stays
+    unknown (:func:`_builtin_registered_triples`).
     """
-    if any(reg_product == product for reg_product, _version, _impl_id in all_connectors_v2()):
-        return True
-    triples = await _visible_connector_triples(tenant_id)
+    triples = await _visible_connector_triples(tenant_id) | _builtin_registered_triples()
     return any(row_product == product for row_product, _version, _impl_id in triples)
 
 

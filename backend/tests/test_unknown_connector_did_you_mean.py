@@ -17,12 +17,16 @@ ids the caller can see, so the model can fix its call at once:
 
 A connector of another tenant is never named. Rows are real rows in the
 autouse-migrated SQLite database, so the tenant rule runs as real SQL.
+A hand-coded connector class with no rows yet is built-in and is named.
+The class that ingest registers is not named on its own: a tenant-scoped
+ingest registers one too, so it counts only through its tenant rows.
 """
 
 from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -31,13 +35,20 @@ import pytest
 from fastapi.testclient import TestClient
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.registry import (
+    all_connectors_v2,
+    deregister_connector_v2,
+    register_connector_v2,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, Tenant
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.mcp.schemas import INVALID_PARAMS
-from meho_backplane.operations import dispatch
-from meho_backplane.operations._lookup import close_connector_ids
+from meho_backplane.operations import _lookup, dispatch
+from meho_backplane.operations._lookup import close_connector_ids, connector_product_known
 from meho_backplane.operations._request_preview import preview_dispatch
+from meho_backplane.operations.ingest import ensure_connector_class_registered
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -48,6 +59,62 @@ from tests.mcp_test_fixtures import (
 
 _OTHER_TENANT = UUID("00000000-0000-0000-0000-00000000b0b0")
 _OP = "GET:/api/vcenter/vm"
+
+#: A made-up connector no shipped package registers, so the registry
+#: tests do not collide with the real connectors the app imports.
+_ACME = ("acme", "2.0", "acme-rest")
+
+
+class _AcmeConnector(Connector):
+    """Hand-coded class for ``acme-rest-2.0``; its ``shim_kind`` is ``"none"``."""
+
+    product = "acme"
+    version = "2.0"
+    impl_id = "acme-rest"
+
+    async def fingerprint(self, target, operator=None):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
+    async def probe(self, target):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
+    async def execute(self, target, op_id, params):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
+
+@pytest.fixture(autouse=True)
+def _only_acme_in_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hide the shipped connector classes from the lookup; show only the made-up one.
+
+    The app imports every shipped connector into the process-global
+    registry. Hand-coded classes are named as built-in connectors, so
+    with the real registry a close spelling of a seeded id could also
+    match a shipped id and the exact lists below would change whenever
+    a connector is added. The made-up connector is still seen when a
+    test registers it.
+    """
+    real = all_connectors_v2
+
+    def only_acme() -> dict[tuple[str, str, str], type[Connector]]:
+        return {key: cls for key, cls in real().items() if key == _ACME}
+
+    monkeypatch.setattr(_lookup, "all_connectors_v2", only_acme)
+
+
+@pytest.fixture
+def _acme_registry_cleanup() -> Iterator[None]:
+    """Remove the made-up connector from the process-global registry after the test."""
+    try:
+        yield
+    finally:
+        deregister_connector_v2(product=_ACME[0], version=_ACME[1], impl_id=_ACME[2])
+
+
+def _register_acme_as_tenant_ingest_does() -> None:
+    """Register the bare auto-shim that an ingest, also a tenant-scoped one, registers."""
+    assert ensure_connector_class_registered(
+        product=_ACME[0], version=_ACME[1], impl_id=_ACME[2], base_url=None
+    )
 
 
 async def _seed_connector(
@@ -186,6 +253,33 @@ async def test_another_tenants_connector_is_never_named() -> None:
     ]
 
 
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_acme_registry_cleanup")
+async def test_builtin_class_without_rows_is_named() -> None:
+    """A hand-coded connector class is built-in, so it is named before its rows exist."""
+    register_connector_v2(product=_ACME[0], version=_ACME[1], impl_id=_ACME[2], cls=_AcmeConnector)
+
+    assert await close_connector_ids(tenant_id=OPERATOR_TENANT_ID, connector_id="acme-rest") == [
+        "acme-rest-2.0"
+    ]
+    assert await connector_product_known(tenant_id=OPERATOR_TENANT_ID, product="acme")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_acme_registry_cleanup")
+async def test_tenant_ingest_registration_is_not_named_to_another_tenant() -> None:
+    """The class a tenant-scoped ingest registers counts only through the tenant's rows."""
+    _register_acme_as_tenant_ingest_does()
+    await _seed_connector(*_ACME, tenant_id=_OTHER_TENANT)
+
+    assert await close_connector_ids(tenant_id=OPERATOR_TENANT_ID, connector_id="acme-rest") == []
+    assert not await connector_product_known(tenant_id=OPERATOR_TENANT_ID, product="acme")
+    assert await close_connector_ids(tenant_id=_OTHER_TENANT, connector_id="acme-rest") == [
+        "acme-rest-2.0"
+    ]
+    assert await connector_product_known(tenant_id=_OTHER_TENANT, product="acme")
+
+
 # ---------------------------------------------------------------------------
 # search_operations / list_operation_groups over MCP
 # ---------------------------------------------------------------------------
@@ -276,6 +370,25 @@ async def test_list_targets_known_product_without_targets_is_empty(
 
     payload = json.loads(body["result"]["content"][0]["text"])
     assert payload["targets"] == []
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.usefixtures("_acme_registry_cleanup")
+async def test_list_targets_another_tenants_ingested_connector_is_unknown(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A connector ingested by another tenant is unknown, not an empty list."""
+    client, _op = client_with_operator
+    _register_acme_as_tenant_ingest_does()
+    await _seed_connector(*_ACME, tenant_id=_OTHER_TENANT)
+    await _seed_target("vc-1", "vmware")
+
+    body = _tools_call(client, "list_targets", {"connector_id": "acme-rest-2.0"})
+
+    assert body["error"]["code"] == INVALID_PARAMS
+    data = body["error"]["data"]
+    assert data["reason"] == "unknown_connector"
+    assert "acme-rest-2.0" not in data["did_you_mean"]
 
 
 # ---------------------------------------------------------------------------

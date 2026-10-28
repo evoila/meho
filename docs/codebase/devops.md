@@ -1648,7 +1648,8 @@ workflow files, this doc, and the changelog.
 | --- | --- | --- |
 | `python-lint` (`Python lint + typecheck (ruff + mypy)`) | `backend/src/` + `backend/tests/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict`. Non-required; whole-tree, unshardable-by-file, runs once on a GitHub-hosted runner (#3251, #4626). |
 | `python-unit-shard` (`Python unit shard N/4`) | `backend/` unit + acceptance subtree, split 4 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). |
-| `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252). |
+| `python-outside-backend` (`Python tests that read files outside backend`) | the backend tests that read files outside `backend/` | Runs only on a PR with no `backend/` change (`backend_python=false`) that is not docs-only. `pytest -n 3` over the fixed list in `backend/tests/_outside_backend_tests.py`, on a GitHub-hosted runner. Non-required; the fan-in requires it on that path (#5296). See [No-backend path (#5296)](#no-backend-path-5296). |
+| `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252); on a no-backend diff it requires `python-outside-backend` to pass (#5296). |
 | `python-integration` (`Python (integration testcontainers)`) | `backend/tests/integration/` | `uv sync --locked --all-groups` -> `pytest tests/integration/` against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. **Required merge gate (#698)** so the lane that exercises real connector dispatch can no longer ship red. |
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
 | `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
@@ -1845,6 +1846,47 @@ completes CI in minutes.
   the heavy 60-min lane; its detect-crash exposure is identical to the
   pre-existing migration gate and is neutralised for code PRs by the unit
   lane's fail-closed guard above.
+
+### No-backend path (#5296)
+
+A PR that changes no file under `backend/` (for example a Go CLI change, a
+chart change, or a workflow other than `ci.yml`) cannot change the Python code.
+It used to pay the four unit shards and the integration job anyway. Now it
+runs one short job instead.
+
+- **Classification (fail-closed).** The `changes` job has a third output,
+  `backend_python`. It starts `true` and is `false` only when the event is
+  `pull_request`, the diff could be computed, no changed path apart from
+  `.md` files is under `backend/`, and `.github/workflows/ci.yml` did not
+  change. `push` and `merge_group` always keep it `true`. It uses the same
+  `HEAD^1..HEAD` diff as `docs_only`.
+- **What skips.** `python-lint`, the four `python-unit-shard` legs and
+  `python-integration` skip by their own `if:` when `backend_python` is
+  `false`, the same way as on a docs-only PR.
+- **What runs instead.** Some backend tests read files outside `backend/`:
+  the Helm chart, the Go CLI, the workflows, the docs and the examples. A PR
+  that changes no backend file can still break them. The job
+  `python-outside-backend` runs exactly these test files. The list lives in
+  `backend/tests/_outside_backend_tests.py`; the job reads it with
+  `uv run python tests/_outside_backend_tests.py`. It runs on a GitHub-hosted
+  runner with Helm installed and `MEHO_REQUIRE_HELM=1`.
+- **The list stays complete.** `backend/tests/test_outside_backend_tests.py`
+  scans the unit test files (everything under `backend/tests/` except
+  `integration/` and `migrations/`). A file reads outside `backend/` when it
+  climbs from `Path(__file__)` to the repository root with `.parents[N]` or a
+  `.parent` chain, calls a local `_repo_root` helper, or imports a helper
+  module in `tests/` that does. The test fails when the scan and the list
+  differ. Add a new file to the list in the same PR that adds it.
+- **The fan-in.** On this path `python-unit-lane` accepts the skipped lint and
+  shards and requires `python-outside-backend` to pass. On a full run that job
+  is skipped and lint and shards must pass, as before. The required check name
+  does not change.
+- **What is not covered.** The migration tests have their own detector
+  (`migrations`). A few integration tests read files outside `backend/` (the
+  Keycloak sub-chart, `examples/`, the CLI). They need containers, so on a
+  no-backend PR only the merge queue runs them.
+- **Tests.** `backend/tests/test_ci_backend_python_skip.py` runs the real
+  detect script and the real fan-in script from `ci.yml` for each case.
 
 ### Runner-CPU rule
 

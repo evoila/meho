@@ -731,7 +731,7 @@ async def test_paging_stops_at_its_limits_and_says_what_was_left_out() -> None:
 async def test_paging_stops_at_its_time_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     connector = EntraConnector(credentials_loader=entra_loader())
     ticks = iter([0.0, 500.0])
-    monkeypatch.setattr(_paging, "_monotonic", lambda: next(ticks))
+    monkeypatch.setattr(_paging, "_monotonic", ticks.__next__)
 
     with respx.mock() as mock:
         _login(mock)
@@ -784,7 +784,7 @@ async def test_a_traced_call_records_the_app_answer_without_hints(
 ) -> None:
     """While a trace is captured, the recorded body is the filtered one."""
     recorded: list[Any] = []
-    monkeypatch.setattr(_http.flight_recorder_capture, "span_start", lambda: object())
+    monkeypatch.setattr(_http.flight_recorder_capture, "span_start", object)
 
     def capture(_span: Any, **kwargs: Any) -> None:
         recorded.append(kwargs["response_body"])

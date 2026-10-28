@@ -20,7 +20,10 @@ Rules:
   newer shape is refused by name and not read wrongly.
 * Merging keeps the handle order. A record whose ``source_id`` was seen
   before, or a server whose BIOS UUID was seen before, is kept in
-  ``records`` but listed in ``duplicates``. A repeated record's BIOS UUID
+  ``records`` but listed in ``duplicates``. A BIOS UUID matches in both
+  forms a machine reports it, as the hypervisor shows it and as the guest
+  OS shows it with the bytes of the first three groups reversed
+  (:func:`~.contracts.bios_uuid_match_key`). A repeated record's BIOS UUID
   still counts, so a later record of the same machine from another
   source is found even when the first record had no BIOS UUID. The
   caller decides what a duplicate means for its output.
@@ -40,6 +43,7 @@ from meho_backplane.connectors.migration.contracts import (
     InventoryEnvelope,
     InventoryRecord,
     ServerRecord,
+    bios_uuid_match_key,
 )
 from meho_backplane.connectors.result_handle_store import (
     ResultHandleStore,
@@ -162,7 +166,8 @@ def merge_inventories(
             # may lack it, and a later source may report the same machine.
             if not isinstance(record, ServerRecord) or not record.identity_hints.bios_uuid:
                 continue
-            first = by_bios_uuid.setdefault(record.identity_hints.bios_uuid, record.source_id)
+            key = bios_uuid_match_key(record.identity_hints.bios_uuid)
+            first = by_bios_uuid.setdefault(key, record.source_id)
             if first != record.source_id:
                 duplicates.append(Duplicate(record.source_id, first, "bios_uuid"))
     return records, duplicates

@@ -115,9 +115,15 @@ handle_ids)`:
 4. Merges the envelopes in handle order (`merge_inventories`). A handle
    given twice is read once. A repeated `source_id`, or a server whose BIOS
    UUID was already seen, stays in `records` and is listed in
-   `duplicates`; the caller decides what that means. A repeated record's
-   BIOS UUID still counts, so a machine whose first record had no BIOS
-   UUID is still matched to a later record from another source.
+   `duplicates`; the caller decides what that means. A BIOS UUID matches
+   in both forms a machine reports it: as the hypervisor shows it, and as
+   the guest OS shows it with the bytes of the first three groups
+   reversed (newer firmware tables keep them that way; a VMware VM from
+   hardware version 13 on, for example). `bios_uuid_match_key` turns both
+   forms into one key, so a Kubernetes node or a host read inside its OS
+   still matches its VM record. A repeated record's BIOS UUID still
+   counts, so a machine whose first record had no BIOS UUID is still
+   matched to a later record from another source.
 
 ### `migration.inventory.csv`
 
@@ -256,13 +262,17 @@ Per source:
 - **Linux host.** `linux.about` and `linux.file.read` of
   `/sys/devices/system/cpu/online` (cores), `/proc/meminfo` (`MemTotal`,
   a little less than the installed memory), `/proc/partitions` (whole
-  disks), `/sys/firmware/efi` (exists only on UEFI),
+  disks), `/sys/firmware/efi` (exists only on UEFI; a BIOS host gets
+  `secure_boot` `false`, a UEFI host `not_supported`),
   `/sys/class/dmi/id/product_uuid` (root only; empty without root, so
   `no_permission`), `sys_vendor` / `product_name` (a known hypervisor
   name makes it `virtual`), `/etc/machine-id` (the stable `source_id`).
 - **Windows Server host.** `winsrv.system.os-info`,
   `winsrv.system.hardware`, `winsrv.storage.disk.list`. `source_id` is the
   product UUID, or the host name when the UUID is missing or a placeholder.
+  BIOS firmware cannot have Secure Boot, so `secure_boot` is `false` there.
+  On UEFI it is the read value, or unknown when the read gave none (it
+  needs admin rights).
 - **Kubernetes.** `k8s.node.list` (one server per node, with
   `system_uuid` as BIOS UUID and the node capacity), `k8s.workload.list`
   for each kind, all namespaces, page by page (at most 40 pages of 500),
@@ -274,9 +284,10 @@ Per source:
   500"); for a workload list the kind's total is then unknown. CPU and
   memory are sums over the containers per replica, given only when every
   container sets the value. A node that is a VM has the VM's BIOS UUID, so
-  the merge lists it as a duplicate of the VM record. One UUID reported by
-  two nodes of the cluster cannot name one machine, so both nodes get none
-  and an omission says so.
+  the merge lists it as a duplicate of the VM record, also when the node
+  shows the UUID with the bytes of the first three groups reversed. One
+  UUID reported by two nodes of the cluster cannot name one machine, so
+  both nodes get none and an omission says so.
 
 ## Dependencies
 
@@ -293,7 +304,8 @@ fake `dispatch_child` and made-up child answers, stores the inventory in an
 in-memory result store, and reads it back through the loader. It covers
 failed and denied child reads, the counts check (also when a total could
 not be read in full), a VM name used twice, a shortened child answer, a
-Kubernetes node that matches a Hyper-V VM, placeholder and shared BIOS
+Kubernetes node that matches a Hyper-V VM, a node that matches a VMware VM
+whose UUID it reports with reversed bytes, placeholder and shared BIOS
 UUIDs, a failed second page, pod paging, and the count dicts read back
 from the handle of a long answer.
 `backend/tests/test_migration_source_reads.py` covers the reads added for
@@ -320,9 +332,9 @@ header, column for column.
   OS and capacity from the node object.
 - Disk speeds and utilization are not read by any adapter yet
   (`not_measured`), so sizing from these inventories is "allocated".
-- Duplicate servers are matched by exact BIOS UUID only. Some guest
-  systems report the BIOS UUID with the first three groups byte-swapped;
-  the source adapters must normalise it before it reaches `identity_hints`.
+- Duplicate servers are matched by BIOS UUID only, in its two byte
+  orders. A record keeps the UUID text as its source reported it; only
+  the match key is shared.
 
 ## References
 

@@ -25,8 +25,10 @@ from meho_backplane.connectors.migration import adapter_kit
 from meho_backplane.connectors.migration.adapter_kit import read_child
 from meho_backplane.connectors.migration.azure_migrate_csv import inventory_to_csv
 from meho_backplane.connectors.migration.contracts import (
+    InventoryEnvelope,
     KubernetesWorkloadRecord,
     ServerRecord,
+    bios_uuid_match_key,
 )
 from meho_backplane.connectors.migration.inventory_load import (
     load_inventories,
@@ -192,6 +194,17 @@ def test_usable_bios_uuid_drops_placeholders() -> None:
     assert usable("FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF") is None
     assert usable("not a uuid") is None
     assert usable(None) is None
+
+
+def test_bios_uuid_match_key_is_the_same_for_both_byte_orders() -> None:
+    """A hypervisor's form and the guest's form (first three groups reversed) give one key."""
+    as_vcenter = "4e3d2c1b-605f-1847-8293-a4b5c6d7e8f9"
+    as_guest = "1b2c3d4e-5f60-4718-8293-a4b5c6d7e8f9"
+    assert bios_uuid_match_key(as_vcenter) == bios_uuid_match_key(as_guest) == as_guest
+    assert bios_uuid_match_key(as_guest.upper()) == as_guest
+    # The last two groups are never reversed: a change there is another machine.
+    assert bios_uuid_match_key("4e3d2c1b-605f-1847-8293-a4b5c6d7e8fa") != as_guest
+    assert bios_uuid_match_key("not a uuid") == "not a uuid"
 
 
 async def test_counts_and_left_out_items_survive_a_long_omission_list(
@@ -593,6 +606,7 @@ async def test_linux_host_inventory(store: ResultHandleStore) -> None:
     assert isinstance(record, ServerRecord)
     assert record.source_id == "linux:0f1e2d3c4b5a69788796a5b4c3d2e1f0"
     assert (record.cores, record.memory_configured_mb, record.boot_type) == (8, 16000, "uefi")
+    assert record.secure_boot is None and record.missing["secure_boot"] == "not_supported"
     assert record.disks is not None and [(d.label, d.size_gb) for d in record.disks] == [
         ("sda", 100.0)
     ]
@@ -621,6 +635,7 @@ async def test_linux_host_on_a_hypervisor_with_root(store: ResultHandleStore) ->
         "VMware",
         "bios",
     )
+    assert record.secure_boot is False and "secure_boot" not in record.missing
 
 
 def _windows_children() -> FakeChildren:
@@ -677,6 +692,31 @@ async def test_windows_host_when_the_hardware_read_fails(store: ResultHandleStor
     assert isinstance(record, ServerRecord)
     assert record.source_id == "winsrv:sql-01"
     assert record.cores is None and record.missing["cores"] == "collection_failed"
+
+
+@pytest.mark.parametrize(
+    ("firmware", "secure_boot", "reason"),
+    [
+        ("Bios", False, None),
+        ("Uefi", None, "not_reported_by_source"),
+    ],
+)
+async def test_windows_host_secure_boot_when_the_read_gives_no_value(
+    store: ResultHandleStore, firmware: str, secure_boot: bool | None, reason: str | None
+) -> None:
+    """BIOS firmware cannot have Secure Boot, so it is false; on UEFI the state is unknown."""
+    children = _windows_children()
+    hardware = children.answers[_k("winsrv.system.hardware")]
+    assert isinstance(hardware, dict)
+    hardware["FirmwareType"] = firmware
+    hardware["SecureBoot"] = None
+    _answer, envelope = await _run(winsrv_migration_inventory, children, "sql-01", store)
+
+    (record,) = envelope.records
+    assert isinstance(record, ServerRecord)
+    assert record.boot_type == firmware.lower()
+    assert record.secure_boot is secure_boot
+    assert record.missing.get("secure_boot") == reason
 
 
 async def test_hosts_with_a_placeholder_uuid_stay_separate(store: ResultHandleStore) -> None:
@@ -886,6 +926,48 @@ async def test_k8s_node_matches_the_vm_record_of_the_same_machine(
 
     assert [(d.source_id, d.same_as, d.match) for d in duplicates] == [
         ("k8s:prod-cluster:node:worker-1", f"hyperv:{_WIN_ID}", "bios_uuid")
+    ]
+
+
+async def test_k8s_node_matches_its_vmware_vm_when_the_uuid_bytes_are_reversed(
+    store: ResultHandleStore,
+) -> None:
+    """A VMware VM record keeps vCenter's UUID; the node reports the guest's form."""
+    _answer, k8s = await _run(k8s_migration_inventory, _k8s_children(), "prod-cluster", store)
+    node = next(r for r in k8s.records if r.source_id == "k8s:prod-cluster:node:worker-1")
+    assert isinstance(node, ServerRecord) and node.identity_hints.bios_uuid == _NODE_UUID
+    as_vcenter = "4e3d2c1b-605f-1847-8293-a4b5c6d7e8f9"
+    vm = adapter_kit.record_with_reasons(
+        ServerRecord,
+        {
+            "source_id": "vmware:vc-1:vm-7",
+            "collected_at": k8s.source.collected_at,
+            "identity_hints": {"bios_uuid": as_vcenter, "host_name": "worker-1"},
+            "name": "worker-1",
+            "server_type": "virtual",
+            "hypervisor": "VMware",
+            "cores": 4,
+            "memory_configured_mb": 16384,
+            "power_state": "on",
+        },
+    )
+    vmware = InventoryEnvelope.model_validate(
+        {
+            "schema_version": "1",
+            "source": {
+                "connector_id": "vmware-rest-9.0",
+                "target": "vc-1",
+                "collected_at": k8s.source.collected_at,
+            },
+            "records": [vm.model_dump(mode="json")],
+            "counts": {"server": 1, "application": 0, "kubernetes_workload": 0},
+        }
+    )
+
+    _records, duplicates = merge_inventories([vmware, k8s])
+
+    assert [(d.source_id, d.same_as, d.match) for d in duplicates] == [
+        ("k8s:prod-cluster:node:worker-1", "vmware:vc-1:vm-7", "bios_uuid")
     ]
 
 

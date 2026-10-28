@@ -225,7 +225,9 @@ def build_linux_record(
         reasons["boot_type"] = efi
     else:
         boot_type = "uefi" if efi.get("exists") else "bios"
-    reasons["secure_boot"] = "not_supported"
+    # BIOS firmware cannot have Secure Boot. On UEFI, MEHO does not read it.
+    if boot_type != "bios":
+        reasons["secure_boot"] = "not_supported"
     disks, disk_reasons = _host_disks(list(whole_disks(partitions))) if partitions else (None, {})
     reasons.update(disk_reasons)
     host_name = info.get("hostname") or None
@@ -245,6 +247,7 @@ def build_linux_record(
         if info
         else None,
         "boot_type": boot_type,
+        "secure_boot": False if boot_type == "bios" else None,
         "power_state": "on",
     }
     return record_with_reasons(ServerRecord, fields, reasons=reasons)
@@ -286,6 +289,18 @@ async def linux_migration_inventory(
             builder.omit(f"file {path}", exc.reason)
     builder.add(build_linux_record(about, files, target=name, collected_at=datetime.now(UTC)))
     return await store_inventory(operator, builder, op_id=LINUX_INVENTORY_OP_ID)
+
+
+def _secure_boot(value: Any, firmware: str) -> bool | None:
+    """The Secure Boot state; BIOS firmware cannot have it, so there it is ``False``.
+
+    The hardware read gives ``None`` when ``Confirm-SecureBootUEFI`` fails,
+    on BIOS and on UEFI without the rights to ask. On UEFI the state is then
+    unknown.
+    """
+    if isinstance(value, bool):
+        return value
+    return False if firmware == "bios" else None
 
 
 def build_windows_record(
@@ -357,7 +372,7 @@ def build_windows_record(
         if osd
         else None,
         "boot_type": {"uefi": "uefi", "bios": "bios"}.get(firmware),
-        "secure_boot": hw.get("SecureBoot") if isinstance(hw.get("SecureBoot"), bool) else None,
+        "secure_boot": _secure_boot(hw.get("SecureBoot"), firmware),
         "power_state": "on",
     }
     return record_with_reasons(ServerRecord, fields, reasons=reasons)

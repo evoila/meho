@@ -21,11 +21,17 @@ from __future__ import annotations
 from typing import Final
 
 __all__ = [
+    "ARC_API_VERSION",
+    "ARC_ASSESS_PATCHES_PATH",
+    "ARC_MACHINES_PATH",
+    "ARC_MACHINE_PATH",
     "LOCATIONS_PATH",
     "RESOURCE_GRAPH_API_VERSION",
     "RESOURCE_GRAPH_PATH",
     "SUBSCRIPTIONS_API_VERSION",
     "SUBSCRIPTION_PATH",
+    "VM_ASSESS_API_VERSION",
+    "VM_ASSESS_PATCHES_PATH",
     "locations_path",
     "subscription_path",
 ]

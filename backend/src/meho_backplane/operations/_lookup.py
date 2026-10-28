@@ -18,7 +18,8 @@ form ``"<impl_id>-<version>"`` and resolves it into the
   share, so they always agree on which rows a tenant can use.
 * :func:`installed_owner_clause` / :func:`package_visible_group_clause`
   -- hide the rows (and groups) of a connector package that is not
-  installed (#5037). Every lookup below applies it.
+  installed (#5037). The lookups below apply it, except
+  :func:`count_known_ops` (see there).
 * :func:`find_uninstalled_package_owner` -- names the missing package
   for the ``connector_package_not_installed`` error.
 * :func:`descriptor_exists_any_state` -- ``is_enabled``-agnostic
@@ -347,6 +348,11 @@ async def count_known_ops(
     would leak its enabled-op count into a tenant-A caller's
     ``unknown_op`` error payload.
 
+    The count does not apply :func:`installed_owner_clause`: it is only a
+    hint in an error, and the migration tests call it against databases
+    from before the ``owner_package`` column existed. So it can include
+    the hidden rows of a connector package that is not installed.
+
     ``tenant_id=None`` is the operator-less chassis / CLI dispatch path
     (the typed-connector ``execute`` shims, which resolve descriptors
     against global rows only): the predicate collapses to global rows —
@@ -367,7 +373,6 @@ async def count_known_ops(
                 EndpointDescriptor.version == version,
                 EndpointDescriptor.impl_id == impl_id,
                 EndpointDescriptor.is_enabled.is_(True),
-                installed_owner_clause(),
             )
         )
         return len(result.all())

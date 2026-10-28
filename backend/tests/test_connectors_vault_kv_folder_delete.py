@@ -486,6 +486,24 @@ async def test_dot_segments_are_refused_before_any_vault_call(
     assert tree.delete_calls == []
 
 
+@pytest.mark.parametrize(
+    "path",
+    [f"{_FOLDER}/../other", f"./{_FOLDER}", f"tenants//{_TENANT_ID}/lab-old"],
+    ids=["dot-dot", "dot", "empty-part"],
+)
+async def test_folder_with_bad_parts_is_refused_before_any_vault_call(
+    monkeypatch: pytest.MonkeyPatch, path: str, _registered_ops: None
+) -> None:
+    fake, tree = _lab_tree(monkeypatch)
+
+    result = await _run({"path": path, "keys": ["admin"]})
+
+    assert result.status == "error"
+    assert result.extras.get("exception_class") == "VaultFolderKeyError"
+    assert fake.auth.jwt.login_calls == []
+    assert tree.delete_calls == []
+
+
 async def test_too_many_keys_are_refused_before_approval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -242,6 +242,10 @@ def _folder_and_keys(params: dict[str, Any]) -> tuple[str, str, list[str]]:
         raise VaultFolderKeyError(
             f"{FOLDER_DELETE_OP_ID} refuses the mount root. Name a folder below the mount."
         )
+    if any(segment in {"", ".", ".."} for segment in folder.split("/")):
+        raise VaultFolderKeyError(
+            f"{FOLDER_DELETE_OP_ID} path {folder!r} must not have empty, '.' or '..' parts."
+        )
     keys = sorted({str(key) for key in params["keys"]})
     limit = folder_max_keys()
     if len(keys) > limit:

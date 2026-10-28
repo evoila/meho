@@ -2434,8 +2434,9 @@ have to trust to run `meho login` against their secrets.
 `cli/internal/cmd/admin/keycloak/` registers the install-time
 realm-provisioning verb that closes the v0.3.1 dogfood's deepest
 deployer friction: a working `meho-cli` device-code client + the
-public MCP browser-flow client + the **6 protocol mappers + 4 default
-client scopes + five MEHO role groups + admin user** that together let
+public MCP browser-flow client + the **8 protocol mappers + 4 default
+client scopes + five MEHO role groups + `MEHO-Platform-Admins` + admin
+user** that together let
 `meho login` and the MCP onramp authenticate without 4 sequential
 walls of opaque `invalid_token` / `unauthorized_client` errors. The
 verb encodes the 5-step recipe documented in
@@ -2463,14 +2464,17 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      loopback callbacks `http://localhost:*` + `http://127.0.0.1:*`
      that `mcp-remote` and Claude Code listen on — Keycloak matches
      redirect hosts literally, so both loopback forms are listed).
-  3. 6 protocol mappers, installed on **both** public clients:
+  3. 8 protocol mappers, installed on **both** public clients:
      `audience-meho-backplane`, `meho-mcp-audience`, `groups-claim`,
-     and three stock User Attribute mappers
-     (`oidc-usermodel-attribute-mapper`) — `tenant-id`, `tenant-role`
-     and `approver` — that read the `tenant_id`, `tenant_role` and
-     `approver` attributes of the person's group
-     (`aggregate.attrs=false`, `multivalued=false`; `approver` is a
-     `boolean` claim). No mapper carries a fixed value
+     four stock User Attribute mappers
+     (`oidc-usermodel-attribute-mapper`) — `tenant-id`, `tenant-role`,
+     `approver` and `platform-admin` — that read the `tenant_id`,
+     `tenant_role`, `approver` and `platform_admin` attributes of the
+     person's group (`aggregate.attrs=false`, `multivalued=false`;
+     `approver` and `platform_admin` are `boolean` claims), and
+     `meho-tenants` (`tenantsMapper` in `tenants.go`), which lists the
+     `meho_tenant` value of every group of the person in the
+     `meho_tenants` claim (`aggregate.attrs=true`, `multivalued=true`). No mapper carries a fixed value
      ([`docs/decisions/login-role-groups.md`](../decisions/login-role-groups.md),
      #4590). The names `tenant-id` / `tenant-role` are the names the
      older fixed-value mappers had, so a run on an older realm updates
@@ -2492,10 +2496,21 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      `MEHO-Readers` (`read_only`), `MEHO-Operators` (`operator`),
      `MEHO-SA-Operators` (`operator`), `MEHO-Admins` (`tenant_admin`),
      `MEHO-Approvers` (`read_only` + `approver=true`). Each carries
-     `tenant_id` from `--tenant-id` (default the all-zero UUID). The
+     `tenant_id` from `--tenant-id` (default the all-zero UUID) and
+     `meho_tenant` = `<tenant-id>:<tenant-name>:<Role>` (`--tenant-name`,
+     default `main`). Also `MEHO-Platform-Admins` (`platform_admin=true`)
+     and, with `--add-tenant <name>`, the five groups
+     `MEHO-<name>-<Role>` of one more tenant, which carry only
+     `meho_tenant` (`extraTenantGroups` in `tenants.go`). The tenant's
+     UUID comes from `--add-tenant-id`, else from the `meho_tenant` value
+     its groups already carry, else a new one that the summary prints.
+     Names are checked before any Keycloak call: lowercase letters,
+     digits and dashes, not `sa` / `platform` / `ci`, and not the first
+     tenant's name or id. Each group spec names the keys the command owns
+     (`groupSpec.Owned`); only those are set or removed. The
      groups are created even with `--skip-user-provisioning`, because
      they carry the tenant and the role. Then an admin user joined to
-     `MEHO-Admins`, with a password set via
+     `MEHO-Admins` and `MEHO-Platform-Admins`, with a password set via
      `/users/{id}/reset-password` (skipped with
      `--skip-user-provisioning`). `--tenant-role` and
      `--admin-group-name` were removed in #4590; passing either fails
@@ -2632,8 +2647,13 @@ the CA cert is available.
 in-memory state maps) through these scenarios, among others:
 
 - Fresh realm: every resource created, mapper + scope counts match
-  the recipe (6 mappers, 4 default scopes, 2 clients, 5 groups with
-  their attributes, 1 user in `MEHO-Admins` only).
+  the recipe (8 mappers, 4 default scopes, 2 clients, 5 groups with
+  their attributes plus `MEHO-Platform-Admins`, 1 user in `MEHO-Admins`
+  and `MEHO-Platform-Admins`).
+- `tenants_test.go`: `--add-tenant` makes five groups with only
+  `meho_tenant`, a second run changes nothing, a missing id is made once
+  and read back, a one-tenant realm gains `meho_tenant`, and bad tenant
+  flags stop before any Keycloak call.
 - Idempotent re-run: zero new POSTs and zero mapper / group /
   membership PUTs against the same realm; password reset called
   exactly once across two runs.

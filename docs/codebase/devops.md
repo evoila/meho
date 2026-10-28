@@ -762,6 +762,7 @@ The file holds **no secret and no host name**. Keycloak fills every
 | --- | --- |
 | `MEHO_REALM_PUBLIC_URL` | `https://<coreKeycloak.hostname>` |
 | `MEHO_REALM_TENANT_ID` | `coreKeycloak.firstTenantId` (a UUID; pick one per install and keep it for a move) |
+| `MEHO_REALM_TENANT_NAME` | `coreKeycloak.tenantName` (the first tenant's short name, default `main`; goes into `meho_tenant`) |
 | `MEHO_REALM_ADMIN_CLIENT_SECRET`, `MEHO_REALM_WEB_CLIENT_SECRET`, `MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET` | the three client Secrets above |
 
 **Groups.** Each group carries the first tenant id and a role:
@@ -793,12 +794,14 @@ on a person directly: the claim always comes from the group.
 
 The three clients people log in with (`meho-cli`, `meho-mcp`, `meho-web`)
 have the default scopes `basic`, `roles`, `web-origins`, `acr`,
-`profile`, `email` and the six mappers `meho admin keycloak
-bootstrap-clients` sets: `tenant_id`, `tenant_role` and `approver` with the
-stock User Attribute mapper (`aggregate.attrs` and `multivalued` false; into
-the access token and userinfo; `approver` as a boolean), the audience
-mappers for `meho-backplane` and `https://<host>/mcp`, and the `groups`
-claim. No client has a fixed-value tenant or role mapper. The group model is
+`profile`, `email` and the eight mappers `meho admin keycloak
+bootstrap-clients` sets: `tenant_id`, `tenant_role`, `approver` and
+`platform_admin` with the stock User Attribute mapper (`aggregate.attrs`
+and `multivalued` false; into the access token and userinfo; `approver`
+and `platform_admin` as booleans), `meho-tenants` (the `meho_tenant`
+values of all the person's groups as the list `meho_tenants`;
+`aggregate.attrs` and `multivalued` true), the audience mappers for
+`meho-backplane` and `https://<host>/mcp`, and the `groups` claim. No client has a fixed-value tenant or role mapper. The group model is
 the decision in `docs/decisions/login-role-groups.md`.
 
 **Realm settings.** Offline sessions end after 7 days at most

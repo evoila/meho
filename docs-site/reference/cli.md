@@ -98,8 +98,10 @@ Idempotently provision the public CLI + MCP clients in a Keycloak realm
 meho admin keycloak bootstrap-clients [flags]
 ```
 
+- `--add-tenant` — also make the five groups `MEHO-<name>-<Role>` of one more tenant with this short name
+- `--add-tenant-id` — the UUID of the `--add-tenant` tenant (default: the UUID its groups already carry, else a new one, printed at the end)
 - `--admin-user-email` — optional email for the new admin user
-- `--admin-user-username` — username of the admin user to provision in MEHO-Admins (required unless --skip-user-provisioning)
+- `--admin-user-username` — username of the admin user to provision in MEHO-Admins and MEHO-Platform-Admins (required unless --skip-user-provisioning)
 - `--admin-username` — master-realm admin username (or set KEYCLOAK_ADMIN_USER)
 - `--backplane-audience` — audience claim the `audience-meho-backplane` mapper emits (matches chart's `config.keycloakAudience`)
 - `--cli-client-id` — public client_id for the device-code flow (matches chart's `config.keycloakCliClientId`)
@@ -116,6 +118,7 @@ meho admin keycloak bootstrap-clients [flags]
 - `--realm` — target realm name (NOT the master realm — that's where the admin token is minted)
 - `--skip-user-provisioning` — skip the admin user step (use when people come from a directory or another login system); the five role groups are still created
 - `--tenant-id` — tenant UUID written as the `tenant_id` attribute on the five MEHO role groups (default: the all-zero UUID). Changing it later moves everyone to a new tenant
+- `--tenant-name` — the first tenant's short name (lowercase letters, digits, dashes), written into the `meho_tenant` attribute of the five MEHO role groups
 
 ## `meho agent`
 

@@ -1478,8 +1478,9 @@ numbered for cross-reference with the originating dogfood reports.
   recipe.
 - **Automation of the recipe.** [#791](https://github.com/evoila/meho/issues/791)
   (G0.9.1-T11) ships `meho admin keycloak bootstrap-clients` — an
-  idempotent verb that creates the two public clients + 6 mappers +
-  4 default scopes + the five role groups from one invocation, plus (from the next release
+  idempotent verb that creates the two public clients + 8 mappers +
+  4 default scopes + the five role groups + `MEHO-Platform-Admins` from
+  one invocation, plus (from the next release
   after v0.6.0 via [#912](https://github.com/evoila/meho/issues/912))
   the `offline_access` optional scope on the MCP client (W7). The recipe
   above is the manual path; the helper is the supported automation.

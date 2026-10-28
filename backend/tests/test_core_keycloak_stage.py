@@ -22,6 +22,7 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from meho_backplane.core import bootstrap as core_bootstrap
 from meho_backplane.core import keycloak as core_keycloak
@@ -59,6 +60,8 @@ _ROLE_GROUPS = {
 _ALNUM_32 = re.compile(r"^[A-Za-z0-9]{32}$")
 _TENANT = "3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c"
 _CI_TENANT = "9a7b6c5d-4e3f-4a2b-8c1d-0e9f8a7b6c5d"
+_LAB_B = "5d0f7a3e-1c2b-4e8d-9f6a-7b3c2d1e0f9a"
+_ROLES = ("Readers", "Operators", "SA-Operators", "Admins", "Approvers")
 
 _ENV = {
     BOOTSTRAP_ID_ENV: "boot-client",
@@ -66,6 +69,7 @@ _ENV = {
     ADMIN_SECRET_ENV: "admin-secret-value",
     "MEHO_REALM_PUBLIC_URL": "https://meho.test",
     "MEHO_REALM_TENANT_ID": _TENANT,
+    "MEHO_REALM_TENANT_NAME": "main",
     "MEHO_REALM_WEB_CLIENT_SECRET": "web-secret-value",
     "MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET": "runner-secret-value",
 }
@@ -136,6 +140,9 @@ class FakeKeycloak:
             mapper["id"] = str(uuid.uuid4())
         self.clients[client["clientId"]] = client
         return client["id"]
+
+    def _group_by_id(self, group_id: str) -> dict[str, Any] | None:
+        return next((g for g in self.groups.values() if g["id"] == group_id), None)
 
     def _client_by_id(self, client_id: str) -> dict[str, Any] | None:
         return next((c for c in self.clients.values() if c["id"] == client_id), None)
@@ -209,6 +216,11 @@ class FakeKeycloak:
             assert params == {"username": params["username"], "exact": "true"}
             user = self.users.get(params["username"])
             return Reply(200, [{"id": user["id"], "username": user["username"]}] if user else [])
+        if match := re.fullmatch(r"/admin/realms/meho/groups/([^/]+)", path):
+            group = self._group_by_id(match.group(1))
+            if group is None:
+                return Reply(404, {"error": "Could not find group by id"})
+            return Reply(200, copy.deepcopy(group))
         if match := re.fullmatch(r"/admin/realms/meho/clients/([^/]+)(/.*)?", path):
             client = self._client_by_id(match.group(1))
             if client is None:
@@ -270,6 +282,14 @@ class FakeKeycloak:
         raise AssertionError(f"unexpected POST {path}")
 
     def _put(self, path: str, body: Any, params: dict[str, str]) -> Reply:
+        if match := re.fullmatch(r"/admin/realms/meho/groups/([^/]+)", path):
+            group = self._group_by_id(match.group(1))
+            assert group is not None
+            assert body["id"] == group["id"]
+            assert body["name"] == group["name"]
+            # Keycloak replaces the whole attribute map.
+            group["attributes"] = copy.deepcopy(body.get("attributes") or {})
+            return Reply(204, None)
         if match := re.fullmatch(r"/admin/realms/meho/clients/([^/]+)", path):
             client = self._client_by_id(match.group(1))
             assert client is not None
@@ -660,7 +680,9 @@ async def test_realm_file_placeholder_without_a_value_stops_the_stage(tmp_path: 
     )
 
 
-@pytest.mark.parametrize("missing", [ADMIN_SECRET_ENV, "MEHO_REALM_TENANT_ID"])
+@pytest.mark.parametrize(
+    "missing", [ADMIN_SECRET_ENV, "MEHO_REALM_TENANT_ID", "MEHO_REALM_TENANT_NAME"]
+)
 async def test_required_env_is_checked_before_any_call(missing: str) -> None:
     env = {k: v for k, v in _ENV.items() if k != missing}
     kc = _fresh()
@@ -678,6 +700,7 @@ def test_load_realm_file_fills_every_placeholder() -> None:
     assert web["secret"] == "web-secret-value"
     assert web["redirectUris"] == ["https://meho.test/ui/auth/callback"]
     assert realm["groups"][0]["attributes"]["tenant_id"] == [_TENANT]
+    assert realm["groups"][0]["attributes"]["meho_tenant"] == [f"{_TENANT}:main:Readers"]
 
 
 def test_load_realm_file_errors_name_the_file(tmp_path: Path) -> None:
@@ -705,6 +728,105 @@ def test_load_realm_file_errors_name_the_file(tmp_path: Path) -> None:
 def test_load_plan_rejects_a_bad_plan(raw: str, problem: str) -> None:
     with pytest.raises(RealmStageError, match=re.escape(problem)):
         load_plan({PLAN_ENV: raw} if raw else {})
+
+
+# --- Several tenants (docs/decisions/2026-10-28-several-tenants-per-person.md)
+
+
+async def test_extra_tenant_gets_five_groups_with_only_meho_tenant(
+    realm_file: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    kc = _fresh()
+    plan = _plan(realm_file, tenants=[{"name": "lab-b", "id": _LAB_B}])
+
+    store = FakeStore()
+    await finish_realm(plan, _ENV, kc, store)
+
+    for role in _ROLES:
+        group = kc.groups[f"MEHO-lab-b-{role}"]
+        assert group["attributes"] == {"meho_tenant": [f"{_LAB_B}:lab-b:{role}"]}
+    for user in kc.users.values():
+        assert not [g for g in user["groups"] if g.startswith("MEHO-lab-b-")]
+    assert "group MEHO-lab-b-Readers: created" in capfd.readouterr().out
+
+    state = kc.state()
+    kc.calls.clear()
+    await finish_realm(plan, _ENV, kc, store)
+    assert kc.state() == state
+    assert not [c for c in kc.calls if c[0] in ("POST", "DELETE")]
+    assert not [c for c in kc.calls if c[0] == "PUT" and "/groups/" in c[1]]
+
+
+async def test_one_tenant_install_gets_meho_tenant_on_its_groups(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """An install from before: groups without meho_tenant, clients without the mapper."""
+    old = _realm_as_imported()
+    for group in old["groups"]:
+        group["attributes"].pop("meho_tenant", None)
+        group["attributes"]["note"] = ["kept"]
+    for client in old["clients"]:
+        client["protocolMappers"] = [
+            m for m in client.get("protocolMappers", []) if m["name"] != "meho-tenants"
+        ]
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(old)
+    kc.users["admin"] = {"id": "u1", "username": "admin", "groups": ["MEHO-Admins"]}
+    kc.users["approver"] = {"id": "u2", "username": "approver", "groups": ["MEHO-SA-Operators"]}
+
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+    roles = {
+        "MEHO-Readers": "Readers",
+        "MEHO-Operators": "Operators",
+        "MEHO-SA-Operators": "SA-Operators",
+        "MEHO-Admins": "Admins",
+        "MEHO-Approvers": "Approvers",
+    }
+    for name, role in roles.items():
+        attributes = kc.groups[name]["attributes"]
+        assert attributes["meho_tenant"] == [f"{_TENANT}:main:{role}"], name
+        assert attributes["tenant_id"] == [_TENANT]
+        assert attributes["note"] == ["kept"]
+    assert kc.groups["MEHO-Platform-Admins"]["attributes"] == {
+        "platform_admin": ["true"],
+        "note": ["kept"],
+    }
+    for client_id in ("meho-cli", "meho-mcp", "meho-web"):
+        mappers = {m["name"]: m for m in kc.clients[client_id]["protocolMappers"]}
+        assert mappers["meho-tenants"]["config"]["claim.name"] == "meho_tenants"
+    out = capfd.readouterr().out
+    assert "group MEHO-Readers: kept (attributes set)" in out
+    assert "group MEHO-Platform-Admins: kept\n" in out
+    assert "client meho-cli: kept (mapper meho-tenants added)" in out
+
+
+@pytest.mark.parametrize(
+    ("tenants", "problem"),
+    [
+        ([{"name": "Lab-B", "id": _LAB_B}], "name"),
+        ([{"name": "lab:b", "id": _LAB_B}], "name"),
+        ([{"name": "platform", "id": _LAB_B}], "taken"),
+        ([{"name": "lab-b", "id": "not-a-uuid"}], "id"),
+        (
+            [{"name": "lab-b", "id": _LAB_B}, {"name": "lab-b", "id": _CI_TENANT}],
+            "its own name",
+        ),
+    ],
+)
+def test_plan_refuses_bad_tenants(tenants: list[dict[str, str]], problem: str) -> None:
+    with pytest.raises(ValidationError, match=re.escape(problem)):
+        _plan(_REALM_FILE, tenants=tenants)
+
+
+@pytest.mark.parametrize(
+    "tenant", [{"name": "main", "id": _LAB_B}, {"name": "lab-b", "id": _TENANT.upper()}]
+)
+async def test_extra_tenant_like_the_first_stops_before_any_call(tenant: dict[str, str]) -> None:
+    kc = _fresh()
+    with pytest.raises(RealmStageError, match="the name or the id of the first tenant"):
+        await finish_realm(_plan(_REALM_FILE, tenants=[tenant]), _ENV, kc, FakeStore())
+    assert kc.calls == []
 
 
 # --- HttpAdmin over httpx ---------------------------------------------------

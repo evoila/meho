@@ -885,7 +885,21 @@ consumer session that fell back to raw kubectl):
   keeps metadata identifiers + `labels` and a JSON `spec_excerpt` capped
   at `CR_SPEC_EXCERPT_MAX_BYTES` (2048 B); over the cap, `spec_truncated`
   is `true` and the excerpt is a preview (not parseable JSON). The
-  verbose `managedFields` / `annotations` metadata blocks are dropped.
+  verbose `managedFields` metadata block is dropped.
+- **Annotations, version and status on CR rows** (#3878): every
+  `k8s.cr.list` row and the `k8s.cr.info` result also carry
+  `resource_version`, `uid`, `annotations` and a `status_excerpt`. This
+  lets a governed read confirm that an annotation-only change landed
+  (for example a Cluster API pause annotation), and lets
+  `result_query --where` filter list rows on annotations or status.
+  - Each annotation value is cut at `CR_ANNOTATION_VALUE_MAX_BYTES`
+    (256 B). `annotations_truncated` is `true` when any value was cut.
+  - The `kubectl.kubernetes.io/last-applied-configuration` annotation
+    is always left out. It is a copy of the whole last manifest, so it
+    is large, and on a Secret it repeats every value.
+  - `status_excerpt` is the JSON `.status`, capped like `spec_excerpt`
+    (2048 B), with its own `status_truncated` flag. It is `null` when
+    the object has no `.status`.
 
 This tier also retires the `cluster_kinds` **dead-end advertisements**:
 `k8s.ls /` had long listed `storageclasses` / `persistentvolumes` in its
@@ -921,8 +935,9 @@ path that can surface a raw Secret object — is scrubbed before JSONFlux /
 audit / broadcast.
 
 **Projection note.** `custom_resource_row` otherwise keeps only
-`metadata` + a bounded `.spec` excerpt and drops every other top-level
-field; a `Secret` has no `.spec`, so before #3501 a CR read of a Secret
+`metadata` + bounded `.spec` / `.status` excerpts and drops every other
+top-level field (a Secret's annotations show, but never its
+last-applied annotation); a `Secret` has no `.spec`, so before #3501 a CR read of a Secret
 returned no `data` at all (safe, but uninformative). The redactor lets
 the projection surface a `data` / `string_data` **key inventory** (values
 redacted, digests attached) for a `kind: Secret` object instead — safe

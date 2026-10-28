@@ -257,6 +257,20 @@ def test_custom_resource_row_secret_surfaces_redacted_data_with_digest() -> None
     assert _STRINGDATA_PLAINTEXT not in str(row)
 
 
+def test_custom_resource_row_secret_keeps_annotations_but_drops_last_applied() -> None:
+    """A Secret's annotations show, but the last-applied copy of its values never does."""
+    secret = _make_secret()
+    secret["metadata"]["annotations"] = {
+        LAST_APPLIED_ANNOTATION: f'{{"data":{{"tls.key":"{_TLS_KEY_B64}"}}}}',
+        "owner": "team-a",
+    }
+    row = custom_resource_row(secret)
+    assert row["annotations"] == {"owner": "team-a"}
+    assert row["status_excerpt"] is None
+    assert row["data"]["tls.key"].startswith(REDACTED_PREFIX)
+    assert _TLS_KEY_B64 not in str(row)
+
+
 def test_custom_resource_row_non_secret_has_no_data_fields() -> None:
     row = custom_resource_row(
         {"apiVersion": "v1", "kind": "IPAddressPool", "metadata": {"name": "default"}}

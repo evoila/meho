@@ -49,6 +49,7 @@ from meho_backplane.connectors.kubernetes import KubernetesConnector, Kubernetes
 from meho_backplane.connectors.kubernetes.ops import KUBERNETES_OPS
 from meho_backplane.connectors.kubernetes.ops_core import K8S_CLUSTER_KINDS
 from meho_backplane.connectors.kubernetes.ops_customresource import (
+    CR_ANNOTATION_VALUE_MAX_BYTES,
     CR_SPEC_EXCERPT_MAX_BYTES,
     CUSTOM_RESOURCE_OPS,
     crd_row,
@@ -61,6 +62,7 @@ from meho_backplane.connectors.kubernetes.ops_storage import (
     persistentvolumeclaim_row,
     storageclass_row,
 )
+from meho_backplane.connectors.kubernetes.redaction import LAST_APPLIED_ANNOTATION
 from meho_backplane.settings import get_settings
 
 
@@ -467,6 +469,73 @@ def test_custom_resource_row_drops_managed_fields_metadata() -> None:
 
 
 # ---------------------------------------------------------------------------
+# custom_resource_row -- annotations, resourceVersion, uid, status (#3878)
+# ---------------------------------------------------------------------------
+
+
+def test_custom_resource_row_carries_resource_version_uid_and_annotations() -> None:
+    cr = _make_cr()
+    cr["metadata"]["resourceVersion"] = "48213"
+    cr["metadata"]["uid"] = "0c8e0d4e-1111-2222-3333-444455556666"
+    cr["metadata"]["annotations"] = {"cluster.x-k8s.io/paused": ""}
+    row = custom_resource_row(cr)
+    assert row["resource_version"] == "48213"
+    assert row["uid"] == "0c8e0d4e-1111-2222-3333-444455556666"
+    assert row["annotations"] == {"cluster.x-k8s.io/paused": ""}
+    assert row["annotations_truncated"] is False
+
+
+def test_custom_resource_row_without_annotations_yields_empty_map() -> None:
+    row = custom_resource_row(_make_cr())
+    assert row["annotations"] == {}
+    assert row["annotations_truncated"] is False
+    assert row["resource_version"] is None
+    assert row["uid"] is None
+
+
+def test_custom_resource_row_caps_long_annotation_value() -> None:
+    cr = _make_cr()
+    cr["metadata"]["annotations"] = {"short": "yes", "long": "x" * 5000}
+    row = custom_resource_row(cr)
+    assert row["annotations"]["short"] == "yes"
+    assert len(row["annotations"]["long"].encode("utf-8")) == CR_ANNOTATION_VALUE_MAX_BYTES
+    assert row["annotations_truncated"] is True
+
+
+def test_custom_resource_row_drops_last_applied_annotation() -> None:
+    cr = _make_cr()
+    cr["metadata"]["annotations"] = {
+        LAST_APPLIED_ANNOTATION: json.dumps({"spec": {"addresses": ["10.0.0.0/24"]}}),
+        "owner": "team-a",
+    }
+    row = custom_resource_row(cr)
+    assert row["annotations"] == {"owner": "team-a"}
+    assert row["annotations_truncated"] is False
+
+
+def test_custom_resource_row_small_status_is_full_json() -> None:
+    cr = _make_cr()
+    cr["status"] = {"phase": "Outdated", "currentRunners": 3}
+    row = custom_resource_row(cr)
+    assert json.loads(row["status_excerpt"]) == {"phase": "Outdated", "currentRunners": 3}
+    assert row["status_truncated"] is False
+
+
+def test_custom_resource_row_large_status_is_truncated_within_bound() -> None:
+    cr = _make_cr()
+    cr["status"] = {"conditions": [{"type": "Ready", "message": "m" * 100}] * 50}
+    row = custom_resource_row(cr)
+    assert row["status_truncated"] is True
+    assert len(row["status_excerpt"].encode("utf-8")) <= CR_SPEC_EXCERPT_MAX_BYTES
+
+
+def test_custom_resource_row_no_status_yields_none_excerpt() -> None:
+    row = custom_resource_row(_make_cr())
+    assert row["status_excerpt"] is None
+    assert row["status_truncated"] is False
+
+
+# ---------------------------------------------------------------------------
 # Handlers -- storage (mocked API clients)
 # ---------------------------------------------------------------------------
 
@@ -748,3 +817,75 @@ async def test_k8s_cr_info_without_namespace_uses_cluster_api() -> None:
         )
 
     assert result["namespace"] is None
+
+
+def _make_annotated_cr() -> dict[str, Any]:
+    cr = _make_cr()
+    cr["metadata"]["resourceVersion"] = "7"
+    cr["metadata"]["uid"] = "uid-1"
+    cr["metadata"]["annotations"] = {"cluster.x-k8s.io/paused": "", LAST_APPLIED_ANNOTATION: "{}"}
+    cr["status"] = {"phase": "Outdated"}
+    return cr
+
+
+@pytest.mark.asyncio
+async def test_k8s_cr_list_rows_carry_annotations_and_status() -> None:
+    """A list row lets ``result_query --where`` filter on annotations and status (#3878)."""
+    connector = _make_connector()
+    with (
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            new_callable=AsyncMock,
+            return_value=MagicMock(close=AsyncMock()),
+        ),
+        patch("meho_backplane.connectors.kubernetes.connector.client.CustomObjectsApi") as co_cls,
+    ):
+        co_cls.return_value.list_cluster_custom_object = AsyncMock(
+            return_value={"items": [_make_annotated_cr()]}
+        )
+        result = await connector.k8s_cr_list(
+            _make_operator(),
+            _TARGET,
+            {"group": "metallb.io", "version": "v1beta1", "plural": "ipaddresspools"},
+        )
+
+    row = result["rows"][0]
+    assert row["annotations"] == {"cluster.x-k8s.io/paused": ""}
+    assert row["resource_version"] == "7"
+    assert row["uid"] == "uid-1"
+    assert json.loads(row["status_excerpt"]) == {"phase": "Outdated"}
+
+
+@pytest.mark.asyncio
+async def test_k8s_cr_info_returns_annotations_resource_version_uid_and_status() -> None:
+    """An annotation-only change can be confirmed by a governed read (#3878)."""
+    connector = _make_connector()
+    with (
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            new_callable=AsyncMock,
+            return_value=MagicMock(close=AsyncMock()),
+        ),
+        patch("meho_backplane.connectors.kubernetes.connector.client.CustomObjectsApi") as co_cls,
+    ):
+        co_cls.return_value.get_namespaced_custom_object = AsyncMock(
+            return_value=_make_annotated_cr()
+        )
+        result = await connector.k8s_cr_info(
+            _make_operator(),
+            _TARGET,
+            {
+                "group": "metallb.io",
+                "version": "v1beta1",
+                "plural": "ipaddresspools",
+                "name": "default",
+                "namespace": "metallb-system",
+            },
+        )
+
+    assert result["annotations"] == {"cluster.x-k8s.io/paused": ""}
+    assert result["annotations_truncated"] is False
+    assert result["resource_version"] == "7"
+    assert result["uid"] == "uid-1"
+    assert json.loads(result["status_excerpt"]) == {"phase": "Outdated"}
+    assert result["status_truncated"] is False

@@ -40,12 +40,12 @@ before the body reaches the recorder, so a ``k8s.apply`` of a Secret or
 a ``k8s.cr.*`` read of one never records a value either.
 
 Note on the current CR projection: ``custom_resource_row`` otherwise
-keeps only ``metadata`` + a bounded ``.spec`` excerpt and drops every
-other top-level field, and a ``Secret`` has no ``.spec`` -- so before
-this module a CR read of a ``Secret`` returned no ``data`` at all. This
-redactor lets the projection surface the ``data`` / ``stringData`` **key
-inventory** (values redacted) instead, which is both safe and more
-useful than silently dropping it. ``k8s.secret.read_to_ref`` (#3496) is
+keeps only ``metadata`` + bounded ``.spec`` / ``.status`` excerpts and
+drops every other top-level field, and a ``Secret`` has no ``.spec`` --
+so before this module a CR read of a ``Secret`` returned no ``data`` at
+all. This redactor lets the projection surface the ``data`` /
+``stringData`` **key inventory** (values redacted) instead, which is
+both safe and more useful than silently dropping it. ``k8s.secret.read_to_ref`` (#3496) is
 unaffected: it returns only a Vault ``secret_ref`` + a SHA-256, never a
 ``data`` map, so there is nothing here for this walk to match.
 """

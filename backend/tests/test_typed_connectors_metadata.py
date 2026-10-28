@@ -75,6 +75,7 @@ _K8S_GROUPS: Final[frozenset[str]] = frozenset(
         "exec",
         "storage",
         "custom_resources",
+        "access",
     }
 )
 _VAULT_GROUPS: Final[frozenset[str]] = frozenset({"auth", "kv", "sys"})

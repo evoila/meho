@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``0118_create_ingested_auth_profile`` (#5016).
+"""Behavioural tests for ``0119_create_ingested_auth_profile`` (#5016).
 
 The table saves the login type an operator chose for an ingested
 connector. One row per ``(tenant_id, product, version, impl_id)``, kept by
 two partial unique indexes (built-in rows have ``tenant_id IS NULL``).
 
-Every step targets this migration's own revision (``0118``) and its
-``down_revision`` (``0117``), never ``head``.
+Every step targets this migration's own revision (``0119``) and its
+``down_revision`` (``0118``), never ``head``.
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0118"
-_DOWN_REVISION = "0117"
+_REVISION = "0119"
+_DOWN_REVISION = "0118"
 _TABLE = "ingested_auth_profile"
 _TENANT_A = "11111111111111111111111111111111"
 
@@ -39,7 +39,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0118.db"
+    db_path = tmp_path / "migration_0119.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)

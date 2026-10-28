@@ -31,6 +31,7 @@ from datetime import datetime
 from typing import Final
 
 from meho_backplane.auth.runner_principals import RunnerPrincipalRead
+from meho_backplane.runner import wire
 from meho_backplane.ui.routes.checks.views import coerce_utc_aware, state_badge_class
 
 __all__ = [
@@ -87,4 +88,11 @@ def project_runner_to_row(
         "stale_at": coerce_utc_aware(stale_at),
         "last_seen_at": coerce_utc_aware(principal.last_seen_at),
         "created_at": coerce_utc_aware(principal.created_at),
+        "wire_version": principal.wire_version,
+        # ``None`` (not called since #5020) is not flagged: such a runner is
+        # either idle or counts as version 1 on its next call.
+        "wire_version_mismatch": (
+            principal.wire_version is not None and principal.wire_version != wire.SCHEMA_VERSION
+        ),
+        "central_wire_version": wire.SCHEMA_VERSION,
     }

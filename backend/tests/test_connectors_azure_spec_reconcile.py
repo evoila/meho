@@ -62,12 +62,24 @@ _SWAGGER2_METHODS = frozenset({"get", "put", "post", "delete", "options", "head"
 #: Per path constant: the HTTP method(s) the connector sends and the name of
 #: the API version constant it sends with them. A path string carries no
 #: method, so it is written here; the guard test keeps this table and the
-#: constants in step.
+#: constants in step. Each family adds its lines under its own comment, so two
+#: families never add a line at the same place.
 _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
+    # account and shared paths
     "SUBSCRIPTION_PATH": (("GET",), "SUBSCRIPTIONS_API_VERSION"),
     "LOCATIONS_PATH": (("GET",), "SUBSCRIPTIONS_API_VERSION"),
     "RESOURCE_GRAPH_PATH": (("POST",), "RESOURCE_GRAPH_API_VERSION"),
-    # ---- security (Task #5089) ----
+    # aks (Task #5087)
+    # arc (Task #5084)
+    # automation (Task #5092)
+    # avs (Task #5091)
+    # compute (Task #5083)
+    # cost (Task #5088)
+    # inventory (Task #5082)
+    # migrate (Task #5093)
+    # monitor (Task #5090)
+    # network (Task #5085)
+    # security (Task #5089)
     "SECURE_SCORES_PATH": (("GET",), "SECURE_SCORE_API_VERSION"),
     "SECURE_SCORE_CONTROLS_PATH": (("GET",), "SECURE_SCORE_API_VERSION"),
     "SECURITY_ASSESSMENTS_PATH": (("GET",), "SECURITY_ASSESSMENTS_API_VERSION"),
@@ -79,6 +91,7 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     "ROLE_ASSIGNMENTS_PATH": (("GET",), "AUTHORIZATION_API_VERSION"),
     "ROLE_DEFINITIONS_PATH": (("GET",), "AUTHORIZATION_API_VERSION"),
     "ACTIVITY_LOG_PATH": (("GET",), "ACTIVITY_LOG_API_VERSION"),
+    # storage (Task #5086)
 }
 
 _PARAMETER = re.compile(r"\{[^}]*\}")
@@ -151,23 +164,57 @@ def test_every_path_constant_has_a_method_and_an_api_version() -> None:
 
 
 def test_the_checked_paths_are_pinned() -> None:
-    """The list of checked paths, so a change to it is always on purpose."""
-    assert sorted(_declared_op_ids()) == [
+    """The list of checked paths, so a change to it is always on purpose.
+
+    The list has one block per family, like the ``_DECLARED`` table. A line
+    that starts with ``"# "`` starts a block: it names the family and holds no
+    path. Each family adds its paths under its own line, so two families never
+    add a line at the same place, even when their paths come from the same spec
+    file. Inside each block the paths are sorted.
+    """
+    pinned = [
+        "# account and shared paths",
         "GET:/subscriptions/{}/locations@2022-12-01",
+        "GET:/subscriptions/{}@2022-12-01",
+        "POST:/providers/microsoft.resourcegraph/resources@2024-04-01",
+        "# aks (Task #5087)",
+        "# arc (Task #5084)",
+        "# automation (Task #5092)",
+        "# avs (Task #5091)",
+        "# compute (Task #5083)",
+        "# cost (Task #5088)",
+        "# inventory (Task #5082)",
+        "# migrate (Task #5093)",
+        "# monitor (Task #5090)",
+        "# network (Task #5085)",
+        "# security (Task #5089)",
         "GET:/subscriptions/{}/providers/microsoft.authorization/policyassignments@2026-07-01",
         "GET:/subscriptions/{}/providers/microsoft.insights/eventtypes/management/values@2015-04-01",
         "GET:/subscriptions/{}/providers/microsoft.security/alerts@2022-01-01",
         "GET:/subscriptions/{}/providers/microsoft.security/assessmentmetadata@2025-05-04",
         "GET:/subscriptions/{}/providers/microsoft.security/securescorecontrols@2020-01-01",
         "GET:/subscriptions/{}/providers/microsoft.security/securescores@2020-01-01",
-        "GET:/subscriptions/{}@2022-12-01",
         "GET:/{}/providers/microsoft.authorization/roleassignments@2022-04-01",
         "GET:/{}/providers/microsoft.authorization/roledefinitions@2022-04-01",
         "GET:/{}/providers/microsoft.security/assessments@2020-01-01",
         "GET:/{}/providers/microsoft.security/pricings@2024-01-01",
-        "POST:/providers/microsoft.resourcegraph/resources@2024-04-01",
         "POST:/subscriptions/{}/providers/microsoft.policyinsights/policystates/{}/summarize@2024-10-01",
+        "# storage (Task #5086)",
     ]
+    blocks: list[tuple[str, list[str]]] = []
+    for line in pinned:
+        if line.startswith("# "):
+            blocks.append((line, []))
+        else:
+            assert blocks, f"{line!r} is above the first block line"
+            blocks[-1][1].append(line)
+    names = [name for name, _ in blocks]
+    assert len(names) == len(set(names)), f"a block line is there twice: {names}"
+    for name, block in blocks:
+        assert ":/" not in name, f"{name!r} starts a block, so it must not hold a path"
+        assert block == sorted(block), f"the paths under {name!r} are not sorted"
+    checked = [path for _, block in blocks for path in block]
+    assert sorted(checked) == sorted(_declared_op_ids())
 
 
 @pytest.mark.parametrize(

@@ -73,8 +73,22 @@ methods that `AzureConnector` takes over.
 - `_model.py` holds what every family imports: `AzureTypedOp`, `NO_PARAMS`
   and `TEXT_OR_NULL`.
 - `typed_ops.py` and `connector.py` collect the families: an import and one
-  line per list for each family, in alphabetical order.
-- `_paths.py` keeps the paths, in one marked section per family.
+  line per list for each family.
+- `_paths.py` keeps the paths, in one marked section per family. It has no
+  `__all__`, because every family would add its names at the same place.
+
+Every place that collects the families has one fixed comment line per family,
+`# <family> (Task #<n>)`, in alphabetical order. A family adds its lines
+directly under its own comment and leaves the comment as it is. Git merges two
+changes without a conflict only when at least one unchanged line lies between
+them, so two family branches then merge in any order. In the two import parts
+an empty line follows each family comment, because Ruff wants an empty line
+between two imports there; leave it as it is. The same holds for the
+spec path check: its `_DECLARED` table has the same comment lines, and its list
+of checked paths has the same lines as strings (`"# <family> (Task #<n>)"`),
+because the test reads them to check that each block is sorted. The end of
+this page has one section per family: a family replaces the line "Not built
+yet" under its heading with its text and keeps the heading.
 
 ## Target shape
 
@@ -543,6 +557,34 @@ as MEHO's system identity, which cannot read the secret, so it reports
 - Related pages: `connectors-keycloak.md` (the same client credentials request),
   `connectors-shared-vault-creds.md`, `error-message-shape.md`.
 
+## aks
+
+Not built yet (Task #5087).
+
+## arc
+
+Not built yet (Task #5084).
+
+## automation
+
+Not built yet (Task #5092).
+
+## avs
+
+Not built yet (Task #5091).
+
+## compute
+
+Not built yet (Task #5083).
+
+## cost
+
+Not built yet (Task #5088).
+
+## inventory
+
+Not built yet (Task #5082).
+
 ## migrate
 
 The `migrate` group reads what Azure Migrate knows about the servers a team
@@ -715,3 +757,19 @@ API description files. Open points for the lab proof:
 - Pinned API description files: `Microsoft.Migrate/AssessmentProjects/stable/2024-01-15/migrate.json`
   and `Microsoft.OffAzure/OffAzure/stable/2023-06-06/migrate.json` in
   <https://github.com/Azure/azure-rest-api-specs>.
+
+## monitor
+
+Not built yet (Task #5090).
+
+## network
+
+Not built yet (Task #5085).
+
+## security
+
+Not built yet (Task #5089).
+
+## storage
+
+Not built yet (Task #5086).

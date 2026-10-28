@@ -19,6 +19,9 @@ Every other family of operations has its own module: its group text, its
 operations, their bodies and a mixin class (a class whose methods
 ``AzureConnector`` takes over). :data:`AZURE_TYPED_OPS` and
 :data:`AZURE_TYPED_WHEN_TO_USE_BY_GROUP` collect the families, one line each.
+Each family has a fixed comment line in the imports and in both lists, and its
+line goes directly under that comment. So two families never add a line at the
+same place, and git merges their branches in any order without a conflict.
 """
 
 from __future__ import annotations
@@ -27,9 +30,39 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
-from meho_backplane.connectors.azure import migrate
 from meho_backplane.connectors.azure._llm_instructions import AZURE_READ_LLM_INSTRUCTIONS
 from meho_backplane.connectors.azure._model import NO_PARAMS, TEXT_OR_NULL, AzureTypedOp
+
+# The family modules. Each family imports its module on the line under its own
+# comment: from meho_backplane.connectors.azure import <family>
+# Ruff does not sort this part, so it cannot join these imports into one line.
+# Keep the empty line under each family: Ruff wants one between two imports.
+# isort: off
+# aks (Task #5087)
+
+# arc (Task #5084)
+
+# automation (Task #5092)
+
+# avs (Task #5091)
+
+# compute (Task #5083)
+
+# cost (Task #5088)
+
+# inventory (Task #5082)
+
+# migrate (Task #5093)
+from meho_backplane.connectors.azure import migrate
+
+# monitor (Task #5090)
+
+# network (Task #5085)
+
+# security (Task #5089)
+
+# storage (Task #5086)
+# isort: on
 
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
@@ -321,17 +354,41 @@ _ACCOUNT_OPS: tuple[AzureTypedOp, ...] = (
 
 #: Every Azure typed operation: the account operations first, then each family.
 AZURE_TYPED_OPS: tuple[AzureTypedOp, ...] = (
-    # Each family module adds one line here, in alphabetical order: *<family>.OPS,
+    # Each family module adds one line, *<family>.OPS, under its own comment below.
     *_ACCOUNT_OPS,
+    # aks (Task #5087)
+    # arc (Task #5084)
+    # automation (Task #5092)
+    # avs (Task #5091)
+    # compute (Task #5083)
+    # cost (Task #5088)
+    # inventory (Task #5082)
+    # migrate (Task #5093)
     *migrate.OPS,
+    # monitor (Task #5090)
+    # network (Task #5085)
+    # security (Task #5089)
+    # storage (Task #5086)
 )
 
 #: The text of each group. The AI reads it through ``list_operation_groups``
 #: to choose where to search.
 AZURE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
-    # Each family module adds one line here, in alphabetical order: **<family>.WHEN_TO_USE,
+    # Each family module adds one line, **<family>.WHEN_TO_USE, under its own comment below.
     **_ACCOUNT_WHEN_TO_USE,
+    # aks (Task #5087)
+    # arc (Task #5084)
+    # automation (Task #5092)
+    # avs (Task #5091)
+    # compute (Task #5083)
+    # cost (Task #5088)
+    # inventory (Task #5082)
+    # migrate (Task #5093)
     **migrate.WHEN_TO_USE,
+    # monitor (Task #5090)
+    # network (Task #5085)
+    # security (Task #5089)
+    # storage (Task #5086)
 }
 
 

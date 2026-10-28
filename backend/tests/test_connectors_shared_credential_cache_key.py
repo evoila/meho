@@ -4,8 +4,9 @@
 """Tests for ``credential_cache_key``: the cache key for login tokens and sessions.
 
 Two targets in one tenant that use the same secret against the same login
-host get the same key, so they share one token. A different secret, login
-host, tenant or login input gives a different key. A target with no secret
+address get the same key, so they share one token. A different secret, login
+address (scheme, host, port), tenant or login input gives a different key.
+An unset port is the scheme's default port. A target with no secret
 reference keeps a key of its own.
 
 Fixture values are made up.
@@ -62,8 +63,43 @@ def test_a_different_credential_gives_a_different_key() -> None:
         _target(host="other-appliance.test.invalid"),
         _target(port=8443),
         _target(fqdn="org-a.appliance.test.invalid"),
+        _target(extras={"scheme": "http"}),
     ):
         assert credential_cache_key(base) != credential_cache_key(other), other
+
+
+def test_http_and_https_targets_never_share_a_key() -> None:
+    """An HTTPS login token must not be sent over HTTP to another service."""
+    https = _target(port=None)
+    plain = _target(port=None, extras={"scheme": "http"})
+    explicit_https = _target(port=None, extras={"scheme": "https"})
+    assert credential_cache_key(https) != credential_cache_key(plain)
+    assert credential_cache_key(https) == credential_cache_key(explicit_https)
+    assert credential_cache_key(https)[2] == "https"
+    assert credential_cache_key(plain)[2] == "http"
+
+
+def test_an_unset_port_is_the_default_port_of_the_scheme() -> None:
+    """Both targets reach the same login address, so they share one key."""
+    assert credential_cache_key(_target(port=None)) == credential_cache_key(_target(port=443))
+    assert credential_cache_key(_target(port=None))[4] == "443"
+    http_unset = _target(port=None, extras={"scheme": "http"})
+    http_80 = _target(port=80, extras={"scheme": "http"})
+    assert credential_cache_key(http_unset) == credential_cache_key(http_80)
+    assert credential_cache_key(http_unset) != credential_cache_key(_target(port=80))
+
+
+def test_a_secret_reference_override_replaces_the_target_secret() -> None:
+    """A login that uses another secret than the target's own keys on that secret."""
+    first = _target(secret_ref="targets/shared/tenant-a")
+    second = _target(secret_ref="targets/shared/tenant-b")
+    assert credential_cache_key(first) != credential_cache_key(second)
+    shared = "targets/shared/provider"
+    assert credential_cache_key(first, secret_ref=shared) == credential_cache_key(
+        second, secret_ref=shared
+    )
+    assert credential_cache_key(first, secret_ref=shared)[1] == shared
+    assert credential_cache_key(first, secret_ref=None) == credential_cache_key(first)
 
 
 def test_tenants_stay_apart() -> None:

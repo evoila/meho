@@ -192,6 +192,7 @@ class _Target:
         version: str = SRM_VERSION,
         secret_ref: str = "targets/op-reads/srm-typed",
         tenant_id: UUID = _TENANT_ID,
+        port: int | None = 443,
     ) -> None:
         self.product = product
         self.fingerprint = type("_FP", (), {"version": version})()
@@ -200,7 +201,7 @@ class _Target:
         self.tenant_id: UUID = tenant_id
         self.name = f"{product}-typed-{self.id.hex[:6]}"
         self.host = _HOST
-        self.port = 443
+        self.port = port
         self.secret_ref = secret_ref
         self.auth_model = "shared_service_account"
 
@@ -527,6 +528,37 @@ async def test_late_401s_after_a_renewal_do_not_end_the_new_shared_session(
     assert appliance.logins == 2
     # More than one call got a 401, so late 401s did happen.
     assert appliance.rejected > 1
+
+
+@pytest.mark.asyncio
+async def test_unset_port_and_explicit_default_port_share_one_session_and_one_renewal(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """A target with no port and one with port 443 reach the same login address."""
+    await _register_and_resolve(_stub_embedding)
+    unset = _Target(port=None)
+    explicit = _Target(port=443)
+    appliance = _OneSessionPerUser()
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.post(_SESSION).mock(side_effect=appliance.login)
+        info = mock.get(_INFO).mock(side_effect=appliance.info)
+
+        warm = await asyncio.gather(
+            *(_dispatch("srm.about", {}, target) for target in (unset, explicit) * 3)
+        )
+        appliance.expire_all()
+        renewed = await _dispatch("srm.about", {}, explicit)
+        after = await asyncio.gather(
+            *(_dispatch("srm.about", {}, target) for target in (unset, explicit) * 3)
+        )
+
+    for outcome in (*warm, renewed, *after):
+        assert outcome.status == "ok", outcome.error
+    assert appliance.logins == 2
+    assert appliance.rejected == 1
+    sent = {call.request.headers["x-dr-session"] for call in info.calls}
+    assert sent == {"srm-session-1", "srm-session-2"}
 
 
 @pytest.mark.asyncio

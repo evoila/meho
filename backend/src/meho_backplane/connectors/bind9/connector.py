@@ -257,8 +257,8 @@ class Bind9Connector(SshConnector):
     # makes room for a future ``("bind9", "9.x", "bind9-rndc")`` or
     # ``("bind9", "9.x", "bind9-rest")`` sibling once a non-SSH
     # control surface lands; the multi-impl shape is already in the
-    # registry-v2 substrate (vmware-rest vs the future
-    # vmware-pyvmomi). The ``9.x`` version range covers ISC's 9.18
+    # registry-v2 substrate (several impl_ids can serve one
+    # product). The ``9.x`` version range covers ISC's 9.18
     # (current Extended Support Version) and 9.20 (current Stable
     # Release) -- both expose ``named -v`` / ``named-checkconf -p``
     # with the same flags and the same banner format.

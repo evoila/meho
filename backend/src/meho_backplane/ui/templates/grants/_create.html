@@ -39,19 +39,19 @@
         <legend class="px-1 text-sm font-semibold">Service-principal standing grant</legend>
         <label class="block space-y-1">
           <span class="text-sm font-medium">Exact operation ID</span>
-          <input type="text" name="op" value="{{ values.get('op', '') }}" class="input input-bordered w-full font-mono" :required="kind === 'service'" maxlength="512" placeholder="POST:/vcenter/vm/{vm}/power?action=start" />
+          <input type="text" name="op" value="{{ values.get('op', '') }}" class="input input-bordered w-full font-mono" :required="kind === 'service'" maxlength="512" placeholder="POST:/repos/{owner}/{repo}/issues" />
           <span class="block text-xs opacity-60">No globs. A literal <span class="font-mono">?key=value</span> action suffix is allowed.</span>
         </label>
         <label class="block space-y-1">
           <span class="text-sm font-medium">Exact connector ID</span>
-          <input type="text" name="connector_id" value="{{ values.get('connector_id', '') }}" class="input input-bordered w-full font-mono" :required="kind === 'service'" maxlength="256" placeholder="vmware-rest-9.0" />
+          <input type="text" name="connector_id" value="{{ values.get('connector_id', '') }}" class="input input-bordered w-full font-mono" :required="kind === 'service'" maxlength="256" placeholder="gh-rest-3" />
           <span class="block text-xs opacity-60">No globs. The connector and operation are reviewed as one exact pair.</span>
         </label>
         <div class="space-y-1"><p class="text-sm font-medium">Target scope</p><p class="text-xs opacity-60">Supply one target UUID, or a selector (product and/or name pattern), or leave every field blank for a targetless operation. A target UUID cannot be combined with a selector.</p></div>
         <label class="block space-y-1"><span class="text-sm">Target UUID</span><input type="text" name="target_id" value="{{ values.get('target_id', '') }}" class="input input-bordered w-full font-mono {% if errors.get('target_id') %}input-error{% endif %}" maxlength="64" placeholder="Target UUID" />{% if errors.get('target_id') %}<span class="text-error text-xs">{{ errors['target_id'] }}</span>{% endif %}</label>
         <div class="grid gap-4 sm:grid-cols-2">
-          <label class="block space-y-1"><span class="text-sm">Target product selector</span><input type="text" name="target_product" value="{{ values.get('target_product', '') }}" class="input input-bordered w-full font-mono" maxlength="256" placeholder="vmware" /></label>
-          <label class="block space-y-1"><span class="text-sm">Target name pattern selector</span><input type="text" name="target_name_pattern" value="{{ values.get('target_name_pattern', '') }}" class="input input-bordered w-full font-mono" maxlength="512" placeholder="esx-dc*" /></label>
+          <label class="block space-y-1"><span class="text-sm">Target product selector</span><input type="text" name="target_product" value="{{ values.get('target_product', '') }}" class="input input-bordered w-full font-mono" maxlength="256" placeholder="gh" /></label>
+          <label class="block space-y-1"><span class="text-sm">Target name pattern selector</span><input type="text" name="target_name_pattern" value="{{ values.get('target_name_pattern', '') }}" class="input input-bordered w-full font-mono" maxlength="512" placeholder="prod-k8s-*" /></label>
         </div>
         <label class="block space-y-1"><span class="text-sm font-medium">Reason</span><textarea name="reason" class="textarea textarea-bordered w-full" :required="kind === 'service'" maxlength="2048" rows="3" placeholder="Why this service may run this operation unattended">{{ values.get('reason', '') }}</textarea></label>
         {% if sandbox_mode_on %}

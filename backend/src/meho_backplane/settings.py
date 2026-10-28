@@ -1771,7 +1771,7 @@ class Settings(BaseModel):
     # the mint is still refused if this config disagrees). Format: a
     # comma-separated list of ``op_pattern`` or ``op_pattern@target_scope``
     # tokens (``@`` omitted => ``target_scope='*'``), e.g.
-    # ``"vmware.vm.tag_set@*,vmware.vm.annotation_set"``; default ``""`` is
+    # ``"k8s.label@*,k8s.annotate"``; default ``""`` is
     # fail-closed (no remote-write executes at the edge until provisioned).
     # Central-only deployments (no runner role) leave this unset.
     satellite_write_allowlist: str = ""

@@ -758,7 +758,9 @@ register_mcp_tool(
                 "op_id": {
                     "type": "string",
                     "minLength": 1,
-                    "description": ("Connector-side op_id (e.g. 'GET:/api/vcenter/cluster')."),
+                    "description": (
+                        "Connector-side op_id (e.g. 'GET:/repos/{owner}/{repo}/issues')."
+                    ),
                 },
                 "custom_description": {"type": ["string", "null"]},
                 "safety_level": {

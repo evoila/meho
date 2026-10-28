@@ -417,8 +417,8 @@ class KubernetesConnector(Connector):
     # operator surface (CLI alias verbs / meta-tool dispatch) bakes.
     # A future EKS-specific transport lands as a sibling row under
     # ``("k8s", "1.x", "<impl-id>")`` and selects via
-    # ``target.preferred_impl_id`` -- the same shape vmware-rest's
-    # multi-impl-ready substrate already supports.
+    # ``target.preferred_impl_id`` -- the multi-impl shape the
+    # v2 registry already supports.
     product = "k8s"
     version = "1.x"
     impl_id = "k8s"

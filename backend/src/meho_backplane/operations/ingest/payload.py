@@ -81,8 +81,7 @@ class ConnectorReviewOp(BaseModel):
     ``parameter_schema`` / ``response_schema`` / ``embedding`` —
     those are dispatch-time concerns, not review-time concerns, and
     sending 4 KB of schema per op would balloon the review payload
-    for connectors with thousands of operations (vCenter has 961
-    paths in v0.2).
+    for connectors with thousands of operations.
     """
 
     model_config = ConfigDict(frozen=True)

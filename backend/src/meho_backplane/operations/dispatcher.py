@@ -938,7 +938,7 @@ def _composite_terminal_error_code(descriptor: EndpointDescriptor, envelope: Any
     predicate detects the marker so :func:`_execute_and_audit_inner` can re-route
     the envelope through the error-audit path.
 
-    Rule (documented in ``docs/codebase/connectors-vmware-rest.md``): the signal
+    Rule: the signal
     is an ``error``-severity issue, NOT the ``status`` sentinel. The sentinel
     space is unbounded and mixes hard failures with legitimate soft refusals /
     idempotency guards (``rule_exists``, ``not_powered_off``,

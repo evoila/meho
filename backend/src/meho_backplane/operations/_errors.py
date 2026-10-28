@@ -222,7 +222,7 @@ def result_unknown_connector(connector_id: str, op_id: str, duration_ms: float) 
         op_id=op_id,
         error=(
             f"unknown_connector: unknown connector_id {connector_id!r}. Expected "
-            "<impl_id>-<version> (e.g. 'vmware-rest-9.0', 'vault-1.x'). The id is "
+            "<impl_id>-<version> (e.g. 'k8s-1.x', 'vault-1.x'). The id is "
             "mistyped or the connector is not registered on this deploy. Use "
             "meho_connector_list to see the connector ids."
         ),

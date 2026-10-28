@@ -1369,7 +1369,7 @@ _LIST_TARGETS_INPUT_SCHEMA: Final[dict[str, Any]] = {
             "type": ["string", "null"],
             "description": (
                 "Optional connector filter in the form "
-                '`<impl_id>-<version>` (e.g. "vmware-rest-9.0") or a '
+                '`<impl_id>-<version>` (e.g. "k8s-1.x") or a '
                 'v1-style single-product slug (e.g. "vault"). Only the '
                 "product component is used: the result is narrowed to "
                 "targets whose `product` matches that connector's "
@@ -1439,7 +1439,7 @@ _LIST_TARGETS_DESCRIPTION: Final[str] = (
     "`target`.\n\n"
     "WHEN TO CALL: the operator asks 'what can I act on?', or you need a "
     "concrete target name and only have a product in mind ('list the "
-    "vCenters' → `connector_id=vmware-rest-9.0`). Tenant scope is the "
+    "Kubernetes clusters' → `connector_id=k8s-1.x`). Tenant scope is the "
     "operator's own tenant unless a `platform_admin` passes `tenant`.\n\n"
     "Returns `{targets: [{id, name, aliases, product, host}, ...], "
     "next_cursor: <name|null>}` ordered by name; `next_cursor` is the "
@@ -1464,7 +1464,7 @@ _LIST_TARGETS_REDUCER: Final[JsonFluxReducer] = JsonFluxReducer()
 _LIST_TARGETS_PAGINATION_HINT: Final[dict[str, Any]] = {
     "params": {
         "connector_id": (
-            "Narrow to one connector's product (e.g. `vmware-rest-9.0`); "
+            "Narrow to one connector's product (e.g. `k8s-1.x`); "
             "a page at or under the threshold comes back inline as `targets`."
         ),
         "limit": "Page size (1..500). A smaller page can come back inline.",
@@ -1475,7 +1475,7 @@ _LIST_TARGETS_PAGINATION_HINT: Final[dict[str, Any]] = {
     },
     "example_next_call": {
         "tool": _LIST_TARGETS_NAME,
-        "args": {"connector_id": "vmware-rest-9.0"},
+        "args": {"connector_id": "k8s-1.x"},
     },
 }
 

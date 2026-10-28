@@ -59,7 +59,7 @@ class GovernedSubopSurface(NamedTuple):
     Attributes
     ----------
     connector_id:
-        The connector the composite dispatches against (``"vmware-rest-9.0"``)
+        The connector the composite dispatches against (``"gh-rest-3"``)
         — used to resolve each child's descriptor for a best-effort
         ``safety_level`` on the discovery surface.
     sub_op_ids:

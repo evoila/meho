@@ -27,8 +27,8 @@ detail is a G6.3 surface; T2 ships the conservative default.
 Why a classifier rather than a per-op annotation:
 
 1. Sensitivity is mostly op-class-shaped. ``vault.kv.read`` is no more
-   sensitive than ``vault.kv.list``; ``vsphere.vm.list`` is no more
-   sensitive than ``vsphere.host.list``. A per-op flag would multiply
+   sensitive than ``vault.kv.list``; ``k8s.pod.list`` is no more
+   sensitive than ``k8s.node.list``. A per-op flag would multiply
    the contract surface for no policy gain.
 2. The classifier is one auditable function. A reviewer can read it in
    one sitting and verify policy compliance; scattered annotations on
@@ -585,9 +585,9 @@ _WRITE_OPS: Final[frozenset[str]] = frozenset(
 #: ``.versions``) would otherwise fall through to the full-detail
 #: ``other`` class rather than broadcast at the same ``read`` sensitivity
 #: as its ``harbor.project.info`` sibling. Adding it also reclassifies
-#: the ``vmware.composite.performance.summary`` metrics composite from
-#: ``other`` to ``read`` — the correct class for a non-mutating read;
-#: neither class is sensitive (:data:`~meho_backplane.broadcast.overrides._SENSITIVE_OP_CLASSES`),
+#: any other ``*.summary`` metrics read from ``other`` to ``read`` —
+#: the correct class for a non-mutating read; neither class is sensitive
+#: (:data:`~meho_backplane.broadcast.overrides._SENSITIVE_OP_CLASSES`),
 #: so the broadcast detail level is unchanged for it. ``.ha_status`` and
 #: ``.autopilot_state`` are the Vault cluster-wide node reads
 #: (``vault.sys.ha_status`` / ``vault.sys.raft.autopilot_state``): like
@@ -877,9 +877,9 @@ def classify_op(op_id: str) -> str:
     'write'
     >>> classify_op("net.tcp_check")
     'read'
-    >>> classify_op("vsphere.vm.list")
+    >>> classify_op("k8s.pod.list")
     'read'
-    >>> classify_op("vsphere.vm.create")
+    >>> classify_op("k8s.namespace.create")
     'write'
     >>> classify_op("argocd.app.set")
     'write'

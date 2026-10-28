@@ -31,9 +31,9 @@ The G0.3-T1.5 (#477) amendment added two fields to :class:`Target`:
   fabricated values.
 * ``preferred_impl_id`` — operator override for the G0.6 resolver's
   tie-break ladder. Acceptable on both write schemas. The canonical
-  form is **versioned** (``"nsx-rest-4.2"``) per
+  form is **versioned** (``"harbor-rest-2.x"``) per
   ``docs/codebase/api-shape-conventions.md`` §3 (Enum vocabulary
-  discipline); the base form (``"nsx-rest"``) stays accepted on both
+  discipline); the base form (``"harbor-rest"``) stays accepted on both
   ``TargetCreate`` and ``TargetUpdate`` for backward compatibility,
   and the resolver normalizes both to the same connector
   (G0.16-T6 Finding C #1312).
@@ -319,7 +319,7 @@ class TargetCreate(BaseModel):
 
     ``version`` is accepted as an optional operator-asserted product
     version (G0.15-T6 #1215). Operators who know the version up-front
-    (e.g. ``"9.0"`` for a vCenter Hetzner-DC target the consumer just
+    (e.g. ``"2.x"`` for a Harbor target the consumer just
     deployed) can pass it at create time so the very first probe
     dispatches against the versioned connector without round-tripping
     through PATCH. Fresh targets still default to ``None`` and resolve

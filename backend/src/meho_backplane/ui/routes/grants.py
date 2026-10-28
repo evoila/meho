@@ -43,7 +43,10 @@ from meho_backplane.targets.resolver import resolve_target_by_id
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.references import subject_ref
-from meho_backplane.ui.routes.agents.grants.forms import _validation_errors_by_field
+from meho_backplane.ui.routes.agents.grants.forms import (
+    _service_error_to_field,
+    _validation_errors_by_field,
+)
 from meho_backplane.ui.routes.agents.operator import _lift_operator
 from meho_backplane.ui.templating import get_templates
 
@@ -125,8 +128,16 @@ def _create_form_errors(exc: Exception) -> dict[str, str]:
     """Map a refused create to form field -> message.
 
     An error with no field on the form goes to ``__root__`` (the top of the
-    form), so a refused form never shows no message at all.
+    form), so a refused form never shows no message at all. The agent grant
+    service names the field in its message, so that message goes next to
+    the field; the service grant errors (for example the sandbox limit)
+    stay at the top.
     """
+    if isinstance(exc, AgentGrantValidationError):
+        return {
+            _SCHEMA_TO_FORM_FIELD.get(key, key): message
+            for key, message in _service_error_to_field(exc.message).items()
+        }
     if not isinstance(exc, ValidationError):
         return {"__root__": str(exc)}
     errors: dict[str, str] = {}

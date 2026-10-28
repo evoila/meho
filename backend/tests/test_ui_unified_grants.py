@@ -501,6 +501,23 @@ def test_agent_field_errors_show_next_to_their_field(overrides: dict[str, str], 
     assert f'data-error-for="{field}"' in response.text
 
 
+def test_wrong_agent_target_scope_shows_next_to_the_target_scope_field() -> None:
+    response = _post_create(
+        {
+            "kind": "agent",
+            "principal_sub": "agent:new",
+            "op": "vault.kv.*",
+            "target_scope": "not-a-uuid",
+            "verdict": "deny",
+            "expires_at": "",
+        }
+    )
+    assert response.status_code == 422, response.text
+    assert 'data-error-for="target_scope"' in response.text
+    assert "is not a valid UUID string" in response.text
+    assert 'class="alert alert-error"' not in response.text
+
+
 def test_target_uuid_with_a_selector_shows_at_the_top_of_the_form() -> None:
     response = _post_create(_service_form(target_id=str(uuid.uuid4()), target_product="vmware"))
     assert response.status_code == 422, response.text

@@ -228,7 +228,7 @@ K8S_AUTH_CAN_I_RESPONSE_SCHEMA: dict[str, Any] = {
 
 
 K8S_AUTH_CAN_I_LLM_INSTRUCTIONS: dict[str, Any] = {
-    "when_to_use": (
+    "when_to_call": (
         "Call to check whether MEHO's identity on this cluster may do one "
         "action: 'can MEHO patch deployments in shop?', 'why was this "
         "apply refused?'. The same as 'kubectl auth can-i'. Read-only: the "
@@ -307,7 +307,7 @@ K8S_AUTH_RULES_RESPONSE_SCHEMA: dict[str, Any] = {
 
 
 K8S_AUTH_RULES_LLM_INSTRUCTIONS: dict[str, Any] = {
-    "when_to_use": (
+    "when_to_call": (
         "Call to list everything MEHO's identity on this cluster may do in "
         "one namespace: 'what can MEHO do in shop?'. The same as 'kubectl "
         "auth can-i --list -n <ns>'. Read-only. For one yes/no question "
@@ -321,6 +321,11 @@ K8S_AUTH_RULES_LLM_INSTRUCTIONS: dict[str, Any] = {
         "list their rules, so the list may miss permissions -- confirm a "
         "single action with k8s.auth.can_i."
     ),
+    "next_step": (
+        "If a rule you need is missing, confirm it with k8s.auth.can_i. If the "
+        "rule is there but the apply still failed, look at "
+        "k8s.admission_webhook.list and k8s.event.list."
+    ),
 }
 
 
@@ -330,12 +335,10 @@ ACCESS_OPS: tuple[KubernetesOp, ...] = (
         handler_attr="k8s_auth_can_i",
         summary="Check if MEHO's identity on the cluster may do one action (kubectl auth can-i).",
         description=(
-            "Sends a SelfSubjectAccessReview with "
-            "AuthorizationV1Api.create_self_subject_access_review for one verb "
-            "on one resource (group / resource / subresource / name / "
-            "namespace) or on one non-resource path. Returns {allowed, denied, "
-            "reason, evaluation_error} plus the question asked. The API server "
-            "stores nothing. Checks the identity in the target's kubeconfig."
+            "Sends a SelfSubjectAccessReview "
+            "(AuthorizationV1Api.create_self_subject_access_review) for one verb "
+            "on one resource or one non-resource path. Returns {allowed, denied, "
+            "reason, evaluation_error}. The API server stores nothing."
         ),
         parameter_schema=K8S_AUTH_CAN_I_PARAMETER_SCHEMA,
         response_schema=K8S_AUTH_CAN_I_RESPONSE_SCHEMA,

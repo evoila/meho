@@ -126,6 +126,7 @@ K8S_ADMISSION_WEBHOOK_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
         },
     },
     "additionalProperties": False,
+    "examples": [{}, {"type": "validating"}],
 }
 
 
@@ -187,7 +188,7 @@ K8S_ADMISSION_WEBHOOK_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
 
 
 K8S_ADMISSION_WEBHOOK_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
-    "when_to_use": (
+    "when_to_call": (
         "Call when an apply was refused, changed, or timed out and the "
         "reason may be an admission webhook: 'which webhooks see a create "
         "of certificates?', 'which webhook has failurePolicy Fail?'. Lists "
@@ -219,11 +220,9 @@ ADMISSION_OPS: tuple[KubernetesOp, ...] = (
         handler_attr="k8s_admission_webhook_list",
         summary="List admission webhooks -- rules, selectors, failure policy.",
         description=(
-            "Calls AdmissionregistrationV1Api.list_validating_webhook_configuration "
-            "and list_mutating_webhook_configuration and returns one row per "
-            "webhook: {configuration, type, name, failure_policy, match_policy, "
-            "side_effects, timeout_seconds, reinvocation_policy, service, url, "
-            "rules, namespace_selector, object_selector, match_conditions}. "
+            "Calls AdmissionregistrationV1Api list_validating_webhook_configuration "
+            "and list_mutating_webhook_configuration. One row per webhook with its "
+            "rules, selectors, failure policy, timeout and service or URL. "
             "caBundle is left out. Cluster-scoped; read-only."
         ),
         parameter_schema=K8S_ADMISSION_WEBHOOK_LIST_PARAMETER_SCHEMA,

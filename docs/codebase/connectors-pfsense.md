@@ -859,7 +859,8 @@ packets take, without the user's own client.
 - **Bounded.** `host` and `source` are checked before any SSH call: an IP
   address (multicast, unspecified and `%zone` addresses are refused) or a DNS
   host name that starts with a letter or digit, so a value can never look
-  like a ping option. Both are also passed through `shlex.quote`. A host IP
+  like a ping option. Short numeric IPv4 forms such as `10.1` or
+  `0x7f000001` are refused, because ping would read them as addresses. Both are also passed through `shlex.quote`. A host IP
   and the source must be the same IP version; for a host name, the source's
   version picks `-4` or `-6`. Each reply is awaited at most one second
   (`-W 1000`), ping stops after `count + 2` seconds (`-t`), and the SSH call

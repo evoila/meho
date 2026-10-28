@@ -12,7 +12,8 @@ path a VPN user's packets take.
 Bounded on purpose
 ------------------
 
-* ``host`` must be an IP address or a DNS host name. ``source`` must be an
+* ``host`` must be an IP address or a DNS host name. Short numeric
+  IPv4 forms (for example ``10.1``) are refused. ``source`` must be an
   IP address. Both are checked before any SSH call, and both are quoted
   with :func:`shlex.quote` on top. No free text reaches the shell.
 * ``source`` must be an address that ``ifconfig -a`` shows on the
@@ -37,6 +38,7 @@ from __future__ import annotations
 import ipaddress
 import re
 import shlex
+import socket
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.pfsense.ops import PfSenseOp
@@ -112,9 +114,21 @@ def _validate_host(value: Any) -> tuple[str, int | None]:
     addr = _check_ip(host, "host")
     if addr is not None:
         return str(addr), addr.version
-    if not _HOSTNAME_RE.fullmatch(host):
+    if not _HOSTNAME_RE.fullmatch(host) or _is_short_ipv4(host):
         raise ValueError(f"host must be an IP address or a host name; got {value!r}")
     return host, None
+
+
+def _is_short_ipv4(host: str) -> bool:
+    """True for a short numeric IPv4 form such as ``10.1`` or ``0x7f000001``.
+
+    ``ping`` reads these as IPv4 addresses, so they are not host names.
+    """
+    try:
+        socket.inet_aton(host)
+    except OSError:
+        return False
+    return True
 
 
 def _validate_source(value: Any) -> ipaddress.IPv4Address | ipaddress.IPv6Address:

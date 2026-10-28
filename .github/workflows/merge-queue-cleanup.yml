@@ -22,24 +22,19 @@
 # own branch, so a dropped group never gets a new run that cancels the old
 # one.
 #
-# What one sweep does (2 to 5 API calls, plus one per cancel):
-#   1. Lists the open (queued or in progress) merge-queue runs of all
-#      workflows. None open: done.
-#   2. Reads the head commit of every queue entry (GraphQL `mergeQueue`).
-#      A run whose commit is one of them is live. None left: done.
-#   3. Lists the queue branches that still exist. The queue deletes a
-#      group's branch when the group leaves the queue.
-#   4. Lists the newest commits on `main`. A merged group's commit becomes
-#      a `main` commit, and its branch is gone too, so this read comes last:
-#      a group that merges during the sweep shows up here.
-#   5. Cancels a run only when all three agree: its commit is not in the
-#      queue, its branch is gone, and its commit is not on `main`.
-# If any read fails or cannot be read, the sweep cancels nothing and fails,
-# so a broken read shows as a red run, never as a cancelled live group.
+# What a sweep does is in scripts/ci/merge_queue_cleanup.sh. In short: it
+# cancels an open merge-queue run only when the run's commit is not in the
+# queue, its queue branch is gone, and its commit is not on `main`, and it
+# reads the queue and the branch once more right before each cancel. Any
+# failed read stops the sweep. The reads and the cancel are separate API
+# calls, so this makes a wrong cancel very unlikely, not impossible.
 #
-# It runs on a GitHub-hosted runner, so it never takes a slot from the jobs
-# it frees. A pull request that changes this file runs one sweep as a dry
-# run: it reads everything and only prints what it would cancel.
+# Both jobs run on GitHub-hosted runners, so they never take a slot from
+# the jobs they free. A pull request that changes the cleanup runs one
+# sweep as a dry run with a read-only token: it does every read and only
+# prints what it would cancel. The schedule starts once this file is on
+# `main`. GitHub runs schedules on a best-effort basis: a run can start
+# late or be skipped under load.
 
 name: Merge queue cleanup
 
@@ -53,107 +48,62 @@ on:
     branches: [main]
     paths:
       - .github/workflows/merge-queue-cleanup.yml
+      - scripts/ci/merge_queue_cleanup.sh
 
-# `actions: write` is what cancelling a run needs; `contents: read` covers
-# the branch, commit and merge-queue reads.
 permissions:
   contents: read
-  actions: write
-
-concurrency:
-  group: merge-queue-cleanup-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   sweep:
     name: Cancel runs of dropped merge-queue groups
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # One sweep at a time, scheduled or started by hand. A new sweep waits
+    # for the running one instead of stopping it halfway.
+    concurrency:
+      group: merge-queue-cleanup
+      cancel-in-progress: false
+    # `actions: write` is what cancelling a run needs. Only this job gets it.
+    # `contents: read` is listed again because a job-level block replaces
+    # the workflow-wide one.
+    permissions:
+      contents: read
+      actions: write
     steps:
+      - name: Check out the cleanup script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          sparse-checkout: scripts/ci/merge_queue_cleanup.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
       - name: Cancel merge-queue runs whose group is gone
         env:
           GH_TOKEN: ${{ github.token }}
           # The branch the merge queue merges into.
           BASE_BRANCH: main
-          DRY_RUN: ${{ github.event_name == 'pull_request' }}
-        run: |
-          set -uo pipefail
-          api="repos/${GITHUB_REPOSITORY}"
-          prefix="gh-readonly-queue/${BASE_BRANCH}/"
+          DRY_RUN: 'false'
+        run: bash scripts/ci/merge_queue_cleanup.sh
 
-          stop() {
-            echo "::error title=Merge queue cleanup::${1} Nothing was cancelled."
-            exit 1
-          }
-
-          # 1. The open merge-queue runs of every workflow.
-          runs='[]'
-          for status in queued in_progress; do
-            page="$(gh api "${api}/actions/runs?event=merge_group&status=${status}&per_page=100")" \
-              || stop "Could not list the ${status} merge-queue runs."
-            runs="$(jq -c --argjson acc "${runs}" --arg prefix "${prefix}" \
-                '$acc + [.workflow_runs[] | select((.head_branch // "") | startswith($prefix))
-                         | {id, name, head_sha, head_branch}]' <<<"${page}")" \
-              || stop "Could not read the list of ${status} merge-queue runs."
-          done
-          echo "$(jq length <<<"${runs}") open merge-queue run(s)"
-
-          # 2. The commits the queue still holds: one per group it builds.
-          if [ "$(jq length <<<"${runs}")" -eq 0 ]; then
-            exit 0
-          fi
-          # shellcheck disable=SC2016  # $owner, $name and $branch are GraphQL variables
-          queue="$(gh api graphql \
-              -f owner="${GITHUB_REPOSITORY%/*}" -f name="${GITHUB_REPOSITORY#*/}" -f branch="${BASE_BRANCH}" \
-              -f query='query($owner: String!, $name: String!, $branch: String!) {
-                repository(owner: $owner, name: $name) {
-                  mergeQueue(branch: $branch) {
-                    entries(first: 100) { totalCount nodes { headCommit { oid } } }
-                  }
-                }
-              }')" || stop "Could not read the merge queue."
-          in_queue="$(jq -ce '.data.repository.mergeQueue.entries
-              | if . == null then error("no merge queue in the answer")
-                elif .totalCount > (.nodes | length) then error("more queue entries than one page")
-                else [.nodes[].headCommit.oid // empty] end' <<<"${queue}")" \
-            || stop "Could not read the merge queue entries."
-          candidates="$(jq -c --argjson queue "${in_queue}" \
-              '[.[] | select(.head_sha | IN($queue[]) | not)]' <<<"${runs}")" \
-            || stop "Could not compare the runs with the queue."
-          echo "$(jq length <<<"${candidates}") run(s) whose commit is not in the queue"
-          if [ "$(jq length <<<"${candidates}")" -eq 0 ]; then
-            exit 0
-          fi
-
-          # 3. The queue branches that still exist.
-          refs="$(gh api "${api}/git/matching-refs/heads/${prefix}")" \
-            || stop "Could not list the queue branches."
-          branches="$(jq -ce '[.[].ref | ltrimstr("refs/heads/")]' <<<"${refs}")" \
-            || stop "Could not read the list of queue branches."
-
-          # 4. The newest commits on the base branch. Read last, see the header.
-          commits="$(gh api "${api}/commits?sha=${BASE_BRANCH}&per_page=100")" \
-            || stop "Could not list the commits on ${BASE_BRANCH}."
-          merged="$(jq -ce '[.[].sha]' <<<"${commits}")" \
-            || stop "Could not read the commits on ${BASE_BRANCH}."
-
-          # 5. Cancel the runs of groups that are gone.
-          dead="$(jq -r --argjson branches "${branches}" --argjson merged "${merged}" \
-              '.[] | select(.head_branch | IN($branches[]) | not)
-                   | select(.head_sha | IN($merged[]) | not)
-                   | [.id, .name, .head_branch] | @tsv' <<<"${candidates}")" \
-            || stop "Could not compare the runs with the queue branches and ${BASE_BRANCH}."
-          if [ -z "${dead}" ]; then
-            echo "every such run still has its queue branch or has merged; nothing to cancel"
-            exit 0
-          fi
-          while IFS=$'\t' read -r id name branch; do
-            if [ "${DRY_RUN}" = "true" ]; then
-              echo "dry run: would cancel run ${id} (${name}) of the dropped group ${branch}"
-            elif gh api -X POST "${api}/actions/runs/${id}/cancel" >/dev/null; then
-              echo "::notice title=Merge queue cleanup::Cancelled run ${id} (${name}): the queue has dropped its group ${branch}."
-            else
-              # Most often the run finished between the list and the cancel.
-              echo "::warning title=Merge queue cleanup::Could not cancel run ${id} (${name}) of ${branch}; the next sweep tries again."
-            fi
-          done <<<"${dead}"
+  dry-run:
+    name: Merge queue cleanup (dry run)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Read-only token: a dry run must not be able to cancel anything.
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out the cleanup script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          sparse-checkout: scripts/ci/merge_queue_cleanup.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Show which merge-queue runs a sweep would cancel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_BRANCH: main
+          DRY_RUN: 'true'
+        run: bash scripts/ci/merge_queue_cleanup.sh

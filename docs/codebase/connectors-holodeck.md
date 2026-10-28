@@ -549,6 +549,11 @@ Each write runs these steps and stops at the first failure (the answer's
    line that is not exactly `<address> <name>`. When the line is already there
    (add) or not there (remove), nothing is written and nothing restarts:
    `state` is `unchanged` or `absent`. This makes both writes safe to run twice.
+   Size limit: the patch (step 4) carries the whole `hosts` value twice, old
+   and new, inside one shell argument, and Linux allows at most 128 KiB per
+   argument. MEHO builds the patch command first and refuses with a `write`
+   error, before the save, when it is longer than 100,000 bytes
+   (`PATCH_CMD_MAX_BYTES`). That is a `hosts` value of about 50 KB.
 3. `save` — `kubectl get configmap dnsmasq -n default -o yaml >
    /root/dnsmasq-cm-pre-<op>-<time>.yaml`, returned as `backup_path`.
 4. `write` — `kubectl patch configmap dnsmasq -n default --type json -p
@@ -559,9 +564,8 @@ Each write runs these steps and stops at the first failure (the answer's
    patch MEHO reads the ConfigMap again. When `hosts` changed, the error is
    `conflict: the hosts list changed since MEHO read it; nothing was written;
    run the op again`. Otherwise the router's text is kept. The patch is
-   built with `json.dumps` and passed as one `shlex.quote`-d argument. It
-   carries the whole `hosts` value, so a very large file would hit the
-   command-line length limit.
+   built with `json.dumps` and passed as one `shlex.quote`-d argument (see
+   the size limit above).
 5. `verify` — read the ConfigMap again: `hosts` must be the new value and
    every other key unchanged. `lines_before` / `lines_after` count the
    `hosts` lines.

@@ -93,6 +93,11 @@ _GET_PODS_JSON = "kubectl get pods -n default -o json"
 #: SSH timeout for ``rollout status``: longer than its own 180 s wait.
 _ROLLOUT_STATUS_TIMEOUT_S: float = 200.0
 
+#: Largest patch command MEHO sends, in bytes. The router's shell gets the
+#: command as one argument, and Linux allows at most 128 KiB per argument
+#: (MAX_ARG_STRLEN). The patch holds the hosts value twice (old and new).
+PATCH_CMD_MAX_BYTES: int = 100_000
+
 #: How long to wait for the old dnsmasq pods to go after the rollout.
 _POD_WAIT_INTERVAL_S: float = 2.0
 _POD_WAIT_ATTEMPTS: int = 45
@@ -218,6 +223,19 @@ async def _write_hosts(
     router: _Router, before: dict[str, Any], new_hosts: str, result: dict[str, Any]
 ) -> None:
     """Save, patch, re-read, restart and wait. Fills *result* as it goes."""
+    patch = json.dumps(
+        [
+            {"op": "test", "path": "/data/hosts", "value": before["hosts"]},
+            {"op": "replace", "path": "/data/hosts", "value": new_hosts},
+        ]
+    )
+    patch_cmd = f"kubectl patch configmap dnsmasq -n default --type json -p {shlex.quote(patch)}"
+    if len(patch_cmd.encode()) > PATCH_CMD_MAX_BYTES:
+        raise HolodeckDnsError(
+            "write",
+            f"the hosts list is too large for MEHO to change (the change would be "
+            f"more than {PATCH_CMD_MAX_BYTES} bytes); nothing was written",
+        )
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     backup = f"/root/dnsmasq-cm-pre-{result['op']}-{stamp}.yaml"
     quoted = shlex.quote(backup)
@@ -226,17 +244,8 @@ async def _write_hosts(
         "save",
     )
     result["backup_path"] = backup
-    patch = json.dumps(
-        [
-            {"op": "test", "path": "/data/hosts", "value": before["hosts"]},
-            {"op": "replace", "path": "/data/hosts", "value": new_hosts},
-        ]
-    )
     try:
-        await router.step(
-            f"kubectl patch configmap dnsmasq -n default --type json -p {shlex.quote(patch)}",
-            "write",
-        )
+        await router.step(patch_cmd, "write")
     except HolodeckDnsError as exc:
         # A failed JSON Patch "test" step only gives the API server's generic
         # 422 text, so read again to tell the caller what happened.

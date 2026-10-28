@@ -455,6 +455,19 @@ async def test_add_keeps_the_router_text_when_the_patch_fails_otherwise() -> Non
 
 
 @pytest.mark.asyncio
+async def test_add_refuses_a_hosts_list_too_large_to_send_before_any_save() -> None:
+    line_count = ops_dns.PATCH_CMD_MAX_BYTES // 2 // 30 + 1
+    big = "".join(f"192.0.2.1 host{i:06d}.example.test\n" for i in range(line_count))
+    router = _FakeRouter(big)
+    result = await _call(router, "dns_host_add", _NEW)
+    assert result["error"].startswith("write: the hosts list is too large")
+    assert result["changed"] is False
+    assert result["backup_path"] is None
+    assert router.files == {}
+    assert not any("patch" in c or "-o yaml" in c for c in router.commands)
+
+
+@pytest.mark.asyncio
 async def test_add_reports_not_verified_when_dig_is_missing() -> None:
     router = _FakeRouter(has_dig=False)
     result = await _call(router, "dns_host_add", _NEW)

@@ -68,6 +68,7 @@ Other ways, and why not:
 
 - Group **`MEHO-Platform-Admins`** (name confirmed). It already ships in the built-in Keycloak (`deploy/charts/meho/charts/keycloak/files/meho-realm.json:104`), and the first admin is in it (`backend/src/meho_backplane/core/keycloak.py:94`). The bring-your-own setup (`cli/internal/cmd/admin/keycloak/bootstrap.go:234-240`) does not create it yet.
 - The group sets `platform_admin: true`. MEHO reads it into the existing flag (`auth/jwt.py:1245`, `auth/operator.py:232`). It is not a role group: it holds no tenant and no role.
+- A platform admin is also in at least one role group, so every login has a tenant to start in. The first admin is in `MEHO-Admins` too.
 - **A platform admin may:**
   - pick any tenant that exists in MEHO as the current tenant, also without a group in that tenant;
   - act there as a tenant admin, unless they are in a role group of that tenant (then that group's role applies);

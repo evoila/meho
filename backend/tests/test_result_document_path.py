@@ -720,7 +720,168 @@ async def test_path_read_over_the_output_budget_is_recoverable(
 ) -> None:
     monkeypatch.setenv("RESULT_QUERY_MAX_OUTPUT_BYTES", "64")
     get_settings.cache_clear()
-    handle_id = await _seed_document(store, {"big": "w" * 500})
+    handle_id = await _seed_document(store, {"big": {"w": "w" * 500}})
 
     with pytest.raises(ResultQueryOutputTooLargeError, match="Point `path`"):
         await run_result_query(_operator(), handle_id, ResultQuerySpec(path="/big"))
+
+
+# ---------------------------------------------------------------------------
+# Core: a text value comes back in parts (#4994)
+# ---------------------------------------------------------------------------
+
+
+async def test_large_text_value_is_read_in_parts(
+    store: ResultHandleStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A text over the budget comes back part by part, each inside the budget."""
+    monkeypatch.setenv("RESULT_QUERY_MAX_OUTPUT_BYTES", "1000")
+    get_settings.cache_clear()
+    config = "".join(f"<line n='{i}'>{'x' * 20}</line>\n" for i in range(200))
+    handle_id = await _seed_document(store, {"config_xml": config, "size": len(config)})
+
+    parts: list[str] = []
+    offset = 0
+    while True:
+        part = await run_result_query(
+            _operator(), handle_id, ResultQuerySpec(path="/config_xml"), offset=offset
+        )
+        assert part["value_type"] == "string"
+        assert part["path"] == "/config_xml"
+        assert part["offset"] == offset
+        assert part["total_chars"] == len(config)
+        assert part["returned_chars"] == len(part["value"])
+        assert len(msgspec.json.encode(part["value"])) <= 1000
+        assert part["limit"] == 1000
+        assert part["rows"] == []
+        parts.append(part["value"])
+        offset += part["returned_chars"]
+        if not part["truncated"]:
+            break
+
+    assert len(parts) > 1
+    assert "".join(parts) == config
+    assert offset == len(config)
+
+
+async def test_text_limit_counts_characters(store: ResultHandleStore) -> None:
+    text = "abcdefghij"
+    handle_id = await _seed_document(store, {"text": text, "pad": "p" * 5000})
+
+    part = await run_result_query(
+        _operator(), handle_id, ResultQuerySpec(path="/text"), offset=3, limit=4
+    )
+
+    assert part["value"] == "defg"
+    assert part["offset"] == 3
+    assert part["limit"] == 4
+    assert part["returned_chars"] == 4
+    assert part["total_chars"] == 10
+    assert part["truncated"] is True
+
+    tail = await run_result_query(
+        _operator(), handle_id, ResultQuerySpec(path="/text"), offset=7, limit=4
+    )
+    assert tail["value"] == "hij"
+    assert tail["returned_chars"] == 3
+    assert tail["truncated"] is False
+
+
+async def test_text_limit_may_exceed_the_row_cap(store: ResultHandleStore) -> None:
+    """``limit`` counts characters here, so the 500-row page cap does not apply."""
+    text = "y" * 2000
+    handle_id = await _seed_document(store, {"text": text, "pad": "p" * 5000})
+
+    part = await run_result_query(_operator(), handle_id, ResultQuerySpec(path="/text"), limit=1500)
+
+    assert part["returned_chars"] == 1500
+    assert part["truncated"] is True
+
+
+async def test_text_offset_past_the_end_is_an_empty_part(store: ResultHandleStore) -> None:
+    handle_id = await _seed_document(store, {"text": "short", "pad": "p" * 5000})
+
+    part = await run_result_query(_operator(), handle_id, ResultQuerySpec(path="/text"), offset=50)
+
+    assert part["value"] == ""
+    assert part["returned_chars"] == 0
+    assert part["total_chars"] == 5
+    assert part["truncated"] is False
+
+
+async def test_text_within_the_budget_comes_back_whole_by_default(
+    store: ResultHandleStore,
+) -> None:
+    """No ``limit`` means the whole text when it fits: the #3633 shape is kept."""
+    text = "e" * 600
+    handle_id = await _seed_document(store, {"text": text, "pad": "p" * 5000})
+
+    part = await run_result_query(_operator(), handle_id, ResultQuerySpec(path="/text"))
+
+    assert part["value"] == text
+    assert part["returned_chars"] == part["total_chars"] == 600
+    assert part["truncated"] is False
+
+
+async def test_text_part_is_cut_on_escaped_json_bytes(
+    store: ResultHandleStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The budget measures JSON text: a part full of escapes is cut shorter."""
+    monkeypatch.setenv("RESULT_QUERY_MAX_OUTPUT_BYTES", "100")
+    get_settings.cache_clear()
+    text = "\n" * 300  # each newline is two bytes of JSON text
+    handle_id = await _seed_document(store, {"text": text})
+
+    part = await run_result_query(_operator(), handle_id, ResultQuerySpec(path="/text"), limit=200)
+
+    assert len(msgspec.json.encode(part["value"])) <= 100
+    assert 0 < part["returned_chars"] < 200
+    assert part["truncated"] is True
+
+
+async def test_budget_too_small_for_one_character_is_refused(
+    store: ResultHandleStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RESULT_QUERY_MAX_OUTPUT_BYTES", "2")
+    get_settings.cache_clear()
+    handle_id = await _seed_document(store, {"text": "abc"})
+
+    with pytest.raises(ResultQueryOutputTooLargeError, match="Point `path`"):
+        await run_result_query(_operator(), handle_id, ResultQuerySpec(path="/text"))
+
+
+async def test_array_path_limit_over_the_row_cap_is_a_contract_error(
+    store: ResultHandleStore,
+) -> None:
+    handle_id = await _seed_document(store)
+
+    with pytest.raises(QueryContractError, match="500-row page cap"):
+        await run_result_query(_operator(), handle_id, ResultQuerySpec(path="/lines"), limit=501)
+
+
+async def test_array_path_without_a_limit_pages_fifty(store: ResultHandleStore) -> None:
+    handle_id = await _seed_document(store, {"items": list(range(80))})
+
+    page = await run_result_query(_operator(), handle_id, ResultQuerySpec(path="/items"))
+
+    assert page["limit"] == 50
+    assert page["returned_rows"] == 50
+
+
+async def test_row_paging_limit_over_the_cap_is_a_contract_error(
+    store: ResultHandleStore,
+) -> None:
+    handle_id = uuid.uuid4()
+    assert await store.spill(
+        tenant_id=_TENANT,
+        operator_sub="op-a",
+        handle_id=handle_id,
+        op_id="k8s.pod.list",
+        rows=[{"i": i} for i in range(3)],
+        total_rows=3,
+        ttl_seconds=60,
+        max_rows=10,
+    )
+
+    with pytest.raises(QueryContractError, match="500-row page cap"):
+        await read_result_window(_operator(), handle_id, offset=0, limit=501)

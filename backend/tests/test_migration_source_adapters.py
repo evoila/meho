@@ -984,6 +984,8 @@ async def test_k8s_inventory_when_a_kind_cannot_be_listed(store: ResultHandleSto
         "what": "all DaemonSet workloads",
         "reason": "no_permission",
         "detail": "k8s.workload.list",
+        "kind": None,
+        "source_id": None,
     }
 
 
@@ -1028,6 +1030,8 @@ async def test_k8s_second_page_failure_keeps_the_first_page(store: ResultHandleS
         "what": "Deployment workloads after the first 500",
         "reason": "collection_failed",
         "detail": "k8s.workload.list",
+        "kind": None,
+        "source_id": None,
     }
 
 

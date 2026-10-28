@@ -117,6 +117,9 @@ from meho_backplane.api.v1.scheduler import router as api_v1_scheduler_router
 from meho_backplane.api.v1.search_docs import router as api_v1_search_docs_router
 from meho_backplane.api.v1.sensors import router as api_v1_sensors_router
 from meho_backplane.api.v1.service_grants import router as api_v1_service_grants_router
+from meho_backplane.api.v1.service_read_scopes import (
+    router as api_v1_service_read_scopes_router,
+)
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
 from meho_backplane.api.v1.tenants import router as api_v1_tenants_router
 from meho_backplane.api.v1.topology import router as api_v1_topology_router
@@ -1182,6 +1185,8 @@ app.include_router(api_v1_approvals_router)
 # #3151 -- operator-managed standing scoped auto-approval grants for
 # service principals (the persistent form of an approve decision).
 app.include_router(api_v1_service_grants_router)
+# #4992 -- the targets a service principal may read (set by a person).
+app.include_router(api_v1_service_read_scopes_router)
 # #3025 -- add-on pairing handshake (pair / unpair / list / heartbeat): a
 # sibling add-on product paired as a scoped Keycloak service principal over a
 # versioned integration contract (Initiative #2900 foundation).

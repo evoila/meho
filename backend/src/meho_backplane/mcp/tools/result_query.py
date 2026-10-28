@@ -45,6 +45,7 @@ from meho_backplane.jsonflux.query.json_pointer import MAX_POINTER_LENGTH
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
 from meho_backplane.operations.result_query import (
+    DEFAULT_LIMIT,
     MAX_LIMIT,
     QueryContractError,
     ResultHandleNotFoundError,
@@ -60,9 +61,12 @@ __all__: list[str] = []
 
 #: Mirror of the inline-sample upper bound's sibling list tools: a single
 #: page returns at most this many rows so one read-back can't pull an
-#: unbounded slice in one call. Sourced from the transport-neutral core so
-#: the MCP ``inputSchema`` and the REST body share one ceiling (#3179).
+#: unbounded slice in one call. Sourced from the transport-neutral core,
+#: which checks it, so the MCP tool and the REST body share one ceiling
+#: (#3179). The schema names it but does not pin it: a text value read by
+#: ``path`` counts characters, and one part may hold more (#4994).
 _MAX_LIMIT = MAX_LIMIT
+_DEFAULT_LIMIT = DEFAULT_LIMIT
 
 
 async def _result_query_handler(
@@ -98,7 +102,8 @@ async def _result_query_handler(
         ) from exc
 
     offset = int(arguments.get("offset", 0))
-    limit = int(arguments.get("limit", 50))
+    raw_limit = arguments.get("limit")
+    limit = int(raw_limit) if raw_limit is not None else None
 
     raw_query = arguments.get("query")
     if raw_query is not None:
@@ -125,7 +130,7 @@ async def _run_query(
     handle_id: UUID,
     raw_query: Any,
     offset: int,
-    limit: int,
+    limit: int | None,
 ) -> dict[str, Any]:
     """Validate the ``query`` argument and run the bounded structured query.
 
@@ -185,87 +190,54 @@ register_mcp_tool(
         name="result_query",
         surface=ToolSurface.WORKING,
         description=(
-            "Read rows back from a JSONFlux result handle. After "
-            "`call_operation` (or `list_targets`) reduces a large list "
-            "response, you get an inline sample plus a handle "
-            "(`result.handle.handle_id`); call "
-            "this tool to read the FULL set beyond that sample, either by "
-            "paging or by running a bounded server-side query. "
-            "Paging: pass `handle_id` (required, the UUID from the reduced "
-            "response's `handle.handle_id` / the `fetch_more.drill_in."
-            "example_call`) plus `offset` (default 0) and `limit` (default "
-            "50, max 500); page by re-calling with a higher `offset`, and an "
-            "empty `rows` with `offset >= stored_rows` is the end. "
-            "Query: pass `handle_id` plus a `query` object to filter, "
-            "project (`select`), `group_by`, and `aggregate` "
-            "(COUNT/SUM/MIN/MAX/AVG) server-side — so you fetch just the one "
-            "row you need or the counts by group, not the whole set. The "
-            "query runs as one bounded read-only SELECT over the handle "
-            "(no raw SQL); every referenced field must be a column on the "
-            "handle. Results carry `total_rows`, `stored_rows` (retrievable "
-            "rows — may be below `total_rows` if the spill was capped), "
-            "`truncated` (more rows existed than returned), and, for a "
-            "query, `coverage` (`complete`/`partial`): a `partial` result "
-            "aggregated only the stored subset, not the whole inventory. "
-            "A handle that does not exist, has expired (TTL elapsed), or "
-            "belongs to another operator is a recoverable error (`-32602`, "
-            "`data.reason=handle_not_found`) — re-run the original operation "
-            "to get a fresh handle. "
-            "Document handles: when the reduced response has "
-            '`result_record: "document"` (one large object, not a list), read '
-            'one part with `query={"path": "/key/0/name"}` (an RFC '
-            '6901 JSON Pointer; `""` is the whole document). An array '
-            "value pages with `offset` / `limit`; any other value comes back "
-            "in `value`. A rows handle with `omitted_scalar_count` keeps the "
-            "fields that did not fit its inline summary the same way when its "
-            "`fetch_more.drill_in.rationale` says so: read one with "
-            '`query={"path": "/<field name>"}`. `path` cannot be '
-            "combined with the other `query` fields. Only use this when "
-            "`fetch_more.drill_in.available` is `true` on the handle; when "
-            "it is `false` the full set was not spilled and you must "
-            "re-call the operation with narrower params instead."
+            "Read the full data behind a result handle. When "
+            "`call_operation` (or `list_targets`) returns a large list, you "
+            "get a sample plus `handle.handle_id`; use this tool to read "
+            "the rest. Only when `fetch_more.drill_in.available` is `true`; "
+            "when it is `false`, call the operation again with narrower "
+            "params.\n\n"
+            "PAGING: `handle_id` plus `offset` (default 0) and `limit`. An "
+            "empty `rows` with `offset >= stored_rows` is the end.\n\n"
+            "QUERY: `handle_id` plus a `query` object to filter, `select`, "
+            "`group_by` and `aggregate` on the server, so you fetch only "
+            "the rows or counts you need. Every field must be a column on "
+            "the handle. If `coverage` is `partial`, only the stored rows "
+            "were counted, not the whole set.\n\n"
+            'DOCUMENT: when `result_record` is `"document"` (one large '
+            'object), read one part with `query={"path": "/key/0/name"}`. '
+            "A text value comes back in parts: continue with `offset` = "
+            "`offset` + `returned_chars` while `truncated` is true. Also use "
+            "`path` for fields a rows handle left out of its sample "
+            "(`omitted_scalar_count`).\n\n"
+            "`data.reason=handle_not_found` means the handle expired or is "
+            "not yours: run the operation again for a new one."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "handle_id": {
                     "type": "string",
-                    "description": (
-                        "The result handle's UUID, taken from the reduced "
-                        "response's `handle.handle_id` or "
-                        "`fetch_more.drill_in.example_call.args.handle_id`."
-                    ),
+                    "description": "The handle's UUID (`handle.handle_id`).",
                     "minLength": 1,
                 },
                 "offset": {
                     "type": "integer",
                     "minimum": 0,
                     "default": 0,
-                    "description": (
-                        "Zero-based index of the first row to return. Page "
-                        "by advancing this by the previous `limit`."
-                    ),
+                    "description": "Index of the first row (or character) to return.",
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": _MAX_LIMIT,
-                    "default": 50,
                     "description": (
-                        f"Page size (paging mode). Default 50; max {_MAX_LIMIT}. "
-                        "Matches the sibling list tools' upper bound."
+                        f"Page size in rows (default {_DEFAULT_LIMIT}, max "
+                        f"{_MAX_LIMIT}), or in characters for a text value read by `path`."
                     ),
                 },
                 "query": {
                     "type": "object",
                     "description": (
-                        "Optional structured query (query mode). When present, "
-                        "`offset`/`limit` are ignored and the handle is queried "
-                        "server-side as one bounded read-only SELECT. Every "
-                        "referenced field must be a column on the handle. "
-                        "For a document handle, or for the fields a rows handle "
-                        "left out of its inline summary, send only `path` "
-                        "instead; `offset`/`limit` then page an array value."
+                        "Optional query. Then `offset`/`limit` are ignored, except with `path`."
                     ),
                     "additionalProperties": False,
                     "properties": {
@@ -361,14 +333,10 @@ register_mcp_tool(
                             "type": "string",
                             "maxLength": MAX_POINTER_LENGTH,
                             "description": (
-                                "Document handles only: an RFC 6901 JSON Pointer "
-                                "to the value to read, for example "
+                                "RFC 6901 JSON Pointer to the value to read, e.g. "
                                 '`/status/conditions/0`; `""` is the whole '
-                                "document. `~1` means `/` and `~0` means `~` "
-                                "inside a key. An array value pages with the "
-                                "top-level `offset` / `limit`. Cannot be "
-                                "combined with `filter`, `select`, `group_by`, "
-                                "`aggregate`, `order_by`, or `limit`."
+                                "document. Cannot be combined with the other "
+                                "query fields."
                             ),
                         },
                     },
@@ -410,12 +378,30 @@ register_mcp_tool(
                     "enum": ["object", "array", "string", "number", "boolean", "null"],
                     "description": (
                         "Path reads only. The JSON type of the value at `path`. "
-                        "An `array` pages in `rows`; any other type is in `value`."
+                        "An `array` pages in `rows`; a `string` comes back in "
+                        "parts in `value`; any other type is whole in `value`."
                     ),
                 },
                 "value": {
                     "description": (
-                        "Path reads only, when `value_type` is not `array`: the value at `path`."
+                        "Path reads only, when `value_type` is not `array`: the value "
+                        "at `path`. For a `string`, the part from character `offset`."
+                    ),
+                },
+                "returned_chars": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": (
+                        "Path reads of a text value only. How many characters "
+                        "`value` holds. Continue with `offset` + `returned_chars`."
+                    ),
+                },
+                "total_chars": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": (
+                        "Path reads of a text value only. The full length of the "
+                        "text, in characters."
                     ),
                 },
             },

@@ -263,7 +263,12 @@ class InventoryBuilder:
             ),
             records=self.records,
             omissions=self.omissions,
-            counts=InventoryCounts(**counts, source_totals=self.complete_totals()),
+            counts=InventoryCounts(
+                server=counts["server"],
+                application=counts["application"],
+                kubernetes_workload=counts["kubernetes_workload"],
+                source_totals=self.complete_totals(),
+            ),
         )
 
     def counts_match(self, envelope: InventoryEnvelope) -> bool:

@@ -240,12 +240,12 @@ async def test_sweep_passes_for_code_shipped_only_registry() -> None:
 
 @pytest.mark.asyncio
 async def test_sweep_passes_for_empty_registry() -> None:
-    """The production shape: no composite declares a descriptor-routed surface.
+    """An empty registry passes: the sweep is a clean no-op.
 
-    Every shipped composite dispatches its sub-ops directly on the connector
-    session (Goal #2247), so nothing registers a dispatch surface and the
-    sweep is a clean no-op. The seam still exists for a future
-    ``dispatch_child``-routed composite; this asserts the empty case passes.
+    The vmware composites dispatch their vCenter sub-ops directly on the
+    connector session (Goal #2247); only ``vmware.migration.inventory``
+    declares a surface (its VCF Operations child reads), and this module's
+    fixture starts from an empty registry.
     """
     assert _invariant.registered_composite_dispatch_surfaces() == {}
     await assert_registered_composites_have_no_ingested_dispatch()

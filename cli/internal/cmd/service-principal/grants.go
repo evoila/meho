@@ -160,7 +160,11 @@ func newCreateCmd() *cobra.Command {
 			if resp.StatusCode() != http.StatusCreated {
 				return renderHTTPStatus(cmd, url, resp.StatusCode(), resp.Body, jsonOut)
 			}
-			return renderGrantEntry(cmd.OutOrStdout(), resp.JSON201, jsonOut, "created")
+			if err := renderGrantEntry(cmd.OutOrStdout(), resp.JSON201, jsonOut, "created"); err != nil {
+				return err
+			}
+			printCompositeGrantNote(cmd, body, jsonOut)
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&principal, "principal", "", "JWT sub of the service principal (required)")
@@ -189,9 +193,6 @@ func buildGrantCreateBody(principal, opID, connectorID, target, targetProduct, t
 	if isDeleteShaped(opID) {
 		return api.ServiceGrantCreate{}, fmt.Errorf("--op-id %q is a delete operation. A delete grant is made in the web console, by a tenant admin, and only on an instance in sandbox mode; the CLI cannot create one", opID)
 	}
-	if strings.Contains(opID, ".composite.") {
-		return api.ServiceGrantCreate{}, fmt.Errorf("--op-id %q is a composite; create one grant for each governed child operation instead", opID)
-	}
 	body := api.ServiceGrantCreate{PrincipalSub: principal, OpId: opID, ConnectorId: connectorID, Reason: reason}
 	if target != "" {
 		id, err := uuid.Parse(target)
@@ -214,6 +215,32 @@ func buildGrantCreateBody(principal, opID, connectorID, target, targetProduct, t
 		body.ExpiresAt = &parsed
 	}
 	return body, nil
+}
+
+// isCompositeOp reports whether opID names a multi-step operation. MEHO checks
+// such an operation twice: once on the operation itself, before any step
+// runs, and once on each write step. A service principal needs a grant for
+// both, so the grant on the operation is accepted and a note names the
+// second kind.
+func isCompositeOp(opID string) bool { return strings.Contains(opID, ".composite.") }
+
+// compositeGrantNote tells the operator that each write step of a multi-step
+// operation needs its own grant, and where to list the steps.
+func compositeGrantNote(opID, connectorID string) string {
+	return fmt.Sprintf("This is a multi-step operation. Each of its write steps needs its own grant too. List them with GET /api/v1/operations/governed-subops?op_id=%s&connector_id=%s", opID, connectorID)
+}
+
+// printCompositeGrantNote prints the note after a grant on a multi-step
+// operation. With --json the note goes to stderr so stdout stays valid JSON.
+func printCompositeGrantNote(cmd *cobra.Command, body api.ServiceGrantCreate, jsonOut bool) {
+	if !isCompositeOp(body.OpId) {
+		return
+	}
+	w := cmd.OutOrStdout()
+	if jsonOut {
+		w = cmd.ErrOrStderr()
+	}
+	fmt.Fprintln(w, compositeGrantNote(body.OpId, body.ConnectorId))
 }
 
 // hasGlob rejects glob operators that cannot be part of an exact identifier.

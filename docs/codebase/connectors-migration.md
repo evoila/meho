@@ -18,6 +18,10 @@ The first part, in this package today:
   collects the estate into the inventory shape (`source_*.py`, shared parts
   in `adapter_kit.py`, registrar in `source_register.py`).
 
+The VMware read `vmware.migration.inventory` lives with the vCenter
+connector (see "VMware source adapter" below). The other adapters are in
+this package (see "Source adapters" below).
+
 Like `connectors/audit/`, the package has no connector class. Its
 operations are registered under the natural key
 `(product="migration", version="1.x", impl_id="migration-assess")`, so the
@@ -38,10 +42,23 @@ One inventory from one source:
 | `source` | `connector_id`, `target` name, `collected_at`. |
 | `records` | Records of three kinds, told apart by `kind`. |
 | `omissions` | Parts of the estate that were not collected, with a reason. |
-| `counts` | Records per kind, plus `source_totals`: the source's own total per kind, for checking. |
+| `counts` | Records per kind, plus `source_totals`: the source's own total per kind, and `reconciliation`: the count check per kind. |
+| `duplicates` | Records that look like a machine already in the list (same BIOS UUID or instance UUID, directly or through other records). Both records stay; later steps count the machine once. |
 
 The model checks that `counts` match the records and that no
-`source_id` repeats.
+`source_id` repeats. It also checks that every `duplicates` entry names
+records of the inventory, and that each `reconciliation` entry adds up:
+
+- `source_total`: the total the source reports (equal to
+  `source_totals[kind]`).
+- `records`: the records of that kind.
+- `omitted`: the omissions of that kind. An omission with `kind` and
+  `source_id` set stands for one item of the source that has no record
+  (one left-out VM). An omission without `kind` is a part of the work that
+  failed as a whole (for example "utilization from VCF Operations").
+- `difference` = `source_total` - `records` - `omitted`, and `matches` is
+  true exactly when the difference is 0. A difference is reported, not
+  hidden.
 
 Record kinds:
 
@@ -54,7 +71,9 @@ Record kinds:
   (name, version, family, architecture), `boot_type` (`bios` or `uefi`),
   `secure_boot`, `power_state`, `nics`, `utilization` (CPU, memory and
   network as average, p95 and maximum, with the window, the number of
-  samples and the source) or `null`, `collected_at`, `missing`.
+  samples and the source) or `null`, `collected_at`, `missing`, and
+  `source_attributes` (more facts with fixed keys per source; VMware:
+  `vm_id`, `instance_uuid`, `esxi_host`, `cluster`).
 - `ApplicationRecord` (`kind="application"`): name, version, vendor,
   category, and `runs_on` (server `source_id` values).
 - `KubernetesWorkloadRecord` (`kind="kubernetes_workload"`): cluster,
@@ -113,9 +132,12 @@ handle_ids)`:
 3. Decodes and checks each record in a worker thread
    (`asyncio.to_thread`), because a stored result can be several MB.
 4. Merges the envelopes in handle order (`merge_inventories`). A handle
-   given twice is read once. A repeated `source_id`, or a server whose BIOS
-   UUID was already seen, stays in `records` and is listed in
-   `duplicates`; the caller decides what that means. A BIOS UUID matches
+   given twice is read once. A repeated `source_id`, or a server that
+   shares a BIOS UUID or an instance UUID with another record, stays in
+   `records` and is listed in `duplicates`; the caller decides what that
+   means. The match comes from `IdentityIndex` in `contracts.py`, which
+   the VMware adapter uses too, so `same_as` always names the first record
+   of the machine, also through a chain of matches. A BIOS UUID matches
    in both forms a machine reports it: as the hypervisor shows it, and as
    the guest OS shows it with the bytes of the first three groups
    reversed (newer firmware tables keep them that way; a VMware VM from
@@ -291,6 +313,129 @@ Per source:
   UUID reported by two nodes of the cluster cannot name one machine, so
   both nodes get none and an omission says so.
 
+### VMware source adapter: `vmware.migration.inventory`
+
+A read-only multi-step operation of the vCenter connector
+(`connectors/vmware_rest/composites/_migration_inventory*.py`), registered
+on both vCenter catalogs (`vmware-rest-8.0` and `vmware-rest-9.0`), group
+`migration`, `safe`, no approval. It returns one inventory envelope, always
+as a stored result: the operation's `result_document: {"always": true}`
+hint makes the reducer keep the inventory whole under a handle whatever its
+size, so even a one-VM inventory has a handle for `migration.inventory.csv`.
+The caller sees the reducer's document summary (`result_record`,
+`top_level_fields`, the small scalars) and reads the rest with
+`result_query` and a path (for example `/counts` or `/records`).
+
+Parameters: `vcf_operations_target` (optional), `utilization_days` (1 to
+365, default 30), and `cluster` or `folder` (an id) to narrow the scope.
+
+Steps:
+
+1. `RetrieveServiceContent`: the root folder, the view manager, the
+   performance manager and the vCenter instance UUID.
+2. One paged `RetrievePropertiesEx` from the scope down to every VM: name
+   and template flag. The walk goes through the hosts (every registered VM
+   sits on a host), or, for a VM folder, through the folder tree, its vApps
+   and the vApps and resource pools inside them, as deep as they go.
+3. vCenter's own count of the VMs in scope, read another way: a recursive
+   `ContainerView` of `VirtualMachine` on the same root (`CreateContainerView`,
+   one read through the view, `DestroyView`). This count is
+   `source_totals.server`. It shares nothing with the walk of step 2, so a
+   VM the walk misses shows as a difference in the count check. When the
+   count read fails, there is no count check (`source_totals` and
+   `reconciliation` are empty) and one omission without `kind` says so. A
+   check built on the listing count could only ever match, so it would make
+   a listing that missed VMs look verified.
+4. Templates are left out: one omission each, reason `not_supported`.
+5. The other VMs in batches of 20: one `RetrievePropertiesEx` for the record
+   properties (`DETAIL_PROPERTIES` in `_migration_inventory_map.py`). A
+   failed batch is read again one VM at a time; a VM that still fails is an
+   omission (`collection_failed`), not a failed run.
+6. The ESXi host and cluster names, read once for all hosts (best effort).
+7. Utilization per batch (below), then the records, the duplicates and the
+   count check.
+
+The record, from the VM's properties:
+
+| Field | From |
+|---|---|
+| `source_id` | `vmware:<vCenter instance UUID>:<VM instance UUID>`; the VM id (`vm-42`) instead when the instance UUID is missing or already used |
+| `identity_hints` | `config.uuid` (BIOS UUID) in the form the guest reports it (below), NIC MAC addresses, `guest.hostName` |
+| `cores`, `memory_configured_mb` | `config.hardware.numCPU`, `config.hardware.memoryMB` |
+| `memory_assigned_mb` | the configured memory while the VM runs (vSphere has no dynamic memory); unknown (`powered_off`) when it is off |
+| `disks` | each `VirtualDisk`: size; thin (flat disk flag, sparse disks are thin); shared (`sharingMultiWriter`); raw mapping (RDM backing); independent (`diskMode`). Used space and disk speeds are unknown with a reason |
+| `snapshot_count` | the nodes of `snapshot.rootSnapshotList`; 0 when the VM has none |
+| `os` | `guest.guestFullName`, else `config.guestFullName`; family from `guest.guestFamily`, else from `config.guestId`; `x64` or `arm64` from the guest id |
+| `boot_type`, `secure_boot` | `config.firmware` (`efi` is `uefi`), `config.bootOptions.efiSecureBootEnabled`. An EFI VM without the flag has secure boot off; a flag vCenter could not read is unknown, with the reason |
+| `power_state`, `nics` | `runtime.powerState`; NIC devices with their guest IP addresses and network |
+| `source_attributes` | `vm_id`, `instance_uuid`, `hardware_version` (`config.version`, for example `vmx-19`), `esxi_host`, `cluster` |
+
+A property vCenter refuses (`NoPermission`) makes its field unknown with the
+reason `no_permission`.
+
+**The BIOS UUID form.** The VMware adapter stores the BIOS UUID in the form
+the guest OS reports it (`dmidecode`, Windows WMI), lower case. That is the
+common form, because a read inside the guest cannot know the VM's hardware
+version. (The loader matches a BIOS UUID in both forms anyway, see
+`bios_uuid_match_key`.) From virtual hardware version 13 on, the VM's firmware reports SMBIOS
+2.7, and the guest shows the first three groups of the UUID with their bytes
+reversed against vCenter's `config.uuid` (vendor article 53609): vCenter's
+`4201aaaa-0000-4000-...` is `aaaa0142-0000-0040-...` in the guest. So
+`guest_bios_uuid` in `_migration_inventory_map.py` reverses those bytes for
+`vmx-13` and later and keeps the value as it is below that, or when the
+hardware version or the UUID cannot be read as such. A record read inside the
+guest therefore matches its vCenter record. `source_attributes.hardware_version`
+says which rule applied; to compare with vCenter's own value, reverse the
+bytes of the first three groups again.
+
+Utilization:
+
+- **Without `vcf_operations_target`**: vCenter's performance history, one
+  `QueryPerf` per batch for `cpu.usage.average`, `mem.usage.average`,
+  `net.received.average` and `net.transmitted.average` (aggregate instance
+  only). The counter ids come from `PerformanceManager.perfCounter`. The
+  sample interval follows the window: 5 minutes up to a day, 30 minutes up
+  to a week, 2 hours up to 30 days, 1 day above. Average, p95 (nearest rank)
+  and maximum; vCenter's `-1` (no sample) is skipped. `source` is
+  `vcenter-performance`.
+- **With `vcf_operations_target`**: per VM, the child operations
+  `vrops.resource.query` (by name, then matched on the VM id and vCenter
+  UUID, or the instance UUID) and `vrops.resource.stats` on that target. Each
+  child has its own policy check and audit row. Both are declared with
+  `register_composite_dispatch_surface` when the vCenter composites register
+  (`register_migration_inventory_dispatch_surface`), so the start-up check of
+  `composite_invariant` fails the start if either ever resolves to an
+  ingested catalog row. A child answer that came
+  back as a stored result (a handle, because it was large) is read back from
+  the result store for the caller's tenant. That read gives the latest
+  values only, so the window is the time of those samples and `samples` is
+  small; `source` is `vcf-operations-latest`. The first child answer that is
+  denied or waits for approval stops the source: the rest of the VMs get
+  `no_permission`, and one omission without `kind` says why.
+- No samples: `utilization` is `null` with `powered_off` (the VM is off) or
+  `not_measured`. A failed read gives `collection_failed`. Never zero.
+
+Duplicates: a record that shares a BIOS UUID or an instance UUID with
+another record (for example a VM registered again from copied files) is
+listed in `duplicates`. Both stay in `records`, because vCenter counts both.
+The match comes from `IdentityIndex` in `contracts.py`, which the loader
+(`merge_inventories`) uses too, so the CSV export leaves every later record
+of the machine out as `same_machine_as`. The index joins identities after
+every record is in, so `same_as` always names the first record of the
+machine, whatever the order: when C shares A's BIOS UUID and B's instance
+UUID, A, B and C are one machine, and B and C both name A.
+
+Tests: `backend/tests/test_vmware_migration_inventory.py` runs the operation
+against a fake vCenter with made-up VMs (Windows with three disks, Linux
+without samples, a copy with the same BIOS UUID, a template, a VM that cannot
+be read). The fake walks a small inventory tree the way the property
+collector does (a cluster, a standalone host, a VM folder with a vApp inside
+a vApp), and counts the VMs another way for the `ContainerView`. The tests
+check the values, the count check (also a count that differs and a count
+read that fails), the nested vApps, the guest UUID form against a record read
+inside the guest, the duplicates in either record order and the CSV export of
+the stored result.
+
 ## Dependencies
 
 - `pydantic` v2 models (`model_validator`, discriminated union on `kind`).
@@ -314,7 +459,6 @@ from the handle of a long answer.
 the adapters (`hyperv.vms.guest.list`, `winsrv.system.hardware`,
 `k8s.workload.list`, and the new `k8s.node.list` fields).
 
-
 `backend/tests/test_migration_contracts.py` pins the shapes with made-up
 fixtures: a Windows VM with three disks, a Linux VM with no utilization,
 the same Linux machine read through its guest OS (same BIOS UUID), a
@@ -332,11 +476,18 @@ header, column for column.
   the results.
 - A bare-metal Kubernetes node has no disk, firmware or boot data; only the
   OS and capacity from the node object.
-- Disk speeds and utilization are not read by any adapter yet
-  (`not_measured`), so sizing from these inventories is "allocated".
-- Duplicate servers are matched by BIOS UUID only, in its two byte
-  orders. A record keeps the UUID text as its source reported it; only
-  the match key is shared.
+- Disk speeds and utilization are not read by the adapters of this package
+  yet (`not_measured`), so sizing from these inventories is "allocated".
+- The VCF Operations source gives only the latest values, not a history
+  window. A history read of VCF Operations would need a new operation of
+  that connector.
+- The VMware adapter reads vCenter targets. A standalone ESXi host is not
+  covered.
+- Duplicate servers are matched by BIOS UUID, in its two byte orders, or by
+  exact instance UUID. A record keeps the UUID text as its source reported
+  it; only the match key is shared.
+- `net.received.average` and `net.transmitted.average` are not in vCenter's
+  default statistics level 1, so network in and out are often unknown.
 
 ## References
 

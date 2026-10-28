@@ -72,6 +72,39 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
 )
 
+# The family mixin classes. Each family imports its mixin on the line under its
+# own comment: from meho_backplane.connectors.azure.<family> import <Family>Ops
+# Ruff does not sort this part, so two families never add a line at the same place.
+# Keep the empty line under each family: Ruff wants one between two imports.
+# isort: off
+# aks (Task #5087)
+from meho_backplane.connectors.azure.aks import AksOps
+
+# arc (Task #5084)
+
+# automation (Task #5092)
+
+# avs (Task #5091)
+
+# compute (Task #5083)
+from meho_backplane.connectors.azure.compute import ComputeOps
+
+# cost (Task #5088)
+from meho_backplane.connectors.azure.cost import CostOps
+
+# inventory (Task #5082)
+
+# migrate (Task #5093)
+
+# monitor (Task #5090)
+
+# network (Task #5085)
+
+# security (Task #5089)
+
+# storage (Task #5086)
+# isort: on
+
 __all__ = ["AzureConnector"]
 
 _log = structlog.get_logger(__name__)
@@ -117,7 +150,29 @@ def _may_use_cache(operator: Operator) -> bool:
     return bool(operator.raw_jwt) and not is_system_operator(operator)
 
 
-class AzureConnector(HttpConnector):
+class AzureConnector(
+    # Family mixin classes first, each on the line under its own comment below;
+    # the HTTP base last. The mixins must stay before HttpConnector, so that a
+    # mixin can replace a method of the base (the inventory family replaces
+    # list_candidates). Their order among themselves does not matter today:
+    # no two families define a method with the same name.
+    # aks (Task #5087)
+    AksOps,
+    # arc (Task #5084)
+    # automation (Task #5092)
+    # avs (Task #5091)
+    # compute (Task #5083)
+    ComputeOps,
+    # cost (Task #5088)
+    CostOps,
+    # inventory (Task #5082)
+    # migrate (Task #5093)
+    # monitor (Task #5090)
+    # network (Task #5085)
+    # security (Task #5089)
+    # storage (Task #5086)
+    HttpConnector,
+):
     """Azure Resource Manager connector. One target is one subscription.
 
     Registered as ``("azure", "2026.10", "azure-arm")``, so the connector ID is
@@ -406,6 +461,14 @@ class AzureConnector(HttpConnector):
         from meho_backplane.connectors.azure.typed_reads import azure_about_impl
 
         return await azure_about_impl(self, operator, target, params)
+
+    async def location_list(
+        self, operator: Operator, target: AzureTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``azure.location.list``: the Azure regions of this target's subscription."""
+        from meho_backplane.connectors.azure.typed_reads import azure_location_list_impl
+
+        return await azure_location_list_impl(self, operator, target, params)
 
     async def operation_status(
         self, operator: Operator, target: AzureTargetLike, params: dict[str, Any]

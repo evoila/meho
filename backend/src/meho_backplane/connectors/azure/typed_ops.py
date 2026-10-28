@@ -8,21 +8,63 @@ descriptions as Swagger 2.0, which MEHO's spec ingestion does not read, and
 hand-written operations give clear groups, risk levels and guidance.
 
 The operations are registered at start-up with ``source_kind="typed"``, so
-they work on a fresh install with nothing to ingest. The bodies live in
+they work on a fresh install with nothing to ingest. This module holds the
+account operations. Their bodies live in
 :mod:`meho_backplane.connectors.azure.typed_reads`, the guidance for the AI in
 :mod:`meho_backplane.connectors.azure._llm_instructions`. Thin methods on
 :class:`~meho_backplane.connectors.azure.connector.AzureConnector` expose them
 under the ``handler_attr`` names below.
+
+Every other family of operations has its own module: its group text, its
+operations, their bodies and a mixin class (a class whose methods
+``AzureConnector`` takes over). :data:`AZURE_TYPED_OPS` and
+:data:`AZURE_TYPED_WHEN_TO_USE_BY_GROUP` collect the families, one line each.
+Each family has a fixed comment line in the imports and in both lists, and its
+line goes directly under that comment. So two families never add a line at the
+same place, and git merges their branches in any order without a conflict.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
 from meho_backplane.connectors.azure._llm_instructions import AZURE_READ_LLM_INSTRUCTIONS
+from meho_backplane.connectors.azure._model import NO_PARAMS, TEXT_OR_NULL, AzureTypedOp
+
+# The family modules. Each family imports its module on the line under its own
+# comment: from meho_backplane.connectors.azure import <family>
+# Ruff does not sort this part, so it cannot join these imports into one line.
+# Keep the empty line under each family: Ruff wants one between two imports.
+# isort: off
+# aks (Task #5087)
+from meho_backplane.connectors.azure import aks
+
+# arc (Task #5084)
+
+# automation (Task #5092)
+
+# avs (Task #5091)
+
+# compute (Task #5083)
+from meho_backplane.connectors.azure import compute
+
+# cost (Task #5088)
+from meho_backplane.connectors.azure import cost
+
+# inventory (Task #5082)
+
+# migrate (Task #5093)
+
+# monitor (Task #5090)
+
+# network (Task #5085)
+
+# security (Task #5089)
+
+# storage (Task #5086)
+# isort: on
 
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
@@ -39,68 +81,38 @@ _log = structlog.get_logger(__name__)
 _GROUP_ACCOUNT: Final[str] = "account"
 
 
-@dataclass(frozen=True)
-class AzureTypedOp:
-    """One Azure typed operation, as the registrar passes it on.
-
-    The fields match the keyword arguments of
-    :func:`~meho_backplane.operations.typed_register.register_typed_operation`.
-    ``handler_attr`` names the method on ``AzureConnector`` that runs it.
-    """
-
-    op_id: str
-    handler_attr: str
-    summary: str
-    description: str
-    parameter_schema: dict[str, Any]
-    response_schema: dict[str, Any] | None
-    group_key: str
-    tags: tuple[str, ...]
-    safety_level: Literal["safe", "caution", "dangerous", "destructive"]
-    requires_approval: bool
-    llm_instructions: dict[str, Any] | None
-
-
-#: The text of each group. The AI reads it through ``list_operation_groups``
-#: to choose where to search.
-AZURE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
+#: The text of the account group.
+_ACCOUNT_WHEN_TO_USE: dict[str, str] = {
     _GROUP_ACCOUNT: (
         "Start here for an Azure target. azure.about reads the subscription (ID, name "
         "and state), its tenant and cloud, and the app ID and object ID of the login "
         "MEHO uses. Use it first for a new target, after a secret change, or when "
         "another Azure read fails with an access or login error. "
+        "azure.location.list lists the Azure regions the subscription can use, with "
+        "their geography and paired regions; use it to check a region name. "
         "azure.operation.status reads the state of a long-running Azure operation "
         "once, from the operation reference an Azure write returned; use it after a "
         "lost answer or a restart instead of sending the write again. Read-only."
     ),
 }
 
-_NO_PARAMS: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {},
-    "additionalProperties": False,
-    "examples": [{}],
-}
-
-_TEXT_OR_NULL: Final[list[str]] = ["string", "null"]
-
 _ABOUT_RESPONSE: Final[dict[str, Any]] = {
     "type": "object",
     "properties": {
         "subscription_id": {
-            "type": _TEXT_OR_NULL,
+            "type": TEXT_OR_NULL,
             "description": "The subscription ID (a GUID).",
         },
         "display_name": {
-            "type": _TEXT_OR_NULL,
+            "type": TEXT_OR_NULL,
             "description": "The subscription name, as set in Azure.",
         },
         "state": {
-            "type": _TEXT_OR_NULL,
+            "type": TEXT_OR_NULL,
             "description": "Enabled, Warned, PastDue, Disabled or Deleted.",
         },
         "tenant_id": {
-            "type": _TEXT_OR_NULL,
+            "type": TEXT_OR_NULL,
             "description": "The tenant (directory) ID the subscription belongs to.",
         },
         "cloud": {
@@ -108,11 +120,11 @@ _ABOUT_RESPONSE: Final[dict[str, Any]] = {
             "description": "The Azure cloud: AzureCloud, AzureUSGovernment or AzureChinaCloud.",
         },
         "app_id": {
-            "type": _TEXT_OR_NULL,
+            "type": TEXT_OR_NULL,
             "description": "Application (client) ID of the login, read from the access token.",
         },
         "object_id": {
-            "type": _TEXT_OR_NULL,
+            "type": TEXT_OR_NULL,
             "description": "Object ID of the login's service principal, read from the token.",
         },
     },
@@ -120,6 +132,71 @@ _ABOUT_RESPONSE: Final[dict[str, Any]] = {
 }
 
 _READ_TAGS: Final[tuple[str, ...]] = ("read-only", "azure")
+
+_LOCATION_ROW: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": TEXT_OR_NULL,
+            "description": "The region name Azure uses in requests, for example westeurope.",
+        },
+        "display_name": {
+            "type": TEXT_OR_NULL,
+            "description": "The region name for people, for example West Europe.",
+        },
+        "region_type": {
+            "type": TEXT_OR_NULL,
+            "description": "Physical (a real data center region) or Logical.",
+        },
+        "geography": {
+            "type": TEXT_OR_NULL,
+            "description": (
+                "The Azure geography of the region, for example Europe, Germany or United States."
+            ),
+        },
+        "geography_group": {
+            "type": TEXT_OR_NULL,
+            "description": (
+                "The wider group the region belongs to, for example Europe, US or "
+                "Asia Pacific. Azure calls it geographyGroup and may change it."
+            ),
+        },
+        "paired_regions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "The names of the regions paired with this one, often one.",
+        },
+    },
+    "required": ["name", "paired_regions"],
+}
+
+_LOCATION_LIST_RESPONSE: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "value": {
+            "type": "array",
+            "items": _LOCATION_ROW,
+            "description": "One row per region. A long list comes back as a stored-result link.",
+        },
+        "truncated": {
+            "type": "boolean",
+            "description": "True when MEHO stopped reading pages at one of its limits.",
+        },
+        "omission": {
+            "type": TEXT_OR_NULL,
+            "description": "What was left out and how to narrow the request, when truncated.",
+        },
+        "omission_kind": {
+            "type": TEXT_OR_NULL,
+            "description": "Which limit stopped the list: row_limit, page_limit or time_limit.",
+        },
+        "pages_read": {
+            "type": "integer",
+            "description": "How many pages MEHO read from Azure.",
+        },
+    },
+    "required": ["value", "truncated", "pages_read"],
+}
 
 _EXAMPLE_POLL_URL: Final[str] = (
     "https://management.azure.com/subscriptions/00000000-0000-0000-0000-000000000000"
@@ -142,11 +219,11 @@ _OPERATION_REFERENCE_SCHEMA: Final[dict[str, Any]] = {
             "description": "Which Azure header the URL came from.",
         },
         "resource_id": {
-            "type": _TEXT_OR_NULL,
+            "type": TEXT_OR_NULL,
             "description": "The Azure resource ID the operation changes, when known.",
         },
         "started_at": {
-            "type": _TEXT_OR_NULL,
+            "type": TEXT_OR_NULL,
             "description": "When MEHO started the operation (ISO 8601).",
         },
         "retry_after_seconds": {
@@ -190,8 +267,8 @@ _OPERATION_STATUS_RESPONSE: Final[dict[str, Any]] = {
             "type": ["object", "null"],
             "description": "Azure's error code and message when the operation failed.",
             "properties": {
-                "code": {"type": _TEXT_OR_NULL, "description": "Azure's error code."},
-                "message": {"type": _TEXT_OR_NULL, "description": "Azure's error text."},
+                "code": {"type": TEXT_OR_NULL, "description": "Azure's error code."},
+                "message": {"type": TEXT_OR_NULL, "description": "Azure's error text."},
             },
         },
         "result": {
@@ -208,8 +285,8 @@ _OPERATION_STATUS_RESPONSE: Final[dict[str, Any]] = {
             "properties": {
                 "poll_url": {"type": "string", "description": "The poll URL."},
                 "poll_kind": {"type": "string", "description": "The kind of poll URL."},
-                "resource_id": {"type": _TEXT_OR_NULL, "description": "The resource ID."},
-                "started_at": {"type": _TEXT_OR_NULL, "description": "The start time."},
+                "resource_id": {"type": TEXT_OR_NULL, "description": "The resource ID."},
+                "started_at": {"type": TEXT_OR_NULL, "description": "The start time."},
                 "retry_after_seconds": {
                     "type": ["number", "null"],
                     "description": "The Retry-After of the answer that started the operation.",
@@ -221,8 +298,8 @@ _OPERATION_STATUS_RESPONSE: Final[dict[str, Any]] = {
 }
 
 
-#: Every Azure typed operation. Reads are ``safe`` and need no approval.
-AZURE_TYPED_OPS: tuple[AzureTypedOp, ...] = (
+#: The account operations. Reads are ``safe`` and need no approval.
+_ACCOUNT_OPS: tuple[AzureTypedOp, ...] = (
     AzureTypedOp(
         op_id="azure.about",
         handler_attr="about",
@@ -232,13 +309,31 @@ AZURE_TYPED_OPS: tuple[AzureTypedOp, ...] = (
             "Returns the subscription ID, name and state, the tenant ID, the cloud, "
             "and the app ID and object ID of the login. Read-only."
         ),
-        parameter_schema=_NO_PARAMS,
+        parameter_schema=NO_PARAMS,
         response_schema=_ABOUT_RESPONSE,
         group_key=_GROUP_ACCOUNT,
         tags=(*_READ_TAGS, "subscription", "identity", "about"),
         safety_level="safe",
         requires_approval=False,
         llm_instructions=AZURE_READ_LLM_INSTRUCTIONS["azure.about"],
+    ),
+    AzureTypedOp(
+        op_id="azure.location.list",
+        handler_attr="location_list",
+        summary="List the Azure regions this subscription can use.",
+        description=(
+            "Reads GET /subscriptions/{subscriptionId}/locations on Azure Resource "
+            "Manager. Returns one row per region: name, display name, region type, "
+            "geography and paired regions. Azure has more than 50 regions, so the "
+            "rows come back as a stored-result link. Read-only."
+        ),
+        parameter_schema=NO_PARAMS,
+        response_schema=_LOCATION_LIST_RESPONSE,
+        group_key=_GROUP_ACCOUNT,
+        tags=(*_READ_TAGS, "location", "region", "geography"),
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=AZURE_READ_LLM_INSTRUCTIONS["azure.location.list"],
     ),
     AzureTypedOp(
         op_id="azure.operation.status",
@@ -258,6 +353,49 @@ AZURE_TYPED_OPS: tuple[AzureTypedOp, ...] = (
         llm_instructions=AZURE_READ_LLM_INSTRUCTIONS["azure.operation.status"],
     ),
 )
+
+#: Every Azure typed operation: the account operations first, then each family.
+AZURE_TYPED_OPS: tuple[AzureTypedOp, ...] = (
+    # Each family module adds one line, *<family>.OPS, under its own comment below.
+    *_ACCOUNT_OPS,
+    # aks (Task #5087)
+    *aks.OPS,
+    # arc (Task #5084)
+    # automation (Task #5092)
+    # avs (Task #5091)
+    # compute (Task #5083)
+    *compute.OPS,
+    # cost (Task #5088)
+    *cost.OPS,
+    # inventory (Task #5082)
+    # migrate (Task #5093)
+    # monitor (Task #5090)
+    # network (Task #5085)
+    # security (Task #5089)
+    # storage (Task #5086)
+)
+
+#: The text of each group. The AI reads it through ``list_operation_groups``
+#: to choose where to search.
+AZURE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
+    # Each family module adds one line, **<family>.WHEN_TO_USE, under its own comment below.
+    **_ACCOUNT_WHEN_TO_USE,
+    # aks (Task #5087)
+    **aks.WHEN_TO_USE,
+    # arc (Task #5084)
+    # automation (Task #5092)
+    # avs (Task #5091)
+    # compute (Task #5083)
+    **compute.WHEN_TO_USE,
+    # cost (Task #5088)
+    **cost.WHEN_TO_USE,
+    # inventory (Task #5082)
+    # migrate (Task #5093)
+    # monitor (Task #5090)
+    # network (Task #5085)
+    # security (Task #5089)
+    # storage (Task #5086)
+}
 
 
 async def register_azure_typed_operations(

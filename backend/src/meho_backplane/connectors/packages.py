@@ -4,8 +4,12 @@
 """Start-up check of the connector folders before MEHO imports them.
 
 MEHO finds connectors by walking ``meho_backplane/connectors/`` at start
-and importing every subpackage there. Before any import, this module
-checks where each subpackage folder came from. A folder is allowed when:
+and importing every subpackage there. Route modules and other code also
+import single connector subpackages directly, long before the walk. So the
+check runs in the ``__init__`` of the ``connectors`` package itself: Python
+runs that before any ``connectors.<folder>`` module, whoever imports it.
+The check looks at where each subpackage folder came from. A folder is
+allowed when:
 
 * its files belong to the ``meho-backplane`` distribution (the folder came
   with MEHO itself), or
@@ -22,9 +26,11 @@ built-in folders are allowed there.
 "Files belong to a distribution" is read from the installed file list of
 that distribution (its ``RECORD``, through :mod:`importlib.metadata`).
 Every file on disk in the folder must be in that list; ``__pycache__``
-folders are skipped. An editable install (a source checkout set up with
-``uv sync``) has no such list for its source files, so for it every
-folder inside the checkout counts as built in.
+folders are skipped. A symbolic link anywhere in the folder, or the folder
+being a link itself, is never allowed: a wheel cannot contain links, and
+a link can point at files that are not in the list. An editable install
+(a source checkout set up with ``uv sync``) has no such list for its source
+files, so for it every folder inside the checkout counts as built in.
 
 See ``docs/codebase/connector-packages.md``.
 """
@@ -33,7 +39,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterable
+import pkgutil
 from importlib import metadata
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Final
@@ -160,18 +166,25 @@ class _Installed:
     def owns(self, connectors_dir: Path, folder: str) -> bool:
         """Whether the folder exists and every file in it is in the list.
 
-        ``__pycache__`` folders are skipped.
+        ``__pycache__`` folders are skipped. Any symbolic link makes the
+        answer ``False``: ``os.walk`` does not enter a linked folder, so
+        its files would never be checked, and a linked file can point
+        anywhere.
         """
         owned = self.owned.get(folder)
         path = connectors_dir / folder
-        if not owned or not path.is_dir():
+        if not owned or path.is_symlink() or not path.is_dir():
             return False
         for current, dirs, files in os.walk(path):
             dirs[:] = [d for d in dirs if d != _PYCACHE]
+            here = Path(current)
+            if any((here / d).is_symlink() for d in dirs):
+                return False
             for name in files:
+                file = here / name
                 if (
-                    PurePosixPath((Path(current) / name).relative_to(self.root).as_posix())
-                    not in owned
+                    file.is_symlink()
+                    or PurePosixPath(file.relative_to(self.root).as_posix()) not in owned
                 ):
                     return False
         return True
@@ -201,26 +214,27 @@ def _listed_folders(
             if not installed.owns(connectors_dir, folder):
                 raise ConnectorPackageError(
                     f"connector_package_not_allowed: the connector folder {folder!r} is listed for "
-                    f"{package.name!r} in {path}, but its files were not installed by that "
-                    "package. MEHO does not import it."
+                    f"{package.name!r} in {path}, but its files were not all installed by that "
+                    "package, or it holds a link. MEHO does not import it."
                 )
             listed[folder] = package.name
     return listed
 
 
-def check_connector_folders(
-    connectors_dir: Path,
-    folders: Iterable[str],
-    allowlist_path: Path | None = None,
-) -> None:
-    """Stop the start unless every connector folder is built in or listed.
+def check_connector_folders(connectors_dir: Path, allowlist_path: Path | None = None) -> None:
+    """Stop the start unless every subpackage folder in ``connectors_dir`` is built in or listed.
 
-    Called before any connector subpackage is imported. Raises
-    :class:`ConnectorPackageError` that names the first folder that is not
-    allowed. On success, logs one ``connector_packages_allowed`` line.
+    Called from the ``__init__`` of the ``connectors`` package, so it runs
+    before any connector subpackage is imported. Raises
+    :class:`ConnectorPackageError` that names the first folder (in name
+    order) that is not allowed. On success, logs one
+    ``connector_packages_allowed`` line.
     """
     path = CONNECTOR_PACKAGES_FILE if allowlist_path is None else allowlist_path
     connectors_dir = connectors_dir.resolve()
+    folders = sorted(
+        name for _, name, ispkg in pkgutil.iter_modules([str(connectors_dir)]) if ispkg
+    )
     packages = load_connector_packages(path)
     listed = _listed_folders(packages, connectors_dir, path)
     builtin: _Installed | None = None
@@ -243,8 +257,8 @@ def check_connector_folders(
             continue
         raise ConnectorPackageError(
             f"connector_package_not_allowed: the connector folder {folder!r} in {connectors_dir}, "
-            f"or a file in it, did not come with MEHO and is not listed in {path}. MEHO does not "
-            "import it. Remove what was added, or build the image with its package listed."
+            f"or a file or link in it, did not come with MEHO and is not listed in {path}. MEHO "
+            "does not import it. Remove what was added, or build the image with its package listed."
         )
 
     _log.info(

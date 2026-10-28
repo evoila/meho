@@ -10,7 +10,12 @@ A connector package from another repository is a wheel (a built Python
 package file) that adds one or more folders to `connectors/`. An overlay
 image (a new image built from the public MEHO image) installs such wheels.
 
-Before MEHO imports anything, it now checks every subpackage folder:
+Before MEHO imports any connector, it checks every subpackage folder. The
+check runs in the `__init__` of the `connectors` package itself. Python
+runs that file before any module inside `connectors/`, no matter who
+imports it. So the check also runs when a route module in `main.py`
+imports one connector directly, which happens long before the server's
+start-up steps. The rules:
 
 - A folder is allowed when all its files were installed by the
   `meho-backplane` distribution. The folder came with MEHO.
@@ -61,6 +66,9 @@ start with `connector_package_not_allowed`.
 - For a folder, every file on disk must be in that list. `__pycache__`
   folders are skipped, because Python writes them at run time.
 - So a file added later to a built-in folder also stops the start.
+- A symbolic link anywhere in a folder, or a folder that is itself a link,
+  stops the start. A wheel cannot contain links, and a link can point at
+  files that are not in the list and that the walk would not see.
 
 A source checkout set up with `uv sync` is an editable install. Its file
 list does not name the source files. For it, every folder inside the
@@ -70,16 +78,26 @@ editable install, so the full check applies there.
 
 ## Control flow
 
-1. `_eager_import_connectors()` in `connectors/registry.py` lists the
-   subpackages with `pkgutil.iter_modules`, sorted by name.
-2. `check_connector_folders()` in `connectors/packages.py` reads the
-   allowlist file, checks each listed package, then checks each folder.
-3. Only when every folder is allowed are the subpackages imported.
-4. One log line, `connector_packages_allowed`, lists the allowed packages
-   (name, version, wheel digest, folders).
+1. Some code imports `meho_backplane.connectors` or any module under it.
+   Python runs `connectors/__init__.py` first.
+2. The first thing that file does is call `check_connector_folders()` in
+   `connectors/packages.py`. It lists the subpackage folders with
+   `pkgutil.iter_modules`, sorted by name, reads the allowlist file,
+   checks each listed package, then checks each folder.
+3. An unknown folder raises `ConnectorPackageError`. The import of
+   `meho_backplane.connectors` fails, so no connector module can load.
+   For the server this means `meho_backplane.main` does not even import.
+4. On success, one log line, `connector_packages_allowed`, lists the
+   allowed packages (name, version, wheel digest, folders).
+5. Later, `_eager_import_connectors()` in `connectors/registry.py` imports
+   every subpackage so each one registers. It does not check again.
 
-The same walk runs in the server start, the satellite runner start, the
-OpenAPI schema build and the topology scope-repair tool.
+The check is in the package `__init__`, and not in the start-up steps of
+the server, because `main.py` imports connector code through its route
+modules (for example the Vault and mail connectors) before those steps run.
+The server start, the satellite runner start, the OpenAPI schema build and
+the topology scope-repair tool all import the package, so all of them are
+covered.
 
 ## Key types
 
@@ -96,6 +114,10 @@ OpenAPI schema build and the topology scope-repair tool.
   build refuses such files.
 - Plain modules (single `.py` files) directly in `connectors/` are not
   imported by the walk, so the check does not look at them.
+- MEHO must be installed, as a wheel or as an editable install of the same
+  checkout. A bare source tree on `PYTHONPATH` that borrows another
+  checkout's install has no file list and is outside that checkout, so
+  every folder is refused and nothing imports.
 
 ## References
 

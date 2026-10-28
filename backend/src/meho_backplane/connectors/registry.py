@@ -34,13 +34,11 @@ condition, and should surface as a deploy failure.
 
 import importlib
 import pkgutil
-from pathlib import Path
 from types import ModuleType
 
 import structlog
 
 from meho_backplane.connectors.base import Connector
-from meho_backplane.connectors.packages import check_connector_folders
 
 __all__ = [
     "_eager_import_connectors",
@@ -424,11 +422,11 @@ def _eager_import_connectors() -> None:
     avoids surprises if a future connector ever takes a registration-
     time side-effect on another connector's presence.
 
-    Before anything is imported, :func:`check_connector_folders` checks
-    that every subpackage came with MEHO or is named in the connector
-    package list. An unknown folder raises
-    :class:`~meho_backplane.connectors.packages.ConnectorPackageError`
-    and nothing is imported.
+    The folders were already checked against the connector package list
+    when :mod:`meho_backplane.connectors` itself was imported (see
+    :func:`~meho_backplane.connectors.packages.check_connector_folders`).
+    That import is a precondition of reaching this function, so the walk
+    only imports.
     """
     import meho_backplane.connectors as pkg
 
@@ -436,13 +434,12 @@ def _eager_import_connectors() -> None:
 
 
 def _import_connector_subpackages(pkg: ModuleType) -> None:
-    """Check, then import, every subpackage of ``pkg`` in name order."""
+    """Import every subpackage of ``pkg`` in name order."""
     names = [
         name
         for _, name, ispkg in sorted(pkgutil.iter_modules(pkg.__path__), key=lambda m: m[1])
         if ispkg
     ]
-    check_connector_folders(Path(next(iter(pkg.__path__))), names)
     for name in names:
         importlib.import_module(f"{pkg.__name__}.{name}")
 

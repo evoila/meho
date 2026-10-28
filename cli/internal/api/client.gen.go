@@ -5704,6 +5704,8 @@ type GroupSummaryModel struct {
 //
 // Mirrors the dataclass; rendered alongside :class:`IngestionResultModel`
 // in the ingest response so the operator sees both counts.
+// “unassigned_op_ids“ names the operations still without a group
+// (sorted, capped); “operations_unassigned“ is the full count.
 type GroupingResultModel struct {
 	ConnectorId          string               `json:"connector_id"`
 	Groups               *[]GroupSummaryModel `json:"groups,omitempty"`
@@ -5712,6 +5714,7 @@ type GroupingResultModel struct {
 	LlmDurationMs        float32              `json:"llm_duration_ms"`
 	OperationsAssigned   int                  `json:"operations_assigned"`
 	OperationsUnassigned int                  `json:"operations_unassigned"`
+	UnassignedOpIds      *[]string            `json:"unassigned_op_ids,omitempty"`
 }
 
 // HTTPValidationError defines model for HTTPValidationError.
@@ -6015,6 +6018,8 @@ type IngestJobStatusResponse struct {
 	//
 	// Mirrors the dataclass; rendered alongside :class:`IngestionResultModel`
 	// in the ingest response so the operator sees both counts.
+	// ``unassigned_op_ids`` names the operations still without a group
+	// (sorted, capped); ``operations_unassigned`` is the full count.
 	Grouping *GroupingResultModel `json:"grouping,omitempty"`
 	ImplId   *string              `json:"impl_id"`
 
@@ -6167,6 +6172,8 @@ type IngestResponse struct {
 	//
 	// Mirrors the dataclass; rendered alongside :class:`IngestionResultModel`
 	// in the ingest response so the operator sees both counts.
+	// ``unassigned_op_ids`` names the operations still without a group
+	// (sorted, capped); ``operations_unassigned`` is the full count.
 	Grouping *GroupingResultModel `json:"grouping,omitempty"`
 
 	// Ingestion Pydantic projection of

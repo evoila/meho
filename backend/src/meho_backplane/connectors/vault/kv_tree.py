@@ -24,7 +24,15 @@ import hvac.exceptions
 
 from meho_backplane.settings import get_settings
 
-__all__ = ["VaultFolderTooLargeError", "folder_max_keys", "list_kv_tree"]
+__all__ = [
+    "DEFAULT_FOLDER_MAX_KEYS",
+    "VaultFolderTooLargeError",
+    "folder_max_keys",
+    "list_kv_tree",
+]
+
+#: Default of the ``vault_kv_folder_max_keys`` setting.
+DEFAULT_FOLDER_MAX_KEYS = 500
 
 
 class VaultFolderTooLargeError(Exception):

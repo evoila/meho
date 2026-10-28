@@ -49,7 +49,11 @@ from typing import Any
 import hvac.exceptions
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors.vault.kv_tree import folder_max_keys, list_kv_tree
+from meho_backplane.connectors.vault.kv_tree import (
+    DEFAULT_FOLDER_MAX_KEYS,
+    folder_max_keys,
+    list_kv_tree,
+)
 from meho_backplane.connectors.vault.ops import (
     _DEFAULT_KV_MOUNT,
     _MOUNT_PROPERTY,
@@ -390,6 +394,20 @@ register_preview_builder(FOLDER_DELETE_OP_ID, _folder_delete_preview)
 register_permission_preflight(FOLDER_DELETE_OP_ID, _folder_delete_preflight)
 
 
+def _registration_max_keys() -> int:
+    """The ``keys`` limit for the param schema, read when the op is registered.
+
+    A running backplane always has its settings, so this is the
+    ``vault_kv_folder_max_keys`` setting. A process without the required
+    settings (some test sweeps register every op with no env) gets the
+    setting's default. The handler checks the live setting again anyway.
+    """
+    try:
+        return folder_max_keys()
+    except KeyError:
+        return DEFAULT_FOLDER_MAX_KEYS
+
+
 async def register_vault_kv_folder_operations(
     *,
     when_to_use: str,
@@ -416,7 +434,7 @@ async def register_vault_kv_folder_operations(
             "the card shows every key path. Secrets that are not listed are left "
             "alone and reported."
         ),
-        parameter_schema=vault_kv_folder_delete_parameter_schema(folder_max_keys()),
+        parameter_schema=vault_kv_folder_delete_parameter_schema(_registration_max_keys()),
         response_schema=_RESPONSE_SCHEMA,
         tags=["write", "destructive", "reversible"],
         safety_level="dangerous",

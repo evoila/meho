@@ -277,7 +277,7 @@ CENTRAL_MANAGEMENT_OP = _op(
     "Reads monitor/system/central-management/status on the device target. "
     "fortimanager_controls is true in normal mode with a FortiManager server set; then every "
     "change must be made in FortiManager. It is null when the answer has no mode or server "
-    "MEHO knows; then MEHO refuses a direct change, because it cannot tell.",
+    "MEHO knows; then MEHO refuses a direct change.",
     _object(
         {
             "fortimanager_controls": _field(

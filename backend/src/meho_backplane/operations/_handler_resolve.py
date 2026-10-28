@@ -21,6 +21,9 @@ Two related concerns the dispatcher needs but that don't belong in
   :class:`asyncssh.SSHClientConnection` pool on :class:`SshConnector`)
   persists across dispatches. The cache is module-local; reset via
   :func:`reset_connector_instance_cache`.
+* :func:`forget_target_in_connectors` -- drop the logins and credentials
+  that every cached connector instance keeps for one target, so a changed
+  target is used fresh on the next dispatch (#3879).
 """
 
 from __future__ import annotations
@@ -30,15 +33,26 @@ import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import structlog
+
 from meho_backplane.connectors.base import Connector
 
 __all__ = [
+    "forget_target_in_connectors",
     "get_or_create_connector_instance",
     "import_handler",
     "is_unbound_method",
     "reset_connector_instance_cache",
     "reset_handler_cache",
 ]
+
+_log = structlog.get_logger(__name__)
+
+#: The duck-typed connector hooks that drop what a connector keeps for one
+#: target: ``invalidate_session`` drops the login token, and
+#: ``invalidate_credentials`` drops the secret read from Vault (and, for some
+#: connectors, the client built from it).
+_TARGET_FORGET_HOOKS = ("invalidate_session", "invalidate_credentials")
 
 # ``handler_ref`` -> resolved callable cache.
 _HANDLER_CACHE: dict[str, Callable[..., Awaitable[Any]]] = {}
@@ -136,6 +150,40 @@ def get_or_create_connector_instance(cls: type[Connector]) -> Connector:
     instance = cls()
     _CONNECTOR_INSTANCE_CACHE[cls] = instance
     return instance
+
+
+async def forget_target_in_connectors(target: Any) -> None:
+    """Drop what every cached connector instance keeps for *target*.
+
+    Connectors keep logins and credentials per target, keyed on the
+    ``(tenant_id, id)`` pair, which a target change does not alter. Without
+    this, a changed ``secret_ref`` (or host, TLS setting, ...) is used only
+    after the kept login expires (#3879). The target update route calls this
+    after it changes the row.
+
+    Each instance in the cache gets every hook in :data:`_TARGET_FORGET_HOOKS`
+    that it has. The hooks only remove this target's own entries, so calling
+    them on a connector that never saw the target is a no-op. All instances
+    are asked, not only the one the target resolves to now, because the
+    change may have moved the target to another connector. A failing hook is
+    logged and skipped: the target change must still go through, and one
+    connector must not stop the others from forgetting the target.
+    """
+    for instance in list(_CONNECTOR_INSTANCE_CACHE.values()):
+        for hook_name in _TARGET_FORGET_HOOKS:
+            hook = getattr(instance, hook_name, None)
+            if not callable(hook):
+                continue
+            try:
+                await hook(target)
+            except Exception as exc:
+                _log.warning(
+                    "target_forget_hook_failed",
+                    connector=type(instance).__name__,
+                    hook=hook_name,
+                    target_id=str(getattr(target, "id", "?")),
+                    error=f"{type(exc).__name__}: {exc}",
+                )
 
 
 def is_unbound_method(handler: Any, connector_cls: type[Connector]) -> bool:

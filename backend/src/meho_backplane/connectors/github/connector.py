@@ -492,6 +492,19 @@ class GitHubRestConnector(HttpConnector):
         """
         return None
 
+    async def invalidate_credentials(self, target: GitHubTargetLike) -> None:
+        """Drop the kept installation token and PAT for *target* (#2396, #3879).
+
+        The next call reads the secret from Vault again. The dispatcher calls
+        this after a failed login, and the target update route calls it after
+        a target change, so a new or narrower credential is used at once
+        instead of after the kept token expires.
+        """
+        cache_key = target_cache_key(target)
+        async with self._token_lock:
+            self._installation_tokens.pop(cache_key, None)
+            self._pat_tokens.pop(cache_key, None)
+
     async def aclose(self) -> None:
         """Drop cached tokens + close the inherited httpx pool."""
         async with self._token_lock:

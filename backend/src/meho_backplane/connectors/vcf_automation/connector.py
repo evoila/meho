@@ -1236,6 +1236,15 @@ class VcfAutomationConnector(HttpConnector):
     # Shutdown
     # ------------------------------------------------------------------
 
+    async def invalidate_credentials(self, target: VcfAutomationTargetLike) -> None:
+        """Drop the kept provider and tenant tokens for *target* (#2396, #3879).
+
+        The next call on either plane reads the secret again and logs in with
+        it. Called after a failed login and after a target change.
+        """
+        await self._invalidate_plane(target, "provider")
+        await self._invalidate_plane(target, "tenant")
+
     async def aclose(self) -> None:
         """Clear both plane token caches and tear down the httpx pool.
 

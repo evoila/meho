@@ -433,6 +433,19 @@ class SshConnector(Connector):
             f"target unreachable for {result.product!r} via {result.probe_method!r}{detail}"
         )
 
+    async def invalidate_credentials(self, target: Target) -> None:
+        """Close and drop the pooled connection for *target* (#2396, #3879).
+
+        A pooled connection was opened with the old host and secret. Dropping
+        it makes the next command open a new one with the current values.
+        Called after a failed login and after a target change.
+        """
+        async with self._pool_lock:
+            entry = self._connections.pop(target_cache_key(target), None)
+        if entry is not None and not entry[0].is_closed():
+            entry[0].close()
+            await entry[0].wait_closed()
+
     async def aclose(self) -> None:
         """Close all pooled connections. Called by lifespan or cleanup."""
         async with self._pool_lock:

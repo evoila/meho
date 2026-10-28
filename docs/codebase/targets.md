@@ -23,7 +23,8 @@ through `resolve_target` (`targets/resolver.py`). Destination checks
 are covered in [`target-ssrf-guard.md`](target-ssrf-guard.md).
 
 This document covers the two **list** paths and how `list_targets`
-bounds its response (#3858).
+bounds its response (#3858), and what a target change does to the
+logins connectors keep (#3879).
 
 ## Key types
 
@@ -36,6 +37,42 @@ bounds its response (#3858).
 | `_reduce_target_page` | `mcp/tools/topology.py` | runs the page through JSONFlux |
 | `JsonFluxReducer` | `operations/jsonflux_reducer.py` | the reducer `call_operation` results go through; thresholds and handle shape |
 | `ResultHandleStore` | `connectors/result_handle_store.py` | Valkey-backed spill that `result_query` reads back |
+
+## Control flow — changing a target
+
+`PATCH /api/v1/targets/{name}` (`update_target`) changes only the sent
+fields. Connectors keep logins and credentials per target, keyed on
+`(tenant_id, id)`, and a change does not alter that key. So when the
+PATCH sends a field that changes how MEHO reaches or logs in to the
+target (`_CONNECTION_FIELDS`: `product`, `version`, `preferred_impl_id`, `host`,
+`port`, `fqdn`, `secret_ref`, `auth_model`, `verify_tls`, `tls_ca_pin`,
+`tls_server_name`, `extras`), the route calls `forget_target_in_connectors(target)`
+(`operations/_handler_resolve.py`, through
+`_drop_kept_logins_on_connection_change`).
+
+That helper asks every cached connector instance to run its
+`invalidate_session` and `invalidate_credentials` hooks for the
+target, when it has them. The next dispatch logs in with the new
+values (#3879). A hook that fails is logged and skipped.
+
+The check is "field sent", not "value changed". After a secret changes
+only in Vault, re-send the same `secret_ref`
+(`meho targets update <name> --secret-ref <same path>`) to make MEHO
+read it again.
+
+Limits:
+
+- The kept logins live in each backplane process. The drop runs only
+  in the process that served the PATCH. Other replicas, and satellite
+  runners, keep their logins until they expire.
+- The drop runs before the request's transaction commits. The handler
+  does not commit on its own, because the UI import calls it for many
+  targets in one transaction. A dispatch that reads the target in that
+  short time, or one that was already logging in, can still keep a
+  login made with the old values.
+- A connector with no hook keeps its login until it expires. The
+  pooled HTTP client is not affected: its key already includes the
+  host, port, scheme and TLS settings.
 
 ## Control flow — listing targets
 

@@ -156,7 +156,10 @@ from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.flight_recorder.config import invalidate_target_override_cache
-from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._handler_resolve import (
+    forget_target_in_connectors,
+    get_or_create_connector_instance,
+)
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import resolve_target
 from meho_backplane.targets.schemas import (
@@ -1388,6 +1391,46 @@ async def create_target(
     return _to_full(t)
 
 
+#: PATCH fields that change how MEHO reaches or logs in to a target. Sending
+#: any of them makes connectors drop what they keep for the target (#3879).
+#: The check is "field sent", not "value changed": re-sending the same
+#: ``secret_ref`` is how an operator makes MEHO read a secret again after it
+#: was changed only in Vault.
+_CONNECTION_FIELDS = frozenset(
+    {
+        "product",
+        "version",
+        "preferred_impl_id",
+        "host",
+        "port",
+        "fqdn",
+        "secret_ref",
+        "auth_model",
+        "verify_tls",
+        "tls_ca_pin",
+        "tls_server_name",
+        "extras",
+    }
+)
+
+
+async def _drop_kept_logins_on_connection_change(t: TargetORM, updates: dict[str, Any]) -> None:
+    """Make connectors drop the login they keep for *t* after a connection change.
+
+    #3879. Runs only when the PATCH sent a field in :data:`_CONNECTION_FIELDS`.
+    Every connector drops the login and credentials it keeps for the target,
+    so the next dispatch logs in with the new values.
+
+    This runs before the request's transaction commits. The handler does not
+    commit on its own, because the UI import calls it for many targets in
+    one transaction. So a dispatch that reads the target in the short time
+    before the commit can still log in with the old values and keep that
+    login.
+    """
+    if _CONNECTION_FIELDS.intersection(updates):
+        await forget_target_in_connectors(t)
+
+
 def _validate_update_body_fields(
     updates: dict[str, Any],
     t: TargetORM,
@@ -1519,6 +1562,7 @@ async def update_target(
         _audit_flight_recorder_capture_write(
             t, tenant_id=operator.tenant_id, before=fr_capture_before
         )
+    await _drop_kept_logins_on_connection_change(t, updates)
     return _to_full(t)
 
 

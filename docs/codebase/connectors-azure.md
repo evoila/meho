@@ -1138,7 +1138,189 @@ Not built yet (Task #5085).
 
 ## security
 
-Not built yet (Task #5089).
+The `security` family reads the security and governance state of the
+target's subscription: Microsoft Defender for Cloud, Azure Policy, role
+assignments and the activity log. All nine operations are in the group
+`security`, all are `safe`, and none needs approval. Nothing changes in Azure.
+The compliance summary is a POST, but it only reads, so it is `safe` too.
+
+Files: `security.py` (group text, guidance for the AI, operation table, and
+the `SecurityOps` methods `AzureConnector` inherits), `security_schemas.py`
+(parameter and response schemas), `security_parse.py` (how Azure's answers
+become rows, and the parameter checks) and `security_reads.py` (the calls).
+The shared pieces (`AzureTypedOp`, `NO_PARAMS`, `TEXT_OR_NULL`) are in
+`_model.py`, so a family module and `typed_ops.py` never import each other in
+a circle.
+
+### Operations
+
+| Operation | Azure call | api-version | Parameters |
+|---|---|---|---|
+| `azure.security.score.list` | `GET /subscriptions/{id}/providers/Microsoft.Security/secureScores` | 2020-01-01 | none |
+| `azure.security.control.list` | `GET .../Microsoft.Security/secureScoreControls?$expand=definition` | 2020-01-01 | none |
+| `azure.security.recommendation.list` | `GET /{scope}/providers/Microsoft.Security/assessments`, and when needed `GET .../Microsoft.Security/assessmentMetadata` | 2020-01-01, 2025-05-04 | `status`: `Unhealthy` (default), `Healthy`, `NotApplicable` or `All` |
+| `azure.security.alert.list` | `GET /subscriptions/{id}/providers/Microsoft.Security/alerts` | 2022-01-01 | `days`: 1 to 90, default 7 |
+| `azure.security.plan.list` | `GET /{scope}/providers/Microsoft.Security/pricings` | 2024-01-01 | none |
+| `azure.policy.compliance.summary` | `POST /subscriptions/{id}/providers/Microsoft.PolicyInsights/policyStates/latest/summarize` | 2024-10-01 | none |
+| `azure.policy.assignment.list` | `GET /subscriptions/{id}/providers/Microsoft.Authorization/policyAssignments` | 2026-07-01 | none |
+| `azure.role.assignment.list` | `GET /{scope}/providers/Microsoft.Authorization/roleAssignments`, then `GET .../roleDefinitions?$filter=atScopeAndBelow()` once | 2022-04-01 | `scope` (optional, inside the subscription) |
+| `azure.activity.list` | `GET /subscriptions/{id}/providers/Microsoft.Insights/eventtypes/management/values?$filter=...` | 2015-04-01 | `from`, `to`, `resource_group`, `caller`, `status` (all optional) |
+
+`{scope}` is `subscriptions/<id>` unless the caller gives a scope. The API
+versions are the ones Microsoft's documentation pages show. The pinned spec
+files also hold newer versions for the recommendations (2025-05-04) and the
+Defender plans (2026-07-01); MEHO uses them only after the lab proof shows
+they work.
+
+Roles: Reader on the subscription allows every read here. Security Reader
+also allows the Defender for Cloud reads (Microsoft's table: "View alerts and
+recommendations" for Security Reader and Reader).
+
+### What each operation returns
+
+Every list answer has the rows under `value`, their number in `count`, and
+the paging fields of `PagedRows.as_dict()` (`truncated`, `omission`,
+`omission_kind`, `pages_read`). The paging fields describe what MEHO read
+from Azure, before a filter of MEHO's own.
+
+- **Secure score**: `name`, `display_name`, `score`, `max_score`,
+  `percentage`. Azure gives the percentage as a ratio from 0 to 1; MEHO
+  returns a percent from 0 to 100.
+- **Controls**: the same score fields per control, the healthy, unhealthy and
+  not-applicable resource counts, and `recommendation_names`: the names of
+  the recommendations in the control (from `$expand=definition`). Each name
+  matches the `name` of a recommendation row.
+- **Recommendations**: `name` (the recommendation type, the same for every
+  resource), `display_name`, `severity`, `status`, `resource_id`, plus
+  `status_filter`. Azure's list has no status filter, so MEHO reads every page
+  and keeps the rows with the asked status. Severity comes from the row's
+  `metadata` when Azure includes it; otherwise MEHO reads the assessment
+  metadata of the subscription once per call and matches it by name.
+  `resource_id` comes from `resourceDetails.id` (the key is read without
+  regard to case) or, when missing, from the assessment id without its end.
+- **Alerts**: `name`, `display_name`, `alert_type`, `severity`, `status`,
+  `time` (`timeGeneratedUtc`, else `startTimeUtc`), `resource_id` (the
+  `AzureResource` entry of `resourceIdentifiers`), `compromised_entity`, and
+  `window: {days, from, to}`. Azure's list has no time filter, so MEHO keeps
+  the alerts made inside the window. An alert without a readable time is
+  kept. The alert description, the remediation steps, the entities and the
+  evidence are left out.
+- **Defender plans**: `name`, `tier` (`Standard` is on, `Free` is off),
+  `sub_plan`, `deprecated`.
+- **Compliance summary**: `non_compliant_resources`, `non_compliant_policies`
+  and `compliant_resources` of the subscription at the top, and one row per
+  policy assignment with the same three counts, `assignment_id`,
+  `assignment_name` and `policy_set_definition_id` (set for an initiative).
+  Azure sorts the assignments by non-compliant resources and writes the ids
+  in lower case. MEHO sends no `$top`, so it gets every assignment Azure
+  returns. The call is sent as repeatable: after a 5xx it is tried again,
+  like a GET.
+- **Policy assignments**: `id`, `name`, `display_name`, `scope`,
+  `policy_definition_id`, `is_initiative`, `enforcement_mode` (`Default`
+  when Azure leaves it out, Azure's documented default). No `$filter` is
+  sent, so the list holds the assignments on the subscription, those
+  inherited from management groups, and those on resource groups and
+  resources in it.
+- **Role assignments**: `name`, `principal_id`, `principal_type`,
+  `role_name`, `role_definition_id`, `scope`, plus the `scope` MEHO read.
+  Role ids become names through one role definitions read per call, matched
+  by the role's GUID (so `/providers/...` and `/subscriptions/<id>/providers/...`
+  forms both match). `role_name` is `null` when the role is not found.
+  Principal names live in Microsoft Entra ID, which a separate Entra ID
+  connector reads (a later Task); this operation returns ids only.
+- **Activity log**: `time`, `operation`, `status`, `caller`, `resource_id`,
+  `correlation_id`, `level`, and `window: {from, to, clamped}`. The event's
+  `claims`, `httpRequest` (with the caller's IP address) and `properties`
+  are left out.
+
+### Parameter checks
+
+A value that would change a request is checked before the login and before
+any request. A bad value fails with `AzureParameterError` (the dispatcher
+returns `connector_error` with `remediation`); the message never repeats the
+value.
+
+- `scope` of `azure.role.assignment.list` must start with the target's own
+  subscription (`/subscriptions/<id>`, any case). Every further part may
+  hold only letters and digits (any script), `_`, `-`, `.`, `(` and `)`, and
+  must not be `.` or `..`. So no scope leaves the subscription, and no `?`,
+  `#`, `%` or quote reaches the path.
+- `resource_group` of `azure.activity.list` follows the same character rule
+  (at most 90 characters), because it goes into the filter
+  `resourceGroupName eq '<name>'`.
+- The activity log window: `to` is now when not given, and a `to` after now
+  is moved to now; `from` is 24 hours before `to` when not given. A `from`
+  more than 90 days back is moved to 90 days back (the activity log keeps 90
+  days). `clamped` says that MEHO moved one of them. An empty window, or a
+  time that is not ISO 8601, fails. A time without an offset is UTC. The
+  checks run before any date arithmetic, so a time such as the year 1 cannot
+  overflow.
+
+The activity log filter allows only the time range plus one of resource
+group, resource, provider or correlation id ("No other syntax is allowed",
+says Microsoft). So `caller` and `status` are compared by MEHO after reading,
+without regard to case; they do not make the read smaller. MEHO sends no
+`$select`, because Microsoft's list of selectable fields has no `caller`.
+
+### Result handles
+
+A list over 50 rows or 4 KB becomes a link to the stored result. The scalar
+fields next to the rows (`count`, `status_filter`, `scope`, the three policy
+totals, the paging fields) stay inline under the reducer's default rule.
+The `window` objects of the alert list and the activity log stay inline
+because their guidance carries a `result_objects` hint naming them.
+`test_connectors_azure_security.py` proves this for every operation whose
+list can pass 50 rows, with the real reducer and `result_query`.
+
+### Untrusted text
+
+Names, display names, alert titles, affected resource names and callers are
+text from Azure. Some of it can be chosen by an attacker (for example a
+resource name in an alert). It is copied as data and never used to build a
+request, and the guidance of every operation tells the AI to treat it as
+data, never as instructions.
+
+### Spec path check
+
+Every path is a `*_PATH` constant in `_paths.py`, in the section for this
+family, with one line in the check's `_DECLARED` table. The check compares
+each path and its API version with the pinned spec files.
+
+### Proven live
+
+Nothing yet: the lab login does not exist. Every operation is proven with
+mocked HTTP shaped like Microsoft's documented examples. The lab proof checks
+the secure score and controls against the portal, real recommendations and
+plans, the non-compliant count against the portal's Policy page, the lab
+logins' own role assignments, and the activity log of the last 7 days.
+
+### Known issues
+
+- The recommendation list may or may not carry `metadata.severity`; when it
+  does not, one extra read of the assessment metadata fills it. The lab
+  proof shows which case is real.
+- The next page of a list is the `nextLink` as Azure sends it (the shared
+  paging helper). Azure's own SDKs add the `api-version` again to a next-page
+  request; the lab proof checks a second page of the activity log.
+- MEHO sends no `$top` to the compliance summary. If Azure cuts the number
+  of assignments without saying so, the rows would miss some; the lab proof
+  compares the count with the portal.
+
+### References
+
+- Secure Scores - List: <https://learn.microsoft.com/en-us/rest/api/defenderforcloud/secure-scores/list>
+- Secure Score Controls - List: <https://learn.microsoft.com/en-us/rest/api/defenderforcloud/secure-score-controls/list>
+- Assessments - List: <https://learn.microsoft.com/en-us/rest/api/defenderforcloud/assessments/list>
+- Assessments Metadata - List By Subscription: <https://learn.microsoft.com/en-us/rest/api/defenderforcloud/assessments-metadata/list-by-subscription>
+- Alerts - List: <https://learn.microsoft.com/en-us/rest/api/defenderforcloud/alerts/list>
+- Pricings - List: <https://learn.microsoft.com/en-us/rest/api/defenderforcloud/pricings/list>
+- Policy States - Summarize For Subscription: <https://learn.microsoft.com/en-us/rest/api/policyinsights/policy-states/summarize-for-subscription>
+- Policy Assignments - List: <https://learn.microsoft.com/en-us/rest/api/policy-authorization/policy-assignments/list>
+- Role Assignments - List For Scope: <https://learn.microsoft.com/en-us/rest/api/authorization/role-assignments/list-for-scope>
+- Role Definitions - List: <https://learn.microsoft.com/en-us/rest/api/authorization/role-definitions/list>
+- Activity Logs - List: <https://learn.microsoft.com/en-us/rest/api/monitor/activity-logs/list>
+- Activity log (90 days): <https://learn.microsoft.com/en-us/azure/azure-monitor/platform/activity-log>
+- Defender for Cloud roles: <https://learn.microsoft.com/en-us/azure/defender-for-cloud/permissions>
 
 ## storage
 

@@ -99,6 +99,17 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     # monitor (Task #5090)
     # network (Task #5085)
     # security (Task #5089)
+    "SECURE_SCORES_PATH": (("GET",), "SECURE_SCORE_API_VERSION"),
+    "SECURE_SCORE_CONTROLS_PATH": (("GET",), "SECURE_SCORE_API_VERSION"),
+    "SECURITY_ASSESSMENTS_PATH": (("GET",), "SECURITY_ASSESSMENTS_API_VERSION"),
+    "SECURITY_ASSESSMENT_METADATA_PATH": (("GET",), "SECURITY_ASSESSMENT_METADATA_API_VERSION"),
+    "SECURITY_ALERTS_PATH": (("GET",), "SECURITY_ALERTS_API_VERSION"),
+    "DEFENDER_PLANS_PATH": (("GET",), "DEFENDER_PLANS_API_VERSION"),
+    "POLICY_STATES_SUMMARY_PATH": (("POST",), "POLICY_INSIGHTS_API_VERSION"),
+    "POLICY_ASSIGNMENTS_PATH": (("GET",), "POLICY_ASSIGNMENTS_API_VERSION"),
+    "ROLE_ASSIGNMENTS_PATH": (("GET",), "AUTHORIZATION_API_VERSION"),
+    "ROLE_DEFINITIONS_PATH": (("GET",), "AUTHORIZATION_API_VERSION"),
+    "ACTIVITY_LOG_PATH": (("GET",), "ACTIVITY_LOG_API_VERSION"),
     # storage (Task #5086)
 }
 
@@ -215,6 +226,17 @@ def test_the_checked_paths_are_pinned() -> None:
         "# monitor (Task #5090)",
         "# network (Task #5085)",
         "# security (Task #5089)",
+        "GET:/subscriptions/{}/providers/microsoft.authorization/policyassignments@2026-07-01",
+        "GET:/subscriptions/{}/providers/microsoft.insights/eventtypes/management/values@2015-04-01",
+        "GET:/subscriptions/{}/providers/microsoft.security/alerts@2022-01-01",
+        "GET:/subscriptions/{}/providers/microsoft.security/assessmentmetadata@2025-05-04",
+        "GET:/subscriptions/{}/providers/microsoft.security/securescorecontrols@2020-01-01",
+        "GET:/subscriptions/{}/providers/microsoft.security/securescores@2020-01-01",
+        "GET:/{}/providers/microsoft.authorization/roleassignments@2022-04-01",
+        "GET:/{}/providers/microsoft.authorization/roledefinitions@2022-04-01",
+        "GET:/{}/providers/microsoft.security/assessments@2020-01-01",
+        "GET:/{}/providers/microsoft.security/pricings@2024-01-01",
+        "POST:/subscriptions/{}/providers/microsoft.policyinsights/policystates/{}/summarize@2024-10-01",
         "# storage (Task #5086)",
     ]
     blocks: list[tuple[str, list[str]]] = []

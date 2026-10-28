@@ -62,6 +62,7 @@ from meho_backplane.connectors.azure import cost
 # network (Task #5085)
 
 # security (Task #5089)
+from meho_backplane.connectors.azure import security
 
 # storage (Task #5086)
 # isort: on
@@ -372,6 +373,7 @@ AZURE_TYPED_OPS: tuple[AzureTypedOp, ...] = (
     # monitor (Task #5090)
     # network (Task #5085)
     # security (Task #5089)
+    *security.OPS,
     # storage (Task #5086)
 )
 
@@ -394,6 +396,7 @@ AZURE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # monitor (Task #5090)
     # network (Task #5085)
     # security (Task #5089)
+    **security.WHEN_TO_USE,
     # storage (Task #5086)
 }
 

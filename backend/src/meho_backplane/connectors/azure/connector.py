@@ -101,6 +101,7 @@ from meho_backplane.connectors.azure.cost import CostOps
 # network (Task #5085)
 
 # security (Task #5089)
+from meho_backplane.connectors.azure.security import SecurityOps
 
 # storage (Task #5086)
 # isort: on
@@ -170,6 +171,7 @@ class AzureConnector(
     # monitor (Task #5090)
     # network (Task #5085)
     # security (Task #5089)
+    SecurityOps,
     # storage (Task #5086)
     HttpConnector,
 ):

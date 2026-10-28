@@ -1395,7 +1395,9 @@ use the same values. A destructive operation always waits for approval,
 whatever the overrides say.
 
 Turning approval off for an operation is the one loosening edit. It
-needs `platform_admin`, a written reason, and a person: in the console
+needs `platform_admin`, a written reason, and a person. This holds for
+every edit that ends approval, also removing an override that required
+it: in the console
 the web session is the person (the same rule as an approval click); on
 REST it is the **fresh sign-in check**,
 `auth/fresh_sign_in.py:has_fresh_sign_in`:
@@ -1403,7 +1405,9 @@ REST it is the **fresh sign-in check**,
 * the caller is a human principal (`PrincipalKind.USER`); agents,
   service principals and runners always fail;
 * the token's `auth_time` claim (now on `Operator.auth_time`) is at
-  most `FRESH_SIGN_IN_MAX_AGE_SECONDS` old (default `300`). A token
+  most `FRESH_SIGN_IN_MAX_AGE_SECONDS` old (default `300`, from 30 to
+  3600; `get_settings()` reads the environment variable, and the same
+  value sets the check and the `max_age` in the challenge). A token
   refresh keeps `auth_time` (RFC 9470 section 6.1), so a long-lived
   refreshed CLI token does not pass; a token without `auth_time` fails.
 

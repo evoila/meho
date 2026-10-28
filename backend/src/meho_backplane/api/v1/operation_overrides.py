@@ -57,13 +57,13 @@ async def load_override_rows(
             op_id=row.op_id,
             scope="install" if row.tenant_id is None else "tenant",
             tenant_id=row.tenant_id,
-            safety_level=row.safety_level,
-            requires_approval=row.requires_approval,
+            safety_level=policy.safety_level,
+            requires_approval=policy.requires_approval,
             reason=row.reason,
             set_by_sub=row.set_by_sub,
             set_at=row.set_at,
         )
-        for row in rows
+        for row, policy in rows
     ]
 
 
@@ -75,8 +75,9 @@ async def list_operation_overrides(
     """List the operator overrides of risk levels and approval flags.
 
     ``reduced_approval=true`` keeps only the operations whose approval a
-    platform admin turned off. Each row names the connector, the operation,
-    the stored values, the scope, who set it, when, and the reason.
+    platform admin turned off and where approval is still off. Each row
+    names the connector, the operation, the risk level and approval that
+    apply in the row's scope, the scope, who set it, when, and the reason.
     """
     return OperationOverrideList(
         overrides=await load_override_rows(operator, reduced_approval=reduced_approval)

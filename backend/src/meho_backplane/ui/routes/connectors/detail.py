@@ -90,6 +90,7 @@ from meho_backplane.db.models import (
 from meho_backplane.db.models import (
     Target as TargetORM,
 )
+from meho_backplane.operations.op_policy import OpKey, effective_policy_map
 from meho_backplane.targets.resolver import resolve_target
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
@@ -273,6 +274,8 @@ async def _load_ops_matrix(
         .order_by(EndpointDescriptor.group_id, EndpointDescriptor.op_id)
     )
     descriptors = (await db_session.execute(descriptor_stmt)).scalars().all()
+    # #4711: show the risk level and approval that apply, with overrides.
+    policies = await effective_policy_map(db_session, tenant_id=tenant_id, rows=descriptors)
 
     by_group: dict[uuid.UUID, list[_OpsMatrixOp]] = {gid: [] for gid in group_ids}
     for descriptor in descriptors:
@@ -282,8 +285,8 @@ async def _load_ops_matrix(
             _OpsMatrixOp(
                 op_id=descriptor.op_id,
                 summary=descriptor.summary,
-                safety_level=descriptor.safety_level,
-                requires_approval=descriptor.requires_approval,
+                safety_level=policies[OpKey.of(descriptor)].safety_level,
+                requires_approval=policies[OpKey.of(descriptor)].requires_approval,
             ),
         )
 

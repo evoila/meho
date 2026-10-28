@@ -10,7 +10,8 @@
   Context contract:
     * ``rows`` -- list[dict]: {connector_id, op_id, scope, tenant_id,
                   safety_level, requires_approval, reason, set_by_sub,
-                  set_at}.
+                  set_at}. ``safety_level`` / ``requires_approval`` are the
+                  values that apply in the row's scope.
     * ``show`` -- "reduced" | "all".
 -#}
 {% extends "base.html" %}
@@ -63,8 +64,10 @@
                   (from code)
                 {% elif row.requires_approval %}
                   required
-                {% else %}
+                {% elif show == "reduced" %}
                   <span class="badge badge-warning badge-sm">turned off</span>
+                {% else %}
+                  not required
                 {% endif %}
               </td>
               <td>{{ "whole install" if row.scope == "install" else "tenant " ~ row.tenant_id }}</td>

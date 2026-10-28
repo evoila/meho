@@ -36,12 +36,13 @@ func newOverridesCmd() *cobra.Command {
 		Long: "overrides calls GET /api/v1/connectors/operation-overrides and lists\n" +
 			"every change an operator made to an operation's risk level or approval\n" +
 			"flag (with `meho connector edit-op`, the console or the MCP edit tool).\n\n" +
-			"Each row shows the connector, the operation, the stored risk level and\n" +
-			"approval value, the scope (one tenant or the whole install), who made\n" +
-			"the change, when, and the reason. \"(code)\" means the value in code\n" +
-			"applies.\n\n" +
+			"Each row shows the connector, the operation, the risk level and\n" +
+			"approval that apply in the row's scope (the value in code with every\n" +
+			"change there), the scope (one tenant or the whole install), who made\n" +
+			"the change, when, and the reason.\n\n" +
 			"--reduced-approval lists only the operations a platform admin turned\n" +
-			"approval off for: the report \"operations running with reduced\n" +
+			"approval off for, where approval is still off: the report\n" +
+			"\"operations running with reduced\n" +
 			"approval\". The console shows the same report at /ui/connectors/overrides.\n\n" +
 			"A tenant admin sees the install-wide changes and their own tenant's.\n" +
 			"A platform admin sees every tenant's.\n\n" +
@@ -130,7 +131,7 @@ func printOverridesTable(w io.Writer, reducedApproval bool, rows []api.Operation
 		if row.RequiresApproval != nil {
 			approval = "required"
 			if !*row.RequiresApproval {
-				approval = "off"
+				approval = "no"
 			}
 		}
 		reason := ""

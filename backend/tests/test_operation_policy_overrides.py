@@ -35,7 +35,7 @@ from sqlalchemy import select
 
 from meho_backplane.api.v1.connectors_ingest import router as connectors_ingest_router
 from meho_backplane.api.v1.operation_overrides import router as overrides_router
-from meho_backplane.auth.fresh_sign_in import has_fresh_sign_in
+from meho_backplane.auth.fresh_sign_in import fresh_sign_in_challenge, has_fresh_sign_in
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.registry import clear_registry
@@ -453,6 +453,137 @@ async def test_review_payload_shows_effective_and_classified_values(
     assert (op.safety_level, op.classified_safety_level) == ("dangerous", "caution")
 
 
+@pytest.mark.asyncio
+async def test_removing_an_approval_override_needs_the_approval_off_rules(
+    embedding: AsyncMock,
+) -> None:
+    """Ending approval by removing an override passes the same checks as turning it off."""
+    tenant_id = uuid.uuid4()
+    await _register_typed(embedding)  # the code does not require approval
+    await ReviewService(_operator(tenant_id)).edit_op(
+        _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=tenant_id, requires_approval=True
+    )
+    assert await _effective(tenant_id) == ("caution", True)
+
+    with pytest.raises(OpPolicyEditError) as caught:
+        await ReviewService(_operator(tenant_id)).edit_op(
+            _TYPED_CONNECTOR,
+            "typedpets.pet.update",
+            tenant_id=tenant_id,
+            requires_approval=False,
+            reason="x",
+            person_present=True,
+        )
+    assert caught.value.code == "approval_off_needs_platform_admin"
+    assert await _effective(tenant_id) == ("caution", True)
+
+    admin = _operator(uuid.uuid4(), platform_admin=True)
+    await ReviewService(admin).edit_op(
+        _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=None, requires_approval=True
+    )
+    for kwargs, code in (
+        ({"reason": "x"}, "approval_off_needs_fresh_sign_in"),
+        ({"person_present": True}, "approval_off_needs_reason"),
+        ({"reason": "x", "person_present": True, "tighten_only": True}, "edit_tool_cannot_loosen"),
+    ):
+        with pytest.raises(OpPolicyEditError) as caught:
+            await _turn_off(admin, **kwargs)
+        assert caught.value.code == code
+    assert await _effective(uuid.uuid4()) == ("caution", True)
+
+    await _turn_off(admin, reason="no longer needed", person_present=True)
+    assert await _effective(uuid.uuid4()) == ("caution", False)
+    async with get_sessionmaker()() as session:
+        left = (
+            (
+                await session.execute(
+                    select(OperationPolicyOverride).where(
+                        OperationPolicyOverride.tenant_id.is_(None)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert list(left) == []
+
+
+@pytest.mark.asyncio
+async def test_lowering_from_destructive_that_ends_approval_needs_the_rules(
+    embedding: AsyncMock,
+) -> None:
+    """Setting the level back from destructive ends its approval; that needs the rules too."""
+    tenant_id = uuid.uuid4()
+    await _register_typed(embedding)
+    service = ReviewService(_operator(tenant_id))
+    await service.edit_op(
+        _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=tenant_id, safety_level="destructive"
+    )
+    with pytest.raises(OpPolicyEditError) as caught:
+        await service.edit_op(
+            _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=tenant_id, safety_level="caution"
+        )
+    assert caught.value.code == "approval_off_needs_platform_admin"
+    assert await _effective(tenant_id) == ("destructive", True)
+
+    # Lowering while keeping approval is fine.
+    await service.edit_op(
+        _TYPED_CONNECTOR,
+        "typedpets.pet.update",
+        tenant_id=tenant_id,
+        safety_level="caution",
+        requires_approval=True,
+    )
+    assert await _effective(tenant_id) == ("caution", True)
+
+
+@pytest.mark.asyncio
+async def test_audit_records_approval_turned_on_by_destructive(embedding: AsyncMock) -> None:
+    """Raising to destructive also turns approval on; the audit row records both."""
+    tenant_id = uuid.uuid4()
+    await _register_typed(embedding)
+    await ReviewService(_operator(tenant_id)).edit_op(
+        _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=tenant_id, safety_level="destructive"
+    )
+    changes = (await _last_edit_audit())["changes"]
+    assert changes == {
+        "safety_level": {"old": "caution", "new": "destructive"},
+        "requires_approval": {"old": False, "new": True},
+    }
+
+
+async def _install_override() -> OperationPolicyOverride:
+    async with get_sessionmaker()() as session:
+        return (
+            await session.execute(
+                select(OperationPolicyOverride).where(OperationPolicyOverride.tenant_id.is_(None))
+            )
+        ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_risk_edit_keeps_who_turned_approval_off_and_why(embedding: AsyncMock) -> None:
+    """A later risk-only edit keeps the reason, author and time of the approval exception."""
+    await _register_typed(embedding, requires_approval=True)
+    first = _operator(uuid.uuid4(), platform_admin=True)
+    await _turn_off(first, reason="read-only in practice", person_present=True)
+    before = await _install_override()
+
+    second = _operator(uuid.uuid4(), platform_admin=True)
+    await ReviewService(second).edit_op(
+        _TYPED_CONNECTOR,
+        "typedpets.pet.update",
+        tenant_id=None,
+        safety_level="dangerous",
+        reason="   ",
+    )
+    after = await _install_override()
+    assert (after.safety_level, after.requires_approval) == ("dangerous", False)
+    assert after.reason == "read-only in practice"
+    assert after.set_by_sub == first.sub
+    assert after.set_at == before.set_at
+
+
 # ---------------------------------------------------------------------------
 # Fresh sign-in check
 # ---------------------------------------------------------------------------
@@ -468,6 +599,22 @@ def test_has_fresh_sign_in() -> None:
         assert not has_fresh_sign_in(_operator(tenant_id, kind=kind, auth_time=int(now)), now=now)
 
 
+def test_fresh_sign_in_max_age_comes_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``FRESH_SIGN_IN_MAX_AGE_SECONDS`` sets the check and the 401 challenge."""
+    monkeypatch.setenv("FRESH_SIGN_IN_MAX_AGE_SECONDS", "60")
+    get_settings.cache_clear()
+    assert get_settings().fresh_sign_in_max_age_seconds == 60
+    now = time.time()
+    tenant_id = uuid.uuid4()
+    assert has_fresh_sign_in(_operator(tenant_id, auth_time=int(now) - 30), now=now)
+    assert not has_fresh_sign_in(_operator(tenant_id, auth_time=int(now) - 120), now=now)
+    challenge = fresh_sign_in_challenge("sign in again")
+    assert challenge.headers is not None
+    assert challenge.headers["WWW-Authenticate"].endswith("max_age=60")
+
+
 # ---------------------------------------------------------------------------
 # REST and MCP surfaces
 # ---------------------------------------------------------------------------
@@ -480,14 +627,16 @@ def _client() -> TestClient:
     return TestClient(app)
 
 
-def _patch(token_kwargs: dict[str, Any], body: dict[str, Any]) -> Any:
+def _patch(
+    token_kwargs: dict[str, Any], body: dict[str, Any], *, tenant_id: uuid.UUID | None = None
+) -> Any:
     clear_jwks_cache()  # each call signs with a new key
     key = _make_rsa_keypair(f"kid-{uuid.uuid4()}")
     token = _mint_token(
         key,
         sub="admin-sub",
         tenant_role=TenantRole.TENANT_ADMIN.value,
-        tenant_id=str(uuid.uuid4()),
+        tenant_id=str(tenant_id or uuid.uuid4()),
         **token_kwargs,
     )
     with respx.mock as mock_router:
@@ -560,6 +709,72 @@ async def test_rest_refusals_map_to_400_and_403(embedding: AsyncMock) -> None:
     assert "approval_off_needs_platform_admin" in tenant_admin.json()["detail"]
     raised, _ = _patch(fresh, {"safety_level": "destructive"})
     assert raised.status_code == 200, raised.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "token_kwargs",
+    [
+        {"platform_admin": True, "extra_claims": {"auth_time": int(time.time()) - 3600}},
+        {"platform_admin": True, "principal_kind": "service", "extra_claims": {"auth_time": 1}},
+    ],
+    ids=["old-sign-in", "service-principal"],
+)
+async def test_rest_cannot_remove_an_install_approval_override_without_fresh_sign_in(
+    embedding: AsyncMock, token_kwargs: dict[str, Any]
+) -> None:
+    """Removing an install-wide approval override over REST needs a fresh sign-in."""
+    await _register_typed(embedding)  # the code does not require approval
+    await ReviewService(_operator(uuid.uuid4(), platform_admin=True)).edit_op(
+        _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=None, requires_approval=True
+    )
+    response, _ = _patch(token_kwargs, _OFF)
+    assert response.status_code == 401, response.text
+    assert "approval_off_needs_fresh_sign_in" in response.json()["detail"]
+    assert await _effective(uuid.uuid4()) == ("caution", True)
+
+    fresh, _ = _patch(
+        {"platform_admin": True, "extra_claims": {"auth_time": int(time.time()) - 5}}, _OFF
+    )
+    assert fresh.status_code == 200, fresh.text
+    assert await _effective(uuid.uuid4()) == ("caution", False)
+
+
+@pytest.mark.asyncio
+async def test_rest_tenant_admin_cannot_remove_own_approval_override(
+    embedding: AsyncMock,
+) -> None:
+    """A tenant admin can require approval for their tenant, but not end it again."""
+    tenant_id = uuid.uuid4()
+    await _register_typed(embedding)
+    fresh = {"extra_claims": {"auth_time": int(time.time())}}
+    on, _ = _patch(fresh, {"requires_approval": True}, tenant_id=tenant_id)
+    assert on.status_code == 200, on.text
+    off, _ = _patch(fresh, _OFF, tenant_id=tenant_id)
+    assert off.status_code == 403, off.text
+    assert "approval_off_needs_platform_admin" in off.json()["detail"]
+    assert await _effective(tenant_id) == ("caution", True)
+
+
+@pytest.mark.asyncio
+async def test_report_shows_effective_values(embedding: AsyncMock) -> None:
+    """The report shows the risk level that applies, and drops exceptions that no longer reduce."""
+    await _register_typed(embedding, requires_approval=True)
+    await _turn_off(
+        _operator(uuid.uuid4(), platform_admin=True),
+        reason="read-only in practice",
+        person_present=True,
+    )
+    fresh = {"platform_admin": True, "extra_claims": {"auth_time": int(time.time())}}
+
+    _, report = _patch(fresh, {"custom_description": "Change a pet."})
+    (row,) = report.json()["overrides"]
+    assert (row["safety_level"], row["requires_approval"]) == ("caution", False)
+
+    raised, report = _patch(fresh, {"safety_level": "destructive"})
+    assert raised.status_code == 200, raised.text
+    assert report.json() == {"overrides": []}
+    assert await _effective(uuid.uuid4()) == ("destructive", True)
 
 
 @pytest.mark.asyncio

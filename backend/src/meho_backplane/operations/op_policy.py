@@ -17,8 +17,9 @@ The rules:
 * **Approval.** Approval is required when the classification says so or
   an override requires it. The one way to turn it off is an install-wide
   override with ``requires_approval=False``, set by a platform admin with a
-  reason and a fresh sign-in. A destructive operation always waits for
-  approval.
+  reason and a fresh sign-in. Every edit that ends approval (also removing
+  an override) passes these checks. A destructive operation always waits
+  for approval.
 * **Scope.** A tenant admin's override (``tenant_id`` = the tenant) applies
   to that tenant only. A platform admin's override on a built-in operation
   (``tenant_id IS NULL``) applies to the whole install.
@@ -381,7 +382,15 @@ async def apply_policy_edit(
             new_safety=new_safety,
             who=who,
         )
-    mine = await _store(
+    candidate = OperationPolicyOverride(safety_level=safety_field, requires_approval=approval_field)
+    new = effective_policy(row.safety_level, row.requires_approval, [*others, candidate])
+    if old.requires_approval and not new.requires_approval:
+        # Every edit that ends approval passes the same checks, also one
+        # that only removes an override or lowers a raised risk level.
+        if tighten_only:
+            raise _edit_tool_cannot_loosen()
+        _check_may_turn_approval_off(row.op_id, new.safety_level, who)
+    await _store(
         session,
         key=key,
         mine=mine,
@@ -390,12 +399,12 @@ async def apply_policy_edit(
         approval_field=approval_field,
         reason=reason,
         operator=operator,
+        approval_edited=requires_approval is not None,
     )
-    new = effective_policy(row.safety_level, row.requires_approval, [mine, *others])
     changes: dict[str, dict[str, Any]] = {}
-    if safety_level is not None:
+    if safety_level is not None or new.safety_level != old.safety_level:
         changes["safety_level"] = {"old": old.safety_level, "new": new.safety_level}
-    if requires_approval is not None:
+    if requires_approval is not None or new.requires_approval != old.requires_approval:
         changes["requires_approval"] = {"old": old.requires_approval, "new": new.requires_approval}
     return PolicyEditResult(
         changes=changes, scope="install" if scope_tenant_id is None else "tenant"
@@ -417,12 +426,13 @@ async def _store(
     approval_field: bool | None,
     reason: str | None,
     operator: Operator,
-) -> OperationPolicyOverride | None:
-    """Write, update or delete the override of this scope; return what remains."""
+    approval_edited: bool,
+) -> None:
+    """Write, update or delete the override of this scope."""
     if safety_field is None and approval_field is None:
         if mine is not None:
             await session.delete(mine)
-        return None
+        return
     if mine is None:
         mine = OperationPolicyOverride(
             tenant_id=scope_tenant_id,
@@ -432,17 +442,18 @@ async def _store(
             op_id=key.op_id,
         )
         session.add(mine)
-    elif not reason and approval_field is False and mine.requires_approval is False:
-        # Keep the reason of an earlier "approval off" when this edit only
-        # raised the risk level.
-        reason = mine.reason
+    elif not approval_edited and approval_field is False and mine.requires_approval is False:
+        # This edit did not touch the approval exception. Keep who turned
+        # approval off, when, and why; the audit row records this edit.
+        mine.safety_level = safety_field
+        await session.flush()
+        return
     mine.safety_level = safety_field
     mine.requires_approval = approval_field
     mine.reason = reason.strip() if reason and reason.strip() else None
     mine.set_by_sub = operator.sub
     mine.set_at = datetime.now(UTC)
     await session.flush()
-    return mine
 
 
 # ---------------------------------------------------------------------------
@@ -455,12 +466,14 @@ async def list_overrides(
     *,
     operator: Operator,
     reduced_approval_only: bool,
-) -> list[OperationPolicyOverride]:
-    """Return the overrides *operator* may see, oldest connector name first.
+) -> list[tuple[OperationPolicyOverride, EffectivePolicy]]:
+    """Return the overrides *operator* may see, each with its effective policy.
 
     A tenant admin sees the install-wide overrides and their own tenant's.
-    A platform admin sees every tenant's too. ``reduced_approval_only``
-    keeps only the overrides that turned approval off.
+    A platform admin sees every tenant's too. The effective policy of a row
+    is what applies in the row's scope: the classification plus every
+    override visible there. ``reduced_approval_only`` keeps only the
+    overrides that turned approval off and where approval is really off.
     """
     stmt = select(OperationPolicyOverride)
     if not operator.platform_admin:
@@ -473,4 +486,44 @@ async def list_overrides(
         OperationPolicyOverride.op_id,
         OperationPolicyOverride.set_at,
     )
-    return list((await session.execute(stmt)).scalars().all())
+    rows = list((await session.execute(stmt)).scalars().all())
+    report = [(row, await _scope_policy(session, row)) for row in rows]
+    if reduced_approval_only:
+        report = [(row, policy) for row, policy in report if not policy.requires_approval]
+    return report
+
+
+async def _scope_policy(session: AsyncSession, row: OperationPolicyOverride) -> EffectivePolicy:
+    """Return the effective policy of *row*'s operation in *row*'s scope.
+
+    The classification comes from the scope's own descriptor row when the
+    tenant has one, else from the built-in row. With no descriptor (the
+    operation is gone) only the overrides count.
+    """
+    key = OpKey(row.product, row.version, row.impl_id, row.op_id)
+    descriptors = (
+        (
+            await session.execute(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.product == key.product,
+                    EndpointDescriptor.version == key.version,
+                    EndpointDescriptor.impl_id == key.impl_id,
+                    EndpointDescriptor.op_id == key.op_id,
+                    or_(
+                        EndpointDescriptor.tenant_id.is_(None),
+                        EndpointDescriptor.tenant_id == row.tenant_id,
+                    ),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    descriptor = next(
+        (d for d in descriptors if d.tenant_id is not None),
+        next(iter(descriptors), None),
+    )
+    overrides = (await load_overrides(session, tenant_id=row.tenant_id, keys=[key])).get(key, [])
+    if descriptor is None:
+        return effective_policy("safe", False, overrides)
+    return effective_policy(descriptor.safety_level, descriptor.requires_approval, overrides)

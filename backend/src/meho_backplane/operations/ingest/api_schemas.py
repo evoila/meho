@@ -1093,8 +1093,9 @@ class OperationOverrideRow(BaseModel):
 
     ``scope`` is ``tenant`` (the change applies to ``tenant_id`` only) or
     ``install`` (the whole install). ``safety_level`` / ``requires_approval``
-    are the stored override values; ``None`` means "not changed here".
-    ``requires_approval=false`` means a platform admin turned approval off.
+    are the values that apply in that scope: the classification with every
+    override there. ``reason`` is the reason a platform admin gave for
+    turning approval off.
     """
 
     model_config = ConfigDict(frozen=True)

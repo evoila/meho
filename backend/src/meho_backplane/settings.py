@@ -2802,6 +2802,10 @@ def get_settings() -> Settings:
         approval_allow_delegated_decision=parse_bool_env(
             os.environ.get("APPROVAL_ALLOW_DELEGATED_DECISION", "false"),
         ),
+        # #4711 -- how old a sign-in may be for an action that needs a person.
+        fresh_sign_in_max_age_seconds=int(
+            os.environ.get("FRESH_SIGN_IN_MAX_AGE_SECONDS", "300"),
+        ),
         # #4622 -- sandbox mode is off unless both settings are set; the
         # boot guards in ``meho_backplane.sandbox_mode`` check them.
         sandbox_mode=parse_bool_env(

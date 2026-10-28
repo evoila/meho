@@ -1096,8 +1096,13 @@ upgrade and a new ingest of the API description.
 
 `lookup_descriptor` (dispatch, preview, checks, gateway mint, governed
 sub-operations, service grants), the operation contract,
-`search_operations` hits and the review payload all read these effective
-values, so a call, a preview and the approval check always agree. The
+`search_operations` hits, `describe_descriptor` (`GET
+/api/v1/operations/{descriptor_id}`, the console operation drawer and run
+window), the operations list on the console connector page and the review
+payload all read these effective values, so a call, a preview and the
+approval check always agree. For example, a typed operation raised to
+`destructive` shows the preview step in the console, because a
+destructive call needs a preview. The
 review payload also carries `classified_safety_level` /
 `classified_requires_approval` (the floor).
 
@@ -1112,6 +1117,16 @@ review payload also carries `classified_safety_level` /
 | a level below the classification | anyone | - | refused, `risk_level_below_classification`: open a pull request |
 | `requires_approval=false` where the classification requires it | platform admin, with a non-empty `reason` and a person present | whole install (built-in) or the row's tenant | override `false`; listed in the reduced-approval report |
 | `requires_approval=false` on a destructive operation | anyone | - | always refused, `approval_off_destructive` |
+
+**Every edit that ends approval passes the same checks.** The rule looks
+at the result, not at the field in the request. When the effective
+approval goes from required to not required, the edit needs
+`platform_admin`, a reason and a person present, and it is refused for a
+destructive operation and by the MCP tool. This also covers removing an
+override that required approval, and setting a level back from
+`destructive` (which ends the approval that `destructive` brings). A
+tenant admin who lowers their own `destructive` override can keep
+approval by also sending `requires_approval=true`.
 
 "A person present" is the fresh sign-in check on REST
 (`auth/fresh_sign_in.py`, see `approvals.md`) and the web session in the
@@ -1135,7 +1150,9 @@ max_age=<N>` (RFC 9470).
 
 **Audit.** The `meho_connector_edit_op` row carries `changes`
 (`{field: {"old", "new"}}` for the risk level, approval and
-`is_enabled`, with effective values), `scope` (`tenant` / `install`) and
+`is_enabled`, with effective values; a field that changed as a side
+effect is recorded too, for example approval when a raise to
+`destructive` turns it on), `scope` (`tenant` / `install`) and
 `reason`, next to the existing `fields_updated` and `is_enabled_set_to`.
 
 **Report.** `GET /api/v1/connectors/operation-overrides`
@@ -1143,6 +1160,12 @@ max_age=<N>` (RFC 9470).
 approval), `meho connector overrides [--reduced-approval]`, and the
 console page `/ui/connectors/overrides`. A tenant admin sees the
 install-wide rows and their own tenant's; a platform admin sees all.
+Each row shows the risk level and approval that apply in the row's scope
+(the classification with every override there), not the stored override
+fields. The reduced-approval view lists an override only while approval
+is really off, so an exception that a later raise to `destructive` made
+void drops out. A later edit that does not touch approval keeps the
+reason, author and time of an approval exception.
 
 **Upgrade.** Before this change an edit wrote the descriptor row, so it
 was lost at the next start (typed) or re-ingest (ingested). Existing

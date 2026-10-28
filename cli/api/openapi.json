@@ -5010,7 +5010,7 @@
           "connectors"
         ],
         "summary": "List Operation Overrides",
-        "description": "List the operator overrides of risk levels and approval flags.\n\n``reduced_approval=true`` keeps only the operations whose approval a\nplatform admin turned off. Each row names the connector, the operation,\nthe stored values, the scope, who set it, when, and the reason.",
+        "description": "List the operator overrides of risk levels and approval flags.\n\n``reduced_approval=true`` keeps only the operations whose approval a\nplatform admin turned off and where approval is still off. Each row\nnames the connector, the operation, the risk level and approval that\napply in the row's scope, the scope, who set it, when, and the reason.",
         "operationId": "list_operation_overrides_api_v1_connectors_operation_overrides_get",
         "parameters": [
           {
@@ -31865,7 +31865,7 @@
           "set_at"
         ],
         "title": "OperationOverrideRow",
-        "description": "One operator override of a risk level or approval flag (#4711).\n\n``scope`` is ``tenant`` (the change applies to ``tenant_id`` only) or\n``install`` (the whole install). ``safety_level`` / ``requires_approval``\nare the stored override values; ``None`` means \"not changed here\".\n``requires_approval=false`` means a platform admin turned approval off."
+        "description": "One operator override of a risk level or approval flag (#4711).\n\n``scope`` is ``tenant`` (the change applies to ``tenant_id`` only) or\n``install`` (the whole install). ``safety_level`` / ``requires_approval``\nare the values that apply in that scope: the classification with every\noverride there. ``reason`` is the reason a platform admin gave for\nturning approval off."
       },
       "OperationRunStatus": {
         "type": "string",

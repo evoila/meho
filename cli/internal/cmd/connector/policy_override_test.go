@@ -80,7 +80,7 @@ func TestIsFreshSignInRequired(t *testing.T) {
 }
 
 // TestPrintOverridesTable renders the report rows, with "(code)" for a
-// field the override does not change and "off" for approval turned off.
+// field the server leaves out and "no" for approval not required.
 func TestPrintOverridesTable(t *testing.T) {
 	off := false
 	reason := "read-only in practice"
@@ -100,7 +100,7 @@ func TestPrintOverridesTable(t *testing.T) {
 	var buf bytes.Buffer
 	printOverridesTable(&buf, false, rows)
 	out := buf.String()
-	for _, want := range []string{"2 operation override(s)", "off", "read-only in practice", "dangerous", "(code)", "2026-10-28 09:30"} {
+	for _, want := range []string{"2 operation override(s)", "no", "read-only in practice", "dangerous", "(code)", "2026-10-28 09:30"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("table misses %q:\n%s", want, out)
 		}

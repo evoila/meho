@@ -2358,6 +2358,7 @@ type BodyOperationsCallUiOperationsCallPost struct {
 	ConnectorId string  `json:"connector_id"`
 	OpId        string  `json:"op_id"`
 	Params      *string `json:"params,omitempty"`
+	PreviewHash *string `json:"preview_hash,omitempty"`
 	Target      *string `json:"target,omitempty"`
 	WorkRef     *string `json:"work_ref,omitempty"`
 }
@@ -8149,6 +8150,7 @@ type RunnerPrincipalRead struct {
 	Revoked            bool               `json:"revoked"`
 	TenantId           openapi_types.UUID `json:"tenant_id"`
 	UpdatedAt          time.Time          `json:"updated_at"`
+	WireVersion        *string            `json:"wire_version"`
 }
 
 // RunnerResult The outcome of executing one :class:`RunnerWorkItem`.
@@ -10689,11 +10691,17 @@ type RunAgentEventsApiV1AgentsNameRunEventsPostParams struct {
 
 // ListApprovalsApiV1ApprovalsGetParams defines parameters for ListApprovalsApiV1ApprovalsGet.
 type ListApprovalsApiV1ApprovalsGetParams struct {
-	// Status Filter by status. One of: pending, approved, rejected, expired. Defaults to 'pending'.
+	// Status Filter by status. One of: pending, approved, rejected, expired, all. 'all' returns requests in every state. Defaults to 'pending'.
 	Status *string `form:"status,omitempty" json:"status,omitempty"`
 
 	// WorkRef Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#1' — the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter.
-	WorkRef       *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+
+	// Limit Return at most this many requests (1..500). Omit for no limit.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Offset Skip this many requests first (newest first). Defaults to 0.
+	Offset        *int    `form:"offset,omitempty" json:"offset,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -10823,9 +10831,10 @@ type RecentBroadcastEventsApiV1BroadcastRecentGetParams struct {
 
 // GetAssignmentApiV1ChecksAssignmentGetParams defines parameters for GetAssignmentApiV1ChecksAssignmentGet.
 type GetAssignmentApiV1ChecksAssignmentGetParams struct {
-	Runner        string  `form:"runner" json:"runner"`
-	KnownVersion  *string `form:"known_version,omitempty" json:"known_version,omitempty"`
-	Authorization *string `json:"authorization,omitempty"`
+	Runner                 string  `form:"runner" json:"runner"`
+	KnownVersion           *string `form:"known_version,omitempty" json:"known_version,omitempty"`
+	Authorization          *string `json:"authorization,omitempty"`
+	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
 }
 
 // PutAssignmentApiV1ChecksAssignmentRunnerPutParams defines parameters for PutAssignmentApiV1ChecksAssignmentRunnerPut.
@@ -10860,7 +10869,8 @@ type GetDashboardApiV1ChecksDashboardsDashboardIdGetParams struct {
 
 // PostResultsApiV1ChecksResultsPostParams defines parameters for PostResultsApiV1ChecksResultsPost.
 type PostResultsApiV1ChecksResultsPostParams struct {
-	Authorization *string `json:"authorization,omitempty"`
+	Authorization          *string `json:"authorization,omitempty"`
+	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
 }
 
 // ListEndpointApiV1ConnectorsGetParams defines parameters for ListEndpointApiV1ConnectorsGet.
@@ -11049,13 +11059,15 @@ type FeedEndpointApiV1FeedGetParams struct {
 // PollNextCommandApiV1GatewayRunnerNextGetParams defines parameters for PollNextCommandApiV1GatewayRunnerNextGet.
 type PollNextCommandApiV1GatewayRunnerNextGetParams struct {
 	// Wait Long-poll hold in seconds. 0 = a single immediate claim attempt (no hold). Values above the ceiling (30s) are clamped down, not rejected — the runner asking for a longer hold gets a bounded one.
-	Wait          *int    `form:"wait,omitempty" json:"wait,omitempty"`
-	Authorization *string `json:"authorization,omitempty"`
+	Wait                   *int    `form:"wait,omitempty" json:"wait,omitempty"`
+	Authorization          *string `json:"authorization,omitempty"`
+	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
 }
 
 // ReportCommandResultApiV1GatewayRunnerResultPostParams defines parameters for ReportCommandResultApiV1GatewayRunnerResultPost.
 type ReportCommandResultApiV1GatewayRunnerResultPostParams struct {
-	Authorization *string `json:"authorization,omitempty"`
+	Authorization          *string `json:"authorization,omitempty"`
+	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
 }
 
 // AuthenticatedHealthApiV1HealthGetParams defines parameters for AuthenticatedHealthApiV1HealthGet.
@@ -24542,6 +24554,38 @@ func NewListApprovalsApiV1ApprovalsGetRequest(server string, params *ListApprova
 
 		}
 
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -26053,6 +26097,17 @@ func NewGetAssignmentApiV1ChecksAssignmentGetRequest(server string, params *GetA
 			req.Header.Set("authorization", headerParam0)
 		}
 
+		if params.XMEHORunnerWireVersion != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Wire-Version", runtime.ParamLocationHeader, *params.XMEHORunnerWireVersion)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
+		}
+
 	}
 
 	return req, nil
@@ -26461,6 +26516,17 @@ func NewPostResultsApiV1ChecksResultsPostRequestWithBody(server string, params *
 			}
 
 			req.Header.Set("authorization", headerParam0)
+		}
+
+		if params.XMEHORunnerWireVersion != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Wire-Version", runtime.ParamLocationHeader, *params.XMEHORunnerWireVersion)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
 		}
 
 	}
@@ -28365,6 +28431,17 @@ func NewPollNextCommandApiV1GatewayRunnerNextGetRequest(server string, runner st
 			req.Header.Set("authorization", headerParam0)
 		}
 
+		if params.XMEHORunnerWireVersion != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Wire-Version", runtime.ParamLocationHeader, *params.XMEHORunnerWireVersion)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
+		}
+
 	}
 
 	return req, nil
@@ -28425,6 +28502,17 @@ func NewReportCommandResultApiV1GatewayRunnerResultPostRequestWithBody(server st
 			}
 
 			req.Header.Set("authorization", headerParam0)
+		}
+
+		if params.XMEHORunnerWireVersion != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Wire-Version", runtime.ParamLocationHeader, *params.XMEHORunnerWireVersion)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
 		}
 
 	}

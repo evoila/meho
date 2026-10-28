@@ -19,9 +19,11 @@ class again from it:
   same closed selection the ingest request accepts. No secret values, no
   free-form login config.
 * :func:`restore_ingested_profiled_connectors` runs at start (after the
-  shipped catalog is stamped) and again when a call finds no connector
-  class, so a replica that was already running when another replica took
-  the ingest catches up without a restart.
+  shipped catalog is stamped) and again, scoped to the target's product,
+  before every call to an ingested operation resolves its connector. So a
+  replica that was already running when another replica took the ingest
+  catches up without a restart, also when it already holds another
+  connector for the same product and the target prefers the new one.
 
 Restoring goes through the same
 :meth:`~meho_backplane.operations.ingest.service.ReviewService.record_profile_stamp`
@@ -177,20 +179,26 @@ async def _restore_row(row: IngestedAuthProfile) -> bool:
 
 async def restore_ingested_profiled_connectors(
     sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+    *,
+    product: str | None = None,
 ) -> int:
     """Register a profiled connector class for every saved login type.
 
     Skips rows whose ``(product, version, impl_id)`` already has a class,
     so it is safe to run twice. Rows are read oldest first, so when two
     tenants saved the same key the older choice wins, the same as the
-    in-memory table before a restart. Returns how many classes it
-    registered.
+    in-memory table before a restart. With *product* set, only the rows of
+    that product are read; the dispatcher uses this before a call, since
+    the resolver only looks at connectors of the target's product. Returns
+    how many classes it registered.
     """
     maker = sessionmaker if sessionmaker is not None else get_sessionmaker()
     async with maker() as session:
         stmt = select(IngestedAuthProfile).order_by(
             IngestedAuthProfile.updated_at, IngestedAuthProfile.id
         )
+        if product is not None:
+            stmt = stmt.where(IngestedAuthProfile.product == product)
         rows = list((await session.execute(stmt)).scalars().all())
 
     restored = 0

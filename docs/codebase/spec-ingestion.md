@@ -1114,7 +1114,7 @@ failed with `no_connector` and the list showed `ingested-shim`. Now:
 
 * `_stamp_profiled_connector` first saves the choice through
   `ingest/ingest_auth_store.py::save_ingest_auth_profile` into the
-  `ingested_auth_profile` table (migration `0118`). One row per
+  `ingested_auth_profile` table (migration `0119`). One row per
   `(tenant_id, product, version, impl_id)`. It holds the scheme name and the
   secret field **names** only, never values. A re-ingest with a login type
   replaces the row.
@@ -1126,9 +1126,14 @@ failed with `no_connector` and the list showed `ingested-shim`. Now:
   hand-written class keeps its key. A row that no longer builds a valid
   profile is logged (`ingested_profile_restore_skipped`) and skipped.
 * A replica that was already running when another replica took the ingest
-  catches up on the first call: when the dispatcher finds no class for an
-  ingested op, it runs the same restore once and resolves again. Until then
-  that replica's `meho connector list` still shows the old kind.
+  catches up on the first call: before the dispatcher resolves the connector
+  for an ingested op, it runs the same restore for the rows of the target's
+  product and builds any class it does not have yet. It does this before
+  the resolver runs, not only on a miss, so a replica that already holds
+  another connector for the same product also loads the new one when the
+  target prefers it (`preferred_impl_id`). A row whose key already has a
+  class is skipped, so the read is one small query per call. Until the
+  first call that replica's `meho connector list` still shows the old kind.
 * A connector delete removes the row, so the class does not come back.
 * Restoring never enables an op, lowers a risk level, or removes an
   approval; the review gate stays the interlock.

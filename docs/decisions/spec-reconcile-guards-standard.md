@@ -554,6 +554,38 @@ Path existence is version-stable across the 8.x↔9.x boundary, so the modern
   ship its own served-set (or manifest-pin) lane at that point — the op-set
   drift guard is what surfaces the divergence.
 
+### azure-arm-2026.10 — the public Retail Prices API is excluded (no spec exists) (#5088)
+
+The Azure connector's lane (`backend/tests/test_connectors_azure_spec_reconcile.py`)
+compares every `*_PATH` constant of `connectors/azure/_paths.py` with the
+pinned Azure Resource Manager spec files. One call of the connector is not
+an Azure Resource Manager call: `azure.price.list` reads the public Azure
+Retail Prices API at `https://prices.azure.com/api/retail/prices`. It needs
+no login, and MEHO sends it no token.
+
+- **Excluded (1 URL: `GET https://prices.azure.com/api/retail/prices`).**
+  What was checked, on 2026-10-27: (1) a GitHub code search of
+  [`Azure/azure-rest-api-specs`](https://github.com/Azure/azure-rest-api-specs)
+  for `api/retail/prices` and for `prices.azure.com` found no file; (2)
+  Microsoft documents the API only on a conceptual page
+  (<https://learn.microsoft.com/en-us/rest/api/cost-management/retail-prices/azure-retail-prices>),
+  with no API description file; (3) the manifest of the pinned
+  `azure-arm-2026.10` shelf records it as an API with no spec. So no file
+  can serve as the reference for this URL.
+- **How the lane stays honest about it.** The address is a full-URL
+  constant (`RETAIL_PRICES_URL`), not a `*_PATH` constant, so the lane does
+  not sweep it and cannot fail on it. Its API version is
+  `RETAIL_PRICES_API_VERSION`. Unit tests in
+  `backend/tests/test_connectors_azure_cost.py` pin what the lane cannot:
+  the host and path, the query MEHO builds, the next-page rule (only the
+  `$skip` number is read from Azure's link), and that no request to the
+  host carries an `Authorization` header.
+- **Residual risk, named:** without a spec, a change to the API's answer
+  shape shows up only in a live call (the connector's lab proof).
+- **Activation:** Microsoft publishing an API description file for the
+  Retail Prices API. Then the file goes on the shelf, the constant becomes
+  a `*_PATH` on the lane, and this entry is withdrawn.
+
 ## Red lane = finding (the protocol)
 
 A red lane on first run against the real shelf is **the guard working**,

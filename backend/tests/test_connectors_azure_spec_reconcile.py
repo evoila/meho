@@ -75,6 +75,10 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     # avs (Task #5091)
     # compute (Task #5083)
     # cost (Task #5088)
+    "COST_QUERY_PATH": (("POST",), "COST_MANAGEMENT_API_VERSION"),
+    "COST_FORECAST_PATH": (("POST",), "COST_MANAGEMENT_API_VERSION"),
+    "BUDGETS_PATH": (("GET",), "CONSUMPTION_API_VERSION"),
+    "ADVISOR_RECOMMENDATIONS_PATH": (("GET",), "ADVISOR_API_VERSION"),
     # inventory (Task #5082)
     # migrate (Task #5093)
     # monitor (Task #5090)
@@ -172,6 +176,10 @@ def test_the_checked_paths_are_pinned() -> None:
         "# avs (Task #5091)",
         "# compute (Task #5083)",
         "# cost (Task #5088)",
+        "GET:/subscriptions/{}/providers/microsoft.advisor/recommendations@2026-10-01",
+        "GET:/{}/providers/microsoft.consumption/budgets@2026-06-01",
+        "POST:/{}/providers/microsoft.costmanagement/forecast@2026-06-01",
+        "POST:/{}/providers/microsoft.costmanagement/query@2026-06-01",
         "# inventory (Task #5082)",
         "# migrate (Task #5093)",
         "# monitor (Task #5090)",

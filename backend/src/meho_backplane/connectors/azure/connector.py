@@ -88,6 +88,7 @@ from meho_backplane.connectors.schemas import (
 # compute (Task #5083)
 
 # cost (Task #5088)
+from meho_backplane.connectors.azure.cost import CostOps
 
 # inventory (Task #5082)
 
@@ -159,6 +160,7 @@ class AzureConnector(
     # avs (Task #5091)
     # compute (Task #5083)
     # cost (Task #5088)
+    CostOps,
     # inventory (Task #5082)
     # migrate (Task #5093)
     # monitor (Task #5090)

@@ -51,6 +51,45 @@ RESOURCE_GRAPH_API_VERSION: Final[str] = "2024-04-01"
 
 # ---- cost (Task #5088) ----
 
+#: ``POST /{scope}/providers/Microsoft.CostManagement/query``: the cost of a
+#: subscription or a resource group (Query - Usage). A read, even though it is
+#: a POST. ``scope`` is ``subscriptions/{id}`` or
+#: ``subscriptions/{id}/resourceGroups/{name}``, without a leading slash.
+COST_QUERY_PATH: Final[str] = "/{scope}/providers/Microsoft.CostManagement/query"
+
+#: ``POST /{scope}/providers/Microsoft.CostManagement/forecast``: the expected
+#: cost of a scope (Forecast - Usage). A read, even though it is a POST.
+COST_FORECAST_PATH: Final[str] = "/{scope}/providers/Microsoft.CostManagement/forecast"
+
+#: The API version of the cost query and the forecast (Microsoft.CostManagement).
+COST_MANAGEMENT_API_VERSION: Final[str] = "2026-06-01"
+
+#: ``GET /{scope}/providers/Microsoft.Consumption/budgets``: the budgets of a
+#: subscription or a resource group (Budgets - List).
+BUDGETS_PATH: Final[str] = "/{scope}/providers/Microsoft.Consumption/budgets"
+
+#: The API version of the budget reads (Microsoft.Consumption).
+CONSUMPTION_API_VERSION: Final[str] = "2026-06-01"
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.Advisor/recommendations``:
+#: Azure Advisor's recommendations for one subscription (Recommendations - List).
+ADVISOR_RECOMMENDATIONS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Advisor/recommendations"
+)
+
+#: The API version of the Advisor reads (Microsoft.Advisor).
+ADVISOR_API_VERSION: Final[str] = "2026-10-01"
+
+#: The public Azure Retail Prices API. It is not Azure Resource Manager: it
+#: needs no login and gets no token. Microsoft publishes no API description
+#: file for it, so it is a full URL and not a ``*_PATH`` constant, and the spec
+#: path check leaves it out.
+RETAIL_PRICES_URL: Final[str] = "https://prices.azure.com/api/retail/prices"
+
+#: The API version of the price list. From this version on, filter values must
+#: match in upper and lower case.
+RETAIL_PRICES_API_VERSION: Final[str] = "2023-01-01-preview"
+
 # ---- inventory (Task #5082) ----
 
 # ---- migrate (Task #5093) ----

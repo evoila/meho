@@ -42,6 +42,17 @@ What is never shown
 * A Job ``command`` / ``args``: only their size in bytes, because a command
   line can hold a token (the guest ``program.run`` preview does the same).
 
+``k8s.apply`` has its own builder in :mod:`meho_backplane.operations._preview`
+(a server dry-run). It uses :func:`apply_manifest_echo` and
+:func:`apply_subject` from this module to also show the manifest it applies
+(#3877). The echo hides the same kind of values:
+
+* A Secret document's ``data`` and ``stringData`` values: only the key names
+  stay.
+* Every ``env`` entry's ``value``: only the variable name stays.
+* The ``kubectl.kubernetes.io/last-applied-configuration`` annotation: it is
+  a full copy of an earlier object and can hold all of the above.
+
 The Secret and Job builders read only ``ctx.params`` and do no network
 calls. The CronJob builder reads the CronJob once; a missing CronJob raises,
 and the park then stores the ``preview_unavailable`` marker with the reason.
@@ -49,11 +60,27 @@ and the park then stores the ``preview_unavailable`` marker with the reason.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from kubernetes_asyncio import client
 
+from meho_backplane.connectors.kubernetes.ops_write_dangerous import _parse_manifest
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
+
+#: Put in place of a value the approver must not see.
+_HIDDEN = "***REDACTED***"
+
+#: This annotation holds a full JSON copy of an earlier object, Secret values included.
+_LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration"
+
+#: Most bytes of manifest the ``k8s.apply`` echo keeps. A document that does
+#: not fit is shown by its identity only, so a huge manifest cannot fill the
+#: approval row.
+MANIFEST_ECHO_MAX_BYTES = 16_384
+
+#: Most objects named in the ``k8s.apply`` subject line.
+_SUBJECT_MAX_OBJECTS = 5
 
 
 def _sorted_keys(value: Any) -> list[str]:
@@ -196,6 +223,100 @@ async def _cronjob_run_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "containers": _containers(pod_spec, "containers"),
         "init_containers": _containers(pod_spec, "initContainers"),
     }
+
+
+def _hide_env_values(node: Any) -> Any:
+    """Copy *node*, hiding the ``value`` of every entry in an ``env`` list."""
+    if isinstance(node, dict):
+        out: dict[str, Any] = {}
+        for key, item in node.items():
+            if key == "env" and isinstance(item, list):
+                out[key] = [
+                    {**entry, "value": _HIDDEN}
+                    if isinstance(entry, dict) and "value" in entry
+                    else _hide_env_values(entry)
+                    for entry in item
+                ]
+            else:
+                out[key] = _hide_env_values(item)
+        return out
+    if isinstance(node, list):
+        return [_hide_env_values(item) for item in node]
+    return node
+
+
+def _hide_document_secrets(doc: dict[str, Any]) -> dict[str, Any]:
+    """Copy one manifest document with the values that can hold a secret hidden."""
+    hidden: dict[str, Any] = _hide_env_values(doc)
+    if hidden.get("kind") == "Secret":
+        for field in ("data", "stringData"):
+            if field in hidden:
+                value = hidden[field]
+                hidden[field] = (
+                    {str(key): _HIDDEN for key in value} if isinstance(value, dict) else _HIDDEN
+                )
+    metadata = hidden.get("metadata")
+    annotations = metadata.get("annotations") if isinstance(metadata, dict) else None
+    if isinstance(annotations, dict) and _LAST_APPLIED in annotations:
+        annotations[_LAST_APPLIED] = _HIDDEN
+    return hidden
+
+
+def _identity_only(doc: dict[str, Any], size: int) -> dict[str, Any]:
+    """A document cut down to its identity, saying why the rest is left out."""
+    raw_metadata = doc.get("metadata")
+    metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+    identity = {key: metadata[key] for key in ("name", "namespace") if key in metadata}
+    return {
+        "apiVersion": doc.get("apiVersion"),
+        "kind": doc.get("kind"),
+        "metadata": identity,
+        "echo_omitted": f"document is {size} bytes; the echo keeps at most "
+        f"{MANIFEST_ECHO_MAX_BYTES} bytes of manifest",
+    }
+
+
+def apply_manifest_echo(manifest: str) -> list[dict[str, Any]]:
+    """The ``k8s.apply`` manifest as one dict per document, safe to show.
+
+    Secret ``data`` / ``stringData`` values, ``env`` values and the
+    last-applied annotation are hidden (see the module docstring). The
+    documents are kept in order until :data:`MANIFEST_ECHO_MAX_BYTES` is
+    used up; each document after that keeps only its identity. The caller
+    still runs the shared params redaction over the result.
+    """
+    echo: list[dict[str, Any]] = []
+    used = 0
+    for doc in _parse_manifest(manifest):
+        hidden = _hide_document_secrets(doc)
+        size = len(json.dumps(hidden, default=str).encode("utf-8"))
+        if used + size > MANIFEST_ECHO_MAX_BYTES:
+            echo.append(_identity_only(hidden, size))
+            continue
+        used += size
+        echo.append(hidden)
+    return echo
+
+
+def apply_subject(applied: Any) -> str | None:
+    """Name the objects a ``k8s.apply`` touches, e.g. ``Deployment/prod/web``.
+
+    Built from the dry-run's per-document summary (``kind``, ``namespace``,
+    ``name``). A cluster-wide object has no namespace part. Names at most
+    five objects and counts the rest. ``None`` when nothing is named.
+    """
+    if not isinstance(applied, list):
+        return None
+    names = [
+        "/".join(str(entry[key]) for key in ("kind", "namespace", "name") if entry.get(key))
+        for entry in applied
+        if isinstance(entry, dict) and entry.get("kind") and entry.get("name")
+    ]
+    if not names:
+        return None
+    shown = ", ".join(names[:_SUBJECT_MAX_OBJECTS])
+    rest = len(names) - _SUBJECT_MAX_OBJECTS
+    return f"{shown} and {rest} more" if rest > 0 else shown
 
 
 def _register_kubernetes_write_preview_builders() -> None:

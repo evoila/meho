@@ -512,7 +512,12 @@ to the API's `?dryRun=All`) so the would-be object is returned without
 mutating -- the diff-preview an agent or reviewer runs before the real
 apply. When the op waits for approval, the `k8s.apply` preview builder in
 `operations/_preview.py` runs this dry-run and stores the result on the
-approval row (see `approvals.md`).
+approval row (see `approvals.md`). Next to the dry-run summary it stores
+the manifest itself (`preview.manifest`, one dict per document) and a
+`preview.subject` line such as `Deployment/prod/web` (#3877). Before the
+manifest is stored, `apply_manifest_echo` in `ops_write_preview.py` hides
+Secret `data` / `stringData` values (key names stay), every `env` value
+(variable names stay) and the last-applied annotation.
 
 **`k8s.apply` API-server rejections (#3876).** `DynamicClient.request`
 calls the API with `_preload_content=False`, and kubernetes_asyncio only

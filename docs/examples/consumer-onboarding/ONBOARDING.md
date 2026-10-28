@@ -340,11 +340,12 @@ you expect, walk these checks:
    --slug <slug> --kind operational --title "<label>" --body
    @<file>` (requires `tenant_admin`; `--kind operational` so the
    rule is packed into the preamble — `edit` only updates an
-   existing rule and 404s against an absent slug). The assembler
-   still returns a
-   non-empty preamble in this case (it always carries the static
-   broadcast-discipline band), so "no tenant rules in the preamble"
-   and "no preamble at all" are different symptoms.
+   existing rule and 404s against an absent slug). The `initialize`
+   instructions are usually still non-empty in this case (every
+   session gets the feature-maturity band while some features are
+   pre-GA, and a session that can announce also gets the
+   broadcast-discipline band), so "no tenant rules in
+   the preamble" and "no preamble at all" are different symptoms.
 2. **Did the client actually re-initialize?** The preamble is a
    snapshot taken from the `initialize` response; a client that
    cached that response has no signal to refresh until it re-runs

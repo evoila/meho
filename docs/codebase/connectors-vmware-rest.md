@@ -1036,6 +1036,36 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   composites (`caution`, they wait for approval). All three are on both
   catalogs. See **Alarms: list, acknowledge, reset to green** under Control
   flow.
+- **Content-library finds** (`typed_ops_content_library_find.py`, `#3550`) —
+  two typed reads that turn a name into ids. Both are `safe` and on both
+  catalogs.
+  - `vmware.content_library.find` (handler `content_library_find`) calls
+    `POST /content/library?action=find`. Filters: `name`, `type` (`LOCAL` or
+    `SUBSCRIBED`). Returns `{library_ids: [...]}`.
+  - `vmware.content_library.item.find` (handler `content_library_item_find`)
+    calls `POST /content/library/item?action=find`. Filters: `name`,
+    `library_id`, `type`, `source_id`, `cached`. Returns `{item_ids: [...]}`.
+  - The body is the `FindSpec` at the top level, with only the filters the
+    caller set. vCenter answers `400` to an empty `FindSpec`, so the schemas
+    need at least one filter (`minProperties: 1`) and MEHO refuses `{}` before
+    the call.
+  - The HTTP call is the composites' helper `_find_content_library_ids`
+    (`composites/_write.py`), so one place sends the find. The composites
+    that resolve a name keep calling the helper directly, without a second
+    policy check: the composite is already checked as a whole.
+  - They share the `content_library` group with the content-library
+    composites. The group text lives in `CONTENT_LIBRARY_WHEN_TO_USE` in the
+    typed module, and `composites/_register.py` imports it, so both
+    registrars write the same text.
+  - Before `#3550` a call to the raw `POST:/content/library?action=find` row
+    answered `unknown_op` on a fresh install: that row exists only after a
+    catalog ingest and an operator enables it. The typed reads need neither.
+  - Tests: `tests/test_connectors_vmware_rest_typed_content_library_find.py`
+    (the body, the answer, the schemas, the registered rows on both catalogs,
+    and a run through the dispatcher on `vmware-rest-9.0`) and the reconcile
+    lane `tests/test_connectors_vmware_rest_content_library_find_reconcile.py`
+    (both paths in the pinned 8.0 and 9.0 `vcenter.yaml`, and the top-level
+    `FindSpec` fields in the 9.0 file).
 - **`register_vmware_typed_operations`** (`typed_ops.py`) — async
   registrar wrapper queued onto `run_typed_op_registrars` (via
   `register_typed_op_registrar` in the package `__init__`, alongside the

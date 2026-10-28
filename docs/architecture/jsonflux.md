@@ -746,9 +746,27 @@ identity value within that bound stays verbatim; an exceptional value is
 returned as its bounded prefix and named in `result_object_truncations`, so a
 caller knows to retrieve the complete value from the handle spill when that
 object is an alias of the spilled collection (as the TLS leaf is). This is an
-additive generic facility: a descriptor without `result_objects` retains the
-existing bookkeeping-only reduced summary, and the full collection remains
+additive generic facility: the hint only chooses which inline fields of the
+named objects ride in the summary, and the full collection remains
 retrievable through `result_query`.
+
+### Parts next to the rows are kept by default (#5139)
+
+An answer often carries objects and lists next to its rows: `assumptions`,
+`inputs`, `totals`, `unknowns`, a task's `errors`. Without them the rows can be
+read wrongly. So, with no hint, the reducer stores every top-level object or
+list next to the rows (a "part") whole with the rows. `result_query` with
+`query={"path": "/<part>"}` returns it, and a list part pages with `offset` /
+`limit`. Whole parts are also copied into the inline summary, in answer order,
+while the summary stays under 4,096 bytes. A part is never cut. The parts left
+out are named in `parts_not_inline` (with `parts_not_inline_count` when the
+names list itself is cut), and `parts_note` names the `path` read. When the
+store must drop the parts to keep the rows (its per-record size cap), the note
+says they cannot be read. Credential-class ops keep the old rule: no part is
+copied or stored without their own hint. The registry sweep in
+`tests/test_operations_jsonflux_conformance.py` reduces a large sample for every
+typed and multi-step op whose declared answer has rows plus parts and fails
+when a part is lost.
 
 For typed descriptors with an explicit response schema, a top-level array plus
 one recognised Boolean outcome field (`handshake`, `reachable`, `success`, `ok`,

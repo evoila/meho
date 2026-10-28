@@ -667,8 +667,8 @@ async def test_reduce_scalar_hint_skips_reserved_non_scalar_and_absent_keys() ->
 
     * ``total`` collides with reducer bookkeeping — the reduction contract
       wins (the vendor value is dropped with a warning).
-    * ``additionalProperties`` is a nested object — copying it inline would
-      defeat the reduction the hint rides on.
+    * ``additionalProperties`` is a nested object — the scalar hint skips it;
+      the parts rule (#5139) keeps it whole instead.
     * ``missing`` is absent from the payload — a poll-shape variance, not
       an error.
     * ``validationChecks`` is the collection itself — already represented
@@ -700,7 +700,7 @@ async def test_reduce_scalar_hint_skips_reserved_non_scalar_and_absent_keys() ->
     assert reduced["id"] == payload["id"]
     assert reduced["resultStatus"] is None
     assert reduced["total"] == 60, "reducer bookkeeping must win over a colliding vendor field"
-    assert "additionalProperties" not in reduced
+    assert reduced["additionalProperties"] == {"nested": "object"}
     assert "missing" not in reduced
     assert "validationChecks" not in reduced
 
@@ -3045,8 +3045,8 @@ async def test_default_rule_is_bounded() -> None:
     assert len(_serialize(scalars)) <= reducer_module._DEFAULT_SCALAR_BYTE_BUDGET
 
 
-async def test_default_rule_never_copies_object_or_list_siblings() -> None:
-    """Objects stay behind the bounded ``result_objects`` opt-in (#3592)."""
+async def test_default_rule_copies_small_object_and_list_siblings_whole() -> None:
+    """Small objects and lists next to the rows ride inline whole (#5139)."""
     payload = {
         "items": [{"i": i} for i in range(60)],
         "leaf": {"subject": "CN=x", "pem": "-----BEGIN CERTIFICATE-----"},
@@ -3058,8 +3058,9 @@ async def test_default_rule_never_copies_object_or_list_siblings() -> None:
     reduced, _handle = await reducer.reduce(payload, None, {"op_id": "example.list"})
 
     assert reduced["name"] == "inventory"
-    assert "leaf" not in reduced
-    assert "tags" not in reduced
+    assert reduced["leaf"] == payload["leaf"]
+    assert reduced["tags"] == ["a", "b"]
+    assert "parts_not_inline" not in reduced
 
 
 def test_object_seam_constants_are_unchanged() -> None:

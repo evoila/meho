@@ -320,6 +320,9 @@ _RESERVED_SUMMARY_KEYS = frozenset(
         "document_bytes",
         "top_level_fields",
         "top_level_field_count",
+        "parts_not_inline",
+        "parts_not_inline_count",
+        "parts_note",
     }
 )
 
@@ -346,6 +349,15 @@ _CREDENTIAL_CLASSES = frozenset({"credential_read", "credential_mint", "credenti
 _DEFAULT_SCALAR_MAX_KEYS = 32
 _DEFAULT_SCALAR_BYTE_BUDGET = 1024
 _DEFAULT_SCALAR_VALUE_BYTE_CAP = 512
+
+#: Bounds for the parts rule (#5139). A part is a top-level object or list
+#: next to the reduced rows (``assumptions``, ``totals``, ``unknowns``). Every
+#: part is stored with the rows. Whole parts are copied inline while the
+#: inline summary stays under :data:`_INLINE_SUMMARY_BYTE_LIMIT` bytes; the
+#: rest are named under ``parts_not_inline``. The names list has its own
+#: budget, so many long names cannot grow the summary past the limit either.
+_INLINE_SUMMARY_BYTE_LIMIT = 4096
+_PARTS_NAMES_BYTE_BUDGET = 512
 
 #: Bounds for the opt-in object projection. They constrain descriptor
 #: metadata as well as the copied JSON so a malformed or overly broad hint
@@ -505,9 +517,11 @@ class JsonFluxReducer:
         materialized = self._materialize(rows, context)
         preserved_scalars, omitted_scalars = _preserved_scalars(payload, envelope_key, context)
         hinted_objects = _hinted_objects(payload, envelope_key, context)
+        parts = _sibling_parts(payload, envelope_key, context, skip=frozenset(hinted_objects))
         kept_fields = {
             **omitted_scalars,
             **{key: value for key, (value, _fields) in hinted_objects.items()},
+            **parts,
         }
         spill_outcome = await self._spill(materialized, context, kept_fields)
         preserved_scalars.update(
@@ -515,7 +529,7 @@ class JsonFluxReducer:
         )
         digest = _row_digest(rows, envelope_key, digest_spec)
         summary, handle = self._assemble(
-            materialized, envelope_key, context, spill_outcome, preserved_scalars, digest
+            materialized, envelope_key, context, spill_outcome, preserved_scalars, digest, parts
         )
         self._record_flux_span(rows, materialized, summary, context)
         return summary, handle
@@ -894,6 +908,7 @@ class JsonFluxReducer:
         spill_outcome: _SpillOutcome,
         preserved_scalars: dict[str, Any] | None = None,
         digest: dict[str, Any] | None = None,
+        parts: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], ResultHandle]:
         """Build the inline summary + the :class:`ResultHandle`.
 
@@ -915,6 +930,12 @@ class JsonFluxReducer:
         ``failed`` rows (errors included). It is merged after the scalars and
         before the bookkeeping, so the reducer-owned keys still win.
 
+        ``parts`` (#5139) carries the payload's top-level objects and lists
+        next to the rows (:func:`_sibling_parts`), all stored with the rows.
+        :func:`_add_parts_inline` copies whole parts into the summary last,
+        while it stays under :data:`_INLINE_SUMMARY_BYTE_LIMIT`, and names
+        the rest; the drill-in rationale repeats how to read them.
+
         The inline sample is serialized **exactly once** (#134): it lives
         only on :attr:`ResultHandle.sample_rows` -- the audit hoist
         (``sample_rows_returned``) and every connector e2e assertion read
@@ -928,29 +949,10 @@ class JsonFluxReducer:
         """
         total_rows = materialized.total_rows
         omitted_fields = (preserved_scalars or {}).get("omitted_scalar_count", 0)
-        fetch_more = _build_fetch_more(
-            context,
-            handle_id=materialized.handle_id,
-            total_rows=total_rows,
-            spill_outcome=spill_outcome,
-            ttl_seconds=self._ttl_seconds,
-            omitted_fields=omitted_fields if isinstance(omitted_fields, int) else 0,
-        )
         sample_rows = _fit_sample_to_budget(
             materialized.sample_rows,
             self._resolve_sample_byte_budget(),
             from_tail=_sample_from_tail(context),
-        )
-        handle = ResultHandle(
-            handle_id=materialized.handle_id,
-            summary_md=(
-                f"{total_rows} rows materialized as a JSONFlux handle.\n\n{materialized.summary_md}"
-            ),
-            schema_=materialized.schema_,
-            total_rows=total_rows,
-            sample_rows=tuple(sample_rows) if sample_rows else None,
-            ttl_seconds=self._ttl_seconds,
-            fetch_more=fetch_more,
         )
         # The inline summary is the compact reduced view. It deliberately
         # does NOT carry a ``sample`` -- the bounded preview lives once on
@@ -981,6 +983,28 @@ class JsonFluxReducer:
             summary["sample_note"] = (
                 "Preview omitted because the selected row exceeds the byte budget."
             )
+        parts_note = _add_parts_inline(
+            summary, parts or {}, stored=spill_outcome.omitted_fields_stored
+        )
+        handle = ResultHandle(
+            handle_id=materialized.handle_id,
+            summary_md=(
+                f"{total_rows} rows materialized as a JSONFlux handle.\n\n{materialized.summary_md}"
+            ),
+            schema_=materialized.schema_,
+            total_rows=total_rows,
+            sample_rows=tuple(sample_rows) if sample_rows else None,
+            ttl_seconds=self._ttl_seconds,
+            fetch_more=_build_fetch_more(
+                context,
+                handle_id=materialized.handle_id,
+                total_rows=total_rows,
+                spill_outcome=spill_outcome,
+                ttl_seconds=self._ttl_seconds,
+                omitted_fields=omitted_fields if isinstance(omitted_fields, int) else 0,
+                parts_note=parts_note,
+            ),
+        )
         return summary, handle
 
     def _resolve_sample_byte_budget(self) -> int:
@@ -1319,8 +1343,8 @@ def _default_scalar_siblings(
     The default rule for a reduced payload's siblings (#3633 / #3549): every
     top-level JSON scalar (:data:`_SCALAR_VALUE_TYPES` or ``None``) is kept,
     except *exclude_key* (the reduced collection) and the reducer's own
-    :data:`_RESERVED_SUMMARY_KEYS`. Lists and objects are never copied (the
-    #3592 object seam stays an opt-in). At most
+    :data:`_RESERVED_SUMMARY_KEYS`. Lists and objects are not handled here;
+    they follow the parts rule (:func:`_sibling_parts`, #5139). At most
     :data:`_DEFAULT_SCALAR_MAX_KEYS` keys and
     :data:`_DEFAULT_SCALAR_BYTE_BUDGET` bytes of JSON text are kept, and no
     single key over :data:`_DEFAULT_SCALAR_VALUE_BYTE_CAP` bytes; any scalar
@@ -1354,6 +1378,105 @@ def _default_scalar_siblings(
         preserved[key] = value
         used += cost
     return preserved, omitted
+
+
+def _sibling_parts(
+    payload: Any,
+    envelope_key: str | None,
+    context: dict[str, Any] | None,
+    *,
+    skip: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """The top-level objects and lists next to the reduced rows (#5139).
+
+    These are the parts of an answer that make the rows mean something:
+    ``assumptions``, ``inputs``, ``totals``, ``unknowns``, a task's
+    ``errors``. They are all stored with the rows, so a ``path`` read on
+    the handle returns each one whole. No op hint is needed.
+
+    Nothing is returned for a bare list (it has no siblings), for the rows
+    key itself, for keys in *skip* (objects a ``result_objects`` hint already
+    keeps), or for a credential-class op or a reduce without an ``op_id``:
+    those keep the rule from before, so a secret-shaped value is never
+    copied or stored without the op's own hint.
+    """
+    if not isinstance(payload, dict) or envelope_key is None or _is_credential_class(context):
+        return {}
+    return {
+        key: value
+        for key, value in payload.items()
+        if isinstance(key, str)
+        and key != envelope_key
+        and key not in skip
+        and isinstance(value, dict | list)
+    }
+
+
+def _add_parts_inline(summary: dict[str, Any], parts: dict[str, Any], *, stored: bool) -> str:
+    """Copy whole *parts* into *summary* while it fits; name the rest (#5139).
+
+    Parts are copied in payload order, never cut. A part is left out when it
+    would push the summary to :data:`_INLINE_SUMMARY_BYTE_LIMIT` bytes or
+    more (room is kept for the names list and the note), when its key is a
+    reducer key, or when it would replace a key the summary already has.
+    The names of the parts left out go under ``parts_not_inline`` (cut to
+    :data:`_PARTS_NAMES_BYTE_BUDGET` bytes, with ``parts_not_inline_count``
+    when cut) next to ``parts_note``, which says how to read them, or that
+    the store could not keep them (*stored* is false). Returns that note, or
+    ``""`` when every part is inline.
+    """
+    if not parts:
+        return ""
+    note = _parts_note(stored)
+    reserve = _PARTS_NAMES_BYTE_BUDGET + json_text_bytes(
+        {"parts_not_inline": [], "parts_not_inline_count": len(parts), "parts_note": note}
+    )
+    used = _json_bytes_or_none(summary) or 0
+    not_inline: list[str] = []
+    for key, value in parts.items():
+        cost = _json_bytes_or_none({key: value})
+        if (
+            key in summary
+            or key in _RESERVED_SUMMARY_KEYS
+            or cost is None
+            or used + cost - 1 + reserve >= _INLINE_SUMMARY_BYTE_LIMIT
+        ):
+            not_inline.append(key)
+            continue
+        summary[key] = value
+        used += cost - 1  # the braces are already counted; add one comma
+    if not not_inline:
+        return ""
+    names: list[str] = []
+    for name in not_inline:
+        if json_text_bytes([*names, name]) > _PARTS_NAMES_BYTE_BUDGET:
+            summary["parts_not_inline_count"] = len(not_inline)
+            break
+        names.append(name)
+    summary["parts_not_inline"] = names
+    summary["parts_note"] = note
+    return note
+
+
+def _parts_note(stored: bool) -> str:
+    """Plain-language note on how to read the parts left out of the summary (#5139)."""
+    if stored:
+        return (
+            "The parts named in parts_not_inline did not fit here. They are kept with "
+            'the rows: read one with result_query, query={"path": "/<name>"}.'
+        )
+    return (
+        "The parts named in parts_not_inline did not fit here, and they could not be "
+        "kept with the rows, so they cannot be read from this handle."
+    )
+
+
+def _json_bytes_or_none(value: Any) -> int | None:
+    """:func:`json_text_bytes` of *value*, or ``None`` when it is not plain JSON."""
+    try:
+        return json_text_bytes(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _spill_tenant(context: dict[str, Any] | None) -> tuple[UUID, str] | None:
@@ -1738,6 +1861,7 @@ def _build_fetch_more(
     spill_outcome: _SpillOutcome,
     ttl_seconds: int,
     omitted_fields: int = 0,
+    parts_note: str = "",
 ) -> FetchMore:
     """Build the :class:`FetchMore` envelope from the reducer's *context*.
 
@@ -1781,6 +1905,7 @@ def _build_fetch_more(
         spill_outcome=spill_outcome,
         ttl_seconds=ttl_seconds,
         omitted_fields=omitted_fields,
+        parts_note=parts_note,
     )
     native = _native_pagination_from_context(context)
     return FetchMore(drill_in=drill_in, native_pagination=native)
@@ -1793,6 +1918,7 @@ def _build_drill_in(
     spill_outcome: _SpillOutcome,
     ttl_seconds: int,
     omitted_fields: int = 0,
+    parts_note: str = "",
 ) -> FetchMoreDrillIn:
     """Build the drill-in branch: available when the set was spilled.
 
@@ -1823,7 +1949,8 @@ def _build_drill_in(
             total_rows,
             omitted_fields,
             spill_outcome.omitted_fields_stored,
-        ),
+        )
+        + (f" {parts_note}" if parts_note else ""),
         mcp_tool=_RESULT_QUERY_TOOL,
         example_call={
             "tool": _RESULT_QUERY_TOOL,

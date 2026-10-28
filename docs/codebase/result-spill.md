@@ -30,10 +30,14 @@ threshold (>50 rows or >4 KB by default), the caller gets back:
   retrievable from the handle instead of naming a read that fails.
   Credential-class ops do not get this default copy;
   they keep only the scalars their `result_scalars` hint lists (#3084).
-  Lists and objects are never copied by default (objects need the
-  bounded `result_objects` hint). An object that hint names is stored
-  whole next to the omitted scalars, so a `path` read returns what the
-  bounded inline projection left out; and
+  An object the `result_objects` hint names is stored whole next to the
+  omitted scalars, so a `path` read returns what the bounded inline
+  projection left out. Every other top-level object or list next to the
+  rows (a part, #5139) is stored whole there too, with no hint. Whole
+  parts ride inline while the summary stays under 4,096 bytes; the rest
+  are named in `parts_not_inline`, and `parts_note` names the `path`
+  read, or says the parts cannot be read when the store dropped them to
+  keep the rows. Credential-class ops get no default parts; and
 - a `ResultHandle` on `OperationResult.handle` carrying `summary_md`,
   `schema_`, `total_rows`, `sample_rows`, and the self-documenting
   `fetch_more` envelope. `schema_` comes from the result field catalog
@@ -334,11 +338,11 @@ array value). The pointer rules follow RFC 6901: `""` is the whole
 document, each `/` starts one step, and in a step `~1` means `/` and `~0`
 means `~` (in that order, so `/a~1b~0c` reads the key `a/b~c`). An array
 index has no leading zero, and `-` never resolves. On a rows handle, the
-document is only the top-level scalar fields left out of the inline
-summary that the store kept with the rows (see Overview). Lists and
-objects beside the rows are not part of it, and when the store dropped
-the omitted scalars to make room for the rows, there is no document at
-all. `path` cannot be combined with any relational field (a
+document holds the top-level fields the store kept with the rows (see
+Overview): the scalars left out of the inline summary, the objects a
+`result_objects` hint names, and every object or list beside the rows
+(#5139). When the store dropped them to make room for the rows, there is
+no document at all. `path` cannot be combined with any relational field (a
 `ValidationError` at spec construction). An array value pages with the
 call's `offset` / `limit` (items that are not objects come back as
 `{"value": item}`). A text value comes back in parts (#4994, see

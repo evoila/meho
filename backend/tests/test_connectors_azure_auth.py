@@ -335,17 +335,15 @@ async def test_aclose_forgets_cached_secrets_and_tokens(clock: _Clock) -> None:
 async def test_no_token_or_secret_reaches_a_log_line(
     clock: _Clock, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # structlog caches a logger on its first use, with the processors of that
+    # moment. When an earlier test used it and then changed the structlog
+    # setup, capture_logs below would miss it. A fresh logger is always seen.
+    monkeypatch.setattr(azure_connector, "_log", structlog.get_logger(azure_connector.__name__))
     connector = AzureConnector(credentials_loader=CountingLoader())
     target = AzureTargetStub()
     refusal = {"error": "invalid_client", "error_codes": [7000215]}
-    # A private capture on the connector's own logger. capture_logs() misses
-    # the events of a logger that another test on the same worker already
-    # cached (the pattern of test_corpus_client.py).
-    capture = structlog.testing.LogCapture()
-    private_log = structlog.wrap_logger(structlog.PrintLogger(), processors=[capture])
-    monkeypatch.setattr(azure_connector, "_log", private_log)
 
-    with respx.mock() as mock:
+    with structlog.testing.capture_logs() as events, respx.mock() as mock:
         mock.post(token_url()).mock(
             side_effect=[
                 httpx.Response(200, json=token_answer(login_token())),
@@ -357,7 +355,7 @@ async def test_no_token_or_secret_reaches_a_log_line(
         with pytest.raises(ConnectorAuthError):
             await connector.auth_headers(target, operator())
 
-    logged: list[Any] = [*capture.entries, *(record.getMessage() for record in caplog.records)]
+    logged: list[Any] = [*events, *(record.getMessage() for record in caplog.records)]
     text = repr(logged)
     assert "azure_login_done" in text
     assert login_token() not in text

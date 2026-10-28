@@ -13,31 +13,14 @@ constant gets one line in that check.
 Azure pins an API version per call (the ``api-version`` query parameter). The
 versions are kept next to their paths, one per family of operations. Each
 family keeps its paths in its own section below, so families built at the
-same time do not edit the same lines.
+same time do not edit the same lines. For the same reason the module has no
+``__all__``: every family would add its names at the same place. The spec path
+check finds the constants with ``vars()``.
 """
 
 from __future__ import annotations
 
 from typing import Final
-
-__all__ = [
-    "LOCATIONS_PATH",
-    "LOCKS_API_VERSION",
-    "LOCKS_PATH",
-    "RESOURCES_API_VERSION",
-    "RESOURCES_PATH",
-    "RESOURCE_GRAPH_API_VERSION",
-    "RESOURCE_GRAPH_PATH",
-    "RESOURCE_GROUPS_PATH",
-    "RESOURCE_GROUP_RESOURCES_PATH",
-    "SUBSCRIPTIONS_API_VERSION",
-    "SUBSCRIPTIONS_PATH",
-    "SUBSCRIPTION_PATH",
-    "TAGS_AT_SCOPE_PATH",
-    "TAG_NAMES_PATH",
-    "locations_path",
-    "subscription_path",
-]
 
 #: ``GET /subscriptions/{subscriptionId}``: one subscription (Subscriptions - Get).
 SUBSCRIPTION_PATH: Final[str] = "/subscriptions/{subscription_id}"

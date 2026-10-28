@@ -55,7 +55,6 @@ from meho_backplane.connectors.adapters.http import HttpConnector, json_payload_
 from meho_backplane.connectors.azure._errors import AzureApiError, AzureNotFoundError
 from meho_backplane.connectors.azure._http import NoRedirectClient, send
 from meho_backplane.connectors.azure._paths import SUBSCRIPTIONS_API_VERSION, subscription_path
-from meho_backplane.connectors.azure.inventory import InventoryOps
 from meho_backplane.connectors.azure.session import (
     AzureCredentials,
     AzureCredentialsLoader,
@@ -72,6 +71,37 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+
+# The family mixin classes. Each family imports its mixin on the line under its
+# own comment: from meho_backplane.connectors.azure.<family> import <Family>Ops
+# Ruff does not sort this part, so two families never add a line at the same place.
+# Keep the empty line under each family: Ruff wants one between two imports.
+# isort: off
+# aks (Task #5087)
+
+# arc (Task #5084)
+
+# automation (Task #5092)
+
+# avs (Task #5091)
+
+# compute (Task #5083)
+
+# cost (Task #5088)
+
+# inventory (Task #5082)
+from meho_backplane.connectors.azure.inventory import InventoryOps
+
+# migrate (Task #5093)
+
+# monitor (Task #5090)
+
+# network (Task #5085)
+
+# security (Task #5089)
+
+# storage (Task #5086)
+# isort: on
 
 __all__ = ["AzureConnector"]
 
@@ -119,8 +149,24 @@ def _may_use_cache(operator: Operator) -> bool:
 
 
 class AzureConnector(
-    # Family mixin classes first, one per line in alphabetical order; the HTTP base last.
+    # Family mixin classes first, each on the line under its own comment below;
+    # the HTTP base last. The mixins must stay before HttpConnector, so that a
+    # mixin can replace a method of the base (the inventory family replaces
+    # list_candidates). Their order among themselves does not matter today:
+    # no two families define a method with the same name.
+    # aks (Task #5087)
+    # arc (Task #5084)
+    # automation (Task #5092)
+    # avs (Task #5091)
+    # compute (Task #5083)
+    # cost (Task #5088)
+    # inventory (Task #5082)
     InventoryOps,
+    # migrate (Task #5093)
+    # monitor (Task #5090)
+    # network (Task #5085)
+    # security (Task #5089)
+    # storage (Task #5086)
     HttpConnector,
 ):
     """Azure Resource Manager connector. One target is one subscription.

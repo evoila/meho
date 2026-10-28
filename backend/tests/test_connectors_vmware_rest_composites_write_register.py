@@ -110,6 +110,9 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     # Add a CD drive (dangerous) and unmount the Tools installer (caution).
     "vmware.composite.vm.cdrom.add",
     "vmware.composite.vm.tools.installer.unmount",
+    # Mount and unmount a content-library ISO (both caution).
+    "vmware.composite.vm.cdrom.mount_library_iso",
+    "vmware.composite.vm.cdrom.unmount_library_iso",
     # VM CPU / memory limit + reservation write (#3880) -- caution + approval.
     "vmware.composite.vm.resource_allocation.set",
     "vmware.composite.host.evacuate",
@@ -416,6 +419,8 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.device.cdrom": "vm",
     "vmware.composite.vm.cdrom.add": "vm",
     "vmware.composite.vm.tools.installer.unmount": "vm",
+    "vmware.composite.vm.cdrom.mount_library_iso": "vm",
+    "vmware.composite.vm.cdrom.unmount_library_iso": "vm",
     "vmware.composite.vm.resource_allocation.set": "vm",
     "vmware.composite.license.assign": "vmware-licensing",
     "vmware.composite.host.evacuate": "host",
@@ -626,6 +631,8 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
         "vmware.composite.namespace.create",
         "vmware.composite.datastore.dir.create",
         "vmware.composite.vm.tools.installer.unmount",
+        "vmware.composite.vm.cdrom.mount_library_iso",
+        "vmware.composite.vm.cdrom.unmount_library_iso",
         "vmware.composite.vm.snapshot.create",
     }
     for row in rows:

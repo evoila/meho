@@ -195,6 +195,9 @@ from meho_backplane.connectors.vmware_rest.composites._vm_allocation import (
     vm_resource_allocation_set_composite,
     vm_resource_allocation_show_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_library_iso import (
+    VM_CDROM_LIBRARY_ISO_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_tools import (
     VM_CDROM_TOOLS_COMPOSITES,
 )
@@ -2015,6 +2018,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     # Add a CD drive and unmount the VMware Tools installer; the rows live in
     # their own module.
     *(_CompositeSpec(**row) for row in VM_CDROM_TOOLS_COMPOSITES),
+    # Mount and unmount a content-library ISO on a VM; the rows live in their
+    # own module.
+    *(_CompositeSpec(**row) for row in VM_CDROM_LIBRARY_ISO_COMPOSITES),
     # ----------------------------------------------------------------
     # Licence write -- dangerous / approval. The full key never leaves
     # the handler; the license-key tag keeps the vCenter bodies out of

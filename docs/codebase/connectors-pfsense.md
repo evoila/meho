@@ -32,7 +32,10 @@ just to check a user or a static route. #3850 adds `pfsense.filter.rule.add` and
 The delete always needs a human approval. The add needs a human approval,
 unless an operator gave a standing grant for it. #3937 adds
 `pfsense.user.disable` and `pfsense.user.enable`: they turn one local user off
-or on again, and a second person must approve each call.
+or on again, and a second person must approve each call. #3965 adds an
+optional `descr` to `pfsense.gateway.add` and `pfsense.route.static.add`, and
+the safe read `pfsense.diag.ping`: a short ping that runs on the firewall, from
+one of the firewall's own addresses, to prove that a route carries traffic.
 
 Source: `backend/src/meho_backplane/connectors/pfsense/`.
 
@@ -73,7 +76,14 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   `ops_config_reads` module; #3850 appends `pfsense.filter.rule.add` and
   `pfsense.filter.rule.delete` via the `ops_filter_rule` module; #3937
   appends `pfsense.user.disable` and `pfsense.user.enable` via the
-  `ops_user_write` module.
+  `ops_user_write` module; #3965 appends `pfsense.diag.ping` via the
+  `ops_diag` module.
+
+- **Diagnostics** (`ops_diag.py`, #3965) — the handler `pfsense_diag_ping`,
+  the input checks (`_validate_host`, `_validate_source`, `_validate_count`),
+  `firewall_addresses` (every `inet` / `inet6` address in `ifconfig -a`,
+  including the point-to-point form OpenVPN interfaces use) and
+  `parse_ping_summary` (the FreeBSD `ping` summary lines).
 
 - **Filter-rule ops** (`ops_filter_rule.py`, #3850) — the parser
   `parse_filter_rules_xml`, the input checks (`_validate_rule_params`,
@@ -251,7 +261,7 @@ Two-phase registration, identical to the bind9 pattern:
   (`connectors/registry.py`, `operations/typed_register.py`) — registration
   infrastructure.
 
-## Op surface (21 ops)
+## Op surface (24 ops)
 
 | Op ID | Command | Group | Safety |
 |---|---|---|---|
@@ -278,9 +288,10 @@ Two-phase registration, identical to the bind9 pattern:
 | `pfsense.alias.member.remove` | `cat /cf/conf/config.xml` guard (match one `<aliases><alias>` by name + locate the member token) + `pfSsh.php playback` fragment (read-modify-write `<address>`/`<detail>` + `write_config()` + `filter_configure()`) + read-back verify | `alias` | `destructive` |
 | `pfsense.user.disable` | `cat /cf/conf/config.xml` guard (match one `<system><user>` by name, refuse the admin account) + `pfSsh.php playback` fragment (set `disabled` + `local_user_set()` + `write_config()`) + read-back verify | `users` | `dangerous` |
 | `pfsense.user.enable` | same as `pfsense.user.disable`, but clears `disabled` | `users` | `dangerous` |
+| `pfsense.diag.ping` | `ifconfig -a` (the source must be one of these addresses) + `ping -4\|-6 -n -c <1-5> -W 1000 -t <count+2> -S <source> <host>` | `diagnostics` | `safe` |
 
-The 11 read / identity ops plus the `pfsense.mgmt_flow.summary` classifier are
-`safety_level="safe"`; the 2 write ops (#3090)
+The 11 read / identity ops plus the `pfsense.mgmt_flow.summary` classifier and
+`pfsense.diag.ping` are `safety_level="safe"`; the 2 write ops (#3090)
 are `safety_level="caution"` / `requires_approval=False` — the same posture
 `bind9.record.add` / `windns.record.add` carry for an additive, recoverable,
 idempotent config write. `pfsense.filter.rule.add` (#3850) is
@@ -609,6 +620,17 @@ upstream device is not up yet). A non-zero playback exit, or a silent
 `write_config` failure that leaves the entry absent on read-back, raises rather
 than reporting success.
 
+**Description (`descr`).** Both ops take an optional `descr`: one line of
+text, 1 to 200 characters, no control characters (so no line breaks). It is
+stored as the gateway's or route's description on the firewall, so people who
+read the firewall later know what the entry is for (for example which lab and
+which ticket). Without it, MEHO writes `meho: gateway <name>` or
+`meho: static route <network>`, as before. The answer carries the `descr` that
+was written. A gateway or route that already exists is not changed, so it keeps
+its own description; `existing.descr` shows it. `descr` is free text, so it is
+not checked against an allow-list. It reaches the PHP fragment only through
+`_php_squote`, inside the quoted heredoc, and the heredoc end marker is refused.
+
 **Injection safety.** Every operator value is validated and re-serialised before
 it reaches the fragment: names / interfaces against a strict character-class
 allowlist (`^[A-Za-z0-9_-]{1,64}$` / `^[A-Za-z0-9_]{1,32}$`), IPs parsed and
@@ -816,6 +838,46 @@ the account, its password, its groups and its certificates stay.
   other config writes use; they check only the user list. That is separate
   work.
 
+## Diagnostics: `pfsense.diag.ping` (#3965)
+
+A static route that `pfsense.route.static.add` wrote is only config. The
+read-back shows that the route is saved, not that traffic passes.
+`pfsense.diag.ping` is the functional check: it pings a host from the firewall
+itself, with one of the firewall's own addresses as the source. With the
+VPN-side address as the source, the packets take the same path a VPN user's
+packets take, without the user's own client.
+
+- **Parameters.** `host` (an IPv4 or IPv6 address, or a DNS host name),
+  `source` (an IP address; required) and `count` (1 to 5, default 3).
+- **Answer.** `{host, source, count, packets_sent, packets_received,
+  packet_loss_percent, reachable, rtt_ms: {min, avg, max} | null}`.
+  `reachable` is true when at least one reply came back. No reply (ping exit
+  2) is an answer with `reachable: false`, not an error.
+- **The source must belong to the firewall.** The op reads `ifconfig -a`
+  first and refuses any source that is not one of its `inet` / `inet6`
+  addresses, before ping runs.
+- **Bounded.** `host` and `source` are checked before any SSH call: an IP
+  address (multicast, unspecified and `%zone` addresses are refused) or a DNS
+  host name that starts with a letter or digit, so a value can never look
+  like a ping option. Both are also passed through `shlex.quote`. A host IP
+  and the source must be the same IP version; for a host name, the source's
+  version picks `-4` or `-6`. Each reply is awaited at most one second
+  (`-W 1000`), ping stops after `count + 2` seconds (`-t`), and the SSH call
+  times out after `count + 15` seconds.
+- **Errors.** A ping that prints no summary (for example an unknown host
+  name, exit 68) raises with the first line of ping's error output.
+- **Safety.** `safe`, no approval: it changes nothing on the firewall.
+  Unlike `net.ping`, it does not use MEHO's own probe allow-list, because the
+  packets leave from the firewall, not from MEHO.
+- **Not included.** The issue also mentioned reading a service banner with
+  `nc` as a stronger proof. That is left out: ping answers "does traffic
+  pass", and a TCP check would need its own bounds (port, timeout, output
+  size).
+
+FreeBSD `ping(8)` (pfSense 2.7 runs FreeBSD 14) accepts `-4` / `-6`, `-c`,
+`-n`, `-S`, `-t` and `-W` for IPv4 and IPv6 alike, and exits 0 (a reply came
+back), 2 (no reply) or another value (an error).
+
 ## Known issues
 
 - `known_hosts=None` in the SSH adapter disables host-key verification for
@@ -855,6 +917,9 @@ the account, its password, its groups and its certificates stay.
   and remove ONE firewall rule by a stable id, with approval, the
   management-path guard, and read-back. pfSense 2.7.2 sources used:
   `firewall_rules_edit.php`, `firewall_rules.php`, `filter.inc`, `util.inc`.
+- Task #3965: optional `descr` on `pfsense.gateway.add` /
+  `pfsense.route.static.add`, and the safe read `pfsense.diag.ping`.
+  FreeBSD `ping(8)`: https://man.freebsd.org/cgi/man.cgi?query=ping&sektion=8.
 - Parent initiative: #370 (G3.7 tier-3 standalone connectors).
 - Bind9 connector (canonical typed-SSH reference): `docs/codebase/connectors-bind9.md`.
 - `SshConnector` adapter: `backend/src/meho_backplane/connectors/adapters/ssh.py`.

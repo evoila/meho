@@ -51,3 +51,5 @@ RUN set -eu; \
 
 FROM ${BASE_IMAGE}
 COPY --from=install /overlay/out/ /
+# The same non-root user as the public image.
+USER 1001:0

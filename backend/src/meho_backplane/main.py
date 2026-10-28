@@ -781,8 +781,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     The operation rows commit only when the ``with`` block below ends
     without an error, that is after every background loop started
     (#5019). A start that fails anywhere changes no operation row, and
-    the loops it already started are cancelled. Nothing that can fail
-    may run after the block.
+    the loops it already started are cancelled: a start that fails
+    inside the block is cleaned up by
+    :func:`_start_background_tasks_or_none`, and a commit that fails
+    when the block ends is cleaned up by the ``finally`` below, which
+    then stops every loop the block started. Nothing that can fail may
+    run after the block.
 
     Each phase helper carries the load-bearing detail in its own
     docstring; the lifespan body stays thin so the chassis function-
@@ -790,12 +794,14 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     refactor when adding a fourth background loop.
     """
     await _run_lifespan_startup()
-    async with operation_catalog_write():
-        tasks = await _start_background_tasks_or_none()
+    tasks: _BackgroundTasks | None = None
     try:
+        async with operation_catalog_write():
+            tasks = await _start_background_tasks_or_none()
         yield
     finally:
-        await _stop_background_tasks(tasks)
+        if tasks is not None:
+            await _stop_background_tasks(tasks)
 
 
 app: FastAPI = FastAPI(

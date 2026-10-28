@@ -11,6 +11,8 @@ all or nothing:
 * A start that fails at a later start-up check changes no row.
 * A start that fails while it starts its background loops changes no
   row, and the loops it already started are stopped.
+* A start whose final database commit fails changes no row, and every
+  loop it started is stopped.
 * A registrar that fails in the middle of the run changes no row, also
   not the rows earlier registrars wrote.
 * A check that fails after every registrar wrote (the invariant sweep)
@@ -372,6 +374,71 @@ def test_start_that_fails_while_starting_background_loops_changes_no_row(
     assert asyncio.run(_stored_release()) == stored_before
     assert len(started) == 1
     assert started[0].cancelled()
+
+
+@pytest.mark.asyncio
+async def test_start_whose_final_commit_fails_changes_no_row_and_stops_the_loops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every loop started, then the commit of the rows fails: nothing changed, no loop runs.
+
+    The commit is the last step of the start. When it fails, the start
+    fails after every background loop is already running. The rows and
+    the release stamp still equal the copy from the first start, and
+    every loop the failed start began is stopped again.
+
+    The lifespan runs in this test's event loop, not in a ``TestClient``:
+    the client tears its own loop down after a failed start, which stops
+    every task anyway and would hide a loop the lifespan left running.
+    """
+    from meho_backplane import main
+
+    _use_registrars(monkeypatch, widget_registrar)
+    async with main.lifespan(main.app):
+        pass
+    before = await _built_in_rows()
+    stored_before = await _stored_release()
+    assert before[_OP_ID]["safety_level"] == "safe"
+    assert stored_before is not None
+
+    started_lists: list[list[asyncio.Task[None]]] = []
+    real_start_background_tasks = main._start_background_tasks
+
+    def start_background_tasks(started: list[asyncio.Task[None]]) -> Any:
+        started_lists.append(started)
+        return real_start_background_tasks(started)
+
+    real_sessionmaker = typed_register.get_sessionmaker
+
+    def sessionmaker_whose_commit_fails() -> Any:
+        make_session = real_sessionmaker()
+
+        def make_session_whose_commit_fails(*args: Any, **kwargs: Any) -> Any:
+            session = make_session(*args, **kwargs)
+
+            async def commit_fails() -> None:
+                raise RuntimeError("commit failed on purpose")
+
+            session.commit = commit_fails
+            return session
+
+        return make_session_whose_commit_fails
+
+    monkeypatch.setenv("GIT_SHA", "new0000000000000000000000000000000000000")
+    get_settings.cache_clear()
+    _set_new_release()
+    monkeypatch.setattr(main, "_start_background_tasks", start_background_tasks)
+    monkeypatch.setattr(typed_register, "get_sessionmaker", sessionmaker_whose_commit_fails)
+    with pytest.raises(RuntimeError, match="commit failed on purpose"):
+        async with main.lifespan(main.app):
+            pass
+
+    assert len(started_lists) == 1
+    started = started_lists[0]
+    assert started, "the start began no background loop; the commit failure was not last"
+    assert all(task.done() for task in started)
+    assert await _built_in_rows() == before
+    assert await _stored_release() == stored_before
 
 
 @pytest.mark.asyncio

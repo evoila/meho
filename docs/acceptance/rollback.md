@@ -151,8 +151,8 @@ from the code of the release that starts.
 operation rows in one database transaction. It commits that transaction
 only as its last step, after every start-up check passed and every
 background loop (the sweepers, the scheduler, the check runner) started.
-When a check, the write itself or the start of a loop fails, the
-transaction is undone: the rows stay as the previous release left them,
+When a check, the write itself, the start of a loop or the final
+commit fails, the transaction is undone: the rows stay as the previous release left them,
 and the loops that already started are stopped again. The log then shows
 `operation_catalog_unchanged`.
 

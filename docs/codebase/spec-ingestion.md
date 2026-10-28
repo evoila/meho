@@ -1066,7 +1066,7 @@ default**. A tenant can now turn a built-in operation on or off for
 itself only. Other tenants keep the install default.
 
 - **Where it is stored.** The table `tenant_operation_setting`
-  (migration `0118`, model `TenantOperationSetting`): one row per
+  (migration `0119`, model `TenantOperationSetting`): one row per
   `(tenant_id, product, version, impl_id, op_id)` with `enabled`
   true or false. No row means "use the install default". The row is
   keyed on the operation's natural key, not on the descriptor id. A

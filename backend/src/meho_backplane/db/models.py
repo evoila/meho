@@ -4723,6 +4723,12 @@ class RunnerPrincipal(Base):
         nullable=False,
         default=lambda: datetime.now(UTC),
     )
+    # #5020: the wire version the runner sent on its last call (the runner
+    # list shows it). Stored by
+    # :func:`~meho_backplane.auth.runner_guard.assert_runner_scope` also when
+    # the version does not match, so an operator can see which runner is on
+    # another version. ``NULL`` until the runner calls after migration 0118.
+    wire_version: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         Index(

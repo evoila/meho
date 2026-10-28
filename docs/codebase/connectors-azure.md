@@ -5,8 +5,8 @@ subscription. The connector logs in to Microsoft Entra ID with a login (a
 service principal) from Vault, keeps the access token in its own cache, and
 calls Azure Resource Manager (Azure's management API) with it.
 
-Today the connector has two operations, `azure.about` and
-`azure.operation.status`. Later reads (inventory, compute, network, storage,
+Today the connector has three operations: `azure.about`,
+`azure.location.list` and `azure.operation.status`. Later reads (inventory, compute, network, storage,
 cost and more) build on the login, the cache, the retry budget, the paging
 helper and the polling helper described here.
 
@@ -21,7 +21,9 @@ Package: `backend/src/meho_backplane/connectors/azure/`. Shared login code:
 | Connector ID | `azure-arm-2026.10` (implementation `azure-arm`, version `2026.10`) |
 | Registration | the versioned row plus the wildcard row `("azure", "", "")` |
 | Kind | typed operations only; nothing is ingested from a spec |
-| Operations | `azure.about` and `azure.operation.status` (group `account`, `safe`) |
+| Operations | `azure.about`, `azure.location.list` and `azure.operation.status` (group `account`, `safe`) |
+| Spec path check | `backend/tests/test_connectors_azure_spec_reconcile.py` against the shelf folder `azure-arm-2026.10` |
+| Onboarding | [`docs/cross-repo/azure-onboarding.md`](../cross-repo/azure-onboarding.md) |
 
 Azure has no product version, so the version is a date, like
 `hetzner-rest-2026.04`. The wildcard row lets every `azure` target find the
@@ -48,7 +50,8 @@ groups, risk levels and guidance for the AI.
   `register_azure_typed_operations` (`typed_ops.py`): the operation table, the
   group texts and the start-up registrar.
 - `_paths.py`: every Resource Manager path and API version the connector
-  calls, so a CI check can compare them with Azure's API description files.
+  calls. The spec path check (below) compares them with Azure's API
+  description files.
 - `send`, `check_azure_url`, `retry_after_seconds` (`_http.py`): every Azure
   call, with one retry budget, the wait after a 429, the limit per login and
   the URL check.
@@ -58,6 +61,34 @@ groups, risk levels and guidance for the AI.
   (`_paging.py`): reading every page of a list, with limits.
 - `OperationReference`, `operation_reference`, `read_operation_state`,
   `wait_for_operation` (`_polling.py`): following long-running operations.
+
+## Package layout
+
+Each family of operations (inventory, compute, network and so on) has its own
+module, `<family>.py`, so families built at the same time do not edit the same
+lines. The module holds the family's group text (`WHEN_TO_USE`), its
+operations (`OPS`), their bodies and a mixin class: a class with the thin
+methods that `AzureConnector` takes over.
+
+- `_model.py` holds what every family imports: `AzureTypedOp`, `NO_PARAMS`
+  and `TEXT_OR_NULL`.
+- `typed_ops.py` and `connector.py` collect the families: an import and one
+  line per list for each family.
+- `_paths.py` keeps the paths, in one marked section per family. It has no
+  `__all__`, because every family would add its names at the same place.
+
+Every place that collects the families has one fixed comment line per family,
+`# <family> (Task #<n>)`, in alphabetical order. A family adds its lines
+directly under its own comment and leaves the comment as it is. Git merges two
+changes without a conflict only when at least one unchanged line lies between
+them, so two family branches then merge in any order. In the two import parts
+an empty line follows each family comment, because Ruff wants an empty line
+between two imports there; leave it as it is. The same holds for the
+spec path check: its `_DECLARED` table has the same comment lines, and its list
+of checked paths has the same lines as strings (`"# <family> (Task #<n>)"`),
+because the test reads them to check that each block is sorted. The end of
+this page has one section per family: a family replaces the line "Not built
+yet" under its heading with its text and keeps the heading.
 
 ## Target shape
 
@@ -399,6 +430,58 @@ a caller learns the outcome of a write after a lost answer or a MEHO restart:
 the reference holds everything needed, and no state in MEHO's memory is used.
 The answer is `{status, done, error, result, retry_after_seconds, operation}`.
 
+## azure.location.list
+
+`azure.location.list` (group `account`, `safe`, no parameters) reads
+`GET /subscriptions/{subscriptionId}/locations?api-version=2022-12-01` with
+`list_all_pages`, so it follows `nextLink` within the paging limits. Each
+Azure `Location` becomes one row:
+
+| Field | Source |
+|---|---|
+| `name` | `name` (the region name used in requests, for example `westeurope`) |
+| `display_name` | `displayName` |
+| `region_type` | `metadata.regionType` (`Physical` or `Logical`) |
+| `geography` | `metadata.geography` (the Azure geography, for example `Europe`, `Germany` or `United States`) |
+| `geography_group` | `metadata.geographyGroup` (the wider group, for example `Europe` or `US`; Azure may move a region to another group) |
+| `paired_regions` | the `name` of every entry in `metadata.pairedRegion` (an empty list when there is none) |
+
+An item that is not an object is left out. The result has the `PagedRows`
+shape (`value`, `truncated`, `omission`, `omission_kind`, `pages_read`).
+Azure has more than 50 regions, so the dispatcher stores the rows and
+returns a link to the stored result; `result_query` reads them.
+`test_connectors_azure_typed_reads.py` proves this through the real
+dispatcher and reducer.
+
+## Spec path check
+
+`backend/tests/test_connectors_azure_spec_reconcile.py` checks every
+`*_PATH` constant in `_paths.py`, with its method and API version, against
+Azure's own API description files. The files are pinned on the private
+spec shelf in `azure-arm-2026.10/`: Swagger 2.0 files from
+`Azure/azure-rest-api-specs` (MIT license), all from one commit, with their
+upstream paths kept. The shelf's `MANIFEST.md` names the commit and every
+file. CI fetches the folder with the other shelf folders
+(`docs/decisions/vendor-spec-ci-provisioning.md`). Without the shelf the
+check skips.
+
+How it compares:
+
+- MEHO's spec ingest does not read Swagger 2.0, so the check reads the keys
+  of `paths` and `x-ms-paths` itself. The query part of an `x-ms-paths` key
+  is cut off.
+- Parameter names are ignored (`{subscriptionId}` and `{subscription_id}`
+  match), because Azure names one parameter differently across files.
+- Case is ignored, because Resource Manager paths are case-insensitive and
+  the files mix `resourceGroups` and `resourcegroups`.
+- The API version counts: each file serves its `info.version`, so a path
+  sent with a wrong `api-version` fails.
+
+A new path constant needs one line in the check's `_DECLARED` table (method
+and API version constant); a guard test fails until it has one. A later
+read whose API version is not on the shelf yet adds that file to the shelf
+first.
+
 ## azure.about, fingerprint and probe
 
 `azure.about` (group `account`, `safe`, no parameters) reads
@@ -438,12 +521,11 @@ as MEHO's system identity, which cannot read the secret, so it reports
   made once and fails with `MicrosoftLoginError`.
 - The limit per login holds per MEHO process. Several MEHO processes do not
   share it.
-- Paging, the polling helper and `azure.operation.status` are proven with
-  mocked HTTP only. The live proof on a lab subscription is still open.
+- Paging, the polling helper, `azure.operation.status` and
+  `azure.location.list` are proven with mocked HTTP only. The live proof on
+  a real subscription is still open.
 - `resultTruncated` from Resource Graph is read as the string `"true"` (what
   the API sends) or a real `true`.
-- The check of the hand-written paths against Azure's pinned API description
-  files arrives with those files; `_paths.py` is ready for it.
 - The cache lives in one MEHO process. Each process logs in on its own.
 
 ## References
@@ -467,7 +549,58 @@ as MEHO's system identity, which cannot read the secret, so it reports
 - Paging with `nextLink`: <https://learn.microsoft.com/en-us/rest/api/azure/>
 - Subscriptions - Get (API version 2022-12-01):
   <https://learn.microsoft.com/en-us/rest/api/resources/subscriptions/get>
+- Subscriptions - List Locations (API version 2022-12-01):
+  <https://learn.microsoft.com/en-us/rest/api/resources/subscriptions/list-locations>
+- Azure API description files: <https://github.com/Azure/azure-rest-api-specs>
 - Azure Government endpoints:
   <https://learn.microsoft.com/en-us/azure/azure-government/compare-azure-government-global-azure>
 - Related pages: `connectors-keycloak.md` (the same client credentials request),
   `connectors-shared-vault-creds.md`, `error-message-shape.md`.
+
+## aks
+
+Not built yet (Task #5087).
+
+## arc
+
+Not built yet (Task #5084).
+
+## automation
+
+Not built yet (Task #5092).
+
+## avs
+
+Not built yet (Task #5091).
+
+## compute
+
+Not built yet (Task #5083).
+
+## cost
+
+Not built yet (Task #5088).
+
+## inventory
+
+Not built yet (Task #5082).
+
+## migrate
+
+Not built yet (Task #5093).
+
+## monitor
+
+Not built yet (Task #5090).
+
+## network
+
+Not built yet (Task #5085).
+
+## security
+
+Not built yet (Task #5089).
+
+## storage
+
+Not built yet (Task #5086).

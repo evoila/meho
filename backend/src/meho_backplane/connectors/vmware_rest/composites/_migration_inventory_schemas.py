@@ -103,8 +103,8 @@ MIGRATION_INVENTORY_LLM_INSTRUCTIONS: dict[str, Any] = {
     "next_step": (
         "Pass the handle to migration.inventory.csv for an Azure Migrate file. Read the "
         "inventory with result_query and a path, for example '/counts' or '/duplicates'. "
-        "Check counts.reconciliation (matches true, else name the difference) and the "
-        "duplicates."
+        "Check counts.reconciliation (matches true, else name the difference; empty "
+        "when the count read failed, then an omission says so) and the duplicates."
     ),
     # The migration operations load the inventory by its handle, so a small
     # inventory (one VM) must be stored too. See the reducer's document hint.

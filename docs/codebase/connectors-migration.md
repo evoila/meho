@@ -211,8 +211,10 @@ Steps:
    one read through the view, `DestroyView`). This count is
    `source_totals.server`. It shares nothing with the walk of step 2, so a
    VM the walk misses shows as a difference in the count check. When the
-   count read fails, the check uses the number of VMs the listing found and
-   one omission without `kind` says so.
+   count read fails, there is no count check (`source_totals` and
+   `reconciliation` are empty) and one omission without `kind` says so. A
+   check built on the listing count could only ever match, so it would make
+   a listing that missed VMs look verified.
 4. Templates are left out: one omission each, reason `not_supported`.
 5. The other VMs in batches of 20: one `RetrievePropertiesEx` for the record
    properties (`DETAIL_PROPERTIES` in `_migration_inventory_map.py`). A

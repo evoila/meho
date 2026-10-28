@@ -925,13 +925,16 @@ async def test_count_check_names_a_vm_the_listing_missed() -> None:
     }
 
 
-async def test_a_failed_count_read_falls_back_to_the_listing_and_says_so() -> None:
+async def test_a_failed_count_read_leaves_out_the_count_check_and_says_so() -> None:
+    """A check built on the listing could only match, so there is none at all."""
     vcenter = _FakeVcenter(view_fails=True)
     result = await _run(vcenter=vcenter)
 
     assert vcenter.destroyed == []
-    assert result["counts"]["source_totals"] == {"server": 5}
-    assert result["counts"]["reconciliation"][0]["matches"] is True
+    assert result["counts"]["server"] == 3
+    assert result["counts"]["source_totals"] == {}
+    assert result["counts"]["reconciliation"] == []
+    assert "matches" not in str(result["counts"])
     problems = [o for o in result["omissions"] if o["kind"] is None]
     assert [(o["what"], o["reason"]) for o in problems] == [
         ("vCenter's own VM count (ContainerView)", "collection_failed")

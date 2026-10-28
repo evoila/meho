@@ -28,7 +28,8 @@ Steps, all reads:
 6. The ESXi host and cluster names, read once for all hosts (best effort).
 7. Duplicate detection (same BIOS UUID or instance UUID) and the count check:
    vCenter's count of step 3 against records plus omissions. A VM the walk
-   missed shows as a difference.
+   missed shows as a difference. When the count read of step 3 failed, the
+   result has no count check and one omission says so.
 
 Like the other read multi-step operations of this connector (see
 ``_read.py``), the vCenter reads run on the connector's own session. The VCF
@@ -574,24 +575,50 @@ def _count_problem(source_count: int | str) -> list[Omission]:
             what="vCenter's own VM count (ContainerView)",
             reason="collection_failed",
             detail=(
-                f"the count read failed ({source_count}); the count check uses the number "
-                "of VMs the listing found, so it cannot show a VM the listing missed"
+                f"the count read failed ({source_count}); there is no count check for "
+                "this run, so a VM the listing missed cannot show"
             ),
         )
     ]
 
 
+def _counts(source_count: int | str, collector: _Collector) -> InventoryCounts:
+    """The count check: vCenter's own count against records plus omissions.
+
+    When the count read failed there is no check: a check built on the listing
+    count could only ever match, and would make a listing that missed VMs look
+    verified. The omission from :func:`_count_problem` says so instead.
+    """
+    records = len(collector.records)
+    if not isinstance(source_count, int):
+        return InventoryCounts(server=records, application=0, kubernetes_workload=0)
+    omitted = len(collector.omissions)
+    difference = source_count - records - omitted
+    return InventoryCounts(
+        server=records,
+        application=0,
+        kubernetes_workload=0,
+        source_totals={"server": source_count},
+        reconciliation=[
+            CountCheck(
+                kind="server",
+                source_total=source_count,
+                records=records,
+                omitted=omitted,
+                difference=difference,
+                matches=difference == 0,
+            )
+        ],
+    )
+
+
 def _envelope(
     connector: VmwareRestConnector,
     target: Any,
-    listing: dict[str, VmProps],
     source_count: int | str,
     collector: _Collector,
 ) -> InventoryEnvelope:
-    """The inventory, with the count check: vCenter's count against records plus omissions."""
-    vm_omissions = len(collector.omissions)
-    source_total = source_count if isinstance(source_count, int) else len(listing)
-    difference = source_total - len(collector.records) - vm_omissions
+    """The inventory with its omissions, duplicates and count check."""
     return InventoryEnvelope(
         schema_version="1",
         source=InventorySource(
@@ -605,22 +632,7 @@ def _envelope(
             *_count_problem(source_count),
             *_source_problems(collector),
         ],
-        counts=InventoryCounts(
-            server=len(collector.records),
-            application=0,
-            kubernetes_workload=0,
-            source_totals={"server": source_total},
-            reconciliation=[
-                CountCheck(
-                    kind="server",
-                    source_total=source_total,
-                    records=len(collector.records),
-                    omitted=vm_omissions,
-                    difference=difference,
-                    matches=difference == 0,
-                )
-            ],
-        ),
+        counts=_counts(source_count, collector),
         duplicates=find_identity_duplicates(collector.records),
     )
 
@@ -672,7 +684,7 @@ async def migration_inventory_composite(
         collected_at = datetime.now(UTC)
         for vm in batch_vms:
             collector.add(vm, usage, placement, collected_at)
-    envelope = _envelope(connector, target, listing, source_count, collector)
+    envelope = _envelope(connector, target, source_count, collector)
     _log.info(
         "migration_inventory_read",
         target=getattr(target, "name", None),

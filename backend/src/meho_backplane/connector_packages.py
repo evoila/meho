@@ -8,6 +8,14 @@ and importing every subpackage there. Route modules and other code also
 import single connector subpackages directly, long before the walk. So the
 check runs in the ``__init__`` of the ``connectors`` package itself: Python
 runs that before any ``connectors.<folder>`` module, whoever imports it.
+
+This module lives next to the ``connectors`` package, not inside it. A
+folder added under ``connectors/`` with the same name as a module there
+takes its place on import (Python prefers a package folder over a module
+file), so a module inside the tree could be replaced by the very thing it
+has to check. Nothing under ``connectors/`` can shadow a module of
+``meho_backplane`` itself.
+
 The check looks at where each subpackage folder came from. A folder is
 allowed when:
 

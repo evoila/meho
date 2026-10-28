@@ -33,6 +33,7 @@ stub so the ingest test paths don't need a real Anthropic key.
 
 from __future__ import annotations
 
+import asyncio
 import socket
 import uuid
 from collections.abc import Callable, Iterator
@@ -64,6 +65,7 @@ from meho_backplane.db.models import (
     AuditLog,
     EndpointDescriptor,
     OperationGroup,
+    OperationPolicyOverride,
 )
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.operations.ingest import (
@@ -2091,7 +2093,9 @@ async def test_edit_op_omitted_custom_description_preserves_existing_value(
         )
         op_row = (await session.execute(stmt)).scalar_one()
         assert op_row.custom_description == "Operator-authored summary."
-        assert op_row.safety_level == "caution"
+        # #4711: the risk level is stored as an override, not on the row.
+        override = (await session.execute(select(OperationPolicyOverride))).scalar_one()
+        assert override.safety_level == "caution"
 
 
 @pytest.mark.asyncio
@@ -2644,14 +2648,14 @@ def test_reingest_surfaces_safety_changes_in_response(
     client: TestClient,
     tmp_path: Any,
 ) -> None:
-    """A re-ingest that reverts an operator's safety edit reports it (#2702).
+    """A re-ingest keeps an operator's safety edit, so it reports no change (#2702, #4711).
 
     End-to-end over the REST surface: ingest → operator PATCHes an op to
-    ``dangerous`` at review → re-ingest re-derives ``safe`` from the
-    verb heuristic and overwrites the edit. The response's additive
-    ``ingestion.safety_changes`` field names the ``(op_id, old, new)``
-    diff; the first ingest (nothing to diff against) serializes the
-    backward-compatible empty list.
+    ``dangerous`` at review → re-ingest. Before #4711 the re-ingest wrote
+    ``safe`` over the edit and ``ingestion.safety_changes`` named that
+    diff. Now the edit is an override kept apart from the row, so the
+    stored classification does not change, ``safety_changes`` stays the
+    empty list, and the override still says ``dangerous``.
     """
     spec_path = tmp_path / "spec.yaml"
     spec_path.write_text(
@@ -2722,14 +2726,14 @@ paths:
             headers=_authed(token),
         )
     assert second.status_code == 200, second.text
-    assert second.json()["ingestion"]["safety_changes"] == [
-        {
-            "op_id": "GET:/items",
-            "old_safety_level": "dangerous",
-            "new_safety_level": "safe",
-            "affected_sensors": [],
-        }
-    ]
+    assert second.json()["ingestion"]["safety_changes"] == []
+
+    async def _override_level() -> str | None:
+        async with get_sessionmaker()() as session:
+            row = (await session.execute(select(OperationPolicyOverride))).scalar_one()
+        return row.safety_level
+
+    assert asyncio.run(_override_level()) == "dangerous"
 
 
 @pytest.mark.asyncio

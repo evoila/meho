@@ -66,6 +66,7 @@ from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup, Tenant
 from meho_backplane.operations.ingest import ensure_connector_class_registered
+from meho_backplane.operations.op_policy import OpKey, effective_policy_map
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
 from meho_backplane.ui.auth.flow import (
@@ -293,6 +294,7 @@ def _client_with_role(
     tenant_id: uuid.UUID,
     operator_sub: str,
     role: TenantRole,
+    platform_admin: bool | None = None,
 ) -> tuple[TestClient, respx.MockRouter, str]:
     """Return a TestClient + respx mock + csrf token for the role-gated routes."""
     keypair, jwks = _make_keypair_and_jwks()
@@ -301,6 +303,7 @@ def _client_with_role(
         sub=operator_sub,
         tenant_id=str(tenant_id),
         tenant_role=role.value,
+        platform_admin=platform_admin,
     )
     session_id = _seed_session_sync(
         tenant_id=tenant_id,
@@ -324,7 +327,11 @@ def _edit_headers(token: str) -> dict[str, str]:
 
 
 def _read_op_governance(op_id: str = _OP_ID) -> tuple[str, bool, bool]:
-    """Return the stored ``(safety_level, requires_approval, is_enabled)`` of *op_id*."""
+    """Return the effective ``(safety_level, requires_approval, is_enabled)`` of *op_id*.
+
+    Risk level and approval are the values with operator overrides applied
+    (#4711): an edit stores them apart from the row.
+    """
 
     async def _do() -> tuple[str, bool, bool]:
         sessionmaker = get_sessionmaker()
@@ -338,7 +345,10 @@ def _read_op_governance(op_id: str = _OP_ID) -> tuple[str, bool, bool]:
                     ),
                 )
             ).scalar_one()
-            return row.safety_level, row.requires_approval, row.is_enabled
+            policy = (await effective_policy_map(session, tenant_id=_TENANT_A, rows=[row]))[
+                OpKey.of(row)
+            ]
+            return policy.safety_level, policy.requires_approval, row.is_enabled
 
     return asyncio.run(_do())
 
@@ -566,14 +576,63 @@ def test_op_edit_requires_approval_only_keeps_enabled() -> None:
     _seed_connector(
         tenant_id=_TENANT_A,
         safety_level="caution",
-        requires_approval=True,
+        requires_approval=False,
         enabled=True,
     )
 
-    status = _patch_op({"requires_approval": "false"})
+    status = _patch_op({"requires_approval": "true"})
 
     assert status == 200
-    assert _read_op_governance() == ("caution", False, True)
+    assert _read_op_governance() == ("caution", True, True)
+
+
+def test_op_edit_tenant_admin_cannot_turn_approval_off() -> None:
+    """#4711: a tenant admin turning approval off gets the refusal panel."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(tenant_id=_TENANT_A, safety_level="caution", requires_approval=True)
+
+    status = _patch_op({"requires_approval": "false", "reason": "read-only in practice"})
+
+    assert status == 403
+    assert _read_op_governance() == ("caution", True, False)
+
+
+def test_op_edit_lower_than_classification_is_refused() -> None:
+    """#4711: the console refuses a level below the classification."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(tenant_id=_TENANT_A, safety_level="dangerous")
+
+    assert _patch_op({"safety_level": "safe"}) == 400
+    assert _read_op_governance()[0] == "dangerous"
+
+
+def test_op_edit_platform_admin_turns_approval_off_with_reason() -> None:
+    """#4711: in the console the web session is the person; a reason is still needed."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(tenant_id=_TENANT_A, safety_level="caution", requires_approval=True)
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+    )
+    url = f"/ui/connectors/registry/{_CONNECTOR_ID}/operations/{_OP_ID}"
+    try:
+        without_reason = client.patch(
+            url, data={"requires_approval": "false"}, headers=_edit_headers(csrf)
+        )
+        with_reason = client.patch(
+            url,
+            data={"requires_approval": "false", "reason": "read-only in practice"},
+            headers=_edit_headers(csrf),
+        )
+    finally:
+        mock.stop()
+
+    assert without_reason.status_code == 400
+    assert "reason" in without_reason.text
+    assert with_reason.status_code == 200, with_reason.text
+    assert _read_op_governance() == ("caution", False, False)
 
 
 @pytest.mark.parametrize(
@@ -997,3 +1056,33 @@ def test_drawer_badges_profiled_but_staged_distinctly() -> None:
     assert "profiled — staged" in body
     # The distinct sub-state must NOT read as a plain dispatchable "profiled".
     assert 'data-connector-kind="profiled"' not in body
+
+
+def test_overrides_report_page_lists_reduced_approval() -> None:
+    """#4711: the console report lists operations with approval turned off."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(tenant_id=_TENANT_A, safety_level="caution", requires_approval=True)
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+    )
+    try:
+        empty = client.get("/ui/connectors/overrides")
+        edit = client.patch(
+            f"/ui/connectors/registry/{_CONNECTOR_ID}/operations/{_OP_ID}",
+            data={"requires_approval": "false", "reason": "read-only in practice"},
+            headers=_edit_headers(csrf),
+        )
+        report = client.get("/ui/connectors/overrides")
+    finally:
+        mock.stop()
+
+    assert empty.status_code == 200, empty.text
+    assert "data-overrides-empty" in empty.text
+    assert edit.status_code == 200, edit.text
+    assert report.status_code == 200, report.text
+    assert f'data-op-id="{_OP_ID}"' in report.text
+    assert "read-only in practice" in report.text
+    assert "turned off" in report.text

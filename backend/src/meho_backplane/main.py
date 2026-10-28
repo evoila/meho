@@ -101,6 +101,9 @@ from meho_backplane.api.v1.gateway import router as api_v1_gateway_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.api.v1.kb import router as api_v1_kb_router
 from meho_backplane.api.v1.memory import router as api_v1_memory_router
+from meho_backplane.api.v1.operation_overrides import (
+    router as api_v1_operation_overrides_router,
+)
 from meho_backplane.api.v1.operation_runs import router as api_v1_operation_runs_router
 from meho_backplane.api.v1.operations import router as api_v1_operations_router
 from meho_backplane.api.v1.read_docs import router as api_v1_read_docs_router
@@ -985,6 +988,9 @@ app.include_router(api_v1_operations_router)
 # operator-gated. The same service layer (IngestionPipelineService +
 # ReviewService) backs T5 (CLI verbs) and T7 (admin MCP tools).
 app.include_router(api_v1_connectors_ingest_router)
+# #4711 -- the override report: operator overrides of risk levels and
+# approval flags, and the "operations running with reduced approval" list.
+app.include_router(api_v1_operation_overrides_router)
 # G4.1-T2 (#416) -- knowledge-base REST surface at /api/v1/kb*.
 # Five routes (GET / GET /{slug} / POST / DELETE /{slug} / POST /ingest)
 # that expose the T1 :class:`KbService` to operators + agents. Tenant-

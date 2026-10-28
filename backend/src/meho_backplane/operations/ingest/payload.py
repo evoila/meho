@@ -101,6 +101,13 @@ class ConnectorReviewOp(BaseModel):
     # is re-ingested. Additive with a default so existing construction
     # call sites keep working; the service sets it from the row.
     needs_reingest: bool = False
+    # #4711: ``safety_level`` / ``requires_approval`` above are the values
+    # that apply to the viewer's tenant, with operator overrides. These two
+    # keep the classification (the value in code or in the API
+    # description), the floor an edit cannot go below. ``None`` only for
+    # payloads built without a descriptor row.
+    classified_safety_level: str | None = None
+    classified_requires_approval: bool | None = None
 
 
 class ConnectorReviewDeleteOp(BaseModel):

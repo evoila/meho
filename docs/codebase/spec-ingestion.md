@@ -773,7 +773,10 @@ flips it after the LLM-grouping pass runs.
 
 `safety_changes` (#2702) is a tuple of frozen `SafetyChange`
 entries — one per **existing** row whose `safety_level` the call
-overwrote with a different value. Both existing-row update paths in
+overwrote with a different value. An operator's stricter level is an
+override kept apart from the row (#4711, see
+[Operator overrides of risk level and approval](#operator-overrides-of-risk-level-and-approval-4711)),
+so a re-ingest never overwrites it and it never shows up here. Both existing-row update paths in
 `_upsert.py` capture the diff (the body hash covers embedding text,
 not safety metadata, so the skip-re-embed branch can carry a
 reclassification too). After the upsert loop,
@@ -1057,6 +1060,94 @@ Do not fix such a copy by renaming its rows to the current product.
 Since #3870 a tenant's own copy is the only copy used for that tenant,
 and the old copy lacks the hand-written ops of the built-in copy
 (`vrli.event.query`), so the tenant would lose them.
+
+### Operator overrides of risk level and approval (#4711)
+
+An operator can make an operation stricter: raise its risk level,
+require approval, or turn it off. The change stays after a restart, an
+upgrade and a new ingest of the API description.
+
+**Where the values live.**
+
+* `endpoint_descriptor.safety_level` / `requires_approval` hold the
+  *classification*: the value in code (typed and composite operations)
+  or from the API description plus its safety floors (ingested
+  operations). Typed registration at every start and every re-ingest
+  write only these columns.
+* `operation_policy_override` (migration `0119`, model
+  `OperationPolicyOverride`) holds the operator's choice, one row per
+  scope and operation name `(product, version, impl_id, op_id)`.
+  `tenant_id` is the scope: a tenant UUID (that tenant only) or `NULL`
+  (the whole install). Keyed on the name, not on a descriptor id, so a
+  re-ingest that deletes and re-creates rows keeps it.
+* Turning an operation off still writes `endpoint_descriptor.is_enabled`
+  as before; both registration paths already keep it. A per-tenant
+  on/off switch for built-in operations is a separate task.
+
+**The effective values** (`operations/op_policy.py`,
+`effective_policy`):
+
+* risk level: the highest of the classification and every override that
+  applies (install-wide plus the caller's tenant);
+* approval: required when the classification or any override says so.
+  The only way to turn it off is an override with
+  `requires_approval=false` (see below). A destructive operation always
+  requires approval.
+
+`lookup_descriptor` (dispatch, preview, checks, gateway mint, governed
+sub-operations, service grants), the operation contract,
+`search_operations` hits and the review payload all read these effective
+values, so a call, a preview and the approval check always agree. The
+review payload also carries `classified_safety_level` /
+`classified_requires_approval` (the floor).
+
+**Edit rules** (`apply_policy_edit`, called by `ReviewService.edit_op`):
+
+| Edit | Who | Scope | Result |
+|---|---|---|---|
+| raise the risk level (any of the four levels) | tenant admin | own tenant | override; `destructive` also requires approval |
+| raise the risk level | platform admin, built-in operation | whole install | override |
+| require approval | tenant admin / platform admin | as above | override |
+| set the level back to the classification | same scope | same scope | override field removed, value from code applies |
+| a level below the classification | anyone | - | refused, `risk_level_below_classification`: open a pull request |
+| `requires_approval=false` where the classification requires it | platform admin, with a non-empty `reason` and a person present | whole install (built-in) or the row's tenant | override `false`; listed in the reduced-approval report |
+| `requires_approval=false` on a destructive operation | anyone | - | always refused, `approval_off_destructive` |
+
+"A person present" is the fresh sign-in check on REST
+(`auth/fresh_sign_in.py`, see `approvals.md`) and the web session in the
+console. A tenant admin may now edit the risk level and approval of a
+built-in operation without `platform_admin`: the change is an override
+for their tenant, not a write to the shared row. Every other field of a
+built-in row still needs `platform_admin`.
+
+**Surfaces.** REST `PATCH /api/v1/connectors/{id}/operations/{op_id}`
+(body field `reason`), the console review drawer (the approval toggle
+asks for a reason; the risk level select offers only levels at or above
+the classification), the CLI `meho connector edit-op --safety
+safe|caution|dangerous|destructive --reason <text>`, and the MCP tool
+`meho_connector_edit_op`. The MCP tool passes `tighten_only=True`: it
+refuses `requires_approval=false` and any level below the current one
+(`edit_tool_cannot_loosen`), so an AI client can never loosen approval
+with an admin's token. REST maps refusals to `400`, a tenant admin
+turning approval off to `403`, and a missing fresh sign-in to `401` with
+`WWW-Authenticate: Bearer error="insufficient_user_authentication",
+max_age=<N>` (RFC 9470).
+
+**Audit.** The `meho_connector_edit_op` row carries `changes`
+(`{field: {"old", "new"}}` for the risk level, approval and
+`is_enabled`, with effective values), `scope` (`tenant` / `install`) and
+`reason`, next to the existing `fields_updated` and `is_enabled_set_to`.
+
+**Report.** `GET /api/v1/connectors/operation-overrides`
+(`?reduced_approval=true` for the operations running with reduced
+approval), `meho connector overrides [--reduced-approval]`, and the
+console page `/ui/connectors/overrides`. A tenant admin sees the
+install-wide rows and their own tenant's; a platform admin sees all.
+
+**Upgrade.** Before this change an edit wrote the descriptor row, so it
+was lost at the next start (typed) or re-ingest (ingested). Existing
+stricter edits on rows stay until then; re-apply them once with
+`edit-op` to make them stick.
 
 ### Operator-selectable auth scheme on a non-catalog ingest (#2289)
 

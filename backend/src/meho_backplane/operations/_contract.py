@@ -44,6 +44,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations._lookup import visible_scope_clause
 from meho_backplane.operations.dispatcher import descriptor_requires_target
+from meho_backplane.operations.op_policy import apply_effective_policy
 
 __all__ = [
     "EXAMPLES_MAX",
@@ -249,10 +250,11 @@ async def _find_descriptor(
                 )
             )
         ).first()
-    if row is None:
-        return None
-    descriptor, group_key = row
-    return descriptor, group_key
+        if row is None:
+            return None
+        descriptor, group_key = row
+        # #4711: the contract shows the risk level and approval that apply.
+        return await apply_effective_policy(session, tenant_id=tenant_id, row=descriptor), group_key
 
 
 async def build_operation_contract(

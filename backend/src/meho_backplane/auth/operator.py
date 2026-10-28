@@ -233,6 +233,12 @@ class Operator(BaseModel):
     approver: bool = False
     runner_id: UUID | None = None
     check_runner_dispatch: bool = False
+    #: The ``auth_time`` claim: when the person last entered their
+    #: credentials (seconds since the epoch, OIDC Core section 2). A token
+    #: refresh keeps it (RFC 9470 section 6.1). ``None`` when the token has
+    #: no such claim, which a service token never has. Read by the fresh
+    #: sign-in check (:mod:`meho_backplane.auth.fresh_sign_in`).
+    auth_time: int | None = None
 
 
 #: Machine (non-human) principal kinds. A human operator authenticates as

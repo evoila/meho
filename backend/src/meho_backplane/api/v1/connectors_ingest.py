@@ -25,7 +25,7 @@ Route inventory
   :class:`EditGroupBody`. Returns 204. Role: ``tenant_admin``.
 * ``PATCH /api/v1/connectors/{connector_id}/operations/{op_id}`` —
   edit a per-op override (``safety_level``, ``requires_approval``,
-  ``custom_description``, ``is_enabled``). Body: :class:`EditOpBody`.
+  ``custom_description``, ``is_enabled``, ``reason``). Body: :class:`EditOpBody`.
   Returns 200 with :class:`EditOpResponse` (enable-time advisories
   in ``warnings``, G0.23-T4 #1630). Role: ``tenant_admin``.
 * ``POST /api/v1/connectors/{connector_id}/enable`` — transition all
@@ -197,6 +197,7 @@ from fastapi import status as http_status
 from fastapi.responses import JSONResponse, Response
 
 from meho_backplane.api.v1.operations import connector_not_ingested_404
+from meho_backplane.auth.fresh_sign_in import fresh_sign_in_challenge, has_fresh_sign_in
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.operations._lookup import (
@@ -270,8 +271,10 @@ from meho_backplane.operations.ingest.list_connectors import (
     next_step_for_registered_connector,
 )
 from meho_backplane.operations.meta_tools import ConnectorNotIngestedError
+from meho_backplane.operations.op_policy import OpPolicyEditError
 
 __all__ = [
+    "apply_op_edit",
     "get_llm_client_factory",
     "router",
     "set_llm_client_factory",
@@ -1509,6 +1512,37 @@ async def edit_op_endpoint(
     operations whose natural key contains slashes
     (``"GET:/api/vcenter/cluster"``) round-trip without
     URL-encoding the colon-prefixed path segment.
+
+    ``safety_level`` / ``requires_approval`` are stored as an operator
+    override (#4711). Turning approval off needs a person with a fresh
+    sign-in (:func:`~meho_backplane.auth.fresh_sign_in.has_fresh_sign_in`):
+    an API token with an old sign-in, a service principal or an agent gets
+    ``401`` with ``WWW-Authenticate: Bearer
+    error="insufficient_user_authentication"``. A tenant admin asking for it
+    gets ``403``; a level below the classification, a missing reason or a
+    destructive operation gets ``400``.
+    """
+    return await apply_op_edit(
+        connector_id,
+        op_id,
+        body,
+        operator,
+        person_present=has_fresh_sign_in(operator),
+    )
+
+
+async def apply_op_edit(
+    connector_id: str,
+    op_id: str,
+    body: EditOpBody,
+    operator: Operator,
+    *,
+    person_present: bool,
+) -> EditOpResponse:
+    """Run one per-op edit and map service errors to HTTP errors.
+
+    Shared by the REST route and the console (which calls it in-process
+    with ``person_present=True``: the web session is the person, #4711).
     """
     service = ReviewService(operator)
     # Forward custom_description only when the operator supplied one. The
@@ -1521,6 +1555,8 @@ async def edit_op_endpoint(
         "safety_level": body.safety_level,
         "requires_approval": body.requires_approval,
         "is_enabled": body.is_enabled,
+        "reason": body.reason,
+        "person_present": person_present,
     }
     if body.custom_description is not None:
         edit_op_overrides["custom_description"] = body.custom_description
@@ -1547,12 +1583,24 @@ async def edit_op_endpoint(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         ) from exc
+    except OpPolicyEditError as exc:
+        raise _policy_edit_http_error(exc) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
     return EditOpResponse(warnings=warnings)
+
+
+def _policy_edit_http_error(exc: OpPolicyEditError) -> HTTPException:
+    """Map a refused risk level / approval edit to its HTTP error (#4711)."""
+    detail = f"{exc.code}: {exc}"
+    if exc.code == "approval_off_needs_fresh_sign_in":
+        return fresh_sign_in_challenge(detail)
+    if exc.code == "approval_off_needs_platform_admin":
+        return HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail=detail)
+    return HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail=detail)
 
 
 @router.post(

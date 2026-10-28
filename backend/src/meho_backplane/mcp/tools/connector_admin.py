@@ -381,12 +381,18 @@ async def _edit_op_handler(
         patch["requires_approval"] = arguments["requires_approval"]
     if "is_enabled" in arguments:
         patch["is_enabled"] = arguments["is_enabled"]
+    if "reason" in arguments:
+        patch["reason"] = arguments["reason"]
     service = ReviewService(operator)
     try:
+        # #4711: an AI client may make an operation stricter, never looser.
+        # ``tighten_only`` refuses ``requires_approval: false`` and any lower
+        # risk level with a message that names the console / CLI path.
         warnings = await service.edit_op(
             connector_id,
             op_id,
             tenant_id=tenant_id,
+            tighten_only=True,
             **patch,
         )
     except BuiltinConnectorWriteForbiddenError as exc:
@@ -734,14 +740,20 @@ register_mcp_tool(
             "Edit one operation's per-op overrides (tenant_admin only). "
             "Editable fields: custom_description (operator-authored "
             "agent-facing description), safety_level (safe / caution / "
-            "dangerous), requires_approval (gate the operation behind "
-            "out-of-band approval), is_enabled (per-op enable/disable "
-            "that survives connector-level enable/disable cycles). Pass "
-            "at least one field; passing none is rejected. Use during "
-            "review (after meho_connector_review surfaces the op) when "
-            "an LLM-generated description is misleading or when a "
-            "DELETE-shaped op needs the safety_level promoted from "
-            "'dangerous' to require approval. is_enabled=false here "
+            "dangerous / destructive), requires_approval (gate the "
+            "operation behind out-of-band approval), is_enabled (per-op "
+            "enable/disable that survives connector-level enable/disable "
+            "cycles), reason (written to the audit row). Pass at least one "
+            "field; passing none is rejected. This tool can only make an "
+            "operation stricter: it refuses requires_approval=false and "
+            "any risk level lower than the current one. Turning approval "
+            "off is for a platform admin in the console or the CLI; "
+            "lowering a risk level needs a pull request. A raised risk "
+            "level or required approval survives restarts and re-ingest. "
+            "Use during review (after meho_connector_review surfaces the "
+            "op) when an LLM-generated description is misleading or when "
+            "a DELETE-shaped op needs a higher safety_level or approval. "
+            "is_enabled=false here "
             "STICKS: a subsequent meho_connector_enable will NOT "
             "clobber the operator's per-op disable. Do not use this "
             "to flip whole-connector state — pair with "
@@ -767,6 +779,7 @@ register_mcp_tool(
                 },
                 "requires_approval": {"type": ["boolean", "null"]},
                 "is_enabled": {"type": ["boolean", "null"]},
+                "reason": {"type": ["string", "null"], "minLength": 1, "maxLength": 1024},
                 "tenant_id": _TENANT_ID_PROPERTY,
             },
             "required": ["connector_id", "op_id"],

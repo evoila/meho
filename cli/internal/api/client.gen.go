@@ -440,6 +440,12 @@ const (
 	MemoryScopeUserTenant MemoryScope = "user-tenant"
 )
 
+// Defines values for OperationOverrideRowScope.
+const (
+	OperationOverrideRowScopeInstall OperationOverrideRowScope = "install"
+	OperationOverrideRowScopeTenant  OperationOverrideRowScope = "tenant"
+)
+
 // Defines values for OperationRunStatus.
 const (
 	OperationRunStatusCancelled OperationRunStatus = "cancelled"
@@ -899,6 +905,12 @@ const (
 	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateOk       ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "ok"
 	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateSkip     ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "skip"
 	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateUnknown  ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "unknown"
+)
+
+// Defines values for UiConnectorsOverridesUiConnectorsOverridesGetParamsShow.
+const (
+	UiConnectorsOverridesUiConnectorsOverridesGetParamsShowAll     UiConnectorsOverridesUiConnectorsOverridesGetParamsShow = "all"
+	UiConnectorsOverridesUiConnectorsOverridesGetParamsShowReduced UiConnectorsOverridesUiConnectorsOverridesGetParamsShow = "reduced"
 )
 
 // Defines values for RunbooksIndexUiRunbooksGetParamsStatus.
@@ -2842,6 +2854,7 @@ type BodyUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPost struct {
 type BodyUiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatch struct {
 	CustomDescription *string `json:"custom_description"`
 	IsEnabled         *string `json:"is_enabled"`
+	Reason            *string `json:"reason"`
 	RequiresApproval  *string `json:"requires_approval"`
 	SafetyLevel       *string `json:"safety_level"`
 
@@ -3867,15 +3880,17 @@ type ConnectorReviewGroupAdvisory struct {
 // for connectors with thousands of operations (vCenter has 961
 // paths in v0.2).
 type ConnectorReviewOp struct {
-	CustomDescription *string  `json:"custom_description"`
-	Description       *string  `json:"description"`
-	IsEnabled         bool     `json:"is_enabled"`
-	NeedsReingest     *bool    `json:"needs_reingest,omitempty"`
-	OpId              string   `json:"op_id"`
-	RequiresApproval  bool     `json:"requires_approval"`
-	SafetyLevel       string   `json:"safety_level"`
-	Summary           *string  `json:"summary"`
-	Tags              []string `json:"tags"`
+	ClassifiedRequiresApproval *bool    `json:"classified_requires_approval"`
+	ClassifiedSafetyLevel      *string  `json:"classified_safety_level"`
+	CustomDescription          *string  `json:"custom_description"`
+	Description                *string  `json:"description"`
+	IsEnabled                  bool     `json:"is_enabled"`
+	NeedsReingest              *bool    `json:"needs_reingest,omitempty"`
+	OpId                       string   `json:"op_id"`
+	RequiresApproval           bool     `json:"requires_approval"`
+	SafetyLevel                string   `json:"safety_level"`
+	Summary                    *string  `json:"summary"`
+	Tags                       []string `json:"tags"`
 }
 
 // ConnectorReviewPayload Top-level review payload returned by :meth:`ReviewService.get_review_payload`.
@@ -5041,8 +5056,19 @@ type EditGroupBody struct {
 //
 // “safety_level“ is the bounded enum from
 // :class:`~meho_backplane.db.models.EndpointDescriptor.safety_level`
-// (“safe“ / “caution“ / “dangerous“); a value outside the set
-// is rejected by Pydantic before the service layer sees it.
+// (“safe“ / “caution“ / “dangerous“ / “destructive“); a value
+// outside the set is rejected by Pydantic before the service layer sees
+// it. It can only raise the level above the classification (#4711).
+//
+// “safety_level“ and “requires_approval“ are stored as an operator
+// override, apart from the value in code or in the API description, so
+// they survive a restart and a re-ingest (#4711). “requires_approval:
+// false“ where the classification requires approval needs
+// “platform_admin“, a “reason“ and a fresh sign-in; it is never
+// allowed for a destructive operation.
+//
+// “reason“ is written to the audit row. It is required to turn
+// approval off.
 //
 // “is_enabled“ is the per-op override that wins over the group
 // cascade (see :meth:`ReviewService.edit_op` for the full
@@ -5062,6 +5088,7 @@ type EditGroupBody struct {
 type EditOpBody struct {
 	CustomDescription *string                `json:"custom_description"`
 	IsEnabled         *bool                  `json:"is_enabled"`
+	Reason            *string                `json:"reason"`
 	RequiresApproval  *bool                  `json:"requires_approval"`
 	SafetyLevel       *EditOpBodySafetyLevel `json:"safety_level"`
 }
@@ -6829,6 +6856,32 @@ type OperationDescriptor struct {
 	TenantId          *openapi_types.UUID     `json:"tenant_id"`
 	Version           string                  `json:"version"`
 }
+
+// OperationOverrideList Response body for “GET /api/v1/connectors/operation-overrides“ (#4711).
+type OperationOverrideList struct {
+	Overrides []OperationOverrideRow `json:"overrides"`
+}
+
+// OperationOverrideRow One operator override of a risk level or approval flag (#4711).
+//
+// “scope“ is “tenant“ (the change applies to “tenant_id“ only) or
+// “install“ (the whole install). “safety_level“ / “requires_approval“
+// are the stored override values; “None“ means "not changed here".
+// “requires_approval=false“ means a platform admin turned approval off.
+type OperationOverrideRow struct {
+	ConnectorId      string                    `json:"connector_id"`
+	OpId             string                    `json:"op_id"`
+	Reason           *string                   `json:"reason"`
+	RequiresApproval *bool                     `json:"requires_approval"`
+	SafetyLevel      *string                   `json:"safety_level"`
+	Scope            OperationOverrideRowScope `json:"scope"`
+	SetAt            time.Time                 `json:"set_at"`
+	SetBySub         string                    `json:"set_by_sub"`
+	TenantId         *openapi_types.UUID       `json:"tenant_id"`
+}
+
+// OperationOverrideRowScope defines model for OperationOverrideRow.Scope.
+type OperationOverrideRowScope string
 
 // OperationRunStatus Closed lifecycle status of an :class:`OperationRun`.
 //
@@ -10896,6 +10949,13 @@ type GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams defines parameters for ListOperationOverridesApiV1ConnectorsOperationOverridesGet.
+type ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams struct {
+	// ReducedApproval Only the operations a platform admin turned approval off for.
+	ReducedApproval *bool   `form:"reduced_approval,omitempty" json:"reduced_approval,omitempty"`
+	Authorization   *string `json:"authorization,omitempty"`
+}
+
 // DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams defines parameters for DeleteEndpointApiV1ConnectorsConnectorIdDelete.
 type DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -11800,6 +11860,14 @@ type UiConnectorsListUiConnectorsGetParams struct {
 	Product *string                                            `form:"product,omitempty" json:"product,omitempty"`
 }
 
+// UiConnectorsOverridesUiConnectorsOverridesGetParams defines parameters for UiConnectorsOverridesUiConnectorsOverridesGet.
+type UiConnectorsOverridesUiConnectorsOverridesGetParams struct {
+	Show *UiConnectorsOverridesUiConnectorsOverridesGetParamsShow `form:"show,omitempty" json:"show,omitempty"`
+}
+
+// UiConnectorsOverridesUiConnectorsOverridesGetParamsShow defines parameters for UiConnectorsOverridesUiConnectorsOverridesGet.
+type UiConnectorsOverridesUiConnectorsOverridesGetParamsShow string
+
 // UiConnectorsRegistryListUiConnectorsRegistryGetParams defines parameters for UiConnectorsRegistryListUiConnectorsRegistryGet.
 type UiConnectorsRegistryListUiConnectorsRegistryGetParams struct {
 	Status  *UnderscoreStatusFilter `form:"status,omitempty" json:"status,omitempty"`
@@ -12321,6 +12389,9 @@ type UiConnectorsImportPreviewUiConnectorsImportPostMultipartRequestBody = BodyU
 
 // UiConnectorsImportConfirmUiConnectorsImportConfirmPostMultipartRequestBody defines body for UiConnectorsImportConfirmUiConnectorsImportConfirmPost for multipart/form-data ContentType.
 type UiConnectorsImportConfirmUiConnectorsImportConfirmPostMultipartRequestBody = BodyUiConnectorsImportConfirmUiConnectorsImportConfirmPost
+
+// UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody defines body for UiConnectorsOverridesUiConnectorsOverridesGet for application/json ContentType.
+type UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody = UISessionContext
 
 // UiConnectorsRegistryListUiConnectorsRegistryGetJSONRequestBody defines body for UiConnectorsRegistryListUiConnectorsRegistryGet for application/json ContentType.
 type UiConnectorsRegistryListUiConnectorsRegistryGetJSONRequestBody = UISessionContext
@@ -14398,6 +14469,9 @@ type ClientInterface interface {
 	// GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet request
 	GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet(ctx context.Context, jobId openapi_types.UUID, params *GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListOperationOverridesApiV1ConnectorsOperationOverridesGet request
+	ListOperationOverridesApiV1ConnectorsOperationOverridesGet(ctx context.Context, params *ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// DeleteEndpointApiV1ConnectorsConnectorIdDelete request
 	DeleteEndpointApiV1ConnectorsConnectorIdDelete(ctx context.Context, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -15086,6 +15160,11 @@ type ClientInterface interface {
 
 	// UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBody request with any body
 	UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsOverridesUiConnectorsOverridesGetWithBody request with any body
+	UiConnectorsOverridesUiConnectorsOverridesGetWithBody(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsOverridesUiConnectorsOverridesGet(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, body UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiConnectorsRegistryListUiConnectorsRegistryGetWithBody request with any body
 	UiConnectorsRegistryListUiConnectorsRegistryGetWithBody(ctx context.Context, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -16733,6 +16812,18 @@ func (c *Client) IngestEndpointApiV1ConnectorsIngestPost(ctx context.Context, pa
 
 func (c *Client) GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet(ctx context.Context, jobId openapi_types.UUID, params *GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetRequest(c.Server, jobId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListOperationOverridesApiV1ConnectorsOperationOverridesGet(ctx context.Context, params *ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListOperationOverridesApiV1ConnectorsOperationOverridesGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -19793,6 +19884,30 @@ func (c *Client) UiConnectorsImportPreviewUiConnectorsImportPostWithBody(ctx con
 
 func (c *Client) UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiConnectorsImportConfirmUiConnectorsImportConfirmPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsOverridesUiConnectorsOverridesGetWithBody(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsOverridesUiConnectorsOverridesGetRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsOverridesUiConnectorsOverridesGet(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, body UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsOverridesUiConnectorsOverridesGetRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -26718,6 +26833,70 @@ func NewGetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetRequest(server stri
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListOperationOverridesApiV1ConnectorsOperationOverridesGetRequest generates requests for ListOperationOverridesApiV1ConnectorsOperationOverridesGet
+func NewListOperationOverridesApiV1ConnectorsOperationOverridesGetRequest(server string, params *ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/operation-overrides")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.ReducedApproval != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "reduced_approval", runtime.ParamLocationQuery, *params.ReducedApproval); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -38149,6 +38328,68 @@ func NewUiConnectorsImportConfirmUiConnectorsImportConfirmPostRequestWithBody(se
 	return req, nil
 }
 
+// NewUiConnectorsOverridesUiConnectorsOverridesGetRequest calls the generic UiConnectorsOverridesUiConnectorsOverridesGet builder with application/json body
+func NewUiConnectorsOverridesUiConnectorsOverridesGetRequest(server string, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, body UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsOverridesUiConnectorsOverridesGetRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewUiConnectorsOverridesUiConnectorsOverridesGetRequestWithBody generates requests for UiConnectorsOverridesUiConnectorsOverridesGet with any type of body
+func NewUiConnectorsOverridesUiConnectorsOverridesGetRequestWithBody(server string, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/overrides")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Show != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "show", runtime.ParamLocationQuery, *params.Show); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewUiConnectorsRegistryListUiConnectorsRegistryGetRequest calls the generic UiConnectorsRegistryListUiConnectorsRegistryGet builder with application/json body
 func NewUiConnectorsRegistryListUiConnectorsRegistryGetRequest(server string, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, body UiConnectorsRegistryListUiConnectorsRegistryGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -45803,6 +46044,9 @@ type ClientWithResponsesInterface interface {
 	// GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetWithResponse request
 	GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetWithResponse(ctx context.Context, jobId openapi_types.UUID, params *GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams, reqEditors ...RequestEditorFn) (*GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse, error)
 
+	// ListOperationOverridesApiV1ConnectorsOperationOverridesGetWithResponse request
+	ListOperationOverridesApiV1ConnectorsOperationOverridesGetWithResponse(ctx context.Context, params *ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams, reqEditors ...RequestEditorFn) (*ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse, error)
+
 	// DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse request
 	DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse(ctx context.Context, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse, error)
 
@@ -46491,6 +46735,11 @@ type ClientWithResponsesInterface interface {
 
 	// UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBodyWithResponse request with any body
 	UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse, error)
+
+	// UiConnectorsOverridesUiConnectorsOverridesGetWithBodyWithResponse request with any body
+	UiConnectorsOverridesUiConnectorsOverridesGetWithBodyWithResponse(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsOverridesUiConnectorsOverridesGetResponse, error)
+
+	UiConnectorsOverridesUiConnectorsOverridesGetWithResponse(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, body UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsOverridesUiConnectorsOverridesGetResponse, error)
 
 	// UiConnectorsRegistryListUiConnectorsRegistryGetWithBodyWithResponse request with any body
 	UiConnectorsRegistryListUiConnectorsRegistryGetWithBodyWithResponse(ctx context.Context, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryListUiConnectorsRegistryGetResponse, error)
@@ -48578,6 +48827,29 @@ func (r GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse) Status() 
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *OperationOverrideList
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -52715,6 +52987,28 @@ func (r UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse) StatusCo
 	return 0
 }
 
+type UiConnectorsOverridesUiConnectorsOverridesGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsOverridesUiConnectorsOverridesGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsOverridesUiConnectorsOverridesGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiConnectorsRegistryListUiConnectorsRegistryGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -56801,6 +57095,15 @@ func (c *ClientWithResponses) GetIngestJobEndpointApiV1ConnectorsIngestJobsJobId
 	return ParseGetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse(rsp)
 }
 
+// ListOperationOverridesApiV1ConnectorsOperationOverridesGetWithResponse request returning *ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse
+func (c *ClientWithResponses) ListOperationOverridesApiV1ConnectorsOperationOverridesGetWithResponse(ctx context.Context, params *ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams, reqEditors ...RequestEditorFn) (*ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse, error) {
+	rsp, err := c.ListOperationOverridesApiV1ConnectorsOperationOverridesGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse(rsp)
+}
+
 // DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse request returning *DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse
 func (c *ClientWithResponses) DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse(ctx context.Context, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse, error) {
 	rsp, err := c.DeleteEndpointApiV1ConnectorsConnectorIdDelete(ctx, connectorId, params, reqEditors...)
@@ -59018,6 +59321,23 @@ func (c *ClientWithResponses) UiConnectorsImportConfirmUiConnectorsImportConfirm
 		return nil, err
 	}
 	return ParseUiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse(rsp)
+}
+
+// UiConnectorsOverridesUiConnectorsOverridesGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsOverridesUiConnectorsOverridesGetResponse
+func (c *ClientWithResponses) UiConnectorsOverridesUiConnectorsOverridesGetWithBodyWithResponse(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsOverridesUiConnectorsOverridesGetResponse, error) {
+	rsp, err := c.UiConnectorsOverridesUiConnectorsOverridesGetWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsOverridesUiConnectorsOverridesGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsOverridesUiConnectorsOverridesGetWithResponse(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, body UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsOverridesUiConnectorsOverridesGetResponse, error) {
+	rsp, err := c.UiConnectorsOverridesUiConnectorsOverridesGet(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsOverridesUiConnectorsOverridesGetResponse(rsp)
 }
 
 // UiConnectorsRegistryListUiConnectorsRegistryGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsRegistryListUiConnectorsRegistryGetResponse
@@ -63164,6 +63484,39 @@ func ParseGetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse(rsp *htt
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest IngestJobStatusResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse parses an HTTP response from a ListOperationOverridesApiV1ConnectorsOperationOverridesGetWithResponse call
+func ParseListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse(rsp *http.Response) (*ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OperationOverrideList
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -68542,6 +68895,32 @@ func ParseUiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse(rsp *ht
 	}
 
 	response := &UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsOverridesUiConnectorsOverridesGetResponse parses an HTTP response from a UiConnectorsOverridesUiConnectorsOverridesGetWithResponse call
+func ParseUiConnectorsOverridesUiConnectorsOverridesGetResponse(rsp *http.Response) (*UiConnectorsOverridesUiConnectorsOverridesGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsOverridesUiConnectorsOverridesGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

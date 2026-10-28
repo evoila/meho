@@ -44,6 +44,7 @@ from sqlalchemy.orm import aliased
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
+from meho_backplane.operations.op_policy import apply_effective_policy
 
 __all__ = [
     "connector_class_registered",
@@ -174,6 +175,12 @@ async def lookup_descriptor(
     or absent op there resolves to ``None``. There is no fallback to the
     built-in row (#3870). Otherwise the built-in row is used. Because
     only one bucket is ever visible, one SELECT finds at most one row.
+
+    The returned row carries the *effective* ``safety_level`` and
+    ``requires_approval`` for *tenant_id*: the operator overrides are
+    applied (#4711, :func:`~meho_backplane.operations.op_policy.apply_effective_policy`).
+    The row is detached from its session, so those values are never
+    written back.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -193,7 +200,10 @@ async def lookup_descriptor(
                 EndpointDescriptor.is_enabled.is_(True),
             )
         )
-        return result.scalar_one_or_none()
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        return await apply_effective_policy(session, tenant_id=tenant_id, row=row)
 
 
 async def descriptor_exists_any_state(

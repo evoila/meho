@@ -132,6 +132,8 @@ async def _edit_handler(
     # field, so "omitted" must stay "no edit" (``None``).
     requires_approval: str | None = Form(default=None),
     is_enabled: str | None = Form(default=None),
+    # #4711: the reason a platform admin gives for turning approval off.
+    reason: str | None = Form(default=None, max_length=1024),
     session_ctx: UISessionContext = _require_session_dep,
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
@@ -155,6 +157,7 @@ async def _edit_handler(
         is_enabled=_parse_flag(is_enabled, submitted="is_enabled" in form, field="is_enabled"),
         session_ctx=session_ctx,
         operator=operator,
+        reason=reason,
     )
 
 

@@ -364,7 +364,7 @@ from meho_backplane.operations._validate import (
     policy_gate,
     validate_params,
 )
-from meho_backplane.operations._vendor_text import withhold_vendor_text
+from meho_backplane.operations._vendor_text import redact_error_result, withhold_vendor_text
 from meho_backplane.operations.composite import (
     COMPOSITE_DEPTH_TOP_LEVEL,
     CompositeRecursionLimitExceeded,
@@ -1843,8 +1843,14 @@ async def _audit_error_and_return(
     first (:func:`~meho_backplane.operations._vendor_text.withhold_vendor_text`).
     Every error result passes here, so the caller's answer, the audit row and
     the stored approval result all hold the same text.
+
+    #5031: then, for every operation, secrets are removed from the whole
+    result (:func:`~meho_backplane.operations._vendor_text.redact_error_result`):
+    secret-named fields and Tier-1 shapes in every string of ``error`` and
+    ``extras``.
     """
     result = withhold_vendor_text(result, op_id=descriptor.op_id, tags=descriptor.tags)
+    result = redact_error_result(result)
     receipt = await audit_safe(
         audit_id=audit_id,
         event_class=AuditEventClass.OPERATION_EXECUTION,

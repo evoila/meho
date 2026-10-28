@@ -270,6 +270,17 @@ text from the error result, in one shared place.
   the raised error. So the new login and one retry after HTTP 401, and
   the 403 and 429 results, work as before.
 
+**Every error result is cleaned of secrets (#5031).** For every operation,
+right after the step above, `_audit_error_and_return` runs
+`operations/_vendor_text.py::redact_error_result`. It cleans every string
+and every field of `error` and `extras`: the value of each secret-named
+field is replaced with `[REDACTED:param_name]`, then the Tier-1 default
+policy runs. This also covers the fields that come straight from the
+vendor, such as the `validation_errors` of a `connector_http_422` and the
+`permission_headers` of a `connector_http_403`. Details:
+`docs/codebase/redaction.md` ("Errors, diagnostics and saved test
+captures").
+
 **Non-httpx upstream status: `ConnectorUpstreamError` (#3876).** A
 connector whose client library does not raise `httpx.HTTPStatusError`
 reads the HTTP status and the upstream's message at its own boundary and

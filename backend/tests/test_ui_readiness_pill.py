@@ -638,49 +638,59 @@ def test_dashboard_pill_follows_probe_state_unchanged() -> None:
 async def test_sequential_ui_requests_do_not_serialise_on_a_blocking_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """N ``/ui/*`` renders stay fast + sweep a bounded number of times.
+    """30 ``/ui/*`` page loads run a blocking probe at most once.
 
-    This is the load-bearing regression for the #1776 CI-unit-lane
-    overrun. The earlier design awaited the probe sweep **inline** on
-    every ``/ui/*`` render. Under a black-holed dependency each sweep hit
-    the timeout bound, the timeout verdict was **not** cached, so every
-    subsequent request re-swept — serialised through the readiness
-    single-flight lock and orphaning a probe-worker thread each time.
-    Hundreds of UI tests x ~1 s serialised + thread accumulation overran
-    the unit lane's hard job-timeout cap (it died at ~15 min on every
-    run; the local sweep passed only because ``ECONNREFUSED`` fails fast).
+    This guards the fix for the #1776 CI overrun. In the earlier design,
+    every ``/ui/*`` page load ran the probe sweep itself and waited for
+    it. A probe that never answers hit the time limit on every page load.
+    The timeout result was **not** cached, so the next page load ran the
+    sweep again. The page loads queued one after another on the readiness
+    lock, and each one left a probe thread behind. Hundreds of UI tests x
+    ~1 s each overran the unit lane's job time limit.
 
-    The fix decouples the request path from probe execution
-    (stale-while-revalidate): the hot-path accessor
-    (:func:`~meho_backplane.health.ui_readiness_verdict`) returns the
-    cached verdict immediately and refreshes it in a single-flight
-    background task; only the first-ever request warms a cold cache with
-    one bounded sweep. So N sequential requests against a blocking probe
-    must (a) complete in well under N x the bound — they don't serialise —
-    and (b) invoke the probe only a small constant number of times
-    (warm + at most one background refresh in flight), not once per
-    request.
+    In the fixed design, a page load only reads the cached verdict
+    (:func:`~meho_backplane.health.ui_readiness_verdict`). Only the first
+    page load fills the empty cache, with one sweep that has a time limit,
+    and the timeout result is cached too.
 
-    Driven through ``httpx.ASGITransport`` on this test's persistent event
-    loop rather than ``TestClient`` — ``TestClient``'s blocking portal
-    joins the orphaned ``asyncio.to_thread`` future before returning,
-    which would inflate the test's wall-clock to the probe's full sleep
-    (a harness artifact, not a property of the production hot path).
+    The proof is the probe count, not the clock time:
 
-    On the pre-fix head (``fb725e5d``) this FAILS: with the timeout
-    verdict never cached, all N renders re-sweep and the wall-time
-    balloons to ≈ N x the bound (blowing the time assertion) while the
-    probe is invoked once per request (blowing the invocation assertion).
+    * The test keeps the cached result fresh for the whole test. So no
+      background refresh starts, however slow the machine is.
+    * Then the probe runs at most once (to fill the cache) for all 30
+      page loads. If page loads ran the probe themselves, it would run
+      many times (up to once per page load).
+
+    An earlier version of this test also checked that the 30 page loads
+    took under 2 s. That check failed on busy CI runners: most of the time
+    is normal page work (session lookup, template rendering), and that
+    work gets slower under load. Only a loose limit against a hang stays.
+
+    The test sends requests through ``httpx.ASGITransport`` on this test's
+    own event loop, not through ``TestClient``. ``TestClient`` waits for
+    the left-behind probe thread before it returns, which would make the
+    test wait for the probe to finish. Production does not do that.
+
+    On the pre-fix head (``fb725e5d``) this FAILS: the timeout verdict is
+    never cached, so every page load runs the probe again.
     """
+    from meho_backplane import health
     from meho_backplane.ui.auth import middleware as ui_middleware
 
-    # Shrink the per-sweep bound so the test runs fast; on the pre-fix
-    # head N renders each pay this bound serially.
+    # A short time limit per sweep keeps the test fast. On the pre-fix
+    # head every page load waits this long.
     bound = 0.1
     monkeypatch.setattr(ui_middleware, "_READINESS_TIMEOUT_S", bound)
+    # Keep the cached result fresh for the whole test. Then the machine's
+    # speed cannot decide whether a background refresh starts, and the
+    # probe count below has one fixed upper limit.
+    monkeypatch.setattr(health, "DEFAULT_READINESS_TTL_S", 3600.0)
 
     invocations = 0
     invocations_lock = threading.Lock()
+    # Set when the test ends, so the blocked probe thread stops then and
+    # does not keep running for 10 s after the test.
+    release_probe = threading.Event()
 
     def _blocking_sync_probe() -> ProbeResult:
         # The probe runs on a worker thread (``asyncio.to_thread``); guard
@@ -688,7 +698,8 @@ async def test_sequential_ui_requests_do_not_serialise_on_a_blocking_probe(
         nonlocal invocations
         with invocations_lock:
             invocations += 1
-        time.sleep(10)  # >> the bound and the TTL: a black-holed dependency
+        # Blocks far longer than the bound: a dependency that never answers.
+        release_probe.wait(timeout=10)
         return ProbeResult(name="docs_backends", ok=True)
 
     register_probe("docs_backends", _blocking_sync_probe)
@@ -731,21 +742,19 @@ async def test_sequential_ui_requests_do_not_serialise_on_a_blocking_probe(
                 assert _pill_state(response.text) == ("bg-warning", "starting")
     finally:
         mock.stop()
+        release_probe.set()
     elapsed = loop.time() - started
 
-    # (a) The N renders did NOT serialise on the sweep. Pre-fix this is
-    # ≈ N x bound (= 3.0 s here); the cached-verdict hot path keeps it to
-    # a small constant (one cold-warm sweep + cheap dict reads).
-    assert elapsed < 2.0, (
-        f"{n_requests} renders should not serialise on the blocking probe; "
-        f"took {elapsed:.2f}s (≈Nxbound={n_requests * bound:.1f}s would mean inline re-sweeps)"
-    )
-    # (b) Single-flight + caching bound the probe invocations to a small
-    # constant — NOT once per request. Pre-fix the probe runs ~N times
-    # (one inline sweep per render). Allow a little slack for the cold
-    # warm plus at most a couple of background refreshes that may start
-    # before the cache is consulted again.
-    assert invocations <= 4, (
-        f"probe should be swept a small constant number of times "
-        f"(single-flight + cache), got {invocations} for {n_requests} requests"
+    # Only a guard against a hang, not the proof (the proof is the probe
+    # count below). Normal page work gets much slower on a busy CI runner,
+    # so a tight clock limit here fails for reasons unrelated to readiness.
+    assert elapsed < 10.0, f"{n_requests} page loads took {elapsed:.2f}s; this looks like a hang"
+    # The proof. The first page load runs the probe once to fill the
+    # cache; the other page loads only read the cache. Pre-fix every page
+    # load runs the probe again, so the count is far above 1. The check is
+    # ``<= 1`` and not ``== 1``: on a very slow runner the probe thread may
+    # not start inside the 0.1 s bound, and then the count is 0.
+    assert invocations <= 1, (
+        f"probe should run at most once (to fill the cache), "
+        f"got {invocations} for {n_requests} page loads"
     )

@@ -9,9 +9,10 @@ path REST, MCP and the console share):
 * one refusal test per kind of user: sensor, runbook template (draft and
   published), hosted agent, schedule, waiting approval, approved approval
   that has not run, queued and running operation run;
-* finished things (a rejected approval, an approval that already ran, an
-  approval decided longer ago than the approval time limit that never
-  ran, a finished operation run, a deprecated runbook, a cancelled schedule) do
+* an approved request that nobody started blocks the delete however old
+  it is, because the resume claim has no time limit;
+* finished things (a rejected approval, an approval that already ran, a
+  finished operation run, a deprecated runbook, a cancelled schedule) do
   not block;
 * the refusal lists every user, deletes nothing and writes no audit row;
 * with no users the delete works as before, audit row included;
@@ -192,11 +193,10 @@ def _approval(
     status: str,
     resumed: bool = False,
     decided_at: datetime | None = None,
-    resume_result: dict[str, object] | None = None,
 ) -> ApprovalRequest:
     if decided_at is None and status != "pending":
         decided_at = datetime.now(UTC)
-    row = ApprovalRequest(
+    return ApprovalRequest(
         tenant_id=tenant_id,
         principal_sub="someone",
         op_id=_OP,
@@ -206,11 +206,6 @@ def _approval(
         decided_at=decided_at,
         resumed_at=datetime.now(UTC) if resumed else None,
     )
-    # Set the result only when there is one: an explicit None is saved as
-    # a JSON null, while real rows keep a SQL NULL until a result is stored.
-    if resume_result is not None:
-        row.resume_result = resume_result
-    return row
 
 
 def _operation_run(tenant_id: uuid.UUID, *, status: str) -> OperationRun:
@@ -374,33 +369,29 @@ async def test_operation_run_blocks_delete(status: str) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["approved-long-ago-never-run", "approved-with-stored-result"])
-async def test_approved_request_that_cannot_run_does_not_block_delete(case: str) -> None:
-    """An approved request with an empty ``resumed_at`` that can no longer run.
+async def test_old_approved_request_that_never_ran_still_blocks_delete() -> None:
+    """An approved request that nobody started can still run, however old it is.
 
-    Rows approved before ``resumed_at`` existed, and rows whose agent
-    stopped waiting, keep ``resumed_at`` empty. ``approved`` is final, so
-    they must not block the delete for ever.
+    ``claim_resume`` claims any ``approved`` row with an empty
+    ``resumed_at`` and has no time limit, so the delete must not use one
+    either: a request approved longer ago than the approval time limit
+    still blocks it.
     """
     tenant = await _seed_tenant()
     await _seed_connector(tenant)
-    if case == "approved-long-ago-never-run":
-        time_limit = timedelta(seconds=get_settings().approval_default_ttl_seconds)
-        row = _approval(
+    time_limit = timedelta(seconds=get_settings().approval_default_ttl_seconds)
+    row = await _add(
+        _approval(
             tenant,
             status="approved",
-            decided_at=datetime.now(UTC) - time_limit - timedelta(minutes=1),
+            decided_at=datetime.now(UTC) - 2 * time_limit,
         )
-    else:
-        row = _approval(tenant, status="approved", resume_result={"status": "ok"})
-    await _add(row)
-
-    result = await ReviewService(_operator(tenant)).delete_connector(
-        _CONNECTOR_ID, tenant_id=tenant
     )
 
-    assert result.operations_deleted == 2
-    assert await _descriptor_count() == 0
+    exc = await _refusal(tenant)
+
+    assert [(u.kind, u.id, u.op_id) for u in exc.users] == [("approval_request", str(row.id), _OP)]
+    assert await _descriptor_count() == 2
 
 
 @pytest.mark.asyncio

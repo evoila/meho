@@ -50,8 +50,11 @@ from meho_backplane.connectors.registry import register_connector_v2
 # import side-effect that wires the park-time proposed_effect previews for
 # vault.kv.put / patch / delete — #2332 — and metadata.delete — #3424).
 # Same side-effect for the userpass password writes (#4850).
+# Importing ops_kv_folder registers the preview and the permission check
+# for vault.kv.folder.delete.
 from meho_backplane.connectors.vault import (
     kv_write_preview,  # noqa: F401
+    ops_kv_folder,  # noqa: F401
     userpass_write_preview,  # noqa: F401
 )
 from meho_backplane.connectors.vault.connector import VaultConnector

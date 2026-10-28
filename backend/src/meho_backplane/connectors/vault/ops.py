@@ -77,6 +77,7 @@ from typing import Any
 import hvac.exceptions
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.vault.kv_tree import folder_max_keys, list_kv_tree
 from meho_backplane.connectors.vault.ops_auth import register_vault_auth_operations
 from meho_backplane.connectors.vault.ops_auth_write import register_vault_auth_write_operations
 from meho_backplane.connectors.vault.target_auth import vault_client_for_target
@@ -415,7 +416,21 @@ async def vault_kv_read(operator: Operator, target: Any, params: dict[str, Any])
 #: agent call but the value may be a single segment.
 VAULT_KV_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": {"mount": _MOUNT_PROPERTY, "path": _PATH_PROPERTY},
+    "properties": {
+        "mount": _MOUNT_PROPERTY,
+        "path": _PATH_PROPERTY,
+        "recursive": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Optional. True lists every secret under the folder, also in "
+                "sub-folders, as paths relative to the folder (for example "
+                "'run1/token'). Folder entries are then left out. A folder with "
+                "more secrets than the vault_kv_folder_max_keys setting "
+                "(default 500) is refused."
+            ),
+        },
+    },
     "required": ["path"],
     "additionalProperties": False,
 }
@@ -427,7 +442,9 @@ _VAULT_KV_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": {"type": "string"},
             "description": (
-                "Key names directly beneath the path. Folder entries are suffixed with '/'."
+                "Key names directly beneath the path. Folder entries are suffixed "
+                "with '/'. With recursive=true: every secret path under the "
+                "folder, relative to it, and no folder entries."
             ),
         },
     },
@@ -452,6 +469,11 @@ _VAULT_KV_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
             "children to list. Listing a leaf (a secret, not a folder) "
             "returns an empty key list."
         ),
+        "recursive": (
+            "Optional, default false. True returns every secret under the "
+            "folder, also in sub-folders, as paths relative to the folder. "
+            "Use it to get the 'keys' list for vault.kv.folder.delete."
+        ),
     },
     "output_shape": (
         "On success: {'keys': [<name>, ...]}. On failure: the "
@@ -474,6 +496,12 @@ async def vault_kv_list(operator: Operator, target: Any, params: dict[str, Any])
     ``LIST /v1/<mount>/metadata/<path>`` call). Raises on a malformed
     hvac payload so the dispatcher's ``connector_error`` branch surfaces
     a structured error rather than an unhandled exception.
+
+    With ``recursive=true`` it walks every sub-folder
+    (:func:`~meho_backplane.connectors.vault.kv_tree.list_kv_tree`) and
+    returns the secret paths relative to the folder. A folder with more
+    secrets than the ``vault_kv_folder_max_keys`` setting raises
+    :class:`~meho_backplane.connectors.vault.kv_tree.VaultFolderTooLargeError`.
     """
     # Shared mount/path extraction + path-shape pre-flight (#1755).
     mount, path = _extract_mount_and_path("vault.kv.list", params)
@@ -482,6 +510,11 @@ async def vault_kv_list(operator: Operator, target: Any, params: dict[str, Any])
     enforce_tenant_scope(operator, mount=mount, path=path, read_only=True)
 
     async with vault_client_for_target(operator, target) as client:
+        if params.get("recursive") is True:
+            tree = await list_kv_tree(
+                client, mount=mount, path=path.strip("/"), max_keys=folder_max_keys()
+            )
+            return {"keys": tree}
         list_payload = await asyncio.to_thread(
             client.secrets.kv.v2.list_secrets,
             path=path,
@@ -1559,7 +1592,8 @@ async def register_vault_typed_operations(
     kv_when_to_use = (
         "Use for HashiCorp Vault KV-v2 secret CRUD: read a secret, "
         "write a new version, list child paths under a folder, "
-        "enumerate version history, soft-delete a version, or "
+        "enumerate version history, soft-delete a version, soft-delete "
+        "many secrets under a folder with one approval, or "
         "permanently remove a whole secret. The right "
         "group when the question names a specific secret path "
         "(``kubeconfig/<cluster>``, ``oidc/clients/<id>``, etc.) and "
@@ -1587,6 +1621,15 @@ async def register_vault_typed_operations(
     # Identity-read group (Task #547) -- registered from its own
     # module so the auth surface stays independently reviewable while
     # the package keeps a single lifespan-driven registrar entry.
+    # The folder delete (one approval for many secrets) lives in its own
+    # module; imported here because that module imports from this one.
+    from meho_backplane.connectors.vault.ops_kv_folder import (
+        register_vault_kv_folder_operations,
+    )
+
+    await register_vault_kv_folder_operations(
+        when_to_use=kv_when_to_use, embedding_service=embedding_service
+    )
     await register_vault_auth_operations(embedding_service=embedding_service)
     # Auth credential-lifecycle write group (G3.15-T3 #1411) -- the
     # userpass/approle write half (create/update/delete + secret-id

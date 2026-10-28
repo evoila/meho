@@ -414,9 +414,9 @@ meho approvals list [flags]
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit raw JSON array instead of the human table
-- `--limit` — max requests per page (1..500, server default 50 when omitted)
-- `--offset` — offset into the result set (default 0)
-- `--status` — filter by status: pending, approved, rejected, expired (default: all)
+- `--limit` — max requests to return (1..500; no limit when omitted)
+- `--offset` — skip this many requests first (default 0)
+- `--status` — filter by status: pending, approved, rejected, expired, all (default: pending)
 - `--work-ref` — filter by external change-ticket reference, exact match
 
 ### `meho approvals reject`
@@ -4671,6 +4671,7 @@ meho targets discover <product> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--import-yaml` — print the candidates as a file for `meho targets import` instead of the tables
 - `--json` — emit machine-readable JSON to stdout instead of the human tables
 - `--seed-target` — scope discovery to one already-registered target's reach (resolved tenant-scoped)
 

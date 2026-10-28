@@ -189,6 +189,47 @@ is a behavioural regression, and the substring guards in
 the load-bearing pieces. The maturity prefix (#2675) and the kb
 REST/CLI cross-references (#2486) are unchanged by this wording pass.
 
+### Tool text size limit on the default list (#4112)
+
+Every session gets the default tool list before the user's question. The
+tool text (name, description and input schema) uses up the model's
+context window. A small open model often has a 32,768-token window, so
+this text must stay short.
+
+`tests/test_mcp_tool_text_budget.py` sets two limits. It measures a tool
+as its name plus description plus input schema as compact JSON, taken
+from `ToolDefinition.to_wire()`. Output schemas are not counted.
+
+- One tool: at most 6,000 characters.
+- The whole default list (26 tools, docs add-on on): at most 70,000
+  characters, about 17,500 tokens.
+
+When #4112 set the limits, the default list went from 96,804 to 66,092
+characters. The largest tool, `query_topology`, went from 16,302 to
+5,537.
+
+What a description keeps:
+
+- what the tool is for, and when to call it (the proactive-trigger
+  sentences above stay);
+- its arguments, and which are required for which option, because the
+  wire schema drops top-level `allOf` / `anyOf`;
+- the one or two rules that stop wrong calls.
+
+What moved out:
+
+- Return shapes. Tools with an output schema already describe them there.
+- Help that matters only after a certain answer. Example: the
+  `query_topology` closure answer with `status: "node_untracked"` now
+  carries a `detail` text that says the answer is not "safe to delete"
+  and how to add the missing data. The description keeps only the
+  short rule.
+- Background and history (issue numbers, internal table names, server
+  internals). These stay in this file and in the code comments.
+
+If the test fails, shorten the text first. Raise a limit only with a
+reason in the pull request.
+
 ### Runbook family canonicalisation (#1612)
 
 The 11 runbook tools were the last flat multi-verb family
@@ -1058,6 +1099,26 @@ The redaction helper is `redacted_audit_uri(template)` in
 `mcp/registry.py`. New query-bearing resources reuse the same flag +
 contextvar pattern rather than special-casing the dispatcher per
 resource.
+
+## Empty optional text on read tools (#4110)
+
+Small models often send an unused filter as empty text, for example
+`list_targets` with `connector_id: ""`. A filter on empty text matches
+nothing, so the tool used to answer with an empty list and no warning.
+
+`handle_tools_call` (`mcp/handlers.py`) now drops these values for read
+tools (`op_class == "read"`) just before the `inputSchema` check:
+
+* A top-level argument whose value is empty text, or only spaces, is
+  removed, so the handler sees it as "not given".
+* A key in the schema's top-level `required` list is kept, so an empty
+  required field is still refused with `-32602`. A key that a
+  conditional rule (`anyOf` / `if`-`then`) needs is removed and then
+  fails the schema check as missing, for example `search_operations`
+  with only `query: ""`.
+* Write tools, the REST API, and the CLI are not changed.
+* The audit row's `params_hash` is still computed over the arguments
+  the client sent.
 
 ## Request-size bounds
 

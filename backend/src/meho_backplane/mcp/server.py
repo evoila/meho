@@ -88,6 +88,7 @@ from pydantic import BaseModel, ValidationError
 from meho_backplane.auth.operator import Operator
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.maturity import FEATURE_MATURITY_BAND
+from meho_backplane.mcp.registry import all_tools_for
 from meho_backplane.mcp.schemas import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
@@ -156,6 +157,11 @@ _SERVER_NAME: str = "meho-backplane"
 #: ``docs/codebase/tenant_conventions.md`` for the conditional-emit
 #: contract specifically as it lands in G7.1-T4 (#316).
 RESOURCES_SUBSCRIBE_ENABLED: Final[bool] = False
+
+
+#: The broadcast write tool. The ``initialize`` instructions name the
+#: broadcast tools only when the session's tool list has this one (#4113).
+BROADCAST_ANNOUNCE_TOOL: Final[str] = "meho_broadcast_announce"
 
 
 #: Module-level structlog logger. Defined up here (rather than next to
@@ -378,6 +384,18 @@ def _log_protocol_version_mismatch(
     )
 
 
+def _session_can_announce(operator: Operator) -> bool:
+    """Return True when *operator*'s tool list has ``meho_broadcast_announce`` (#4113).
+
+    Uses :func:`~meho_backplane.mcp.registry.all_tools_for`, the same
+    filter ``tools/list`` uses, so the instructions and the tool list
+    agree. No add-on families are passed: the broadcast tools are not
+    add-on gated, so the answer is the same without the database read
+    ``tools/list`` does for add-on tools.
+    """
+    return any(defn.name == BROADCAST_ANNOUNCE_TOOL for defn in all_tools_for(operator))
+
+
 async def _session_instructions(operator: Operator) -> str | None:
     """Assemble the ``initialize.instructions`` payload for *operator*.
 
@@ -411,6 +429,11 @@ async def _session_instructions(operator: Operator) -> str | None:
     ``instructions`` text, reported separately. It records what MEHO
     sent; the MCP client may ignore ``instructions``, so it is not
     proof that an agent applied them.
+
+    #4113: the broadcast-discipline band is included only when the
+    session's tool list has ``meho_broadcast_announce`` (see
+    :func:`_session_can_announce`). A ``read_only`` session cannot call
+    the broadcast tools, so its instructions do not name them.
     """
     # Imported inside the function to break the import cycle (mcp.server
     # → conventions.preamble → db → ... → mcp.server). The cost of one
@@ -428,7 +451,10 @@ async def _session_instructions(operator: Operator) -> str | None:
     # sees a byte-identical preamble to the pre-band shape (each band helper
     # returns ``text=""`` and the assembler omits that section).
     preamble = await assemble_preamble_detailed(
-        operator.tenant_id, operator.sub, capabilities=operator.capabilities
+        operator.tenant_id,
+        operator.sub,
+        capabilities=operator.capabilities,
+        include_broadcast=_session_can_announce(operator),
     )
     if preamble.dropped_slugs:
         # Loud, not silent -- the dropped-slug list is part of the

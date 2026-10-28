@@ -18,8 +18,11 @@ Nothing here calls Azure. Three kinds of functions:
   connection string in an answer never reaches a result.
 * **Data-plane answers.** :func:`blob_page` reads one List Blobs answer
   (XML, read with ``defusedxml``, which refuses entity and DTD tricks).
-  :func:`file_properties` reads one file's properties from the answer
-  headers, and :func:`text_content` decides whether a file's bytes are text.
+  ``defusedxml`` ships no type hints, so its XML nodes are typed ``Any``
+  here: the standard library's ``Element`` type would bring back the
+  ``xml.etree`` import that the security scan flags. :func:`file_properties`
+  reads one file's properties from the answer headers, and
+  :func:`text_content` decides whether a file's bytes are text.
 
 Text from Azure (names, content types, file content) is copied as data. It
 is never used to build a request.
@@ -44,8 +47,6 @@ from defusedxml.ElementTree import ParseError, fromstring
 from meho_backplane.connectors.azure._paging import MAX_ROWS, PagedRows
 
 if TYPE_CHECKING:
-    from xml.etree.ElementTree import Element
-
     import httpx
 
 __all__ = [
@@ -420,13 +421,13 @@ def _int_text(value: str | None) -> int | None:
     return int(value)
 
 
-def _xml_text(element: Element | None) -> str | None:
+def _xml_text(element: Any) -> str | None:
     if element is None or element.text is None:
         return None
     return element.text.strip() or None
 
 
-def _listed_name(element: Element | None) -> str | None:
+def _listed_name(element: Any) -> str | None:
     """A blob name of a List Blobs answer.
 
     Azure percent-encodes a name that holds a character XML cannot carry and
@@ -438,7 +439,7 @@ def _listed_name(element: Element | None) -> str | None:
     return name
 
 
-def blob_row(blob: Element) -> dict[str, Any]:
+def blob_row(blob: Any) -> dict[str, Any]:
     """One row of ``azure.storage.blob.list`` from one ``<Blob>`` element."""
     properties = blob.find("Properties")
 

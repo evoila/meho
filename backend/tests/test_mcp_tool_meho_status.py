@@ -49,6 +49,7 @@ from meho_backplane.api.v1.health import HealthResponse
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from tests.mcp_test_fixtures import (
     build_operator,
@@ -195,6 +196,37 @@ def test_tools_call_unknown_argument_still_refused(
     client, _op = client_with_operator
 
     body = _call_tool(client, tool, arguments)
+
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert "no_such_argument" in body["error"]["message"]
+
+
+async def _no_argument_write_handler(
+    _operator: Operator, _arguments: dict[str, Any]
+) -> dict[str, Any]:
+    return {"done": True}
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_tools_call_write_tool_with_no_arguments_still_refuses_extra_arguments(
+    client_with_operator: tuple[TestClient, Operator],
+) -> None:
+    """#4137: only read tools drop extra arguments; a write tool with none refuses them."""
+    client, _op = client_with_operator
+    register_mcp_tool(
+        ToolDefinition(
+            feature=None,
+            surface=ToolSurface.WORKING,
+            name="test.no_argument_write",
+            description="Test write tool that takes no arguments.",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+            required_role=TenantRole.OPERATOR,
+            op_class="write",
+        ),
+        _no_argument_write_handler,
+    )
+
+    body = _call_tool(client, "test.no_argument_write", {"no_such_argument": "x"})
 
     assert body["error"]["code"] == INVALID_PARAMS
     assert "no_such_argument" in body["error"]["message"]

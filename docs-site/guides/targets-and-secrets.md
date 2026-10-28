@@ -191,6 +191,27 @@ meho targets update lab-prom --clear secret-ref --extra scheme=http
 you want to keep. `--clear extra` removes every extra, and `--clear alias`
 removes every alias. In YAML, write `secret_ref: null`.
 
+## Change a secret
+
+MEHO keeps a login for each target for a while, so it does not have to
+log in on every call. When you change a secret only in Vault (or your
+secret store), MEHO keeps using the old login until it expires.
+
+To make MEHO read the secret again right away, send the same
+`secret_ref` again:
+
+```bash
+meho targets update lab-vcenter --secret-ref tenants/<tenant-id>/lab-vcenter
+```
+
+Any change to how MEHO reaches or logs in to a target (for example
+`--host`, `--secret-ref`, or `--extra`) does the same: the next call
+logs in with the new values.
+
+This works only on the MEHO server that gets the update. If you run
+more than one backplane server, or use satellite runners, the others
+keep their login until it expires.
+
 ## Import and verify
 
 ```bash

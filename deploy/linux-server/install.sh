@@ -112,10 +112,10 @@ unseal key to two files for root only, and installs the meho command.
 Run it as root from the folder of the unpacked download:
   sudo ./install.sh --hostname meho.example.com --admin-network 10.0.50.0/24
 
-On a machine where MEHO is installed, the same command without options
-updates MEHO to the version of this download. The update keeps the answers
-of the install, the firewall, the data, the passwords and the keys. Take a
-VM snapshot or a backup first:
+On a machine where MEHO is installed, the script updates MEHO to the
+version of this download. Run it without the options of a first install:
+the update keeps the answers of the install, the firewall, the data, the
+passwords and the keys. Take a VM snapshot or a backup first:
   sudo ./install.sh --confirm-backup
 
 Options:

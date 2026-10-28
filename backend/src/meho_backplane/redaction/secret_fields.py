@@ -64,7 +64,7 @@ _QUOTED_PAIRS: Final[tuple[re.Pattern[str], ...]] = (
 #: and a connector's own ``***`` or ``***REDACTED***``. It stays, so the
 #: reader still sees which step masked it.
 _PLACEHOLDER: Final[re.Pattern[str]] = re.compile(
-    r"\[(?:MEHO-)?(?:REDACTED|OMITTED):[^\]\s'\"]+\]|\[redacted\]|\*+(?:REDACTED)?\*+"
+    r"\[(?:MEHO-)?(?:REDACTED|OMITTED):[^\[\]\s'\"]+\]|\[redacted\]|\*{2,}|\*+REDACTED\*+"
 )
 
 

@@ -10,7 +10,7 @@ Protection and Recovery, all through the SRM REST API v2 at
 The login, the session cache, the version read and both operations are
 shared with the vSphere Replication connector: both APIs are served by
 the same REST API gateway
-(:class:`~meho_backplane.connectors._shared.dr_rest.DrRestConnector`).
+(:class:`~meho_backplane.connectors.vmware_shared.dr_rest.DrRestConnector`).
 This class sets the SRM paths.
 
 Login
@@ -44,7 +44,7 @@ Operations
 
 ``srm.about`` and ``srm.api_file.get``. The entry methods are defined on
 this class and call the shared code (``server_about`` on the base class
-and :func:`~meho_backplane.connectors._shared.dr_api_file.dr_api_file_get`).
+and :func:`~meho_backplane.connectors.vmware_shared.dr_api_file.dr_api_file_get`).
 Defining them here, not on the base class, is what keeps an ``srm.*``
 operation from running on a ``vr`` target: the stored handler names this
 class, and the dispatcher binds it only to an ``SrmConnector``. Both
@@ -57,13 +57,13 @@ from __future__ import annotations
 from typing import Any
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.dr_api_file import dr_api_file_get
-from meho_backplane.connectors._shared.dr_rest import DrRestConnector, DrTargetLike
 from meho_backplane.connectors.srm.api_file import API_FILES
 from meho_backplane.connectors.srm.session import (
     SrmSessionLoader,
     load_session_credentials_from_vault,
 )
+from meho_backplane.connectors.vmware_shared.dr_api_file import dr_api_file_get
+from meho_backplane.connectors.vmware_shared.dr_rest import DrRestConnector, DrTargetLike
 
 __all__ = ["API_BASE", "SrmConnector"]
 
@@ -105,5 +105,5 @@ class SrmConnector(DrRestConnector):
     async def api_file_get(
         self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
-        """``srm.api_file.get``; the body is :func:`dr_api_file_get` in ``_shared/dr_api_file``."""
+        """``srm.api_file.get``; the body is ``vmware_shared.dr_api_file.dr_api_file_get``."""
         return await dr_api_file_get(self, operator, target, params)

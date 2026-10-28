@@ -4227,7 +4227,7 @@ flight-recorder span holds a full key.**
   (`vrops.licensing.*`). The guidance of the write says so; if vCenter 9
   refuses the change, the caller gets the vendor fault as an error.
 - **The mask.** The shared `mask_license_key` in
-  `connectors/_shared/license_key.py` keeps the last 5 characters and turns
+  `connectors/vmware_shared/license_key.py` keeps the last 5 characters and turns
   every other letter and digit into `*`; dashes stay, for example
   `*****-*****-*****-*****-AB12C`. A value of 10 characters or fewer is
   hidden in full. It is the same rule `vrops.license.info` and

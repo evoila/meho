@@ -9,7 +9,7 @@ at ``/api/rest/vr/v2``.
 
 The login, the session cache, the version read and both operations are
 shared with the SRM connector: both APIs are served by the same REST API
-gateway (:class:`~meho_backplane.connectors._shared.dr_rest.DrRestConnector`).
+gateway (:class:`~meho_backplane.connectors.vmware_shared.dr_rest.DrRestConnector`).
 This class sets the vSphere Replication paths.
 
 Login
@@ -38,7 +38,7 @@ Operations
 
 ``vr.about`` and ``vr.api_file.get``. The entry methods are defined on
 this class and call the shared code (``server_about`` on the base class
-and :func:`~meho_backplane.connectors._shared.dr_api_file.dr_api_file_get`).
+and :func:`~meho_backplane.connectors.vmware_shared.dr_api_file.dr_api_file_get`).
 Defining them here, not on the base class, is what keeps a ``vr.*``
 operation from running on an ``srm`` target: the stored handler names
 this class, and the dispatcher binds it only to a ``VrConnector``. Both
@@ -51,8 +51,8 @@ from __future__ import annotations
 from typing import Any
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.dr_api_file import dr_api_file_get
-from meho_backplane.connectors._shared.dr_rest import DrRestConnector, DrTargetLike
+from meho_backplane.connectors.vmware_shared.dr_api_file import dr_api_file_get
+from meho_backplane.connectors.vmware_shared.dr_rest import DrRestConnector, DrTargetLike
 
 __all__ = ["API_BASE", "API_FILES", "VrConnector"]
 
@@ -91,5 +91,5 @@ class VrConnector(DrRestConnector):
     async def api_file_get(
         self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
-        """``vr.api_file.get``; the body is :func:`dr_api_file_get` in ``_shared/dr_api_file``."""
+        """``vr.api_file.get``; the body is ``vmware_shared.dr_api_file.dr_api_file_get``."""
         return await dr_api_file_get(self, operator, target, params)

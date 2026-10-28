@@ -16,7 +16,7 @@ Chosen per target with ``extras["login"]`` (see
 * ``basic`` (default): ``Authorization: Basic`` on every call.
 * ``vcfa-session`` (VCF 9): a VCF Automation session token for
   ``<user>@<extras.org>`` from the shared login
-  (:mod:`meho_backplane.connectors._shared.vcfa_session`), sent as
+  (:mod:`meho_backplane.connectors.vmware_shared.vcfa_session`), sent as
   ``Authorization: Bearer <token>``. The connector logs in again 60
   seconds before the token ends.
 * ``automation``: the Aria Automation token, minted with the Aria
@@ -71,17 +71,17 @@ from meho_backplane.connectors._shared.system_operator import (
     synthesise_system_operator,
 )
 from meho_backplane.connectors._shared.vcf_auth import basic_auth_header, is_acceptable_auth_model
-from meho_backplane.connectors._shared.vcfa_session import (
-    LOGIN_VCFA_SESSION,
-    VcfaSessionToken,
-    vcfa_session_login,
-)
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.schemas import (
     AuthModel,
     FingerprintResult,
     OperationResult,
     ProbeResult,
+)
+from meho_backplane.connectors.vmware_shared.vcfa_session import (
+    LOGIN_VCFA_SESSION,
+    VcfaSessionToken,
+    vcfa_session_login,
 )
 from meho_backplane.connectors.vro.session import (
     LOGIN_AUTOMATION,

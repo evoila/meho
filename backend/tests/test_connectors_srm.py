@@ -46,7 +46,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.api_file_secrets import REDACTED
-from meho_backplane.connectors._shared.dr_rest import parse_server_version
 from meho_backplane.connectors.hcx import (
     HCX_CONNECTOR_ID,
     HCX_IMPL_ID,
@@ -71,6 +70,7 @@ from meho_backplane.connectors.srm import (
     register_srm_typed_operations,
 )
 from meho_backplane.connectors.srm.api_file import API_FILES
+from meho_backplane.connectors.vmware_shared.dr_rest import parse_server_version
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.flight_recorder import capture as flight_recorder_capture

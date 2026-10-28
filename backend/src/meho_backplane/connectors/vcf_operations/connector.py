@@ -119,7 +119,6 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
-from meho_backplane.connectors._shared.license_key import mask_license_key
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import (
@@ -141,6 +140,7 @@ from meho_backplane.connectors.vcf_operations.session import (
     VcfOperationsTargetLike,
     load_credentials_from_vault,
 )
+from meho_backplane.connectors.vmware_shared.license_key import mask_license_key
 
 # Re-export ``SessionLoginError`` so callers that catch the helper's
 # structured failure don't have to reach into the shared module.

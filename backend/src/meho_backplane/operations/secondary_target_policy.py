@@ -20,12 +20,15 @@ Who is checked
   operator approval surfaces (REST ``/approve`` and ``/decide``, the MCP
   by-id approve) run the approved call *as the reviewer*. Without a second
   check, an agent's ``deny`` on the second target would never be looked
-  at. So the park records who asked (:func:`requester_policy_preflight`,
-  stored in the approval card's ``permission_preflight``), the resume binds
-  that requester (:func:`bind_approved_requester`), and
-  :func:`secondary_target_refusal` checks the requester too. Only the
-  requester's ``deny`` refuses here: the approval satisfies its
-  ``needs-approval``.
+  at. So the resume binds the requester from the approval row
+  (:func:`bind_approved_requester`), and :func:`secondary_target_refusal`
+  checks the requester too. The rest of what the policy gate needs about
+  the requester (kind, role, client id) comes from the record the park
+  stores on the approval card (:func:`requester_policy_preflight`, in
+  ``permission_preflight``). That record is used only when its ``sub``
+  matches the row. When it is missing or does not match, the run is
+  refused and the requester must ask again. Only the requester's ``deny``
+  refuses otherwise: the approval satisfies its ``needs-approval``.
 
 The execution still runs as the reviewer. The requester's policy on the
 second target is still enforced, and checked again at run time, so a deny
@@ -73,10 +76,17 @@ class SecondaryTargetWrite:
 
 
 class _Requester(NamedTuple):
-    """The requester as the park recorded it (``permission_preflight["requester"]``)."""
+    """The requester of an approved request.
+
+    ``sub`` and ``act`` come from the approval row. ``subject`` is the card's
+    ``permission_preflight["requester"]`` record, or ``None`` when the card
+    has none or its ``sub`` does not match the row.
+    """
 
     tenant_id: Any
-    subject: Mapping[str, Any]
+    sub: str
+    act: str | None
+    subject: Mapping[str, Any] | None
 
 
 #: The requester of the approved request a reviewer is running. Bound by
@@ -168,15 +178,18 @@ async def requester_policy_preflight(
 
 @contextmanager
 def bind_approved_requester(request: ApprovalRequest) -> Iterator[None]:
-    """Bind the requester recorded on *request*'s card while a reviewer runs it.
+    """Bind *request*'s requester while a reviewer runs it.
 
-    Reads ``proposed_effect["permission_preflight"]["requester"]``. A request
-    whose card has no such block (an operation that does not opt in, or a
-    request parked before #3898) binds nothing.
+    Who asked comes from the row (``principal_sub`` / ``principal_act``).
+    The card's ``proposed_effect["permission_preflight"]["requester"]``
+    record is kept only when its ``sub`` matches the row. Only operations
+    that call :func:`secondary_target_refusal` read the binding.
     """
     preflight = (request.proposed_effect or {}).get("permission_preflight")
     subject = preflight.get("requester") if isinstance(preflight, dict) else None
-    requester = _Requester(request.tenant_id, subject) if isinstance(subject, Mapping) else None
+    if not isinstance(subject, Mapping) or subject.get("sub") != request.principal_sub:
+        subject = None
+    requester = _Requester(request.tenant_id, request.principal_sub, request.principal_act, subject)
     token = _approved_requester_var.set(requester)
     try:
         yield
@@ -184,11 +197,10 @@ def bind_approved_requester(request: ApprovalRequest) -> Iterator[None]:
         _approved_requester_var.reset(token)
 
 
-def _requester_operator(requester: _Requester) -> Operator:
+def _requester_operator(requester: _Requester, subject: Mapping[str, Any]) -> Operator:
     """Rebuild the requester as an :class:`Operator` for the policy gate."""
-    subject = requester.subject
     return Operator(
-        sub=str(subject["sub"]),
+        sub=requester.sub,
         raw_jwt="",
         tenant_id=requester.tenant_id,
         tenant_role=TenantRole(subject["tenant_role"]),
@@ -202,20 +214,22 @@ async def _approved_requester_refusal(
 ) -> str | None:
     """Check the bound requester of the approved request; ``None`` = allowed or none bound."""
     requester = _approved_requester_var.get()
-    if requester is None:
-        return None
-    try:
-        principal = _requester_operator(requester)
-    except (KeyError, TypeError, ValueError):
+    if requester is None or requester.sub == operator.sub:
+        return None  # not a reviewer's run, or the requester runs it (checked as the caller)
+    cannot_check = (
+        f"policy_denied: the requester's policy for the write on {write.target_label} "
+        f"{target.name!r} cannot be checked"
+    )
+    if requester.subject is None:
         return (
-            f"policy_denied: the requester's policy for the write on {write.target_label} "
-            f"{target.name!r} cannot be checked (the approval card's requester record is "
-            "unreadable)"
+            f"{cannot_check} (the approval card has no requester record for "
+            f"{requester.sub!r}) -- ask again so a new request records it"
         )
-    if principal.sub == operator.sub:
-        return None  # the requester runs it; already checked as the caller
-    act = requester.subject.get("act")
-    with structlog.contextvars.bound_contextvars(**{ACTOR_SUB_KEY: act}):
+    try:
+        principal = _requester_operator(requester, requester.subject)
+    except (KeyError, TypeError, ValueError):
+        return f"{cannot_check} (the approval card's requester record is unreadable)"
+    with structlog.contextvars.bound_contextvars(**{ACTOR_SUB_KEY: requester.act}):
         reason = await _refusal(principal, write, target, approved=True, decide_only=True)
     if reason is None:
         return None

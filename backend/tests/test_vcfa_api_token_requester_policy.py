@@ -212,3 +212,63 @@ async def test_a_deny_added_while_the_request_waits_still_stops_it(
     assert body["dispatch_result"]["guidance"].startswith(f"policy_denied: requester {sub!r}")
     assert not any(route.called for route in routes.values())
     assert vault_writes == []
+
+
+async def test_reviewer_approval_fails_closed_when_the_card_has_no_requester_record(
+    vcfa: VcfAutomationConnector,
+    vault_writes: list[tuple[str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import meho_backplane.connectors.vault.ops as vault_ops
+
+    async def _raise(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("probe broke")
+
+    sub = "agent:tenant-bootstrap-no-record"
+    await _deny_agent_vault_patch(sub)
+    _capabilities(monkeypatch, ["create", "read", "update"])
+    monkeypatch.setattr(vault_ops, "vault_kv_write_capability_preflight", _raise)
+    request_id = await _park(_principal(PrincipalKind.AGENT, sub))
+    async with get_sessionmaker()() as session:
+        row = (
+            await session.execute(select(ApprovalRequest).where(ApprovalRequest.id == request_id))
+        ).scalar_one()
+    assert not (row.proposed_effect.get("permission_preflight") or {}).get("requester")
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        routes = _mount_user_flow(mock)
+        body = _decide(request_id, mock)
+    out = body["dispatch_result"]
+    assert out["status"] == "invalid_request", body
+    assert "no requester record" in out["guidance"]
+    assert "ask again" in out["guidance"]
+    assert not any(route.called for route in routes.values())  # no appliance call, no mint
+    assert vault_writes == []
+
+
+async def test_reviewer_approval_fails_closed_when_the_requester_record_does_not_match(
+    vcfa: VcfAutomationConnector,
+    vault_writes: list[tuple[str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sub = "agent:tenant-bootstrap-mismatch"
+    await _deny_agent_vault_patch(sub)
+    _capabilities(monkeypatch, ["create", "read", "update"])
+    request_id = await _park(_principal(PrincipalKind.AGENT, sub))
+    async with get_sessionmaker()() as session:
+        row = (
+            await session.execute(select(ApprovalRequest).where(ApprovalRequest.id == request_id))
+        ).scalar_one()
+        effect = dict(row.proposed_effect)
+        preflight = dict(effect["permission_preflight"])
+        preflight["requester"] = {**preflight["requester"], "sub": "op-someone-else"}
+        effect["permission_preflight"] = preflight
+        row.proposed_effect = effect
+        await session.commit()
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        routes = _mount_user_flow(mock)
+        body = _decide(request_id, mock)
+    out = body["dispatch_result"]
+    assert out["status"] == "invalid_request", body
+    assert f"no requester record for {sub!r}" in out["guidance"]
+    assert not any(route.called for route in routes.values())
+    assert vault_writes == []

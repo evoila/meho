@@ -1755,7 +1755,10 @@ How it works:
    satisfies it. A `requester_denied: true` does **not** refuse the park.
    The reviewer sees it on the card and should reject.
 2. **On a reviewer's resume** `_dispatch_resume_with_bound_context` binds
-   that `requester` record (`bind_approved_requester`) for the run.
+   the requester for the run (`bind_approved_requester`). Who asked comes
+   from the approval row (`principal_sub` / `principal_act`). The card's
+   `requester` record supplies the rest (kind, role, client id), and only
+   when its `sub` matches the row.
 3. **In the handler** `secondary_target_refusal` checks the caller (the
    reviewer) as before, then the bound requester, **live**, with
    `decide_only=True` (no standing grant is marked used). A requester
@@ -1764,9 +1767,12 @@ How it works:
    A deny added while the request waited still stops it.
 
 The agent's own resume (`call_operation_with_approval`) runs as the agent,
-so the agent is the caller and nothing extra is bound. A request whose
-card has no `requester` record (an op that does not opt in, or a request
-parked before #3898) is checked for the caller only, as before.
+so the agent is the caller and the requester check adds nothing. When a
+reviewer runs an opted-in op and the card has no `requester` record, or
+its `sub` does not match the row, the run is refused before any appliance
+call: `policy_denied: the requester's policy … cannot be checked … -- ask
+again`. This covers a park whose preflight failed and a request parked
+before #3898. Ops that do not opt in never read the binding.
 
 **To opt an op in:** describe its second-target write as a
 `SecondaryTargetWrite(connector_id, op_ids, target_label)`. Call

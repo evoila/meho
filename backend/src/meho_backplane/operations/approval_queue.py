@@ -2043,7 +2043,7 @@ async def _dispatch_resume_with_bound_context(
     to continue, so it may wait again. That new request is saved for the
     requester of *request*, not for the reviewer who runs this re-run.
 
-    #3898: the requester recorded on the card is bound for the run
+    #3898: the requester (from the row) is bound for the run
     (:func:`~meho_backplane.operations.secondary_target_policy.bind_approved_requester`),
     so an op that writes to a second, caller-named target checks the
     requester's policy there too, not only the reviewer's.

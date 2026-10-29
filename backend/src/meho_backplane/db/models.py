@@ -311,6 +311,7 @@ __all__ = [
     "GraphNode",
     "GraphNodeHistory",
     "IdentityBudget",
+    "IngestedAuthProfile",
     "KbRevision",
     "OperationGroup",
     "RequestUsageEvent",
@@ -2064,6 +2065,69 @@ class SpecProvenance(Base):
         sa.CheckConstraint(
             "origin IN ('fetched', 'inline', 'shipped')",
             name="ck_spec_provenance_origin",
+        ),
+    )
+
+
+class IngestedAuthProfile(Base):
+    """The login type an operator chose when ingesting a connector (#5016).
+
+    ``meho connector ingest --auth-scheme <name>`` builds a
+    :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector` from
+    the chosen login type and registers it in the in-memory connector
+    table. This row saves that choice so every start of the backplane (and
+    every replica) can build the same class again
+    (:func:`~meho_backplane.operations.ingest.ingest_auth_store.restore_ingested_profiled_connectors`).
+    Without it the connector has no class after a restart and every call
+    fails with ``no_connector``.
+
+    Only the choice is stored: the named scheme and the secret field
+    **names**. Never secret values, and no free-form login config.
+
+    One row per connector scope: ``(tenant_id, product, version,
+    impl_id)``, with ``tenant_id IS NULL`` for a built-in connector. Two
+    partial unique indexes enforce it, the same shape as
+    :class:`SpecProvenance`. A re-ingest with a login type replaces the
+    row. A connector delete removes it.
+    """
+
+    __tablename__ = "ingested_auth_profile"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
+    product: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    impl_id: Mapped[str] = mapped_column(Text, nullable=False)
+    auth_scheme: Mapped[str] = mapped_column(Text, nullable=False)
+    secret_fields: Mapped[list[str]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False
+    )
+    operator_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "ingested_auth_profile_global_idx",
+            "product",
+            "version",
+            "impl_id",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NULL"),
+            sqlite_where=sa.text("tenant_id IS NULL"),
+        ),
+        Index(
+            "ingested_auth_profile_tenant_idx",
+            "tenant_id",
+            "product",
+            "version",
+            "impl_id",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NOT NULL"),
+            sqlite_where=sa.text("tenant_id IS NOT NULL"),
         ),
     )
 

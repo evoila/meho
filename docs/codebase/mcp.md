@@ -163,6 +163,20 @@ two tool descriptions therefore cross-reference the `kb` REST/CLI surface
 and note that entry deletion is REST/CLI-only (`DELETE /api/v1/kb/{slug}`
 or `meho kb delete` — there is no MCP delete tool).
 
+### No issue numbers or planning codes in model text
+
+A model reads every tool description, every schema field description and
+every operation-group text. It cannot open an issue link, and a code like
+`G0.18-T5` means nothing to it. So these texts hold no issue numbers
+(`#1234`), planning codes (`G11.2-T6`) or design-doc section marks
+(`§6`). Say the meaning in plain words instead. A change-ticket example
+such as `gh:org/repo#7` is fine: the `#` follows a word.
+`tests/test_model_text_no_internal_refs.py` checks every tool's
+`to_wire()` text and every group registered at start-up. It uses the
+same pattern (`_INTERNAL_REF`) that
+`backend/scripts/generate_reference_docs.py` uses to strip these codes
+from the public reference page.
+
 ### Proactive-trigger wording on the coordination levers (#3132)
 
 The three coordination levers — knowledge (`search_knowledge` /

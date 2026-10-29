@@ -206,8 +206,8 @@ register_mcp_tool(
             "own review is still staged but that holds ≥1 per-op-enabled "
             "operation IS listed, flagged `partial=true` with a non-zero "
             "`enabled_op_count` — only those ops are live and "
-            "dispatchable; `search_operations` will find them. Pagination "
-            "(G0.18-T5 #1358): keyset on `group_key`; "
+            "dispatchable; `search_operations` will find them. Pagination: "
+            "keyset on `group_key`; "
             "default `limit=100`, max 500; pass the response's "
             "`next_cursor` back as the next call's `cursor` to fetch "
             "the next page. A `null` `next_cursor` is the end."
@@ -233,7 +233,7 @@ register_mcp_tool(
                     "description": (
                         "Page size. Default 100; max 500. Matches "
                         "`list_targets` paging — sibling list tools share "
-                        "one upper bound (G0.18-T5 #1358)."
+                        "one upper bound."
                     ),
                 },
                 "cursor": {
@@ -244,7 +244,7 @@ register_mcp_tool(
                         "next. Results are ordered by `group_key` "
                         "ascending. Matches `cursor` on `query_audit` / "
                         "`query_topology` / `list_targets` / "
-                        "`meho_broadcast_recent` (G0.18-T5 #1358)."
+                        "`meho_broadcast_recent`."
                     ),
                     "maxLength": 256,
                 },
@@ -875,7 +875,7 @@ register_mcp_tool(
                 "preview_hash": {
                     "type": "string",
                     "description": (
-                        "Preview-result-hash binding (#3197, status=ok): a "
+                        "Preview-result-hash binding (status=ok): a "
                         "stable SHA-256 over the resolved request. Present it "
                         "as `call_operation`'s `preview_hash` arg to govern a "
                         "destructive-tier delete."

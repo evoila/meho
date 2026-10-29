@@ -88,8 +88,8 @@ _APPROVAL_REQUEST_ID_PROPERTY: Final[dict[str, Any]] = {
     "type": "string",
     "format": "uuid",
     "description": (
-        "Approval request UUID. Canonical name "
-        "(G0.18-T5 #1358); matches the `<noun>_id` convention used "
+        "Approval request UUID. Canonical name; "
+        "matches the `<noun>_id` convention used "
         "by every other MCP tool that names a resource UUID."
     ),
 }
@@ -240,7 +240,7 @@ register_mcp_tool(
         name="meho_approvals_list",
         surface=ToolSurface.OPERATOR,
         description=(
-            "List approval requests for your tenant (G11.2-T5 / #818). "
+            "List approval requests for your tenant. "
             "Operator-level. Use status='pending' (default) for the "
             "common case — requests awaiting a decision. Pass status='all' "
             "for every state. Pagination via limit / offset."
@@ -256,8 +256,7 @@ register_mcp_tool(
                         "Filter by status. 'all' is the sentinel meaning "
                         "'no filter'. Vocabulary mirrors "
                         "`meho_scheduler_list.status` (both surface the "
-                        "allowed values as a JSON enum, not prose) — "
-                        "RDC #789 N4 / G0.18-T5."
+                        "allowed values as a JSON enum, not prose)."
                     ),
                 },
                 "limit": {
@@ -278,8 +277,8 @@ register_mcp_tool(
                     "description": (
                         "Filter by external change-ticket reference (exact "
                         "match), e.g. 'gh:evoila/meho#1' — the requests "
-                        "authorised by change ticket X (work_ref I2-T1 "
-                        "#1659). Omit for no work_ref filter."
+                        "authorised by change ticket X. Omit for no "
+                        "work_ref filter."
                     ),
                 },
             },
@@ -325,13 +324,13 @@ register_mcp_tool(
         name="meho_approvals_get",
         surface=ToolSurface.OPERATOR,
         description=(
-            "Inspect a single approval request by id (G11.2-T5 / #818). "
+            "Inspect a single approval request by id. "
             "Operator-level. Returns the full detail including "
             "proposed_effect (human-readable description of what the op "
             "would do) so an operator can decide before approving. "
             "Cross-tenant / absent ids return approval_request_not_found. "
-            "Pass either `approval_request_id` (canonical name; "
-            "G0.18-T5 #1358) or the deprecated `id` alias."
+            "Pass either `approval_request_id` (canonical name) "
+            "or the deprecated `id` alias."
         ),
         inputSchema={
             "type": "object",

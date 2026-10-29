@@ -32,6 +32,9 @@ form ``"<impl_id>-<version>"`` and resolves it into the
   see that have the same ``op_id`` enabled. Named in the ``unknown_op``
   error so a caller who picked the wrong connector version learns where
   the op lives (#4031).
+* :func:`close_connector_ids` / :func:`connector_product_known` -- the
+  "did you mean" ids and the product check behind every
+  unknown-connector error (#4136).
 
 The split lets the dispatcher's :func:`dispatch` body keep step 2's
 descriptor resolution one helper call instead of three.
@@ -39,6 +42,7 @@ descriptor resolution one helper call instead of three.
 
 from __future__ import annotations
 
+import difflib
 import re
 from typing import Any
 from uuid import UUID
@@ -47,13 +51,16 @@ import sqlalchemy as sa
 from sqlalchemy import ColumnElement, SQLColumnExpression, and_, or_, select
 from sqlalchemy.orm import aliased
 
+from meho_backplane.connectors.base import shim_kind
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup, TenantOperationSetting
 
 __all__ = [
+    "close_connector_ids",
     "connector_class_registered",
     "connector_exists",
+    "connector_product_known",
     "count_known_ops",
     "descriptor_exists_any_state",
     "enabled_for_tenant_clause",
@@ -438,12 +445,150 @@ async def find_connectors_with_op(
         )
         triples = {(row.product, row.version, row.impl_id) for row in result}
     triples.discard(exclude)
-    connector_ids: set[str] = set()
-    for product, version, impl_id in triples:
-        connector_id = f"{impl_id}-{version}" if impl_id and version else product
-        if parse_connector_id(connector_id) == (product, version, impl_id):
-            connector_ids.add(connector_id)
-    return sorted(connector_ids)[:_CONNECTORS_WITH_OP_CAP]
+    rendered = {_render_connector_id(*triple) for triple in triples}
+    return sorted(cid for cid in rendered if cid is not None)[:_CONNECTORS_WITH_OP_CAP]
+
+
+def _render_connector_id(product: str, version: str, impl_id: str) -> str | None:
+    """Render a row's triple as a connector id, or ``None`` if it does not parse back.
+
+    ``<impl_id>-<version>``, or ``<product>`` for a v1-style row with no
+    version. Only an id that :func:`parse_connector_id` maps back to the
+    same triple is returned, so every rendered id can be passed to
+    dispatch as is.
+    """
+    connector_id = f"{impl_id}-{version}" if impl_id and version else product
+    if parse_connector_id(connector_id) == (product, version, impl_id):
+        return connector_id
+    return None
+
+
+async def _visible_connector_triples(tenant_id: UUID) -> set[tuple[str, str, str]]:
+    """Return the *(product, version, impl_id)* of every connector the caller can see.
+
+    Same tenant rule as :func:`connector_exists`: built-in rows plus the
+    caller's own tenant rows, from ``endpoint_descriptor`` and
+    ``operation_group``. A connector of another tenant is never returned.
+    """
+    sessionmaker = get_sessionmaker()
+    triples: set[tuple[str, str, str]] = set()
+    async with sessionmaker() as session:
+        for model in (EndpointDescriptor, OperationGroup):
+            result = await session.execute(
+                select(model.product, model.version, model.impl_id)
+                .where((model.tenant_id.is_(None)) | (model.tenant_id == tenant_id))
+                .distinct()
+            )
+            triples.update((row.product, row.version, row.impl_id) for row in result)
+    return triples
+
+
+def _shipped_profile_triples() -> set[tuple[str, str, str]]:
+    """Return the parsed triple of every catalog row shipped with an execution profile.
+
+    Startup stamps a profiled connector class for each such row under
+    the built-in scope
+    (:func:`~meho_backplane.operations.ingest.boot_stamp.stamp_catalog_profiled_connectors`).
+    The triple is derived the way that stamp derives it: from the row's
+    ``<impl_id>-<version>`` id, so a catalog product that does not round
+    trip (``_fixture`` -> ``fixture``) still matches the registry entry.
+    """
+    # Local import: the ingest package imports this module at load time.
+    from meho_backplane.operations.ingest.catalog import load_catalog
+
+    return {
+        parse_connector_id(f"{entry.impl_id}-{entry.version}")
+        for entry in load_catalog().entries
+        if entry.profile_resource is not None
+    }
+
+
+def _builtin_registered_triples() -> set[tuple[str, str, str]]:
+    """Return the parsed *(product, version, impl_id)* of every built-in connector class.
+
+    Two kinds of registered class are built-in: a hand-coded class
+    (``shim_kind == "none"``), and the profiled class startup stamps for
+    a catalog row shipped with a profile (``mehoauto-rest-0.1.0``; see
+    :func:`_shipped_profile_triples`). Before its first ingest such a
+    connector has no operation rows, yet ``meho_connector_list`` shows
+    it, so its id is named here too.
+
+    Ingest also registers a class, a bare auto-shim or a profiled class
+    for a triple the catalog does not ship a profile for, and it does so
+    for a tenant-scoped ingest too. Such a connector is known only through
+    its rows, which :func:`_visible_connector_triples` filters by tenant.
+    Naming it from the registry would tell a caller of another tenant
+    that it exists. The v1-compat ``(product, "", "")`` entries are
+    skipped, and each entry is rendered and parsed back, the same round
+    trip :func:`connector_class_registered` uses.
+    """
+    shipped_profiles = _shipped_profile_triples()
+    triples: set[tuple[str, str, str]] = set()
+    for (_product, version, impl_id), cls in all_connectors_v2().items():
+        if not version or not impl_id:
+            continue
+        kind = shim_kind(cls)
+        if kind == "bare":
+            continue
+        parsed = parse_connector_id(f"{impl_id}-{version}")
+        if kind == "none" or parsed in shipped_profiles:
+            triples.add(parsed)
+    return triples
+
+
+#: Most ids one "did you mean" answer names (#4136).
+_DID_YOU_MEAN_CAP: int = 5
+
+#: Lowest :class:`difflib.SequenceMatcher` ratio that counts as a close spelling.
+_DID_YOU_MEAN_CUTOFF: float = 0.6
+
+
+async def close_connector_ids(*, tenant_id: UUID, connector_id: str) -> list[str]:
+    """Return up to 5 caller-visible connector ids close to *connector_id* (#4136).
+
+    Runs only on the unknown-connector error path. A close id is one that
+    starts with the given text (``vmware-rest`` -> ``vmware-rest-9.0``) or
+    has a close spelling (``linux-ssh-1.0`` -> ``linux-ssh-1.x``). The
+    match ignores case. Closest ids come first.
+
+    Only ids the caller can see are named: built-in connectors and the
+    caller's own tenant, the same rule as :func:`connector_exists`. A
+    built-in connector class with no rows yet, hand-coded or stamped at
+    startup from a shipped profile, is named too
+    (:func:`_builtin_registered_triples`).
+    """
+    needle = connector_id.strip().lower()
+    if not needle:
+        return []
+    triples = await _visible_connector_triples(tenant_id) | _builtin_registered_triples()
+    rendered = {_render_connector_id(*t) for t in triples}
+    known = {cid.lower(): cid for cid in rendered if cid is not None}
+    candidates = {key for key in known if key.startswith(needle)}
+    candidates.update(
+        difflib.get_close_matches(
+            needle, list(known), n=_DID_YOU_MEAN_CAP, cutoff=_DID_YOU_MEAN_CUTOFF
+        )
+    )
+    ranked = sorted(
+        candidates,
+        key=lambda key: (-difflib.SequenceMatcher(None, needle, key).ratio(), key),
+    )
+    return [known[key] for key in ranked[:_DID_YOU_MEAN_CAP]]
+
+
+async def connector_product_known(*, tenant_id: UUID, product: str) -> bool:
+    """Return whether any connector the caller can see has *product*.
+
+    ``list_targets`` uses this when its ``connector_id`` filter finds no
+    target (#4136): a product no connector has means the id is wrong, not
+    that the tenant has no targets of that kind. A built-in connector
+    class with no rows yet, hand-coded or stamped at startup from a
+    shipped profile, also counts. A class that ingest registered counts
+    only through its rows, so a connector of another tenant stays
+    unknown (:func:`_builtin_registered_triples`).
+    """
+    triples = await _visible_connector_triples(tenant_id) | _builtin_registered_triples()
+    return any(row_product == product for row_product, _version, _impl_id in triples)
 
 
 async def connector_exists(

@@ -7,7 +7,12 @@
 .github/workflows/chart.yml:generic-api-key:300
 backend/tests/test_chart_core_secrets.py:generic-api-key:65
 #
-# The example certificate thumbprint in the Entra test fixtures. It is a
-# fixture, not a credential. The hook sees it in every merge commit that
-# brings the Entra connector and its tests in from main.
+# The example certificate thumbprint in the Entra ID test fixtures. It is
+# base64 for the words "EXAMPLETHUMBPRINT", not a credential. The hook sees
+# it in every merge commit that brings the fixtures in from main.
 backend/tests/_entra_fixtures.py:generic-api-key:217
+#
+# The made-up storage account key in the Azure Storage connector tests.
+# It is a fixture, not a credential. The hook sees it in every merge
+# commit that brings the connector and its tests in from main.
+backend/tests/test_connectors_azure_storage.py:generic-api-key:114

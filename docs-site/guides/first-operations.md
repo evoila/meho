@@ -314,7 +314,7 @@ a one-VM drill becomes a cluster-wide incident.
 
 | Symptom | What it means | Fix |
 |---|---|---|
-| `-32602` with `data.reason: unknown_connector` | The `connector_id` names nothing registered — usually a bare product name (`k8s`) where `<impl_id>-<version>` (`k8s-1.x`) belongs. | `meho connector list`, copy the id verbatim. |
+| `-32602` with `data.reason: unknown_connector` | The `connector_id` names nothing registered — usually a bare product name (`k8s`) where `<impl_id>-<version>` (`k8s-1.x`) belongs. | Use an id from `data.did_you_mean` (close ids). If it is empty, run `meho connector list` and copy the id verbatim. |
 | `-32602` with `data.reason: connector_not_ingested` | The connector is registered but its spec has not been ingested, so it has no operations yet. Recoverable: the error's `data.next_step.verb` carries the exact `meho connector ingest …` command to run. | Run the named command, then retry. |
 | `meho operation groups` returns an empty list | The connector exists but nothing is enabled yet — operations ship default-deny until reviewed/enabled. | `meho connector review <id>`, then enable groups or single ops (`meho connector enable-reads <id>` bulk-enables the read class). |
 | Search cannot find an operation you know exists | Search only indexes **enabled** operations; a disabled op is invisible by design. An unknown `--group` also silently narrows to zero hits (that is not an error). | Check enablement via `meho connector review`; drop the group filter. |

@@ -81,6 +81,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.db.connector_usage_lock import lock_connector_usage_exclusive
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations.ingest._internals import (
     _UNSET,
@@ -1354,7 +1355,11 @@ class ReviewService:
         ``meho_connector_delete`` audit row commits atomically with the
         row deletes; the registry pop runs strictly after the commit so
         a failed transaction never leaves the process-local registry
-        ahead of the database. A connector that still had enabled
+        ahead of the database. A connector that is still used by a
+        sensor, runbook template, hosted agent, schedule, waiting approval
+        or queued operation run is not deleted: the call raises
+        :class:`ConnectorInUseError`, which lists each user (#5027). A
+        connector that still had enabled
         operations is deleted anyway and the returned
         :attr:`DeleteConnectorResult.warnings` carries the advisory
         (warnings never block the write — the
@@ -1375,11 +1380,21 @@ class ReviewService:
         scope = self._resolve_scope(connector_id, tenant_id)
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
+            # #5027: the first statement, so no new sensor, runbook template,
+            # hosted agent or schedule can be saved between the in-use check
+            # and the row delete (see db/connector_usage_lock.py).
+            await lock_connector_usage_exclusive(session)
             if tenant_id is not None:
                 legacy = await self._find_legacy_tenant_copy(scope, session)
                 if legacy is not None:
                     scope = legacy
-            staged = await stage_connector_delete(session, scope, connector_id)
+            staged = await stage_connector_delete(
+                session,
+                scope,
+                connector_id,
+                viewer_tenant_id=self._operator.tenant_id,
+                viewer_sees_all_tenants=self._operator.platform_admin,
+            )
             await write_audit_row(
                 session,
                 operator_sub=self._operator.sub,

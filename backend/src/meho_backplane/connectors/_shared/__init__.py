@@ -55,6 +55,11 @@ Exports:
   for ``gsm``) and the ``wrapped`` kind is present before any credential
   resolution.
 
+* :mod:`meho_backplane.connectors._shared.soap_fault` — reads a SOAP 1.1
+  ``<soapenv:Fault>`` body and carries the parsed fault on an exception.
+  The core error builders use it to fill ``upstream_fault``, so it must not
+  live in a connector folder.
+
 New cross-connector shared modules land alongside these — keep each
 module focused on a single concern (auth, retries, pagination, etc.)
 rather than growing this package into a god-module.

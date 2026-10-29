@@ -3846,7 +3846,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `vm.snapshot.create` | `{action, vm, snapshot_name, memory, quiesce}` echo | param echo, no I/O |
 | `vm.snapshot.delete` | mandatory `blast_radius` from the handler's own plan: the snapshot, and the snapshots below it when `remove_children` is set | live read (vim `RetrievePropertiesEx` of `VirtualMachine.snapshot`) |
 | `vm.migrate` | `{vm, cluster, target_host, target_host_source}` | param echo, no I/O |
-| `vm.power` | `{vm, verb, power_kind}` echo (`power_kind` = `hard` vs Tools-soft `guest`) | param echo, no I/O |
+| `vm.power` | `{vm, name, power_state, verb, power_kind}` (`power_kind` = `hard` vs Tools-soft `guest`); a failed read keeps the moid, sets `name` / `power_state` to `null` and adds an `unavailable` note -- the request is still created (#3942) | live read, best-effort (`GET:/vcenter/vm/{vm}`) |
 | `cluster.drs_rule.create` | `{cluster, cluster_name, rule_type, rule_name, enabled, resolved, total_resolved}` | live read (`GET:/vcenter/vm` + `GET:/vcenter/cluster/{cluster}`) |
 | `folder.create` | `{parent_folder` / `parent_folder_id, datacenter?, new_folder_name}` echo | param echo, no I/O |
 

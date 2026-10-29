@@ -428,24 +428,32 @@ the envelope `status`, with the same rule as `isError`
 | `status` | `extras.error_code` | row `status_code` |
 |---|---|---|
 | `ok`, `awaiting_approval`, anything else | any | `200` |
-| `error` | `unknown_op`, `unknown_connector` | `404` |
-| `error` | any other code | `400` |
+| `error`, with an `audit_id` (the call ran) | any | `500` |
+| `error`, no `audit_id` | `unknown_op`, `unknown_connector` | `404` |
+| `error`, no `audit_id` | any other code | `400` |
 | `denied` | any | `403` |
 | `rate_limited` | any | `429` |
 
 The row's payload also carries `result_status` (the envelope `status`)
 and `error_code` (from `extras.error_code`, when there is one), so a
 query can filter on them. A call that did run keeps its own operation
-row from the dispatcher; that row still holds the exact result. Every
-other tool keeps `status_code = 200` when its handler returns.
+row from the dispatcher; that row still holds the exact result. When
+such a call fails (for example the vendor times out), the result carries
+the `audit_id` of that row, and the tool-call row says `500`, the same
+as the operation row. Every other tool keeps `status_code = 200` when
+its handler returns.
 
-The counts that read only `status_code = 200` tool-call rows (the
-reflex adoption numbers and the retrieval usage numbers) no longer count
-a `call_operation` that failed or was refused.
+The reflex adoption numbers and the working-surface check query (later
+in this file) read only `status_code = 200` tool-call rows, so they no
+longer count a `call_operation` that failed or was refused. The
+retrieval usage numbers do not change: they filter on
+`status_code = 200` only for the search tools.
 
 With `AUDIT_WRAPPER_ROWS_RETIRED=true` the cut-over rules in
 `audit_cutover.py` decide what is written:
 
+- `500`: no tool-call row. The dispatcher already wrote its operation
+  row for the caller.
 - `404`, `400` and `429`: no tool-call row (`call_operation` is a
   routine tool, and other 4xx write nothing). The request usage event
   holds the real outcome: `not_found`, `client_error` or

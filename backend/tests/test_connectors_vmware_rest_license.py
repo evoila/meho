@@ -40,7 +40,6 @@ from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors import OperationResult
-from meho_backplane.connectors._shared.license_key import mask_license_key
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError, SessionLoginError
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.connectors.vmware_rest import (
@@ -74,6 +73,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops_license import (
     license_list_impl,
 )
 from meho_backplane.connectors.vmware_rest.vim_body import unwrap_vim_value
+from meho_backplane.connectors.vmware_shared.license_key import mask_license_key
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, AuditLog, EndpointDescriptor, OperationGroup
 from meho_backplane.db.models import Target as TargetORM

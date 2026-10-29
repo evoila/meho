@@ -897,6 +897,8 @@
         "enabled": { "type": "boolean" },
         "hostname": { "type": "string", "description": "MEHO's public DNS name, equal to `ingress.host`. Keycloak's public address is `https://<hostname>/auth`. Required when enabled." },
         "firstTenantId": { "type": "string", "description": "The first tenant's id (a UUID). Every realm group carries it as `tenant_id`. Required when enabled." },
+        "tenantName": { "type": "string", "description": "The first tenant's short name. The five role groups carry it in `meho_tenant`." },
+        "tenants": { "type": "array", "description": "More tenants, as `{name, id}`. The bootstrap Job makes the five groups `MEHO-<name>-<Role>` for each one." },
         "ingress": { "type": "object", "description": "`exposeAdmin`: also route the admin console on the MEHO host." },
         "image": { "type": "object" },
         "waitForDatabase": { "type": "object" },
@@ -1083,6 +1085,7 @@
               "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*$"
             },
             "tag": { "type": "string", "minLength": 1 },
+            "digest": { "type": "string", "pattern": "^(sha256:[0-9a-f]{64})?$", "description": "Image index digest. When set, the pod uses `repository@digest` and the tag is only a label. Empty string = use the tag." },
             "pullPolicy": {
               "type": "string",
               "enum": ["Always", "IfNotPresent", "Never"]
@@ -1197,6 +1200,7 @@
               "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*$"
             },
             "tag": { "type": "string", "minLength": 1 },
+            "digest": { "type": "string", "pattern": "^(sha256:[0-9a-f]{64})?$", "description": "Image index digest. When set, the pod uses `repository@digest` and the tag is only a label. Empty string = use the tag." },
             "pullPolicy": {
               "type": "string",
               "enum": ["Always", "IfNotPresent", "Never"]

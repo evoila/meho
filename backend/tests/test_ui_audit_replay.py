@@ -358,6 +358,37 @@ def test_replay_renders_tree_for_tenant_admin() -> None:
     assert "Session too large" not in body
 
 
+def test_replay_nodes_name_their_tenant() -> None:
+    """Every node in the tree shows the tenant name from the tenant table (#5238)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_uuid = uuid.uuid4()
+    root_id = _seed_audit_row(
+        tenant_id=_TENANT_A,
+        second=0,
+        op_id="agent.session.start",
+        agent_session_id=session_uuid,
+    )
+    _seed_audit_row(
+        tenant_id=_TENANT_A,
+        second=1,
+        op_id="vsphere.vm.list",
+        agent_session_id=session_uuid,
+        parent_audit_id=root_id,
+    )
+
+    session_id, _jwks, mock = _admin_replay()
+    try:
+        client = _authenticated_client(session_id)
+        response = client.get(f"/ui/audit/sessions/{session_uuid}/replay")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    # The row label is the only place with this exact markup, so each hit is
+    # one tree node: the root and its child.
+    assert response.text.count('data-tenant title="Tenant">Tenant tenant-a<') == 2
+
+
 # ===========================================================================
 # AC1(b): operator / read_only sessions get the 403 forbidden fragment
 # ===========================================================================

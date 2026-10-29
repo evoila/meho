@@ -46,6 +46,7 @@ from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
+from meho_backplane.redaction.secret_fields import scrub_secret_fields_in_text
 
 if TYPE_CHECKING:
     from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
@@ -147,9 +148,14 @@ def _sanitize_free_text(text: str, *, cap: int = _EXC_MESSAGE_CAP) -> str:
 
     *cap* defaults to :data:`_EXC_MESSAGE_CAP`; upstream body text passes
     the larger :data:`_UPSTREAM_MESSAGE_CAP` (#3567).
+
+    Before the Tier-1 pass, the value of each quoted secret-named pair is
+    replaced (``"password": "..."`` in a vendor's JSON error body, #5031):
+    the Tier-1 patterns need the name right before the ``:`` and do not see
+    it behind a quote.
     """
     try:
-        redacted = redact(text, get_default_policy()).redacted
+        redacted = redact(scrub_secret_fields_in_text(text), get_default_policy()).redacted
     except Exception:  # fail-closed: never leak, never raise on the error path
         return _TEXT_WITHHELD
     if not isinstance(redacted, str):  # pragma: no cover -- str in, str out

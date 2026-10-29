@@ -63,6 +63,7 @@ from meho_backplane.connectors.kubernetes.ops_logs_window import (
     RFC3339_PATTERN,
     LogWindow,
     LogWindowError,
+    decode_window_body,
     parse_rfc3339,
     read_pod_log_window,
     select_window,
@@ -282,7 +283,9 @@ K8S_LOGS_LLM_INSTRUCTIONS: dict[str, Any] = {
             "'end' and 'last_line_time' is the time of the last line "
             "kept: call again with since_time set to that value to get "
             "the next lines. The next call starts again with the "
-            "line(s) at that exact time, so nothing is skipped."
+            "line(s) at that exact time, so nothing is skipped. Stop "
+            "when 'last_line_time' is the same as in the call before "
+            "(see 'limits')."
         ),
         "until_time": (
             "RFC 3339 end time; needs 'since_time'. Lines after it are "
@@ -296,7 +299,14 @@ K8S_LOGS_LLM_INSTRUCTIONS: dict[str, Any] = {
         "the newest MiB, page back in time with since_time (and "
         "until_time). Kubernetes keeps only part of a log: the node "
         "rotates old log files away, and MEHO cannot read what "
-        "Kubernetes no longer serves."
+        "Kubernetes no longer serves. Kubernetes takes since_time in "
+        "whole seconds only, so a page always starts at the start of "
+        "a second. If more than about "
+        f"{WINDOW_LIMIT_BYTES / (1024 * 1024):.2f} MiB is written "
+        "within one second, paging stops moving forward: "
+        "'last_line_time' stays the same and the next call returns "
+        "the same lines. Stop paging when 'last_line_time' does not "
+        "change; the rest of that second cannot be read this way."
     ),
     "output_shape": (
         "Flat dict: {'pod': <resolved-name>, 'namespace', 'container', "
@@ -563,10 +573,10 @@ async def k8s_logs(
             tail_lines=tail if "tail" in params else None,
             limit_bytes=WINDOW_LIMIT_BYTES,
         )
-        window_body = await read_pod_log_window(
+        raw = await read_pod_log_window(
             api_client, name=exact_name, namespace=namespace, query=query
         )
-        return _window_result(exact_name, namespace, container_name, window_body, window)
+        return _window_result(exact_name, namespace, container_name, raw, window)
 
     # ``kubernetes_asyncio`` accepts every parameter as a kwarg; pass
     # only the ones with non-default values so the wire request stays
@@ -624,19 +634,19 @@ def _window_result(
     pod: str,
     namespace: str,
     container: str,
-    body: str,
+    raw: bytes,
     window: LogWindow,
 ) -> dict[str, Any]:
     """Build the ``k8s.logs`` answer for a ``since_time`` read.
 
     Keeps the oldest lines that fit in :data:`MAX_BODY_BYTES`. When the
-    body reached :data:`WINDOW_LIMIT_BYTES`, Kubernetes stopped early and
-    may have cut the last line in half, so that line is dropped and the
-    window counts as cut at the end.
+    body reached :data:`WINDOW_LIMIT_BYTES`, Kubernetes stopped early:
+    the cut last line is dropped (see :func:`decode_window_body`) and
+    the window counts as cut at the end.
     """
+    body, stopped_early = decode_window_body(raw, WINDOW_LIMIT_BYTES)
     lines = body.split("\n")
-    stopped_early = len(body.encode("utf-8")) >= WINDOW_LIMIT_BYTES
-    if lines and (lines[-1] == "" or stopped_early):
+    if lines and lines[-1] == "":
         lines.pop()
     selected, stamps, reached_until = select_window(lines, window)
     kept, _ = truncate_lines_to_byte_cap(selected, MAX_BODY_BYTES, keep_oldest=True)

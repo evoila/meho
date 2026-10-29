@@ -181,6 +181,13 @@ window:
   does not accept `since_time`. It also sends
   `limitBytes = 1 MiB + 64 KiB`, so a forward read from an old time
   never pulls the whole rest of the log into memory.
+* `limitBytes` can stop inside a line, even inside a multi-byte UTF-8
+  character. The SDK decodes a normal answer as strict UTF-8, which
+  would fail on such a body. So the window call uses
+  `_preload_content=False`, reads the raw bytes, and
+  `decode_window_body` drops the cut last line before it decodes.
+  With `_preload_content=False` the SDK does not check the HTTP
+  status, so `read_pod_log_window` raises `ApiException` itself.
 * The API server passes `sinceTime` to the node in whole seconds.
   The handler drops the extra lines from the start of that second
   itself (`ops_logs_window.select_window`).
@@ -190,7 +197,8 @@ window:
 * Paging: call again with `since_time` set to `last_line_time`. The
   next answer starts again with the line(s) at that exact time (the
   start is inclusive), so no line is skipped; drop the repeated
-  lines. Repeat until `truncated` is false.
+  lines. Repeat until `truncated` is false, or stop when
+  `last_line_time` does not change (see Known issues).
 * A long window still comes back behind a result handle, as any long
   `lines` list does.
 * Limit: Kubernetes keeps only part of a log. The node rotates old log
@@ -221,9 +229,17 @@ window:
   `tools/call` envelope has no streaming shape in 2025-06-18; the
   connector's `OperationResult` is single-response). Operators
   following live logs continue using `kubectl-vcf.sh -f` until v0.2.next.
-* **Paging gets stuck on a huge burst with one timestamp.** If more
-  than 1 MiB of lines share the exact same timestamp, `last_line_time`
-  does not move forward and the next page repeats the same lines.
+* **Paging gets stuck on a burst of more than about 1.06 MiB within
+  one second.** The API server sends `sinceTime` to the node in whole
+  seconds, so every page starts at the start of the second of
+  `last_line_time`. When more than `WINDOW_LIMIT_BYTES` (1 MiB + 64
+  KiB) is written within that one second, every page gets the same
+  first bytes of it. `last_line_time` then stops changing, even when
+  every line has its own time, and the next page repeats the same
+  lines. The caller must stop paging when `last_line_time` does not
+  change. The rest of that second cannot be read with `since_time`.
+  `test_paging_stops_moving_when_one_second_holds_more_than_the_byte_limit`
+  pins this.
 * **1 MiB body cap is not configurable per-target.** The cap matches
   the operator's typical terminal scrollback and the MCP envelope's
   practical payload ceiling. A per-target override is v0.2.next.

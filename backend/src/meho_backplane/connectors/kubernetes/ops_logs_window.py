@@ -17,7 +17,10 @@ depend on the op's schemas or caps:
   ``sinceTime``. ``kubernetes_asyncio`` 36 does not accept
   ``since_time`` on ``read_namespaced_pod_log`` (the generated method
   has no such parameter), so the request goes through
-  :meth:`ApiClient.call_api` on the same path.
+  :meth:`ApiClient.call_api` on the same path. It reads the raw bytes,
+  because the SDK's strict UTF-8 decode fails when ``limitBytes`` cuts a
+  multi-byte character.
+* :func:`decode_window_body` -- drops a cut last line and decodes.
 * :func:`select_window` -- keeps the lines inside the window.
 
 Kubernetes behaviour this relies on (``k8s.io/cri-client`` log reader
@@ -42,11 +45,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 from kubernetes_asyncio import client
+from kubernetes_asyncio.client.exceptions import ApiException
 
 __all__ = [
     "RFC3339_PATTERN",
     "LogWindow",
     "LogWindowError",
+    "decode_window_body",
     "parse_rfc3339",
     "read_pod_log_window",
     "select_window",
@@ -138,14 +143,17 @@ async def read_pod_log_window(
     name: str,
     namespace: str,
     query: dict[str, Any],
-) -> str:
+) -> bytes:
     """``GET /api/v1/namespaces/{ns}/pods/{name}/log`` with extra query params.
 
     Builds the same request the generated ``read_namespaced_pod_log``
     does, but with the query params given here, so ``sinceTime`` can be
-    sent. Returns the log body as text.
+    sent. Returns the raw body bytes. The body is not decoded here:
+    ``limitBytes`` can cut a multi-byte UTF-8 character in half, and the
+    SDK's own decode is strict, so it would fail on such a body. Use
+    :func:`decode_window_body` to decode it.
     """
-    body: str = await api_client.call_api(
+    response = await api_client.call_api(
         "/api/v1/namespaces/{namespace}/pods/{name}/log",
         "GET",
         path_params={"name": name, "namespace": namespace},
@@ -154,8 +162,37 @@ async def read_pod_log_window(
         response_types_map={200: "str"},
         auth_settings=["BearerToken"],
         _return_http_data_only=True,
+        _preload_content=False,
     )
-    return body
+    try:
+        raw: bytes = await response.read()
+    finally:
+        response.release()
+    if not 200 <= response.status <= 299:
+        # With ``_preload_content=False`` the SDK does not check the
+        # status, so raise the same error it raises for the other calls.
+        # The SDK turns the body into text there as well; its type
+        # hints say bytes.
+        error = ApiException(status=response.status, reason=response.reason)
+        error.headers = response.headers
+        error.body = raw.decode("utf-8", errors="replace")  # type: ignore[assignment]
+        raise error
+    return raw
+
+
+def decode_window_body(raw: bytes, limit_bytes: int) -> tuple[str, bool]:
+    """Decode a window body; also say whether Kubernetes stopped early.
+
+    When the body reached ``limit_bytes``, Kubernetes stopped early and
+    may have cut the last line, even inside a multi-byte character. That
+    last part line is dropped before decoding, so only whole lines are
+    kept. Bytes that are still not valid UTF-8 become U+FFFD instead of
+    failing the read.
+    """
+    stopped_early = len(raw) >= limit_bytes
+    if stopped_early:
+        raw = raw[: raw.rfind(b"\n") + 1]
+    return raw.decode("utf-8", errors="replace"), stopped_early
 
 
 def window_query(

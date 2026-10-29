@@ -7,8 +7,9 @@ The cluster side is a small stand-in for the node's log reader: it
 keeps lines at or after ``sinceTime`` (whole seconds, as the API server
 passes it on), applies ``tailLines``, writes the RFC 3339 nanosecond
 timestamp in front of every line, and stops after ``limitBytes`` even
-in the middle of a line. The tests drive ``k8s_logs`` against those
-recorded answers.
+in the middle of a line or of a multi-byte character. It answers with
+raw bytes, as the real ``/log`` call does with ``_preload_content=False``.
+The tests drive ``k8s_logs`` against those recorded answers.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from jsonschema import Draft202012Validator
 from kubernetes_asyncio import client
+from kubernetes_asyncio.client.exceptions import ApiException
 
 from meho_backplane.connectors.kubernetes.ops_logs import (
     K8S_LOGS_LLM_INSTRUCTIONS,
@@ -33,6 +35,7 @@ from meho_backplane.connectors.kubernetes.ops_logs import (
 )
 from meho_backplane.connectors.kubernetes.ops_logs_window import (
     LogWindow,
+    decode_window_body,
     read_pod_log_window,
     window_query,
 )
@@ -56,18 +59,29 @@ def _stamp(second: int, nanos: int = 0) -> str:
     return f"2026-08-01T{hours:02d}:{minutes:02d}:{seconds:02d}.{nanos:09d}Z"
 
 
+def _raw_response(raw: bytes, status: int = 200) -> MagicMock:
+    """A stand-in for the ``aiohttp`` response ``call_api`` returns unread."""
+    return MagicMock(
+        status=status,
+        reason="OK" if status == 200 else "Not Found",
+        headers={"Content-Type": "text/plain"},
+        read=AsyncMock(return_value=raw),
+        release=MagicMock(),
+    )
+
+
 def _kubelet_answer(entries: list[tuple[str, str]]) -> Callable[..., Any]:
     """Build a ``call_api`` stand-in that answers like the node's log reader."""
 
-    async def _answer(*_args: Any, **kwargs: Any) -> str:
+    async def _answer(*_args: Any, **kwargs: Any) -> MagicMock:
+        assert kwargs["_preload_content"] is False
         query = dict(kwargs["query_params"])
         assert query["timestamps"] is True
         since = query["sinceTime"].replace("Z", ".000000000Z")
         selected = [f"{ts} {text}\n" for ts, text in entries if ts >= since]
         if "tailLines" in query:
             selected = selected[-query["tailLines"] :]
-        raw = "".join(selected).encode("utf-8")[: query["limitBytes"]]
-        return raw.decode("utf-8", errors="ignore")
+        return _raw_response("".join(selected).encode("utf-8")[: query["limitBytes"]])
 
     return _answer
 
@@ -148,6 +162,8 @@ def test_guidance_names_the_limits() -> None:
     assert str(MAX_TAIL_LINES) in limits
     assert "1 MiB" in limits
     assert "rotates" in limits
+    assert "1.06 MiB is written within one second" in limits
+    assert "Stop paging when 'last_line_time' does not change" in limits
     assert "since_time" in K8S_LOGS_LLM_INSTRUCTIONS["parameter_hints"]
     assert "until_time" in K8S_LOGS_LLM_INSTRUCTIONS["parameter_hints"]
 
@@ -255,6 +271,38 @@ async def test_paging_from_last_line_time_has_no_gap() -> None:
 
 
 @pytest.mark.asyncio
+async def test_paging_stops_moving_when_one_second_holds_more_than_the_byte_limit() -> None:
+    """Known limit: ``sinceTime`` goes out in whole seconds.
+
+    Each page asks Kubernetes for the log from the start of the second of
+    ``last_line_time``. When that one second holds more than
+    ``WINDOW_LIMIT_BYTES`` (about 1.06 MiB), every page gets the same
+    first bytes of that second, and ``last_line_time`` stops changing
+    even though every line has its own time. The caller must stop then.
+    """
+    entries = [
+        (_stamp(0, index * 1000), f"line {index:05d} " + "x" * 1000) for index in range(2000)
+    ]
+    assert sum(len(f"{ts} {text}\n") for ts, text in entries) > WINDOW_LIMIT_BYTES
+
+    times: list[str] = []
+    sizes: list[int] = []
+    since_time = "2026-08-01T00:00:00Z"
+    for _ in range(4):
+        result, _ = await _call(entries, since_time=since_time)
+        assert result["truncated"] is True
+        sizes.append(len(result["lines"]))
+        times.append(result["last_line_time"])
+        since_time = result["last_line_time"]
+
+    assert times[0] != times[1]
+    assert times[1] == times[2] == times[3]
+    assert sizes[2:] == [1, 1]
+    # The rest of that second is never reached.
+    assert times[-1] < entries[-1][0]
+
+
+@pytest.mark.asyncio
 async def test_window_that_ends_before_the_byte_limit_is_not_cut() -> None:
     """``until_time`` reached inside the bytes Kubernetes sent: the window is whole."""
     entries = _big_log()
@@ -340,13 +388,14 @@ async def test_without_window_params_the_newest_lines_path_is_unchanged() -> Non
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_window_request_on_the_wire() -> None:
-    """The real ``ApiClient`` builds the URL and query and returns the text body."""
+async def _read_through_real_api_client(response: MagicMock) -> tuple[bytes, AsyncMock]:
+    """Run :func:`read_pod_log_window` through a real ``ApiClient``.
+
+    Only the HTTP layer (``ApiClient.request``) is replaced, so the SDK's
+    own handling of the answer runs.
+    """
     configuration = client.Configuration(host="https://k8s.test:6443")
     api_client = client.ApiClient(configuration)
-    response = MagicMock(status=200, data=f"{_stamp(1)} hello\n".encode())
-    response.getheader.return_value = "text/plain; charset=utf-8"
     try:
         with patch.object(api_client, "request", AsyncMock(return_value=response)) as request:
             query = window_query(
@@ -364,13 +413,23 @@ async def test_window_request_on_the_wire() -> None:
             )
     finally:
         await api_client.close()
+    return body, request
 
-    assert body == f"{_stamp(1)} hello\n"
+
+@pytest.mark.asyncio
+async def test_window_request_on_the_wire() -> None:
+    """The real ``ApiClient`` builds the URL and query and returns the raw body."""
+    response = _raw_response(f"{_stamp(1)} hello\n".encode())
+    body, request = await _read_through_real_api_client(response)
+
+    assert body == f"{_stamp(1)} hello\n".encode()
+    response.release.assert_called_once()
     args = request.call_args
     assert args.args == (
         "GET",
         "https://k8s.test:6443/api/v1/namespaces/argocd/pods/argocd-server-7c4b8d-x7r2k/log",
     )
+    assert args.kwargs["_preload_content"] is False
     assert args.kwargs["query_params"] == [
         ("container", "argocd-server"),
         ("previous", False),
@@ -378,3 +437,49 @@ async def test_window_request_on_the_wire() -> None:
         ("timestamps", True),
         ("limitBytes", WINDOW_LIMIT_BYTES),
     ]
+
+
+@pytest.mark.asyncio
+async def test_body_cut_inside_a_multi_byte_character_is_read() -> None:
+    """``limitBytes`` can cut a UTF-8 character in half; the read still works.
+
+    The SDK's own decode is strict UTF-8 and fails on such a body, so the
+    window read must take the raw bytes and decode them itself.
+    """
+    line = f"{_stamp(1)} grüße ".encode() + "ü".encode() * 600 + b"\n"
+    raw = (line * (WINDOW_LIMIT_BYTES // len(line) + 2))[:WINDOW_LIMIT_BYTES]
+    # The cut lands inside a two-byte character.
+    assert raw.endswith("ü".encode()[:1])
+    with pytest.raises(UnicodeDecodeError):
+        raw.decode("utf-8")
+
+    body, _ = await _read_through_real_api_client(_raw_response(raw))
+    text, stopped_early = decode_window_body(body, WINDOW_LIMIT_BYTES)
+
+    assert stopped_early is True
+    lines = text.split("\n")
+    assert lines.pop() == ""
+    assert lines
+    assert all(kept == line[:-1].decode() for kept in lines)
+
+
+@pytest.mark.asyncio
+async def test_window_read_raises_api_exception_on_an_error_status() -> None:
+    """The raw read does not let an error answer pass as a log body."""
+    response = _raw_response(b'{"kind":"Status","reason":"NotFound"}', status=404)
+    with pytest.raises(ApiException) as caught:
+        await _read_through_real_api_client(response)
+    assert caught.value.status == 404
+    assert caught.value.body == '{"kind":"Status","reason":"NotFound"}'
+    response.release.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_page_cut_inside_a_multi_byte_character_keeps_whole_lines() -> None:
+    """Through ``k8s_logs``: a cut character never fails the call or shows up."""
+    entries = [(_stamp(index // 10, index % 10), "ü" * 1000) for index in range(1000)]
+    result, _ = await _call(entries, since_time="2026-08-01T00:00:00Z")
+    assert result["truncated"] is True
+    assert result["lines"]
+    assert all(line.endswith("ü" * 1000) for line in result["lines"])
+    assert not any("\ufffd" in line for line in result["lines"])

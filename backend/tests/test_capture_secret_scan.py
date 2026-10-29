@@ -20,7 +20,9 @@ real system, so it can carry a real token or password by mistake.
 * a field with a secret name and a value, as a quoted pair (JSON
   ``"password": "..."``, Python ``'password': "..."`` with either quote,
   escaped JSON ``\\"password\\": \\"...\\"``; found by the shared
-  ``iter_quoted_secret_fields``), as YAML (``password: ...``) or as XML
+  ``iter_quoted_secret_fields``), as an object or a list under a secret name
+  (``"credentials": {"value": "..."}``: it counts when a string value inside
+  looks like a secret), as YAML (``password: ...``) or as XML
   (``<password>...</password>``). The name rule is the shared
   ``is_secret_param_name``.
 
@@ -51,7 +53,7 @@ import pytest
 
 from meho_backplane.broadcast.events import is_secret_param_name
 from meho_backplane.redaction.patterns import NAMED_PATTERNS
-from meho_backplane.redaction.secret_fields import iter_quoted_secret_fields
+from meho_backplane.redaction.secret_fields import QuotedSecretField, iter_quoted_secret_fields
 
 #: The start of every value ``test_redaction_planted_secrets.py`` plants.
 PLANTED_MARKER: Final = "planted-secret-"
@@ -100,6 +102,11 @@ _MIN_VALUE_LENGTH: Final = 8
 
 _FIELD_NAME: Final = re.compile(r"[A-Za-z_]+")
 
+#: A quoted string inside an object or a list; ``colon`` is set when it is a key.
+_QUOTED_STRING: Final = re.compile(
+    r"""(?:"(?P<double>(?:[^"\\]|\\.)*)"|'(?P<single>(?:[^'\\]|\\.)*)')(?P<colon>\s*:)?"""
+)
+
 
 class Finding(NamedTuple):
     """One secret-like match in a capture."""
@@ -122,6 +129,24 @@ def _is_secret_value(value: str) -> bool:
     return _NOT_A_SECRET.fullmatch(value) is None
 
 
+def _string_values_inside(field: QuotedSecretField) -> Iterator[str]:
+    """The string values (not the keys) inside an object or a list value."""
+    value = re.sub(r"\\(.)", r"\1", field.value) if field.escaped else field.value
+    for match in _QUOTED_STRING.finditer(value):
+        if match.group("colon") is None:
+            yield (
+                match.group("double")
+                if match.group("double") is not None
+                else match.group("single")
+            )
+
+
+def _holds_secret_value(field: QuotedSecretField) -> bool:
+    if field.bracketed:
+        return any(_is_secret_value(value) for value in _string_values_inside(field))
+    return _is_secret_value(field.value)
+
+
 def scan_text(text: str, *, path: str = "<text>") -> list[Finding]:
     """Return every planted marker, secret shape and secret-named field in *text*."""
     findings: list[Finding] = []
@@ -138,7 +163,7 @@ def scan_text(text: str, *, path: str = "<text>") -> list[Finding]:
         for match in pattern.finditer(text):
             findings.append(Finding(path, _line_of(text, match.start()), name))
     for field in iter_quoted_secret_fields(text):
-        if _is_secret_value(field.value):
+        if _holds_secret_value(field):
             findings.append(Finding(path, _line_of(text, field.start), "quoted_field"))
     for name, pattern in _FIELD_PATTERNS.items():
         for match in pattern.finditer(text):
@@ -208,6 +233,14 @@ _FAKE_AWS_KEY_ID = "AK" + "IA" + "MADEUPMADEUP1234"
         ("answer.py.txt", "{'note': \"it's\", 'password': \"made-up-it's-pass\"}", "quoted_field"),
         ("answer.json", '{"body": "{\\"password\\": \\"made-up-pass-123\\"}"}', "quoted_field"),
         ("answer.json", '{"password": "' + "x" * 5000 + '"}', "quoted_field"),
+        ("answer.json", '{"credentials": {"value": "made-up-secret-1"}}', "quoted_field"),
+        ("answer.json", '{"password": ["made-up-pass-123", "made-up-pass-456"]}', "quoted_field"),
+        ("answer.py.txt", "{'credentials': {'value': \"made-up-it's-secret\"}}", "quoted_field"),
+        (
+            "answer.json",
+            '{"body": "{\\"credentials\\": {\\"value\\": \\"made-up-secret-1\\"}}"}',
+            "quoted_field",
+        ),
         ("answer.yaml", "account:\n  sessionToken: made-up-session-token\n", "yaml_field"),
         ("answer.xml", "<login><password>made-up-pass-123</password></login>", "xml_field"),
         ("key.pem", _FAKE_KEY_BLOCK, "private_key_block"),
@@ -232,6 +265,8 @@ def test_scan_finds_a_planted_capture(
         "<key>key-vim.host.ScsiDisk-0000</key><password></password>",
         '{"secret_ref": "tenants/made-up/target", "pwd": "short"}',
         "credential_field: kubeconfig\nnote: set `password=<generated>`).\n",
+        '{"credentials": {"username": "<user>", "password": "<password>"}, "secret": {}}',
+        '{"password": ["[REDACTED:param_name]"], "credentials": {"kind": "token", "ttl": 60}}',
     ],
 )
 def test_scan_passes_a_clean_capture(tmp_path: Path, content: str) -> None:

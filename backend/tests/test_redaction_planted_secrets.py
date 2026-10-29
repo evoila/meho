@@ -16,8 +16,10 @@ vendor answer with planted secrets:
   (an ``issues[]`` entry with ``severity == "error"``) with the vendor's
   answer inside.
 
-The planted values are a token, a password field and a vendor's encrypted
-password field. For each run the test checks that no planted value is in:
+The planted values are a token, a password field, a vendor's encrypted
+password field and a credentials object (a secret-named field whose value is
+an object, not a string). For each run the test checks that no planted value
+is in:
 
 * the result the caller gets;
 * the committed audit row of the run;
@@ -87,19 +89,22 @@ PLANTED_MARKER = "planted-secret-"
 PLANTED_TOKEN = f"{PLANTED_MARKER}token-5031-made-up"
 PLANTED_PASSWORD = f"{PLANTED_MARKER}password-5031-made-up"
 PLANTED_ENCRYPTED = f"{PLANTED_MARKER}encrypted-5031-made-up"
-PLANTED_VALUES = (PLANTED_TOKEN, PLANTED_PASSWORD, PLANTED_ENCRYPTED)
+PLANTED_CREDENTIAL = f"{PLANTED_MARKER}credential-5031-made-up"
+PLANTED_VALUES = (PLANTED_TOKEN, PLANTED_PASSWORD, PLANTED_ENCRYPTED, PLANTED_CREDENTIAL)
 
 _TENANT = uuid.UUID("00000000-0000-0000-0000-000000005031")
 _VENDOR_URL = "https://vendor.example.invalid/api/v1/items"
 
-#: A vendor's JSON error body: a session token, a password field and an
-#: encrypted password field, with no top-level ``message``.
+#: A vendor's JSON error body: a session token, a password field, an
+#: encrypted password field and a credentials object, with no top-level
+#: ``message``.
 _VENDOR_ERROR_BODY: dict[str, Any] = {
     "error": {
         "code": "LOGIN_FAILED",
         "sessionToken": PLANTED_TOKEN,
         "password": PLANTED_PASSWORD,
         "encryptedPassword": PLANTED_ENCRYPTED,
+        "credentials": {"value": PLANTED_CREDENTIAL, "kind": "made-up"},
     }
 }
 

@@ -38,7 +38,12 @@ What is held back, as one part:
   ``<script>`` or ``<style>`` block, and the page text. Page text that is
   split over several tags (``<span>sessionId</span>: ...``) is joined in
   document order first (:func:`hold_back_pieces`). Then the texts around
-  the secret are held back, as few as the check can find.
+  the secret are held back, as few as the check can find;
+* in an HTML file, the value of a label-and-value pair whose label names
+  a secret: the cell after a table cell, the ``<dd>`` after a ``<dt>``,
+  the element after a ``<label>``. The value counts whatever its length
+  or punctuation; the token rule is for free text only
+  (:func:`~meho_backplane.connectors._shared.api_file_markup.last_check_html`).
 
 A held-back part becomes the placeholder. It is counted, and the reason
 (:data:`~meho_backplane.connectors._shared.api_file_values.SECRET_NAME_AFTER_FLATTENING`)
@@ -155,15 +160,16 @@ _VALUE_AFTER_NAME: Final[re.Pattern[str]] = re.compile(
 _TOKEN_AFTER_SPACE: Final[re.Pattern[str]] = re.compile(
     _QUOTES + r"\s++" + _QUOTES + r"(?P<run>[A-Za-z0-9+/=_\-]++)"
 )
-_HEX: Final[re.Pattern[str]] = re.compile(r"[0-9A-Fa-f]{16,}")
-_LETTERS_AND_DIGITS: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9]{16,}")
-_HAS_LETTER: Final[re.Pattern[str]] = re.compile(r"[A-Za-z]")
-_HAS_DIGIT: Final[re.Pattern[str]] = re.compile(r"[0-9]")
 
 #: How long a run must be to count as a token: hex or letters mixed with
 #: digits from 16 characters, any other base64 run from 20.
 _TOKEN_MIN: Final[int] = 16
 _BASE64_MIN: Final[int] = 20
+
+_HEX: Final[re.Pattern[str]] = re.compile(rf"[0-9A-Fa-f]{{{_TOKEN_MIN},}}")
+_LETTERS_AND_DIGITS: Final[re.Pattern[str]] = re.compile(rf"[A-Za-z0-9]{{{_TOKEN_MIN},}}")
+_HAS_LETTER: Final[re.Pattern[str]] = re.compile(r"[A-Za-z]")
+_HAS_DIGIT: Final[re.Pattern[str]] = re.compile(r"[0-9]")
 
 
 class LastCheckTooCostlyError(ValueError):

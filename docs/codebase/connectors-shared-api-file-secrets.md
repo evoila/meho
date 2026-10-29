@@ -144,6 +144,17 @@ is how `{"credentials": {"default": "..."}}` got through a text scan.
      `is_secret_param_name_lowercased`, which asks whether any casing of
      the name is a secret name. It matches a few more names than the
      exact rule (`passwordless`), which only replaces more.
+   - HTML label-and-value pairs: a table cell (`<th>` or `<td>`), a
+     `<dt>` or a `<label>` whose text names a secret (`password`,
+     `Admin password:`) labels the element after it: the next cell, the
+     `<dd>`, the next element. That element is secret: it loses its
+     content and its attribute values, whatever the value looks like.
+     `<tr><td>password</td><td>Sample!Pass123</td></tr>` comes back
+     with the second cell replaced. The token rule of the last check is
+     for free text, where a space is the only separator; in a pair the
+     markup separates the label from its value, so a short value with
+     punctuation counts too. Blank text between label and value does
+     not part them.
    - HTML `<script>` blocks: JSON content is checked like a JSON file.
      Any other script content becomes the placeholder; the helper cannot
      parse JavaScript, so it does not return it. `<style>` content is
@@ -253,6 +264,11 @@ What it holds back, as one part:
   few texts next to the secret, not the whole page:
   `<div><span>[REDACTED:param_name]</span>[REDACTED:param_name]</div>`.
   Other text on the page stays.
+- In an HTML file: the value of a label-and-value pair (a table cell,
+  a `<dt>` or a `<label>`, then the element after it) whose label names
+  a secret once flattened (`pass%77ord`). The first pass already
+  replaced the value of a pair whose label names a secret as written;
+  this run reads the label the way a person reads it.
 - A redirect path (`scrub_query_string`): the whole path, for example
   `;jsessionid=...` in a path segment.
 
@@ -295,6 +311,10 @@ it off.
   path item. In XML and HTML, an element that a `name`, `id`, `key` or
   `type` attribute marks as secret keeps only that label; its other
   attribute values go too, also a schema `type`.
+- In an HTML parameter table, the cell after a secret-named cell is
+  replaced whatever it holds, so a row `password | string | The user's
+  password` loses its type cell. Only the next cell is read as the
+  value; the description after it stays.
 - Inline JavaScript does not come back. JavaScript, CSS and plain text
   files are refused.
 - Free text that is not JSON, such as "the password is abc", cannot be

@@ -1154,6 +1154,20 @@ _SECRET_PAGES: list[Any] = [
         id="session-id-with-a-value-in-prose",
     ),
     pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        "<table><tr><td>password</td><td>Sample!Pass123</td></tr></table>",
+        "Sample!Pass123",
+        id="short-password-in-the-cell-after-a-secret-named-cell",
+    ),
+    pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        "<dl><dt>Password:</dt>\n  <dd>Sample!Pass123</dd></dl>",
+        "Sample!Pass123",
+        id="short-password-in-the-dd-after-a-secret-named-dt",
+    ),
+    pytest.param(
         "application/json",
         _API_DOCS,
         '{"example": "sessionId: example-session-id-0123456789\\n---\\nok: true"}',

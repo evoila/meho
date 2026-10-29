@@ -1543,13 +1543,9 @@ _BASE64_TOKEN = "c2Vzc2lvbi1rZXktZm9yLXRlc3Rz"
         (_JSON, json.dumps({"d": f"sessionId {_BASE64_TOKEN}"}), _BASE64_TOKEN),
         (_JSON, json.dumps({"d": f"Run: login --password '{_HEX_TOKEN}'"}), _HEX_TOKEN),
         (_JSON, json.dumps({"d": "token abc123def456ghi789"}), "abc123def456ghi789"),
-        (
-            _HTML,
-            f"<table><tr><td>sessionId</td><td>{_HEX_TOKEN}</td></tr></table>",
-            _HEX_TOKEN,
-        ),
+        (_HTML, f"<p><span>sessionId</span> <span>{_HEX_TOKEN}</span></p>", _HEX_TOKEN),
     ],
-    ids=["hex", "base64", "quoted-after-a-flag", "letters-and-digits", "two-table-cells"],
+    ids=["hex", "base64", "quoted-after-a-flag", "letters-and-digits", "two-inline-spans"],
 )
 def test_token_after_a_secret_name_and_a_space_is_held_back(
     monkeypatch: pytest.MonkeyPatch, content_type: str, document: str, secret: str
@@ -1558,6 +1554,101 @@ def test_token_after_a_secret_name_and_a_space_is_held_back(
     checked = check_api_file(document, content_type=content_type, path="/x")
     assert secret not in checked.text
     assert checked.withheld == (SECRET_NAME_AFTER_FLATTENING,)
+
+
+#: A short value with punctuation: no token, so only the pair rule finds it.
+_SHORT_SECRET = "Sample!Pass123"
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        pytest.param(
+            f"<table><tr><td>password</td><td>{_SHORT_SECRET}</td></tr></table>",
+            f"<table><tr><td>password</td><td>{REDACTED}</td></tr></table>",
+            id="two-table-cells",
+        ),
+        pytest.param(
+            f"<table><tr><th>Admin password *</th>\n  <td>{_SHORT_SECRET}</td></tr></table>",
+            f"<table><tr><th>Admin password *</th>\n  <td>{REDACTED}</td></tr></table>",
+            id="header-cell-with-a-required-marker-and-blank-text-between",
+        ),
+        pytest.param(
+            f"<dl><dt>sessionId</dt><dd>{_SHORT_SECRET}</dd></dl>",
+            f"<dl><dt>sessionId</dt><dd>{REDACTED}</dd></dl>",
+            id="definition-list",
+        ),
+        pytest.param(
+            f"<label>Password</label><span>{_SHORT_SECRET}</span>",
+            f"<label>Password</label><span>{REDACTED}</span>",
+            id="label-and-its-value-element",
+        ),
+        pytest.param(
+            f'<label>Password</label><input value="{_SHORT_SECRET}">',
+            f'<label>Password</label><input value="{REDACTED}">',
+            id="label-and-an-input-value",
+        ),
+        pytest.param(
+            "<table><tr><td><b>pass</b>word</td><td><i>Sample</i>!Pass123</td></tr></table>",
+            f"<table><tr><td><b>pass</b>word</td><td>{REDACTED}</td></tr></table>",
+            id="label-and-value-split-over-inline-tags",
+        ),
+    ],
+)
+def test_value_of_a_secret_labelled_pair_is_replaced_whatever_its_shape(
+    document: str, expected: str
+) -> None:
+    checked = check_api_file(document, content_type=_HTML, path="/x")
+    assert (checked.text, checked.secrets_replaced, checked.withheld) == (expected, 1, ())
+
+
+def test_label_that_the_text_check_withheld_still_labels_its_value() -> None:
+    document = f"<table><tr><th>Password:</th><td>{_SHORT_SECRET}</td></tr></table>"
+    checked = check_api_file(document, content_type=_HTML, path="/x")
+    assert checked.text == f"<table><tr><th>{REDACTED}</th><td>{REDACTED}</td></tr></table>"
+    assert checked.secrets_replaced == 2
+
+
+def test_label_that_names_a_secret_once_flattened_is_read_by_the_last_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = f"<table><tr><td>pass%77ord</td><td>{_SHORT_SECRET}</td></tr></table>"
+    assert _SHORT_SECRET in _without_the_last_check(monkeypatch, document, _HTML).text
+    checked = check_api_file(document, content_type=_HTML, path="/x")
+    assert checked.text == f"<table><tr><td>pass%77ord</td><td>{REDACTED}</td></tr></table>"
+    assert checked.withheld == (SECRET_NAME_AFTER_FLATTENING,)
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        pytest.param(
+            f"<table><tr><td>Name</td><td>{_SHORT_SECRET}</td></tr></table>",
+            f"<table><tr><td>Name</td><td>{_SHORT_SECRET}</td></tr></table>",
+            id="label-that-names-no-secret",
+        ),
+        pytest.param(
+            "<table><tr><td>password</td><td>string</td><td>The password of the user.</td></tr>"
+            "</table>",
+            f"<table><tr><td>password</td><td>{REDACTED}</td><td>The password of the user.</td>"
+            "</tr></table>",
+            id="only-the-next-cell-is-the-value",
+        ),
+        pytest.param(
+            "<table><tr><td>password</td><td></td></tr></table>",
+            "<table><tr><td>password</td><td></td></tr></table>",
+            id="empty-value-cell",
+        ),
+        pytest.param(
+            "<p>password</p><p>A sentence that is no value.</p>",
+            "<p>password</p><p>A sentence that is no value.</p>",
+            id="paragraphs-are-no-pair",
+        ),
+    ],
+)
+def test_only_the_element_after_a_secret_label_is_its_value(document: str, expected: str) -> None:
+    checked = check_api_file(document, content_type=_HTML, path="/x")
+    assert (checked.text, checked.withheld) == (expected, ())
 
 
 @pytest.mark.parametrize(

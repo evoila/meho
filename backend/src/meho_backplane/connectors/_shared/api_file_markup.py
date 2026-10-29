@@ -14,7 +14,14 @@ rule for names whose case is lost. In both, a secret-named element loses
 its content, a secret-named attribute loses its value, and an element
 that a ``name``, ``id``, ``key`` or ``type`` attribute marks as secret
 loses its content and every attribute value except the label that marks
-it. A ``<script>`` block comes back only when its content is JSON. Every
+it. In HTML, the value of a label-and-value pair is secret too: a table
+cell, a ``<dt>`` or a ``<label>`` whose text names a secret labels the
+element after it (the next cell, the ``<dd>``, the next element), and
+that element loses its content and its attribute values, whatever the
+value looks like (:data:`_HTML_LABELS`). The token rule of the last
+check is for free text, where a space is the only separator; in a pair
+the markup separates the label from its value, so a short password with
+punctuation counts too. A ``<script>`` block comes back only when its content is JSON. Every
 JSON object in a text or attribute value is checked like a JSON file and
 written back from the parsed copy (:meth:`Scrubber.text`).
 
@@ -35,7 +42,9 @@ The last check runs on the written copy (:func:`last_check_html`,
 :func:`last_check_xml`; :mod:`.api_file_last_check`). It parses the copy
 again and reads it the way a person reads it: the page text joined over
 its tags, each attribute value, each ``<script>`` and ``<style>`` block.
-A part that still shows a secret name with a value is held back.
+A part that still shows a secret name with a value is held back, and so
+is the value of a label-and-value pair whose label names a secret once
+flattened (:func:`_hold_back_html_pairs`).
 """
 
 from __future__ import annotations
@@ -106,6 +115,19 @@ _HTML_VOID: Final[frozenset[str]] = frozenset(
 )
 
 _XML_NAMESPACE: Final[str] = "http://www.w3.org/XML/1998/namespace"
+
+#: HTML elements that label the element after them, and what that element
+#: may be: a table cell labels the next cell, a ``<dt>`` the ``<dd>``
+#: after it, a ``<label>`` any element after it (an empty set).
+_HTML_LABELS: Final[dict[str, frozenset[str]]] = {
+    "th": frozenset({"th", "td"}),
+    "td": frozenset({"th", "td"}),
+    "dt": frozenset({"dd"}),
+    "label": frozenset(),
+}
+
+#: What a label may end in besides its name: a colon, a required marker.
+_LABEL_ENDINGS: Final[str] = " \t\r\n:*"
 
 #: HTML blocks that hold an example. Their check fails closed
 #: (:func:`_html_example_block`). A ``<span>`` is not one: it is an inline
@@ -471,16 +493,19 @@ _HTML_OWN_PARTS: Final[frozenset[str]] = frozenset({"script", "style"})
 def last_check_html(copy: str, scrubber: Scrubber, work: Work) -> str:
     """*copy*, a checked HTML page, with every part that still shows a secret held back.
 
-    The parts are each attribute value, each ``<script>`` and ``<style>``
-    block, each declaration, and the page text, joined in document order
-    over its tags (:func:`hold_back_pieces`). A copy with nothing to hold
-    back comes back as it is; otherwise it is written again from the
-    changed tree, as the check wrote it.
+    The parts are the value of each label-and-value pair whose label
+    names a secret (:func:`_hold_back_html_pairs`), each attribute value,
+    each ``<script>`` and ``<style>`` block, each declaration, and the
+    page text, joined in document order over its tags
+    (:func:`hold_back_pieces`). A copy with nothing to hold back comes
+    back as it is; otherwise it is written again from the changed tree,
+    as the check wrote it.
     """
     parser = _HtmlTree()
     parser.feed(copy)
     parser.close()
     before = scrubber.count
+    _hold_back_html_pairs(parser.root, scrubber, work)
     places: list[tuple[_HtmlNode, int]] = []
     pieces: list[str] = []
     stack: list[tuple[_HtmlNode, Iterator[tuple[int, _HtmlNode | str]]]] = [
@@ -508,6 +533,46 @@ def last_check_html(copy: str, scrubber: Scrubber, work: Work) -> str:
     out: list[str] = []
     _html_as_written(parser.root, out)
     return "".join(out)
+
+
+def _hold_back_html_pairs(root: _HtmlNode, scrubber: Scrubber, work: Work) -> None:
+    """Hold back the value of every label-and-value pair whose label names a secret once flattened.
+
+    The first pass (:func:`_html_children`) already replaced the value
+    of a pair whose label names a secret as written. This run reads the
+    label the way a person reads it (``pass%77ord``) and holds back the
+    content of the value element whole, and its ``value`` attribute.
+    Blank text between label and value does not part them. A value that
+    already is the placeholder stays, so the check finds nothing on its
+    own result.
+    """
+    stack: list[_HtmlNode] = [root]
+    while stack:
+        node = stack.pop()
+        label: _HtmlNode | None = None
+        for child in node.children:
+            if isinstance(child, str):
+                if child.strip():
+                    label = None
+                continue
+            if child.tag == "!":
+                continue
+            stack.append(child)
+            is_value = label is not None and _is_value_of(label, child)
+            text = _html_label_text(child)
+            label = child if text and names_a_secret(text, work) else None
+            if is_value:
+                _hold_back_html_value(child, scrubber)
+
+
+def _hold_back_html_value(node: _HtmlNode, scrubber: Scrubber) -> None:
+    """The value element of a pair: its content and its ``value`` attribute become placeholders."""
+    content = "".join(_html_text(node))
+    if content.strip() and not is_placeholder(content):
+        node.children = [scrubber.withhold(SECRET_NAME_AFTER_FLATTENING)]
+    for index, (key, value) in enumerate(node.attrs):
+        if key == "value" and value is not None and not is_placeholder(value):
+            node.attrs[index] = (key, scrubber.withhold(SECRET_NAME_AFTER_FLATTENING))
 
 
 def _hold_back_html_attributes(node: _HtmlNode, scrubber: Scrubber, work: Work) -> None:
@@ -549,17 +614,38 @@ def _html_as_written(node: _HtmlNode, out: list[str]) -> None:
 
 
 def _html_children(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
+    """Write the children of *node*; the value element of a secret-labelled pair is secret."""
+    label: _HtmlNode | None = None
     for child in node.children:
         if isinstance(child, str):
             out.append(html.escape(scrubber.text(child), quote=False))
+            if child.strip():
+                label = None
         elif child.tag == "!":
             out.append(f"<!{child.children[0]}>")
         else:
-            _html_element(child, out, scrubber)
+            is_value = label is not None and _is_value_of(label, child)
+            label = child if is_secret_name_lowercased(_html_label_text(child)) else None
+            _html_element(child, out, scrubber, secret=is_value)
 
 
-def _html_element(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
-    secret = _html_element_is_secret(node)
+def _is_value_of(label: _HtmlNode, element: _HtmlNode) -> bool:
+    """True when *element* is what *label*, a label element, may label (:data:`_HTML_LABELS`)."""
+    allowed = _HTML_LABELS[label.tag]
+    return not allowed or element.tag in allowed
+
+
+def _html_label_text(node: _HtmlNode) -> str:
+    """The text of *node* when it is a label element, without a colon or a required marker."""
+    if node.tag not in _HTML_LABELS:
+        return ""
+    return "".join(_html_text(node)).strip(_LABEL_ENDINGS)
+
+
+def _html_element(
+    node: _HtmlNode, out: list[str], scrubber: Scrubber, *, secret: bool = False
+) -> None:
+    secret = secret or _html_element_is_secret(node)
     head = [f"<{node.tag}"]
     for key, value in node.attrs:
         if value is None:

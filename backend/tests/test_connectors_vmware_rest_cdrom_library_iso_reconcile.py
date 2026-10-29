@@ -51,6 +51,9 @@ def test_declared_calls_match_the_frozen_lists() -> None:
 
 
 class _BodyRecorder:
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(self) -> None:
         self.bodies: dict[str, Any] = {}
 

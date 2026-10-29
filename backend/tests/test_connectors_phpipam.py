@@ -245,17 +245,42 @@ async def test_reserve_of_a_taken_address_fails_and_names_the_holder() -> None:
 
 async def test_reserve_race_409_reads_the_holder() -> None:
     fake = _fake()
-    original = fake._address
+    original = fake._subnet_address
 
-    def _address_hidden_once(method: str, ip: str, subnet_id: int) -> httpx.Response:
+    def _address_hidden_once(subnet_id: int, ip: str) -> httpx.Response:
         # The first read says "free"; someone else books it before the POST.
-        fake._address = original  # type: ignore[method-assign]
+        fake._subnet_address = original  # type: ignore[method-assign]
         fake.add_address(7, "192.0.2.10", "other.example.test")
         return httpx.Response(404, json={"code": 404, "success": False, "message": "none"})
 
-    fake._address = _address_hidden_once  # type: ignore[method-assign]
+    fake._subnet_address = _address_hidden_once  # type: ignore[method-assign]
     with pytest.raises(PhpipamAddressTakenError, match=r"other\.example\.test"):
         await _run(fake, "address_reserve", {"subnet_id": 7, "ip": "192.0.2.10", "hostname": "w"})
+
+
+async def test_address_that_is_not_the_first_of_its_subnet_is_found() -> None:
+    # 192.0.2.1 is the first address row of subnet 7, so 192.0.2.10 is not.
+    # The fake answers GET /addresses/{ip}/{subnet}/ only for the first row,
+    # like phpIPAM 1.8.2, so this checks that MEHO reads the address another way.
+    fake = _fake()
+    params = {"subnet_id": 7, "ip": "192.0.2.10", "hostname": "web-01.example.test"}
+    first = await _run(fake, "address_reserve", params)
+    second = await _run(fake, "address_reserve", params)
+    assert first["status"] == "reserved"
+    assert first["verification"] == "verified"
+    assert second["status"] == "nothing_to_do"
+    assert len(fake.calls_of("POST")) == 1
+    reads = fake.calls_of("GET", f"/api/{APP_ID}/subnets/7/addresses/192.0.2.10/")
+    assert len(reads) == 3
+
+    released = await _run(fake, "address_release", {"subnet_id": 7, "ip": "192.0.2.10"})
+    again = await _run(fake, "address_release", {"subnet_id": 7, "ip": "192.0.2.10"})
+    assert released["status"] == "released"
+    assert released["released_hostname"] == "web-01.example.test"
+    assert released["verification"] == "verified"
+    assert again["status"] == "nothing_to_do"
+    assert fake.calls_of("DELETE") == [("DELETE", f"/api/{APP_ID}/addresses/192.0.2.10/7/", None)]
+    assert fake.calls_of("GET", f"/api/{APP_ID}/addresses/192.0.2.10/") == []
 
 
 async def test_reserve_readback_mismatch_is_not_verified() -> None:

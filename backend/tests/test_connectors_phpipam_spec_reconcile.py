@@ -27,8 +27,9 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_SUBNET_USAGE_PATH": ("GET",),
     "_SUBNET_SLAVES_PATH": ("GET",),
     "_SUBNET_ADDRESSES_PATH": ("GET",),
+    "_SUBNET_ADDRESS_PATH": ("GET",),
     "_ADDRESSES_PATH": ("POST",),
-    "_ADDRESS_PATH": ("GET", "DELETE"),
+    "_ADDRESS_PATH": ("DELETE",),
     "_FIRST_FREE_PATH": ("GET", "POST"),
 }
 
@@ -60,8 +61,8 @@ def test_phpipam_manifest_is_pinned() -> None:
         "GET:/api/{app_id}/subnets/{subnet_id}/usage/",
         "GET:/api/{app_id}/subnets/{subnet_id}/slaves/",
         "GET:/api/{app_id}/subnets/{subnet_id}/addresses/",
+        "GET:/api/{app_id}/subnets/{subnet_id}/addresses/{ip}/",
         "POST:/api/{app_id}/addresses/",
-        "GET:/api/{app_id}/addresses/{ip}/{subnet_id}/",
         "DELETE:/api/{app_id}/addresses/{ip}/{subnet_id}/",
         "GET:/api/{app_id}/addresses/first_free/{subnet_id}/",
         "POST:/api/{app_id}/addresses/first_free/{subnet_id}/",

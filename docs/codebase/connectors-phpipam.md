@@ -137,7 +137,10 @@ however large the subnet is.
 1. Checks the input: the host name, the address (in the subnet, not the
    network or broadcast address), and `ip` or `first_free` (exactly one).
 2. Reads the subnet and the address (or, with `first_free`, the used
-   addresses of the subnet).
+   addresses of the subnet). One address is read with
+   `GET /api/{app_id}/subnets/{subnet_id}/addresses/{ip}/`. MEHO does not use
+   `GET /api/{app_id}/addresses/{ip}/{subnet_id}/` for this: in phpIPAM 1.8.2
+   that call finds only the first address of a subnet.
 3. Already reserved for the same host name (case and a trailing dot do not
    count)? Then nothing is written: `status: nothing_to_do`. With
    `first_free`, any address of the subnet with this host name counts.
@@ -152,7 +155,8 @@ however large the subnet is.
 ### phpipam.address.release
 
 1. Reads the subnet and the address. Not reserved? `status: nothing_to_do`.
-2. Sends `DELETE /api/{app_id}/addresses/{ip}/{subnet_id}/`. MEHO never sends
+2. Sends `DELETE /api/{app_id}/addresses/{ip}/{subnet_id}/` (this call finds
+   every address of the subnet, not only the first). MEHO never sends
    `remove_dns`: DNS records stay with the DNS connectors.
 3. Reads the address back: `verified` when it is gone.
 

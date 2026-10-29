@@ -29,8 +29,11 @@ The calls, with what phpIPAM answers (checked in the 1.8.2 source):
   when there is none.
 * ``GET /api/{app_id}/subnets/{subnet_id}/addresses/`` -- the used addresses;
   404 when there is none.
-* ``GET /api/{app_id}/addresses/{ip}/{subnet_id}/`` -- one address in one
-  subnet; 404 when the address is not reserved.
+* ``GET /api/{app_id}/subnets/{subnet_id}/addresses/{ip}/`` -- one address in
+  one subnet; 404 when the address is not reserved. MEHO does not read an
+  address with ``GET /api/{app_id}/addresses/{ip}/{subnet_id}/``: in 1.8.2 that
+  call finds only the first address row of a subnet, because the ``ip`` field
+  of the other rows is never filled in there.
 * ``GET /api/{app_id}/addresses/first_free/{subnet_id}/`` -- the first free
   address (used by the approval preview only).
 * ``POST /api/{app_id}/addresses/`` -- reserve one address with ``subnetId``,
@@ -66,6 +69,7 @@ _SUBNET_USAGE_PATH = "/api/{app_id}/subnets/{subnet_id}/usage/"
 _SUBNET_SLAVES_PATH = "/api/{app_id}/subnets/{subnet_id}/slaves/"
 _SUBNET_ADDRESSES_PATH = "/api/{app_id}/subnets/{subnet_id}/addresses/"
 _ADDRESSES_PATH = "/api/{app_id}/addresses/"
+_SUBNET_ADDRESS_PATH = "/api/{app_id}/subnets/{subnet_id}/addresses/{ip}/"
 _ADDRESS_PATH = "/api/{app_id}/addresses/{ip}/{subnet_id}/"
 _FIRST_FREE_PATH = "/api/{app_id}/addresses/first_free/{subnet_id}/"
 

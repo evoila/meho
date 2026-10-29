@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors.phpipam._errors import HOSTNAME_CAP
-from meho_backplane.connectors.phpipam._paths import _ADDRESS_PATH, _SUBNET_PATH
+from meho_backplane.connectors.phpipam._paths import _SUBNET_ADDRESS_PATH, _SUBNET_PATH
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -235,7 +235,7 @@ async def read_address(
         target,
         operator,
         "GET",
-        _ADDRESS_PATH,
+        _SUBNET_ADDRESS_PATH,
         {"ip": ip, "subnet_id": subnet_id},
         not_found_ok=True,
     )

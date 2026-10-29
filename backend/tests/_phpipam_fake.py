@@ -126,6 +126,8 @@ class FakePhpipam:
             return _answer(200, found) if found else _error(404, "No subnets found")
         if match := re.fullmatch(r"/subnets/(\d+)/(usage/|slaves/|addresses/)?", rest):
             return self._subnet(int(match.group(1)), match.group(2))
+        if method == "GET" and (match := re.fullmatch(r"/subnets/(\d+)/addresses/([^/]+)/", rest)):
+            return self._subnet_address(int(match.group(1)), unquote(match.group(2)))
         if match := re.fullmatch(r"/addresses/first_free/(\d+)/", rest):
             return self._first_free(method, int(match.group(1)), body)
         if method == "POST" and rest == "/addresses/":
@@ -190,10 +192,21 @@ class FakePhpipam:
             row["hostname"] = self.readback_hostname
         return _answer(201, None, message="Address created", id=self._next_id)
 
+    def _subnet_address(self, subnet_id: int, ip: str) -> httpx.Response:
+        if subnet_id not in self.subnets:
+            return _error(404, f"Invalid subnet Id ({subnet_id})")
+        row = self.addresses.get((subnet_id, ip))
+        return _answer(200, [row]) if row else _error(404, "No addresses found")
+
     def _address(self, method: str, ip: str, subnet_id: int) -> httpx.Response:
         row = self.addresses.get((subnet_id, ip))
         if method == "GET":
-            return _answer(200, row) if row else _error(404, "No addresses found")
+            # Like phpIPAM 1.8.2: this read finds only the first address row of
+            # the subnet (lowest id). Later rows have no "ip" field there, so
+            # phpIPAM answers 404 for them.
+            in_subnet = [a for (sid, _ip), a in self.addresses.items() if sid == subnet_id]
+            first = min(in_subnet, key=lambda a: int(a["id"]), default=None)
+            return _answer(200, row) if row and row is first else _error(404, "No addresses found")
         if method == "DELETE":
             if self.lose_write:
                 raise httpx.ReadTimeout("the answer was lost")

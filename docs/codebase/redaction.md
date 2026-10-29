@@ -198,10 +198,14 @@ an error body, where a quote sits between the name and the `:`.
   the pair may be escaped JSON inside a JSON string (`\"name\": \"value\"`).
   A small scanner reads the value from the opening quote to the closing
   quote and steps over each escape, so a quote inside the value does not
-  end it, and there is no length limit. A value with no closing quote (a
-  diagnostic cut by a length cap) is replaced up to the end of the text.
-  `iter_quoted_secret_fields(text)` lists the same pairs; the capture check
-  uses it.
+  end it, and there is no length limit. The value may also be an object or
+  a list (`"credentials": {"value": "..."}`, `"password": ["..."]`): the
+  scanner walks it to its closing bracket (a bracket inside a quoted string
+  does not count) and replaces the whole object or list with the quoted
+  marker, as the walk does for data. A value with no closing quote or
+  bracket (a diagnostic cut by a length cap) is replaced up to the end of
+  the text. `iter_quoted_secret_fields(text)` lists the same pairs; the
+  capture check uses it.
 
 The name rule is the shared `broadcast.events.is_secret_param_name`
 (`password`, `encryptedPassword`, `sessionToken`, `client_secret`,
@@ -215,7 +219,7 @@ Numbers, booleans and `null` stay. A value an earlier step already masked
 | --- | --- |
 | Error free text (`operations/_errors.py::_sanitize_free_text`) | the text step, then Tier-1, then the length cap |
 | Every error result (`dispatcher._audit_error_and_return` → `operations/_vendor_text.py::redact_error_result`) | the walk, then Tier-1 (default policy, pinned), over every string and field of `error`, `extras` and `result`; this covers the fields copied straight from the vendor (`validation_errors` of an HTTP 422, `permission_headers` of an HTTP 403), any field a connector adds, and the vendor's answer in `result` of an error a handler returns or of a multi-step operation's error envelope. If redaction fails, the result keeps only `error_code` and a fixed text: `result` and the result handle are dropped and `delivery` is `unavailable`. The audit row and the stored approval result get the cleaned copy. |
-| Multi-step error envelope (`dispatcher._reduce_and_audit_composite_error`) | the walk, before the reducer stores the full envelope behind a result handle, so the stored copy and the inline summary are both clean |
+| Multi-step error envelope (`dispatcher._reduce_and_audit_composite_error` → `redact_error_payload`) | the walk, then Tier-1 (default policy, pinned), **before** the reducer stores the full envelope behind a result handle, so the stored rows, the handle's sample rows and the inline summary are all clean. The envelope went through the operator's own policy first, and a shadow-mode policy leaves every secret in place; the cleanup of the inline result runs later and cannot reach the stored copy. If this cleanup fails, the envelope is withheld like a reducer failure (`delivery` is `unavailable`) and nothing is stored. |
 | Trace bodies and header values (`flight_recorder/_content.py::scrub_content`) | the walk, then the trace's credential-shape policy, for every recorded request and answer body |
 
 **What does not change.** The normal result path: a secret-named field in a
@@ -241,6 +245,11 @@ header and a password in the request body, to the trace redaction
 normal answer holds only labelled secrets, for the reason above. A new
 connector is covered as soon as it is registered.
 
+`backend/tests/test_operations_composite_error_redaction.py` drives the
+multi-step error envelope through the real JSONFlux reducer under a
+shadow-mode policy and checks the inline result, the handle's sample rows,
+the stored rows and the audit row.
+
 **The capture check.** `backend/tests/test_capture_secret_scan.py` scans
 every saved test capture: each file under `backend/tests/fixtures/` and
 `backend/tests/data/` that is not Python. It fails on:
@@ -251,8 +260,9 @@ every saved test capture: each file under `backend/tests/fixtures/` and
   which also matches any rendered `ConfigMap`), a private key block, an AWS
   access key id, GitHub and Slack tokens;
 - a secret-named field with a value, as a quoted pair (JSON, Python with
-  either quote, escaped JSON; found by `iter_quoted_secret_fields`), as
-  YAML or as XML.
+  either quote, escaped JSON; found by `iter_quoted_secret_fields`), as an
+  object or a list under a secret name (it counts when a string value
+  inside looks like a secret), as YAML or as XML.
 
 It skips values that are clearly not secrets: a `<placeholder>`, a masked
 value, a `${...}` or `{{ ... }}` reference, a URL with no user part, a

@@ -443,7 +443,17 @@ secret's `map.get(X, X)`. `secret_field_map_of(target)` reads the map with
 `getattr`, so stand-in targets built around another secret ref (op
 parameter refs, `guest_secret_ref`) have no map and are never remapped.
 `missing_secret_field_map_sources` is the probe-time check. Field names
-only, never a value. Full description: [`targets.md`](targets.md#secret-field-map-3711).
+only, never a value.
+
+The map is applied exactly once between the centre and a satellite runner.
+`broker_wrapped_credential` reads the target's secret through
+`load_vault_secret_data`, so the wrapped payload is already the connector's
+view. When a target's `secret_ref` is a `wrapped:` token, the two loaders
+therefore skip the map (`_field_map_for_read`). Without this, two entries
+that chain (for example `username -> host_login` and
+`guest_username -> username`) would give `guest_username` the host login
+on the runner. Full description:
+[`targets.md`](targets.md#secret-field-map-3711).
 
 ## SSH host-key trust (F08 / #270)
 

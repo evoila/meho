@@ -142,8 +142,10 @@ does not change and does not know the map exists.
 
 The map is applied in `load_basic_credentials` and
 `load_vault_secret_data`, so it works for every credential backend
-(`vault:`, `gsm:`, `wrapped:`). It only applies to the target's **own**
-secret. Readers that build a small stand-in target around another secret
+(`vault:`, `gsm:`). It is applied exactly once. A `wrapped:` credential for
+a satellite runner is brokered at the centre from the mapped view of the
+secret, so the runner that unwraps it does not apply the map again. The map
+only applies to the target's **own** secret. Readers that build a small stand-in target around another secret
 ref (for example `guest_secret_ref` or a `password_secret_ref` op
 parameter) do not copy the map, so it never applies there.
 

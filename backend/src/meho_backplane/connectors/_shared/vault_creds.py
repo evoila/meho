@@ -101,6 +101,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError, vault_client_for_operator
 from meho_backplane.connectors._shared.credential_backend import (
+    WRAPPED_CREDENTIAL_SCHEME,
     CredentialsReadError,
     parse_credential_scheme,
     register_credential_backend,
@@ -352,6 +353,25 @@ def secret_field_map_of(target: object) -> Mapping[str, str]:
     """
     field_map = getattr(target, "secret_field_map", None)
     return field_map if isinstance(field_map, Mapping) else {}
+
+
+def _field_map_for_read(target: BasicCredentialsTargetLike) -> Mapping[str, str]:
+    """Return the map to apply to one read of *target*'s secret (#3711).
+
+    The map is applied exactly once between the centre and a satellite
+    runner. A ``wrapped:`` credential is brokered at the centre from the
+    **mapped** view of the target's secret (``broker_wrapped_credential``
+    reads through :func:`load_vault_secret_data`), so the runner that
+    unwraps it gets the connector's view already and must not apply the
+    map again. With two entries that chain, for example ``username ->
+    host_login`` and ``guest_username -> username``, a second pass would
+    give ``guest_username`` the host login. Every other ref (standing
+    ``vault:`` / ``gsm:`` / schemeless) applies the target's own map.
+    """
+    ref = target.secret_ref
+    if ref and parse_credential_scheme(ref.strip()) == WRAPPED_CREDENTIAL_SCHEME:
+        return {}
+    return secret_field_map_of(target)
 
 
 def _apply_secret_field_map(
@@ -614,7 +634,7 @@ async def load_basic_credentials(
     # → the Vault KV-v2 read) selects the backend. ``store_ref`` is the
     # scheme-stripped ref, named in a missing-field error.
     store_ref, secret_data = await _resolve_and_load(target, operator, mount=mount)
-    field_map = secret_field_map_of(target)
+    field_map = _field_map_for_read(target)
     credentials = _extract_fields(
         _apply_secret_field_map(secret_data, field_map),
         fields,
@@ -672,7 +692,7 @@ async def load_vault_secret_data(
     :class:`VaultCredentialsReadError`.
     """
     _store_ref, raw_data = await _resolve_and_load(target, operator, mount=mount)
-    secret_data = _apply_secret_field_map(raw_data, secret_field_map_of(target))
+    secret_data = _apply_secret_field_map(raw_data, _field_map_for_read(target))
 
     # Log only the field-name set (no values). Sorted for a stable log
     # shape that diff-friendly observability tooling can pattern-match

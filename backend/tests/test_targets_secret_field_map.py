@@ -45,6 +45,7 @@ from meho_backplane.connectors._shared.vault_creds import (
     load_vault_secret_data,
     missing_secret_field_map_sources,
 )
+from meho_backplane.connectors._shared.wrapped_creds import WrappedCredentialBackend
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector
@@ -289,6 +290,58 @@ async def test_no_secret_value_in_log_events(monkeypatch: pytest.MonkeyPatch) ->
     rendered = repr(events)
     assert _CANARY_USER not in rendered
     assert _CANARY_PASSWORD not in rendered
+
+
+# ---------------------------------------------------------------------------
+# Wrapped credential: the map is applied exactly once
+# ---------------------------------------------------------------------------
+
+# Two entries that chain: ``username`` takes the host login, and
+# ``guest_username`` takes the plain ``username``. A second application of
+# the map would give ``guest_username`` the host login.
+_CHAINED_MAP = {"username": "host_login", "guest_username": "username"}
+_CHAINED_SECRET: dict[str, object] = {"username": "canary-login", "host_login": "canary-host"}
+
+
+async def test_chained_entries_read_the_original_fields_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each entry reads the secret as stored, not the result of another entry."""
+    install_fake_client(monkeypatch, secret=dict(_CHAINED_SECRET))
+    target = _Target(secret_field_map=dict(_CHAINED_MAP))
+
+    view = await load_vault_secret_data(target, _operator())
+
+    assert view == {
+        "username": "canary-host",
+        "guest_username": "canary-login",
+        "host_login": "canary-host",
+    }
+
+
+async def test_wrapped_credential_is_not_mapped_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The centre brokers the mapped view; the runner must not map it twice."""
+    install_fake_client(monkeypatch, secret=dict(_CHAINED_SECRET))
+    centre_target = _Target(secret_field_map=dict(_CHAINED_MAP))
+    # ``broker_wrapped_credential`` wraps exactly this dict.
+    wrapped_payload = await load_vault_secret_data(centre_target, _operator())
+
+    async def _unwrap(
+        self: object, secret_ref: str, operator: object, *, target_name: str, mount: str
+    ) -> dict[str, object]:
+        return dict(wrapped_payload)
+
+    monkeypatch.setattr(WrappedCredentialBackend, "load_secret_data", _unwrap)
+    # The runner's descriptor keeps the target's map next to the wrapped ref.
+    runner_target = _Target(secret_ref="wrapped:hvs.TOKEN", secret_field_map=dict(_CHAINED_MAP))
+
+    creds = await load_basic_credentials(
+        runner_target, _operator(), fields=("username", "guest_username")
+    )
+    data = await load_vault_secret_data(runner_target, _operator())
+
+    assert creds == {"username": "canary-host", "guest_username": "canary-login"}
+    assert data == wrapped_payload
 
 
 # ---------------------------------------------------------------------------

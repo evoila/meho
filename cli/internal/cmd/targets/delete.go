@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -88,8 +89,13 @@ func newDeleteCmd() *cobra.Command {
 func runDelete(cmd *cobra.Command, name string, force, confirm, jsonOut bool, backplaneOverride string) error {
 	result := deleteResult{Name: name, Force: force}
 	// Ask before resolving the backplane, so a decline exits 0 even
-	// when the operator is not logged in.
-	if !confirm && !confirmPrompt(cmd, deletePrompt(name, force)) {
+	// when the operator is not logged in. With --json the prompt goes
+	// to stderr, so stdout holds only the envelope.
+	promptW := cmd.OutOrStdout()
+	if jsonOut {
+		promptW = cmd.ErrOrStderr()
+	}
+	if !confirm && !confirmPrompt(cmd, promptW, deletePrompt(name, force)) {
 		result.Status = "declined"
 		if jsonOut {
 			return output.PrintJSON(cmd.OutOrStdout(), result)
@@ -158,11 +164,11 @@ func hasReferencesMessage(refs int) string {
 		"will point at a deleted target. Run again with --force to delete it anyway.", refs, nodes)
 }
 
-// confirmPrompt prints prompt and returns true only when the operator
-// answers y or yes. Any read error, such as EOF on closed stdin, counts
-// as no. Same shape as the connector and conventions helpers.
-func confirmPrompt(cmd *cobra.Command, prompt string) bool {
-	fmt.Fprintf(cmd.OutOrStdout(), "%s [y/N]: ", prompt)
+// confirmPrompt writes prompt to promptW and returns true only when the
+// operator answers y or yes on stdin. Any read error, such as EOF on
+// closed stdin, counts as no. Same shape as the memory helper.
+func confirmPrompt(cmd *cobra.Command, promptW io.Writer, prompt string) bool {
+	fmt.Fprintf(promptW, "%s [y/N]: ", prompt)
 	var answer string
 	if _, err := fmt.Fscanln(cmd.InOrStdin(), &answer); err != nil {
 		return false

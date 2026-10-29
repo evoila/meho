@@ -246,17 +246,63 @@ func TestDeleteDeclinedDoesNotCallServer(t *testing.T) {
 	if f.calls != 0 {
 		t.Fatalf("a declined delete must not call the server; got %d calls", f.calls)
 	}
-	stdout, _, err := runDeleteCmd(t, url, "", "demo-vault", "--json")
-	if err != nil {
-		t.Fatalf("decline --json: %v", err)
-	}
-	if !strings.Contains(stdout.String(), `"status": "declined"`) {
-		t.Errorf("--json decline should report status declined; got:\n%s", stdout.String())
-	}
 	if _, _, err := runDeleteCmd(t, url, "y\n", "demo-vault"); err != nil {
 		t.Fatalf("answering y should delete: %v", err)
 	}
 	if f.calls != 1 {
 		t.Errorf("answering y should send one request; got %d", f.calls)
+	}
+}
+
+// TestDeletePromptJSONKeepsStdoutClean pins that with --json and
+// without --confirm, the y/N prompt goes to stderr and the whole stdout
+// is one JSON envelope, for "y", "n" and closed stdin.
+func TestDeletePromptJSONKeepsStdoutClean(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
+	var f fakeDeleteServer
+	url := f.start(t, http.StatusNoContent, "")
+	cases := []struct {
+		stdin      string
+		wantStatus string
+		wantCalls  int
+	}{
+		{stdin: "y\n", wantStatus: "deleted", wantCalls: 1},
+		{stdin: "n\n", wantStatus: "declined", wantCalls: 0},
+		{stdin: "", wantStatus: "declined", wantCalls: 0},
+	}
+	for _, c := range cases {
+		f.calls = 0
+		stdout, stderr, err := runDeleteCmd(t, url, c.stdin, "demo-vault", "--json")
+		if err != nil {
+			t.Fatalf("stdin %q: %v\nstderr=%s", c.stdin, err, stderr.String())
+		}
+		var got deleteResult
+		if jerr := json.Unmarshal(stdout.Bytes(), &got); jerr != nil {
+			t.Fatalf("stdin %q: stdout is not one JSON envelope: %v\n%s", c.stdin, jerr, stdout.String())
+		}
+		if got != (deleteResult{Name: "demo-vault", Status: c.wantStatus}) {
+			t.Errorf("stdin %q: unexpected envelope: %+v", c.stdin, got)
+		}
+		if !strings.Contains(stderr.String(), "[y/N]:") {
+			t.Errorf("stdin %q: the prompt should go to stderr; got:\n%s", c.stdin, stderr.String())
+		}
+		if f.calls != c.wantCalls {
+			t.Errorf("stdin %q: want %d request(s); got %d", c.stdin, c.wantCalls, f.calls)
+		}
+	}
+}
+
+// TestDeletePromptHumanOnStdout pins that without --json the prompt
+// stays on stdout, as for the other delete verbs.
+func TestDeletePromptHumanOnStdout(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
+	var f fakeDeleteServer
+	url := f.start(t, http.StatusNoContent, "")
+	stdout, stderr, err := runDeleteCmd(t, url, "n\n", "demo-vault")
+	if err != nil {
+		t.Fatalf("decline: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "[y/N]:") || stderr.Len() != 0 {
+		t.Errorf("human prompt should be on stdout only; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }

@@ -529,6 +529,7 @@ caveat). The contract a deploy must satisfy is therefore:
 | Read (`vault.token.role.read` / `vault.token.role.list`) | same | `read` on `auth/token/roles/<role>`; `list` on `auth/token/roles` (§6.4) |
 | Write (`vault.auth.jwt.role.write` create or change a JWT/OIDC login role) | same | `create` + `read` + `update` on `auth/<mount>/role/<role>` (§6.5) |
 | Read (`vault.auth.jwt.role.read` / `.role.list` / `.config.read`) | same | `read` on `auth/<mount>/role/<role>` and `auth/<mount>/config`; `list` on `auth/<mount>/role` (§6.5) |
+| Write (`vault.sys.policy.delete` delete one Vault policy) | same; use a target whose `vault_role` has this rule, not `meho-mcp` | `delete` on `sys/policy/<name>` ([vault-remove-tenant.md](vault-remove-tenant.md) step 4) |
 
 A deploy that follows only the §2 read grant provisions **read-only** and
 discovers the missing write grant *after* an operator approves a parked

@@ -163,6 +163,11 @@ func TestFilterWorkRefOnReadCommands(t *testing.T) {
 			t.Run("old spelling after the command name", func(t *testing.T) {
 				check(t, "", with(nil, "--work-ref", tag), tag, tag, true)
 			})
+			// A filter value that is not in the tag shape still
+			// filters; it is not sent as the header.
+			t.Run("old spelling with a non-tag value filters and warns", func(t *testing.T) {
+				check(t, "", with(nil, "--work-ref", "CHG-123"), "", "CHG-123", true)
+			})
 		})
 	}
 }

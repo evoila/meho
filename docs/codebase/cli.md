@@ -1036,7 +1036,9 @@ that header from one place, so every verb gets it without its own flag.
   ticket X. For one release, a `--work-ref` on these commands still
   filters too, and `workref.Filter` (`cli/internal/cmd/workref/`)
   prints one warning line on stderr that names `--filter-work-ref`.
-  `MEHO_WORK_REF` never filters. `TestWorkRefFlagHasOneMeaning` walks
+  A filter value need not have the `gh:<owner>/<repo>#<n>` shape: when
+  it does not, `applyWorkRef` skips the tag on these commands instead
+  of failing, and the value only filters. `MEHO_WORK_REF` never filters. `TestWorkRefFlagHasOneMeaning` walks
   the command tree and fails when a command adds its own `--work-ref`
   that is not a tag; `TestFilterWorkRefOnReadCommands` checks the
   header and the filter on the wire for all six commands.

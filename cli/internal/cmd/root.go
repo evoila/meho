@@ -61,6 +61,7 @@ import (
 	vcflogs "github.com/evoila/meho/cli/internal/cmd/vcf-logs"
 	vcfoperations "github.com/evoila/meho/cli/internal/cmd/vcf-operations"
 	"github.com/evoila/meho/cli/internal/cmd/vmware"
+	"github.com/evoila/meho/cli/internal/cmd/workref"
 	"github.com/evoila/meho/cli/internal/discovery"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -683,6 +684,13 @@ func applyWorkRef(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 	if !api.ValidWorkRef(ref) {
+		// On a read command that filters by reference, the old
+		// --work-ref spelling still filters for one release, and a
+		// filter value need not have the tag shape. Skip the tag and
+		// let workref.Filter filter and warn.
+		if source == "--work-ref" && cmd.Flags().Lookup(workref.FilterFlag) != nil {
+			return nil
+		}
 		jsonOut := false
 		if f := cmd.Flags().Lookup("json"); f != nil {
 			jsonOut = f.Value.String() == "true"

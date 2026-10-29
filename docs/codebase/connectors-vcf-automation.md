@@ -364,7 +364,9 @@ handlers, the org-create check and the park-time preview are in
   `invalid_request`. A flag already in the requested state answers
   `unchanged` and sends no `PUT`; otherwise it answers `changed` with
   `previous_enabled`. The `PUT` body is the flag as read, with `enabled`
-  replaced. `If-Match` is sent only when the read returned an `ETag`.
+  replaced. A read that returns no `ETag` refuses the write with an error
+  and sends no `PUT`, because without `If-Match` the write could
+  overwrite a change made in between.
 - **Response headers.** `_send_with_retry` on the connector returns the
   raw `httpx.Response` (same 401 retry-once as the JSON helpers), so the
   handler can read the `ETag` header.

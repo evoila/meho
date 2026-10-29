@@ -97,9 +97,9 @@ _FEATURE_FLAG_SET = VcfaTypedOp(
     summary="Turn one VCF Automation feature flag on or off (provider plane); safe to run twice.",
     description=(
         "Finds the flag by name, reads it with GET /cloudapi/1.0.0/featureFlags/{id}, "
-        "and sends PUT with If-Match (the ETag of that read) only when the flag is not "
-        "in the requested state yet. A flag already in that state answers 'unchanged' "
-        "and nothing is written."
+        "and sends PUT with If-Match (the ETag of that read) only when the state must "
+        "change. A flag already in that state answers 'unchanged'; a read without an "
+        "ETag fails the op. In both cases nothing is written."
     ),
     parameter_schema={
         "type": "object",

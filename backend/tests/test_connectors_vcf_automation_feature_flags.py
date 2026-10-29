@@ -7,7 +7,8 @@ Drives each op through the real dispatcher (approval already granted)
 against a respx-mocked appliance and pins: the list read; ``set`` →
 ``changed`` (``GET`` for the ``ETag``, ``PUT`` with ``If-Match``); ``set``
 → ``unchanged`` (no ``PUT``); an unknown flag → ``invalid_request`` (no
-``PUT``); the park-time preview; and ``vcfa.provider.org.create`` answering
+``PUT``); a read without an ``ETag`` → error (no ``PUT``); the park-time
+preview; and ``vcfa.provider.org.create`` answering
 ``invalid_request`` before any write while ``CLASSIC_TENANT_CREATION`` is off.
 """
 
@@ -186,6 +187,25 @@ async def test_feature_flag_set_changed_sends_if_match(vcfa: VcfAutomationConnec
     request = put.calls.last.request
     assert request.headers["If-Match"] == _ETAG
     assert json.loads(request.content) == _flag(enabled=True)
+
+
+async def test_feature_flag_set_without_etag_refuses_the_write(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(_FLAGS).respond(200, json=page([_flag(enabled=False)]))
+        read = mock.get(_CLASSIC).respond(200, json=_flag(enabled=False))
+        put = mock.put(_CLASSIC).respond(200, json=_flag(enabled=True))
+        result = await run(
+            "vcfa.provider.feature_flag.set", {"name": "CLASSIC_TENANT_CREATION", "enabled": True}
+        )
+    assert result["status"] == "error", result
+    assert result["extras"]["error_code"] == "connector_error"
+    assert "ETag" in result["extras"]["exception_message"]
+    assert "nothing was written" in result["extras"]["exception_message"]
+    assert read.called
+    assert not put.called
 
 
 async def test_feature_flag_set_unchanged_writes_nothing(vcfa: VcfAutomationConnector) -> None:

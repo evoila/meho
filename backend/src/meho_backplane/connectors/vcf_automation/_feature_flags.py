@@ -7,7 +7,9 @@
 * ``vcfa.provider.feature_flag.set`` -- find the flag by name, ``GET`` it for
   its current state and ``ETag``, then ``PUT`` it with ``If-Match`` only when
   the state must change (``changed``); a flag already in the requested state
-  answers ``unchanged`` and nothing is written.
+  answers ``unchanged`` and nothing is written. A read without an ``ETag``
+  refuses the write: without ``If-Match`` the ``PUT`` could overwrite a
+  change made in between.
 
 A VCF Automation 9.1 appliance refuses a VM Apps (classic tenant) org while
 the ``CLASSIC_TENANT_CREATION`` flag is off.
@@ -123,7 +125,9 @@ async def provider_feature_flag_set(
     Finds the flag by name before any write (``invalid_request`` on a miss),
     reads it by id for the current state and ``ETag``, and sends ``PUT`` with
     ``If-Match`` only when the state differs. The ``PUT`` body is the flag as
-    read, with ``enabled`` replaced.
+    read, with ``enabled`` replaced. When the read carries no ``ETag`` the
+    write is refused (``RuntimeError``), so a change made in between can
+    never be overwritten.
     """
     wanted, enabled = params["name"], bool(params["enabled"])
     found = await _find_flag(connector, target, operator, wanted)
@@ -150,13 +154,18 @@ async def provider_feature_flag_set(
                 "nothing was written"
             ),
         }
+    if not etag:
+        raise RuntimeError(
+            f"vcf-automation answered the read of feature flag {flag_id!r} without an ETag, "
+            "so the write cannot carry If-Match; nothing was written. Run the op again"
+        )
     updated = await connector._post_json(
         target,
         PROVIDER_FEATURE_FLAG_PATH.format(id=quote_segment(flag_id)),
         operator=operator,
         verb="PUT",
         json={**current, "enabled": enabled},
-        extra_headers={"If-Match": etag} if etag else None,
+        extra_headers={"If-Match": etag},
     )
     return {
         "status": "changed",

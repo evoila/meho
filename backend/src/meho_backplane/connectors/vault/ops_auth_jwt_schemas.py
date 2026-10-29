@@ -86,6 +86,21 @@ def _duration(description: str) -> dict[str, Any]:
     }
 
 
+def _leeway(description: str) -> dict[str, Any]:
+    """A time leeway: like :func:`_duration`, but ``-1`` is allowed.
+
+    Vault reads ``-1`` on the three leeway fields as "no leeway" and ``0``
+    as "use the default". A token lifetime has no such switch, so it keeps
+    the nonnegative :func:`_duration`.
+    """
+    return {
+        "type": ["string", "integer"],
+        "minimum": -1,
+        "pattern": "\\S",
+        "description": description,
+    }
+
+
 def _string_list(description: str) -> dict[str, Any]:
     return {"type": "array", "items": _STRING_LIST, "description": description}
 
@@ -160,12 +175,17 @@ _ROLE_WRITE_PROPERTIES: dict[str, Any] = {
         "Most time since the user last logged in at the identity provider, for "
         "'oidc' roles. Seconds or a Go duration string such as '1h'."
     ),
-    "clock_skew_leeway": _duration("Allowed clock difference for 'jwt' roles. Vault default 60s."),
-    "expiration_leeway": _duration(
-        "Extra time a token is accepted after its 'exp', for 'jwt' roles. Vault default 150s."
+    "clock_skew_leeway": _leeway(
+        "Allowed clock difference for 'jwt' roles. 0 means the Vault default of 60s; "
+        "-1 turns it off."
     ),
-    "not_before_leeway": _duration(
-        "Extra time a token is accepted before its 'nbf', for 'jwt' roles. Vault default 150s."
+    "expiration_leeway": _leeway(
+        "Extra time a token is accepted after its 'exp', for 'jwt' roles. 0 means the "
+        "Vault default of 150s; -1 turns it off."
+    ),
+    "not_before_leeway": _leeway(
+        "Extra time a token is accepted before its 'nbf', for 'jwt' roles. 0 means the "
+        "Vault default of 150s; -1 turns it off."
     ),
     "token_ttl": _duration(
         "Lifetime of a Vault token from a new login, before renewal. Seconds or a Go "

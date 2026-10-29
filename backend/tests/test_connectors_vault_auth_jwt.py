@@ -22,6 +22,8 @@ Coverage:
 * ``role.list`` turns Vault's ``404`` into ``{"keys": []}``.
 * The mount is a parameter (default ``jwt``) and a mount or role name
   that could leave ``auth/<mount>/role/`` is refused by the schema.
+* The three leeway fields accept ``-1`` (Vault: no leeway); a token
+  lifetime below ``0`` is refused by the schema.
 * All handlers log in under the target's Vault role.
 * The write's permission preflight probes ``auth/<mount>/role/<name>``
   for ``create`` + ``read`` + ``update``; without them MEHO refuses the call before
@@ -395,6 +397,36 @@ async def test_write_rejects_params_outside_the_schema(
     fake = install_fake_client(monkeypatch)
 
     result = await _dispatch_vault(AUTH_JWT_OP_ROLE_WRITE, params)
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "invalid_params"
+    assert fake.adapter.post_calls == []
+
+
+@pytest.mark.parametrize("field", ["clock_skew_leeway", "expiration_leeway", "not_before_leeway"])
+async def test_write_accepts_minus_one_to_turn_a_leeway_off(
+    monkeypatch: pytest.MonkeyPatch, _registered_vault_typed_ops: None, field: str
+) -> None:
+    """Vault reads -1 on a leeway field as "no leeway"; the schema must let it through."""
+    fake = install_fake_client(monkeypatch)
+    given = {"role_name": _ROLE, "role_type": "jwt", "bound_claims_type": "string", field: -1}
+
+    result = await _dispatch_vault(AUTH_JWT_OP_ROLE_WRITE, given)
+
+    assert result.status == "ok", result.error
+    assert fake.adapter.post_calls[0]["json"][field] == -1
+
+
+@pytest.mark.parametrize(
+    "field", ["max_age", "token_ttl", "token_max_ttl", "token_explicit_max_ttl", "token_period"]
+)
+async def test_write_rejects_a_negative_lifetime(
+    monkeypatch: pytest.MonkeyPatch, _registered_vault_typed_ops: None, field: str
+) -> None:
+    """Only the three leeway fields know -1; a lifetime below 0 is refused before Vault."""
+    fake = install_fake_client(monkeypatch)
+
+    result = await _dispatch_vault(AUTH_JWT_OP_ROLE_WRITE, {"role_name": _ROLE, field: -1})
 
     assert result.status == "error"
     assert result.extras["error_code"] == "invalid_params"

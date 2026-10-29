@@ -25,6 +25,11 @@ Input:
   decorator wraps: coverage then names them after the decorator's module
   (for example ``functools.test_x``).
 * The files changed by the last N merged pull requests, read with ``gh``.
+  ``gh pr list`` orders by creation date, and no GitHub API orders by
+  merge date. So the script reads a larger window of merged pull requests
+  (``_WINDOW`` times N, newest created first), sorts them by merge date
+  and keeps the N merged last. A pull request created before that window
+  and merged recently is still left out.
 
 For each pull request it counts the test items the map would pick, in two
 ways:
@@ -34,7 +39,7 @@ ways:
   nothing.
 * **safe**: like "map only", but a changed file that the map cannot judge
   picks the full suite. Docs (``docs/`` or ``*.md``) never pick tests,
-  like the docs-only rule in CI today. The map cannot judge three kinds of
+  like the docs-only rule in CI today. The map cannot judge four kinds of
   files, and the report counts them apart:
 
   * **not in data**: a source or test file that the coverage data or the
@@ -43,6 +48,9 @@ ways:
   * **no test ran**: a source file that is in the coverage data, but no
     test function ran any of its lines (its code runs only at import time
     or in fixtures).
+  * **test not in list**: a source file that a test function ran which
+    the test list does not have (a decorator-wrapped test, or inputs from
+    different commits). The map cannot turn that name into test items.
   * **other**: a config or data file, a test helper or ``conftest.py``, or
     a file outside ``backend/``.
 
@@ -69,11 +77,15 @@ import sys
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import Any
 
 _SOURCE = re.compile(r"^backend/src/.+\.py$")
 _TEST_FILE = re.compile(r"^backend/tests/(?!integration/)(?:.+/)?test_[^/]+\.py$")
 _INTEGRATION = re.compile(r"^backend/tests/integration/")
 _DOCS = re.compile(r"(^docs/|\.md$)")
+# How many merged pull requests to read per pull request asked for, so the
+# ones merged last are in the window even when they were created earlier.
+_WINDOW = 10
 
 
 @dataclass
@@ -134,11 +146,12 @@ class Selection:
     map_only: set[str]
     not_in_data: list[str] = field(default_factory=list)
     no_test_ran: list[str] = field(default_factory=list)
+    test_not_in_list: list[str] = field(default_factory=list)
     other: list[str] = field(default_factory=list)
 
     @property
     def safe_full(self) -> bool:
-        return bool(self.not_in_data or self.no_test_ran or self.other)
+        return bool(self.not_in_data or self.no_test_ran or self.test_not_in_list or self.other)
 
 
 def select(changed: Iterable[str], file_map: dict[str, set[str]], suite: Suite) -> Selection:
@@ -158,9 +171,11 @@ def select(changed: Iterable[str], file_map: dict[str, set[str]], suite: Suite) 
             sel.not_in_data.append(path)
         elif not file_map[path]:
             sel.no_test_ran.append(path)
+        elif not file_map[path] <= suite.by_function.keys():
+            sel.test_not_in_list.append(path)
         else:
             for function in file_map[path]:
-                sel.map_only.update(suite.by_function.get(function, ()))
+                sel.map_only.update(suite.by_function[function])
     return sel
 
 
@@ -184,6 +199,15 @@ def touched_by_most(file_map: dict[str, set[str]], top: int) -> tuple[int, list[
     return total, shares[:top]
 
 
+def merged_last(listed: list[dict[str, Any]], last: int) -> list[dict[str, Any]]:
+    """Keep the ``last`` pull requests merged most recently, newest merge first.
+
+    ``listed`` is in the order ``gh pr list`` gives, newest created first,
+    which is not the merge order.
+    """
+    return sorted(listed, key=lambda pr: pr["mergedAt"], reverse=True)[:last]
+
+
 def fetch_prs(repo: str, last: int) -> list[tuple[int, str, list[str]]]:
     """Return (number, title, changed files) for the last merged pull requests."""
     listed = subprocess.run(
@@ -196,16 +220,16 @@ def fetch_prs(repo: str, last: int) -> list[tuple[int, str, list[str]]]:
             "--state",
             "merged",
             "--limit",
-            str(last),
+            str(last * _WINDOW),
             "--json",
-            "number,title",
+            "number,title,mergedAt",
         ],
         check=True,
         capture_output=True,
         text=True,
     )
     prs = []
-    for pr in json.loads(listed.stdout):
+    for pr in merged_last(json.loads(listed.stdout), last):
         files = subprocess.run(
             [
                 "gh",
@@ -241,27 +265,31 @@ def report(
         f"Full unit suite: {full} test items.",
         f"Test functions in the coverage data that are not in the test list: {len(unmatched)}.",
         "",
-        "| PR | files | map only | safe | not in data | no test ran | other |",
-        "|---|---|---|---|---|---|---|",
+        "| PR | files | map only | safe | not in data | no test ran | test not in list | other |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     map_counts: list[int] = []
     safe_counts: list[int] = []
     # Safe count if "no test ran" files were handled some other way
     # (for example by import analysis), so only the other two kinds fall back.
     without_no_test_ran: list[int] = []
-    reasons = {"not in data": 0, "no test ran": 0, "other": 0}
+    reasons = {"not in data": 0, "no test ran": 0, "test not in list": 0, "other": 0}
     for number, _title, files in prs:
         sel = select(files, file_map, suite)
         map_count = len(sel.map_only)
         map_counts.append(map_count)
         safe_counts.append(full if sel.safe_full else map_count)
-        without_no_test_ran.append(full if sel.not_in_data or sel.other else map_count)
+        without_no_test_ran.append(
+            full if sel.not_in_data or sel.test_not_in_list or sel.other else map_count
+        )
         reasons["not in data"] += bool(sel.not_in_data)
         reasons["no test ran"] += bool(sel.no_test_ran)
+        reasons["test not in list"] += bool(sel.test_not_in_list)
         reasons["other"] += bool(sel.other)
         lines.append(
             f"| #{number} | {len(files)} | {map_count} | {safe_counts[-1]} "
-            f"| {_shown(sel.not_in_data)} | {_shown(sel.no_test_ran)} | {_shown(sel.other)} |"
+            f"| {_shown(sel.not_in_data)} | {_shown(sel.no_test_ran)} "
+            f"| {_shown(sel.test_not_in_list)} | {_shown(sel.other)} |"
         )
     if prs:
         n_full = sum(1 for count in safe_counts if count == full and full)
@@ -312,7 +340,7 @@ def main(argv: list[str] | None = None) -> int:
             + ", ".join(sorted(unmatched)[:3])
             + ". Make the test list on the exact commit the coverage run tested. A few"
             " names can also differ when a decorator wraps the test (for example"
-            " functools.test_x); the map loses those tests.",
+            " functools.test_x). A changed file that such a test ran picks the full suite.",
             file=sys.stderr,
         )
     print(report(fetch_prs(args.repo, args.last), file_map, suite, args.top))

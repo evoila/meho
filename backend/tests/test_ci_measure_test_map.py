@@ -104,6 +104,45 @@ def test_select_applies_the_rules_per_changed_file(tool: ModuleType) -> None:
     assert only_unused.no_test_ran == ["backend/src/pkg/unused.py"]
 
 
+def test_select_falls_back_when_a_test_name_is_not_in_the_list(tool: ModuleType) -> None:
+    suite = tool.Suite.from_nodeids(_NODEIDS)
+    file_map = {
+        # A decorator wrapped the test, so coverage named it after the decorator's module.
+        "backend/src/pkg/wrapped.py": {"functools.test_one"},
+        # One test is in the list, the other is not: still cannot be judged.
+        "backend/src/pkg/mixed.py": {"tests.test_a.test_one", "tests.test_new.test_four"},
+    }
+
+    wrapped = tool.select(["backend/src/pkg/wrapped.py"], file_map, suite)
+    assert wrapped.map_only == set()
+    assert wrapped.safe_full
+    assert wrapped.test_not_in_list == ["backend/src/pkg/wrapped.py"]
+    assert wrapped.not_in_data == []
+    assert wrapped.no_test_ran == []
+
+    mixed = tool.select(["backend/src/pkg/mixed.py"], file_map, suite)
+    assert mixed.map_only == set()
+    assert mixed.safe_full
+    assert mixed.test_not_in_list == ["backend/src/pkg/mixed.py"]
+
+    text = tool.report([(1, "t", ["backend/src/pkg/wrapped.py"])], file_map, suite, top=1)
+    assert "| #1 | 1 | 0 | 4 | " in text
+    assert "`backend/src/pkg/wrapped.py`" in text
+    assert "test not in list: 1" in text
+
+
+def test_merged_last_orders_by_merge_date_not_creation_date(tool: ModuleType) -> None:
+    # The order gh pr list gives: newest created first.
+    listed = [
+        {"number": 30, "title": "new, merged early", "mergedAt": "2026-10-01T00:00:00Z"},
+        {"number": 20, "title": "merged last", "mergedAt": "2026-10-03T00:00:00Z"},
+        {"number": 10, "title": "old, merged late", "mergedAt": "2026-10-02T00:00:00Z"},
+    ]
+
+    assert [pr["number"] for pr in tool.merged_last(listed, 2)] == [20, 10]
+    assert [pr["number"] for pr in tool.merged_last(listed, 5)] == [20, 10, 30]
+
+
 def test_unmatched_functions_finds_tests_missing_from_the_list(tool: ModuleType) -> None:
     suite = tool.Suite.from_nodeids(_NODEIDS)
     file_map = {

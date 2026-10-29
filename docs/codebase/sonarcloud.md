@@ -99,12 +99,20 @@ the counts are wrong. The script prints how many test functions in the
 coverage data are not in the list, and warns when that number is not zero.
 A small number can also come from tests that a decorator wraps (for example
 `@respx.mock`): coverage then names them after the decorator's module, such
-as `functools.test_x`, and the map loses them.
+as `functools.test_x`.
 
-The report splits the changed files the map cannot judge into three kinds:
+The report splits the changed files the map cannot judge into four kinds:
 files the data does not have (for example files added after the coverage
-run), files in the data that no test function ran, and other files (config,
-test helpers, files outside `backend/`).
+run), files in the data that no test function ran, files that a test ran
+whose name is not in the test list (the decorator case above), and other
+files (config, test helpers, files outside `backend/`). A pull request with
+a file of any kind counts as a full-suite run in the "safe" column.
+
+The script reads the merged pull requests with `gh pr list`, which orders
+by creation date. No GitHub API orders by merge date. So the script reads a
+window of ten times the number asked for, sorts it by merge date, and keeps
+the ones merged last. A pull request created before that window and merged
+recently is still left out.
 
 Things to know about the data:
 

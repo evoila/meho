@@ -121,8 +121,20 @@ async def run_async_migrations() -> None:
 
 
 def run_migrations_online() -> None:
-    """Entry point Alembic invokes for online migrations."""
-    asyncio.run(run_async_migrations())
+    """Entry point Alembic invokes for online migrations.
+
+    A caller that already holds a connection hands it over in
+    ``config.attributes["connection"]`` (Alembic cookbook, "Programmatic
+    API use (connection sharing) With Asyncio"). The migration runner
+    :mod:`meho_backplane.db.migrate` does this, so the migrations run on
+    the connection that holds its advisory lock (#5233). Without one,
+    build an engine and connect here.
+    """
+    connection = config.attributes.get("connection")
+    if connection is None:
+        asyncio.run(run_async_migrations())
+    else:
+        do_run_migrations(connection)
 
 
 if context.is_offline_mode():

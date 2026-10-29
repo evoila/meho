@@ -764,6 +764,34 @@ async def test_lowering_an_install_override_checks_every_tenant_it_reaches(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_clean_registry")
+async def test_install_approval_is_stored_when_a_tenant_override_turned_it_off(
+    embedding: AsyncMock,
+) -> None:
+    """Both classifications require approval, but a tenant exception turned it off."""
+    tenant_id = uuid.uuid4()
+    await _register_typed(embedding, requires_approval=True)
+    await _ingest_tenant_copy(embedding, tenant_id, requires_approval=True)
+    admin = ReviewService(_operator(tenant_id, platform_admin=True))
+    await admin.edit_op(
+        _TYPED_CONNECTOR,
+        "typedpets.pet.update",
+        tenant_id=tenant_id,
+        requires_approval=False,
+        reason="read-only in practice",
+        person_present=True,
+    )
+    assert await _effective(tenant_id) == ("caution", False)
+
+    await admin.edit_op(
+        _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=None, requires_approval=True
+    )
+    assert (await _install_override()).requires_approval is True
+    assert await _effective(tenant_id) == ("caution", True)
+    assert await _effective(uuid.uuid4()) == ("caution", True)
+
+
+@pytest.mark.asyncio
 async def test_lowering_from_destructive_that_ends_approval_needs_the_rules(
     embedding: AsyncMock,
 ) -> None:

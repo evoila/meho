@@ -427,14 +427,18 @@ def _new_approval_field(
     """Check a requested approval flag; return the value to store (``None`` = no override).
 
     ``True`` is stored unless the classification requires approval, no
-    other scope's override turns it off, and every tenant copy in
-    *tenants* requires it too. Like the risk level, the choice is kept
-    apart from the other scopes' overrides.
+    other scope's override turns it off, and every tenant in *tenants*
+    requires it on its own: by its copy's classification or by its own
+    override. Like the risk level, the choice is kept apart from the
+    other scopes' overrides.
     """
     base = _approval(row.requires_approval, others)
     if requested:
         turned_off = any(o.requires_approval is False for o in others)
-        needed_by_a_tenant = any(not t.code_approval for t in tenants)
+        needed_by_a_tenant = any(
+            not effective_policy(t.code_safety, t.code_approval, t.own).requires_approval
+            for t in tenants
+        )
         return None if row.requires_approval and not turned_off and not needed_by_a_tenant else True
     if who.tighten_only:
         raise _edit_tool_cannot_loosen()

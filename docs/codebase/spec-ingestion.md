@@ -1164,8 +1164,10 @@ with its own copy or its own override: when approval ends for any of
 them, the approval-off checks apply, even when the built-in operation
 keeps approval. The audit row names those tenants in
 `approval_ended_for_tenants`. An install-wide `requires_approval=true`
-is stored when any tenant copy needs it, so a platform admin can lower
-the level and keep approval for everyone.
+is stored when any tenant needs it: because its copy's classification
+does not require approval, or because an approved tenant override turned
+approval off. So a platform admin can lower the level, or require
+approval again after a tenant exception, and it holds for everyone.
 
 **Each scope's override stands on its own.** The stored value is
 measured against the classification, not against the other scopes'

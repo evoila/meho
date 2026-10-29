@@ -494,8 +494,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `vcenter.yaml` by `test_connectors_vmware_rest_library_reconcile.py`.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 75
-  `_CompositeSpec` rows (17 read — incl. the `#3789` datastore
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 76
+  `_CompositeSpec` rows (18 read — incl. the `#3789` datastore
   cache-refresh read `datastore.refresh` — + 46 dangerous/destructive
   writes + 12 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
@@ -1205,8 +1205,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 75 `vmware.composite.*` rows with
-   `source_kind="composite"` — 17 reads (16 with `safety_level="safe"` +
+   queued registrar and upserts: the 76 `vmware.composite.*` rows with
+   `source_kind="composite"` — 18 reads (17 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
    service principals), and 58 writes, all `requires_approval=True`
@@ -1602,7 +1602,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 75 composites (17 reads + 58 writes) land as `source_kind="composite"`
+The 76 composites (18 reads + 58 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1699,7 +1699,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 75 composites are hand-authored aggregators the connector ships as
+The 76 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the

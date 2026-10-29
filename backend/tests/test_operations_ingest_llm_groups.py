@@ -594,10 +594,12 @@ async def test_run_llm_grouping_omitted_ops_counted_once(
             # "POST:/api/vcenter/vm/{vm}/snapshot" -- omitted
         },
     )
+    # The extend round for the two leftovers proposes no new group.
     stub = StubLlmClient(
         responses=[
             small_corpus.STUB_PROPOSE_RESPONSE,
             partial_assignment_response,
+            "[]",
         ],
     )
     result = await run_llm_grouping(
@@ -618,6 +620,10 @@ async def test_run_llm_grouping_omitted_ops_counted_once(
     # counted once via the per-row loop's NONE_GROUP_KEY default and
     # again via the trailing all_op_ids/missing block).
     assert result.operations_unassigned == 2
+    assert result.unassigned_op_ids == (
+        "DELETE:/api/vcenter/vm/{vm}",
+        "POST:/api/vcenter/vm/{vm}/snapshot",
+    )
 
     # Audit-row payload reflects the same (correct) total.
     sessionmaker = get_sessionmaker()
@@ -632,6 +638,7 @@ async def test_run_llm_grouping_omitted_ops_counted_once(
     assert isinstance(payload, dict)
     assert payload["operations_assigned"] == 3
     assert payload["operations_unassigned"] == 2
+    assert payload["unassigned_op_ids"] == list(result.unassigned_op_ids)
     assert payload["operations_assigned"] + payload["operations_unassigned"] == len(
         small_corpus.PROTOS
     )
@@ -666,13 +673,15 @@ async def test_run_llm_grouping_omitted_ops_counted_once(
 async def test_run_llm_grouping_medium_corpus_two_llm_calls(
     stub_embedding_service: Any,
 ) -> None:
-    """50 ops + batch_size=50 -> exactly 2 LLM calls (1 + ceil(50/50))."""
+    """50 ops + batch_size=50 -> 2 LLM calls (1 + ceil(50/50)), plus one
+    extend call for the one op left over, which proposes no new group."""
     await _ingest_medium_corpus(stub_embedding_service)
 
     stub = StubLlmClient(
         responses=[
             medium_corpus.STUB_PROPOSE_RESPONSE,
             medium_corpus.STUB_ASSIGNMENT_RESPONSE,
+            "[]",
         ],
     )
     result = await run_llm_grouping(
@@ -683,11 +692,12 @@ async def test_run_llm_grouping_medium_corpus_two_llm_calls(
         version="9.0",
         impl_id="vmware-rest",
     )
-    assert result.llm_call_count == 2
-    assert stub.call_count == 2
+    assert result.llm_call_count == 3
+    assert stub.call_count == 3
     assert result.groups_created == 8
     assert result.operations_assigned == 49
     assert result.operations_unassigned == 1
+    assert result.unassigned_op_ids == (medium_corpus.EXPECTED_UNASSIGNED_OP_ID,)
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
@@ -711,7 +721,8 @@ async def test_run_llm_grouping_medium_corpus_two_llm_calls(
 async def test_run_llm_grouping_medium_corpus_with_smaller_batch(
     stub_embedding_service: Any,
 ) -> None:
-    """batch_size=25 over 50 ops -> 1 + ceil(50/25) = 3 LLM calls.
+    """batch_size=25 over 50 ops -> 1 + ceil(50/25) = 3 LLM calls, plus
+    one extend call for the leftover op.
 
     The two Pass-2 batches each see half the ops; the parser merges
     the two response dicts into the final assignment map. Each batch's
@@ -734,6 +745,7 @@ async def test_run_llm_grouping_medium_corpus_with_smaller_batch(
             medium_corpus.STUB_PROPOSE_RESPONSE,
             json.dumps(batch_a),
             json.dumps(batch_b),
+            "[]",
         ],
     )
     result = await run_llm_grouping(
@@ -745,8 +757,8 @@ async def test_run_llm_grouping_medium_corpus_with_smaller_batch(
         impl_id="vmware-rest",
         batch_size=25,
     )
-    assert result.llm_call_count == 3
-    assert stub.call_count == 3
+    assert result.llm_call_count == 4
+    assert stub.call_count == 4
     assert result.operations_assigned == 49
     assert result.operations_unassigned == 1
 

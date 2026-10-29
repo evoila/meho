@@ -149,8 +149,9 @@ SDDC_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "VCF services and their status, and the license keys. All reads."
     ),
     _GROUP_TASKS: (
-        "Reads of VCF workflow tasks: list recent tasks, or read one task by "
-        "id to follow a host commission or a domain build. All reads."
+        "Reads of VCF workflow tasks and check results: list recent tasks, read "
+        "one task by id to follow a host commission or a domain build, or read "
+        "one host or domain check by id to get its result. All reads."
     ),
     _GROUP_CREDENTIALS: (
         "One read: the accounts SDDC Manager stores for ESXi, vCenter, NSX and "
@@ -160,7 +161,8 @@ SDDC_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     _GROUP_LIFECYCLE: (
         "Changes that build a workload domain: create a network pool, check "
         "and add ESXi hosts, check and create the domain. The two checks "
-        "change nothing. Creating a pool, adding hosts and creating a domain "
+        "change nothing; read their result with sddc.host.validation.get and "
+        "sddc.domain.validation.get. Creating a pool, adding hosts and creating a domain "
         "wait for a person's approval. Creating a pool returns the pool; keep "
         "its id for sddc.host.validate. Adding hosts and creating a domain "
         "return a task; follow them with sddc.task.get."
@@ -459,6 +461,24 @@ _TASK_GET_PARAMS: dict[str, Any] = {
     "required": ["id"],
     "additionalProperties": False,
     "examples": [{"id": "<task-id>"}],
+}
+
+#: The ``{"id": <validation id>}`` parameter schema of the two validation reads.
+#: The id goes into the URL path, so only letters, digits, ``-`` and ``_`` are
+#: allowed (SDDC Manager validation ids are UUIDs).
+_VALIDATION_GET_PARAMS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "id": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "description": "The validation id returned by the validate call.",
+        },
+    },
+    "required": ["id"],
+    "additionalProperties": False,
+    "examples": [{"id": "validation-id"}],
 }
 
 #: The ``{"spec": <NetworkPool>}`` parameter schema of ``sddc.network_pool.create``.
@@ -1527,6 +1547,64 @@ _TASK_GET = SddcTypedOp(
 
 
 # ---------------------------------------------------------------------------
+# sddc.domain.validation.get / sddc.host.validation.get — validation results
+# ---------------------------------------------------------------------------
+
+
+def _validation_get_op(kind: str, path: str, next_op: str) -> SddcTypedOp:
+    """The safe read of one ``sddc.<kind>.validate`` result by its id (#3518).
+
+    ``result_scalars`` keeps ``executionStatus`` / ``resultStatus`` in the
+    answer when ``validationChecks[]`` becomes a result handle, so the caller
+    reads the result without opening the handle.
+    """
+    return SddcTypedOp(
+        op_id=f"sddc.{kind}.validation.get",
+        handler_attr=f"{kind}_validation_get",
+        summary=f"Read the result of a {kind} check (sddc.{kind}.validate) by its id.",
+        description=(
+            f"Reads one {kind} validation via GET {path}. executionStatus says "
+            "whether the check is done; resultStatus says whether it passed "
+            "(SUCCEEDED, WARNING or FAILED); validationChecks lists each single "
+            "check. Read-only."
+        ),
+        parameter_schema=_VALIDATION_GET_PARAMS,
+        response_schema=_object(f"One {kind} validation.", _VALIDATION_FIELDS),
+        group_key=_GROUP_TASKS,
+        tags=("read-only", "sddc", "vcf", kind, "validation", "lifecycle"),
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=_instructions(
+            when_to_call=(
+                f"Call with the id that sddc.{kind}.validate returned, to get the "
+                "result of the check."
+            ),
+            output_shape=(
+                "{id, description, executionStatus, resultStatus, validationChecks: "
+                "[...]}. When validationChecks[] comes back as a result handle, id, "
+                "executionStatus and resultStatus stay top-level; use result_query "
+                "on the handle to find the failed checks."
+            ),
+            next_step=(
+                "While executionStatus is IN_PROGRESS, call again later. When it is "
+                f"COMPLETED and resultStatus is SUCCEEDED, go on with {next_op}. "
+                "Otherwise report the failed validationChecks."
+            ),
+            parameter_hints={"id": f"The id from the sddc.{kind}.validate answer."},
+            result_scalars=_VALIDATION_RESULT_SCALARS,
+        ),
+    )
+
+
+_DOMAIN_VALIDATION_GET = _validation_get_op(
+    "domain", "/v1/domains/validations/{id}", SDDC_DOMAIN_CREATE_OP_ID
+)
+_HOST_VALIDATION_GET = _validation_get_op(
+    "host", "/v1/hosts/validations/{id}", SDDC_HOST_COMMISSION_OP_ID
+)
+
+
+# ---------------------------------------------------------------------------
 # sddc.network_pool.create — workload-domain write
 # ---------------------------------------------------------------------------
 
@@ -1598,8 +1676,10 @@ _HOST_VALIDATE = SddcTypedOp(
             "[...]}. Wait for executionStatus COMPLETED, then read resultStatus."
         ),
         next_step=(
-            "If resultStatus is SUCCEEDED, call sddc.host.commission with the same "
-            "spec. If not, report the failed validationChecks and fix the spec."
+            "While executionStatus is IN_PROGRESS, read the result with "
+            "sddc.host.validation.get and the returned id. If resultStatus is "
+            "SUCCEEDED, call sddc.host.commission with the same spec. If not, "
+            "report the failed validationChecks and fix the spec."
         ),
         preconditions=(
             "The network pool must exist (sddc.network_pool.get). The hosts must be "
@@ -1690,8 +1770,10 @@ _DOMAIN_VALIDATE = SddcTypedOp(
             "[...]}. Wait for executionStatus COMPLETED, then read resultStatus."
         ),
         next_step=(
-            "If resultStatus is SUCCEEDED, call sddc.domain.create with the same "
-            "spec. If not, report the failed validationChecks and fix the spec."
+            "While executionStatus is IN_PROGRESS, read the result with "
+            "sddc.domain.validation.get and the returned id. If resultStatus is "
+            "SUCCEEDED, call sddc.domain.create with the same spec. If not, "
+            "report the failed validationChecks and fix the spec."
         ),
         preconditions=(
             "The hosts in the spec must be commissioned and free "
@@ -1752,8 +1834,9 @@ _DOMAIN_CREATE = SddcTypedOp(
 #: startup -- the audited 12-read set (#2306), the network-pool pre-flight
 #: reads (#2837), and the curated workload-domain write path (#3497:
 #: network-pool create, host validate/commission, domain validate/create,
-#: plus the task poll). Ordered inventory -> credentials -> tasks -> platform
-#: -> lifecycle to match the operator's typical path.
+#: plus the task poll), and the two validation-result reads (#3518). Ordered
+#: inventory -> credentials -> tasks -> platform -> lifecycle to match the
+#: operator's typical path.
 SDDC_TYPED_OPS: tuple[SddcTypedOp, ...] = (
     _DOMAIN_LIST,
     _DOMAIN_STATUS,
@@ -1766,6 +1849,8 @@ SDDC_TYPED_OPS: tuple[SddcTypedOp, ...] = (
     _CREDENTIAL_LIST,
     _TASK_LIST,
     _TASK_GET,
+    _DOMAIN_VALIDATION_GET,
+    _HOST_VALIDATION_GET,
     _SYSTEM_INFO,
     _VCF_SERVICE_LIST,
     _MANAGER_LIST,

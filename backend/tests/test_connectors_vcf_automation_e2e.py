@@ -70,7 +70,6 @@ import respx
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.schemas import FingerprintResult
 from meho_backplane.connectors.vcf_automation import (
@@ -80,6 +79,7 @@ from meho_backplane.connectors.vcf_automation import (
     VCFA_VERSION,
     VcfAutomationConnector,
 )
+from meho_backplane.connectors.vcf_automation.connector import _plane_cache_key
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup, Target
 from meho_backplane.operations import reset_dispatcher_caches
@@ -676,9 +676,10 @@ async def test_vcfa_e2e_provider_login_fires_once_per_target(
     target_name = vcfa_e2e_canary.target_name
     # The token caches key on the tenant-unique (tenant_id, id) tuple
     # (#1642/#1672), not the bare name.
-    cache_key = target_cache_key(vcfa_e2e_canary.db_target)
+    provider_key = _plane_cache_key(vcfa_e2e_canary.db_target, "provider")
+    tenant_key = _plane_cache_key(vcfa_e2e_canary.db_target, "tenant")
 
-    assert cache_key not in instance._provider_tokens, (
+    assert provider_key not in instance._provider_tokens, (
         f"Expected empty provider cache before first dispatch; got {instance._provider_tokens!r}"
     )
     result = await call_operation(
@@ -691,13 +692,13 @@ async def test_vcfa_e2e_provider_login_fires_once_per_target(
         },
     )
     assert result["status"] == "ok"
-    assert instance._provider_tokens.get(cache_key) == _PROVIDER_JWT, (
+    assert instance._provider_tokens.get(provider_key) == _PROVIDER_JWT, (
         "Expected provider JWT cached after first provider-plane dispatch; "
         f"got _provider_tokens={instance._provider_tokens!r}"
     )
     # Tenant cache must remain untouched: provider dispatch only
     # establishes the provider session.
-    assert instance._tenant_tokens.get(cache_key) is None, (
+    assert instance._tenant_tokens.get(tenant_key) is None, (
         f"Tenant cache should be empty after provider-only dispatch; "
         f"got _tenant_tokens={instance._tenant_tokens!r}"
     )
@@ -709,7 +710,7 @@ async def test_vcfa_e2e_tenant_login_fires_once_per_target(
     """Tenant session-establish runs on first tenant dispatch and the token caches."""
     instance = vcfa_e2e_canary.connector_instance
     target_name = vcfa_e2e_canary.target_name
-    cache_key = target_cache_key(vcfa_e2e_canary.db_target)
+    tenant_key = _plane_cache_key(vcfa_e2e_canary.db_target, "tenant")
 
     result = await call_operation(
         _OPERATOR,
@@ -721,7 +722,7 @@ async def test_vcfa_e2e_tenant_login_fires_once_per_target(
         },
     )
     assert result["status"] == "ok"
-    assert instance._tenant_tokens.get(cache_key) == _TENANT_TOKEN, (
+    assert instance._tenant_tokens.get(tenant_key) == _TENANT_TOKEN, (
         "Expected tenant token cached after first tenant-plane dispatch; "
         f"got _tenant_tokens={instance._tenant_tokens!r}"
     )

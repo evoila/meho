@@ -881,11 +881,11 @@ In the Keycloak realm that hosts `meho-backplane`, create a new
 | Authentication flow → **OAuth 2.0 Device Authorization Grant** | **On** | Required for `meho login` ([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)). |
 | Valid redirect URIs | (none) | Device flow doesn't redirect. |
 
-#### Step 3 — Add the 6 protocol mappers to `meho-cli`
+#### Step 3 — Add the 8 protocol mappers to `meho-cli`
 
 Tokens minted by `meho-cli` must carry the same claim shape the
 backplane validates — otherwise the token decodes cleanly but is
-rejected with `invalid_token` (Wall #2). The six mappers:
+rejected with `invalid_token` (Wall #2). The eight mappers:
 
 | Mapper name | Type | Output claim | Notes |
 | --- | --- | --- | --- |
@@ -894,13 +894,17 @@ rejected with `invalid_token` (Wall #2). The six mappers:
 | `tenant-id` | `oidc-usermodel-attribute-mapper` | `tenant_id` | Reads the `tenant_id` attribute of the person's group (Step 5). Without this the backplane rejects with `missing_tenant_claim` (Wall #2). |
 | `tenant-role` | `oidc-usermodel-attribute-mapper` | `tenant_role` | Reads the `tenant_role` attribute of the person's group. Without this the backplane rejects with `missing_tenant_role_claim`. |
 | `approver` | `oidc-usermodel-attribute-mapper` (Claim JSON Type `boolean`) | `approver` | Reads `approver=true` from the `MEHO-Approvers` group. Without it a `read_only` approver cannot approve. |
+| `platform-admin` | `oidc-usermodel-attribute-mapper` (User Attribute `platform_admin`, Claim JSON Type `boolean`) | `platform_admin` | Reads `platform_admin=true` from the `MEHO-Platform-Admins` group. Without it nobody gets rights across tenants. |
+| `meho-tenants` | `oidc-usermodel-attribute-mapper` (User Attribute `meho_tenant`, Claim JSON Type `String`, **Multivalued** on, **Aggregate attribute values** on) | `meho_tenants` | Lists the `meho_tenant` value of every group of the person. Without it the token does not list the person's tenants. One tenant still works. |
 | `groups-claim` | `oidc-group-membership-mapper` | `groups` | Emits the person's group names. Without this group-gated tools report empty results rather than failing — a softer failure than the above, but still misleading. |
 
-The three User Attribute mappers hold **no fixed value**. When a
+The five User Attribute mappers hold **no fixed value**. When a
 person has no attribute of their own, the stock User Attribute mapper
 takes the value from the person's group (Keycloak's
-`KeycloakModelUtils.resolveAttribute`). Set **Add to access token** on,
-**Multivalued** off and **Aggregate attribute values** off. The full
+`KeycloakModelUtils.resolveAttribute`). Set **Add to access token** on
+for all five. On the four mappers `tenant-id`, `tenant-role`,
+`approver` and `platform-admin`, keep **Multivalued** and **Aggregate
+attribute values** off. Only `meho-tenants` turns both on. The full
 recipe is
 [`docs/cross-repo/keycloak-tenant-claims.md`](../../docs/cross-repo/keycloak-tenant-claims.md);
 the decision is
@@ -1049,19 +1053,31 @@ must carry it for all three surfaces to agree.
 #### Step 5 — Create the five groups and a user in `MEHO-Admins`
 
 A person gets their tenant and role from their group. Create five
-top-level groups, each with a `tenant_id` attribute (your tenant UUID)
-and a `tenant_role` attribute:
+top-level groups, each with a `tenant_id` attribute (your tenant UUID),
+a `tenant_role` attribute and a `meho_tenant` attribute:
 
-| Group | `tenant_role` | Extra attribute |
-| --- | --- | --- |
-| `MEHO-Readers` | `read_only` | – |
-| `MEHO-Operators` | `operator` | – |
-| `MEHO-SA-Operators` | `operator` | – |
-| `MEHO-Admins` | `tenant_admin` | – |
-| `MEHO-Approvers` | `read_only` | `approver` = `true` |
+| Group | `tenant_role` | `meho_tenant` | Extra attribute |
+| --- | --- | --- | --- |
+| `MEHO-Readers` | `read_only` | `<uuid>:<name>:Readers` | – |
+| `MEHO-Operators` | `operator` | `<uuid>:<name>:Operators` | – |
+| `MEHO-SA-Operators` | `operator` | `<uuid>:<name>:SA-Operators` | – |
+| `MEHO-Admins` | `tenant_admin` | `<uuid>:<name>:Admins` | – |
+| `MEHO-Approvers` | `read_only` | `<uuid>:<name>:Approvers` | `approver` = `true` |
+
+In `meho_tenant`, `<uuid>` is the same tenant UUID and `<name>` is the
+tenant's short name (lowercase letters, digits and dashes, for example
+`main`).
+
+Also create the group `MEHO-Platform-Admins` with one attribute,
+`platform_admin` = `true`. Its members get rights across all tenants.
+It is not a role group: it holds no tenant and no role, so a person in
+it is also in one of the five groups.
 
 Each person is in **exactly one** of the five groups. A person in no
-group gets `401 missing_tenant_claim`.
+group gets `401 missing_tenant_claim`. Leave the person's own
+`tenant_id`, `tenant_role`, `approver` and `meho_tenant` attributes
+empty: a value on the person wins over the group, and a `meho_tenant`
+value on the person is added to their tenant list.
 
 The realm ships with zero human users — prior lab work rode
 `client_credentials` and never needed one. Device-code, by RFC 8628
@@ -1071,7 +1087,9 @@ Create at least one user (any username) with:
 
 - A password (any policy-compliant value; the user is prompted to
   change it on first login if the realm's password policy says so).
-- Group membership: `MEHO-Admins` (so the user gets `tenant_admin`).
+- Group membership: `MEHO-Admins` (so the user gets `tenant_admin`)
+  and `MEHO-Platform-Admins` (so the user gets rights across all
+  tenants).
 
 The user's `email_verified` flag does not need to be true for
 device-code to complete; if your realm enforces verified email
@@ -1095,7 +1113,7 @@ client-shape contrast with `meho-cli`:
 | **Optional client scopes** | **`mcp:read`, `mcp:execute`, `mcp:admin`** | The MEHO Claude Code plugin and the Claude Desktop bundle ask for `mcp:read mcp:execute` at every login, and for `mcp:admin` when the user turns on the operator tools. Keycloak does not ship these scopes. Create each one as a realm **client scope** (protocol OpenID Connect, **Include in token scope** On), then assign it to `meho-mcp` as **optional**. If a scope is missing, Keycloak refuses the whole login with `invalid_scope`. `bootstrap-clients` does both steps for you. |
 | Client Offline Session Idle (attribute `client.offline.session.idle.timeout`) | `172800` (48h) | How long an unused MCP login lasts. Without it the realm's Offline Session Idle applies (30 days by default). `bootstrap-clients` sets it; change the value with `--mcp-offline-session-idle=<seconds>`. |
 
-The 6 protocol mappers + 4 default client scopes from Steps 3–4
+The 8 protocol mappers + 4 default client scopes from Steps 3–4
 apply identically. The MCP client additionally carries
 `offline_access` as an **optional** client scope so Claude Code's
 auth-code + PKCE flow — which always lists `offline_access` in its
@@ -1268,7 +1286,7 @@ pre-registration recipe's Step 3 mappers exist to prevent.
 > - **(Preferred) Attach the equivalent mappers to a realm-
 >   level *default* client scope every client inherits.**
 >   Create a new realm client scope (e.g. `meho-backplane-
->   claims`), assign it the six mappers Step 3 lists,
+>   claims`), assign it the eight mappers Step 3 lists,
 >   mark it **Default** in **Realm Settings → Client
 >   Scopes → Default Client Scopes**, and every newly-
 >   resolved client — pre-registered *and* CIMD — gets the
@@ -1462,7 +1480,7 @@ numbered for cross-reference with the originating dogfood reports.
 | Wall | Symptom | Cause | Fix |
 | --- | --- | --- | --- |
 | **W1** | Device-code initiation 401s with `{"error":"unauthorized_client","error_description":"Invalid client or Invalid client credentials"}`. Or DCR 403s with `{"error":"insufficient_scope","error_description":"Policy 'Trusted Hosts' rejected request to client-registration service. Details: Host not trusted."}`. | The CLI / MCP client tried to drive the device or authorization-code grant against a **confidential** client (typically `meho-backplane`), or anonymous DCR against a realm whose Trusted Hosts policy ships with an empty whitelist. Confidential clients require a `client_secret` the CLI can't carry; DCR on a prod realm is closed by design ([Keycloak docs](https://www.keycloak.org/securing-apps/client-registration)). | Pre-create a **public** client per Step 2 (and Step 2-MCP for the MCP path). Set `config.keycloakCliClientId` to the CLI client's ID so `/api/v1/auth-config` surfaces it. Operators on older backplanes can pass `--client-id <id>` per-invocation. Don't open DCR — the right fix is a deployer-side public client. |
-| **W2** | Token issuance succeeds; every backend call 401s with a structured `detail` code (post-[#797](https://github.com/evoila/meho/issues/797) + [#1131](https://github.com/evoila/meho/issues/1131): `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim` / `malformed_jws` if the `Authorization` header carries a non-JWT value at all). | The public client mints tokens with a different claim shape than `meho-backplane` validates against — missing the `audience-meho-backplane` mapper (wrong `aud`), the `meho-mcp-audience` mapper (no MCP audience), the `tenant-id` mapper, or the `tenant-role` mapper. A `malformed_jws` instead means the `Authorization` header is not a JWT (typo, copy/paste truncation, or a probe like `Bearer not-a-real-jwt`). | Add all 6 mappers to the public client per Step 3, and put the person in one of the five groups (Step 5). After the fix, decode the issued token (`jwt.io` or `kcadm.sh evaluate-protocol-mappers`) and confirm `aud` is an array containing both `meho-backplane` and `<backplane-url>/mcp`, plus `tenant_id`, `tenant_role`, `groups` are present. For `malformed_jws`: paste the bearer into `jwt.io` — if it doesn't decode, the header was sent with the wrong value, not the issued token. |
+| **W2** | Token issuance succeeds; every backend call 401s with a structured `detail` code (post-[#797](https://github.com/evoila/meho/issues/797) + [#1131](https://github.com/evoila/meho/issues/1131): `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim` / `malformed_jws` if the `Authorization` header carries a non-JWT value at all). | The public client mints tokens with a different claim shape than `meho-backplane` validates against — missing the `audience-meho-backplane` mapper (wrong `aud`), the `meho-mcp-audience` mapper (no MCP audience), the `tenant-id` mapper, or the `tenant-role` mapper. A `malformed_jws` instead means the `Authorization` header is not a JWT (typo, copy/paste truncation, or a probe like `Bearer not-a-real-jwt`). | Add all 8 mappers to the public client per Step 3, and put the person in one of the five groups (Step 5). After the fix, decode the issued token (`jwt.io` or `kcadm.sh evaluate-protocol-mappers`) and confirm `aud` is an array containing both `meho-backplane` and `<backplane-url>/mcp`, plus `tenant_id`, `tenant_role`, `groups` are present. For `malformed_jws`: paste the bearer into `jwt.io` — if it doesn't decode, the header was sent with the wrong value, not the issued token. |
 | **W3** | Token issuance succeeds; every backend call 401s with `{"detail":"invalid_token"}` even after Wall #2 is closed; decoded token has `aud`, `tenant_id`, `tenant_role`, `groups` but **no `sub` claim**. | The `basic` client scope wasn't assigned. Keycloak 25 moved `sub` into the Subject (sub) protocol mapper inside the `basic` scope; clients created via the admin REST API don't auto-inherit realm default-default scopes the way the admin-console UI populates them. RFC 9068 §2.2.1 makes `sub` REQUIRED on JWT access tokens, so rejection is spec-correct — the diagnostic is the opaque part. | Add `basic`, `roles`, `web-origins`, `acr` to the public client's **default** client scopes per Step 4. Re-issue (logout and re-login; existing tokens are stale) and confirm `sub` is now present. After [#797](https://github.com/evoila/meho/issues/797) lands the symptom is `{"detail":"missing_sub"}` instead of the opaque form. |
 | **W4** | `meho login` fails with `meho: token exchange failed: context deadline exceeded`, often before the human has a chance to approve the verification URL. | Not the device-code TTL (which is already 10 minutes per `cli/internal/auth/devicecode.go:355`'s `PollTimeout = 10 * time.Minute` — longer than Keycloak's default 600 s `expires_in`). The real cause is an **ambient parent deadline** on `cmd.Context()` (CI step timeout, `claude` bash-tool timeout, IDE-task wrapper) that truncates the approval wait far below the device-code lifetime. | (Until [#798](https://github.com/evoila/meho/issues/798) lands) run `meho login` in a real interactive terminal without a short wrapper deadline; or raise the wrapper timeout to ≥ `expires_in` + headroom. After #798 lands the message distinguishes "parent deadline fired" from "device code expired" and the device-flow approval wait detaches from a too-short parent context. |
 | **W7** | Browser-flow MCP client (Claude Code, MCP Inspector) authorization request 400s with `{"error":"invalid_scope","error_description":"Invalid scopes: openid profile email offline_access"}` (or just `offline_access` in the failed-scopes list). Token endpoint never reached; the user never sees a Keycloak login page. | The MCP client requested `offline_access` to obtain a refresh token (Claude Code **always** includes it; OIDC Core §11 makes it the spec-defined signal for a refresh token), but the `meho-mcp` public client doesn't have `offline_access` in either its default or optional client-scope list. Keycloak rejects unknown / unassigned scopes per OAuth 2.0 [RFC 6749 §5.2](https://www.rfc-editor.org/rfc/rfc6749#section-5.2). The realm-built-in `offline_access` scope exists; it just isn't attached to the public MCP client. | Assign the realm's built-in `offline_access` client scope to `meho-mcp` as an **optional** scope (not default — only flows that ask for a refresh token should mint one). In the Keycloak admin console: `meho-mcp` → Client scopes → Add client scope → pick `offline_access` → **Optional**. `meho admin keycloak bootstrap-clients` does this automatically from the next release after v0.6.0 ([#912](https://github.com/evoila/meho/issues/912)). The CLI device-code client (`meho-cli`) is given `offline_access` only when a deployment opts in via `bootstrap-clients --cli-offline-access` (off by default): it assigns the scope as **optional** and bounds it with a tight per-client offline-session idle timeout (default 48h), so an idle long-lived CLI token expires far sooner than the gcloud/kubectl norm; operators opt in per-login with `meho login --offline` (#2902). |
@@ -1478,8 +1496,9 @@ numbered for cross-reference with the originating dogfood reports.
   recipe.
 - **Automation of the recipe.** [#791](https://github.com/evoila/meho/issues/791)
   (G0.9.1-T11) ships `meho admin keycloak bootstrap-clients` — an
-  idempotent verb that creates the two public clients + 6 mappers +
-  4 default scopes + the five role groups from one invocation, plus (from the next release
+  idempotent verb that creates the two public clients + 8 mappers +
+  4 default scopes + the five role groups + `MEHO-Platform-Admins` from
+  one invocation, plus (from the next release
   after v0.6.0 via [#912](https://github.com/evoila/meho/issues/912))
   the `offline_access` optional scope on the MCP client (W7). The recipe
   above is the manual path; the helper is the supported automation.

@@ -22,6 +22,33 @@
       "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})?$",
       "description": "The first tenant's id, a UUID. Every realm group carries it as the `tenant_id` attribute. Required when the subchart is on."
     },
+    "tenantName": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$",
+      "description": "The first tenant's short name (lowercase letters, digits and dashes). The five role groups carry it in the `meho_tenant` attribute."
+    },
+    "tenants": {
+      "type": "array",
+      "description": "More tenants. The parent chart's bootstrap Job makes the five groups `MEHO-<name>-<Role>` for each one.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "id"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          }
+        }
+      }
+    },
     "image": {
       "type": "object",
       "additionalProperties": false,

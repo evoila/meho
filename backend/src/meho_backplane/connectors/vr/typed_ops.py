@@ -9,7 +9,7 @@ Protection and Recovery:
 * ``vr.about`` -- ``GET /api/rest/vr/v2/info``: the server's name,
   status, version, build and local vCenter;
 * ``vr.api_file.get`` -- ``GET`` one of the two API files the appliance
-  serves; the body lives in :mod:`meho_backplane.connectors._shared.dr_api_file`.
+  serves; the body lives in :mod:`meho_backplane.connectors.vmware_shared.dr_api_file`.
 
 The dataclass + tuple + registrar shape mirrors
 :mod:`meho_backplane.connectors.srm.typed_ops`.
@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-from meho_backplane.connectors._shared.dr_rest_schemas import (
+from meho_backplane.connectors.vmware_shared.dr_rest_schemas import (
     API_FILE_NEXT_STEP,
     API_FILE_OUTPUT_SHAPE,
     API_FILE_RESULT_SCALARS,

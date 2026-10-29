@@ -58,7 +58,7 @@
           "version"
         ],
         "summary": "Version",
-        "description": "Return the build-identity payload.\n\nEach field falls back to ``\"unknown\"`` when its env var is unset or\nempty, which keeps local development frictionless without ever\npretending an unknown build is a known one.",
+        "description": "Return the build-identity payload and the installed connector packages.\n\nEach build field falls back to ``\"unknown\"`` when its env var is unset\nor empty, which keeps local development frictionless without ever\npretending an unknown build is a known one. ``connector_packages`` is\nempty for the plain public image.",
         "operationId": "version_version_get",
         "responses": {
           "200": {
@@ -66,12 +66,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "type": "string",
-                    "nullable": true
-                  },
-                  "type": "object",
-                  "title": "Response Version Version Get"
+                  "$ref": "#/components/schemas/VersionResponse"
                 }
               }
             }
@@ -4964,7 +4959,7 @@
           "connectors"
         ],
         "summary": "Delete Endpoint",
-        "description": "Delete *connector_id* \u2014 rows under the operator's tenant + the ingest shim.\n\nG0.25-T2 (#1700): clean-up surface for the zero-op registry stubs\naborted ingests leave behind, and for removing an unwanted\ningested connector outright. Removes the connector's\n``endpoint_descriptor`` + ``operation_group`` rows and writes one\n``meho_connector_delete`` audit row in the same transaction; when\nno rows remain for the triple under any scope, the\nauto-registered ``GenericRestConnector`` shim is also popped from\nthe v2 registry (hand-coded connector classes are never\nderegistered). A zero-op stub \u2014 registered class, no rows \u2014 is\ndeletable here too: that delete is registry-only.\n\nTenant scoping (#1699 contract): this route exposes **no**\n``tenant_id`` parameter \u2014 the delete scope is always the calling\noperator's tenant from the JWT. Built-in / global connectors\n(``tenant_id IS NULL`` rows) are deleted via the MCP sibling\n``meho_connector_delete`` with ``tenant_id`` omitted\n(tenant_admin only). Unknown ids, cross-tenant probes, and rows\nvisible only under a scope this route cannot name all collapse\ninto the same 404 the other connector routes use; a repeat\nDELETE therefore returns 404 once the first one landed.\n\nA connector that still has enabled operations is deleted anyway \u2014\nthe advisory is deliberate, not an error: it surfaces as the\n``connector_delete_enabled_ops`` structured log event plus the\naudit payload's ``enabled_operations_deleted`` count. The wire\nresponse stays ``204 No Content`` per the task contract, so the\nstructured warning body lives on the MCP sibling (the\n``edit_op`` 200-promotion precedent from #1630 remains available\nif a REST wire home is ever needed). Re-ingesting the same triple\nafterwards re-registers the connector from scratch.",
+        "description": "Delete *connector_id* \u2014 rows under the operator's tenant + the ingest shim.\n\nG0.25-T2 (#1700): clean-up surface for the zero-op registry stubs\naborted ingests leave behind, and for removing an unwanted\ningested connector outright. Removes the connector's\n``endpoint_descriptor`` + ``operation_group`` rows and writes one\n``meho_connector_delete`` audit row in the same transaction; when\nno rows remain for the triple under any scope, the\nauto-registered ``GenericRestConnector`` shim is also popped from\nthe v2 registry (hand-coded connector classes are never\nderegistered). A zero-op stub \u2014 registered class, no rows \u2014 is\ndeletable here too: that delete is registry-only.\n\nTenant scoping (#1699 contract): this route exposes **no**\n``tenant_id`` parameter \u2014 the delete scope is always the calling\noperator's tenant from the JWT. Built-in / global connectors\n(``tenant_id IS NULL`` rows) are deleted via the MCP sibling\n``meho_connector_delete`` with ``tenant_id`` omitted\n(tenant_admin only). Unknown ids, cross-tenant probes, and rows\nvisible only under a scope this route cannot name all collapse\ninto the same 404 the other connector routes use; a repeat\nDELETE therefore returns 404 once the first one landed.\n\nA connector that something still uses is not deleted (#5027): the\nroute answers ``409`` with the ``connector_in_use`` detail, which\nlists each sensor, runbook template, hosted agent, schedule, waiting\napproval or queued operation run (kind, id, name, operation).\n\nA connector that still has enabled operations is deleted anyway \u2014\nthe advisory is deliberate, not an error: it surfaces as the\n``connector_delete_enabled_ops`` structured log event plus the\naudit payload's ``enabled_operations_deleted`` count. The wire\nresponse stays ``204 No Content`` per the task contract, so the\nstructured warning body lives on the MCP sibling (the\n``edit_op`` 200-promotion precedent from #1630 remains available\nif a REST wire home is ever needed). Re-ingesting the same triple\nafterwards re-registers the connector from scratch.",
         "operationId": "delete_endpoint_api_v1_connectors__connector_id__delete",
         "parameters": [
           {
@@ -4990,6 +4985,242 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connectors/{connector_id}/tenant-settings": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "List Tenant Settings Endpoint",
+        "description": "List the operations the tenant turned on or off for itself, with the install default.",
+        "operationId": "list_tenant_settings_endpoint_api_v1_connectors__connector_id__tenant_settings_get",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "description": "Act on this tenant instead of your own. Needs platform_admin when it is not your tenant.",
+              "title": "Tenant Id"
+            },
+            "description": "Act on this tenant instead of your own. Needs platform_admin when it is not your tenant."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantOperationSettingsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connectors/{connector_id}/tenant-settings/operations/{op_id}": {
+      "put": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Set Tenant Operation Setting Endpoint",
+        "description": "Turn one built-in operation on or off for the tenant, or back to the install default.\n\nThe ``op_id`` path parameter uses the ``:path`` converter so an op id\nwith slashes (``GET:/api/vcenter/cluster``) round-trips.",
+        "operationId": "set_tenant_operation_setting_endpoint_api_v1_connectors__connector_id__tenant_settings_operations__op_id__put",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "op_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Op Id"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "description": "Act on this tenant instead of your own. Needs platform_admin when it is not your tenant.",
+              "title": "Tenant Id"
+            },
+            "description": "Act on this tenant instead of your own. Needs platform_admin when it is not your tenant."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantSettingBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantOperationSettingItem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connectors/{connector_id}/tenant-settings/groups/{group_key}": {
+      "put": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Set Tenant Group Setting Endpoint",
+        "description": "Turn every built-in operation in one group on or off for the tenant, or back to default.",
+        "operationId": "set_tenant_group_setting_endpoint_api_v1_connectors__connector_id__tenant_settings_groups__group_key__put",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "group_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Group Key"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "description": "Act on this tenant instead of your own. Needs platform_admin when it is not your tenant.",
+              "title": "Tenant Id"
+            },
+            "description": "Act on this tenant instead of your own. Needs platform_admin when it is not your tenant."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantSettingBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantGroupSettingResponse"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -10045,7 +10276,7 @@
           "approvals"
         ],
         "summary": "List Approvals",
-        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired``, ``?status=all`` for every state (the same\nsentinel ``meho_approvals_list`` accepts), and by change ticket via\n``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first\n(``created_at DESC``). ``limit`` / ``offset`` page through the\nresult; no ``limit`` returns every match.",
+        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired`` / ``?status=withdrawn``, ``?status=all`` for every\nstate (the same sentinel ``meho_approvals_list`` accepts), and by\nchange ticket via\n``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first\n(``created_at DESC``). ``limit`` / ``offset`` page through the\nresult; no ``limit`` returns every match.",
         "operationId": "list_approvals_api_v1_approvals_get",
         "parameters": [
           {
@@ -10054,11 +10285,11 @@
             "required": false,
             "schema": {
               "type": "string",
-              "description": "Filter by status. One of: pending, approved, rejected, expired, all. 'all' returns requests in every state. Defaults to 'pending'.",
+              "description": "Filter by status. One of: pending, approved, rejected, expired, withdrawn, all. 'all' returns requests in every state. Defaults to 'pending'.",
               "default": "pending",
               "title": "Status"
             },
-            "description": "Filter by status. One of: pending, approved, rejected, expired, all. 'all' returns requests in every state. Defaults to 'pending'."
+            "description": "Filter by status. One of: pending, approved, rejected, expired, withdrawn, all. 'all' returns requests in every state. Defaults to 'pending'."
           },
           {
             "name": "work_ref",
@@ -10374,6 +10605,70 @@
         }
       }
     },
+    "/api/v1/approvals/{request_id}/withdraw": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Withdraw Approval Request",
+        "description": "The sender takes back its own pending request (#4987).\n\nNot a decision, so this route is not on the approvals-plane gate and\nnot human-only: a person, an agent or a service principal may withdraw\na request **it sent** (``operator.sub == principal_sub``). The request\nmoves to ``withdrawn`` and the operation never runs. One\n``approval.withdraw`` audit row records it. The response is the updated\nrequest, so a sender without approvals-plane access still sees the\nresult.\n\nHTTP status codes:\n\n* 200 \u2014 withdrawn.\n* 403 \u2014 the caller did not send the request (an approver included).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 the request is already closed (decided, expired or withdrawn).\n* 422 \u2014 a reason over 2000 characters.",
+        "operationId": "withdraw_approval_request_api_v1_approvals__request_id__withdraw_post",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WithdrawRequestBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequestView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/approvals/{request_id}/decide": {
       "post": {
         "tags": [
@@ -10539,7 +10834,7 @@
           "service-principal-grants"
         ],
         "summary": "Create Grant",
-        "description": "Create a standing grant (the operator's upfront review).\n\nOnly a person may create one: a machine principal gets 403\n``human_principal_required`` before this runs.\nReturns 422 when the op is delete-shaped, a scope field carries a\nwildcard, ``expires_at`` is in the past, or an active grant for the\nsame fully-scoped key already exists. On an instance in sandbox mode\n(#4622) a delete-shaped op is a delete grant, which only the web\nconsole creates: this route answers 403 ``delete_grant_console_only``.\nAudited via the audit middleware.",
+        "description": "Create a standing grant (the operator's upfront review).\n\nOnly a person may create one: a machine principal gets 403\n``human_principal_required`` before this runs.\nReturns 422 when the op is delete-shaped, a scope field carries a\nwildcard, ``expires_at`` is in the past, or an active grant for the\nsame fully-scoped key already exists. On an instance in sandbox mode\n(#4622) a delete-shaped op is a delete grant. The web console creates\nit; this route refuses it with 403 ``delete_grant_console_only`` unless\n``MEHO_SANDBOX_DELETE_GRANTS_FROM_API`` is on (#5251). With the setting\non, a tenant admin may create it here, with the same checks as the\nconsole; an ``operator`` without ``tenant_admin`` gets 403\n``grants_require_tenant_admin``. Audited via the audit middleware; the\npayload's ``created_via`` is ``api``.",
         "operationId": "create_grant_api_v1_service_principals_grants_post",
         "parameters": [
           {
@@ -23263,10 +23558,11 @@
           "pending",
           "approved",
           "rejected",
-          "expired"
+          "expired",
+          "withdrawn"
         ],
         "title": "ApprovalRequestStatus",
-        "description": "Closed lifecycle status of an :class:`ApprovalRequest`.\n\nInitiative #803 (G11.2 Agent permission model), Task #817 (T4). The\napproval queue parks a ``requires_approval`` dispatch durably; the\nrow walks a simple four-state lifecycle enforced by the service\n(:mod:`meho_backplane.operations.approval_queue`).\n\nMembers:\n\n* :attr:`PENDING` -- the request was written but no decision has\n  been made (initial state on insert). The associated agent run (if\n  any) is in ``awaiting_approval``.\n* :attr:`APPROVED` -- an authorized operator approved the request;\n  the dispatcher has re-executed the original call. Terminal.\n* :attr:`REJECTED` -- an authorized operator rejected the request;\n  the original call was not executed. Terminal.\n* :attr:`EXPIRED` -- the ``expires_at`` deadline passed without a\n  decision; the expiry sweep transitioned the row and wrote the\n  decision audit row. Terminal.\n\nThe enum and the ``CHECK (status IN (...))`` constraint on the DB\ntable move in lock-step (migration ``0023``); the drift guard\n:func:`tests.test_migration_0023_approval_request.test_status_check_matches_enum`\nasserts equality at unit-test time."
+        "description": "Closed lifecycle status of an :class:`ApprovalRequest`.\n\nInitiative #803 (G11.2 Agent permission model), Task #817 (T4). The\napproval queue parks a ``requires_approval`` dispatch durably; the\nrow walks a simple five-state lifecycle enforced by the service\n(:mod:`meho_backplane.operations.approval_queue`).\n\nMembers:\n\n* :attr:`PENDING` -- the request was written but no decision has\n  been made (initial state on insert). The associated agent run (if\n  any) is in ``awaiting_approval``.\n* :attr:`APPROVED` -- an authorized operator approved the request;\n  the dispatcher has re-executed the original call. Terminal.\n* :attr:`REJECTED` -- an authorized operator rejected the request;\n  the original call was not executed. Terminal.\n* :attr:`EXPIRED` -- the ``expires_at`` deadline passed without a\n  decision; the expiry sweep transitioned the row and wrote the\n  decision audit row. Terminal.\n* :attr:`WITHDRAWN` -- the sender took its own pending request back\n  (#4987). Not a decision: ``reviewed_by`` stays NULL, and\n  ``withdrawn_at`` / ``withdraw_reason`` say when and why. The\n  original call was not executed. Terminal.\n\nThe enum and the ``CHECK (status IN (...))`` constraint on the DB\ntable move in lock-step (migration ``0023``, widened by ``0119``); the\ndrift guard\n:func:`tests.migrations.test_migration_0119_approval_withdrawn.test_status_check_matches_enum`\nasserts equality at unit-test time."
       },
       "ApprovalRequestView": {
         "properties": {
@@ -23353,6 +23649,16 @@
             "type": "string",
             "nullable": true,
             "title": "Decided At"
+          },
+          "withdrawn_at": {
+            "type": "string",
+            "nullable": true,
+            "title": "Withdrawn At"
+          },
+          "withdraw_reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Withdraw Reason"
           },
           "created_at": {
             "type": "string",
@@ -23861,6 +24167,11 @@
             "nullable": true,
             "title": "Tenant Id"
           },
+          "tenant_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tenant Name"
+          },
           "principal_sub": {
             "type": "string",
             "title": "Principal Sub"
@@ -23981,7 +24292,7 @@
           "broadcast_event_id"
         ],
         "title": "AuditEntry",
-        "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``parent_audit_id`` \u2190 ``audit_log.parent_audit_id`` (lineage; #398)\n* ``agent_session_id`` \u2190 ``audit_log.agent_session_id`` (MCP session; #1009)\n* ``work_ref`` \u2190 ``audit_log.work_ref`` (external change-ticket reference;\n  work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat\n  ``work_ref`` filter on :class:`AuditQueryFilters` is exact-match.\n* ``principal_name`` \u2190 ``payload['principal_name']`` when set. The MCP\n  audit-write helper (``write_mcp_audit_row``) populates it from\n  ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain\n  None pending a separate fix to bind ``name`` to contextvars in\n  ``verify_jwt_and_bind``.\n* ``broadcast_event_id`` \u2014 v0.2 placeholder, always None (FK direction\n  is reversed: ``BroadcastEvent.audit_id`` points at the audit row)."
+        "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``tenant_name`` \u2190 LEFT JOIN ``tenant.name`` ON ``audit_log.tenant_id``\n  (#5238). ``None`` when the tenant row is gone; show ``tenant_id`` then.\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``parent_audit_id`` \u2190 ``audit_log.parent_audit_id`` (lineage; #398)\n* ``agent_session_id`` \u2190 ``audit_log.agent_session_id`` (MCP session; #1009)\n* ``work_ref`` \u2190 ``audit_log.work_ref`` (external change-ticket reference;\n  work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat\n  ``work_ref`` filter on :class:`AuditQueryFilters` is exact-match.\n* ``principal_name`` \u2190 ``payload['principal_name']`` when set. The MCP\n  audit-write helper (``write_mcp_audit_row``) populates it from\n  ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain\n  None pending a separate fix to bind ``name`` to contextvars in\n  ``verify_jwt_and_bind``.\n* ``broadcast_event_id`` \u2014 v0.2 placeholder, always None (FK direction\n  is reversed: ``BroadcastEvent.audit_id`` points at the audit row)."
       },
       "AuditEventClass": {
         "type": "string",
@@ -27066,6 +27377,44 @@
         "title": "ConnectorListResponse",
         "description": "Unified list envelope for ``GET /api/v1/connectors``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. This listing is not\ncursor-paginated, so ``next_cursor`` is always ``None``; the field\nis present so a client reads it without a ``KeyError`` guard and so\nthe endpoint can grow keyset pagination later without a further\nbreaking change."
       },
+      "ConnectorPackage": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Name"
+          },
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Version"
+          },
+          "wheel_digest": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Wheel Digest"
+          },
+          "folders": {
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Folders"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "version",
+          "wheel_digest",
+          "folders"
+        ],
+        "title": "ConnectorPackage",
+        "description": "One connector package named in the allowlist file."
+      },
       "ConnectorReviewDeleteOp": {
         "properties": {
           "op_id": {
@@ -27226,6 +27575,11 @@
             "type": "boolean",
             "title": "Needs Reingest",
             "default": false
+          },
+          "tenant_enabled": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Tenant Enabled"
           }
         },
         "type": "object",
@@ -30239,6 +30593,13 @@
             "type": "integer",
             "title": "Operations Unassigned"
           },
+          "unassigned_op_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unassigned Op Ids"
+          },
           "llm_call_count": {
             "type": "integer",
             "title": "Llm Call Count"
@@ -30265,7 +30626,7 @@
           "llm_duration_ms"
         ],
         "title": "GroupingResultModel",
-        "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.\n\nMirrors the dataclass; rendered alongside :class:`IngestionResultModel`\nin the ingest response so the operator sees both counts."
+        "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.\n\nMirrors the dataclass; rendered alongside :class:`IngestionResultModel`\nin the ingest response so the operator sees both counts.\n``unassigned_op_ids`` names the operations still without a group\n(sorted, capped); ``operations_unassigned`` is the full count."
       },
       "HTTPValidationError": {
         "properties": {
@@ -30349,6 +30710,14 @@
             "type": "array",
             "title": "Features",
             "default": []
+          },
+          "connector_packages": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorPackage"
+            },
+            "type": "array",
+            "title": "Connector Packages",
+            "default": []
           }
         },
         "type": "object",
@@ -30359,7 +30728,7 @@
           "mcp_session_id_capture"
         ],
         "title": "HealthResponse",
-        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET.\n\n``pairings`` (#3025) carries the tenant's active add-on pairings \u2014\neach add-on's negotiated contract version, whether it is still\ncontract-compatible with this backplane build, and its last liveness\nheartbeat. The list is empty when nothing is paired; the empty-default\nkeeps response decoders generated against the pre-#3025 shape working.\n\n``granted_scopes`` (#3666) lists the OAuth scope names on the caller's\ntoken, sorted. It carries scope names only, never token material.\n``surface_summary`` (#3666) compares the working-surface tools the\nserver registers with the ones this session lists\n(:class:`SurfaceSummary`). Both have empty defaults so older response\ndecoders keep working; the handler always fills them.\n\n``sandbox_mode`` (#4622) is ``\"on\"`` or ``\"off\"``: whether this\ninstance lets a standing grant made in the web console cover a delete\nby a service principal. ``meho status`` prints one line when it is on.\nThe default ``\"off\"`` keeps older response decoders working.\n\n``readiness``, ``approvals`` and ``features`` (#4830) let an operator\nconfirm an upgrade through MEHO: the same checks ``/ready`` returns\n(:class:`ReadinessStatus`), the approval settings in force\n(:class:`ApprovalsStatus`) and the gated features with the names of\nthe settings they still need (:class:`FeatureStatus`). The route is\nOPERATOR-gated, so unlike ``/ready`` no metrics token is needed.\n``None`` / empty defaults keep older response decoders working; the\nhandler always fills them."
+        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET.\n\n``pairings`` (#3025) carries the tenant's active add-on pairings \u2014\neach add-on's negotiated contract version, whether it is still\ncontract-compatible with this backplane build, and its last liveness\nheartbeat. The list is empty when nothing is paired; the empty-default\nkeeps response decoders generated against the pre-#3025 shape working.\n\n``granted_scopes`` (#3666) lists the OAuth scope names on the caller's\ntoken, sorted. It carries scope names only, never token material.\n``surface_summary`` (#3666) compares the working-surface tools the\nserver registers with the ones this session lists\n(:class:`SurfaceSummary`). Both have empty defaults so older response\ndecoders keep working; the handler always fills them.\n\n``sandbox_mode`` (#4622) is ``\"on\"`` or ``\"off\"``: whether this\ninstance lets a standing grant made in the web console cover a delete\nby a service principal. ``meho status`` prints one line when it is on.\nThe default ``\"off\"`` keeps older response decoders working.\n\n``readiness``, ``approvals`` and ``features`` (#4830) let an operator\nconfirm an upgrade through MEHO: the same checks ``/ready`` returns\n(:class:`ReadinessStatus`), the approval settings in force\n(:class:`ApprovalsStatus`) and the gated features with the names of\nthe settings they still need (:class:`FeatureStatus`). The route is\nOPERATOR-gated, so unlike ``/ready`` no metrics token is needed.\n``None`` / empty defaults keep older response decoders working; the\nhandler always fills them.\n\n``connector_packages`` (#5036) lists the connector packages this image\ncarries, the same list ``GET /version`` shows. It is empty for the\nplain public image."
       },
       "InCompare": {
         "properties": {
@@ -32835,6 +33204,11 @@
             "format": "uuid",
             "nullable": true,
             "title": "Tenant Id"
+          },
+          "tenant_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tenant Name"
           },
           "principal_sub": {
             "type": "string",
@@ -36470,6 +36844,39 @@
         "title": "TenantFlightRecorderPolicyUpdate",
         "description": "``PATCH /api/v1/tenants/flight-recorder-policy`` body.\n\nAll three fields are optional-partial: only fields the client actually\nsends are applied (``model_dump(exclude_unset=True)`` in the handler keys\noff ``model_fields_set``, so a JSON ``null`` is distinguished from an\nabsent key). ``extra='forbid'`` rejects unknown keys with a 422.\n\n* ``flight_recorder_enabled`` (F1) -- Boolean, ``NOT NULL`` at the DB\n  layer. Absent = leave unchanged; ``true`` / ``false`` flips the\n  per-tenant capture default. An explicit ``null`` is rejected (the column\n  has no inherit state) -- the validator fires only when the key is\n  present, so an absent field never trips it.\n* ``flight_recorder_agent_readable`` (F5) -- **tri-state**. Absent = leave\n  unchanged; ``true`` / ``false`` force the agent-read override on / off;\n  ``null`` clears it back to inherit (follow the capture default). This is\n  the JSON-``null``-vs-absent distinction the tri-state needs.\n* ``flight_recorder_retention_days`` (F4) -- nullable, bounded ``1..365``\n  (the reaper window; matches ``Settings.flight_recorder_retention_days_default``'s\n  ``ge=1, le=365``). Absent = leave unchanged; an int sets the per-tenant\n  window; ``null`` clears it back to the global default. The bound applies\n  only to the int arm -- a ``null`` clear is always legal."
       },
+      "TenantGroupSettingResponse": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "group_key": {
+            "type": "string",
+            "title": "Group Key"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TenantOperationSettingItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connector_id",
+          "tenant_id",
+          "group_key",
+          "items"
+        ],
+        "title": "TenantGroupSettingResponse",
+        "description": "The group's operations after a group write."
+      },
       "TenantMailRecipientPolicy": {
         "properties": {
           "tenant_id": {
@@ -36504,6 +36911,70 @@
         "title": "TenantMailRecipientPolicyUpdate",
         "description": "``PATCH /api/v1/tenants/mail-recipient-policy`` body (#3499).\n\nThe single field is optional-partial (``model_dump(exclude_unset=True)`` in\nthe handler keys off ``model_fields_set``, so a JSON ``null`` is\ndistinguished from an absent key). ``extra='forbid'`` rejects unknown keys\nwith a 422.\n\n* absent = leave the column unchanged.\n* ``null`` = clear back to **inherit** (the instance floor alone governs the\n  tenant's ``mail.send``).\n* ``\"\"`` = **deny** (an empty tenant allowlist refuses every dispatched\n  send) -- the shared-instance containment lever.\n* a comma-separated address/domain string = the tenant's own recipient\n  space. Validated with the same grammar as the instance floor\n  (:func:`~meho_backplane.connectors.mail.allowlist.parse_recipient_allowlist`),\n  so a malformed entry (whitespace, ``foo@``, bare ``@``, ...) is a 422 at\n  write time rather than a silent inert allowlist at dispatch time."
       },
+      "TenantOperationSettingItem": {
+        "properties": {
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "group_key": {
+            "type": "string",
+            "nullable": true,
+            "title": "Group Key"
+          },
+          "default_enabled": {
+            "type": "boolean",
+            "title": "Default Enabled"
+          },
+          "tenant_enabled": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Tenant Enabled"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "op_id",
+          "group_key",
+          "default_enabled",
+          "tenant_enabled",
+          "enabled"
+        ],
+        "title": "TenantOperationSettingItem",
+        "description": "One built-in operation with its install default and the tenant's own setting."
+      },
+      "TenantOperationSettingsResponse": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TenantOperationSettingItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connector_id",
+          "tenant_id",
+          "items"
+        ],
+        "title": "TenantOperationSettingsResponse",
+        "description": "The tenant settings of one connector, for one tenant."
+      },
       "TenantRole": {
         "type": "string",
         "enum": [
@@ -36513,6 +36984,22 @@
         ],
         "title": "TenantRole",
         "description": "Per-tenant role granted to the operator by the JWT issuer.\n\nThe set is intentionally small in v0.2: a closed three-value enum\nlets the RBAC primitive (Task #234, ``require_role``) make\nexhaustive comparisons without leaking arbitrary string handling\ninto route code. A richer policy engine \u2014 topology-aware\npermissions, ABAC, approval workflows \u2014 is a separate v0.2.next\nGoal; widening this enum is the only ratcheting mechanism in the\ninterim.\n\nValues are the literal strings the Keycloak protocol-mapper recipe\n(Task #235) emits, so a JWT carrying ``\"tenant_admin\"`` materialises\ncleanly as :attr:`TENANT_ADMIN`. ``StrEnum`` (PEP 663, stdlib in\n3.11+) gives the members ``str`` semantics for free, so\n``f\"role={role}\"`` renders as ``\"role=tenant_admin\"`` rather than\n``\"role=TenantRole.TENANT_ADMIN\"``."
+      },
+      "TenantSettingBody": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Enabled"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "title": "TenantSettingBody",
+        "description": "Body of the tenant-setting writes.\n\n``enabled`` is required: ``true`` turns the operation on for the tenant,\n``false`` turns it off, ``null`` removes the setting so the tenant uses\nthe install default again."
       },
       "ThresholdCompare": {
         "properties": {
@@ -37300,6 +37787,54 @@
         ],
         "title": "VaultStatus",
         "description": "Federation-chain status for the deployment's credential backend.\n\nThe field is named ``vault`` on :class:`HealthResponse` for wire\ncompatibility (it predates the credential-backend seam), but the value\nreflects whichever backend ``config.credentialBackend`` selects: the\nVault OIDC-login + KV read on a Vault install, or the configured\nbackend's probe-secret read (``gsm:<project>/<probe-secret>`` on a GSM\ninstall) through the credential-backend seam.\n\n``reachable`` is true when the backend was reached \u2014 on Vault, the OIDC\nlogin succeeded (TCP + TLS + JWT forward); on a seam backend, the store\nwas addressable (config resolved, backend registered). ``read_ok`` is\ntrue when the probe secret read succeeded. ``detail`` carries a short\nstructured string for the CLI to render on failure paths \u2014 a class name\nor error code, never an unbounded exception message or a secret value."
+      },
+      "VersionResponse": {
+        "properties": {
+          "git_sha": {
+            "type": "string",
+            "title": "Git Sha"
+          },
+          "build_date": {
+            "type": "string",
+            "title": "Build Date"
+          },
+          "chart_version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Chart Version"
+          },
+          "connector_packages": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorPackage"
+            },
+            "type": "array",
+            "title": "Connector Packages",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "git_sha",
+          "build_date",
+          "chart_version"
+        ],
+        "title": "VersionResponse",
+        "description": "``GET /version`` response body."
+      },
+      "WithdrawRequestBody": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Reason",
+            "description": "Optional reason why the sender takes the request back.",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "WithdrawRequestBody",
+        "description": "POST body for ``\u2026/withdraw`` (#4987)."
       },
       "_AnnotateEdgeRequest": {
         "properties": {

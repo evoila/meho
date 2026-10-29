@@ -238,6 +238,8 @@ class _FakeRouter:
         self.timeouts: dict[str, float | None] = {}
         #: Command prefix -> exception the SSH call raises instead of running.
         self.raise_on: dict[str, Exception] = {}
+        #: Command prefix -> exception the SSH call raises after the command ran.
+        self.raise_after: dict[str, Exception] = {}
         self._rev = 0
         self.pods: list[dict[str, Any]] = [self._pod()]
 
@@ -337,6 +339,9 @@ class _FakeRouter:
                     self.commands.append(cmd)
                     raise exc
             stdout, stderr, status = self.handle(cmd)
+            for prefix, exc in self.raise_after.items():
+                if cmd.startswith(prefix):
+                    raise exc
             proc = MagicMock()
             proc.stdout, proc.stderr, proc.exit_status = stdout, stderr, status
             return proc
@@ -446,6 +451,20 @@ async def test_add_never_overwrites_a_change_made_in_between() -> None:
     assert result["restarted"] is False
     assert "someone-else" in router.data["hosts"]
     assert "appliance01" not in router.data["hosts"]
+
+
+@pytest.mark.asyncio
+async def test_add_goes_on_when_the_patch_ran_but_its_answer_was_lost() -> None:
+    router = _FakeRouter()
+    router.raise_after["kubectl patch"] = TimeoutError()
+    result = await _call(router, "dns_host_add", _NEW)
+    assert result["error"] is None
+    assert result["state"] == "added"
+    assert result["changed"] is True
+    assert result["restarted"] is True
+    assert result["verified"] is True
+    assert router.data["hosts"] == _HOSTS + "192.0.2.10 appliance01.example.test\n"
+    assert any(c.startswith("kubectl rollout restart") for c in router.commands)
 
 
 @pytest.mark.asyncio

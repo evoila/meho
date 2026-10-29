@@ -561,7 +561,10 @@ Each write runs these steps and stops at the first failure (the answer's
    holds the value MEHO read, then `replace` it. A change made by someone else
    in between makes the patch fail; nothing is overwritten. The API server
    answers a failed `test` step with a generic 422 text only, so on a failed
-   patch MEHO reads the ConfigMap again. When `hosts` changed, the error is
+   patch MEHO reads the ConfigMap again. When `hosts` already holds MEHO's
+   new value, the patch went through and only the answer was lost (for
+   example a timeout), so MEHO goes on with `verify`, `restart` and `wait`.
+   When `hosts` holds a third value, the error is
    `conflict: the hosts list changed since MEHO read it; nothing was written;
    run the op again`. Otherwise the router's text is kept. The patch is
    built with `json.dumps` and passed as one `shlex.quote`-d argument (see

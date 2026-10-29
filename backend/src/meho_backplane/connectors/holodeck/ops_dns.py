@@ -214,13 +214,13 @@ async def _check_all(
     return [await _check_pod(router, p, entry, expect_present) for p in pods]
 
 
-async def _hosts_changed(router: _Router, hosts: str) -> bool:
-    """Return True when the live ``hosts`` value is no longer *hosts*."""
+async def _live_hosts(router: _Router) -> str | None:
+    """Return the live ``hosts`` value, or None when it cannot be read."""
     try:
         now = await router.read_configmap()
     except HolodeckDnsError:
-        return False
-    return bool(now["hosts"] != hosts)
+        return None
+    return str(now["hosts"])
 
 
 async def _write_hosts(
@@ -251,14 +251,19 @@ async def _write_hosts(
     try:
         await router.step(patch_cmd, "write")
     except HolodeckDnsError as exc:
-        # A failed JSON Patch "test" step only gives the API server's generic
-        # 422 text, so read again to tell the caller what happened.
-        if await _hosts_changed(router, before["hosts"]):
+        # Read again to learn what happened. The patch may have reached the
+        # API server even though the SSH call failed (lost answer, timeout):
+        # then the new value is live and MEHO goes on as if the call worked.
+        # A failed JSON Patch "test" step only gives a generic 422 text, so a
+        # third value means someone else changed the list.
+        live = await _live_hosts(router)
+        if live is None or live == before["hosts"]:
+            raise
+        if live != new_hosts:
             raise HolodeckDnsError(
                 "conflict",
                 "the hosts list changed since MEHO read it; nothing was written; run the op again",
             ) from exc
-        raise
     result["changed"] = True
     after = await router.read_configmap()
     result["lines_after"] = len(parse_hosts(after["hosts"]))

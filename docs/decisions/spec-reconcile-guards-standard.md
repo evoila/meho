@@ -630,6 +630,38 @@ file is there.
   mechanics above (CI checkout widened, provenance recorded) and the
   compare test then runs for real.
 
+### freeipa-jsonrpc-4.x — command list exists, GPL-3.0, so it lives on the shelf; check ships skipping (#5357)
+
+The `freeipa-jsonrpc-4.x` connector (product `freeipa`) calls FreeIPA's
+JSON-RPC API. It has no HTTP paths per operation: every call is
+`POST /ipa/session/json` with an IPA command name in the body. So the check
+compares command names, not paths. FreeIPA publishes the contract of each
+release in `API.txt`, one block per command. The file is GPL-3.0 licensed
+(FreeIPA's license), so it is not copied into this Apache-2.0 repository.
+It goes on the private spec shelf, and the check ships now and skips until
+the file is there.
+
+- **Check file:** `backend/tests/test_connectors_freeipa_spec_reconcile.py`.
+  It reads the `*_COMMAND` constants of `connectors/freeipa/rpc.py` live and
+  pins the set (17 commands), with the login and JSON paths. These tests run
+  always. The compare test reads `freeipa-4.13.4/API.txt` from the shelf,
+  takes every `command: <name>/<version>` line, and skips while the file is
+  missing.
+- **What was checked (2026-10-29).** `API.txt` at the tag `release-4-13-4`
+  of [`freeipa/freeipa`](https://github.com/freeipa/freeipa) (commit
+  `ad8e56f5cc414fcaf54b468ebbc629192414a623`, tagged 2026-09-07). Size
+  361,558 bytes, sha256
+  `bcd63e5b9c31a1142345dbabe1b416676db3ef1cc2d5c51ffd5311dc347666f8`,
+  506 commands, API version 2.257. All 17 commands are in it. The compare
+  test passed against this file with `MEHO_CONSUMER_DOCS_ROOT` pointed at a
+  local folder that held it.
+- **Residual risk, named.** Until the file is on the shelf, CI does not
+  compare a new or renamed command with FreeIPA. The always-on manifest test
+  still makes sure every new `*_COMMAND` constant shows up in the pinned
+  list, so a change cannot slip past the check without an edit here.
+- **Activation:** the file lands on the shelf at `freeipa-4.13.4/API.txt`,
+  with its source commit and sha256. The compare test then runs for real.
+
 ## Red lane = finding (the protocol)
 
 A red lane on first run against the real shelf is **the guard working**,

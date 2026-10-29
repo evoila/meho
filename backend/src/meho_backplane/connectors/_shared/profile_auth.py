@@ -206,7 +206,7 @@ class LegacyFallback:
     #1969 no-DSL line). The only scheme that currently declares a fallback is
     ``session_login_basic`` (vCenter's modern ``/api/session`` →
     legacy ``/rest/com/vmware/cis/session``), mirroring the typed
-    :class:`~meho_backplane.connectors.vmware_rest.connector.VmwareRestConnector`.
+    ``VmwareRestConnector`` (the vCenter connector).
 
     Attributes
     ----------
@@ -352,7 +352,7 @@ def _no_login_auth(_auth: AuthSpec, _secret: Mapping[str, str]) -> tuple[str, st
 
 #: vRLI's session-establish endpoint. The connector POSTs the JSON body and
 #: reads ``sessionId`` out of the response. Behaviour parity with
-#: :class:`~meho_backplane.connectors.vcf_logs.connector.VcfLogsConnector`.
+#: ``VcfLogsConnector`` (the VCF Logs connector).
 _VRLI_SESSION_PATH = "/api/v2/sessions"
 
 #: vRLI identity-source default, matching the typed connector + wrapper.
@@ -398,7 +398,7 @@ def _extract_session_login_token(payload: Any) -> SessionToken | None:
 #: vCenter's modern (vSphere 7.0+) session-establish endpoint. The connector
 #: POSTs with HTTP Basic credentials and no body; the response body *is* the
 #: session token as a JSON-quoted string. Behaviour parity with
-#: :class:`~meho_backplane.connectors.vmware_rest.connector.VmwareRestConnector`'s
+#: ``VmwareRestConnector`` (the vCenter connector) and its
 #: ``SESSION_PATH_MODERN``. This is the *modern* login path; the profiled
 #: harness now also tries the legacy ``/rest/com/vmware/cis/session`` on a
 #: 404, mirroring the typed connector (#2031 — see
@@ -442,7 +442,7 @@ def _session_login_basic_auth(auth: AuthSpec, secret: Mapping[str, str]) -> tupl
     """Build vCenter's ``(username, password)`` HTTP Basic credentials.
 
     ``POST /api/session`` authenticates with HTTP Basic, mirroring the typed
-    :class:`~meho_backplane.connectors.vmware_rest.connector.VmwareRestConnector`'s
+    ``VmwareRestConnector`` (the vCenter connector) and its
     ``client.post(SESSION_PATH_MODERN, auth=(username, password))``. The
     field names come from the profile's first two declared
     ``secret_fields`` (conventionally ``username`` / ``password``); reading

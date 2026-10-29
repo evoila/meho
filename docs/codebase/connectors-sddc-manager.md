@@ -223,7 +223,7 @@ row stays. Only the last 5 characters of the key stay visible, for example
 `*****-*****-*****-*****-AB12C`, and a key of 10 characters or fewer is hidden
 in full. `key_masked` is null when SDDC Manager sends an empty key or a key
 that is not text; the response schema allows both. The rule is `mask_license_key` in
-`connectors/_shared/license_key.py`, the same one `vrops.license.info` uses.
+`connectors/vmware_shared/license_key.py`, the same one `vrops.license.info` uses.
 The op also carries the tag `license-key`. Its `key` token is a secret tag
 token of the flight recorder, so the trace stores no body of the vendor call:
 the flight recorder records the raw answer before the handler masks it. Tests:

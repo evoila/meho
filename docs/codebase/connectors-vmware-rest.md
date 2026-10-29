@@ -1265,7 +1265,9 @@ does **not** serve the VI-JSON surface and its `/api/*` is a **JSON-RPC
   `defusedxml` parser, per-method string-template envelope builders with a
   local XML escaper, parsers that return the **exact VI-JSON dict shapes**
   the unchanged downstream consumers already read — lives in
-  `connectors/vmware_rest/soap.py`; the connector wires it onto the pooled
+  `connectors/vmware_rest/soap.py` (the SOAP fault parser and its small XML
+  helpers sit in the public `connectors/_shared/soap_fault.py`, because the
+  core error builders read SOAP faults too); the connector wires it onto the pooled
   `httpx` client (inheriting its TLS-pin → insecure → default precedence and
   `sni_hostname` extension for free — no separate `SSLContext`). **No new
   dependency, no `pyvmomi`, no resolver change, no separate impl class.**
@@ -4288,7 +4290,7 @@ flight-recorder span holds a full key.**
   (`vrops.licensing.*`). The guidance of the write says so; if vCenter 9
   refuses the change, the caller gets the vendor fault as an error.
 - **The mask.** The shared `mask_license_key` in
-  `connectors/_shared/license_key.py` keeps the last 5 characters and turns
+  `connectors/vmware_shared/license_key.py` keeps the last 5 characters and turns
   every other letter and digit into `*`; dashes stay, for example
   `*****-*****-*****-*****-AB12C`. A value of 10 characters or fewer is
   hidden in full. It is the same rule `vrops.license.info` and

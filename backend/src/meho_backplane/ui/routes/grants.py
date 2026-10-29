@@ -354,9 +354,11 @@ async def _create(
                 audit_op_id="service_grant.create",
                 audit_op_class="write",
                 audit_agent_name=service_payload.principal_sub,
+                audit_created_via="console",
             )
-            # #4622: the console is the only place a delete grant can be made.
-            # The mark is set here, in server code; no form field sets it.
+            # #4622: the console mark lets a tenant admin make a delete grant
+            # here. The mark is set in server code; no form field sets it.
+            # REST needs MEHO_SANDBOX_DELETE_GRANTS_FROM_API for it (#5251).
             await ServicePrincipalGrantService().create(
                 session.tenant_id, session.operator_sub, service_payload, from_console=True
             )

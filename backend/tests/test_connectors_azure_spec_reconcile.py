@@ -83,6 +83,10 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     "AUTOMATION_SCHEDULES_PATH": (("GET",), "AUTOMATION_API_VERSION"),
     "AUTOMATION_JOB_SCHEDULES_PATH": (("GET",), "AUTOMATION_API_VERSION"),
     # avs (Task #5091)
+    "AVS_PRIVATE_CLOUDS_PATH": (("GET",), "AVS_API_VERSION"),
+    "AVS_CLUSTERS_PATH": (("GET",), "AVS_API_VERSION"),
+    "AVS_HOSTS_PATH": (("GET",), "AVS_API_VERSION"),
+    "AVS_QUOTA_PATH": (("POST",), "AVS_API_VERSION"),
     # compute (Task #5083)
     "VIRTUAL_MACHINES_PATH": (("GET",), "COMPUTE_API_VERSION"),
     "RESOURCE_GROUP_VIRTUAL_MACHINES_PATH": (("GET",), "COMPUTE_API_VERSION"),
@@ -239,6 +243,10 @@ def test_the_checked_paths_are_pinned() -> None:
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.automation/automationaccounts/{}/runbooks@2024-10-23",
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.automation/automationaccounts/{}/schedules@2024-10-23",
         "# avs (Task #5091)",
+        "GET:/subscriptions/{}/providers/microsoft.avs/privateclouds@2026-03-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.avs/privateclouds/{}/clusters/{}/hosts@2026-03-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.avs/privateclouds/{}/clusters@2026-03-01",
+        "POST:/subscriptions/{}/providers/microsoft.avs/locations/{}/checkquotaavailability@2026-03-01",
         "# compute (Task #5083)",
         "GET:/subscriptions/{}/providers/microsoft.compute/disks@2026-03-02",
         "GET:/subscriptions/{}/providers/microsoft.compute/images@2026-04-01",

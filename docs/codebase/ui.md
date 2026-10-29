@@ -528,6 +528,25 @@ that didn't match the active tenant. The `test_ui_tenant_chip.py`
 suite pins the cascade contract (Memory and Broadcast surfaces both
 render against the session tenant) as a regression guard.
 
+### Tenant on the audit and approvals pages (#5238)
+
+One person can work in several tenants, so these pages name the tenant:
+
+- **Audit list** (`audit/_results_rows.html`): each row starts with its
+  tenant. The label comes from `AuditEntry.tenant_name` (joined from the
+  `tenant` table, see [audit_query.md](audit_query.md)), with the tenant
+  id as fallback (`_tenant_label` in `ui/routes/audit/routes.py`).
+- **Session replay tree** (`audit/_replay_tree.html`, its own partial):
+  each node shows the same tenant label, built by `_project_replay_node`
+  from `ReplayNode.tenant_name` with the id as fallback.
+- **Audit detail drawer** (`audit/_drawer.html`): a "Tenant" line. The
+  drawer reads the row's tenant name from the `tenant` table, with the
+  id as fallback.
+- **Approvals page** (`approvals/index.html`): the heading text names
+  the current tenant from `session_tenant` (`name → slug → id`).
+
+The pages still show only the rows of the current tenant.
+
 ### Readiness pill (G10.7-T1 #1776)
 
 `base.html`'s sidebar-footer pill colours `bg-success` / "ready" vs
@@ -3331,7 +3350,16 @@ have no service-principal registry, so their stored subject is shown directly;
 concrete target UUIDs resolve through the tenant-scoped target resolver and
 unresolved or selector scopes remain explicit. All writes are CSRF-gated and
 call the existing grant services in-process, preserving their validation,
-tenant isolation, and audit behavior. Principal, expiry, and service-revoked
+tenant isolation, and audit behavior. When the server refuses the "Issue
+grant" form, it answers 422 and draws the form again with the typed values.
+Each refused field shows its message next to the field. The schema names
+`op_id` and `op_pattern` show at the form's `op` field. An error that belongs
+to no single field (for example a target UUID together with a selector, or a
+grant-service rule such as the sandbox-mode 30-day limit) shows at the top of
+the form. An error key with no place on the form also goes to the top, so a
+refused form is never silent. The agent grant service puts the field name in
+its message (for example a wrong target scope), so that message shows next to
+its field, the same way as on the agent-grants page. Principal, expiry, and service-revoked
 history filters remain explicit; each table paginates independently so moving
 through service history never changes the agent cursor. The agent section
 opens the established human-only elevation modal, including its required

@@ -164,6 +164,9 @@ def _task_moref(value: str) -> dict[str, str]:
 class _RecordingVmwareConnector:
     """Records the sub-calls the destroy composite + its preview issue."""
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     _MOUNT = "/api"
 
     def __init__(self, *, about_version: str | None = None) -> None:

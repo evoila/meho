@@ -51,13 +51,24 @@ type BootstrapOptions struct {
 	// slash form the backplane normalises to.
 	MCPResourceURI string
 
-	// TenantID is the tenant UUID written as the `tenant_id` attribute
-	// on the five MEHO role groups (see roleGroups). One site has one
-	// tenant for now.
+	// TenantID is the first tenant's UUID, written as the `tenant_id`
+	// attribute on the five MEHO role groups (see roleGroups).
 	TenantID string
 
+	// TenantName is the first tenant's short name (default "main"). The
+	// five role groups carry it in `meho_tenant`.
+	TenantName string
+
+	// AddTenantName / AddTenantID add one more tenant: its five groups
+	// `MEHO-<name>-<Role>` (see extraTenantGroups). Empty name = no extra
+	// tenant. Empty id = reuse the id the groups already carry, else make
+	// a new UUID.
+	AddTenantName string
+	AddTenantID   string
+
 	// AdminUserUsername / AdminUserEmail / AdminUserPassword provision
-	// the first admin user and put it in MEHO-Admins. When
+	// the first admin user and put it in MEHO-Admins and
+	// MEHO-Platform-Admins. When
 	// SkipUserProvisioning is true the user step is skipped (people come
 	// from a directory or another login system). The five groups are
 	// created either way: they carry the tenant and the role.
@@ -128,6 +139,9 @@ func (o BootstrapOptions) withDefaults() BootstrapOptions {
 	}
 	if o.TenantID == "" {
 		o.TenantID = "00000000-0000-0000-0000-000000000000"
+	}
+	if o.TenantName == "" {
+		o.TenantName = defaultTenantName
 	}
 	if o.MCPOfflineSessionIdleSeconds == 0 {
 		o.MCPOfflineSessionIdleSeconds = defaultMCPOfflineSessionIdleSeconds
@@ -214,7 +228,7 @@ func (o BootstrapOptions) validate() error {
 			"--mcp-offline-session-idle must be a positive number of " +
 				"seconds (omit the flag to use the 48h default)")
 	}
-	return nil
+	return o.validateTenants()
 }
 
 // roleGroup is one of the five MEHO role groups. A person is in exactly
@@ -222,6 +236,7 @@ func (o BootstrapOptions) validate() error {
 // role: the User Attribute mappers below read them into the token.
 type roleGroup struct {
 	Name       string
+	Role       string // the role part of the name and of `meho_tenant`
 	TenantRole string
 	Approver   bool
 }
@@ -232,24 +247,30 @@ const adminGroupName = "MEHO-Admins"
 // roleGroups are the five MEHO role groups, see
 // docs/decisions/login-role-groups.md.
 var roleGroups = []roleGroup{
-	{Name: "MEHO-Readers", TenantRole: "read_only"},
-	{Name: "MEHO-Operators", TenantRole: "operator"},
-	{Name: "MEHO-SA-Operators", TenantRole: "operator"},
-	{Name: adminGroupName, TenantRole: "tenant_admin"},
-	{Name: "MEHO-Approvers", TenantRole: "read_only", Approver: true},
+	{Name: "MEHO-Readers", Role: "Readers", TenantRole: "read_only"},
+	{Name: "MEHO-Operators", Role: "Operators", TenantRole: "operator"},
+	{Name: "MEHO-SA-Operators", Role: "SA-Operators", TenantRole: "operator"},
+	{Name: adminGroupName, Role: "Admins", TenantRole: "tenant_admin"},
+	{Name: "MEHO-Approvers", Role: "Approvers", TenantRole: "read_only", Approver: true},
 }
 
-// roleGroupAttributeKeys are the group attributes this command owns.
+// roleGroupAttributeKeys are the role-group attributes this command owns.
 // It sets them on every run and leaves every other attribute alone.
-var roleGroupAttributeKeys = []string{"tenant_id", "tenant_role", "approver"}
+var roleGroupAttributeKeys = []string{"tenant_id", "tenant_role", "approver", "meho_tenant"}
+
+// attributeDisplayOrder fixes the order of attributes in progress lines.
+var attributeDisplayOrder = append(slices.Clone(roleGroupAttributeKeys), "platform_admin")
 
 // desiredAttributes returns the attributes the command owns on g.
 // `approver` is set only on MEHO-Approvers; on the other groups it must
-// be absent.
-func (g roleGroup) desiredAttributes(tenantID string) map[string][]string {
+// be absent. `tenant_id` keeps the text of --tenant-id as given, since
+// the `tenant_id` claim must stay as it was; `meho_tenant` takes the
+// UUID's standard form, so its three colon-separated parts hold.
+func (g roleGroup) desiredAttributes(tenantID, tenantName string) map[string][]string {
 	attrs := map[string][]string{
 		"tenant_id":   {tenantID},
 		"tenant_role": {g.TenantRole},
+		"meho_tenant": {mehoTenantValue(standardUUID(tenantID), tenantName, g.Role)},
 	}
 	if g.Approver {
 		attrs["approver"] = []string{"true"}
@@ -281,7 +302,7 @@ func userAttributeMapper(mapperName, name, jsonType string) protocolMapperRep {
 	}
 }
 
-// desiredMappers returns the six protocol mappers the recipe pins on
+// desiredMappers returns the eight protocol mappers the recipe pins on
 // both public clients. Mappers are matched by name, so a re-run updates
 // them in place. The names `tenant-id` and `tenant-role` are kept from
 // the older fixed-value mappers: a run on an older realm turns those
@@ -320,6 +341,8 @@ func (o BootstrapOptions) desiredMappers() []protocolMapperRep {
 		userAttributeMapper("tenant-id", "tenant_id", "String"),
 		userAttributeMapper("tenant-role", "tenant_role", "String"),
 		userAttributeMapper("approver", "approver", "boolean"),
+		userAttributeMapper("platform-admin", "platform_admin", "boolean"),
+		tenantsMapper(),
 		{
 			Name:           "groups-claim",
 			Protocol:       "openid-connect",
@@ -511,7 +534,11 @@ type Result struct {
 	MCPClientUUID    string
 	AdminGroupUUID   string // UUID of MEHO-Admins
 	AdminUserCreated bool
-	AdminUserJoined  bool // this run added the user to MEHO-Admins
+	AdminUserJoined  bool // this run added the user to MEHO-Admins or MEHO-Platform-Admins
+	// AddedTenantID is the id of the --add-tenant tenant; AddedTenantIDNew
+	// is true when this run made it.
+	AddedTenantID    string
+	AddedTenantIDNew bool
 	AdminUserUUID    string
 	MapperEventsLog  []string // human-readable bullet list (one line per client / mapper / scope / group event)
 	ConfigKeysToSet  []string // chart values + env vars the operator must set
@@ -521,11 +548,12 @@ type Result struct {
 // idempotently reconciles the realm against the recipe shape:
 //
 //  1. Public CLI device-code client (`meho-cli`)
-//  2. 6 protocol mappers: two audiences, the groups claim, and three
-//     User Attribute mappers (tenant_id, tenant_role, approver)
+//  2. 8 protocol mappers: two audiences, the groups claim, four
+//     User Attribute mappers (tenant_id, tenant_role, approver,
+//     platform_admin) and meho-tenants (the meho_tenants list)
 //  3. 4 default client scopes (basic / roles / web-origins / acr)
 //  4. Public MCP browser-flow client (`meho-mcp`)
-//  5. Same 6 mappers + 4 default scopes on the MCP client, **plus**
+//  5. Same 8 mappers + 4 default scopes on the MCP client, **plus**
 //     `offline_access`, `mcp:read`, `mcp:execute` and `mcp:admin` as
 //     *optional* client scopes (the three `mcp:*` scopes are created in
 //     the realm first if missing). The CLI
@@ -534,9 +562,10 @@ type Result struct {
 //     #2902); see RDC Wall W7 in deploy/values-examples/README.md.
 //     The MCP client also gets `client.offline.session.idle.timeout`
 //     (48h unless --mcp-offline-session-idle says otherwise).
-//  6. The five MEHO role groups with their attributes (roleGroups)
-//  7. Admin user, set password, join MEHO-Admins (skipped with
-//     SkipUserProvisioning)
+//  6. The five MEHO role groups with their attributes (roleGroups),
+//     MEHO-Platform-Admins, and the five groups of --add-tenant
+//  7. Admin user, set password, join MEHO-Admins and
+//     MEHO-Platform-Admins (skipped with SkipUserProvisioning)
 //
 // The operator-facing progress output (one line per step + a final
 // summary block) goes to opts.Out / opts.Err.
@@ -659,7 +688,16 @@ func Bootstrap(
 
 	// --- Role groups + first admin user ------------------------------------
 
-	groupUUIDs, groupEvents, err := reconcileRoleGroups(ctx, c, opts.TenantID)
+	specs := append(opts.firstTenantGroups(), platformAdminGroup())
+	if opts.AddTenantName != "" {
+		id, isNew, ierr := resolveAddTenantID(ctx, c, opts)
+		if ierr != nil {
+			return nil, ierr
+		}
+		res.AddedTenantID, res.AddedTenantIDNew = id, isNew
+		specs = append(specs, extraTenantGroups(id, opts.AddTenantName)...)
+	}
+	groupUUIDs, groupEvents, err := reconcileGroups(ctx, c, specs)
 	if err != nil {
 		return nil, err
 	}
@@ -673,7 +711,8 @@ func Bootstrap(
 				Email:         opts.AdminUserEmail,
 				Enabled:       boolPtr(true),
 				EmailVerified: boolPtr(true),
-			}, opts.AdminUserPassword, res.AdminGroupUUID,
+			}, opts.AdminUserPassword,
+			[]string{res.AdminGroupUUID, groupUUIDs[platformAdminGroupName]},
 		)
 		if uerr != nil {
 			return nil, fmt.Errorf(
@@ -704,10 +743,19 @@ func dryRunSummary(
 	for _, m := range opts.desiredMappers() {
 		fmt.Fprintf(out, "    - %s (%s)\n", m.Name, m.ProtocolMapper)
 	}
-	fmt.Fprintln(out, "==> role groups (top-level, with attributes):")
-	for _, g := range roleGroups {
-		fmt.Fprintf(out, "    - %s: %s\n",
-			g.Name, formatAttributes(g.desiredAttributes(opts.TenantID)))
+	fmt.Fprintln(out, "==> groups (top-level, with attributes):")
+	specs := append(opts.firstTenantGroups(), platformAdminGroup())
+	if opts.AddTenantName != "" {
+		id := standardUUID(opts.AddTenantID)
+		if id == "" {
+			id = "<id>"
+			fmt.Fprintf(out, "==> tenant %s: <id> is the id its groups "+
+				"already carry, or a new UUID\n", opts.AddTenantName)
+		}
+		specs = append(specs, extraTenantGroups(id, opts.AddTenantName)...)
+	}
+	for _, s := range specs {
+		fmt.Fprintf(out, "    - %s: %s\n", s.Name, formatAttributes(s.Attrs))
 	}
 	fmt.Fprintln(out, "==> default client scopes (each on both clients):")
 	for _, s := range requiredDefaultScopes() {
@@ -737,8 +785,8 @@ func dryRunSummary(
 			"assigned (opt in with --cli-offline-access)")
 	}
 	if !opts.SkipUserProvisioning {
-		fmt.Fprintf(out, "==> admin user: %s (member of %s)\n",
-			opts.AdminUserUsername, adminGroupName)
+		fmt.Fprintf(out, "==> admin user: %s (member of %s and %s)\n",
+			opts.AdminUserUsername, adminGroupName, platformAdminGroupName)
 	} else {
 		fmt.Fprintln(out, "==> admin user skipped")
 	}
@@ -997,18 +1045,18 @@ func reconcileOptionalScopes(
 	return events, nil
 }
 
-// reconcileRoleGroups makes sure the five MEHO role groups exist as
-// top-level groups with the attributes the command owns
-// (roleGroupAttributeKeys). A missing group is created; a group whose
-// owned attributes differ is updated. Other attributes on the group are
-// kept. Returns the group UUIDs by name plus one event line per group.
-func reconcileRoleGroups(
-	ctx context.Context, c *adminClient, tenantID string,
+// reconcileGroups makes sure every group in specs exists as a top-level
+// group with the attributes the command owns (groupSpec.Owned). A
+// missing group is created; a group whose owned attributes differ is
+// updated. Other attributes on the group are kept. Returns the group
+// UUIDs by name plus one event line per group.
+func reconcileGroups(
+	ctx context.Context, c *adminClient, specs []groupSpec,
 ) (map[string]string, []string, error) {
-	uuids := make(map[string]string, len(roleGroups))
+	uuids := make(map[string]string, len(specs))
 	var events []string
-	for _, g := range roleGroups {
-		want := g.desiredAttributes(tenantID)
+	for _, g := range specs {
+		want := g.Attrs
 		found, err := c.findGroup(ctx, g.Name)
 		if err != nil {
 			return nil, nil, fmt.Errorf("find group %s: %w", g.Name, err)
@@ -1029,7 +1077,7 @@ func reconcileRoleGroups(
 		if err != nil {
 			return nil, nil, fmt.Errorf("read group %s: %w", g.Name, err)
 		}
-		merged, changed := mergeOwnedAttributes(existing.Attributes, want)
+		merged, changed := mergeOwnedAttributes(existing.Attributes, want, g.Owned)
 		if !changed {
 			events = append(events, fmt.Sprintf(
 				"[skip]    group %s (already matches)", g.Name))
@@ -1051,14 +1099,14 @@ func reconcileRoleGroups(
 // an owned key in want is set, an owned key not in want is removed, and
 // every other key is kept. changed reports whether anything differs.
 func mergeOwnedAttributes(
-	existing, want map[string][]string,
+	existing, want map[string][]string, owned []string,
 ) (map[string][]string, bool) {
 	merged := make(map[string][]string, len(existing)+len(want))
 	for k, v := range existing {
 		merged[k] = v
 	}
 	changed := false
-	for _, k := range roleGroupAttributeKeys {
+	for _, k := range owned {
 		wantVal, keep := want[k]
 		gotVal, has := existing[k]
 		switch {
@@ -1076,8 +1124,8 @@ func mergeOwnedAttributes(
 // formatAttributes renders the owned attributes in a fixed order for
 // progress lines, e.g. "tenant_id=<uuid> tenant_role=operator".
 func formatAttributes(attrs map[string][]string) string {
-	parts := make([]string, 0, len(roleGroupAttributeKeys))
-	for _, k := range roleGroupAttributeKeys {
+	parts := make([]string, 0, len(attributeDisplayOrder))
+	for _, k := range attributeDisplayOrder {
 		if v, ok := attrs[k]; ok {
 			parts = append(parts, k+"="+strings.Join(v, ","))
 		}
@@ -1086,15 +1134,16 @@ func formatAttributes(attrs map[string][]string) string {
 }
 
 // reconcileUser ensures a user with the given username exists and
-// belongs to the group groupUUID (MEHO-Admins). If the user already exists the
+// belongs to every group in groupUUIDs (MEHO-Admins and
+// MEHO-Platform-Admins). If the user already exists the
 // password is **not** reset (silent password rotation on a re-run is
 // strictly worse than the "set it once at create time" rule).
 //
 // Returns (created, joined, uuid): joined is true when this run added
-// the user to the group.
+// the user to a group.
 func reconcileUser(
 	ctx context.Context, c *adminClient,
-	desired *userRep, password, groupUUID string,
+	desired *userRep, password string, groupUUIDs []string,
 ) (bool, bool, string, error) {
 	existing, err := c.findUserByUsername(ctx, desired.Username)
 	if err != nil {
@@ -1119,20 +1168,22 @@ func reconcileUser(
 		userUUID = existing.ID
 	}
 
-	// Join the group, skipping if the user is already in it.
+	// Join each group, skipping the ones the user is already in.
 	memberships, err := c.listUserGroups(ctx, userUUID)
 	if err != nil {
 		return created, false, userUUID, err
 	}
-	for _, g := range memberships {
-		if g.ID == groupUUID {
-			return created, false, userUUID, nil
+	joined := false
+	for _, groupUUID := range groupUUIDs {
+		if slices.ContainsFunc(memberships, func(g groupRep) bool { return g.ID == groupUUID }) {
+			continue
 		}
+		if err := c.joinUserToGroup(ctx, userUUID, groupUUID); err != nil {
+			return created, joined, userUUID, err
+		}
+		joined = true
 	}
-	if err := c.joinUserToGroup(ctx, userUUID, groupUUID); err != nil {
-		return created, false, userUUID, err
-	}
-	return created, true, userUUID, nil
+	return created, joined, userUUID, nil
 }
 
 // buildConfigKeySummary names the chart values + env vars the

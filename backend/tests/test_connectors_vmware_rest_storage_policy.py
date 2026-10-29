@@ -57,6 +57,9 @@ class _RecordingConnector:
     read-back sees the new policy and the delete read-back sees it gone.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(
         self,
         *,

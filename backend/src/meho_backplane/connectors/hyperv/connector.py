@@ -343,6 +343,14 @@ class HypervConnector(SshConnector):
 
         return await _h(self, target, params, operator)
 
+    async def hyperv_vms_guest_list(
+        self, target: Target, params: dict[str, Any], operator: Operator | None = None
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``hyperv.vms.guest.list``."""
+        from meho_backplane.connectors.hyperv.ops_guest import hyperv_vms_guest_list as _h
+
+        return await _h(self, target, params, operator)
+
     # -- disks group shims --------------------------------------------------
 
     async def hyperv_disks_vm_list(

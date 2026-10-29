@@ -161,8 +161,8 @@ register_mcp_tool(
         name="meho_scheduler_list",
         surface=ToolSurface.OPERATOR,
         description=(
-            "List scheduled triggers for the operator's tenant "
-            "(Initiative #804). Operator-level read. Returns "
+            "List scheduled triggers for the operator's tenant. "
+            "Operator-level read. Returns "
             "{triggers: [trigger, ...]} sorted newest-first; each row "
             "carries `trigger_id` (accepted verbatim by "
             "meho_scheduler_cancel) alongside the model-native `id`. "
@@ -274,8 +274,8 @@ register_mcp_tool(
         name="meho_scheduler_create",
         surface=ToolSurface.OPERATOR,
         description=(
-            "Create one scheduled trigger under the operator's tenant "
-            "(Initiative #804). Tenant_admin only. Args: kind "
+            "Create one scheduled trigger under the operator's tenant. "
+            "Tenant_admin only. Args: kind "
             "('cron'|'one_off'|'event'), agent_definition_id (UUID of an "
             "agent definition in the operator's tenant), and exactly one "
             "of cron_expr (for kind=cron), fire_at (ISO 8601 string for "
@@ -419,7 +419,7 @@ register_mcp_tool(
         name="meho_scheduler_cancel",
         surface=ToolSurface.OPERATOR,
         description=(
-            "Cancel one scheduled trigger by id (Initiative #804). "
+            "Cancel one scheduled trigger by id. "
             "Tenant_admin only. Transitions status='cancelled'; the row "
             "is retained for audit but never fires again. Idempotent on "
             "an already-cancelled trigger. Cross-tenant / absent id -> "

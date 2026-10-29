@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
-# code-quality-allow: file-size -- already over the soft line limit on main (611
-# lines); #3708 adds only a one-line force-list entry + its rationale comment.
-# Splitting this cohesive SOAP codec is out of scope for this fix.
 
 """Hand-rolled SOAP 1.1 codec for the standalone-ESXi vmomi surface (#3363).
 
@@ -77,11 +74,31 @@ rule:
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from typing import Any, Final
 
-from defusedxml.ElementTree import ParseError, fromstring
+from defusedxml.ElementTree import fromstring
 
+from meho_backplane.connectors._shared.soap_fault import (
+    XSI_TYPE_ATTR as _XSI_TYPE_ATTR,
+)
+from meho_backplane.connectors._shared.soap_fault import (
+    SoapFault,
+    attach_soap_fault,
+    parse_soap_fault,
+    soap_fault_of,
+)
+from meho_backplane.connectors._shared.soap_fault import (
+    find_body as _find_body,
+)
+from meho_backplane.connectors._shared.soap_fault import (
+    find_child as _find_child,
+)
+from meho_backplane.connectors._shared.soap_fault import (
+    local_name as _local,
+)
+from meho_backplane.connectors._shared.soap_fault import (
+    strip_qname_prefix as _strip_qname_prefix,
+)
 from meho_backplane.connectors.vmware_rest.vim_body import VIM_TYPE_NAME_KEY
 
 __all__ = [
@@ -115,8 +132,6 @@ _VIM_NS: Final = "urn:vim25"
 _XSI_NS: Final = "http://www.w3.org/2001/XMLSchema-instance"
 #: XML-Schema namespace (declared so ``xsd:*`` xsi:type values resolve).
 _XSD_NS: Final = "http://www.w3.org/2001/XMLSchema"
-#: Clark-notation key of the ``xsi:type`` attribute on a parsed node.
-_XSI_TYPE_ATTR: Final = f"{{{_XSI_NS}}}type"
 
 #: ``Content-Type`` every ``/sdk`` SOAP POST carries.
 SOAP_CONTENT_TYPE: Final = "text/xml; charset=utf-8"
@@ -186,52 +201,6 @@ _HOST_NAS_VOLUME_SPEC_FIELDS: Final = (
 )
 
 
-# --- Fault -----------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class SoapFault:
-    """A parsed ``<soapenv:Fault>`` -- the connector maps it to an error.
-
-    ``fault_type`` is the discriminator localName of the vim ``detail``
-    child (``InvalidLogin``, ``NoPermission``, ``PlatformConfigFault``,
-    ``HostConfigFault``, ``InvalidArgument`` ...), taken from the child's
-    ``xsi:type`` when present and otherwise from its element local-name.
-    The connector's ``_post_soap`` routes ``InvalidLogin`` / ``NoPermission``
-    to ``ConnectorAuthError`` and the write faults to ``RuntimeError``.
-
-    Carries only ``faultcode`` / ``faultstring`` / ``fault_type`` -- none
-    of which echo the Login envelope, so the default ``repr`` cannot leak
-    a credential.
-    """
-
-    faultcode: str | None
-    faultstring: str | None
-    fault_type: str | None
-
-
-#: Attribute name the parsed fault rides on, on the exception the connector
-#: raises for it (#3567). Kept in one place so the writer and the reader agree.
-_SOAP_FAULT_ATTR: Final = "soap_fault"
-
-
-def attach_soap_fault(exc: BaseException, fault: SoapFault) -> None:
-    """Store the parsed *fault* on *exc*, so the error envelope can show it (#3567).
-
-    On the ESXi SOAP path no :exc:`httpx.HTTPStatusError` reaches the error
-    builders: the connector raises a plain :exc:`RuntimeError` or a
-    ``ConnectorAuthError`` instead. This keeps the fault type and the full
-    faultstring with that exception, and keeps its class unchanged.
-    """
-    setattr(exc, _SOAP_FAULT_ATTR, fault)
-
-
-def soap_fault_of(exc: BaseException) -> SoapFault | None:
-    """The :class:`SoapFault` stored by :func:`attach_soap_fault`, else ``None``."""
-    fault = getattr(exc, _SOAP_FAULT_ATTR, None)
-    return fault if isinstance(fault, SoapFault) else None
-
-
 # --- Small XML helpers -----------------------------------------------------
 
 
@@ -244,17 +213,6 @@ def _xml_escape(value: str) -> str:
         .replace('"', "&quot;")
         .replace("'", "&apos;")
     )
-
-
-def _local(tag: Any) -> str:
-    """Local-name of a Clark-notation tag/attribute (``{ns}foo`` -> ``foo``)."""
-    text = tag if isinstance(tag, str) else str(tag)
-    return text.rpartition("}")[2]
-
-
-def _strip_qname_prefix(qname: str) -> str:
-    """Local part of an ``xsi:type`` value (``xsd:boolean`` -> ``boolean``)."""
-    return qname.rpartition(":")[2]
 
 
 def _this(mo_type: str, moid: str) -> str:
@@ -554,23 +512,6 @@ def _soap_val_to_json(element: Any) -> Any:
     return result
 
 
-def _find_child(parent: Any, localname: str) -> Any:
-    """First direct child of *parent* whose local-name is *localname*, else ``None``."""
-    if parent is None:
-        return None
-    for child in parent:
-        if _local(child.tag) == localname:
-            return child
-    return None
-
-
-def _find_body(root: Any) -> Any:
-    """The ``soapenv:Body`` element (namespace-agnostic by local-name)."""
-    if _local(root.tag) == "Body":
-        return root
-    return _find_child(root, "Body")
-
-
 def _parse_returnval(xml: str, method: str) -> Any:
     """Codec rule 1: ``Body`` -> ``{method}Response`` -> ``returnval`` (converted).
 
@@ -593,40 +534,6 @@ def _parse_returnval(xml: str, method: str) -> Any:
 
 
 # --- Public parsers --------------------------------------------------------
-
-
-def parse_soap_fault(xml: str) -> SoapFault | None:
-    """Parse a ``<soapenv:Fault>`` body; ``None`` when the body is not a fault.
-
-    Run on **both** 200 and 500 responses *before* ``raise_for_status``: a
-    vim25 fault is HTTP 500 with a ``<soapenv:Fault>`` body, but the parse
-    is the authority, not the status code. A body that does not parse or
-    carries no ``Fault`` returns ``None`` so the caller proceeds normally.
-    """
-    try:
-        root = fromstring(xml)
-    except ParseError:
-        return None
-    body = _find_body(root)
-    fault = _find_child(body, "Fault")
-    if fault is None:
-        return None
-    faultcode_el = _find_child(fault, "faultcode")
-    faultstring_el = _find_child(fault, "faultstring")
-    faultcode = faultcode_el.text if faultcode_el is not None else None
-    faultstring = faultstring_el.text if faultstring_el is not None else None
-    fault_type: str | None = None
-    detail = _find_child(fault, "detail")
-    if detail is not None:
-        detail_child = next(iter(detail), None)
-        if detail_child is not None:
-            xsi_type_raw = detail_child.get(_XSI_TYPE_ATTR)
-            fault_type = (
-                _strip_qname_prefix(xsi_type_raw)
-                if xsi_type_raw is not None
-                else _local(detail_child.tag)
-            )
-    return SoapFault(faultcode=faultcode, faultstring=faultstring, fault_type=fault_type)
 
 
 def parse_service_content(xml: str) -> dict[str, Any]:

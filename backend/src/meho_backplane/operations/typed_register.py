@@ -126,6 +126,7 @@ fail-fast deployment shape the chassis tasks already established.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -135,8 +136,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
@@ -270,18 +272,38 @@ def clear_typed_op_snapshot() -> None:
     _TYPED_OP_SNAPSHOT = None
 
 
+#: The group keys ``(product, version, impl_id, group_key)`` already handled
+#: in the running registrar pass. Some connectors hand a different
+#: ``when_to_use`` to the same group from different ops. Only the first
+#: text of a pass is the group's code text, the same text a fresh install
+#: writes, so later calls in the pass leave the row alone. ``None`` outside
+#: a pass: then every call counts as the first.
+_GROUPS_SEEN_IN_PASS: ContextVar[set[tuple[str, str, str, str]] | None] = ContextVar(
+    "_GROUPS_SEEN_IN_PASS", default=None
+)
+
+
+def code_text_hash(text: str) -> str:
+    """Return the SHA-256 hex digest of a group text, as stored in ``code_text_hash``."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 async def _run_registrars(
     *,
     embedding_service: EmbeddingService | None,
 ) -> None:
     """Invoke every registered registrar in order (the real, un-amortized pass)."""
     log = structlog.get_logger(__name__)
-    for registrar in _TYPED_OP_REGISTRARS:
-        log.info(
-            "typed_op_registrar_running",
-            registrar=f"{registrar.__module__}.{registrar.__qualname__}",
-        )
-        await registrar(embedding_service=embedding_service)
+    token = _GROUPS_SEEN_IN_PASS.set(set())
+    try:
+        for registrar in _TYPED_OP_REGISTRARS:
+            log.info(
+                "typed_op_registrar_running",
+                registrar=f"{registrar.__module__}.{registrar.__qualname__}",
+            )
+            await registrar(embedding_service=embedding_service)
+    finally:
+        _GROUPS_SEEN_IN_PASS.reset(token)
 
 
 def _row_to_dict(row: Any) -> dict[str, Any]:
@@ -968,15 +990,16 @@ async def _resolve_or_create_group(
     default at this boundary makes the structural gap impossible to
     silently re-introduce.
 
-    First-write-wins on the existing-row branch: a caller-supplied
-    ``when_to_use`` is **not** written back to a row that already
-    exists. Curation iteration in normal flow happens during code
-    review (the string lives in source; the row is recreated on a
-    fresh database, which #731's required-kwarg gate ensures every
-    new deployment hits). The earlier UPDATE-on-different-string
-    branch this helper carried was dropped in T4b iter-2 to match
-    sibling PR #757 (T4a)'s explicitly-documented first-write-wins
-    contract -- the two designs cannot both ship.
+    Text refresh on the existing-row branch (#4332): the row keeps the
+    SHA-256 of the code text MEHO last wrote (``code_text_hash``). When
+    the row's text still matches that hash, no operator changed it, so a
+    new code text replaces it. When an operator edited the text
+    (``meho connector edit-group``), the hash no longer matches and the
+    row stays as the operator wrote it, also when a later code text
+    happens to equal the operator's text. The write is a conditional
+    ``UPDATE``: it only lands when the row still holds the text and hash
+    read above, so an operator edit saved through another instance in
+    between is kept. See :func:`_refresh_code_text`.
 
     Concurrency note: two concurrent connectors registering against
     the same ``group_key`` race here. The partial unique index
@@ -998,11 +1021,14 @@ async def _resolve_or_create_group(
         )
     )
     existing = result.scalar_one_or_none()
+    seen = _GROUPS_SEEN_IN_PASS.get()
+    key = (product, version, impl_id, group_key)
+    first_in_pass = seen is None or key not in seen
+    if seen is not None:
+        seen.add(key)
     if existing is not None:
-        # First-write-wins: a caller-supplied ``when_to_use`` is not
-        # written back to an existing row (see docstring). Curation
-        # iteration happens through code review + redeploy on a fresh
-        # database, not by re-running registrations on a live DB.
+        if first_in_pass:
+            await _refresh_code_text(session, existing, when_to_use, now)
         return existing.id
 
     # Title-case the dotted key for the default name -- ``"vm-lifecycle"``
@@ -1019,6 +1045,7 @@ async def _resolve_or_create_group(
         group_key=group_key,
         name=name,
         when_to_use=when_to_use,
+        code_text_hash=code_text_hash(when_to_use),
         review_status="enabled",
         created_at=now,
         updated_at=now,
@@ -1027,6 +1054,74 @@ async def _resolve_or_create_group(
     # Flush so ``group.id`` is populated for the descriptor's FK.
     await session.flush()
     return group.id
+
+
+async def _refresh_code_text(
+    session: AsyncSession, group: OperationGroup, code_text: str, now: datetime
+) -> None:
+    """Bring an existing group row up to the current code text, unless an operator edited it.
+
+    * The row's hash is set and does not match its text: an operator
+      edited the text. Leave the row alone, also when ``code_text`` now
+      equals the operator's text. Storing that hash would make the row
+      look like MEHO wrote it, and the next code text would overwrite
+      the operator's choice.
+    * The row already holds ``code_text``: only store its hash, so a later
+      code change can refresh the row.
+    * The row's text matches its stored hash: MEHO wrote it and no
+      operator changed it. Write ``code_text`` and its hash.
+    * Otherwise (no hash and a text MEHO cannot prove it shipped): leave
+      the row alone.
+
+    The write is a conditional ``UPDATE`` on the text and hash the row
+    held when it was read. During a rolling update an operator can save
+    an edit through another instance between that read and this write.
+    The ``UPDATE`` then matches no row, and the edit is kept.
+    """
+    old_text = group.when_to_use
+    old_hash = group.code_text_hash
+    new_hash = code_text_hash(code_text)
+    if old_hash is not None and old_hash != code_text_hash(old_text):
+        return
+    if old_text == code_text:
+        if old_hash == new_hash:
+            return
+        values: dict[str, Any] = {"code_text_hash": new_hash}
+    elif old_hash is None:
+        return
+    else:
+        values = {"when_to_use": code_text, "code_text_hash": new_hash, "updated_at": now}
+    unchanged_hash = (
+        OperationGroup.code_text_hash.is_(None)
+        if old_hash is None
+        else OperationGroup.code_text_hash == old_hash
+    )
+    result = await session.execute(
+        update(OperationGroup)
+        .where(
+            OperationGroup.id == group.id,
+            OperationGroup.when_to_use == old_text,
+            unchanged_hash,
+        )
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    )
+    log = structlog.get_logger(__name__).bind(
+        product=group.product,
+        version=group.version,
+        impl_id=group.impl_id,
+        group_key=group.group_key,
+    )
+    # ``rowcount`` is typed only on the concrete ``CursorResult`` the
+    # runtime returns, as in ``checks/repository.py``.
+    rowcount: int = result.rowcount  # type: ignore[attr-defined]
+    if rowcount != 1:
+        log.info("operation_group_text_refresh_skipped", reason="row changed since read")
+        return
+    for column, value in values.items():
+        set_committed_value(group, column, value)
+    if "when_to_use" in values:
+        log.info("operation_group_text_refreshed")
 
 
 # Pre-existing G0.6-T4 #395 public-API helper; G0.9-T4a #731 adds only the

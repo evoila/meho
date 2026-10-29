@@ -1451,6 +1451,11 @@ class OperationGroup(Base):
     group_key: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     when_to_use: Mapped[str] = mapped_column(Text, nullable=False)
+    # SHA-256 hex of the ``when_to_use`` MEHO's code last wrote (#4332).
+    # NULL for texts from spec ingestion and for rows MEHO cannot prove it
+    # wrote. A row whose text still matches this hash gets the new code
+    # text at start-up; an operator edit breaks the match and is kept.
+    code_text_hash: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     review_status: Mapped[str] = mapped_column(
         Text,
         nullable=False,

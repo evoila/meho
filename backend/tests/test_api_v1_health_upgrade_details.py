@@ -22,6 +22,7 @@ from collections.abc import Iterator
 import pytest
 from cryptography.fernet import Fernet
 
+from meho_backplane import connector_packages
 from meho_backplane.api.v1.health import (
     HealthResponse,
     VaultStatus,
@@ -29,6 +30,7 @@ from meho_backplane.api.v1.health import (
     liveness,
 )
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.connector_packages import ConnectorPackage
 from meho_backplane.db.migrations import DbMigrationStatus
 from meho_backplane.health import ProbeResult, register_probe
 from meho_backplane.settings import get_settings
@@ -240,6 +242,33 @@ async def test_malformed_key_reports_malformed_without_the_value(
     assert response.approvals is not None
     assert response.approvals.custody == "malformed"
     assert "not-a-fernet-key-4830" not in response.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_connector_packages_match_the_version_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The health output lists the same connector packages as ``GET /version`` (#5036)."""
+    package = ConnectorPackage(
+        name="example-connectors",
+        version="1.2.0",
+        wheel_digest="sha256:" + "b" * 64,
+        folders=["example_widget"],
+    )
+    monkeypatch.setattr(connector_packages, "_installed", (package,))
+
+    response = await build_health_response(_operator())
+
+    assert response.connector_packages == [package]
+
+
+@pytest.mark.asyncio
+async def test_connector_packages_empty_for_the_plain_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(connector_packages, "_installed", ())
+
+    response = await build_health_response(_operator())
+
+    assert response.connector_packages == []
 
 
 def test_older_payload_without_the_new_fields_still_validates() -> None:

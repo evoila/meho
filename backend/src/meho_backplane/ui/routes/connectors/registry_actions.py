@@ -49,6 +49,8 @@ an actionable inline panel rather than letting a 5xx escape:
   lists the candidates so the operator disambiguates.
 * ``409 invalid state transition`` -- a forbidden enable/disable move;
   the panel names the rejected transition.
+* ``409 connector_in_use`` -- a delete refused because something still
+  uses the connector (#5027); the panel lists each user.
 * ``404`` -- an unknown / cross-tenant / already-deleted connector.
 
 (The ``503 LlmClientUnavailable`` panel the initiative calls for is
@@ -152,6 +154,7 @@ def _render_error_panel(
     message: str,
     status_code: int,
     candidates: list[dict[str, Any]] | None = None,
+    users: list[dict[str, Any]] | None = None,
 ) -> HTMLResponse:
     """Render the inline action-error panel fragment.
 
@@ -168,6 +171,7 @@ def _render_error_panel(
             "title": title,
             "message": message,
             "candidates": candidates or [],
+            "users": users or [],
         },
         status_code=status_code,
     )
@@ -206,6 +210,26 @@ def _panel_from_http_exception(
             ),
             status_code=409,
             candidates=candidates if isinstance(candidates, list) else [],
+        )
+    if (
+        exc.status_code == 409
+        and isinstance(detail, dict)
+        and detail.get("detail") == "connector_in_use"
+    ):
+        users = detail.get("users")
+        others = detail.get("other_tenant_user_count") or 0
+        message = (
+            f"{connector_id!r} is still used, so it was not deleted. Remove or "
+            "change each item below, then delete again."
+        )
+        if others:
+            message += f" {others} more item(s) are in other tenants."
+        return _render_error_panel(
+            request,
+            title="Connector is still in use",
+            message=message,
+            status_code=409,
+            users=users if isinstance(users, list) else [],
         )
     if exc.status_code == 409:
         return _render_error_panel(

@@ -87,6 +87,7 @@ from meho_backplane.agents.schemas import (
     AgentDefinitionUpdate,
     validate_name,
 )
+from meho_backplane.db.connector_usage_lock import lock_connector_usage_shared
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentDefinition
 
@@ -185,6 +186,9 @@ class AgentDefinitionService:
         row = build_definition_row(tenant_id, created_by_sub, payload)
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
+            # #5027: a connector delete must not run between its in-use
+            # check and its row delete while this agent is saved.
+            await lock_connector_usage_shared(session)
             # Validate identity_ref inside the caller's session so the
             # SELECT and the write share one transaction. The TOCTOU
             # window (READ COMMITTED, not REPEATABLE READ) and the
@@ -306,6 +310,7 @@ class AgentDefinitionService:
         changes = payload.model_dump(exclude_unset=True, exclude_none=True)
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
+            await lock_connector_usage_shared(session)  # #5027, see create
             result = await session.execute(
                 select(AgentDefinition).where(
                     AgentDefinition.tenant_id == tenant_id,

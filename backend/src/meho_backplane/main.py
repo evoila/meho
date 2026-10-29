@@ -86,6 +86,9 @@ from meho_backplane.api.v1.checks import router as api_v1_checks_router
 from meho_backplane.api.v1.checks_dashboards import (
     router as api_v1_checks_dashboards_router,
 )
+from meho_backplane.api.v1.connector_tenant_settings import (
+    router as api_v1_connector_tenant_settings_router,
+)
 from meho_backplane.api.v1.connectors_ingest import (
     router as api_v1_connectors_ingest_router,
 )
@@ -985,6 +988,8 @@ app.include_router(api_v1_operations_router)
 # operator-gated. The same service layer (IngestionPipelineService +
 # ReviewService) backs T5 (CLI verbs) and T7 (admin MCP tools).
 app.include_router(api_v1_connectors_ingest_router)
+# #5029 -- each tenant turns built-in operations on or off for itself.
+app.include_router(api_v1_connector_tenant_settings_router)
 # G4.1-T2 (#416) -- knowledge-base REST surface at /api/v1/kb*.
 # Five routes (GET / GET /{slug} / POST / DELETE /{slug} / POST /ingest)
 # that expose the T1 :class:`KbService` to operators + agents. Tenant-

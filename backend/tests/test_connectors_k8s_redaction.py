@@ -312,15 +312,12 @@ def test_custom_resource_row_non_secret_has_no_data_fields() -> None:
 @pytest.mark.asyncio
 async def test_cr_info_of_secret_returns_no_bytes_but_keeps_keys() -> None:
     connector = _make_connector()
-    with (
-        patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
-            new_callable=AsyncMock,
-            return_value=MagicMock(close=AsyncMock()),
-        ),
-        patch("meho_backplane.connectors.kubernetes.connector.client.CustomObjectsApi") as co_cls,
+    api_client = MagicMock(close=AsyncMock(), call_api=AsyncMock(return_value=_make_secret()))
+    with patch(
+        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        new_callable=AsyncMock,
+        return_value=api_client,
     ):
-        co_cls.return_value.get_namespaced_custom_object = AsyncMock(return_value=_make_secret())
         result = await connector.k8s_cr_info(
             _make_operator(),
             _TARGET,
@@ -343,19 +340,21 @@ async def test_cr_info_of_secret_returns_no_bytes_but_keeps_keys() -> None:
 @pytest.mark.asyncio
 async def test_cr_list_of_secrets_returns_no_bytes_in_envelope() -> None:
     connector = _make_connector()
-    with (
-        patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
-            new_callable=AsyncMock,
-            return_value=MagicMock(close=AsyncMock()),
-        ),
-        patch("meho_backplane.connectors.kubernetes.connector.client.CustomObjectsApi") as co_cls,
+    # The API server does not repeat ``kind`` on the items of a SecretList;
+    # only the list carries it. The rows must still be redacted.
+    items = []
+    for _ in range(2):
+        item = _make_secret(namespace="team-a")
+        del item["kind"]
+        del item["apiVersion"]
+        items.append(item)
+    list_resp = {"apiVersion": "v1", "kind": "SecretList", "items": items}
+    api_client = MagicMock(close=AsyncMock(), call_api=AsyncMock(return_value=list_resp))
+    with patch(
+        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        new_callable=AsyncMock,
+        return_value=api_client,
     ):
-        co_cls.return_value.list_namespaced_custom_object = AsyncMock(
-            return_value={
-                "items": [_make_secret(namespace="team-a"), _make_secret(namespace="team-a")]
-            }
-        )
         result = await connector.k8s_cr_list(
             _make_operator(),
             _TARGET,
@@ -364,6 +363,7 @@ async def test_cr_list_of_secrets_returns_no_bytes_in_envelope() -> None:
 
     assert result["total"] == 2
     for row in result["rows"]:
+        assert row["kind"] == "Secret"
         assert row["data"]["tls.key"] == redact_secret_value(_TLS_KEY_B64)
     # No base64 value survives anywhere in the rows/total envelope.
     assert _TLS_KEY_B64 not in str(result)

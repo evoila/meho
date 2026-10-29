@@ -257,11 +257,12 @@ def custom_resource_row(obj: dict[str, Any]) -> dict[str, Any]:
 
 _GROUP_PARAM: dict[str, Any] = {
     "type": "string",
-    "minLength": 1,
     "description": (
-        "API group of the custom resource (e.g. "
-        "``metallb.io``, ``cert-manager.io``). From ``k8s.crd.list``'s "
-        "``group`` column."
+        "API group of the resource (e.g. ``metallb.io``, "
+        "``cert-manager.io``, ``admissionregistration.k8s.io``). From "
+        "``k8s.crd.list``'s ``group`` column for a custom resource. Pass "
+        "an empty string for the core group (``namespaces``, ``pods``, "
+        "``services`` -- version ``v1``)."
     ),
 }
 
@@ -289,8 +290,8 @@ _CR_NAMESPACE_PARAM: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
     "description": (
-        "Namespace to scope to. Omit for a cluster-scoped CRD, or to "
-        "list a namespaced CRD across every namespace."
+        "Namespace to scope to. Omit for a cluster-scoped resource, or "
+        "to list a namespaced resource across every namespace."
     ),
 }
 
@@ -456,10 +457,14 @@ K8S_CR_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
         "Certificates exist?'. Get ``group`` / ``version`` / ``plural`` "
         "from ``k8s.crd.list`` first. Omit ``namespace`` to list a "
         "namespaced CRD across every namespace (or for a cluster-scoped "
-        "CRD); pass ``namespace`` to scope. Read-only."
+        "CRD); pass ``namespace`` to scope. Also reads built-in kinds "
+        "no dedicated op covers: ``group: ''`` / ``version: 'v1'`` for "
+        "the core group (e.g. ``namespaces``), or a built-in group such "
+        "as ``apiregistration.k8s.io`` / ``v1`` / ``apiservices``. "
+        "Read-only."
     ),
     "parameter_hints": {
-        "group": "API group, e.g. ``metallb.io``. From k8s.crd.list.",
+        "group": "API group, e.g. ``metallb.io``. From k8s.crd.list. '' for the core group.",
         "version": "Served version, e.g. ``v1beta1``. From k8s.crd.list.",
         "plural": "Plural name, e.g. ``ipaddresspools``. NOT the kind.",
         "namespace": "Optional; omit for cluster-scoped or all-namespaces listing.",
@@ -491,10 +496,12 @@ K8S_CR_INFO_LLM_INSTRUCTIONS: dict[str, Any] = {
         "address range on the metallb-system default IPAddressPool?'. "
         "Get ``group`` / ``version`` / ``plural`` from ``k8s.crd.list``; "
         "pass ``namespace`` for a namespaced CRD, omit it for a "
-        "cluster-scoped one. Read-only."
+        "cluster-scoped one. Pass ``group: ''`` / ``version: 'v1'`` "
+        "to read a core-group object (e.g. one ``namespaces`` entry). "
+        "Read-only."
     ),
     "parameter_hints": {
-        "group": "API group, e.g. ``metallb.io``. From k8s.crd.list.",
+        "group": "API group, e.g. ``metallb.io``. From k8s.crd.list. '' for the core group.",
         "version": "Served version, e.g. ``v1beta1``. From k8s.crd.list.",
         "plural": "Plural name, e.g. ``ipaddresspools``. NOT the kind.",
         "name": "The object's metadata.name.",
@@ -541,7 +548,9 @@ CUSTOM_RESOURCE_OPS: tuple[KubernetesOp, ...] = (
             "(which lists a namespaced CRD across all namespaces, or a "
             "cluster-scoped CRD's objects). Each object projects to "
             f"{_CR_ROW_SHAPE}. {_CR_ROW_NOTES} Read-only. Get group / version "
-            "/ plural from ``k8s.crd.list``."
+            "/ plural from ``k8s.crd.list``. ``group: ''`` reads the "
+            "core group under ``/api/{version}`` instead (e.g. "
+            "``namespaces``)."
         ),
         parameter_schema=K8S_CR_LIST_PARAMETER_SCHEMA,
         response_schema=K8S_CR_LIST_RESPONSE_SCHEMA,
@@ -563,7 +572,9 @@ CUSTOM_RESOURCE_OPS: tuple[KubernetesOp, ...] = (
             "``get_cluster_custom_object(group, version, plural, name)``. "
             f"Returns the single-object projection {_CR_ROW_SHAPE} (not a "
             f"rows/total envelope). {_CR_ROW_NOTES} Read-only; the "
-            "counterpart drill-in for a ``k8s.cr.list`` row."
+            "counterpart drill-in for a ``k8s.cr.list`` row. "
+            "``group: ''`` reads a core-group object under "
+            "``/api/{version}`` instead."
         ),
         parameter_schema=K8S_CR_INFO_PARAMETER_SCHEMA,
         response_schema=K8S_CR_INFO_RESPONSE_SCHEMA,

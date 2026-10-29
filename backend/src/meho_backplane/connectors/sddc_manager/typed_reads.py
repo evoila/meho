@@ -74,8 +74,8 @@ from typing import TYPE_CHECKING, Any, cast
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.license_key import mask_license_key
 from meho_backplane.connectors.sddc_manager.session import SddcTargetLike
+from meho_backplane.connectors.vmware_shared.license_key import mask_license_key
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.sddc_manager.connector import SddcManagerConnector
@@ -501,7 +501,7 @@ def _mask_license_keys(node: Any) -> Any:
     In the ``GET /v1/license-keys`` answer only the license rows have a
     ``key`` field, and it holds the license key. ``key_masked`` shows only
     its last 5 characters
-    (:func:`~meho_backplane.connectors._shared.license_key.mask_license_key`).
+    (:func:`~meho_backplane.connectors.vmware_shared.license_key.mask_license_key`).
     The walk covers the whole answer, not only ``elements[]``, so a key in
     an answer of another shape is masked too.
     """

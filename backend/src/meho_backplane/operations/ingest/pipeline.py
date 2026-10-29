@@ -468,6 +468,7 @@ class IngestionPipelineResult:
                 groups_created=self.grouping.groups_created,
                 operations_assigned=self.grouping.operations_assigned,
                 operations_unassigned=self.grouping.operations_unassigned,
+                unassigned_op_ids=list(self.grouping.unassigned_op_ids),
                 llm_call_count=self.grouping.llm_call_count,
                 llm_duration_ms=self.grouping.llm_duration_ms,
                 groups=[

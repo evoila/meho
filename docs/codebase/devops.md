@@ -203,6 +203,13 @@ and every pod uses `meho.core.imagePullSecrets` (both in
 `backend/tests/test_chart_image_registry.py` fails. The recipe is in
 [`../deploying.md`](../deploying.md#install-with-no-internet).
 
+`deploy/charts/meho/images.txt` is the list the customer copies: every
+image of the chart except MEHO's own, one per line, as `<image@digest>
+<path in your registry>:<tag>`. Every image must be pinned by digest. The
+same test fails when the list and a render with every part on differ, and
+prints the lines the chart now wants. A new image, or a new digest, means
+a new line in `images.txt`.
+
 ### Probes
 
 The Deployment renders `startupProbe`, `livenessProbe`, and
@@ -1563,6 +1570,22 @@ these workflows:
   cancelled queue check fails the merge attempt and drops the PR out of
   the queue, so `merge_group` runs are never cancelled; `pull_request` /
   `push` runs still cancel their own predecessors as before.
+- **The runs of a dropped group are cancelled.** GitHub does not stop the
+  runs of a group that leaves the queue. Two helpers do it, so the runs
+  stop using our runners:
+  - The `merge-queue-watchdog` job in `ci.yml` (#4732) stops its own CI
+    run about a minute after the drop.
+  - `merge-queue-cleanup.yml` (#5292) runs
+    `scripts/ci/merge_queue_cleanup.sh` every 5 minutes on a GitHub-hosted
+    runner and covers every workflow. It cancels an open merge-queue run
+    only when the run's commit is not in the queue (GraphQL `mergeQueue`),
+    its queue branch is gone, and its commit is not on `main` (the merge
+    base of the commit and `main` is not the commit itself). Right before
+    each cancel it reads the queue and the run's branch once more, in case
+    a new group took the same commit or branch. A failed read stops the
+    sweep. The reads and the cancel are separate calls, so a wrong cancel
+    is very unlikely, not impossible. Only the sweep job may cancel; the
+    dry run on a pull request has a read-only token.
 - **Third-party actions that derive their own scan range must be told
   the `merge_group` range explicitly.** A `merge_group` trigger makes the
   workflow *run*, but an action that computes its diff from the event

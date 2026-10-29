@@ -174,6 +174,15 @@ How users get the new version is in the
   at [`docs/security/advisory-ledger.md`](security/advisory-ledger.md).
   This is v1.0 gate 2 (Goal #2661).
 
+  **Merging an advisory fix.** The fix is built in the advisory's
+  temporary private fork. CI does not run there, so the fix cannot use
+  the merge queue. Only the repository owner merges it, with a bypass
+  of the "protect main" ruleset that is open for minutes, not days.
+  The steps are in decision record 0010
+  (`docs/decisions/0010-who-approves-pull-requests.md` in the private
+  maintainer repo `evoila-bosnia/meho-internal`). Every other pull
+  request keeps the normal path.
+
 - [ ] Pick `vX.Y.Z`.
 
 ### 2. Roll the CHANGELOG — the load-bearing step
@@ -287,6 +296,8 @@ git push origin vX.Y.Z
 
 The push fans out to `cli-release.yml`, `image.yml`, `chart.yml`.
 `cli-release.yml` then calls `linux-download.yml` for the form-2 download.
+
+**Release tags are protected.** A tag ruleset refuses to create, move or delete any `v*` tag, final or rc. Only members of the evoila team `release-cutters` may push one. GitHub logs each of their pushes as a bypass in the ruleset's Rule insights.
 
 ### 5. Verify the artefacts
 

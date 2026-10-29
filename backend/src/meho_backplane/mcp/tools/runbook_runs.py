@@ -247,7 +247,7 @@ _NEXT_DESCRIPTION: Final[str] = (
     "presence match --\n"
     "   no JSONPath, no operators, no boolean composition; the substrate "
     "is dumb on\n"
-    "   purpose, see #1177).\n"
+    "   purpose).\n"
     "   - You pass verify_response=None on `next` calls for operation_call "
     "verifies --\n"
     "     the substrate does the dispatch + match for you.\n"

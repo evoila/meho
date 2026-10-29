@@ -38,6 +38,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops_host_datastores import (
     HOST_DATASTORES_GROUP_KEY,
     VMWARE_HOST_DATASTORES_OP,
     _host_datastore_moids,
+    _host_datastore_read_fault,
     _map_datastore_summaries,
     host_datastores_impl,
 )
@@ -361,8 +362,10 @@ async def test_vcenter_target_resolves_host_by_moref_fallback() -> None:
 
 @pytest.mark.asyncio
 async def test_host_without_datastores_skips_summary_read() -> None:
+    """An empty ``datastore`` array (no ``missingSet``) is a real, successful empty list."""
     conn = _FakeConnector(host_results={"host-15": _host_result("host-15", [])})
     out = await _run(conn, _vcenter_target(), {"host": "esxi-01"})
+    assert out["status"] == "ok"
     assert out["datastores"] == []
     assert out["datastore_count"] == 0
     assert len(conn.post_calls) == 1
@@ -424,6 +427,49 @@ async def test_host_read_failure_returns_datastores_unreadable() -> None:
     assert out["status"] == "datastores_unreadable"
     assert out["datastores"] == [] and out["datastore_count"] == 0
     assert "HostSystem.datastore" in out["read_note"]
+
+
+def _host_missing_result(host_moid: str, fault_type: str | None) -> dict[str, Any]:
+    """VI-JSON answer where ``HostSystem.datastore`` is in ``missingSet`` (9.x fault wrapper)."""
+    entry: dict[str, Any] = {"_typeName": "MissingProperty", "path": "datastore"}
+    if fault_type is not None:
+        entry["fault"] = {
+            "_typeName": "LocalizedMethodFault",
+            "fault": {
+                "_typeName": fault_type,
+                "object": _moref(host_moid, "HostSystem"),
+                "privilegeId": "System.View",
+            },
+            "localizedMessage": "PLACEHOLDER fault text that must not be echoed",
+        }
+    return {"objects": [{"obj": _moref(host_moid, "HostSystem"), "missingSet": [entry]}]}
+
+
+@pytest.mark.asyncio
+async def test_unreadable_host_datastore_property_is_not_an_empty_list() -> None:
+    """A ``missingSet`` entry for ``datastore`` fails the read instead of answering ok + 0.
+
+    vCenter answers HTTP 200 while the collector could not read the property
+    (here: no permission). The op must not take that for a host without
+    datastores; it returns ``datastores_unreadable``, names the fault class
+    only, and makes no summary read.
+    """
+    conn = _FakeConnector(host_results={"host-15": _host_missing_result("host-15", "NoPermission")})
+    out = await _run(conn, _vcenter_target(), {"host": "esxi-01"})
+    assert out["status"] == "datastores_unreadable"
+    assert out["datastores"] == [] and out["datastore_count"] == 0
+    assert "HostSystem.datastore" in out["read_note"] and "NoPermission" in out["read_note"]
+    assert "PLACEHOLDER" not in out["read_note"]
+    assert len(conn.post_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_unreadable_host_datastore_property_without_fault_still_fails() -> None:
+    """A ``missingSet`` entry with no usable fault still fails the read."""
+    conn = _FakeConnector(host_results={"host-15": _host_missing_result("host-15", None)})
+    out = await _run(conn, _vcenter_target(), {"host": "esxi-01"})
+    assert out["status"] == "datastores_unreadable"
+    assert "unknown fault" in out["read_note"]
 
 
 @pytest.mark.asyncio
@@ -631,11 +677,60 @@ def test_soap_host_datastore_single_element_array_is_still_a_list() -> None:
 
 
 def test_soap_host_datastore_empty_array_yields_no_moids() -> None:
+    """An empty array over SOAP: no moids, and no read fault (a true empty list)."""
     xml = _soap_retrieve_response(
         '<objects><obj type="HostSystem">ha-host</obj><propSet><name>datastore</name>'
         '<val xsi:type="ArrayOfManagedObjectReference"/></propSet></objects>'
     )
-    assert _host_datastore_moids(parse_retrieve_result(xml)) == []
+    result = parse_retrieve_result(xml)
+    assert _host_datastore_moids(result) == []
+    assert _host_datastore_read_fault(result) is None
+
+
+_SOAP_HOST_DATASTORE_MISSING_XML = _soap_retrieve_response(
+    '<objects><obj type="HostSystem">ha-host</obj>'
+    "<missingSet><path>datastore</path>"
+    '<fault xsi:type="LocalizedMethodFault"><fault xsi:type="NoPermission">'
+    '<object type="HostSystem">ha-host</object><privilegeId>System.View</privilegeId>'
+    "</fault><localizedMessage>PLACEHOLDER fault text that must not be echoed"
+    "</localizedMessage></fault></missingSet></objects>"
+)
+
+
+def test_soap_unreadable_host_datastore_property_names_the_fault_class() -> None:
+    """A lone SOAP ``missingSet`` entry (force-listed by the codec) is seen as a read fault."""
+    result = parse_retrieve_result(_SOAP_HOST_DATASTORE_MISSING_XML)
+    assert _host_datastore_moids(result) == []
+    assert _host_datastore_read_fault(result) == "NoPermission"
+
+
+@pytest.mark.asyncio
+async def test_soap_unreadable_host_datastore_property_is_not_an_empty_list() -> None:
+    """On standalone ESXi the same unreadable property returns ``datastores_unreadable``."""
+    conn = _FakeConnector(
+        host_results={
+            STANDALONE_ESXI_HOST_MOID: parse_retrieve_result(_SOAP_HOST_DATASTORE_MISSING_XML)
+        }
+    )
+    out = await _run(conn, _esxi_target(), {})
+    assert out["status"] == "datastores_unreadable"
+    assert out["datastores"] == [] and out["datastore_count"] == 0
+    assert "NoPermission" in out["read_note"] and "PLACEHOLDER" not in out["read_note"]
+    assert len(conn.post_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_soap_host_without_datastores_is_ok_and_empty() -> None:
+    """A standalone ESXi host with an empty ``datastore`` array answers ok with no rows."""
+    xml = _soap_retrieve_response(
+        '<objects><obj type="HostSystem">ha-host</obj><propSet><name>datastore</name>'
+        '<val xsi:type="ArrayOfManagedObjectReference"/></propSet></objects>'
+    )
+    conn = _FakeConnector(host_results={STANDALONE_ESXI_HOST_MOID: parse_retrieve_result(xml)})
+    out = await _run(conn, _esxi_target(), {})
+    assert out["status"] == "ok"
+    assert out["datastores"] == [] and out["datastore_count"] == 0
+    assert len(conn.post_calls) == 1
 
 
 def test_numeric_strings_coerce_and_bad_values_null() -> None:

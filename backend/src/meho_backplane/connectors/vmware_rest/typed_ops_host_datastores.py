@@ -17,7 +17,11 @@ the vmomi seam (:meth:`VmwareRestConnector._post_vmomi_json`: VI-JSON on
 vCenter, SOAP ``/sdk`` on ESXi), the same seam ``vmware.host.storage_devices``
 uses:
 
-1. ``HostSystem.datastore`` -> the host's ``Datastore`` MoRefs.
+1. ``HostSystem.datastore`` -> the host's ``Datastore`` MoRefs. When the
+   collector could not read that property (a ``missingSet`` entry, for
+   example no permission), the read fails with ``datastores_unreadable``
+   instead of answering ``ok`` with no datastores; a host that truly has no
+   datastore sends an empty array and no ``missingSet`` entry.
 2. ``Datastore.summary.{name,type,capacity,freeSpace}`` plus
    ``Datastore.host`` (the per-host mount list) over those moids, mapped
    **per object** (one row per datastore). This read goes through
@@ -56,6 +60,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops_host_storage_devices import
     _moref_value,
 )
 from meho_backplane.connectors.vmware_rest.vim_body import (
+    fault_type_name,
     retrieve_properties_body,
     unwrap_vim_value,
 )
@@ -174,6 +179,23 @@ def _host_datastore_moids(retrieve_result: Any) -> list[str]:
     return moids
 
 
+def _host_datastore_read_fault(retrieve_result: Any) -> str | None:
+    """The fault type name when ``HostSystem.datastore`` landed in ``missingSet``.
+
+    The HTTP call succeeds while the collector still could not read the
+    property (no permission, a system error): the property is then absent
+    from ``propSet`` and named in the object's ``missingSet`` with a fault.
+    Only the fault class name is kept, never its text, which can echo a
+    private identifier. ``None`` when the property was read, also when it
+    is an empty array.
+    """
+    for obj in _result_objects(retrieve_result):
+        for entry in obj.get("missingSet") or []:
+            if isinstance(entry, dict) and entry.get("path") == _PROP_HOST_DATASTORE:
+                return fault_type_name(entry.get("fault")) or "unknown fault"
+    return None
+
+
 def _bool_or_none(value: Any) -> bool | None:
     return value if isinstance(value, bool) else None
 
@@ -243,8 +265,9 @@ async def host_datastores_impl(
 
     Resolves the host, reads ``HostSystem.datastore``, then the summary and
     mount list of each datastore (every page). Fail-closed: a failed read,
-    including a lost continuation page, returns ``datastores_unreadable``
-    with an empty set.
+    including a lost continuation page or a ``HostSystem.datastore`` the
+    collector could not read (``missingSet``), returns
+    ``datastores_unreadable`` with an empty set.
     """
     host_moid, refusal = await _resolve_host_moid(connector, operator, target, params.get("host"))
     if refusal is not None:
@@ -260,6 +283,16 @@ async def host_datastores_impl(
         )
     except (httpx.HTTPError, RuntimeError) as exc:
         return _unreadable(host_moid, "HostSystem.datastore read", exc)
+    fault = _host_datastore_read_fault(host_result)
+    if fault is not None:
+        return _empty(
+            "datastores_unreadable",
+            host_moid,
+            read_note=(
+                f"datastore read failed: HostSystem.datastore for host {host_moid!r} "
+                f"could not be read ({fault})"
+            ),
+        )
     moids = _host_datastore_moids(host_result)
     summaries: dict[str, dict[str, Any]] = {}
     if moids:
@@ -405,7 +438,11 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "read_note": {
             "type": "string",
-            "description": "On 'datastores_unreadable', the failing read + error.",
+            "description": (
+                "On 'datastores_unreadable', the failing read + error (a transport "
+                "error, a lost page, or the fault class when vSphere could not read "
+                "HostSystem.datastore)."
+            ),
         },
         "guidance": {"type": ["string", "null"]},
     },

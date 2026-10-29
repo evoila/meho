@@ -803,8 +803,13 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   has no mount entry for the host. Sizes go through `_int_or_none` because
   the SOAP codec leaves a bare numeric leaf as text. A datastore the read
   does not return keeps its row with null fields. A failed read returns
-  `status='datastores_unreadable'` with an empty set. Set-shaped
-  (JSONFlux-reduced when large).
+  `status='datastores_unreadable'` with an empty set. That includes a
+  `HostSystem.datastore` the collector could not read: the HTTP call
+  succeeds but the property is in the object's `missingSet` (for example
+  `NoPermission`), and the op names the fault class in `read_note` instead
+  of answering `ok` with no datastores. A host that truly has no datastore
+  sends an empty array and no `missingSet` entry, and is `ok` with zero
+  rows. Set-shaped (JSONFlux-reduced when large).
 - **`vmware.snapshot.list`** (`typed_ops_snapshot_list.py`, handler
   `snapshot_list`) — the snapshots of one VM (by `vm` moid) as a flat list in
   tree order. `safe`, in its own group `vmware-snapshot-list`, on both

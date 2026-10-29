@@ -34,10 +34,11 @@ Steps, in this order:
    ``k8s.secret.update`` handler in ``patch`` mode. No second operation is
    started, so the token never sits in any operation's parameters.
 5. **Clean up on failure.** When anything fails after step 2, also a
-   cancellation, MEHO revokes the new token (shielded from cancellation)
-   with the token itself (``auth/token/revoke-self`` is in Vault's
-   ``default`` policy). When that revoke fails too, the error names the
-   accessor and ``vault.token.revoke_accessor``.
+   cancellation and also while MEHO's own Vault login ends, MEHO revokes
+   the new token (shielded from cancellation) with the token itself
+   (``auth/token/revoke-self`` is in Vault's ``default`` policy). When that
+   revoke fails too, the error names the accessor and
+   ``vault.token.revoke_accessor``.
 6. **Return** ``{accessor, expire_time, ttl_seconds, policies, stored_to}``.
 
 The op is pinned ``credential_mint``
@@ -336,25 +337,37 @@ async def _mint(operator: Operator, target: Any, params: Mapping[str, Any]) -> _
     The orphan check and its revoke run while MEHO's own login is still
     open: a non-orphan token is a child of that login, and Vault revokes it
     with the login when the block ends.
+
+    Ending the login block is a network call too. When it fails or is
+    cancelled after an orphan token exists, MEHO revokes that token here
+    (shielded from cancellation), because the caller's clean-up only starts
+    after this function returns.
     """
     role_name = params.get("role_name")
     kwargs = _create_kwargs(params)
-    async with vault_client_for_target(operator, target) as client:
-        if role_name:
-            payload = await asyncio.to_thread(
-                client.auth.token.create, role_name=role_name, **kwargs
-            )
-        else:
-            payload = await asyncio.to_thread(client.auth.token.create_orphan, **kwargs)
-        minted = _minted_from(payload)
-        if not minted.orphan:
+    minted: _Minted | None = None
+    try:
+        async with vault_client_for_target(operator, target) as client:
+            if role_name:
+                payload = await asyncio.to_thread(
+                    client.auth.token.create, role_name=role_name, **kwargs
+                )
+            else:
+                payload = await asyncio.to_thread(client.auth.token.create_orphan, **kwargs)
+            minted = _minted_from(payload)
+            if not minted.orphan:
+                revoked = await asyncio.shield(_revoke(minted))
+                raise TokenStoreError(
+                    f"{TOKEN_STORE_OP}: Vault made a token with a parent, so it would die when "
+                    f"MEHO's own login ends; {_revoke_outcome(minted, revoked)}. The token "
+                    f"role must set orphan=true: vault.token.role.write "
+                    f"role_name={role_name!r} orphan=true."
+                )
+    except BaseException:
+        if minted is not None and minted.orphan:
             revoked = await asyncio.shield(_revoke(minted))
-            raise TokenStoreError(
-                f"{TOKEN_STORE_OP}: Vault made a token with a parent, so it would die when "
-                f"MEHO's own login ends; {_revoke_outcome(minted, revoked)}. The token role "
-                f"must set orphan=true: vault.token.role.write role_name={role_name!r} "
-                "orphan=true."
-            )
+            _log.warning("vault_token_store_aborted", accessor=minted.accessor, revoked=revoked)
+        raise
     return minted
 
 

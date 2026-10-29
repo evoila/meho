@@ -17,7 +17,8 @@ What these tests prove:
 * **Checks before the token exists.** A refused tenant check, a missing
   target, a refused MEHO policy and a missing Secret all stop the call
   before Vault is asked for a token.
-* **Clean up.** A failed write, a cancellation and ``orphan: false`` revoke
+* **Clean up.** A failed write, a cancellation (also while MEHO's own
+  Vault login ends) and ``orphan: false`` revoke
   the new token with the token itself; when that revoke fails the error
   names the accessor and ``vault.token.revoke_accessor``.
 * **No token anywhere.** The token is in no result, audit row (``payload``
@@ -398,6 +399,37 @@ async def test_a_cancellation_during_the_write_still_revokes(
         await vault_token_create_and_store(_operator(), None, dict(_KV_PARAMS))
 
     assert _token(fake) in fake.auth.token.revoked_tokens
+
+
+async def test_a_cancellation_while_the_vault_login_ends_still_revokes(
+    fake: _FakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import asynccontextmanager
+
+    from meho_backplane.connectors.vault import ops_token_store
+
+    @asynccontextmanager
+    async def _login_cancelled_at_exit(*_args: Any) -> AsyncIterator[_FakeClient]:
+        yield fake
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(ops_token_store, "vault_client_for_target", _login_cancelled_at_exit)
+
+    with structlog.testing.capture_logs() as logs, pytest.raises(asyncio.CancelledError):
+        await vault_token_create_and_store(_operator(), None, dict(_KV_PARAMS))
+
+    assert _token(fake) in fake.auth.token.revoked_tokens
+    assert fake.secrets.kv.v2.patch_calls == []
+    aborted = [e for e in logs if e["event"] == "vault_token_store_aborted"]
+    assert aborted == [
+        {
+            "event": "vault_token_store_aborted",
+            "accessor": _ACCESSOR,
+            "revoked": True,
+            "log_level": "warning",
+        }
+    ]
+    assert _token(fake) not in repr(logs)
 
 
 # ---------------------------------------------------------------------------

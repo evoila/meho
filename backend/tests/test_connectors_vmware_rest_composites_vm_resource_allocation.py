@@ -68,6 +68,9 @@ def _alloc(limit: int, reservation: int, shares: int = 1000) -> dict[str, Any]:
 class _VimFake:
     """Recording double for the connector's VI-JSON seam."""
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(
         self,
         *,

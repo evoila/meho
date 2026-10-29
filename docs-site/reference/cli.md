@@ -98,8 +98,10 @@ Idempotently provision the public CLI + MCP clients in a Keycloak realm
 meho admin keycloak bootstrap-clients [flags]
 ```
 
+- `--add-tenant` — also make the five groups `MEHO-<name>-<Role>` of one more tenant with this short name
+- `--add-tenant-id` — the UUID of the `--add-tenant` tenant (default: the UUID its groups already carry, else a new one, printed at the end)
 - `--admin-user-email` — optional email for the new admin user
-- `--admin-user-username` — username of the admin user to provision in MEHO-Admins (required unless --skip-user-provisioning)
+- `--admin-user-username` — username of the admin user to provision in MEHO-Admins and MEHO-Platform-Admins (required unless --skip-user-provisioning)
 - `--admin-username` — master-realm admin username (or set KEYCLOAK_ADMIN_USER)
 - `--backplane-audience` — audience claim the `audience-meho-backplane` mapper emits (matches chart's `config.keycloakAudience`)
 - `--cli-client-id` — public client_id for the device-code flow (matches chart's `config.keycloakCliClientId`)
@@ -116,6 +118,7 @@ meho admin keycloak bootstrap-clients [flags]
 - `--realm` — target realm name (NOT the master realm — that's where the admin token is minted)
 - `--skip-user-provisioning` — skip the admin user step (use when people come from a directory or another login system); the five role groups are still created
 - `--tenant-id` — tenant UUID written as the `tenant_id` attribute on the five MEHO role groups (default: the all-zero UUID). Changing it later moves everyone to a new tenant
+- `--tenant-name` — the first tenant's short name (lowercase letters, digits, dashes), written into the `meho_tenant` attribute of the five MEHO role groups
 
 ## `meho agent`
 
@@ -386,7 +389,7 @@ meho agent-principal revoke <name> [flags]
 
 ## `meho approvals`
 
-Manage approval requests (list / show / approve / reject)
+Manage approval requests (list / show / approve / reject / withdraw)
 
 ```
 meho approvals
@@ -416,7 +419,7 @@ meho approvals list [flags]
 - `--json` — emit raw JSON array instead of the human table
 - `--limit` — max requests to return (1..500; no limit when omitted)
 - `--offset` — skip this many requests first (default 0)
-- `--status` — filter by status: pending, approved, rejected, expired, all (default: pending)
+- `--status` — filter by status: pending, approved, rejected, expired, withdrawn, all (default: pending)
 - `--work-ref` — filter by external change-ticket reference, exact match
 
 ### `meho approvals reject`
@@ -441,6 +444,18 @@ meho approvals show <id> [flags]
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit raw JSON instead of the human-readable view
+
+### `meho approvals withdraw`
+
+Withdraw your own pending approval request
+
+```
+meho approvals withdraw <id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw JSON response instead of summary
+- `--reason` — optional reason for the withdrawal
 
 ## `meho argocd`
 
@@ -1225,6 +1240,7 @@ meho connector ingest [flags]
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
 - `--no-wait` — on an async 202 answer, exit 0 with the job handle (job_id + poll URL) instead of polling the job to completion; no effect when the backplane answers synchronously (HTTP 200)
 - `--product` — product name (e.g. vmware, kubernetes); manual mode (required with --version/--impl/--spec)
+- `--save-converted` — manual mode: when a --spec is a Swagger 2.0 file the CLI converts to OpenAPI 3, also write the converted file here so you can check it and keep it next to the original
 - `--spec` — spec URI; repeat for multi-spec merge under one connector_id; manual mode
 - `--spec-info-versions-compatible` — manual mode: declare that the spec's info.version is compatible with --version even when they differ (e.g. a vendor /api/v2 surface self-versioning as info.version=v2 ingested under --version 9.0). Each entry is a glob (2.x, 9.0.x) or a PEP 440 specifier set (>=2,<3); repeatable or comma-separated. Without it, a spec/label major mismatch is rejected; mutually exclusive with --catalog (the catalog row carries its own band)
 - `--tenant-id` — write scope for the ingested rows (works with both modes): omit for the built-in / global scope (tenant_id left unset — visible to every tenant); pass your own tenant UUID for a tenant-curated ingest (another tenant's UUID is rejected with HTTP 403 unless you hold platform_admin)
@@ -1265,6 +1281,56 @@ meho connector review <connector_id> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit machine-readable JSON to stdout instead of the human render
 - `--prefer` — which connector to use when the id matches both a built-in connector and one in your tenant: tenant, builtin, or legacy (your tenant's old copy stored under a former product name; the copy delete removes first) (default: stop with an error that asks you to pick one)
+
+### `meho connector tenant-setting`
+
+Turn built-in operations on or off for one tenant only
+
+```
+meho connector tenant-setting
+```
+
+#### `meho connector tenant-setting set`
+
+Turn one built-in operation on or off for this tenant
+
+```
+meho connector tenant-setting set <connector_id> <op_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--default` — use the install default again
+- `--json` — emit machine-readable JSON to stdout instead of the human summary
+- `--off` — turn it off for this tenant
+- `--on` — turn it on for this tenant
+- `--tenant-id` — act on this tenant instead of your own (needs platform_admin)
+
+#### `meho connector tenant-setting set-group`
+
+Turn every built-in operation in one group on or off for this tenant
+
+```
+meho connector tenant-setting set-group <connector_id> <group_key> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--default` — use the install default again
+- `--json` — emit machine-readable JSON to stdout instead of the human summary
+- `--off` — turn it off for this tenant
+- `--on` — turn it on for this tenant
+- `--tenant-id` — act on this tenant instead of your own (needs platform_admin)
+
+#### `meho connector tenant-setting show`
+
+List the operations this tenant turned on or off, with the install default
+
+```
+meho connector tenant-setting show <connector_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit machine-readable JSON to stdout instead of the human summary
+- `--tenant-id` — act on this tenant instead of your own (needs platform_admin)
 
 ## `meho conventions`
 
@@ -4510,7 +4576,7 @@ meho service-principals grants create [flags]
 - `--connector-id` — exact connector id; globs are refused (required)
 - `--expires` — optional ISO 8601 UTC expiry
 - `--json` — emit raw ServiceGrantRead JSON
-- `--op-id` — exact operation id; globs are refused, and a delete operation is refused (delete grants are made in the web console, only in sandbox mode) (required)
+- `--op-id` — exact operation id; globs are refused. A delete operation needs a delete grant: only in sandbox mode, by a tenant admin, with --expires within 30 days. REST and the CLI refuse it unless MEHO_SANDBOX_DELETE_GRANTS_FROM_API is on; the server decides (required)
 - `--principal` — JWT sub of the service principal (required)
 - `--reason` — operator justification for this standing grant (required)
 - `--target` — target UUID (optional; targetless is not a wildcard)
@@ -5918,11 +5984,13 @@ meho vcf-operations symptom list [flags]
 
 ## `meho version`
 
-Print CLI version and build metadata
+Print CLI version and build metadata, and the backplane's version and connector packages
 
 ```
-meho version
+meho version [flags]
 ```
+
+- `--backplane` — backplane URL to read the version from (defaults to the URL recorded by the most recent `meho login`)
 
 ## `meho vmware`
 

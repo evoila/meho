@@ -27,6 +27,8 @@ from collections.abc import Iterator
 import pytest
 from fastapi.testclient import TestClient
 
+from meho_backplane import connector_packages
+from meho_backplane.connector_packages import ConnectorPackage
 from meho_backplane.health import (
     ProbeResult,
     clear_probes,
@@ -133,6 +135,7 @@ def test_version_falls_back_to_unknown(client: TestClient, monkeypatch: pytest.M
         "git_sha": "unknown",
         "build_date": "unknown",
         "chart_version": None,
+        "connector_packages": [],
     }
 
 
@@ -148,6 +151,7 @@ def test_version_reads_env_vars(client: TestClient, monkeypatch: pytest.MonkeyPa
         "git_sha": "abc1234",
         "build_date": "2026-05-09T12:00:00Z",
         "chart_version": "0.1.20260518-abc1234",
+        "connector_packages": [],
     }
 
 
@@ -173,6 +177,7 @@ def test_version_treats_empty_env_as_unknown(
         "git_sha": "unknown",
         "build_date": "unknown",
         "chart_version": None,
+        "connector_packages": [],
     }
 
 
@@ -188,6 +193,31 @@ def test_version_chart_version_unset_is_null(
 
     assert response.status_code == 200
     assert response.json()["chart_version"] is None
+
+
+def test_version_lists_the_installed_connector_packages(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``connector_packages`` carries what the start-up check accepted (#5036)."""
+    package = ConnectorPackage(
+        name="example-connectors",
+        version="1.2.0",
+        wheel_digest="sha256:" + "a" * 64,
+        folders=["example_widget"],
+    )
+    monkeypatch.setattr(connector_packages, "_installed", (package,))
+
+    response = client.get("/version")
+
+    assert response.status_code == 200
+    assert response.json()["connector_packages"] == [
+        {
+            "name": "example-connectors",
+            "version": "1.2.0",
+            "wheel_digest": "sha256:" + "a" * 64,
+            "folders": ["example_widget"],
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -112,7 +112,7 @@ Connector lifecycle, principals and grants, scheduler, sensors, topology mutatio
 | `meho_topology_bulk_import` | beta | — | Batch-assert curated `graph_edge` rows in one atomic pass (tenant_admin only). |
 | `meho_topology_create_node` | beta | — | Manually seed a `graph_node` row in the operator's tenant (tenant_admin only). |
 | `meho_topology_delete_node` | beta | — | Hard-delete a manually-seeded `graph_node` row by `node_id` (tenant_admin only), writing a `removed` history tombstone so the delete stays visible in `query_topology {kind: timeline}`. |
-| `meho_topology_unannotate` | beta | — | Hard-delete a curated `graph_edge` and clear its reciprocal markers (tenant_admin only). |
+| `meho_topology_unannotate` | beta | — | Hard-delete a curated `graph_edge` and clear its reciprocal conflict markers (tenant_admin only). |
 | `query_audit` | ga | — | Query the audit log for forensic reconstruction. |
 | `update_doc_collections` | experimental | capability `meho-docs` | Update an existing documentation collection's mutable fields in place — the in-place repoint half of the doc-collection registry (tenant_admin only). |
 

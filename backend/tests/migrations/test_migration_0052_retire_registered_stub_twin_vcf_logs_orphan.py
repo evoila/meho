@@ -41,7 +41,7 @@ with an engine-cache reset on each side. Mirrors
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Final
 from uuid import UUID, uuid4
@@ -60,6 +60,7 @@ from meho_backplane.operations._lookup import (
     parse_connector_id,
 )
 from meho_backplane.settings import get_settings
+from tests.migrations._live_probe import tenant_setting_table
 
 #: This migration's own revision -- the forward-pass target (NOT ``head``).
 _THIS_REVISION: Final[str] = "0052"
@@ -256,6 +257,7 @@ def _count_by_product(sync_url: str, table: str, product: str) -> int:
 
 def test_retire_with_zero_row_registered_stub_twin_at_divergent_version(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """The case ``0049`` missed: retire with NO DB-visible short twin.
 
@@ -269,7 +271,7 @@ def test_retire_with_zero_row_registered_stub_twin_at_divergent_version(
     would leave both orphan rows in place.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
 
     # Seed ONLY the long orphan -- no short-product descriptor/group rows.
     orphan_descriptor = _insert_descriptor_row(
@@ -303,6 +305,7 @@ def test_retire_with_zero_row_registered_stub_twin_at_divergent_version(
 
 def test_retire_with_full_twin_still_retires(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """The case ``0049`` already handled: full per-op short twin present.
 
@@ -312,7 +315,7 @@ def test_retire_with_full_twin_still_retires(
     happy path.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
 
     orphan_descriptor = _insert_descriptor_row(
         sync_url,
@@ -366,6 +369,7 @@ def test_retire_with_full_twin_still_retires(
 
 def test_all_six_splits_retire_without_a_twin(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """SQL-level: every long-product orphan retires with no short twin.
 
@@ -374,7 +378,7 @@ def test_all_six_splits_retire_without_a_twin(
     is 0 on both tables.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
 
     for long_product, impl_id, _short_product in _SPLITS:
         _insert_descriptor_row(
@@ -405,6 +409,7 @@ def test_all_six_splits_retire_without_a_twin(
 
 def test_foreign_impl_id_rows_preserved(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """The retire follows ``parse_connector_id``, not a blanket product match.
 
@@ -414,7 +419,7 @@ def test_foreign_impl_id_rows_preserved(
     scoping), even absent any twin.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
 
     foreign_impl = _insert_descriptor_row(
         sync_url,
@@ -435,6 +440,7 @@ def test_foreign_impl_id_rows_preserved(
 
 def test_tenant_scoped_rows_preserved(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``tenant_id IS NOT NULL`` rows are operator-owned and never deleted.
 
@@ -443,7 +449,7 @@ def test_tenant_scoped_rows_preserved(
     -- is out of scope (#1699 scoping contract).
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
 
     tenant_id = uuid4()
     tenant_descriptor = _insert_descriptor_row(
@@ -476,6 +482,7 @@ def test_tenant_scoped_rows_preserved(
 
 def test_re_running_migration_is_idempotent(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Replaying ``upgrade()`` on a cleaned DB deletes nothing further.
 
@@ -484,7 +491,7 @@ def test_re_running_migration_is_idempotent(
     schema migrations cannot leak into the replay.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
 
     orphan = _insert_descriptor_row(
         sync_url,
@@ -525,6 +532,7 @@ def test_re_running_migration_is_idempotent(
 
 def test_live_short_representation_dispatches_post_migration(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Dispatch parity: the short spelling still resolves its ingested ops.
 
@@ -534,7 +542,7 @@ def test_live_short_representation_dispatches_post_migration(
     gone and the short product still resolves and counts its enabled ops.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
 
     for op_id in ("GET:/api/v2/version", "GET:/api/v2/events"):
         _insert_descriptor_row(
@@ -579,7 +587,8 @@ def test_live_short_representation_dispatches_post_migration(
 
     command.upgrade(cfg, _THIS_REVISION)
 
-    exists_after, known_after = asyncio.run(_probe())
+    with tenant_setting_table(sync_url):
+        exists_after, known_after = asyncio.run(_probe())
     assert exists_after is True, "the live short representation must still resolve"
     assert known_after == 2, "both enabled ops on the short spelling must still count"
     assert _count_by_product(sync_url, "endpoint_descriptor", "vcf-logs") == 0, (

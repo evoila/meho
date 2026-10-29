@@ -62,6 +62,7 @@ __all__ = [
     "ConnectorPackage",
     "ConnectorPackageError",
     "check_connector_folders",
+    "installed_connector_packages",
     "load_connector_packages",
 ]
 
@@ -91,6 +92,10 @@ class ConnectorPackage(BaseModel):
     folders: list[Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]] = Field(
         min_length=1
     )
+
+
+_installed: tuple[ConnectorPackage, ...] = ()
+"""The packages the last successful start-up check accepted."""
 
 
 class _ConnectorPackageList(BaseModel):
@@ -236,7 +241,8 @@ def check_connector_folders(connectors_dir: Path, allowlist_path: Path | None = 
     before any connector subpackage is imported. Raises
     :class:`ConnectorPackageError` that names the first folder (in name
     order) that is not allowed. On success, logs one
-    ``connector_packages_allowed`` line.
+    ``connector_packages_allowed`` line and keeps the accepted packages
+    for :func:`installed_connector_packages`.
     """
     path = CONNECTOR_PACKAGES_FILE if allowlist_path is None else allowlist_path
     connectors_dir = connectors_dir.resolve()
@@ -282,3 +288,15 @@ def check_connector_folders(connectors_dir: Path, allowlist_path: Path | None = 
         ],
         source_checkout=editable_root is not None,
     )
+    global _installed
+    _installed = tuple(packages)
+
+
+def installed_connector_packages() -> tuple[ConnectorPackage, ...]:
+    """The connector packages the start-up check accepted, in allowlist order.
+
+    Read from the allowlist file once, by :func:`check_connector_folders`.
+    Empty for the plain public image, which has no allowlist file.
+    ``GET /version``, ``GET /api/v1/health`` and the console show this list.
+    """
+    return _installed

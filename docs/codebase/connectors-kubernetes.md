@@ -957,7 +957,26 @@ consumer session that fell back to raw kubectl):
   keeps metadata identifiers + `labels` and a JSON `spec_excerpt` capped
   at `CR_SPEC_EXCERPT_MAX_BYTES` (2048 B); over the cap, `spec_truncated`
   is `true` and the excerpt is a preview (not parseable JSON). The
-  verbose `managedFields` / `annotations` metadata blocks are dropped.
+  verbose `managedFields` metadata block is dropped.
+- **Annotations, version and status on CR rows** (#3878): every
+  `k8s.cr.list` row and the `k8s.cr.info` result also carry
+  `resource_version`, `uid`, `annotations` and a `status_excerpt`. This
+  lets a governed read confirm that an annotation-only change landed
+  (for example a Cluster API pause annotation). `annotations` is an
+  object column, so `result_query` cannot filter or sort on it. Return
+  it with `select`, or read the raw rows by paging (`offset` /
+  `limit`).
+  - Each annotation value is cut at `CR_ANNOTATION_VALUE_MAX_BYTES`
+    (256 B). `annotations_truncated` is `true` when any value was cut.
+  - The `kubectl.kubernetes.io/last-applied-configuration` annotation
+    is always left out. It is a copy of the whole last manifest, so it
+    is large, and on a Secret it repeats every value.
+  - On a `Secret`, every annotation value is the redacted placeholder
+    (the same one `data` values get). The keys stay. Deploy tools can
+    copy the whole manifest into an annotation, so no value is shown.
+  - `status_excerpt` is the JSON `.status`, capped like `spec_excerpt`
+    (2048 B), with its own `status_truncated` flag. It is `null` when
+    the object has no `.status`.
 - **Built-in kinds** (#3840): the same two ops read any kind no
   dedicated op covers. A built-in group with a name (for example
   `apiregistration.k8s.io` / `v1` / `apiservices`, or
@@ -1027,8 +1046,9 @@ from its `SecretList` (see "Built-in kinds" above), because the API
 server leaves `kind` off list items.
 
 **Projection note.** `custom_resource_row` otherwise keeps only
-`metadata` + a bounded `.spec` excerpt and drops every other top-level
-field; a `Secret` has no `.spec`, so before #3501 a CR read of a Secret
+`metadata` + bounded `.spec` / `.status` excerpts and drops every other
+top-level field (a Secret's annotation keys show, but every annotation
+value is replaced by the placeholder); a `Secret` has no `.spec`, so before #3501 a CR read of a Secret
 returned no `data` at all (safe, but uninformative). The redactor lets
 the projection surface a `data` / `string_data` **key inventory** (values
 redacted, digests attached) for a `kind: Secret` object instead — safe
@@ -1148,9 +1168,9 @@ happened" apply could not be explained from the trace.
 - Secret payloads are masked before capture. Every JSON request and
   response body first goes through the connector's structural Secret
   redactor (`redaction.py`, the same walk `k8s.cr.*` reads use). Every
-  `data` / `stringData` value of a `kind: Secret` object, and its
-  `last-applied-configuration` annotation, is replaced by a placeholder
-  plus a digest; key names stay. This covers a `k8s.apply` of a Secret
+  `data` / `stringData` value of a `kind: Secret` object, and every
+  annotation value on it, is replaced by a placeholder plus a digest;
+  key names stay. This covers a `k8s.apply` of a Secret
   manifest, a `k8s.cr.info` read of one, and the items of a
   `SecretList` (which carry no `kind` of their own). The normal body
   redaction then runs over the masked body.

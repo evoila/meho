@@ -36,7 +36,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.license_key import mask_license_key
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vcf_operations import (
     VcfOperationsConnector,
@@ -47,6 +46,7 @@ from meho_backplane.connectors.vcf_operations.typed_ops import (
     VROPS_LICENSE_INFO_OP,
     VROPS_TYPED_OPS,
 )
+from meho_backplane.connectors.vmware_shared.license_key import mask_license_key
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations import dispatch, reset_dispatcher_caches

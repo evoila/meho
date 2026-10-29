@@ -25,6 +25,7 @@ design home (design review → this decision → implementation Tasks)
 >    plane's existing human-only line (v0.1-spec §7); it does not invent a second
 >    approval mechanism.
 >    No standing grant applies — except on an instance in sandbox mode; see [sandbox-mode.md](sandbox-mode.md).
+>    Self-approval is allowed for MEHO-SA-Operators, on purpose; an agent's destructive request waits for a person's approval — see [approval-groups-and-self-approval.md](approval-groups-and-self-approval.md) / [#3325](https://github.com/evoila/meho/issues/3325).
 > 2. **Mandatory preview.** Dispatch is refused unless a `preview_operation` of the
 >    same `(connector_id, op_id, target, params)` was executed and **its result
 >    hash** is presented with the approval — the approver sees precisely what dies.

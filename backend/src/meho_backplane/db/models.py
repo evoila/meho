@@ -323,6 +323,7 @@ __all__ = [
     "Tenant",
     "TenantConvention",
     "TenantConventionHistory",
+    "TenantOperationSetting",
     "WebSession",
     "is_valid_kind_slug",
 ]
@@ -1922,6 +1923,53 @@ class EndpointDescriptor(Base):
         sa.CheckConstraint(
             "safety_level IN ('safe', 'caution', 'dangerous', 'destructive')",
             name="ck_endpoint_descriptor_safety_level",
+        ),
+    )
+
+
+class TenantOperationSetting(Base):
+    """One tenant's own on/off choice for one built-in operation (#5029).
+
+    A built-in :class:`EndpointDescriptor` row (``tenant_id IS NULL``) is
+    shared by every tenant, so its ``is_enabled`` flag is the install
+    default. A row here lets one tenant turn that operation on or off for
+    itself only. No row means the tenant uses the install default.
+
+    The row is keyed on the operation's natural key
+    ``(product, version, impl_id, op_id)``, not on the descriptor ``id``.
+    Start-up registration and spec ingest only write ``endpoint_descriptor``
+    rows, so a restart or an update never changes this table.
+
+    Only built-in operations get a row. A connector the tenant imported for
+    itself has its own descriptor rows, and their ``is_enabled`` flag is
+    the switch. Dispatch, ``search_operations``, ``list_operation_groups``
+    and the console read the effective value through
+    :func:`meho_backplane.operations._lookup.enabled_for_tenant_clause`.
+
+    ``tenant_id`` is a soft reference, no FK, the same discipline as
+    :attr:`EndpointDescriptor.tenant_id`.
+    """
+
+    __tablename__ = "tenant_operation_setting"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    product: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    impl_id: Mapped[str] = mapped_column(Text, nullable=False)
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(sa.Boolean(), nullable=False)
+    set_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "tenant_id",
+            "product",
+            "version",
+            "impl_id",
+            "op_id",
+            name="uq_tenant_operation_setting_op",
         ),
     )
 
@@ -6408,7 +6456,7 @@ class ApprovalRequestStatus(StrEnum):
 
     Initiative #803 (G11.2 Agent permission model), Task #817 (T4). The
     approval queue parks a ``requires_approval`` dispatch durably; the
-    row walks a simple four-state lifecycle enforced by the service
+    row walks a simple five-state lifecycle enforced by the service
     (:mod:`meho_backplane.operations.approval_queue`).
 
     Members:
@@ -6423,10 +6471,15 @@ class ApprovalRequestStatus(StrEnum):
     * :attr:`EXPIRED` -- the ``expires_at`` deadline passed without a
       decision; the expiry sweep transitioned the row and wrote the
       decision audit row. Terminal.
+    * :attr:`WITHDRAWN` -- the sender took its own pending request back
+      (#4987). Not a decision: ``reviewed_by`` stays NULL, and
+      ``withdrawn_at`` / ``withdraw_reason`` say when and why. The
+      original call was not executed. Terminal.
 
     The enum and the ``CHECK (status IN (...))`` constraint on the DB
-    table move in lock-step (migration ``0023``); the drift guard
-    :func:`tests.test_migration_0023_approval_request.test_status_check_matches_enum`
+    table move in lock-step (migration ``0023``, widened by ``0119``); the
+    drift guard
+    :func:`tests.migrations.test_migration_0119_approval_withdrawn.test_status_check_matches_enum`
     asserts equality at unit-test time.
     """
 
@@ -6434,10 +6487,11 @@ class ApprovalRequestStatus(StrEnum):
     APPROVED = "approved"
     REJECTED = "rejected"
     EXPIRED = "expired"
+    WITHDRAWN = "withdrawn"
 
 
 #: Closed ``approval_request.status`` vocabulary derived from the enum --
-#: kept in sync with migration ``0023``'s ``_APPROVAL_REQUEST_STATUSES``
+#: kept in sync with migration ``0119``'s ``_STATUSES_WITH_WITHDRAWN``
 #: literal. The drift guard asserts equality so the two never diverge.
 _APPROVAL_REQUEST_STATUSES: tuple[str, ...] = tuple(s.value for s in ApprovalRequestStatus)
 
@@ -6732,6 +6786,16 @@ class ApprovalRequest(Base):
         nullable=True,
         default=None,
     )
+    # When and why the sender withdrew its own pending request (#4987).
+    # Set only on a ``withdrawn`` row; NULL on every other row and on
+    # pre-0119 rows. A withdrawal is not a decision, so ``decided_at`` and
+    # ``reviewed_by`` stay NULL. Added by migration ``0119``.
+    withdrawn_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    withdraw_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

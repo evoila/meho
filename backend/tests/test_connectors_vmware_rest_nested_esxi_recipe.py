@@ -481,6 +481,9 @@ class _RecordingSession:
     composite on the REST create arm this module pins (#3099).
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(self, responses: dict[str, Any]) -> None:
         self._responses = responses
         self.calls: list[dict[str, Any]] = []

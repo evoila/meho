@@ -69,6 +69,7 @@ def stub_dispatch_seams(monkeypatch: pytest.MonkeyPatch) -> dict[str, AsyncMock]
         version="1.0",
         impl_id="svc",
         source_kind="typed",
+        handler_ref=None,
         parameter_schema={},
         op_id="svc.read",
         safety_level="caution",

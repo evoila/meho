@@ -308,13 +308,18 @@ class AzureConnector(
             self._credentials[key] = credentials
             return credentials
 
-    async def invalidate_session(self, target: AzureTargetLike) -> None:
+    async def invalidate_session(
+        self, target: AzureTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Drop the target's cached tokens (the dispatcher's 401 hook).
 
         After Azure answers 401 the dispatcher calls this and tries the call
         once more. The retry then logs in again. The cached secret stays: a
         401 means the token is no longer accepted, not that the secret is
         wrong.
+
+        The token is per target, so *rejected* (the request that got the
+        ``401``) is not needed and not read.
         """
         self._drop_tokens(target)
 

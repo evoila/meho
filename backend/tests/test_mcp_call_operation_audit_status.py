@@ -48,6 +48,7 @@ from ._request_usage_helpers import read_usage_events
 
 _CONNECTOR = "stub-1.x"
 _OK_OP = "stub.thing.get"
+_BOOM_OP = "stub.thing.boom"
 _CALL_PATH = "/mcp/tools/call/call_operation"
 
 
@@ -68,6 +69,10 @@ class _StubConnector(Connector):
 
 async def _ok_handler(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True}
+
+
+async def _boom_handler(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    raise RuntimeError("stub handler failed")
 
 
 @pytest.fixture
@@ -96,6 +101,18 @@ async def stub_op(client: TestClient) -> AsyncIterator[None]:
             "properties": {"name": {"type": "string"}},
             "required": ["name"],
         },
+        when_to_use=None,
+        embedding_service=service,
+    )
+    await register_typed_operation(
+        product="stub",
+        version="1.x",
+        impl_id="stub",
+        op_id=_BOOM_OP,
+        handler=_boom_handler,
+        summary="Stub op that fails.",
+        description="Used by the audit status tests.",
+        parameter_schema={"type": "object", "properties": {}},
         when_to_use=None,
         embedding_service=service,
     )
@@ -194,6 +211,31 @@ async def test_ok_call_row_keeps_200(client: TestClient) -> None:
     assert rows[0].status_code == 200
     assert rows[0].payload["result_status"] == "ok"
     assert "error_code" not in rows[0].payload
+
+
+@pytest.mark.usefixtures("stub_op")
+async def test_error_after_run_row_matches_dispatch_row(client: TestClient) -> None:
+    """A call that ran and failed: the tool-call row says what the operation row says."""
+    result = _call(client, {"connector_id": _CONNECTOR, "op_id": _BOOM_OP})
+    assert result["isError"] is True
+
+    dispatch_rows = await _tool_rows(_BOOM_OP)
+    assert len(dispatch_rows) == 1
+    assert dispatch_rows[0].method == "DISPATCH"
+    rows = await _tool_rows()
+    assert len(rows) == 1
+    assert rows[0].payload["result_status"] == "error"
+    assert rows[0].status_code == dispatch_rows[0].status_code == 500
+
+
+@pytest.mark.usefixtures("cutover_on", "stub_op")
+async def test_cutover_error_after_run_writes_no_tool_row(client: TestClient) -> None:
+    """With the wrapper rows retired, the dispatcher's row is the only record."""
+    _call(client, {"connector_id": _CONNECTOR, "op_id": _BOOM_OP})
+
+    assert await _tool_rows() == []
+    dispatch_rows = await _tool_rows(_BOOM_OP)
+    assert [row.status_code for row in dispatch_rows] == [500]
 
 
 @pytest.mark.parametrize(

@@ -119,6 +119,7 @@ from meho_backplane.mcp.server import (
     McpPermissionDeniedError,
     register_method,
 )
+from meho_backplane.operations._errors import status_code_for_result
 from meho_backplane.operations._validate import compute_audit_params_hash
 from meho_backplane.operations.delivery_budget import tool_result_text
 from meho_backplane.request_usage.collector import (
@@ -168,9 +169,11 @@ def _operation_result_audit(name: str, result: dict[str, Any]) -> tuple[int, dic
     is its only record. That row follows the same rule as ``isError``:
     ``error`` is ``404`` when the op or connector was not found and
     ``400`` otherwise, ``denied`` is ``403``, ``rate_limited`` is ``429``.
-    Every other status, and every other tool, keeps ``200``. The payload
-    fields carry the result status and the ``extras.error_code``, so a
-    query can filter on them.
+    An ``error`` that carries an ``audit_id`` comes from a call that did
+    run; the dispatcher wrote its own row with ``500``, so the tool-call
+    row says ``500`` too. Every other status, and every other tool, keeps
+    ``200``. The payload fields carry the result status and the
+    ``extras.error_code``, so a query can filter on them.
     """
     if name not in _OPERATION_RESULT_TOOLS:
         return 200, {}
@@ -185,6 +188,8 @@ def _operation_result_audit(name: str, result: dict[str, Any]) -> tuple[int, dic
     if status == "rate_limited":
         return 429, fields
     if status == "error":
+        if result.get("audit_id") is not None:
+            return status_code_for_result("error"), fields
         return (404 if error_code in _NOT_FOUND_ERROR_CODES else 400), fields
     return 200, fields
 

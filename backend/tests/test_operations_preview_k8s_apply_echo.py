@@ -15,9 +15,13 @@ approver could not see which fields the apply sets. These tests pin:
   names do, and a command line keeps only its size;
 * a Secret nested in another document and a last-applied annotation in a
   pod template are hidden too, not only the document root;
+* an ``env`` or ``httpHeaders`` entry is walked past its hidden ``value``,
+  so a Secret or a command line nested in the entry is hidden too;
 * a manifest larger than the echo budget keeps only the identity of the
   documents that do not fit, and a manifest with more documents than the
-  budget can name ends in one entry that counts the rest.
+  budget can name ends in one entry that counts the rest;
+* the budget is measured after the shared redaction, so a document whose
+  values grow when they are hidden cannot push the stored echo over it.
 
 The dry-run itself is stubbed: the echo is built from the parked params.
 """
@@ -404,6 +408,80 @@ async def test_nested_secrets_and_annotations_are_hidden_below_the_root(
     text = json.dumps(preview)
     assert _SECRET_VALUE not in text
     assert _STRING_DATA_VALUE not in text
+
+
+_ENTRY_WITH_NESTED_FIELDS = f"""
+apiVersion: bundles.example.com/v1
+kind: Bundle
+metadata:
+  name: shop
+  namespace: prod
+spec:
+  env:
+    - name: MODE
+      value: {_ENV_VALUE}
+      template:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: shop-db
+        data:
+          pw: {_SECRET_VALUE}
+  probe:
+    httpGet:
+      httpHeaders:
+        - name: X-Auth
+          value: {_HEADER_VALUE}
+          exec:
+            command: ["sh", "-c", "{_ARG_VALUE}"]
+"""
+
+
+@pytest.mark.asyncio
+async def test_env_and_header_entries_are_walked_past_their_hidden_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preview = await _preview(monkeypatch, _ENTRY_WITH_NESTED_FIELDS)
+
+    (bundle,) = preview["manifest"]
+    env_entry = bundle["spec"]["env"][0]
+    assert env_entry["name"] == "MODE"
+    assert env_entry["value"] == "***REDACTED***"
+    # The Secret under the env entry keeps its key names, never a value.
+    assert env_entry["template"]["kind"] == "Secret"
+    assert env_entry["template"]["data"] == {"pw": "***REDACTED***"}
+    header = bundle["spec"]["probe"]["httpGet"]["httpHeaders"][0]
+    assert header["name"] == "X-Auth"
+    assert header["value"] == "***REDACTED***"
+    # The command line under the header entry keeps only its size.
+    assert header["exec"]["command"] == {"hidden": True, "bytes": 4 + len(_ARG_VALUE)}
+
+    text = json.dumps(preview)
+    for value in (_ENV_VALUE, _SECRET_VALUE, _HEADER_VALUE, _ARG_VALUE):
+        assert value not in text
+
+
+@pytest.mark.asyncio
+async def test_echo_budget_is_measured_after_the_shared_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Each one-letter value is replaced by a much longer marker, so the
+    # ConfigMap fits the budget before redaction but not after it.
+    count = 700
+    manifest = (
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n  namespace: prod\ndata:\n"
+        + "".join(f"  password_{i}: a\n" for i in range(count))
+    )
+    raw_size = len(json.dumps(next(yaml.safe_load_all(manifest))).encode("utf-8"))
+    assert raw_size < MANIFEST_ECHO_MAX_BYTES
+
+    preview = await _preview(monkeypatch, manifest)
+
+    (doc,) = preview["manifest"]
+    assert doc["metadata"] == {"name": "cm", "namespace": "prod"}
+    assert "data" not in doc
+    assert "echo_omitted" in doc
+    assert len(json.dumps(preview["manifest"]).encode("utf-8")) <= MANIFEST_ECHO_MAX_BYTES
 
 
 @pytest.mark.asyncio

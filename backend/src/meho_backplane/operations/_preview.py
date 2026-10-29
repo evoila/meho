@@ -695,8 +695,10 @@ def _k8s_apply_manifest_echo(ctx: PreviewContext, result: dict[str, Any]) -> dic
     The dry-run summary names each object but not what the apply sets on
     it. ``manifest`` is the applied manifest, one dict per document, with
     Secret values and ``env`` values hidden by the connector, then run
-    through the same two-pass redaction as the generic params echo.
-    ``subject`` names the objects for the reviewer context.
+    through the same two-pass redaction as the generic params echo. The
+    connector applies its size limit after that redaction, so the stored
+    echo is what is measured. ``subject`` names the objects for the
+    reviewer context.
     """
     from meho_backplane.connectors.kubernetes.ops_write_preview import (
         apply_manifest_echo,
@@ -704,13 +706,17 @@ def _k8s_apply_manifest_echo(ctx: PreviewContext, result: dict[str, Any]) -> dic
     )
 
     tenant = str(ctx.operator.tenant_id) if ctx.operator.tenant_id is not None else None
-    redacted = _redact_echoed_params(
-        {"manifest": apply_manifest_echo(ctx.params["manifest"])},
-        connector_id=ctx.connector_id,
-        tenant=tenant,
-        op_id=ctx.descriptor.op_id,
-    )
-    echo: dict[str, Any] = {"manifest": redacted.get("manifest", [])}
+
+    def _redact(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        redacted = _redact_echoed_params(
+            {"manifest": docs},
+            connector_id=ctx.connector_id,
+            tenant=tenant,
+            op_id=ctx.descriptor.op_id,
+        )
+        return [doc for doc in redacted.get("manifest", []) if isinstance(doc, dict)]
+
+    echo: dict[str, Any] = {"manifest": apply_manifest_echo(ctx.params["manifest"], redact=_redact)}
     subject = apply_subject(result.get("applied"))
     if subject is not None:
         echo["subject"] = subject

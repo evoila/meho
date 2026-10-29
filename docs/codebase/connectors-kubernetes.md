@@ -522,9 +522,14 @@ hook (header names stay), the text of every `command` / `args` list (only
 its size in bytes stays, as `{"hidden": true, "bytes": N}`) and the
 last-applied annotation. All of this is done at any depth: a Secret nested
 in a custom resource and a pod template's copy of the annotation are hidden
-too. The echo keeps at most 16 KB in total, counting every entry. A
-document that does not fit in full keeps only its identity; when not even
-that fits, one closing entry counts the documents left out.
+too. Hiding a value in an `env` or `httpHeaders` entry does not stop the
+walk: the entry's other fields are checked as well. Then the shared
+params redaction of the generic echo runs over the documents. The size
+limit comes last, after all redaction, because a redaction marker can be
+longer than the value it replaces: the echo keeps at most 16 KB in total
+as stored, counting every entry. A document that does not fit in full
+keeps only its identity; when not even that fits, one closing entry
+counts the documents left out.
 
 **`k8s.apply` API-server rejections (#3876).** `DynamicClient.request`
 calls the API with `_preload_content=False`, and kubernetes_asyncio only

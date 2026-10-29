@@ -70,6 +70,7 @@ and the park then stores the ``preview_unavailable`` marker with the reason.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 
 from kubernetes_asyncio import client
@@ -84,11 +85,15 @@ _HIDDEN = "***REDACTED***"
 _LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration"
 
 #: Most bytes of manifest the ``k8s.apply`` echo keeps, counting every entry
-#: of the echo. A document that does not fit in full is shown by its identity
-#: only; when not even that fits, the rest of the documents are summed up in
-#: one closing entry. So a huge manifest, or a huge number of documents,
-#: cannot fill the approval row.
+#: of the echo as it is stored, after every redaction. A document that does
+#: not fit in full is shown by its identity only; when not even that fits,
+#: the rest of the documents are summed up in one closing entry. So a huge
+#: manifest, or a huge number of documents, cannot fill the approval row.
 MANIFEST_ECHO_MAX_BYTES = 16_384
+
+#: The shared params redaction the caller runs over the hidden documents,
+#: before the echo budget is applied. Takes and returns one dict per document.
+ManifestRedactor = Callable[[list[dict[str, Any]]], list[dict[str, Any]]]
 
 #: Most objects named in the ``k8s.apply`` subject line.
 _SUBJECT_MAX_OBJECTS = 5
@@ -269,7 +274,8 @@ def _hide_values(node: Any) -> Any:
     """Copy *node*, hiding at any depth every value that can hold a secret.
 
     * The ``value`` of every entry in an ``env`` or ``httpHeaders`` list is
-      hidden; the name stays.
+      hidden; the name stays. The entry's other fields are still walked, so
+      a Secret or a command line nested in such an entry is hidden too.
     * Every ``command`` or ``args`` list becomes ``{"hidden": true, "bytes":
       <size>}``, like the ``k8s.job.create`` preview's ``command_bytes``.
     * Every dict with ``kind: Secret`` keeps only the key names of its
@@ -283,7 +289,7 @@ def _hide_values(node: Any) -> Any:
         for key, item in node.items():
             if key in _NAME_VALUE_LISTS and isinstance(item, list):
                 out[key] = [
-                    {**entry, "value": _HIDDEN}
+                    _hide_values({**entry, "value": _HIDDEN})
                     if isinstance(entry, dict) and "value" in entry
                     else _hide_values(entry)
                     for entry in item
@@ -333,27 +339,28 @@ def _entry_bytes(entry: dict[str, Any]) -> int:
     return len(json.dumps(entry, default=str).encode("utf-8")) + 2
 
 
-def apply_manifest_echo(manifest: str) -> list[dict[str, Any]]:
+def apply_manifest_echo(manifest: str, *, redact: ManifestRedactor) -> list[dict[str, Any]]:
     """The ``k8s.apply`` manifest as one dict per document, safe to show.
 
     Secret ``data`` / ``stringData`` values, ``env`` and ``httpHeaders``
     values, ``command`` / ``args`` text and the last-applied annotation are
-    hidden at any depth (see the module docstring). The documents are kept
-    in order, and every entry of the result counts toward
+    hidden at any depth (see the module docstring). Then *redact*, the
+    caller's shared params redaction, runs over all documents. Only then is
+    the budget applied, because a redaction marker can be longer than the
+    value it replaces: the stored echo is what is measured. The documents
+    are kept in order, and every entry of the result counts toward
     :data:`MANIFEST_ECHO_MAX_BYTES`: a document that does not fit in full
     keeps only its identity, and once not even an identity fits, one last
-    entry counts the documents left out. The caller still runs the shared
-    params redaction over the result.
+    entry counts the documents left out.
     """
-    docs = list(_parse_manifest(manifest))
+    docs = redact([_hide_values(doc) for doc in _parse_manifest(manifest)])
     # Room is kept for the closing summary while documents may still follow,
     # so the whole echo stays within the budget, summary included.
     summary_bytes = _entry_bytes(_omitted_summary(len(docs)))
     echo: list[dict[str, Any]] = []
     used = 0
-    for index, doc in enumerate(docs):
+    for index, hidden in enumerate(docs):
         budget = MANIFEST_ECHO_MAX_BYTES - (summary_bytes if index < len(docs) - 1 else 0)
-        hidden = _hide_values(doc)
         size = _entry_bytes(hidden)
         if used + size <= budget:
             echo.append(hidden)

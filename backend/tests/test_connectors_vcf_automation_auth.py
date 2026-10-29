@@ -725,6 +725,75 @@ async def test_targets_with_one_provider_secret_share_one_provider_session() -> 
     await connector.aclose()
 
 
+def test_provider_key_reads_the_domain_only_without_provider_username() -> None:
+    """The key changes only when the provider login user changes."""
+    base: dict[str, Any] = {"host": "vcfa-shared.test.invalid", "port": 443, "secret_ref": "x"}
+    explicit_a = _StubTarget(name="a", provider_username="admin@System", domain="org-a", **base)
+    explicit_b = _StubTarget(name="b", provider_username="admin@System", domain="org-b", **base)
+    legacy_none = _StubTarget(name="c", **base)
+    legacy_system = _StubTarget(name="d", domain="System", **base)
+    legacy_a = _StubTarget(name="e", domain="org-a", **base)
+    legacy_b = _StubTarget(name="f", domain="org-b", **base)
+    assert _plane_cache_key(explicit_a, "provider") == _plane_cache_key(explicit_b, "provider")
+    assert _plane_cache_key(legacy_none, "provider") == _plane_cache_key(legacy_system, "provider")
+    assert _plane_cache_key(legacy_a, "provider") != _plane_cache_key(legacy_b, "provider")
+    assert _plane_cache_key(legacy_a, "provider") != _plane_cache_key(explicit_a, "provider")
+    assert _plane_cache_key(explicit_a, "tenant") != _plane_cache_key(explicit_b, "tenant")
+
+
+@pytest.mark.asyncio
+async def test_one_provider_user_with_different_domains_shares_one_provider_session() -> None:
+    """Same explicit provider user, secret and address, different tenant domains: one login.
+
+    The provider login sends ``provider_username`` as is, so the tenant
+    domain plays no part in it. Both targets share one provider token and
+    one renewal: after a ``401`` on the first target the second target
+    sends the renewed token without a login of its own.
+    """
+    first = _StubTarget(
+        name="vcfa-dom-a",
+        host="vcfa-shared.test.invalid",
+        port=443,
+        secret_ref="vcfa/sso-a",
+        provider_secret_ref="vcfa/provider",
+        provider_username="admin@System",
+        domain="org-a",
+    )
+    second = _StubTarget(
+        name="vcfa-dom-b",
+        host="vcfa-shared.test.invalid",
+        port=443,
+        secret_ref="vcfa/sso-b",
+        provider_secret_ref="vcfa/provider",
+        provider_username="admin@System",
+        domain="org-b",
+    )
+    connector = _make_connector()
+    operator = _make_operator()
+    async with respx.mock(base_url="https://vcfa-shared.test.invalid") as mock:
+        login = mock.post("/cloudapi/1.0.0/sessions/provider")
+        login.side_effect = [
+            httpx.Response(200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-first"}),
+            httpx.Response(200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-second"}),
+        ]
+        orgs = mock.get("/cloudapi/1.0.0/orgs")
+        orgs.side_effect = [
+            httpx.Response(200, json={"values": []}),
+            httpx.Response(401),
+            httpx.Response(200, json={"values": []}),
+            httpx.Response(200, json={"values": []}),
+        ]
+        await connector._request_json(second, "GET", "/cloudapi/1.0.0/orgs", operator=operator)
+        await connector._request_json(first, "GET", "/cloudapi/1.0.0/orgs", operator=operator)
+        await connector._request_json(second, "GET", "/cloudapi/1.0.0/orgs", operator=operator)
+
+    assert login.call_count == 2
+    sent = [call.request.headers["Authorization"] for call in orgs.calls]
+    assert sent == ["Bearer p-first", "Bearer p-first", "Bearer p-second", "Bearer p-second"]
+    assert connector._provider_tokens == {_plane_cache_key(first, "provider"): "p-second"}
+    await connector.aclose()
+
+
 # ---------------------------------------------------------------------------
 # Failure modes -- login errors
 # ---------------------------------------------------------------------------

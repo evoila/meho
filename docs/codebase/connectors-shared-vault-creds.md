@@ -500,7 +500,9 @@ Rules for the key:
   adapter builds the base URL: the scheme comes from `extras["scheme"]`
   (`https` when unset) and an unset port is the default port of the scheme.
   So a target with no port and a target with port 443 share one key, and an
-  HTTP target never shares a token with an HTTPS target.
+  HTTP target never shares a token with an HTTPS target. Only the host name
+  is case-folded. A service path carried on `host` keeps its case, because
+  the adapter sends it as is and paths are case-sensitive.
 - `fqdn` is included because some connectors send it as the `Host` header,
   and the appliance picks the organisation from it.
 - `secret_ref=` replaces the target's own secret reference when the login
@@ -510,10 +512,14 @@ Rules for the key:
 - VCF Fleet logs in at `vcf_ops_url` from the secret when it is set. Its key
   is built from that resolved login address, not from the target's own
   host, so two fleet targets on different hosts with one secret and one
-  `vcf_ops_url` share one token. The connector remembers which key each
-  target used, so a `401` finds the token without reading the secret again.
+  `vcf_ops_url` share one token. The fleet login does not send the target's
+  `fqdn`, so the `fqdn` is not in that key either. The connector remembers
+  which key each target used, so a `401` finds the token without reading
+  the secret again.
 - `login_inputs` are the other target values the login reads, for example
-  the login domain (vra8, VCF Automation), the auth source (VCF
+  the login domain (vra8, VCF Automation tenant plane), the provider user
+  (VCF Automation provider plane, which reads the domain only when no
+  `provider_username` is set), the auth source (VCF
   Operations), the login provider (VCF Operations for Logs), the login
   mode (vRO) or the API version (Cloud Director). Two targets that differ
   in one of them log in differently and keep separate tokens.

@@ -121,6 +121,7 @@ from meho_backplane.connectors.schemas import (
 from meho_backplane.connectors.vcf_automation._auth import (
     _tenant_domain,
     load_credentials_with_override,
+    provider_login_inputs,
     tenant_login,
     vcfa_provider_login,
 )
@@ -161,16 +162,17 @@ def _plane_cache_key(target: VcfAutomationTargetLike, plane: Plane) -> tuple[str
     The provider login uses ``provider_secret_ref`` in place of
     ``target.secret_ref`` when it is set, so that is the secret in the key:
     two targets with different tenant secrets but one provider secret share
-    one provider session. It also reads ``provider_username`` and
-    ``domain``. The tenant login reads the tenant domain. Both send ``fqdn``
-    as the ``Host`` header, which :func:`credential_cache_key` already
-    includes.
+    one provider session. It also reads ``provider_username``, and the
+    ``domain`` only when ``provider_username`` is unset
+    (:func:`provider_login_inputs`), so two targets with one explicit
+    provider user and different tenant domains share one provider session.
+    The tenant login reads the tenant domain. Both send ``fqdn`` as the
+    ``Host`` header, which :func:`credential_cache_key` already includes.
     """
     if plane == "provider":
         return credential_cache_key(
             target,
-            getattr(target, "provider_username", None),
-            getattr(target, "domain", None),
+            *provider_login_inputs(target),
             secret_ref=getattr(target, "provider_secret_ref", None) or None,
         )
     return credential_cache_key(target, _tenant_domain(target))

@@ -17,9 +17,11 @@ fronts. It is complementary to the `vmware.composite.vm.guest.*` family
 fingerprint (see `connectors-vmware-rest-guest-ops.md`).
 
 This page documents **T1 (#3360)**, the keystone read floor: the connector
-skeleton, transport, probe / fingerprint, and six `safe` read verbs plus
-the `linux.about` identity canary. The governed write surface (T2, #3361)
-and the day-0 verification recipe (T3, #3362) land separately.
+skeleton, transport, probe / fingerprint, and the `safe` read verbs plus
+the `linux.about` identity canary (six reads at T1; `linux.dns.lookup`
+joined later as the first structured safe diagnostic). The governed write
+surface (T2, #3361) and the day-0 verification recipe (T3, #3362) land
+separately.
 
 The motivating failure T1 retires: a provisioning run stands up a
 services/router VM and returns `configured` on deploy + power-on alone,
@@ -136,6 +138,7 @@ dispatch path's `JsonFluxReducer` wraps set-shaped results.
 | `linux.log.tail` | `log` | `path`, `lines?` | `{rows, total, path}` |
 | `linux.service.status` | `service` | `unit` | `{unit, active, enabled, sub_state}` |
 | `linux.sysctl.read` | `system` | `key` | `{key, value}` |
+| `linux.dns.lookup` | `network` | `name` | `{name, found, addresses, exit_code}` |
 | `linux.firewall.show` | `firewall` | — | `{rows, total, backend}` |
 | `linux.mount.list` | `storage` | — | `{rows, total}` (each row `kind` = `mount` / `export`) |
 
@@ -144,6 +147,41 @@ dispatch path's `JsonFluxReducer` wraps set-shaped results.
 exports (`exportfs -s` / `showmount -e`); each row carries a `kind`
 discriminator. Block-topology and capacity reporting (`df` / `lsblk`) is
 out of scope — a separate op if a concrete need arises.
+
+### DNS lookup on the host (`linux.dns.lookup`)
+
+`linux.dns.lookup` answers one question: can this host resolve a name
+through its **own** resolver? It runs `getent ahosts '<name>'` on the host,
+so the lookup goes through the host's name-service switch (on Ubuntu that
+is `systemd-resolved`) and the answer is what programs on that host see.
+This is different from `net.dns_lookup`, which resolves from MEHO's side
+and cannot show that a host's resolver is broken.
+
+- **Input.** `name` is checked against `^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$`
+  (letters, digits, `-`, `.`; must start with a letter or digit; at most
+  253 characters) **before** any command is built. A name with a space,
+  `;`, `$`, `` ` ``, `|`, `>`, a quote, or a leading `-` is refused with a
+  `ValueError` and never reaches the host. Because the charset admits no
+  quote character, the builder wraps the name in single quotes itself and
+  the command is always literally `getent ahosts '<name>'`.
+- **Output.** `{name, found, addresses, exit_code}`. The parser collects
+  the first token of every `getent` line (one line per socket type, so
+  each address appears three times) and de-duplicates in first-seen
+  order. `getent` exit `2` ("key not found") is a **lookup verdict**:
+  `found=false`, `addresses=[]`, no error. Any other non-zero exit
+  (`127` when `getent` is missing, `1` for a bad invocation) raises
+  `LinuxDnsLookupProbeError`, so a probe failure is never reported as
+  "not found".
+- **Timeout.** The SSH command runs with a 15-second cap
+  (`DNS_LOOKUP_TIMEOUT_S`). The host's resolver applies its own per-query
+  timeouts underneath; the cap stops a hung resolver from holding the
+  command open. A timeout surfaces as a connector error, not as
+  `found=false`.
+- **Sensors.** The op is `safe` with no approval, so a sensor can watch a
+  host's DNS on a schedule — for example `select $.found`, compare
+  `{"type": "bool", "expect": true}` — and alert when the host's resolver
+  stops answering. `resolvectl query` (which DNS server answered) is not
+  part of this op.
 
 ### Path confinement
 
@@ -161,11 +199,13 @@ because a flat scalar dict is never JSONFlux-reduced.
 
 ### Injection safety
 
-Every operator-supplied value is `shlex.quote`-wrapped into a **fixed**
-command. `unit` and `key` are additionally re-validated against a strict
-charset before command construction (the schema `pattern` is advisory, the
-handler re-check authoritative — the proxmox method-allow-list mold); the
-charset admits no shell metacharacters, so quoting is defence in depth.
+Every operator-supplied value is quoted into a **fixed** command
+(`shlex.quote` for paths, units and keys; explicit single quotes for the
+DNS `name`, whose charset excludes the quote character). `unit`, `key` and
+`name` are additionally re-validated against a strict charset before
+command construction (the schema `pattern` is advisory, the handler
+re-check authoritative — the proxmox method-allow-list mold); the charset
+admits no shell metacharacters, so quoting is defence in depth.
 Unit tests decode each constructed command and assert both the quoting and
 the confinement.
 
@@ -186,6 +226,11 @@ a secret). The read floor never reads secret material into an operation
 parameter, an `OperationResult`, an audit row, a broadcast event, or a log
 line; the shared SSH seam logs only command length + exit code, and hands
 the command + output to the fail-closed redaction engine.
+
+The multi-step read `linux.migration.inventory` (group `migration`,
+`safe`) returns the host as one server record in the common migration
+inventory shape. It only calls `linux.about` and `linux.file.read`. It lives
+in `connectors/migration/source_hosts.py`; see `connectors-migration.md`.
 
 ## The write surface (T2)
 
@@ -351,9 +396,9 @@ connector has no `command.run` verb to extend it to.
   `ensure_path_under_root` / `confine_read_path` / `LINUX_READ_ROOTS` /
   `PathConfinementError` the confinement primitives.
 - Per-domain op modules: `ops_file.py` (file.read / log.tail),
-  `ops_host.py` (service.status / sysctl.read), `ops_firewall.py`
-  (firewall.show), `ops_storage.py` (mount.list) — each ships its handler,
-  command builder, output parser, and `LinuxOp` rows.
+  `ops_host.py` (service.status / sysctl.read / dns.lookup),
+  `ops_firewall.py` (firewall.show), `ops_storage.py` (mount.list) — each
+  ships its handler, command builder, output parser, and `LinuxOp` rows.
 
 ## Control flow
 

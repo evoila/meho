@@ -444,6 +444,7 @@ async def _service_grant_verdict(
     target_id_str: str | None,
     preview_hash: str | None = None,
     params: dict[str, Any] | None = None,
+    decide_only: bool = False,
 ) -> tuple[PermissionVerdict | None, str | None]:
     """Consult a standing grant for a parking service-principal op (#3151 / #3349).
 
@@ -463,8 +464,9 @@ async def _service_grant_verdict(
         connector_id=connector_id,
         preview_hash=preview_hash,
         params=params,
+        record=not decide_only,
     )
-    if grant_id is not None:
+    if grant_id is not None and not decide_only:
         _log.info(
             "policy_gate_standing_grant_auto_approved",
             operator_sub=operator.sub,
@@ -475,6 +477,7 @@ async def _service_grant_verdict(
             target_id=target_id_str,
             grant_id=str(grant_id),
         )
+    if grant_id is not None:
         return PermissionVerdict.AUTO_EXECUTE, f"auto-granted by standing grant {grant_id}"
 
     hint = await _null_target_park_hint(
@@ -488,6 +491,51 @@ async def _service_grant_verdict(
     return None, gate_reason
 
 
+def _non_agent_park_reason(descriptor: EndpointDescriptor, *, is_service: bool) -> str | None:
+    """Why a non-agent call parks, or ``None`` when it runs at once.
+
+    * ``destructive`` (#3198): mandatory human approval for EVERY non-agent
+      principal — it parks regardless of ``requires_approval`` and of
+      principal kind. Without this branch a USER dispatching a destructive
+      op declared ``requires_approval=False`` would auto-execute (the
+      safety_level→park mapping lived only on the service branch),
+      bypassing the preview-hash + blast-radius gate entirely. No standing
+      grant can pre-clear it either: ``consult_and_record_grant`` refuses
+      the destructive tier (decision ``governed-delete-operations.md``
+      requirement 1).
+    * ``requires_approval`` (G11.7-T1): the approval queue.
+    * Service principals only: :func:`_service_safety_gate_reason` (#3152).
+    """
+    if descriptor.safety_level == "destructive":
+        reason = (
+            "safety_level=destructive; mandatory human approval — every "
+            "non-agent principal parks (routed to the approval queue), never "
+            "auto-executes, and no standing grant can pre-clear it (#3183)"
+        )
+        if is_service and sandbox_mode_active():
+            reason += _sandbox_delete_grant_note()
+        return reason
+    if descriptor.requires_approval:
+        return "requires_approval is True; routed to the approval queue (G11.7-T1)"
+    if is_service:
+        return _service_safety_gate_reason(descriptor)
+    return None
+
+
+async def _service_read_scope_denial(*, operator: Operator, target: Any) -> str | None:
+    """The #4992 read-scope refusal for a service principal, or ``None``.
+
+    Runs only for a call that would otherwise run at once. A person can
+    limit a service principal's reads to named targets; a call on a
+    target outside that list (or without a target, when the scope has no
+    "no target" entry) is denied. A principal without a scope is not
+    limited. Reads one row, writes nothing.
+    """
+    from meho_backplane.operations.service_read_scopes import read_scope_denial
+
+    return await read_scope_denial(operator=operator, target=target)
+
+
 async def _non_agent_verdict(
     *,
     operator: Operator,
@@ -496,6 +544,7 @@ async def _non_agent_verdict(
     connector_id: str | None,
     preview_hash: str | None = None,
     params: dict[str, Any] | None = None,
+    decide_only: bool = False,
 ) -> tuple[PermissionVerdict, str | None]:
     """Resolve the verdict for a human / service (non-agent) principal.
 
@@ -510,32 +559,30 @@ async def _non_agent_verdict(
     live matching **standing grant** (#3151) auto-approves it: the grant
     use is recorded on the approvals audit ledger and the gate clears to
     ``AUTO_EXECUTE``. Absent a grant the op parks for a human decision.
+
+    A call that would run at once for a service principal (a ``safe`` op,
+    or a read-only ``caution`` op) is first checked against the
+    principal's **read scope** (#4992): when a person has set one and it
+    does not cover the call's target, the verdict is ``DENY`` with a
+    ``read_scope_denied`` reason. This is the one ``DENY`` this branch
+    returns. Calls that park keep today's rules (grants or approval).
     """
     target_id_str = str(getattr(target, "id", None)) if target is not None else None
     is_service = operator.principal_kind is PrincipalKind.SERVICE
+    gate_reason = _non_agent_park_reason(descriptor, is_service=is_service)
 
-    gate_reason: str | None = None
-    if descriptor.safety_level == "destructive":
-        # #3198: the destructive tier is mandatory-human-approval for EVERY
-        # non-agent principal — it parks regardless of ``requires_approval``
-        # and regardless of principal kind. Without this branch a USER
-        # dispatching a destructive op declared ``requires_approval=False``
-        # would auto-execute below (the safety_level→park mapping lived only
-        # on the ``elif is_service`` branch), bypassing the preview-hash +
-        # blast-radius gate entirely. No standing grant can pre-clear it
-        # either: ``consult_and_record_grant`` refuses the destructive tier
-        # (decision ``governed-delete-operations.md`` requirement 1).
-        gate_reason = (
-            "safety_level=destructive; mandatory human approval — every "
-            "non-agent principal parks (routed to the approval queue), never "
-            "auto-executes, and no standing grant can pre-clear it (#3183)"
-        )
-        if is_service and sandbox_mode_active():
-            gate_reason += _sandbox_delete_grant_note()
-    elif descriptor.requires_approval:
-        gate_reason = "requires_approval is True; routed to the approval queue (G11.7-T1)"
-    elif is_service:
-        gate_reason = _service_safety_gate_reason(descriptor)
+    if gate_reason is None and is_service:
+        denial = await _service_read_scope_denial(operator=operator, target=target)
+        if denial is not None:
+            _log.info(
+                "policy_gate_read_scope_denied",
+                operator_sub=operator.sub,
+                tenant_id=str(operator.tenant_id),
+                op_id=descriptor.op_id,
+                safety_level=descriptor.safety_level,
+                target_id=target_id_str,
+            )
+            return PermissionVerdict.DENY, denial
 
     if gate_reason is None:
         _log.info(
@@ -561,6 +608,7 @@ async def _non_agent_verdict(
             target_id_str=target_id_str,
             preview_hash=preview_hash,
             params=params,
+            decide_only=decide_only,
         )
         if cleared is not None:
             return cleared, gate_reason
@@ -590,6 +638,7 @@ async def policy_gate(
     connector_id: str | None = None,
     preview_hash: str | None = None,
     params: dict[str, Any] | None = None,
+    decide_only: bool = False,
 ) -> tuple[PermissionVerdict, str | None]:
     """G11.2-T3 per-(principal, op, target) policy gate.
 
@@ -653,11 +702,12 @@ async def policy_gate(
     caller's :class:`~meho_backplane.db.models.AgentPermission` rows,
     mirroring the same pattern :func:`audit_safe` uses.
 
-    ``preview_hash`` and ``params`` (#4622) are read only by the
-    service-principal grant consult on an instance in sandbox mode: a
-    ``destructive`` delete under a delete grant must present the hash of
-    its own preview and a valid blast radius before the grant use is
-    recorded. Every other path ignores them.
+    ``preview_hash`` and ``params`` (#4622) matter only to the
+    service-principal grant consult in sandbox mode (a ``destructive``
+    delete must present its own preview hash and a valid blast radius
+    first). ``decide_only`` (#4923) returns the verdict and writes nothing:
+    a grant that would clear the call is reported but not used; the
+    preview relies on this.
     """
     actor_sub = resolve_actor_sub()
     if actor_sub is not None:
@@ -669,6 +719,7 @@ async def policy_gate(
             connector_id=connector_id,
             preview_hash=preview_hash,
             params=params,
+            decide_only=decide_only,
         )
     return await _caller_verdict(
         operator=operator,
@@ -677,6 +728,7 @@ async def policy_gate(
         connector_id=connector_id,
         preview_hash=preview_hash,
         params=params,
+        decide_only=decide_only,
     )
 
 
@@ -688,6 +740,7 @@ async def _caller_verdict(
     connector_id: str | None,
     preview_hash: str | None = None,
     params: dict[str, Any] | None = None,
+    decide_only: bool = False,
 ) -> tuple[PermissionVerdict, str | None]:
     """Verdict for the caller alone, by its principal kind."""
     if operator.principal_kind is PrincipalKind.AGENT:
@@ -699,6 +752,7 @@ async def _caller_verdict(
         connector_id=connector_id,
         preview_hash=preview_hash,
         params=params,
+        decide_only=decide_only,
     )
 
 
@@ -711,6 +765,7 @@ async def _direct_run_verdict(
     connector_id: str | None,
     preview_hash: str | None = None,
     params: dict[str, Any] | None = None,
+    decide_only: bool = False,
 ) -> tuple[PermissionVerdict, str | None]:
     """Verdict for a call made by a direct hosted-agent run (#4237).
 
@@ -725,8 +780,10 @@ async def _direct_run_verdict(
     hosted-agent deny is already the strictest verdict. When the hosted
     agent needs approval, only an agent-kind caller can still make it
     stricter (a deny grant); a human or service caller never gets deny
-    (:func:`_non_agent_verdict`), and working out its verdict could record
-    a standing grant as used for a call that then waits for approval.
+    for a call that parks (:func:`_non_agent_verdict` denies only a read
+    that would run at once, #4992), and working out its verdict could
+    record a standing grant as used for a call that then waits for
+    approval.
     """
     agent = operator.model_copy(
         update={"sub": actor_sub, "principal_kind": PrincipalKind.AGENT, "client_id": actor_sub}
@@ -749,6 +806,7 @@ async def _direct_run_verdict(
         connector_id=connector_id,
         preview_hash=preview_hash,
         params=params,
+        decide_only=decide_only,
     )
     if _more_restrictive(verdict, agent_verdict) is verdict:
         return verdict, reason

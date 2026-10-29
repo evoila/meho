@@ -1,0 +1,510 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""Tests for ``azure.about``, the fingerprint and the registered operations.
+
+The dispatch tests run the real dispatcher (policy, audit, retry after a 401)
+with only the Azure registrar run. Microsoft's login service and Azure
+Resource Manager are mocked with respx. Every id, name and secret here is
+made up.
+"""
+
+from __future__ import annotations
+
+import inspect
+import json
+from collections.abc import AsyncIterator, Iterator
+from typing import Any
+from unittest.mock import AsyncMock
+
+import httpx
+import pytest
+import respx
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+import meho_backplane.operations.result_query as result_query_module
+from meho_backplane.auth.vault import VaultClientError
+from meho_backplane.connectors.azure import (
+    AZURE_CONNECTOR_ID,
+    AZURE_IMPL_ID,
+    AZURE_PRODUCT,
+    AZURE_TYPED_OPS,
+    AZURE_TYPED_WHEN_TO_USE_BY_GROUP,
+    AZURE_VERSION,
+    AzureConnector,
+    register_azure_typed_operations,
+)
+from meho_backplane.connectors.azure.typed_reads import _location_row
+from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import EndpointDescriptor, OperationGroup
+from meho_backplane.jsonflux.query.contract import ResultQuerySpec
+from meho_backplane.operations import dispatch, reset_dispatcher_caches, set_default_reducer
+from meho_backplane.operations._handler_resolve import (
+    get_or_create_connector_instance,
+    reset_handler_cache,
+)
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.operations.meta_tools import search_operations
+from meho_backplane.settings import get_settings
+from tests._azure_fixtures import (
+    CLIENT_A,
+    OBJECT_A,
+    SECRET_A,
+    SUBSCRIPTION_A,
+    TENANT_A,
+    AzureTargetStub,
+    CountingLoader,
+    location_answer,
+    locations_url,
+    login_token,
+    operator,
+    subscription_answer,
+    subscription_url,
+    token_answer,
+    token_url,
+)
+from tests._result_store_helpers import MemoryResultStore
+
+
+@pytest.fixture(autouse=True)
+def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _azure_only_registry() -> Iterator[None]:
+    reset_dispatcher_caches()
+    reset_handler_cache()
+    clear_registry()
+    register_connector_v2(
+        product=AZURE_PRODUCT, version=AZURE_VERSION, impl_id=AZURE_IMPL_ID, cls=AzureConnector
+    )
+    register_connector_v2(product=AZURE_PRODUCT, version="", impl_id="", cls=AzureConnector)
+    yield
+    reset_dispatcher_caches()
+    reset_handler_cache()
+    clear_registry()
+
+
+@pytest.fixture
+def _stub_embedding(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    service = AsyncMock()
+    service.encode_one.return_value = [0.1] * 384
+    service.encode.return_value = [[0.1] * 384]
+    service.dimension = 384
+    monkeypatch.setattr(
+        "meho_backplane.operations.typed_register.encode_endpoint_text",
+        AsyncMock(return_value=[0.1] * 384),
+    )
+    monkeypatch.setattr("meho_backplane.operations._search.get_embedding_service", lambda: service)
+    return service
+
+
+@pytest.fixture
+async def session() -> AsyncIterator[AsyncSession]:
+    async with get_sessionmaker()() as s:
+        yield s
+
+
+async def _registered_connector(loader: CountingLoader) -> AzureConnector:
+    """Run the Azure registrar and give the dispatcher's instance a stub loader."""
+    await register_azure_typed_operations()
+    instance = get_or_create_connector_instance(AzureConnector)
+    assert isinstance(instance, AzureConnector)
+    instance._credentials_loader = loader
+    return instance
+
+
+@pytest.mark.asyncio
+async def test_about_answers_with_the_subscription_and_the_login(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await _registered_connector(CountingLoader())
+
+    with respx.mock() as mock:
+        mock.post(token_url()).respond(200, json=token_answer(login_token()))
+        arm = mock.get(subscription_url()).respond(200, json=subscription_answer())
+        result = await dispatch(
+            operator=operator(),
+            connector_id=AZURE_CONNECTOR_ID,
+            op_id="azure.about",
+            target=AzureTargetStub(),
+            params={},
+        )
+
+    assert result.status == "ok", result.error
+    assert result.result == {
+        "subscription_id": SUBSCRIPTION_A,
+        "display_name": "Example Subscription",
+        "state": "Enabled",
+        "tenant_id": TENANT_A,
+        "cloud": "AzureCloud",
+        "app_id": CLIENT_A,
+        "object_id": OBJECT_A,
+    }
+    request = arm.calls[0].request
+    assert request.url.params["api-version"] == "2022-12-01"
+    assert request.headers["Authorization"] == f"Bearer {login_token()}"
+    assert login_token() not in json.dumps(result.model_dump(mode="json"))
+
+
+@pytest.mark.asyncio
+async def test_a_401_from_azure_logs_in_again_and_retries_once(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    loader = CountingLoader()
+    await _registered_connector(loader)
+
+    with respx.mock() as mock:
+        login = mock.post(token_url()).mock(
+            side_effect=[
+                httpx.Response(200, json=token_answer(login_token(n=1))),
+                httpx.Response(200, json=token_answer(login_token(n=2))),
+            ]
+        )
+        arm = mock.get(subscription_url()).mock(
+            side_effect=[
+                httpx.Response(401, json={"error": {"code": "ExpiredAuthenticationToken"}}),
+                httpx.Response(200, json=subscription_answer()),
+            ]
+        )
+        result = await dispatch(
+            operator=operator(),
+            connector_id=AZURE_CONNECTOR_ID,
+            op_id="azure.about",
+            target=AzureTargetStub(),
+            params={},
+        )
+
+    assert result.status == "ok", result.error
+    assert login.call_count == 2
+    assert arm.call_count == 2
+    assert loader.calls == 1
+    assert arm.calls[0].request.headers["Authorization"] == f"Bearer {login_token(n=1)}"
+    assert arm.calls[1].request.headers["Authorization"] == f"Bearer {login_token(n=2)}"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_login_fails_clearly_and_the_secret_is_read_again(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    loader = CountingLoader()
+    await _registered_connector(loader)
+    target = AzureTargetStub()
+    refusal = {"error": "invalid_client", "error_codes": [7000215]}
+
+    with respx.mock() as mock:
+        login = mock.post(token_url()).mock(
+            side_effect=[
+                httpx.Response(401, json=refusal),
+                httpx.Response(200, json=token_answer(login_token())),
+            ]
+        )
+        mock.get(subscription_url()).respond(200, json=subscription_answer())
+        refused = await dispatch(
+            operator=operator(),
+            connector_id=AZURE_CONNECTOR_ID,
+            op_id="azure.about",
+            target=target,
+            params={},
+        )
+        fixed = await dispatch(
+            operator=operator(),
+            connector_id=AZURE_CONNECTOR_ID,
+            op_id="azure.about",
+            target=target,
+            params={},
+        )
+
+    assert refused.status == "error"
+    assert refused.error is not None and refused.error.startswith("connector_auth_failed")
+    refused_text = json.dumps(refused.model_dump(mode="json"))
+    assert "AADSTS7000215" in refused_text
+    assert SECRET_A not in refused_text
+    assert fixed.status == "ok", fixed.error
+    assert login.call_count == 2
+    assert loader.calls == 2
+
+
+def _region_names(count: int) -> list[str]:
+    return [f"exampleregion{n:02d}" for n in range(count)]
+
+
+@pytest.mark.asyncio
+async def test_location_list_returns_a_result_handle_that_result_query_reads(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """60 regions are more than 50 rows, so the rows go behind a stored-result link."""
+    await _registered_connector(CountingLoader())
+    store = MemoryResultStore()
+    set_default_reducer(JsonFluxReducer(store=store))
+    names = _region_names(60)
+    first_page = {
+        "value": [location_answer(name, paired=(names[-1],)) for name in names[:40]],
+        "nextLink": f"{locations_url()}?api-version=2022-12-01&$skiptoken=page2",
+    }
+    second_page = {"value": [location_answer(name) for name in names[40:]]}
+    caller = operator()
+
+    with respx.mock() as mock:
+        mock.post(token_url()).respond(200, json=token_answer(login_token()))
+        arm = mock.get(locations_url()).mock(
+            side_effect=[
+                httpx.Response(200, json=first_page),
+                httpx.Response(200, json=second_page),
+            ]
+        )
+        result = await dispatch(
+            operator=caller,
+            connector_id=AZURE_CONNECTOR_ID,
+            op_id="azure.location.list",
+            target=AzureTargetStub(),
+            params={},
+        )
+
+    assert result.status == "ok", result.error
+    assert arm.call_count == 2
+    assert arm.calls[0].request.url.params["api-version"] == "2022-12-01"
+    assert arm.calls[1].request.url.params["$skiptoken"] == "page2"
+    assert result.handle is not None
+    assert result.result["row_count"] == 60
+    assert result.result["truncated"] is False
+    assert result.result["pages_read"] == 2
+    assert login_token() not in json.dumps(result.model_dump(mode="json"))
+
+    monkeypatch.setattr(result_query_module, "get_result_handle_store", lambda: store)
+    query = ResultQuerySpec.model_validate(
+        {"filter": [{"field": "name", "op": "=", "value": names[0]}]}
+    )
+    answer = await result_query_module.run_result_query(caller, result.handle.handle_id, query)
+    assert answer["rows"] == [
+        {
+            "name": names[0],
+            "display_name": names[0].title(),
+            "region_type": "Physical",
+            "geography": "Example Geography",
+            "geography_group": "Example Group",
+            "paired_regions": [names[-1]],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_location_list_keeps_a_short_list_inline_and_skips_odd_rows(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await _registered_connector(CountingLoader())
+    page = {"value": [location_answer("exampleregion"), "not-a-location", {"name": "bare"}]}
+
+    with respx.mock() as mock:
+        mock.post(token_url()).respond(200, json=token_answer(login_token()))
+        mock.get(locations_url()).respond(200, json=page)
+        result = await dispatch(
+            operator=operator(),
+            connector_id=AZURE_CONNECTOR_ID,
+            op_id="azure.location.list",
+            target=AzureTargetStub(),
+            params={},
+        )
+
+    assert result.status == "ok", result.error
+    assert result.result["value"] == [
+        {
+            "name": "exampleregion",
+            "display_name": "Exampleregion",
+            "region_type": "Physical",
+            "geography": "Example Geography",
+            "geography_group": "Example Group",
+            "paired_regions": [],
+        },
+        {
+            "name": "bare",
+            "display_name": None,
+            "region_type": None,
+            "geography": None,
+            "geography_group": None,
+            "paired_regions": [],
+        },
+    ]
+
+
+def test_location_row_keeps_geography_and_group_apart() -> None:
+    # Shaped like Azure's answer for Germany West Central in api-version
+    # 2022-12-01: geography is the Azure geography, geographyGroup the group.
+    real_shape = {
+        "name": "germanywestcentral",
+        "metadata": {"geography": "Germany", "geographyGroup": "Europe"},
+    }
+    only_group = {"name": "exampleregion", "metadata": {"geographyGroup": "Europe"}}
+
+    assert _location_row(real_shape) == {
+        "name": "germanywestcentral",
+        "display_name": None,
+        "region_type": None,
+        "geography": "Germany",
+        "geography_group": "Europe",
+        "paired_regions": [],
+    }
+    row = _location_row(only_group)
+    assert row is not None
+    assert row["geography"] is None
+    assert row["geography_group"] == "Europe"
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_describes_the_subscription() -> None:
+    connector = AzureConnector(credentials_loader=CountingLoader())
+
+    with respx.mock() as mock:
+        mock.post(token_url()).respond(200, json=token_answer(login_token()))
+        mock.get(subscription_url()).respond(200, json=subscription_answer())
+        fp = await connector.fingerprint(AzureTargetStub(), operator=operator())
+
+    assert fp.reachable is True
+    assert (fp.vendor, fp.product, fp.version) == ("microsoft", "azure", None)
+    assert dict(fp.extras) == {
+        "subscription_id": SUBSCRIPTION_A,
+        "tenant_id": TENANT_A,
+        "cloud": "AzureCloud",
+        "state": "Enabled",
+    }
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_without_an_operator_reports_why_it_cannot_read() -> None:
+    async def vault_refuses(_target: Any, _operator: Any) -> Any:
+        raise VaultClientError("Vault refused the login of the system identity")
+
+    connector = AzureConnector(credentials_loader=vault_refuses)
+
+    with respx.mock(assert_all_called=False) as mock:
+        login = mock.post(token_url()).respond(200, json=token_answer(login_token()))
+        fp = await connector.fingerprint(AzureTargetStub())
+
+    assert fp.reachable is False
+    assert "VaultClientError" in fp.extras["error"]
+    assert not login.called
+
+
+@pytest.mark.asyncio
+async def test_probe_uses_the_fingerprint_read() -> None:
+    connector = AzureConnector(credentials_loader=CountingLoader())
+    target = AzureTargetStub(host="attacker.example.net")
+
+    probe = await connector.probe(target)
+
+    assert probe.ok is False
+    assert probe.reason is not None and "host must be" in probe.reason
+
+
+@pytest.mark.asyncio
+async def test_the_operation_is_stored_as_typed_and_enabled(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await register_azure_typed_operations()
+
+    rows = (
+        (
+            await session.execute(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.product == AZURE_PRODUCT,
+                    EndpointDescriptor.impl_id == AZURE_IMPL_ID,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    table = {op.op_id: op for op in AZURE_TYPED_OPS}
+    by_op = {row.op_id: row for row in rows}
+    assert set(by_op) == set(table)
+    for row in rows:
+        assert row.source_kind == "typed"
+        assert row.is_enabled is True
+        assert row.safety_level == table[row.op_id].safety_level
+        assert row.requires_approval is table[row.op_id].requires_approval
+    about_ref = by_op["azure.about"].handler_ref
+    status_ref = by_op["azure.operation.status"].handler_ref
+    location_ref = by_op["azure.location.list"].handler_ref
+    assert about_ref is not None and about_ref.endswith("AzureConnector.about")
+    assert location_ref is not None and location_ref.endswith("AzureConnector.location_list")
+    assert status_ref is not None and status_ref.endswith("AzureConnector.operation_status")
+
+
+@pytest.mark.asyncio
+async def test_every_group_is_enabled_with_its_text(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await register_azure_typed_operations()
+
+    groups = (
+        (
+            await session.execute(
+                select(OperationGroup).where(
+                    OperationGroup.product == AZURE_PRODUCT,
+                    OperationGroup.impl_id == AZURE_IMPL_ID,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert {group.group_key for group in groups} == set(AZURE_TYPED_WHEN_TO_USE_BY_GROUP)
+    for group in groups:
+        assert group.review_status == "enabled"
+        assert group.when_to_use == AZURE_TYPED_WHEN_TO_USE_BY_GROUP[group.group_key]
+
+
+@pytest.mark.asyncio
+async def test_search_operations_finds_azure_about(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await register_azure_typed_operations()
+
+    found = await search_operations(
+        operator(),
+        {"connector_id": AZURE_CONNECTOR_ID, "query": "azure subscription login about"},
+    )
+
+    assert "azure.about" in {hit["op_id"] for hit in found["hits"]}
+
+
+def test_the_account_reads_come_first_and_every_op_id_is_unique() -> None:
+    account_ids = ["azure.about", "azure.location.list", "azure.operation.status"]
+    op_ids = [op.op_id for op in AZURE_TYPED_OPS]
+    assert op_ids[: len(account_ids)] == account_ids
+    assert len(op_ids) == len(set(op_ids))
+    for op in AZURE_TYPED_OPS[: len(account_ids)]:
+        assert op.safety_level == "safe" and op.requires_approval is False
+        assert "read-only" in op.tags
+
+
+def test_every_operation_has_a_closed_schema_and_guidance() -> None:
+    for op in AZURE_TYPED_OPS:
+        assert op.parameter_schema["additionalProperties"] is False
+        assert op.llm_instructions is not None
+        for key in ("when_to_call", "output_shape", "next_step"):
+            assert str(op.llm_instructions[key]).strip()
+
+
+def test_every_operation_has_its_own_method_and_a_group_text() -> None:
+    handler_attrs = [op.handler_attr for op in AZURE_TYPED_OPS]
+    assert len(handler_attrs) == len(set(handler_attrs))
+    modules_by_group: dict[str, set[str]] = {}
+    for op in AZURE_TYPED_OPS:
+        handler = getattr(AzureConnector, op.handler_attr, None)
+        assert inspect.iscoroutinefunction(handler), op.op_id
+        assert AZURE_TYPED_WHEN_TO_USE_BY_GROUP.get(op.group_key, "").strip(), op.op_id
+        modules_by_group.setdefault(op.group_key, set()).add(handler.__module__)
+    assert set(AZURE_TYPED_WHEN_TO_USE_BY_GROUP) == {op.group_key for op in AZURE_TYPED_OPS}
+    # The group texts of all families are merged into one dict, so two families
+    # with the same group key would silently keep only one text.
+    shared = {group: modules for group, modules in modules_by_group.items() if len(modules) > 1}
+    assert not shared, f"one group key used by several family modules: {shared}"

@@ -4659,6 +4659,12 @@ class RunnerPrincipal(Base):
         nullable=False,
         default=lambda: datetime.now(UTC),
     )
+    # #5020: the wire version the runner sent on its last call (the runner
+    # list shows it). Stored by
+    # :func:`~meho_backplane.auth.runner_guard.assert_runner_scope` also when
+    # the version does not match, so an operator can see which runner is on
+    # another version. ``NULL`` until the runner calls after migration 0118.
+    wire_version: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         Index(
@@ -5794,6 +5800,49 @@ class SandboxDeleteGrant(_StandingGrantColumns, Base):
 
     __tablename__ = "sandbox_delete_grant"
     __table_args__ = _standing_grant_table_args("sandbox_delete_grant")
+
+
+class ServicePrincipalReadScope(Base):
+    """The targets a service principal may read (#4992).
+
+    A service principal runs every ``safe`` operation at once on every
+    target of its tenant. A person can narrow that with a **read scope**:
+    one row per ``(tenant, principal_sub)`` holding a list of entries. Each
+    entry is one target id, one target selector (``target_product`` and/or
+    ``target_name_pattern``, the same shapes a standing grant uses, so a
+    target registered later can match), or ``no_target`` (allow calls that
+    have no target). A ``safe`` call on a target outside the scope is
+    refused (``read_scope_denied``,
+    :func:`meho_backplane.operations.service_read_scopes.read_scope_denial`).
+    A principal without a row is not limited.
+
+    ``entries`` is a JSON list; the shape of one entry is
+    :class:`~meho_backplane.operations.service_read_scope_schemas.ReadScopeEntry`.
+    The scope is read as a whole on every service-principal read, so the
+    entries live in one row instead of one row each. Setting the scope
+    replaces the whole row; clearing deletes it. Only a person writes it
+    (``api/v1/service_read_scopes.py``). Changes keep today's rules
+    (grants or approval); the scope limits only calls that run at once.
+    """
+
+    __tablename__ = "service_principal_read_scope"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), ForeignKey("tenant.id"), nullable=False)
+    # JWT ``sub`` of the service principal. Soft reference, no FK -- same
+    # discipline as ServicePrincipalGrant.principal_sub.
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    entries: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False
+    )
+    set_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "tenant_id", "principal_sub", name="uq_service_principal_read_scope_principal"
+        ),
+    )
 
 
 class SandboxModeState(Base):
@@ -8743,6 +8792,17 @@ class CheckDashboardSensor(Base):
         primary_key=True,
         nullable=False,
     )
+    # The member's state as this Dashboard last counted it (#5068): the
+    # severity-capped, hold-time-applied state the rollup folds. The
+    # transition claim (``checks.investigate``) is its only writer and
+    # compare-and-swaps it like ``check_dashboards.last_rollup_state``, so
+    # a member that gets worse while the Dashboard's own state stays the
+    # same still produces exactly one mail. Lives on the link row, not the
+    # ``sensor`` row, because one Sensor can sit on several Dashboards and
+    # each Dashboard mails on its own. NULL means "not counted yet" (every
+    # row from before migration 0116): the first claim records the state
+    # without mailing.
+    last_member_state: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     __table_args__ = (
         # Reverse lookup "which Dashboards reference this Sensor" + the index
@@ -8751,6 +8811,12 @@ class CheckDashboardSensor(Base):
             "check_dashboard_sensors_sensor_idx",
             "sensor_id",
             postgresql_using="btree",
+        ),
+        # ``last_member_state`` over exactly #2504's ``CheckState`` members;
+        # NULL is admitted (the state is unwritten until the first claim).
+        sa.CheckConstraint(
+            _ck_in("last_member_state", _CHECK_DASHBOARD_ROLLUP_STATES),
+            name="ck_check_dashboard_sensors_last_member_state",
         ),
     )
 

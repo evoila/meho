@@ -550,6 +550,7 @@ func TestRenderStatusMapping(t *testing.T) {
 		{"error", ErrOpError},
 		{"denied", ErrOpError},
 		{StatusRateLimited, ErrOpError},
+		{StatusNotFound, ErrOpError},
 	}
 	for _, tc := range cases {
 		cmd := &cobra.Command{}
@@ -786,7 +787,7 @@ func TestCallDecodesAuditID(t *testing.T) {
 func TestPrintGenericFailureRendersAuditReceipt(t *testing.T) {
 	const auditID = "88888888-8888-8888-8888-888888888888"
 	errMsg := "connection refused"
-	for _, status := range []string{"error", "denied", StatusRateLimited} {
+	for _, status := range []string{"error", "denied", StatusRateLimited, StatusNotFound} {
 		t.Run(status, func(t *testing.T) {
 			c := New("vault-1.x")
 			var buf bytes.Buffer
@@ -875,5 +876,92 @@ func TestRenderJSONCarriesAuditID(t *testing.T) {
 				t.Errorf("audit_id: got %#v want %#v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestRenderNotFoundNamesResourceIDs — status=not_found is a known
+// result (#3591, #4986): the connector confirmed the object does not
+// exist. Render prints the envelope, names the ids from
+// extras.resource_ids in plain words, exits 1 via ErrOpError, and never
+// tells the operator to upgrade the CLI.
+func TestRenderNotFoundNamesResourceIDs(t *testing.T) {
+	errText := "not_found: VirtualMachine vm-123 does not exist"
+	for _, jsonOut := range []bool{false, true} {
+		c := New("vmware-rest-9.0")
+		cmd := &cobra.Command{}
+		var out, errBuf bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errBuf)
+		r := &CallResult{
+			Status: StatusNotFound, OpID: "vmware.object.collect", Error: &errText,
+			Extras: json.RawMessage(`{"error_code":"not_found","resource_ids":["vm-123"],"resource_id":"vm-123"}`),
+		}
+		err := c.Render(cmd, "vmware.object.collect", r, jsonOut, nil)
+		if !errors.Is(err, ErrOpError) {
+			t.Fatalf("json=%v: not_found must exit 1 via ErrOpError; got %v", jsonOut, err)
+		}
+		if errBuf.Len() != 0 {
+			t.Errorf("json=%v: stderr must stay empty; got %q", jsonOut, errBuf.String())
+		}
+		if jsonOut {
+			var decoded map[string]any
+			if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+				t.Fatalf("decode --json output: %v; got %q", err, out.String())
+			}
+			if decoded["status"] != StatusNotFound {
+				t.Errorf("--json status: got %v want %q", decoded["status"], StatusNotFound)
+			}
+			continue
+		}
+		for _, want := range []string{
+			"status=not_found",
+			"meho: connector error: not_found: VirtualMachine vm-123 does not exist",
+			"not found: vm-123\n",
+		} {
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("human render missing %q:\n%s", want, out.String())
+			}
+		}
+	}
+}
+
+// TestWriteNotFoundIDs — the ids line joins several ids and is skipped
+// when the extras blob carries none (absent, null, or malformed).
+func TestWriteNotFoundIDs(t *testing.T) {
+	cases := []struct {
+		name   string
+		extras json.RawMessage
+		want   string
+	}{
+		{"one id", json.RawMessage(`{"resource_ids":["vm-1"]}`), "not found: vm-1\n"},
+		{"several ids", json.RawMessage(`{"resource_ids":["vm-1","vm-2"]}`), "not found: vm-1, vm-2\n"},
+		{"no ids", json.RawMessage(`{"error_code":"not_found"}`), ""},
+		{"empty list", json.RawMessage(`{"resource_ids":[]}`), ""},
+		{"null extras", json.RawMessage(`null`), ""},
+		{"absent extras", nil, ""},
+		{"malformed extras", json.RawMessage(`{"resource_ids":`), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			WriteNotFoundIDs(&buf, tc.extras)
+			if buf.String() != tc.want {
+				t.Errorf("got %q want %q", buf.String(), tc.want)
+			}
+		})
+	}
+}
+
+// TestWriteErrorTrailerNamesIDsOnlyForNotFound — a status=error envelope
+// that happens to carry resource_ids does not get the not-found line.
+func TestWriteErrorTrailerNamesIDsOnlyForNotFound(t *testing.T) {
+	errText := "boom"
+	var buf bytes.Buffer
+	WriteErrorTrailer(&buf, &CallResult{
+		Status: "error", Error: &errText,
+		Extras: json.RawMessage(`{"resource_ids":["vm-1"]}`),
+	})
+	if strings.Contains(buf.String(), "not found:") {
+		t.Errorf("status=error must not print the not-found line:\n%s", buf.String())
 	}
 }

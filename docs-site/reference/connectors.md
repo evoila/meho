@@ -13,7 +13,9 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | Connector | Product | Supported versions | Kind |
 | --- | --- | --- | --- |
 | `argocd-api-3.x` | `argocd` | >=2.0,<4.0 | — |
+| `azure-arm-2026.10` | `azure` | — | — |
 | `bind9-ssh-9.x` | `bind9` | — | typed |
+| `entra-graph-1.0` | `entra` | — | — |
 | `fleet-lcm-9.0` | `fleet` | >=9.1,<10.0 | — |
 | `fleet-rest-9.0` | `fleet` | >=8.0,<9.1 | — |
 | `gcloud-rest-1.0` | `gcloud` | — | — |

@@ -48,7 +48,7 @@ import contextvars
 import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
@@ -546,7 +546,12 @@ def test_bridged_tool_matches_mcp_definition(name: str) -> None:
 async def test_bridged_tools_reuse_registered_mcp_handlers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The adapters call the handler the MCP surface registered, with the run's operator."""
+    """The adapters call the handler the MCP surface registered, with the run's operator.
+
+    ``meho_connector_list`` is left out: its hosted handler returns the rows
+    before the reduce step, so the toolset can apply the allow-list first
+    (#4121). ``test_agent_toolset_discovery`` covers it.
+    """
     seen: list[tuple[str, str, dict[str, Any]]] = []
 
     def fake_get_tool(name: str) -> Any:
@@ -564,14 +569,8 @@ async def test_bridged_tools_reuse_registered_mcp_handlers(
     specs = {s.name: s for s in toolset_discovery.build_discovery_meta_tools()}
     operator = _make_operator(sub="op-distinct-principal")
 
-    assert await specs["meho_connector_list"].handler(operator, {"status": "enabled"}) == {
-        "from": "meho_connector_list"
-    }
     assert await specs["list_targets"].handler(operator, {"limit": 10}) == {"from": "list_targets"}
-    assert seen == [
-        ("meho_connector_list", "op-distinct-principal", {"status": "enabled"}),
-        ("list_targets", "op-distinct-principal", {"limit": 10}),
-    ]
+    assert seen == [("list_targets", "op-distinct-principal", {"limit": 10})]
 
 
 async def test_governed_handler_returns_jsonflux_handle_unchanged() -> None:
@@ -1076,6 +1075,30 @@ async def _run_definition(toolset: dict[str, Any] | None, operator: Operator) ->
 async def _audit_row_count() -> int:
     async with get_sessionmaker()() as session:
         return (await session.execute(select(func.count()).select_from(AuditLog))).scalar_one()
+
+
+@pytest.mark.parametrize(
+    ("kind", "reason", "invalid_field"),
+    [("invalid", "unsupported", "kind"), ("capability", "invalid", "reason")],
+)
+def test_receipt_revalidates_existing_omissions(kind: str, reason: str, invalid_field: str) -> None:
+    # A frozen stdlib dataclass does not enforce its own Literal annotations.
+    # The receipt must check an already-created instance at its input boundary.
+    omission = ContextOmission(kind=cast("Any", kind), name="tool", reason=cast("Any", reason))
+    with pytest.raises(ValidationError) as error:
+        HostedContextReceipt(
+            conventions_revision="revision",
+            capabilities={},
+            context_chars=0,
+            context_tokens_estimate=0,
+            conventions_delivered=0,
+            conventions_tokens_estimate=0,
+            omissions=(omission,),
+        )
+    assert any(
+        item["loc"] == ("omissions", 0, invalid_field) and item["type"] == "literal_error"
+        for item in error.value.errors()
+    )
 
 
 async def test_receipt_fixture_configured_empty() -> None:

@@ -1338,7 +1338,8 @@ host changes.
 
 Every credential write that can wait for approval now has a builder.
 Each builder shows what changes and never a secret value. These nine
-got one in #4850:
+got one in #4850; `k8s.secret.update` came later with its own builder
+(`connectors/kubernetes/ops_secret_write_preview.py`):
 
 | Op | Who waits for approval | The approver sees | Never shown |
 |---|---|---|---|
@@ -1346,11 +1347,20 @@ got one in #4850:
 | `vault.auth.userpass.update_password` | every call | mount, username, `sets_password` | the password |
 | `vault.auth.userpass.write` | every call | mount, username, `sets_password`, `token_policies` and whether they are replaced or kept | the password |
 | `k8s.secret.create` | every call | name, namespace, type, all key names, inline key names, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts | any value |
+| `k8s.secret.update` | every call | name, namespace, `mode`, the key names that are set, inline key names, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts, the key names the Secret has now, in `replace` mode the key names that are removed | any value |
 | `k8s.job.create` | every call | name, namespace, service account, per container: name, image, env var names, `envFrom` Secret / ConfigMap names, command size in bytes | env values, the command and args text |
 | `sddc.host.validate` | an agent's call | host count; per host: `fqdn`, `username`, `storageType`, `networkPoolId` | the ESXi password and any other spec field |
 | `sddc.host.commission` | every call | the same as `sddc.host.validate` | the same |
 | `holodeck.router.patch` | every call | HoloRouter version, whether the call only checks (`verify_only`, a 9.1 router), the patch ids and the module file each one edits | nothing secret exists; the op takes no params |
 | `vmware.composite.vm.guest.file.read` | an agent's call | VM, guest path, whether MEHO downloads the bytes (`fetch_content`, `max_inline_bytes`), the guest login's store path (`guest_secret_ref`) | the guest login |
+
+`k8s.secret.delete` is not a credential write (its params are only the
+Secret's name and namespace). It is `destructive`, so its preview must carry
+a `blast_radius` block: the approver sees the Secret (namespace, name, type,
+key names) and every Pod, Deployment, StatefulSet, DaemonSet and CronJob in
+the namespace that uses it, never a value. A missing Secret fails the
+preview, so nothing waits for approval. See
+[`connectors-kubernetes.md`](connectors-kubernetes.md).
 
 Each builder copies the fields it shows by name. It never walks the
 whole params, so a new or extra field (a password in an open
@@ -1770,7 +1780,7 @@ token-decode + live decouple verification, and a rollback note — lives in
 
 | Verb | Path | Access | Purpose |
 |---|---|---|---|
-| `GET` | `/api/v1/approvals` | operator **or** approver | List, filtered by `status` (default: `pending`). |
+| `GET` | `/api/v1/approvals` | operator **or** approver | List, newest first, filtered by `status` (default: `pending`; `all` = every state, #5129). Optional `limit` (1..500, no limit when omitted) and `offset`. |
 | `GET` | `/api/v1/approvals/{id}` | operator **or** approver | **Inspect one request** (T5). 404 on cross-tenant. |
 | `GET` | `/api/v1/approvals/{id}/result` | **request owner** (any role) | **Read the approved dispatch's result** (#3209). Principal-scoped: only `principal_sub` reads it; any other principal gets 403 `not_request_owner`. Writes an `approval.result` audit row. |
 | `POST` | `/api/v1/approvals/{id}/approve` | **human** operator **or** approver | Approve. Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and break-glass is off (G11.7-T1); 403 `human_principal_required` for a machine `principal_kind` (#289). |
@@ -1805,6 +1815,14 @@ dispatcher re-checks `required_role` at `tools/call`.
 verbs that hit the REST surface via the generated typed client. `list`
 has a `RUN` column and `show` / `approve` print how the run of an approved
 request ended (#3543, see "Approved, but the run failed" above).
+`list` shows only pending requests unless `--status` is set; `--status all`
+shows every state. An empty list names the state it filtered on and points
+to `--status all` (#5129). `--limit` / `--offset` go to the server as
+`limit` / `offset`. When `--offset` skips every match, the empty message
+says the page is empty and points to a smaller `--offset`, so it does not
+claim the tenant has no requests. When `--work-ref` matches nothing, the
+empty message names the change ticket and points to removing the filter,
+for the same reason.
 
 ### Operator console (`backend/src/meho_backplane/ui/routes/approvals/`)
 

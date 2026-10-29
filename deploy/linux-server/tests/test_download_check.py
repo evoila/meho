@@ -16,7 +16,7 @@ from pathlib import Path
 from download_harness import LINUX_SERVER, FakeLayout, PackagingTestCase, write_tar
 
 TOP = "meho-linux-0.36.0-amd64"
-EXECUTABLES = {"install.sh", "rke2/install.sh", "bin/helm", "bin/meho"}
+EXECUTABLES = {"install.sh", "meho-host", "rke2/install.sh", "bin/helm", "bin/meho"}
 
 
 class LayoutTests(PackagingTestCase):
@@ -63,6 +63,8 @@ class LayoutTests(PackagingTestCase):
         self.assertIn("images/meho-images.linux-amd64.tar.zst", files)
         self.assertIn("LICENSES/README.txt", files)
         self.assertIn("lib/common.sh", files)
+        self.assertIn("lib/firewall.sh", files)
+        self.assertIn("lib/cis.sh", files)
         self.assertEqual(len(files), len(set(files)))
 
     def test_the_layout_holds_every_file_install_sh_reads(self) -> None:

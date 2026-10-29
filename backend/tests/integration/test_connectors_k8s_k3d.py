@@ -1286,3 +1286,80 @@ async def test_job_info_against_k3s_reports_failed_and_complete_jobs(
                     namespace="default",
                     body=_client.V1DeleteOptions(propagation_policy="Background"),
                 )
+
+
+# ---------------------------------------------------------------------------
+# k8s.cronjob.run -- live k3s exercise: a Job made from a CronJob's template
+# finishes, and the CronJob owns it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cronjob_run_against_k3s_creates_a_job_owned_by_the_cronjob(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``k8s.cronjob.run`` on a suspended CronJob that runs ``true`` makes a
+    Job; ``k8s.job.info`` then reads it as complete and its owner is the
+    CronJob. The CronJob is suspended so its schedule never starts a second
+    Job during the test.
+    """
+    from kubernetes_asyncio import client as _client
+
+    connector, target = k3s_connector
+    api_client = await connector._get_api_client(target, _make_k3d_operator())
+    batch_v1 = _client.BatchV1Api(api_client)
+    cronjob_name = f"meho-cronjob-{uuid4().hex[:6]}"
+    body = {
+        "apiVersion": "batch/v1",
+        "kind": "CronJob",
+        "metadata": {"name": cronjob_name, "namespace": "default"},
+        "spec": {
+            "schedule": "0 0 1 1 *",
+            "suspend": True,
+            "jobTemplate": {
+                "metadata": {"labels": {"app": "meho-cronjob-test"}},
+                "spec": {
+                    "backoffLimit": 0,
+                    "template": {
+                        "spec": {
+                            "restartPolicy": "Never",
+                            "containers": [
+                                {"name": "run", "image": _busybox_image(), "command": ["true"]}
+                            ],
+                        }
+                    },
+                },
+            },
+        },
+    }
+    created_cronjob = await batch_v1.create_namespaced_cron_job(namespace="default", body=body)
+
+    try:
+        result = await connector.k8s_cronjob_run(
+            _make_k3d_operator(), target, {"cronjob": cronjob_name, "namespace": "default"}
+        )
+        assert result["created"] is True
+        assert result["cronjob"] == cronjob_name
+        job_name = result["job_name"]
+        assert job_name.startswith(f"{cronjob_name}-manual-")
+
+        info = await _wait_for_job_to_finish(connector, target, job_name)
+        assert info["state"] == "complete"
+        assert info["pods_succeeded"] == 1
+
+        job = await batch_v1.read_namespaced_job(name=job_name, namespace="default")
+        assert job.metadata.labels["app"] == "meho-cronjob-test"
+        assert job.metadata.annotations["cronjob.kubernetes.io/instantiate"] == "manual"
+        (owner,) = job.metadata.owner_references
+        assert owner.kind == "CronJob"
+        assert owner.name == cronjob_name
+        assert owner.uid == created_cronjob.metadata.uid
+        assert owner.controller is True
+    finally:
+        # Deleting the CronJob with a Background cascade reaps the owned Job.
+        with contextlib.suppress(Exception):
+            await batch_v1.delete_namespaced_cron_job(
+                name=cronjob_name,
+                namespace="default",
+                body=_client.V1DeleteOptions(propagation_policy="Background"),
+            )

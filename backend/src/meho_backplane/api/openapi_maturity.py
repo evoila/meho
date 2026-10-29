@@ -98,6 +98,9 @@ TAG_FEATURE: Final[dict[str, str]] = {
     # #3152) are the persistent form of an operator approve decision --
     # same substrate, same maturity tier as the approval queue.
     "service-principal-grants": "approvals",
+    # The read scope (#4992) narrows what a service principal reads without
+    # a grant; a person sets it on the same operator plane as the grants.
+    "service-principal-read-scopes": "approvals",
     "targets": "targets",
     # The per-tenant flight-recorder capture policy (#3272) is the write-side
     # companion of the operator flight-recorder read surface, which rides the

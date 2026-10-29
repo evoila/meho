@@ -159,3 +159,41 @@ def test_version_that_is_not_x_y_z_fails(repo: Path) -> None:
     result = _run(repo)
     assert result.returncode == 1
     assert "not of the form X.Y.Z" in result.stderr
+
+
+@pytest.mark.parametrize("base", ["--name-only", "--output=unexpected-diff", "missing-branch", ""])
+def test_invalid_base_cannot_be_used_as_a_git_option(repo: Path, base: str) -> None:
+    """An option must not turn the committed plugin diff into an empty worktree diff."""
+    (repo / _PLUGIN / "skills" / "a" / "SKILL.md").write_text("two\n")
+    _commit(repo, "change")
+    result = _run(repo, f"--base={base}")
+    assert result.returncode == 1
+    assert "does not name an available commit" in result.stderr
+    assert "fetch it first" in result.stderr
+    assert not (repo / "unexpected-diff").exists()
+
+
+@pytest.mark.parametrize("kind", ["branch", "tag", "commit", "parent"])
+def test_commit_refs_still_check_the_plugin_change(repo: Path, kind: str) -> None:
+    _git(repo, "branch", "plugin-base")
+    _git(repo, "tag", "plugin-base-tag")
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    (repo / _PLUGIN / "skills" / "a" / "SKILL.md").write_text("two\n")
+    _commit(repo, "change")
+    base = {
+        "branch": "plugin-base",
+        "tag": "plugin-base-tag",
+        "commit": base_sha,
+        "parent": "HEAD^1",
+    }[kind]
+    result = _run(repo, "--base", base)
+    assert result.returncode == 1
+    assert "still 0.1.0" in result.stderr
+
+
+def test_base_must_name_a_commit_not_a_file(repo: Path) -> None:
+    result = _run(repo, "--base", f"HEAD:{_PLUGIN}/.claude-plugin/plugin.json")
+    assert result.returncode == 1
+    assert "does not name an available commit" in result.stderr

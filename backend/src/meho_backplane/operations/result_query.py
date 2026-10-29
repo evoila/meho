@@ -103,6 +103,7 @@ from meho_backplane.operations.result_read_admission import (
 from meho_backplane.settings import get_settings
 
 __all__ = [
+    "DEFAULT_LIMIT",
     "MAX_LIMIT",
     "QueryContractError",
     "ResultHandleNotFoundError",
@@ -117,11 +118,29 @@ __all__ = [
 ]
 
 #: Upper bound on a single read-back page: one call returns at most this many
-#: rows so a reader can't pull an unbounded slice in one request. Matches the
-#: ``search_operations`` / ``list_targets`` max-page convention; both the MCP
-#: tool's ``inputSchema`` and the REST body's Pydantic bound import this so
-#: the two surfaces share one ceiling.
+#: rows (or items of an array value read by ``path``) so a reader can't pull
+#: an unbounded slice in one request. Matches the ``search_operations`` /
+#: ``list_targets`` max-page convention. The cap is checked here, in the
+#: core, so the MCP tool and the REST route share one ceiling; their
+#: ``limit`` argument has no static maximum because a text value read by
+#: ``path`` counts characters, and one part may hold many more than 500
+#: (#4994).
 MAX_LIMIT = 500
+
+#: Page size when the caller gives no ``limit``: rows and array items.
+DEFAULT_LIMIT = 50
+
+
+def _page_limit(limit: int | None) -> int:
+    """Resolve the row page size: the default when absent, capped at ``MAX_LIMIT``."""
+    if limit is None:
+        return DEFAULT_LIMIT
+    if limit > MAX_LIMIT:
+        raise QueryContractError(
+            f"limit {limit} is over the {MAX_LIMIT}-row page cap. Read a smaller "
+            f"window: set `limit` to at most {MAX_LIMIT} and page with `offset`."
+        )
+    return limit
 
 
 class ResultHandleNotFoundError(Exception):
@@ -146,15 +165,17 @@ async def read_result_window(
     operator: Operator,
     handle_id: UUID,
     offset: int = 0,
-    limit: int = 50,
+    limit: int | None = None,
 ) -> dict[str, Any]:
     """Return the ``[offset : offset+limit]`` window of a spilled handle.
 
     The tenant + principal come from *operator* (JWT-resolved), never from
-    the request — the arguments carry no tenant, by design. *offset* and
-    *limit* are validated by each transport's own edge (the MCP
-    ``inputSchema``; the REST body's Pydantic bounds), so this core takes
-    them as given.
+    the request — the arguments carry no tenant, by design. Each transport's
+    own edge (the MCP ``inputSchema``; the REST body's Pydantic bounds)
+    checks that *offset* and *limit* are not negative; the row cap is checked
+    here. A missing *limit* is :data:`DEFAULT_LIMIT`; one over
+    :data:`MAX_LIMIT` is a :class:`QueryContractError`, raised before the
+    store is read.
 
     Raises :class:`ResultHandleNotFoundError` when the operator has no tenant
     (it can never own a spilled handle — the reducer keys the spill on
@@ -173,12 +194,13 @@ async def read_result_window(
     :class:`ResultQueryTimeoutError` when the fetch and decode run past the
     time budget (#3640).
     """
+    page_limit = _page_limit(limit)
     store = get_result_handle_store()
     max_bytes = get_settings().result_query_max_output_bytes
 
     def work(raw: bytes, guard: _WorkerGuard) -> dict[str, Any]:
         window = store.decode_window(
-            raw, operator_sub=operator.sub, handle_id=handle_id, offset=offset, limit=limit
+            raw, operator_sub=operator.sub, handle_id=handle_id, offset=offset, limit=page_limit
         )
         if window is None:
             raise ResultHandleNotFoundError(handle_id)
@@ -201,7 +223,7 @@ async def read_result_window(
             "handle_id": str(handle_id),
             "rows": window.rows,
             "offset": offset,
-            "limit": limit,
+            "limit": page_limit,
             "returned_rows": len(window.rows),
             "total_rows": window.total_rows,
             "stored_rows": window.stored_rows,
@@ -550,7 +572,7 @@ async def run_result_query(
     spec: ResultQuerySpec,
     *,
     offset: int = 0,
-    limit: int = 50,
+    limit: int | None = None,
 ) -> dict[str, Any]:
     """Run a bounded, validated structured query over a spilled handle (#3366).
 
@@ -575,7 +597,8 @@ async def run_result_query(
 
     A spec with ``path`` is a document read, not a query: it branches to
     :func:`_read_document_path`, which uses *offset* / *limit* to page an
-    array value. *offset* / *limit* are ignored for a relational query.
+    array value or to read a text value in parts. *offset* / *limit* are
+    ignored for a relational query.
     """
     if spec.path is not None:
         return await _read_document_path(operator, handle_id, spec.path, offset, limit)
@@ -653,7 +676,7 @@ async def _read_document_path(
     handle_id: UUID,
     path: str,
     offset: int,
-    limit: int,
+    limit: int | None,
 ) -> dict[str, Any]:
     """Resolve the RFC 6901 *path* against a handle's document (#3633).
 
@@ -663,6 +686,8 @@ async def _read_document_path(
     that was too big to ride inline. An array value pages: ``rows`` holds
     ``[offset : offset+limit]`` of its items, a non-object item wrapped as
     ``{"value": item}`` (the same shape the reducer gives a list of scalars).
+    A text value comes back in parts (#4994): *offset* and *limit* count
+    characters, and ``value`` holds the part (see :func:`_text_part`).
     Any other value comes back whole in ``value``. A pointer that does not
     resolve, or a rows handle with nothing kept beside its rows, is a
     :class:`QueryContractError`. The output byte budget is the same as for
@@ -690,30 +715,91 @@ async def _read_document_path(
             "path": path,
             "value_type": json_type(node),
             "offset": offset,
-            "limit": limit,
             "truncated": False,
             "coverage": "complete",
             "coverage_note": None,
         }
         if isinstance(node, list):
-            window = node[offset : offset + limit]
+            page_limit = _page_limit(limit)
+            window = node[offset : offset + page_limit]
             rows = [item if isinstance(item, dict) else {"value": item} for item in window]
             result.update(
-                rows=rows, returned_rows=len(rows), total_rows=len(node), stored_rows=len(node)
+                limit=page_limit,
+                rows=rows,
+                returned_rows=len(rows),
+                total_rows=len(node),
+                stored_rows=len(node),
             )
-            budgeted: Any = rows
+            _check_output_budget(rows, handle_id, max_bytes)
+        elif isinstance(node, str):
+            result.update(_text_part(node, offset, limit, max_bytes, handle_id))
         else:
-            result.update(rows=[], value=node, returned_rows=1, total_rows=1, stored_rows=1)
-            budgeted = node
-
-        output_bytes = len(msgspec.json.encode(budgeted))
-        if output_bytes > max_bytes:
-            raise ResultQueryOutputTooLargeError(
-                handle_id, output_bytes, max_bytes, remediation=_PATH_REMEDIATION
+            result.update(
+                limit=limit if limit is not None else DEFAULT_LIMIT,
+                rows=[],
+                value=node,
+                returned_rows=1,
+                total_rows=1,
+                stored_rows=1,
             )
+            _check_output_budget(node, handle_id, max_bytes)
         _check_wire_ceiling(result, handle_id, _PATH_REMEDIATION)
         return result
 
     return await _run_admitted_read(
         operator, handle_id, store, work, timeout_remediation=_PATH_REMEDIATION
     )
+
+
+def _check_output_budget(value: Any, handle_id: UUID, max_bytes: int) -> None:
+    """Refuse a ``path`` read whose JSON text is over the output budget."""
+    output_bytes = len(msgspec.json.encode(value))
+    if output_bytes > max_bytes:
+        raise ResultQueryOutputTooLargeError(
+            handle_id, output_bytes, max_bytes, remediation=_PATH_REMEDIATION
+        )
+
+
+def _text_part(
+    text: str, offset: int, limit: int | None, max_bytes: int, handle_id: UUID
+) -> dict[str, Any]:
+    """The part of a text value that one ``path`` read returns (#4994).
+
+    *offset* and *limit* count characters (Unicode code points), the way
+    they count items for an array value. The part starts *offset*
+    characters in and holds at most *limit* characters. Without a *limit*
+    the cap is *max_bytes*: a character is at least one byte of JSON text,
+    so no bigger part can fit the budget anyway. A part whose JSON text is
+    over the budget is cut shorter until it fits (a binary search over the
+    prefix length, so a few encodes at most), so a read never fails for
+    size alone; ``returned_chars`` says how much came back and
+    ``truncated`` whether more follows after ``offset + returned_chars``.
+    Only a budget too small for even one character is refused.
+    """
+    cap = max_bytes if limit is None else limit
+    part = text[offset : offset + cap]
+    encoded_bytes = len(msgspec.json.encode(part))
+    if encoded_bytes > max_bytes:
+        fits, over = 0, len(part)  # the prefix of length ``fits`` is in budget
+        while fits < over:
+            probe = (fits + over + 1) // 2
+            if len(msgspec.json.encode(part[:probe])) <= max_bytes:
+                fits = probe
+            else:
+                over = probe - 1
+        if fits == 0:
+            raise ResultQueryOutputTooLargeError(
+                handle_id, encoded_bytes, max_bytes, remediation=_PATH_REMEDIATION
+            )
+        part = part[:fits]
+    return {
+        "limit": cap,
+        "rows": [],
+        "value": part,
+        "returned_rows": 1,
+        "total_rows": 1,
+        "stored_rows": 1,
+        "returned_chars": len(part),
+        "total_chars": len(text),
+        "truncated": offset + len(part) < len(text),
+    }

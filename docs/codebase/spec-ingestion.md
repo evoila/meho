@@ -526,7 +526,10 @@ delete land `destructive`.
 
 The parser treats a VIM-style operation whose `operationId` or final path
 method starts with `Destroy`, `Delete`, `Remove`, or `Unregister` as
-`dangerous` and `requires_approval=True`. VI-JSON exposes managed-object
+`dangerous` and `requires_approval=True`. The word may also follow a vSAN
+prefix (`VsanClusterRemoveShare`), and a path whose query has the part
+`action=delete` (`POST /hvc/links/{link}?action=delete`) counts too
+(#4973). VI-JSON exposes managed-object
 methods as `POST /<Type>/{moId}/<Method>`, so its HTTP verb alone would
 otherwise classify an object destroy as `caution`. This is a raise-only rule:
 it never weakens a stricter existing classification. The vocabulary is narrow

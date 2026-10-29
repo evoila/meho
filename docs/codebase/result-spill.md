@@ -318,6 +318,14 @@ the reducer keeps it **whole** as a document record under a handle:
   is not stored either (`reason=admission_limit_exceeded`).
 - Credential-class ops and reduces without an `op_id` pass through
   unchanged, as before.
+- An op may declare `llm_instructions.result_document: {"always": true}`
+  (the dispatcher forwards it as `context["result_document"]`). Then the
+  reducer skips collection detection and keeps the payload as a document
+  record whatever its size, so a small result gets a handle too. The
+  migration inventory reads use it: other operations load the inventory
+  by its handle. When the store did not keep a small payload, it passes
+  through inline as without the hint. A malformed hint is logged and
+  ignored.
 - A multi-step operation's failure envelope (an `issues[]` entry with
   `severity: "error"`, #3809) takes the same reducer path as a success
   payload (#4223). An oversized refusal — `folder.create`'s
@@ -341,13 +349,50 @@ the omitted scalars to make room for the rows, there is no document at
 all. `path` cannot be combined with any relational field (a
 `ValidationError` at spec construction). An array value pages with the
 call's `offset` / `limit` (items that are not objects come back as
-`{"value": item}`); any other value comes back whole in `value`, with
+`{"value": item}`). A text value comes back in parts (#4994, see
+below). Any other value comes back whole in `value`, with
 `value_type` naming its JSON type. A pointer that does not resolve
 (missing member, `-`, a leading-zero or out-of-range index) is a
 recoverable `QueryContractError`. So is a `path` read on a rows handle
 that kept no fields beside its rows, or paging / a relational query on a
 document handle. The same output
 byte budget applies, and so does the terminal wire check (#3641).
+
+### A text value is read in parts (#4994)
+
+Some operations return one big text value: a firewall configuration
+export of about 500,000 characters, a log, a zone file. Before #4994 a
+`path` read returned a string whole, and one over the output budget was
+refused, so the value could not be read through MEHO at all. Now a
+string node is read as a window:
+
+- `offset` and `limit` count characters (Unicode code points), the
+  same way they count items for an array node. `value` holds the part.
+- Without a `limit` the part is as much text as fits the output budget
+  (`RESULT_QUERY_MAX_OUTPUT_BYTES`), so a text that fits still comes
+  back whole, as before. The budget measures JSON text, so a part full
+  of escaped characters holds fewer characters than bytes.
+- A part is always inside the budget. When the asked window is too
+  big, it is cut shorter (a binary search over the prefix length, so a
+  few encodes at most) instead of refused. Only a budget too small for
+  one character is an `output_too_large` refusal.
+- The answer carries `returned_chars` (the length of `value`),
+  `total_chars` (the full length) and `truncated` (`true` when more
+  follows). The next part starts at `offset + returned_chars`. An
+  `offset` past the end gives an empty part with `truncated: false`.
+
+Because a text part may hold far more than 500 characters, the `limit`
+argument has no static maximum on the MCP tool or the REST body any
+more. The core checks the 500 cap itself (`_page_limit`) for rows and
+array items, so that contract is unchanged: a bigger `limit` on a rows
+read is a recoverable `QueryContractError`, and a missing `limit` is
+50. The CLI sends `--limit` only when it was given, and prints a text
+part as plain text under a header that names the window, the total and
+the `--offset` to continue with.
+
+Tests: `backend/tests/test_result_document_path.py` (the `#4994`
+section), `test_mcp_tool_result_query.py`, `test_api_v1_operations.py`,
+`cli/internal/cmd/operation/resultquery_path_test.go`.
 
 ## Completed-operation receipt (`audit_id`, #3636)
 
@@ -448,6 +493,32 @@ handler builds the reducer context itself (the caller's `tenant_id` and
 page spills and reads back through `result_query` like a dispatched
 result. The spill is keyed to the caller even for a cross-tenant
 `platform_admin` listing. See [`targets.md`](targets.md).
+
+### `meho_connector_list` (#4121)
+
+`meho_connector_list` works the same way. Its handler in
+`mcp/tools/connector_admin.py` has two steps:
+
+- `list_connector_rows` reads the connectors and builds the rows. By
+  default each row is short: `connector_id`, `product`, `version`,
+  `status`, `dispatchable`, `scope`. `detail="full"` gives every
+  `ConnectorListItem` field. `product` keeps one product only; empty
+  text means no filter.
+- `reduce_connector_list` runs the rows through `JsonFluxReducer` with
+  `op_id="meho_connector_list"`, the caller's `tenant_id` and
+  `operator_sub`, and a `pagination_hint` that says to narrow with
+  `product`. Over 50 rows or 4 KB, the answer is the summary plus a
+  `handle`.
+
+The short `status` uses the words of the `status` filter (`staged`,
+`enabled`, `disabled`), plus `registered` for a connector with no
+operations yet and `mixed` for one whose groups are partly enabled and
+partly disabled.
+
+A hosted agent run uses the two steps apart: the toolset first drops the
+connectors outside the agent's allow-list, then reduces. So a handle
+never holds a connector the agent may not see. See
+[`agent-runtime.md`](agent-runtime.md).
 
 ## Diagnosis: the RDC cycle-8 `k8s.logs tail=300` finding (#1629)
 

@@ -47,6 +47,7 @@ via :mod:`respx`. Acceptance criteria from #1078 map onto the tests as:
 from __future__ import annotations
 
 import json
+import ssl
 from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
@@ -57,7 +58,6 @@ import httpx2
 import openai
 import pytest
 import respx
-import truststore
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.profiles.openai import OpenAIModelProfile
@@ -541,13 +541,16 @@ def test_paif_client_trusts_ssl_cert_file(monkeypatch: pytest.MonkeyPatch, tmp_p
 
     Internal CAs (the usual case for an on-prem PAIF endpoint) depend on
     this. ``httpx2`` reads the variable when the SDK builds its client.
-    Without it, the client uses the system store (a ``truststore`` context).
+    Without it, the client still checks certificates, against the system
+    store only, so the test CA is not trusted.
     """
     ca_file = write_test_ca(tmp_path, common_name="MEHO PAIF test CA")
     monkeypatch.delenv("SSL_CERT_DIR", raising=False)
 
     monkeypatch.delenv("SSL_CERT_FILE", raising=False)
-    assert isinstance(client_ssl_context(_paif_model().client._client), truststore.SSLContext)
+    ssl_context = client_ssl_context(_paif_model().client._client)
+    assert ssl_context.verify_mode == ssl.CERT_REQUIRED
+    assert "MEHO PAIF test CA" not in ca_common_names(ssl_context)
 
     monkeypatch.setenv("SSL_CERT_FILE", str(ca_file))
     ssl_context = client_ssl_context(_paif_model().client._client)

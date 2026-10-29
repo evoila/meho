@@ -366,6 +366,39 @@ async def test_existing_grant_row_still_clears_an_ordinary_write() -> None:
 
 
 @pytest.mark.asyncio
+async def test_decide_only_consult_reports_the_grant_but_records_no_use() -> None:
+    """``record=False`` answers "would a grant clear this?" and writes nothing (#4923).
+
+    The preview asks the policy gate what the dispatcher would do; a grant
+    that would clear the call is reported, but its use is not recorded, so
+    a preview never shows up as an auto-approval on the audit ledger.
+    """
+    op_id = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+    await _seed_grant_row(op_id)
+    descriptor = EndpointDescriptor(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        op_id=op_id,
+        source_kind="composite",
+        safety_level="caution",
+        requires_approval=False,
+        parameter_schema={},
+    )
+
+    grant_id = await consult_and_record_grant(
+        operator=_service_operator(),
+        descriptor=descriptor,
+        target=None,
+        connector_id=_CONNECTOR,
+        record=False,
+    )
+
+    assert grant_id is not None
+    assert await _grant_use_audit_rows() == 0
+
+
+@pytest.mark.asyncio
 async def test_create_refuses_destructive_tagged_descriptor() -> None:
     """A non-delete-named op whose descriptor carries 'destructive' is refused.
 

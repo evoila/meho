@@ -6,12 +6,15 @@
 The identity surface (entity / entity-alias / group lifecycle) lives in
 :mod:`meho_backplane.connectors.vault.ops_identity`; the token surface
 (create / revoke_accessor / list_accessors / lookup_accessor) lives in
-:mod:`meho_backplane.connectors.vault.ops_token`. Each module owns its
-handlers, schemas import, ``when_to_use`` blurb, and per-op spec table.
+:mod:`meho_backplane.connectors.vault.ops_token`; the token-role surface
+(role.write / role.read / role.list, also in the ``token`` group) lives
+in :mod:`meho_backplane.connectors.vault.ops_token_role`. Each module
+owns its handlers, schemas import and per-op spec table; the token group
+shares one ``when_to_use`` blurb.
 
 This thin module is the single lifespan-driven registrar entry (queued
 from the package ``__init__`` alongside the KV / sys / auth registrars):
-it walks both spec tables and upserts every row into
+it walks the three spec tables and upserts every row into
 ``endpoint_descriptor``. Writes register ``requires_approval=True``
 (privilege assignment / irreversible removal / secret mint); the read
 primitives register safe + approval-free so create-if-absent flows do
@@ -43,6 +46,12 @@ from meho_backplane.connectors.vault.ops_token import (
     vault_token_lookup_accessor,
     vault_token_revoke_accessor,
 )
+from meho_backplane.connectors.vault.ops_token_role import (
+    TOKEN_ROLE_OP_SPECS,
+    vault_token_role_list,
+    vault_token_role_read,
+    vault_token_role_write,
+)
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
 
@@ -59,6 +68,9 @@ __all__ = [
     "vault_token_list_accessors",
     "vault_token_lookup_accessor",
     "vault_token_revoke_accessor",
+    "vault_token_role_list",
+    "vault_token_role_read",
+    "vault_token_role_write",
 ]
 
 
@@ -68,8 +80,9 @@ async def register_vault_identity_token_operations(
 ) -> None:
     """Upsert the Vault identity + token ops into ``endpoint_descriptor``.
 
-    Walks :data:`~meho_backplane.connectors.vault.ops_identity.IDENTITY_OP_SPECS`
-    and :data:`~meho_backplane.connectors.vault.ops_token.TOKEN_OP_SPECS`,
+    Walks :data:`~meho_backplane.connectors.vault.ops_identity.IDENTITY_OP_SPECS`,
+    :data:`~meho_backplane.connectors.vault.ops_token.TOKEN_OP_SPECS` and
+    :data:`~meho_backplane.connectors.vault.ops_token_role.TOKEN_ROLE_OP_SPECS`,
     selecting the group's ``when_to_use`` blurb per spec. Idempotent: a
     second call against unchanged descriptions is a no-op for the
     embedding pipeline via the body-hash skip path in
@@ -78,7 +91,11 @@ async def register_vault_identity_token_operations(
     ``group_key`` (``identity`` / ``token``), ``safety_level``, and
     ``requires_approval`` are carried per-op in the spec rows.
     """
-    specs: tuple[dict[str, Any], ...] = (*IDENTITY_OP_SPECS, *TOKEN_OP_SPECS)
+    specs: tuple[dict[str, Any], ...] = (
+        *IDENTITY_OP_SPECS,
+        *TOKEN_OP_SPECS,
+        *TOKEN_ROLE_OP_SPECS,
+    )
     for spec in specs:
         when_to_use = TOKEN_WHEN_TO_USE if spec["group_key"] == "token" else IDENTITY_WHEN_TO_USE
         await register_typed_operation(

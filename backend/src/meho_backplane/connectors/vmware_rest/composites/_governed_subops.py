@@ -84,6 +84,7 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.host.evacuate": (
         _write._SUB_OPS_HOST_EVACUATE + _write._VIM_SUB_OPS_HOST_EVACUATE
     ),
+    "vmware.composite.host.maintenance.exit": _write._VIM_SUB_OPS_HOST_MAINTENANCE_EXIT,
     "vmware.composite.host.detach_from_vds": (
         _write._SUB_OPS_HOST_DETACH_FROM_VDS + _write._VIM_SUB_OPS_HOST_DETACH_FROM_VDS
     ),

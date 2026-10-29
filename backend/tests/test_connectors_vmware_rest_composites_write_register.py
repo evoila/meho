@@ -51,6 +51,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
     guest_customization_spec_create_composite,
     host_detach_from_vds_composite,
     host_evacuate_composite,
+    host_maintenance_exit_composite,
     register_vmware_composite_operations,
     vm_clone_composite,
     vm_clone_from_template_composite,
@@ -112,6 +113,8 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     # VM CPU / memory limit + reservation write (#3880) -- caution + approval.
     "vmware.composite.vm.resource_allocation.set",
     "vmware.composite.host.evacuate",
+    # Host maintenance-mode exit (#4967): dangerous + approval, like host.evacuate.
+    "vmware.composite.host.maintenance.exit",
     "vmware.composite.host.detach_from_vds",
     "vmware.composite.network.portgroup.create",
     "vmware.composite.network.portgroup.security.set",
@@ -184,6 +187,8 @@ _READ_OP_IDS: tuple[str, ...] = (
     # Content-library SUBSCRIBED reads (#3495).
     "vmware.composite.content_library.subscribed.status",
     "vmware.composite.content_library.subscribed.items.list",
+    # Migration inventory read of one vCenter.
+    "vmware.migration.inventory",
 )
 
 # 2 caution + approval writes (#3495) -- the SUBSCRIBED content-library
@@ -264,6 +269,9 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     ),
     "vmware.composite.host.evacuate": (
         "meho_backplane.connectors.vmware_rest.composites._write.host_evacuate_composite"
+    ),
+    "vmware.composite.host.maintenance.exit": (
+        "meho_backplane.connectors.vmware_rest.composites._write.host_maintenance_exit_composite"
     ),
     "vmware.composite.host.detach_from_vds": (
         "meho_backplane.connectors.vmware_rest.composites._write.host_detach_from_vds_composite"
@@ -413,6 +421,7 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.resource_allocation.set": "vm",
     "vmware.composite.license.assign": "vmware-licensing",
     "vmware.composite.host.evacuate": "host",
+    "vmware.composite.host.maintenance.exit": "host",
     "vmware.composite.host.detach_from_vds": "host",
     "vmware.composite.network.portgroup.create": "networking",
     "vmware.composite.network.portgroup.security.set": "networking",
@@ -797,6 +806,11 @@ async def test_write_composite_parameter_schemas_persist_with_required_fields(
     # host.evacuate requires host.
     evac_schema: dict[str, Any] = dict(by_op["vmware.composite.host.evacuate"].parameter_schema)
     assert evac_schema["required"] == ["host"]
+    # host.maintenance.exit requires host (#4967).
+    exit_schema: dict[str, Any] = dict(
+        by_op["vmware.composite.host.maintenance.exit"].parameter_schema
+    )
+    assert exit_schema["required"] == ["host"]
     # host.detach_from_vds requires host + dvs + fallback_network.
     detach_schema: dict[str, Any] = dict(
         by_op["vmware.composite.host.detach_from_vds"].parameter_schema
@@ -915,6 +929,14 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "aborted",
             "timeout",
             "not_in_cluster",
+        },
+        # #4967: ``unchanged`` (not in maintenance mode) and ``not_connected``
+        # are pre-change refusals; ``timeout`` is a status with the task id.
+        "vmware.composite.host.maintenance.exit": {
+            "exited",
+            "unchanged",
+            "not_connected",
+            "timeout",
         },
         # #2970: the DVS detach is a polled vim ReconfigureDvs_Task.
         "vmware.composite.host.detach_from_vds": {"detached", "incomplete", "timeout"},
@@ -1145,6 +1167,7 @@ def test_all_write_handlers_are_module_level_coroutine_functions() -> None:
         vm_nic_repoint_composite,
         vm_device_cdrom_composite,
         host_evacuate_composite,
+        host_maintenance_exit_composite,
         host_detach_from_vds_composite,
         cluster_patch_composite,
         guest_customization_spec_create_composite,

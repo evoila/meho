@@ -170,6 +170,7 @@ cli/
     ├── api/
     │   ├── client.gen.go      # generated typed client (oapi-codegen v2.5).
     │   ├── client.go          # auth-aware wrapper; NewAuthedClient + GetHealth.
+    │   ├── validation_error.go # HTTPValidationError.UnmarshalJSON: a 422 `detail` may be a string or a list (#5134).
     │   ├── workref.go         # Meho-Work-Ref header + MEHO_WORK_REF env names, work-ref shape check, context helpers (#3804).
     │   └── refresh.go         # lazy 401-retry refresh via x/oauth2.
     ├── auth/
@@ -969,7 +970,11 @@ treatment: `dispatch.UnknownStatusError` (used by `dispatch.Render`,
 probably newer than the CLI, that the operation may have run or be
 waiting for approval, and points at `meho status`. The exit code stays
 `4` (`unexpected_response`) because the CLI cannot tell whether the
-operation worked.
+operation worked. The known statuses are `ok`, `error`, `denied`,
+`rate_limited`, `not_found` and `awaiting_approval`; the last three
+are the shared constants `dispatch.StatusRateLimited`,
+`dispatch.StatusNotFound` and `dispatch.StatusAwaitingApproval`, and
+all three lists name them so a new status is added in one place.
 
 ## Global work-ref (`--work-ref`, `MEHO_WORK_REF`, #3804)
 
@@ -1394,9 +1399,12 @@ narrow-waist contract.
   `--preview-hash` from a prior preview of the identical
   `(connector_id, op_id, target, params)`. Without this verb the CLI
   had no way to obtain the hash, so the destructive tier was
-  MCP-only. For an ingested op the human output also prints the
-  `safety_level` and, when the op needs a human approval, an
-  `approval: needs approval` line (#3973). The verb exits 1 on a non-ok
+  MCP-only. Whenever the op resolved, the human output also prints one
+  plain line with the risk level and what MEHO would do with this call
+  for this caller and target (#3973 / #4923) — for example "Risk level:
+  dangerous. This call waits for approval." — and `--json` carries
+  `safety_level`, `requires_approval`, `policy_verdict` and
+  `policy_reason`. The verb exits 1 on a non-ok
   envelope (`status="error"` for input faults, `status="unavailable"` for
   a typed/composite op with no literal HTTP request to preview).
 - `meho operation result-query <handle_id> [--offset N] [--limit N] | [--where ...] [--select ...] [--group-by ...] [--aggregate ...] [--order-by ...] [--query-limit N] | [--path <pointer>]`
@@ -1410,11 +1418,19 @@ narrow-waist contract.
   `""` is the whole document, `/a/0/b` goes one step per `/`. It reads
   one value of a document handle, or a top-level field a rows handle
   left out of its inline summary (`omitted_scalar_count`). An array
-  value pages with `--offset` / `--limit`. The CLI refuses `--path`
+  value pages with `--offset` / `--limit`. A text value comes back in
+  parts (#4994): `--offset` and `--limit` count characters, and without
+  `--limit` a part is as much text as fits the output budget. The CLI
+  sends `limit` only when `--limit` was given, so the backplane picks
+  the default for what is read. The CLI refuses `--path`
   together with any query flag before the call. The reply carries
-  `path`, `value_type` and `value` (raw JSON) next to the paging fields;
-  the human render is one header line (handle, path, type) and the
-  pretty-printed value, or the item lines with the window for an array.
+  `path`, `value_type` and `value` (raw JSON) next to the paging fields,
+  plus `returned_chars` and `total_chars` for a text value; the human
+  render is one header line (handle, path, type) and the pretty-printed
+  value, the item lines with the window for an array, or, for a text
+  part, a header with the character window and the total, a note with
+  the `--offset` to continue with when more follows, and the part as
+  plain text.
   Paging a document handle without `--path` is a server 422; the CLI
   shows the server's message and adds the `--path` form that works
   (`resultquery_path.go`).
@@ -1499,10 +1515,13 @@ scenarios.
 
 - `0` — verb ran cleanly; for `call`, `status == "ok"`.
 - `1` — `call` only: dispatcher returned `status == "error"`,
-  `status == "denied"` or `status == "rate_limited"` (connector raised,
-  schema validation rejected, policy denied, or the caller is over its
-  rate or concurrency limit). The envelope is printed first; a
-  `rate_limited` one shows `extras.retry_after_seconds`. When the
+  `status == "denied"`, `status == "rate_limited"` or
+  `status == "not_found"` (connector raised, schema validation
+  rejected, policy denied, the caller is over its rate or concurrency
+  limit, or the connector confirmed the object does not exist). The
+  envelope is printed first; a `rate_limited` one shows
+  `extras.retry_after_seconds`; a `not_found` one adds a
+  `not found: <id>` line from `extras.resource_ids` (#4986). When the
   backplane committed an audit row, the text output ends with
   `audit receipt: <id>` on every status, not only on `ok` (#4833) —
   a failed call's row is the one that says why it failed; read it
@@ -1796,7 +1815,7 @@ unqualified names. After G0.12-T16 #1274 the 15 vendor dirs (`vault`,
 `vcf-logs`, `vcf-operations`) share **one** transport implementation
 instead of byte-near-identical `doAuthedRequest` / `sendRequest` /
 `httpError` trios. Exit codes: `0` status=ok, `1`
-status=error/denied/rate_limited (via the `errOpError` sentinel re-exported from
+status=error/denied/rate_limited/not_found (via the `errOpError` sentinel re-exported from
 `dispatch.ErrOpError`), `2` auth_expired, `3` unreachable,
 `4` unexpected_response.
 
@@ -2709,8 +2728,8 @@ output), `--backplane` (override the configured backplane URL).
 - **Known top-level columns** map 1:1 to the API's `TargetCreate` /
   `TargetUpdate` body fields: `name`, `aliases`, `product`, `host`,
   `port`, `fqdn`, `secret_ref`, `auth_model`, `vpn_required`,
-  `notes`, `preferred_impl_id`, `verify_tls`, `tls_ca_pin`,
-  `tls_server_name`. The list in
+  `notes`, `version`, `preferred_impl_id`, `verify_tls`, `tls_ca_pin`,
+  `tls_server_name`, `flight_recorder_capture`. The list in
   `knownTopLevel` is the canonical reference; the
   Python-side mirror lives in
   `backend/tests/test_api_v1_targets_import.py:_KNOWN_TOP_LEVEL`,
@@ -2736,9 +2755,22 @@ output), `--backplane` (override the configured backplane URL).
   specifically surfaces as `connector_tls_verify_failed` /
   "IP address mismatch" on an appliance reached by IP whose leaf cert
   carries an FQDN-only SAN (#2643).
-- **Every other key** spills into the `extras` JSONB column.
-  Explicit `extras:` blocks in the YAML merge with spilled keys
-  rather than overwriting them.
+- **`version`** is the operator-asserted product version, the same
+  column `meho targets add --version` writes (#3649). It goes at the
+  body root on CREATE and PATCH. The resolver reads it before the
+  first probe, and a versioned, profile-backed connector registers no
+  wildcard entry, so a target without it can neither run an operation
+  nor be probed. `parseTargetsYAML` rejects a non-string value
+  (YAML reads an unquoted `8.0` as the number 8), so the file must
+  quote it.
+- **Every other key** spills into the `extras` JSONB column, and
+  the import prints a warning for each one (`unknown field "<key>":
+  not a target column, stored in extras`). Warnings show in the
+  dry-run plan, in the `--json` plan's `warnings` list, and on stderr
+  before a human-mode apply. Explicit `extras:` blocks in the YAML
+  merge with spilled keys rather than overwriting them, and keys
+  inside them get no warning — that is the way to store a free-form
+  field on purpose.
 
 **Idempotency.** The plan-build phase fetches
 `GET /api/v1/targets` (paginated) and partitions every YAML entry

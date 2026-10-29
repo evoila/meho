@@ -3,9 +3,10 @@
 # Copyright (c) 2026 evoila Group
 """Tests of storage/local-path-storage.yaml, the storage manifest of form 2.
 
-It is Rancher's local-path provisioner v0.0.37 manifest with three changes
+It is Rancher's local-path provisioner v0.0.37 manifest with five changes
 only: the class is the default one, the volumes live in /var/lib/meho/volumes,
-and both images are pinned by digest.
+both images are pinned by digest, the provisioner has CPU and memory bounds,
+and the provisioner cannot gain more rights than it starts with.
 
 fixtures/local-path-storage-v0.0.37.yaml is the upstream file, unchanged.
 The CI job compares it with upstream, and anyone can check it by hand:
@@ -39,6 +40,21 @@ EXPECTED_CHANGES = [
         ["          image: docker.io/rancher/local-path-provisioner:v0.0.37"],
         [f"          image: docker.io/rancher/local-path-provisioner:v0.0.37@{PROVISIONER_DIGEST}"],
     ),
+    # Resource bounds use the example in the upstream v0.0.37 chart values.
+    (
+        [],
+        [
+            "          resources:",
+            "            requests:",
+            "              cpu: 100m",
+            "              memory: 128Mi",
+            "            limits:",
+            "              cpu: 100m",
+            "              memory: 128Mi",
+        ],
+    ),
+    # The provisioner cannot gain more rights than it starts with.
+    ([], ["          securityContext:", "            allowPrivilegeEscalation: false"]),
     # The class is the default storage class.
     ([], ["  annotations:", '    storageclass.kubernetes.io/is-default-class: "true"']),
     # The volumes live in /var/lib/meho/volumes.
@@ -58,7 +74,7 @@ class StorageManifestTests(unittest.TestCase):
     def test_fixture_is_the_upstream_v0_0_37_file(self) -> None:
         self.assertEqual(UPSTREAM_SHA256, hashlib.sha256(UPSTREAM.read_bytes()).hexdigest())
 
-    def test_only_the_three_changes_differ_from_upstream(self) -> None:
+    def test_only_the_five_changes_differ_from_upstream(self) -> None:
         upstream = UPSTREAM.read_text().splitlines()
         ours = OURS.read_text().splitlines()
 

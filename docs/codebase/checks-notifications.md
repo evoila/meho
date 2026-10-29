@@ -16,6 +16,11 @@ address. The identical mail fans out to every recipient in one
 recipient drops only itself and never silences delivery to the
 allowlisted rest.
 
+Since #5068 the notifier also sends a **new problem** mail: when one
+member Sensor gets worse while the Dashboard's overall state stays the
+same (a Dashboard already `critical` because of one Sensor used to hide
+every later problem on it). See "The new problem mail" below.
+
 The notifier is the second, independent consumer of #2507's transition
 claim. The first is the diagnose-only investigator
 (`docs/codebase/checks-investigator.md`), which fires on a **worsening**
@@ -50,6 +55,11 @@ that should send ad-hoc mail does so through `call_operation` on the
 - `DashboardNotice` — the detached input: dashboard id, name, the
   `previous -> current` edge, the two config columns, and the non-green
   members. Built inside the claim transaction while the ORM row is live.
+  Since #5068 it may carry a `member_change`; the notice is then a "new
+  problem" notice and `previous`/`current` are both the Dashboard's
+  unchanged state.
+- `MemberChange` (#5068) — the one member that got worse: sensor id, name,
+  and its `previous -> current` edge as the Dashboard counts it.
 - `NotifyMember` — one non-green member as the mail renders it (name,
   effective state, last value, last evidence). A notifier-owned
   projection, not a reuse of the investigator's briefing snapshot: this
@@ -126,11 +136,20 @@ including `ok -> unknown`, since `unknown` shares rank 1 with
    mechanism: per-`(tenant, dashboard)` advisory lock, member fold under
    the lock, compare-and-swap of the memo. Since #2719 it returns a
    `_ClaimedTransition` for **both** directions instead of discarding the
-   improving edge, carrying a prebuilt `DashboardNotice`.
+   improving edge, carrying a prebuilt `DashboardNotice`. Since #5068 the
+   same transaction also compare-and-swaps each member's counted state
+   on the link row (`check_dashboard_sensors.last_member_state`) and
+   returns one "new problem" `DashboardNotice` per member that got worse
+   while the Dashboard's state stayed the same (`_claim_member_changes`).
+   When the Dashboard's state did move, the members that got worse ride
+   along on the Dashboard notice instead (`member_changes`), and a caller
+   that lost the Dashboard edge leaves the member memos to the winner.
 2. **Routing** (`investigate._process_transition`). The worsening filter
    that used to live inside the claim now sits at this single site,
    unchanged in meaning: `worsening and non_green` → investigator. Every
-   claimed edge → `schedule_dashboard_notification`.
+   claimed edge → `schedule_dashboard_notification`. Every "new problem"
+   notice → `schedule_dashboard_notification` as well, and nothing else:
+   a member change never reaches the investigator.
 3. **Threshold + flap window + screen + send**
    (`notify_dashboard_transition`). Unset recipient short-circuits; a
    recovery crossing clears the Dashboard's flap windows; then the rank
@@ -138,7 +157,12 @@ including `ok -> unknown`, since `unknown` shares rank 1 with
    allowlist screening (`_allowed_recipients`, #2764); then one
    `send_email` fan-out to the survivors. Screening sits **after** the
    suppression claim, so the claim stays per-edge (one window covers all
-   recipients) and the attempt-based contract is unchanged.
+   recipients) and the attempt-based contract is unchanged. A Dashboard
+   mail that won its claim also claims the member window of every
+   non-green member its body lists (`_claim_member_windows`, #5068) —
+   only the shown members, never one the `_MAX_MEMBER_LINES` cut dropped;
+   a Dashboard mail that lost its claim mails its `member_changes` riders
+   one by one as "new problem" notices instead (see below).
 4. **Outcome logging.** `checks_notify_sent` (info, with
    `recipient_count`) on delivery; `checks_notify_failed` (warning, with
    the transport's stable reason code) on a `sent=False` result or an
@@ -153,6 +177,91 @@ including `ok -> unknown`, since `unknown` shares rank 1 with
    `clear`) when Valkey misbehaves and the fail-open path runs. All are
    at info or above because a claimed edge is a rare event and "no mail
    arrived" is a question the log has to be able to answer.
+
+## The new problem mail (#5068)
+
+**What goes wrong without it.** The edge rule only looks at the
+Dashboard's overall state, which is the worst state of its members. A
+Dashboard that is already `critical` because of one Sensor does not change
+when a second Sensor turns `critical`, so no mail went out and the new
+problem stayed unseen behind the old one.
+
+**The rule.** MEHO also mails when one member gets worse while the
+Dashboard's overall state stays the same:
+
+- The member's state is the one the Dashboard counts: after the Sensor's
+  `severity` cap and after its `for_seconds` hold (`rollup.evaluate_member`'s
+  `effective_state`). A held member counts as `ok` until the hold ends; a
+  `severity=degraded` member never counts as more than `degraded`.
+- "Worse" means `ok`/`skip` → `degraded`/`critical`, or `degraded` →
+  `critical` (`investigate._is_worsening`, the same rank the investigator
+  uses). A member recovering while the Dashboard stays red is memoised
+  but not mailed.
+- The Dashboard's `notify_min_state` floor applies to the member's **new**
+  state: at the default `critical` floor, a member turning `ok → degraded`
+  stays silent; at `degraded` it mails.
+- When the member's change also moves the Dashboard's overall state, the
+  Dashboard mail goes out and lists every non-green member. The members
+  that got worse ride along on that notice (`member_changes`). They get
+  their own "new problem" mail only when the Dashboard mail is suppressed
+  by its flap window: for example A turns `critical` (mail) and drops to
+  `degraded` (mail), then B turns `critical` for the first time inside the
+  same window. The Dashboard edge `degraded -> critical` is suppressed by
+  A's earlier mail, so B is mailed on its own, once, through B's own
+  window. Without this, B's memo would advance and B would never mail.
+
+**Where the memo lives, and why.** Each link row
+(`check_dashboard_sensors`) carries `last_member_state`, added by
+migration `0116`: `text` NULL, CHECK over the five-state vocabulary. It
+sits on the link row and not on the `sensor` row because one Sensor can
+be a member of several Dashboards, each with its own recipients and
+floor, so each Dashboard needs its own memo. It is a durable column and
+not a Valkey key because the mail must go out exactly once also when two
+MEHO copies run: the claim already holds the per-`(tenant, dashboard)`
+lock, and the member memo is moved with the same conditional `UPDATE`
+(`_claim_member_state`, `IS NOT DISTINCT FROM` the value this caller
+read). Only the caller whose `UPDATE` moved the row owns the notice.
+Members whose state did not move issue no write, so a steady Dashboard
+costs nothing extra per evaluation.
+
+**NULL means "not counted yet".** Every link row from before `0116`
+starts NULL, and the first claim after the upgrade records each member's
+current state **without mailing**. An upgrade therefore never sends a
+burst of "new problem" mails for problems that are already visible on the
+Dashboard. A brand-new Dashboard never hits this case: its first
+evaluation is always a Dashboard edge (`NULL → state`), which sends the
+Dashboard mail and records every member.
+
+**Message shape.** Subject:
+`[MEHO] <dashboard>: new problem <sensor> <previous> -> <current> (dashboard still <state>)`.
+The Sensor name is folded like the Dashboard name (header safety). Body:
+the Dashboard, `State: <state> (unchanged)`, `New problem: <sensor>
+<previous> -> <current>`, then the usual non-green member blocks with the
+new member **first** and marked `(new)`, so the member-line limit
+(`_MAX_MEMBER_LINES`) can never drop it. When the mail is the fallback
+for a suppressed Dashboard mail, the subject says `(dashboard <previous>
+-> <current>)` and the body `State: <previous> -> <current>` instead.
+
+**Cool-down.** The #2732 window applies per `(tenant, dashboard, sensor,
+state)`: key `meho:checks:notify:<tenant>:<dashboard>:member:<sensor>:<state>`,
+same `SET NX EX`, same `CHECKS_NOTIFY_SUPPRESSION_WINDOW_MINUTES`, same
+fail-open posture. A member that recovers and fails again inside the
+window is suppressed (`checks_notify_suppressed` with `member_name`).
+A Dashboard mail that goes out claims the same key for every non-green
+member its body shows (`_claim_member_windows`): the recipient was just
+told about that member at that state, so neither a later fallback nor a
+recover-and-fail-again mails it again inside the window. `_shown_members`
+decides the list for both the body and the claims, so a member the
+`_MAX_MEMBER_LINES` cut left out of the mail is not claimed: its next
+problem inside the window still mails as a new problem. Member keys are
+not cleared by a Dashboard recovery; they expire on their own. Escalation
+is a different state and therefore a different key, so `degraded →
+critical` on the same member mails at once.
+
+**Logs.** The same events as the Dashboard mail (`checks_notify_sent`,
+`checks_notify_skipped_below_threshold`, `checks_notify_suppressed`, …)
+with `previous_state`/`current_state` being the member's edge, plus
+`member_name` and `member_sensor_id`.
 
 ## Flap suppression (#2732)
 
@@ -329,6 +438,14 @@ from the memo would mean re-mailing every unchanged evaluation.
   per window — the window is per-`(dashboard, state)`, not
   per-dashboard. Digests, batching, and grouping several Dashboards
   into one mail remain out of scope (#2716).
+- **A member recovering on a red Dashboard sends no mail (#5068).** The
+  memo moves to `ok` silently; the recipient learns of it from the next
+  Dashboard mail or the console. A mail for that case, and the
+  investigator looking at a new member problem on an already-red
+  Dashboard, are separate decisions.
+- **One mail per worsened member.** Two members whose holds end in the
+  same evaluation produce two "new problem" mails, not one grouped mail
+  (the #2716 digest boundary).
 - **The window is attempt-based and ephemeral.** A send that fails
   inside a window is not retried by the next same-state crossing, and a
   Valkey flush (or failover to an empty replica) re-arms every window —
@@ -365,14 +482,19 @@ from the memo would mean re-mailing every unchanged evaluation.
   the #2732 flap-window seam
 - `backend/src/meho_backplane/checks/investigate.py` —
   `_process_transition`, `_claim_dashboard_transition`,
-  `_ClaimedTransition`, `_dashboard_notice`, `_finding_notice`
+  `_ClaimedTransition`, `_dashboard_notice`, `_finding_notice`;
+  `_claim_member_changes` / `_claim_member_state` / `_DashboardClaims`
+  are the #5068 member-memo seam
+- `backend/alembic/versions/0116_add_check_dashboard_sensor_member_state.py`
+  — the `last_member_state` column (#5068)
 - `backend/src/meho_backplane/checks/advisory.py` — the `SET NX EX`
   claim precedent the flap window follows
 - `backend/alembic/versions/0068_add_check_dashboard_notify.py`
 - `backend/tests/test_checks_notify.py`,
   `backend/tests/test_checks_investigate.py` (the finding mail through
   the investigation seam),
-  `backend/tests/migrations/test_migration_0068_add_check_dashboard_notify.py`
+  `backend/tests/migrations/test_migration_0068_add_check_dashboard_notify.py`,
+  `backend/tests/migrations/test_migration_0116_add_check_dashboard_sensor_member_state.py`
 - `docs/codebase/connectors-mail.md`,
   `docs/codebase/checks-investigator.md`,
   `docs/codebase/checks-advisory.md`

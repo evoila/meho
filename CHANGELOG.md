@@ -90,6 +90,231 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-10-28
+
+MEHO 0.38.0 starts the Azure connector: the login with a service
+principal, the first reads (`azure.about`, `azure.location.list`) and the
+HTTP behaviour every later Azure read uses (one retry budget, waiting on
+"too many requests", paging and polling of long-running operations). It
+adds four more connectors: vSphere Replication, VMware Orchestrator, Salt
+and the migration assessment shapes. A person can now limit what a
+service principal may read, the install form 2 gets its host firewall
+and the `meho-host` command, and the flight recorder and the audit log
+leak fewer secrets.
+
+### Security
+- An operation that sends a secret no longer returns the vendor's error
+  text to the caller; the text could carry the secret back (#4899).
+- The audit row's parameter hash is keyed and skips secret parameters, so
+  a hash can no longer be matched against a guessed secret (#4907).
+- The flight recorder gets only the checked file from an API file read,
+  not the raw answer (#5021).
+- The OVF upload checks the upload connection's certificate before it
+  sends disk data (#4981).
+- The form-2 download no longer renders the issuer keys into its values
+  (#4836).
+
+### Added
+- The form-2 install script now sets the host firewall (#4635, ADR 0009:
+  closed by default). It writes one nftables file, `/etc/meho/firewall.nft`,
+  in its own table `inet meho`, and loads it at every start with the new
+  unit `meho-firewall.service`, before RKE2. From another machine only
+  ports 80 and 443 answer, and SSH from the admin network. RKE2's own
+  ports answer only to the machine and its pods. The rules filter before
+  RKE2's port forwarding to Traefik, so the console still loads. The new
+  option `--admin-network <range>` names the addresses that may use SSH.
+  Without it, SSH is allowed only from the address of the SSH session that
+  runs the script; on the machine's console the option is required. The
+  script stops before any change when the admin's own SSH address is
+  outside the range. It turns firewalld or ufw off only after the MEHO
+  rules are loaded. Port 80 of RKE2's Traefik now redirects to 443. The
+  file also has the input, forward and output chains of the MEHO
+  appliance. On a form-2 machine their policy is accept and they have no
+  drop rule, so they change nothing. The appliance build sets them to drop.
+- Azure connector, the reads (all `safe`, one module per family, every
+  list over 50 rows behind a result handle, metadata blocks kept next to
+  it): inventory (subscriptions, resource groups, resources, tags, locks,
+  `azure.graph.query` over several subscriptions with a check of each one
+  against the caller's rights, inventory summary and fixed lists,
+  `azure.tag.update` after approval, and `meho targets discover azure
+  --seed-target` for bulk registration) (#5161); compute (VMs with power
+  state, disks, images, scale sets, VM sizes per region) (#5165); network
+  (virtual networks, security groups, gateways, routes, private DNS)
+  (#5166); storage (accounts, containers, blobs and small text files on
+  the data plane, never keys) (#5177); AKS (clusters, node pools, upgrade
+  options, versions per region, never credentials) (#5178); cost (cost
+  query, forecast, budgets, Advisor and the public retail prices) (#5164);
+  security (Defender secure score, recommendations, alerts and plans,
+  policy compliance, role assignments, activity log) (#5163); Automation
+  (accounts, runbooks, jobs, schedules) (#5185); Azure Migrate (projects,
+  sites, machines, groups, assessments and assessed machines) (#5162).
+  State: every read runs through the dispatcher with the Vault secret and
+  passes the spec path check against Azure's pinned API files; the live
+  tenant proofs are still open, so the Tasks stay open.
+- Entra ID connector (product `entra`, Microsoft Graph): users, groups,
+  directory roles and applications with expiring secrets, through the
+  shared Microsoft login (#5192). State: reads live; admin consent for
+  the four Graph permissions is documented; no live tenant proof yet.
+- Migration inventory reads: one vCenter as a migration inventory
+  (#5124), and Hyper-V, Proxmox, Linux, Windows hosts and Kubernetes
+  workloads in the same shape (#5127).
+- Install form 2: RKE2 runs with its CIS profile from the first install
+  (#5122).
+- MCP: the default tool list carries shorter tool text (#5174); the
+  broadcast tools are named only to sessions that can use them (#5180);
+  `search_knowledge` reads a full knowledge entry by its slug (#5187).
+- CLI: `targets import` maps the version field and warns on unknown keys
+  (#5146).
+- Azure connector (product `azure`, connector `azure-arm-2026.10`, hand-
+  written operations only): login with a tenant id, client id and client
+  secret from Vault, `azure.about` (subscription, tenant, cloud and the
+  login's ids), `azure.operation.status` and `azure.location.list`.
+  Tokens are cached per MEHO tenant, target, Azure tenant, client and
+  scope and renewed before they expire (#5115, #5121). One retry budget
+  per call, waiting as Azure asks on "too many requests", paging over
+  `nextLink` with a link check, and restart-safe polling of long-running
+  operations (#5116). A CI check compares every hand-written path with
+  Azure's pinned API files. The package has one module per operation
+  family, so families can be built in parallel (#5159). State: login and
+  reads run through the dispatcher with the Vault secret; no live tenant
+  proof yet.
+- Migration assessment shapes (`migration-assess-1.x`, no connector
+  class): one inventory shape for servers, applications and Kubernetes
+  workloads with stable source ids and a reason for every unknown field,
+  one assessment result shape where every number carries its inputs, and
+  a read of an Azure Migrate import file (#5113).
+- vSphere Replication connector (`vr-rest-9.1`): login, `vr.about` and
+  `vr.api_file.get` for the API description files the appliance serves;
+  works on 8.8 and 9.0 (#4882). State: login and reads live with the
+  appliance's user and password; no further operations yet.
+- VMware Orchestrator connector (`vro-rest-9.0`): version, health,
+  workflows and runs; login with HTTP Basic, or through Aria Automation
+  8.x with `--extra login=automation` (#4859). A VCF 9 Orchestrator signs
+  in through VCF Automation with the new shared session login, which
+  every VCF 9 connector can use; run reads follow it (#5156). State:
+  reads live; no lab proof has run yet (#5153).
+- Salt connector (`salt-raas`): login, version and six reads of jobs,
+  minions and returns on Aria Automation Config 8.x and VCF 9.1 Salt; a
+  failed Salt job is visible through MEHO (#4964). State: reads live.
+- Aria Automation 8: `vcfa.vra8.api_file.get` reads the API descriptions
+  an appliance serves (#4731).
+- Read scope for service principals: a person limits which targets a
+  service principal may read; a safe call outside the scope is refused
+  with `read_scope_denied` (#5126).
+- GitHub: `gh.composite.git_ref_view`, `git_tree_view` and a commit of
+  files in one step (#4834).
+- Hetzner Robot: add a dedicated server to a vSwitch or remove it, after
+  approval; Robot writes now go out as form fields (#3990).
+- Kubernetes: `k8s.job.list` and `k8s.job.info` (#4886), `k8s.pod.info`
+  returns the running image digest and the waiting reason (#4883),
+  `k8s.cronjob.run` starts a CronJob's job now (#5007), and a Secret can
+  be changed or deleted after approval without showing a value (#5008).
+- VMware: read and answer the question a VM waits on (#4841), end
+  maintenance mode on a host only after approval (#5022), the vSAN health
+  read gets a stored result and a timeout fallback (#4998).
+- Linux hosts: `linux.dns.lookup`, a safe DNS lookup on the host (#5002).
+- Vault: cluster-wide node reads so a sealed standby is visible (#5003),
+  and token role write, read and list operations (#5023).
+- Install form 2: `install.sh` installs the core and writes the two
+  one-time files (#4822), sets the host firewall, closed by default, with
+  `--admin-network` for SSH (#4823), and installs `meho-host` with
+  `check`, `support-bundle` (#4824), `admin-network` and `uninstall`
+  (#5066).
+- Chart: one registry setting and one pull secret reach every pod
+  (#4802, part 1 of #4100).
+- Operations: the preview shows the risk level and the policy verdict
+  (#5001).
+- Agents: the run input is capped at 65,536 characters on REST, MCP and
+  the CLI (#4968).
+- Status: `meho status` shows the database migration revision and the
+  readiness details (#4887).
+- Audit: list flight-recorder traces and read one trace from the CLI
+  (#4913); the audit query table shows the audit id (#4915).
+- CLI: `meho addon pair`, `list`, `show` and `unpair` (#4919);
+  `result-query --path` reads a stored document result by its path
+  (#4918) and a long text value in parts (#5123); the audit id is shown
+  when a call fails (#4920).
+- MCP: `meho_connector_list` returns short rows, takes a product filter
+  and uses a result handle for long lists (#5179).
+- Connector import checks connector folders against an allowlist (#5167).
+- The runner sends and checks its wire version (#5168).
+
+### Fixed
+- Broadcast: the announce advisory finds the caller's claim (#4767).
+- Tests: the runner tests get their logger on each call, so they no
+  longer fail with a changed test order (#5234); the migration test job
+  gets 45 minutes (#5291, #5286).
+- VMware: every page is read when vCenter splits a many-object property
+  read (#4917); `host.evacuate` moves VMs and reads the cluster from the
+  host (#4956); more generic vCenter changes wait for approval (#5117);
+  every appliance local-account operation names the SSO group (#5118).
+- Approvals: nine credential writes show what changes (#4897);
+  `approvals list` help is true and `--status all` exists (#5154).
+- Checks: a new sensor problem is mailed even when its dashboard is
+  already red (#5114).
+- Topology: expected refresh refusals are logged once, without a stack
+  trace (#5006).
+- Connectors: an old tenant connector copy stored under a former product
+  name is reachable (#4954); a Kubernetes env variable shows where its
+  value comes from (#4951).
+- Knowledge base: ingest reads only regular files inside the root
+  (#4905).
+- MCP: `query_audit` accepts the `event_class` filter its help names
+  (#4869); tool descriptions use neutral placeholders (#5171); empty
+  optional text on read tools counts as not given (#5173).
+- CLI: one token request per device-code check in `meho login` (#4953);
+  the backplane's `not_found` result is a known status (#5119); a grant
+  on a multi-step operation is accepted and each write step is named
+  (#5147); the server's 422 text is shown instead of "unreachable"
+  (#5151).
+- Console: the event-source form is structured (#3874) and attributes
+  errors to their fields (#3875); a one-field operation edit keeps the
+  approval and enabled flags (#5013); a destructive operation can run
+  from the console (#5157).
+- Audit: the parameter hash is keyed and skips secrets (#4907, see
+  Security).
+- Linux server: the storage provisioner runs with privilege escalation
+  off (#4997).
+- Agents: the prompt pre-check runs in linear time (#4906); malformed
+  text is no longer scanned repeatedly (#4980).
+- Tooling: Git base refs are checked and the storage controller's
+  resources are bounded (#4977); implicit dependency builds are prevented
+  during install and soak checks (#4982); Sonar reliability defects are
+  fixed (#4996).
+
+### Changed
+- The vSphere licence operations use the shared licence-key mask (#4914).
+- CI: Semgrep reports all rules and fails only on error-level findings
+  (#4893); the per-shard time limit is 900 seconds (#4898); `uv.lock` is
+  scanned with Trivy on pull requests (#4916); the coverage shards run
+  once a night (#4985); Dependabot waits 7 days before taking a new
+  version (#4995); a placeholder root `uv.lock` resets the dependency
+  graph (#4866).
+- Tests: the since-time feed test no longer waits out a fixed second
+  (#4871); the late write gets 2 seconds in the deadline re-read test
+  (#4975); the plugin login test waits for the callback server (#4960);
+  the plain SSL context of httpx2 2.15 on Linux is accepted (#5014).
+- Dependencies: setuptools (#4870), npm packages (#4885), Pillow 13.0.0
+  through fastembed 0.9.1 (#4955), pymongo 4.19.0 (#4874), asyncssh
+  2.24.1 (#4875), ruff 0.17.1 (#4880), types-jsonschema (#4881),
+  trufflehog 3.99.4 (#4872), fastapi 0.146.0 (#4999), httpx2 2.14.0
+  (#5000), and the CodeQL, setup-uv and setup-python actions (#4877,
+  #4878, #4879).
+
+### Documentation
+- Decisions: solutions for one target live outside the backplane
+  (#5220); evoila's own connectors leave the public repository (#5271);
+  one person in several tenants, one current tenant at a time (#5235).
+- Releasing: the emergency merge step for advisory fixes is named
+  (#5282).
+- The Azure package has one fixed place per operation family in every
+  shared file, so parallel branches merge in any order (#5184).
+- Vault policy examples no longer use wildcards Vault does not support
+  (#4770).
+- The MCP operations tool module docstring is true (#4773).
+- The Orchestrator docs say that no lab proof has run for its reads
+  (#5153).
+
 ## [0.37.0] - 2026-10-24
 
 MEHO 0.37.0 adds the operations the open lab work needs: VM snapshots,

@@ -113,14 +113,17 @@ BROADCAST_BLOCK_START: Final[str] = "<<BROADCAST_DISCIPLINE>>"
 BROADCAST_BLOCK_END: Final[str] = "<<END_BROADCAST_DISCIPLINE>>"
 
 
-#: The broadcast coordination discipline, injected into every assembled
+#: The broadcast coordination discipline, injected into the assembled
 #: preamble (G6.5-T6 #2546). Before this band the server-assembled
 #: preamble carried zero broadcast content -- the four-step discipline
 #: lived only in an optional consumer onboarding template. Static text:
-#: it has no tenant-specific data source, so it is always present
-#: (exactly once) regardless of whether the tenant has any operational
-#: conventions. Names the MCP tool names (``meho_broadcast_*``)
-#: so an agent reading the preamble can act on it directly. This is
+#: it has no tenant-specific data source, so when included it is present
+#: exactly once regardless of whether the tenant has any operational
+#: conventions. Since #4113 the MCP ``initialize`` path includes it only
+#: when the session's tool list has ``meho_broadcast_announce`` (see the
+#: ``include_broadcast`` keyword of :func:`assemble_preamble`). Names the
+#: MCP tool names (``meho_broadcast_*``) so an agent reading the preamble
+#: can act on it directly. This is
 #: advisory guidance, not an enforced gate -- MEHO never blocks work on
 #: a missing announcement (the discipline stays substrate-minimal); the
 #: only server-side enforcement is the per-principal write rate limit
@@ -143,6 +146,8 @@ BROADCAST_DISCIPLINE_BAND: Final[str] = "\n".join(
         "3. During long work, re-announce progress "
         '(`phase="update"`) so the shared awareness stays fresh.',
         '4. On completion, announce the outcome (`phase="completion"`).',
+        "",
+        "If your client does not offer one of these tools, skip that step.",
         "",
         "This is coordination guidance, not an enforced gate: MEHO does "
         "not block work on a missing announcement. Announce meaningful "
@@ -298,6 +303,7 @@ async def assemble_preamble(
     capabilities: frozenset[str] | None = None,
     max_tokens: int = DEFAULT_MAX_PREAMBLE_TOKENS,
     conventions_only: bool = False,
+    include_broadcast: bool = True,
 ) -> PreambleResult:
     """Assemble the session preamble for *tenant_id* + *operator_sub* up to *max_tokens*.
 
@@ -309,13 +315,13 @@ async def assemble_preamble(
     :attr:`PreambleResult.dropped_slugs`, and packing continues with
     the next entry.
 
-    Every assembled preamble carries the static
+    By default the assembled preamble carries the static
     :data:`BROADCAST_DISCIPLINE_BAND` (G6.5-T6 #2546), so an empty tenant
     with no in-progress runs returns that band as ``text`` (not the empty
-    string) with ``dropped_slugs == []``. The MCP ``_initialize`` wrapper
-    therefore always populates the ``instructions`` field -- the
-    broadcast coordination discipline reaches every session, including
-    fresh-adoption tenants that have configured no conventions yet.
+    string) with ``dropped_slugs == []``. The broadcast discipline then
+    reaches fresh-adoption tenants that have configured no conventions
+    yet. See ``include_broadcast`` below for the one case that leaves it
+    out.
 
     G12.4-T2 (#1316) extended the signature with the operator's
     ``sub`` so the assembler can call
@@ -346,6 +352,13 @@ async def assemble_preamble(
     guard as the MCP preamble. The default ``False`` keeps every existing
     caller byte-identical.
 
+    #4113 added the optional ``include_broadcast`` keyword. When ``False``
+    the broadcast band is left out and every other band stays. The MCP
+    ``initialize`` path passes ``False`` for a session whose tool list
+    does not include ``meho_broadcast_announce`` (for example a
+    ``read_only`` session), so the text does not name tools the session
+    cannot call. The default ``True`` keeps every other caller unchanged.
+
     Delegates to :func:`assemble_preamble_detailed` and discards the
     verbose fields -- the MCP read path only needs ``text`` and
     ``dropped_slugs``. The G0.14-T8 (#1149) post-write inclusion
@@ -359,6 +372,7 @@ async def assemble_preamble(
         capabilities=capabilities,
         max_tokens=max_tokens,
         conventions_only=conventions_only,
+        include_broadcast=include_broadcast,
     )
     return PreambleResult(detailed.text, detailed.dropped_slugs)
 
@@ -371,6 +385,7 @@ async def assemble_preamble_detailed(
     max_tokens: int = DEFAULT_MAX_PREAMBLE_TOKENS,
     session: AsyncSession | None = None,
     conventions_only: bool = False,
+    include_broadcast: bool = True,
 ) -> PreambleAssembly:
     """Assemble the preamble (verbose pack record + runbook priming band).
 
@@ -407,8 +422,8 @@ async def assemble_preamble_detailed(
     shrink the priming surface. Treating them as a single shared
     budget would force a tradeoff that neither caller wants.
 
-    ``conventions_only`` (#3759) skips the broadcast, priming, and
-    catalogue bands; see :func:`assemble_preamble`.
+    For ``conventions_only`` (#3759) and ``include_broadcast`` (#4113)
+    see :func:`assemble_preamble`.
     """
     conventions = await _load_conventions(session, tenant_id)
     # An empty list renders as ``text=""`` with empty receipt fields, so a
@@ -448,7 +463,9 @@ async def assemble_preamble_detailed(
         catalogue_text = catalogue.text
 
     return PreambleAssembly(
-        text=_combine_bands(rendered.text, priming.text, catalogue_text),
+        text=_combine_bands(
+            rendered.text, priming.text, catalogue_text, include_broadcast=include_broadcast
+        ),
         dropped_slugs=rendered.dropped_slugs,
         kept_slugs=rendered.kept_slugs,
         token_counts=rendered.token_counts,
@@ -484,6 +501,8 @@ def _combine_bands(
     conventions_text: str,
     priming_text: str,
     catalogue_text: str = "",
+    *,
+    include_broadcast: bool = True,
 ) -> str:
     """Stitch the broadcast, conventions, priming, and catalogue bands together.
 
@@ -496,15 +515,15 @@ def _combine_bands(
     separator.
 
     The broadcast band leads because it is MEHO-wide coordination
-    protocol that frames all subsequent work, and because it is static
-    (no data source) it is **always present exactly once** — so every
-    assembled preamble now carries broadcast content, even for a tenant
-    with no operational conventions and an operator with no in-progress
-    runs. This is the intended behaviour change of #2546: the
-    server-assembled preamble previously carried zero broadcast content.
+    protocol that frames all subsequent work. It is static (no data
+    source), so when *include_broadcast* is ``True`` (the default) it is
+    present exactly once, even for a tenant with no operational
+    conventions and an operator with no in-progress runs (#2546). When
+    *include_broadcast* is ``False`` (#4113: the session cannot use the
+    broadcast tools) it is left out and the other bands keep their order.
 
     Byte-identity invariants the tests pin (relative to the broadcast
-    band, which is now always the first band):
+    band, which is the first band when included):
 
     * Conventions present -> the broadcast band, then the conventions
       text (its ``BLOCK_START``/``BLOCK_END`` delimiters unchanged as the
@@ -523,7 +542,7 @@ def _combine_bands(
     bands = [
         band
         for band in (
-            BROADCAST_DISCIPLINE_BAND,
+            BROADCAST_DISCIPLINE_BAND if include_broadcast else "",
             conventions_text,
             priming_text,
             catalogue_text,

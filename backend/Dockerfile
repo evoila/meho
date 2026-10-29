@@ -57,7 +57,7 @@ COPY alembic.ini ./
 # Install ONLY the build backend from the lock (direct-URL download, no index
 # resolve), into /app/.venv.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-install-project --only-group build
+    uv sync --locked --no-build --no-install-project --only-group build
 # Build the wheel reusing the installed backend — no fresh PyPI resolution.
 RUN --mount=type=cache,target=/root/.cache/uv \
     VIRTUAL_ENV=/app/.venv uv build --wheel --no-build-isolation --out-dir /wheels
@@ -109,7 +109,7 @@ WORKDIR /app
 # pyproject without error; it costs ~1 KB on a cache hit.
 COPY pyproject.toml uv.lock README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-install-project
+    uv sync --locked --no-build --no-dev --no-install-project
 
 # Step 2: install the project from the wheel prebuilt in the `wheelbuilder`
 # stage. Installing a built pure-Python wheel needs neither a build backend

@@ -78,6 +78,13 @@ type importDoc struct {
 // right hostname. The column composes with `verify_tls` / `tls_ca_pin`
 // (no mutual-exclusion validator); the server caps it at 512 chars and
 // returns 422 on overflow, which the import path already surfaces.
+//
+// #3649 amendment: `version` is the operator-asserted product version
+// (the same column `meho targets add --version` writes). The resolver
+// reads it before the first probe, and a versioned, profile-backed
+// connector cannot match a target without it. Spilling it into
+// `extras` left the column empty, so the target could neither run an
+// operation nor be probed.
 var knownTopLevel = map[string]struct{}{
 	"aliases":                 {},
 	"auth_model":              {},
@@ -94,6 +101,7 @@ var knownTopLevel = map[string]struct{}{
 	"tls_ca_pin":              {},
 	"tls_server_name":         {},
 	"verify_tls":              {},
+	"version":                 {},
 	"vpn_required":            {},
 }
 
@@ -191,9 +199,11 @@ func newImportCmd() *cobra.Command {
 			"Mapping rules. Top-level columns recognised on the API's " +
 			"TargetCreate / TargetUpdate models are mapped 1:1: name, aliases, " +
 			"product, host, port, fqdn, secret_ref, auth_model, vpn_required, " +
-			"notes, preferred_impl_id, verify_tls, tls_ca_pin, tls_server_name, " +
-			"flight_recorder_capture. Any other field " +
-			"is spilled into the `extras` JSONB column. `fingerprint` is " +
+			"notes, version, preferred_impl_id, verify_tls, tls_ca_pin, " +
+			"tls_server_name, flight_recorder_capture. Any other field " +
+			"is stored in the `extras` JSONB column, with a warning for each " +
+			"one (put it under an explicit `extras:` block to silence the " +
+			"warning). `version` must be a quoted string. `fingerprint` is " +
 			"server-managed and skipped with a warning if present in the YAML " +
 			"(the probe verb is the only legitimate writer).\n\n" +
 			"Idempotency. Default mode aborts the whole import if any entry's " +
@@ -294,6 +304,9 @@ func runImport(cmd *cobra.Command, opts importOptions) error {
 			opts.JSONOut)
 	}
 
+	if !opts.JSONOut {
+		printPlanWarnings(cmd.ErrOrStderr(), p)
+	}
 	if err := executePlan(cmd.Context(), doer, p); err != nil {
 		return renderImportRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
@@ -337,6 +350,14 @@ func parseTargetsYAML(data []byte) ([]map[string]any, error) {
 		}
 		if _, ok := e["host"].(string); !ok {
 			return nil, fmt.Errorf("entry %q: missing or non-string `host` field", name)
+		}
+		// YAML reads an unquoted `version: 8.0` as the number 8, which
+		// the API rejects (and which has already lost the ".0"). Fail
+		// here with a hint instead of guessing the string.
+		if v, ok := e["version"]; ok {
+			if _, isStr := v.(string); !isStr {
+				return nil, fmt.Errorf("entry %q: `version` must be a string; quote it (for example version: \"8.0\")", name)
+			}
 		}
 	}
 	return doc.Targets, nil
@@ -403,7 +424,14 @@ func mapEntry(entry map[string]any) (map[string]any, []string) {
 	}
 
 	// Second pass: partition every other key per the mapping rules.
-	for k, v := range entry {
+	// Sorted so the per-key warnings come out in a stable order.
+	keys := make([]string, 0, len(entry))
+	for k := range entry {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := entry[k]
 		if k == "extras" {
 			// Handled in the pre-pass above. Skip here so the
 			// extras dict isn't double-counted.
@@ -418,8 +446,12 @@ func mapEntry(entry map[string]any) (map[string]any, []string) {
 			body[k] = v
 			continue
 		}
-		// Unknown key → spill into extras.
+		// Unknown key → spill into extras, and say so. A silent spill
+		// hid typos and missing columns (#3649: `version` used to land
+		// here and left the target unable to resolve its connector).
 		extras[k] = v
+		warnings = append(warnings,
+			fmt.Sprintf("unknown field %q: not a target column, stored in extras", k))
 	}
 
 	if len(extras) > 0 {
@@ -647,6 +679,19 @@ func renderPlan(cmd *cobra.Command, p *plan, jsonOut bool) error {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Run without --dry-run to apply.")
 	return nil
+}
+
+// printPlanWarnings writes every per-entry warning to w before apply,
+// so an operator sees skipped or unknown fields even when the apply
+// fails part-way. The JSON output already carries them in the plan.
+func printPlanWarnings(w io.Writer, p *plan) {
+	for _, group := range [][]planEntry{p.Create, p.Update} {
+		for _, e := range group {
+			for _, msg := range e.Warnings {
+				fmt.Fprintf(w, "warning: %s: %s\n", e.Name, msg)
+			}
+		}
+	}
 }
 
 func renderApplyResult(cmd *cobra.Command, p *plan, jsonOut bool) error {

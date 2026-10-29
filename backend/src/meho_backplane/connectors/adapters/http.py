@@ -655,6 +655,13 @@ class HttpConnector(Connector):
     (``fingerprint``, ``probe``, ``execute``).
     """
 
+    #: The ``httpx`` client class :meth:`_build_http_client` builds, or
+    #: ``None`` for the shared :class:`_SameOriginRedirectClient`, which
+    #: follows redirects on the same origin only. A connector whose vendor
+    #: never redirects (Azure) sets a class that follows none, so a redirect
+    #: on the same host can never carry a token to another path.
+    _client_class: type[httpx.AsyncClient] | None = None
+
     def __init__(self) -> None:
         # Keyed on the tenant-unique ``(tenant_id, id)`` tuple
         # (``target_cache_key``) plus ``extra_cache_dimensions`` (the
@@ -833,7 +840,8 @@ class HttpConnector(Connector):
         # ``_pin_target_addresses``, reaching the dispatcher's
         # ``ConnectError`` arm and staying out of the retry policy.
         transport = build_pinned_async_transport(_pin_target_addresses, verify=verify_arg)
-        return _SameOriginRedirectClient(
+        client_class = self._client_class or _SameOriginRedirectClient
+        return client_class(
             base_url=self._base_url(target),
             timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=5.0),
             # Same-origin-only redirect following (see

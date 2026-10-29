@@ -308,7 +308,10 @@ pieces make that work:
 - `meho_connector_list` follows the spec's `connectors` allow-list. When the
   list is set, `_make_meta_tool` keeps only the rows whose `connector_id` is
   in it, so the agent is shown only connectors it may call. With no list, all
-  rows come back.
+  rows come back. The hosted handler is `list_connector_rows`, which returns
+  the rows before the JSONFlux step; `_make_meta_tool` filters first and then
+  calls `reduce_connector_list`. So a long list comes back as a result handle,
+  as on MCP, and the handle holds only allowed rows (#4121).
 
 Both are in the default `{}` surface. The usual flow is: `meho_connector_list`
 → `list_operation_groups` / `search_operations` → `call_operation`.
@@ -597,6 +600,18 @@ not a raised exception, so an SSE consumer always sees a terminal frame.
   <handle>` (#1828), `meho agent run-events <name> --input …`.
 
 All fronts require the `operator` role and are tenant-scoped via the JWT.
+
+The run input has one size limit on every front: 65,536 characters
+(`RUN_INPUT_MAX_CHARS` in `agent/invocation.py`, the same size as the
+knowledge and memory body caps). REST declares it as `max_length` on
+`AgentRunRequest.input`, so a longer body is a 422 (`string_too_long`,
+`ctx.max_length`) before the route runs. MCP declares it as `maxLength` on
+`meho_agents_run.input`; the dispatcher renders a `maxLength` violation as
+`<field>: at most <n> characters` instead of repeating the value. The CLI
+checks `--input` with `utf8.RuneCountInString` before it sends, so a
+too-long input is one short error line, not a 422 body that echoes the
+input. The console keeps its own, smaller prompt limit (`INPUT_MAX` in
+`ui/routes/agents/run.py`).
 
 ### Why the SSE events route is a POST that starts a fresh run
 

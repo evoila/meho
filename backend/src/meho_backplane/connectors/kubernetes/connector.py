@@ -140,8 +140,9 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "Use for per-namespace pod, deployment and Job drill-in: "
         "``k8s.pod.list`` / ``k8s.pod.info`` / ``k8s.deployment.list`` "
         "/ ``k8s.deployment.info`` / ``k8s.job.list`` / ``k8s.job.info`` "
-        "(did a migration or batch Job finish, and did it work?). The "
-        "right group once the operator "
+        "(did a migration or batch Job finish, and did it work?), and "
+        "``k8s.cronjob.run`` to start a CronJob's job now instead of "
+        "waiting for its schedule. The right group once the operator "
         "knows the namespace (typically picked from the 'inventory' "
         "group first). Pair with the 'logs' group when investigating "
         "a CrashLoopBackOff pod, with 'events' when the failure is "
@@ -158,14 +159,21 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "the pods behind each Service via label selectors."
     ),
     "config": (
-        "Use for ConfigMap data inspection: ``k8s.configmap.list`` "
-        "(keys-only -- one row per ConfigMap with its data keys but "
-        "no values) and ``k8s.configmap.info`` (full data payload for "
-        "one named ConfigMap). The right group for 'what config is "
-        "this workload reading?' or 'which env var lives in which "
-        "ConfigMap?'. The list / info split is deliberate -- the "
-        "agent surveys keys cheaply via list, then fetches values "
-        "only for the specific ConfigMap it needs."
+        "Use for ConfigMap data inspection and for Secrets. ConfigMaps: "
+        "``k8s.configmap.list`` (keys-only -- one row per ConfigMap with "
+        "its data keys but no values) and ``k8s.configmap.info`` (full "
+        "data payload for one named ConfigMap). The right group for "
+        "'what config is this workload reading?' or 'which env var lives "
+        "in which ConfigMap?'. The list / info split is deliberate -- the "
+        "agent surveys keys cheaply via list, then fetches values only "
+        "for the specific ConfigMap it needs. Secrets: "
+        "``k8s.secret.create`` makes a new Secret, ``k8s.secret.update`` "
+        "changes the values of an existing one (rotate a token or "
+        "password), ``k8s.secret.delete`` removes one after a preview "
+        "that lists the workloads using it, and ``k8s.secret.read_to_ref`` "
+        "copies a Secret value into the credential store and returns only "
+        "a reference. No Secret op ever shows a value; all of them wait "
+        "for approval."
     ),
     "events": (
         "Use for cluster-event observability and troubleshooting: "
@@ -646,15 +654,29 @@ class KubernetesConnector(Connector):
 
         ``operator`` is keyword-only with a ``None`` default to keep the
         :class:`Connector` ABC signature unchanged while letting the
-        refresh service forward the per-tenant system operator the
-        scheduler synthesises
-        (:func:`~meho_backplane.topology.scheduler._system_operator`).
-        The forwarded operator flows through :meth:`_get_api_client` so
-        the operator-context Vault → kubeconfig chain reads under the
-        scheduler's synthetic tenant identity. The ``None`` fall-back
-        synthesises the system operator the fingerprint/probe paths
-        already use, so a direct caller (test, future on-demand surface
-        that doesn't yet thread the operator) still works closed-loop.
+        refresh service forward the acting operator. The forwarded
+        operator flows through :meth:`_get_api_client`, which reads the
+        target's kubeconfig from Vault under the operator's own token.
+
+        **The scheduled run cannot read a kubeconfig stored in Vault
+        today (#4952).** The per-tenant system operator the scheduler
+        synthesises
+        (:func:`~meho_backplane.topology.scheduler._system_operator`)
+        has no person's token (``raw_jwt=""``), and MEHO does not read a
+        target's credentials from Vault without one. So the scheduled
+        refresh fails for every Kubernetes target whose credentials live
+        in Vault with an
+        :class:`~meho_backplane.connectors._shared.vault_creds.OperatorTokenRequiredError`,
+        which the scheduler reports as an expected outcome. Such targets
+        are updated only when a logged-in operator runs
+        ``meho topology refresh <target>``. A deployment whose credential
+        store is GCP Secret Manager reads with its own service identity,
+        so its scheduled refreshes work.
+
+        The ``None`` fall-back synthesises the system operator the
+        fingerprint/probe paths already use, so a direct caller (test,
+        future on-demand surface that doesn't yet thread the operator)
+        still works closed-loop.
         """
         from meho_backplane.connectors.kubernetes._topology import build_topology_hints
 
@@ -1457,6 +1479,17 @@ class KubernetesConnector(Connector):
 
         return await _k8s_deployment_info(self, target, operator, params)
 
+    async def k8s_workload_list(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``k8s.workload.list`` op."""
+        from meho_backplane.connectors.kubernetes.ops_workload_set import k8s_workload_list as _h
+
+        return await _h(self, target, operator, params)
+
     async def k8s_job_list(
         self,
         operator: Operator,
@@ -1601,6 +1634,17 @@ class KubernetesConnector(Connector):
 
         return await k8s_job_create(self, target, operator, params)
 
+    async def k8s_cronjob_run(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.cronjob.run``."""
+        from meho_backplane.connectors.kubernetes.ops_cronjob import k8s_cronjob_run
+
+        return await k8s_cronjob_run(self, target, operator, params)
+
     async def k8s_secret_read_to_ref(
         self,
         operator: Operator,
@@ -1613,6 +1657,28 @@ class KubernetesConnector(Connector):
         )
 
         return await k8s_secret_read_to_ref(self, target, operator, params)
+
+    async def k8s_secret_update(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.secret.update``."""
+        from meho_backplane.connectors.kubernetes.ops_secret_write import k8s_secret_update
+
+        return await k8s_secret_update(self, target, operator, params)
+
+    async def k8s_secret_delete(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.secret.delete``."""
+        from meho_backplane.connectors.kubernetes.ops_secret_write import k8s_secret_delete
+
+        return await k8s_secret_delete(self, target, operator, params)
 
     @classmethod
     async def register_operations(cls) -> None:

@@ -297,7 +297,7 @@ class HostedContextReceipt(BaseModel):
       collection off, or no open request).
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, revalidate_instances="always")
 
     conventions_revision: str = Field(max_length=64)
     capabilities: dict[str, str]

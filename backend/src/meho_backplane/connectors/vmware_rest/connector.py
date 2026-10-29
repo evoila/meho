@@ -3156,8 +3156,10 @@ class VmwareRestConnector(HttpConnector):
         Delegates to
         :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_vsan_health.host_vsan_health_impl`
         (imported lazily to keep this module off the typed-ops import at
-        class-load time). Returns
-        ``{"cluster": ..., "overall_health": ..., "groups": [...]}``.
+        class-load time). Returns ``{"cluster": ..., "overall_health": ...,
+        "groups": [...], "checked_at": ..., "from_cache": ...}``; after a
+        fresh check that timed out, also ``fresh_check`` and ``note``
+        (#4922).
         """
         from meho_backplane.connectors.vmware_rest.typed_ops_host_vsan_health import (
             host_vsan_health_impl,

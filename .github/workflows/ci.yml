@@ -33,7 +33,7 @@
 # critical path of every run twice. The jobs that pull test images from the
 # internal mirror or read the private spec shelf stay on the internal pools:
 # `python-unit-shard` (heavy pool), `python-integration`,
-# `python-migration-tests` and the push-only coverage jobs. Every moved job
+# `python-migration-tests` and the nightly coverage jobs. Every moved job
 # keeps its name, `if:` guard and triggers, so the required checks are
 # unchanged.
 #
@@ -80,22 +80,27 @@
 #
 # The workflow name is `CI` so it satisfies the `workflow_run:
 # workflows: ["CI"]` dependency in quality-gate.yml (SonarCloud's
-# Clean-as-You-Code gate). The dedicated `python-coverage` job (push to
-# main only) uploads `coverage.xml` as a `python-coverage` artifact so
-# the downstream SonarCloud scan can ingest it — quality-gate.yml's
-# `actions/download-artifact` step references that exact name. The
-# required unit lane (the `python-unit-shard` matrix behind the
-# `python-unit-lane` fan-in) is intentionally NO-cov: see those jobs and
-# #1982 — running the unit suite under coverage OOM-kills the
-# memory-limited heavy runner, so coverage was split into its own
-# push-only, non-required, continue-on-error job (#1987).
+# Clean-as-You-Code gate). The dedicated `python-coverage` job (once a
+# night, on the `schedule` trigger — #4910) uploads `coverage.xml` as a
+# `python-coverage` artifact so the downstream SonarCloud scan can ingest
+# it — quality-gate.yml's `actions/download-artifact` step references
+# that exact name. The required unit lane (the `python-unit-shard` matrix
+# behind the `python-unit-lane` fan-in) is intentionally NO-cov: see
+# those jobs and #1982 — running the unit suite under coverage OOM-kills
+# the memory-limited heavy runner, so coverage was split into its own
+# non-required, continue-on-error job (#1987). It ran on every push to
+# `main` until #4910 moved it to the nightly run: the 8 coverage shards
+# took 12 heavy runners after each merge (about 3,000 heavy-runner
+# minutes a day, most of it cancelled by the next merge), and the merge
+# queue's unit shards then waited for a free runner or ran over their
+# time budget.
 #
 # Fail-loud posture (per Goal #11 + devops_best_practices "no
 # continue-on-error on linters or tests"): every step that asserts a
 # contract is allowed to fail the job. The continue-on-error in this
 # file is confined to coverage: the whole `python-coverage` job is
 # job-level continue-on-error (a coverage OOM degrades to "no
-# coverage for this push" and never fails the CI run conclusion —
+# coverage for this night" and never fails the CI run conclusion —
 # which would otherwise also suppress quality-gate.yml's
 # workflow_run), and the artifact-upload step inside it is
 # step-level continue-on-error. SonarCloud already guards its own
@@ -140,6 +145,15 @@ on:
   # any ahead-in-queue PRs). This is the gate that prevents a
   # stale-but-green PR from landing a broken combination on main.
   merge_group:
+  # Nightly full run on `main` (#4910). This is the only run that produces
+  # the SonarCloud coverage artifact: the 8 `python-coverage` shards and
+  # `python-coverage-combine` run here and on a PR with the
+  # `ci-coverage-validate` label, not after every merge. quality-gate.yml
+  # analyzes only this run. 06:00-07:00 UTC is the quietest hour for
+  # merges; minute 17, not 0, because GitHub delays scheduled runs at the
+  # start of every hour.
+  schedule:
+    - cron: '17 6 * * *'
 
 permissions:
   contents: read
@@ -156,6 +170,8 @@ concurrency:
   # The conditional below restricts cancel-in-progress to pull_request /
   # push contexts only. Queued (not-yet-started) merge_group runs can
   # still be displaced by newer queue entries; that is expected behaviour.
+  # The nightly `schedule` run has its own group (`ci-<ref>-schedule`), so
+  # a merge during the run does not cancel it.
   group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
@@ -560,7 +576,8 @@ jobs:
           path: spec-shelf
           # Cone-mode sparse checkout of the shelf directories only +
           # lazy blob filter: the runner materialises just the pinned
-          # spec files (~0.4 MB argocd-3.3 + ~13 MB esxi-9.0 + ~0.2 MB
+          # spec files (~0.4 MB argocd-3.3 + ~9.8 MB azure-arm-2026.10 +
+          # ~13 MB esxi-9.0 + ~0.2 MB
           # hetzner-robot-2026-04 + ~33 MB nsx-9.0 +
           # ~0.1 MB salt-raas-8.18 + ~2 MB sddc-manager-9.0 +
           # ~38 MB vcenter-8.0 + ~18 MB
@@ -578,6 +595,7 @@ jobs:
           # Keep the list sorted.
           sparse-checkout: |
             docs/argocd-3.3
+            docs/azure-arm-2026.10
             docs/esxi-9.0
             docs/fleet-lcm-9.0
             docs/harbor-2.12
@@ -622,6 +640,7 @@ jobs:
           set -euo pipefail
           for f in \
             spec-shelf/docs/argocd-3.3/argocd-swagger.json \
+            spec-shelf/docs/azure-arm-2026.10/specification/resources/resource-manager/Microsoft.Resources/subscriptions/stable/2022-12-01/subscriptions.json \
             spec-shelf/docs/esxi-9.0/wsdl/vim/vim.wsdl \
             spec-shelf/docs/fleet-lcm-9.0/fleet-lcm-openapi.yaml \
             spec-shelf/docs/harbor-2.12/harbor-swagger.yaml \
@@ -662,7 +681,7 @@ jobs:
               exit 1
             fi
           done
-          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; salt-raas-8.18-reference-operations.tsv present under spec-shelf/docs/salt-raas-8.18/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis reference list present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; the orchestrator reference list present under spec-shelf/docs/vcf-operations-orchestrator-9.0/ + spec-shelf/docs/vcf-operations-orchestrator-9.1/; recovery-srm-v2.yaml + replication-vr-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
+          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; the Azure Resource Manager specs (subscriptions.json and the rest) present under spec-shelf/docs/azure-arm-2026.10/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; salt-raas-8.18-reference-operations.tsv present under spec-shelf/docs/salt-raas-8.18/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis reference list present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; the orchestrator reference list present under spec-shelf/docs/vcf-operations-orchestrator-9.0/ + spec-shelf/docs/vcf-operations-orchestrator-9.1/; recovery-srm-v2.yaml + replication-vr-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
@@ -1187,10 +1206,12 @@ jobs:
     # Restores the SonarCloud Clean-as-You-Code coverage artifact that #1982
     # had to drop from the required unit lane to stop the OOM kill. This job
     # is deliberately:
-    #   * PUSH-TO-MAIN ONLY by default (`github.event_name == 'push'`) — PRs
-    #     stay fast/no-cov; SonarCloud decoration updates "one merge late" (the
-    #     pre-#771 behaviour, the accepted trade in #1987). Not run on PRs
-    #     (no per-PR suite double-run) and not in the merge queue. The ONE
+    #   * ONCE A NIGHT by default (`github.event_name == 'schedule'`, #4910) —
+    #     not on push to `main`, not on PRs, not in the merge queue. PRs stay
+    #     fast/no-cov; SonarCloud gets one analysis a day from the nightly
+    #     run (it ran after every merge until #4910, when the 8 shards filled
+    #     the 12-runner heavy pool after each merge and starved the merge
+    #     queue's unit shards; see the header). The ONE
     #     exception is an opt-in `ci-coverage-validate` PR label: a PR carrying
     #     that label also runs this job, so a change to the coverage path
     #     itself can be proven green + artifact-producing on the real
@@ -1203,8 +1224,8 @@ jobs:
     #     absorbed: the job itself still reports conclusion `failure` (jobs
     #     API, observed on run 30925197316), but it never fails the overall
     #     CI run conclusion. That matters twice: a red coverage job must not
-    #     block merge (it can't — push runs after merge — but defence in
-    #     depth), and it must not flip the CI run's `conclusion` to
+    #     block merge (it can't — the nightly run is not a PR check — but
+    #     defence in depth), and it must not flip the CI run's `conclusion` to
     #     `failure`, which would suppress quality-gate.yml's `workflow_run`
     #     (it only runs on `conclusion == 'success'`).
     #     CAUTION (#2800): continue-on-error absorbs *failure* only —
@@ -1272,12 +1293,13 @@ jobs:
     # tests/conftest.py session-finish hook saves the worker's data before
     # that report, so a slow worker clean-up no longer loses a whole
     # shard's test coverage with every check green.
-    # Runs on push to main, OR on a PR explicitly opted in via the
-    # `ci-coverage-validate` label (the on-runner validation escape hatch
-    # described above). The fork-PR guard still applies on the PR path so
-    # fork code never executes on the self-hosted pool.
+    # Runs on the nightly `schedule` run of `main`, OR on a PR explicitly
+    # opted in via the `ci-coverage-validate` label (the on-runner validation
+    # escape hatch described above). Never on `push` or `merge_group`. The
+    # fork-PR guard still applies on the PR path so fork code never executes
+    # on the self-hosted pool.
     if: >-
-      github.event_name == 'push' ||
+      github.event_name == 'schedule' ||
       (github.event_name == 'pull_request' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
        contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate'))
@@ -1331,7 +1353,7 @@ jobs:
     #      reap seen on the heavy pool, so GitHub's job timeout wins that
     #      race. (The combine + coverage.xml upload moved to the
     #      python-coverage-combine fan-in job below, with its own budget.)
-    # Neither runner cap is a perf budget: the job is push-only and non-blocking,
+    # Neither runner cap is a perf budget: the job is nightly and non-blocking,
     # so a long wall never gates a PR.
     timeout-minutes: 55
     continue-on-error: true
@@ -1630,8 +1652,9 @@ jobs:
     # single `python-coverage` artifact (backend/coverage.xml) — the
     # quality-gate.yml contract is byte-identical to the old monolithic
     # producer; only the producer topology changed. Same trigger + absorption
-    # posture as the shard job: push-to-main (or the `ci-coverage-validate`
-    # PR label), non-required, whole-job continue-on-error. `always()` keeps
+    # posture as the shard job: the nightly `schedule` run (or the
+    # `ci-coverage-validate` PR label), never `push` or `merge_group`,
+    # non-required, whole-job continue-on-error. `always()` keeps
     # the fan-in merging partial data when a shard failed its tests or died —
     # per-download continue-on-error tolerates a shard that never produced an
     # artifact, and the combine step's ls guard exits cleanly when none did.
@@ -1640,7 +1663,7 @@ jobs:
     needs: python-coverage
     if: >-
       always() &&
-      (github.event_name == 'push' ||
+      (github.event_name == 'schedule' ||
        (github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate')))
@@ -1762,7 +1785,7 @@ jobs:
         # flipping the run conclusion to `cancelled` and blocking the
         # RELEASING.md tag gate. A step cap converts that hang into an
         # absorbed step FAILURE — run stays `success`, coverage degrades to
-        # "none for this push", the documented lossy contract. This fan-in
+        # "none for this run", the documented lossy contract. This fan-in
         # job's budget: downloads 8 x 2 + this step 4 + upload 2 = 22 min
         # of bounded steps + checkout/uv/sync (~1-2 min honest) under the
         # 26-min job cap, so step caps always fire first.
@@ -1784,7 +1807,7 @@ jobs:
       - name: Upload Python coverage artifact
         # Consumed by quality-gate.yml (`workflow_run` -> SonarCloud) under this
         # exact name. Lossy: a missing upload degrades the SonarCloud signal to
-        # "no coverage for this push" but never invalidates anything.
+        # "no coverage for this run" but never invalidates anything.
         # continue-on-error here is belt-and-suspenders on top of the whole-job
         # continue-on-error.
         if: always() && hashFiles('backend/coverage.xml') != ''
@@ -1903,6 +1926,7 @@ jobs:
           path: spec-shelf
           sparse-checkout: |
             docs/argocd-3.3
+            docs/azure-arm-2026.10
             docs/esxi-9.0
             docs/fleet-lcm-9.0
             docs/harbor-2.12
@@ -1940,6 +1964,7 @@ jobs:
           set -euo pipefail
           for f in \
             spec-shelf/docs/argocd-3.3/argocd-swagger.json \
+            spec-shelf/docs/azure-arm-2026.10/specification/resources/resource-manager/Microsoft.Resources/subscriptions/stable/2022-12-01/subscriptions.json \
             spec-shelf/docs/esxi-9.0/wsdl/vim/vim.wsdl \
             spec-shelf/docs/fleet-lcm-9.0/fleet-lcm-openapi.yaml \
             spec-shelf/docs/harbor-2.12/harbor-swagger.yaml \
@@ -1980,7 +2005,7 @@ jobs:
               exit 1
             fi
           done
-          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; salt-raas-8.18-reference-operations.tsv present under spec-shelf/docs/salt-raas-8.18/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis reference list present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; the orchestrator reference list present under spec-shelf/docs/vcf-operations-orchestrator-9.0/ + spec-shelf/docs/vcf-operations-orchestrator-9.1/; recovery-srm-v2.yaml + replication-vr-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
+          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; the Azure Resource Manager specs (subscriptions.json and the rest) present under spec-shelf/docs/azure-arm-2026.10/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; salt-raas-8.18-reference-operations.tsv present under spec-shelf/docs/salt-raas-8.18/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis reference list present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; the orchestrator reference list present under spec-shelf/docs/vcf-operations-orchestrator-9.0/ + spec-shelf/docs/vcf-operations-orchestrator-9.1/; recovery-srm-v2.yaml + replication-vr-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Same rationale as python-unit-shard's login step — the
@@ -2077,7 +2102,7 @@ jobs:
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.migrations == 'true')
     runs-on: meho-runners-ci
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       # Surfaced as a job-level env var purely so the Docker Hub login
       # step can test it in an `if:`. The `secrets` context is NOT

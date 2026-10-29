@@ -156,6 +156,36 @@ def _tool_result_is_error(name: str, result: dict[str, Any]) -> bool:
     return name in _OPERATION_RESULT_TOOLS and result.get("status") in _ERROR_STATUSES
 
 
+def _drop_empty_optional_text(arguments: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
+    """Return *arguments* without top-level optional values that are empty or blank text.
+
+    A key the schema lists in its top-level ``required`` stays, so an
+    empty required field is still refused by the schema check.
+    """
+    required = set(schema.get("required", ()))
+    return {
+        key: value
+        for key, value in arguments.items()
+        if key in required or not (isinstance(value, str) and not value.strip())
+    }
+
+
+def _schema_error_text(exc: jsonschema.ValidationError) -> str:
+    """Return the human-readable part of a schema-violation message.
+
+    ``jsonschema``'s own ``maxLength`` message repeats the whole offending
+    value (``'xxxx…' is too long``) and never names the limit. A too-long
+    free-text argument is the one case where that is both useless and
+    costly — the value can be tens of kilobytes — so it is rendered as
+    ``<field>: at most <n> characters`` instead. Every other violation keeps
+    the library's message.
+    """
+    if exc.validator != "maxLength":
+        return exc.message
+    field = ".".join(str(part) for part in exc.path) or "value"
+    return f"{field}: at most {exc.validator_value} characters"
+
+
 #: MCP-defined error code for "Resource not found" per spec
 #: §Resources/Error Handling. Distinct from the generic JSON-RPC
 #: ``METHOD_NOT_FOUND`` because ``resources/read`` is the method that
@@ -461,6 +491,12 @@ async def handle_tools_call(
                     },
                 )
 
+        # Read tools treat an empty optional text argument as "not given"
+        # (#4110): small models fill unused filters with "", and a filter
+        # on "" silently matches nothing. Required fields keep the check.
+        if defn.op_class == "read":
+            arguments = _drop_empty_optional_text(arguments, defn.inputSchema)
+
         # Validate arguments against the tool's inputSchema. ``cls`` is
         # pinned to :class:`jsonschema.Draft202012Validator` to make the
         # "JSON Schema 2020-12" contract called out in :class:`ToolDefinition`
@@ -490,7 +526,7 @@ async def handle_tools_call(
         except jsonschema.ValidationError as exc:
             status_code = 400
             raise McpInvalidParamsError(
-                f"tools/call {name!r}: arguments failed inputSchema: {exc.message}",
+                f"tools/call {name!r}: arguments failed inputSchema: {_schema_error_text(exc)}",
             ) from exc
 
         result = await handler(operator, arguments)

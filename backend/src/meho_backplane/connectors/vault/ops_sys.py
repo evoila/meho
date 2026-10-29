@@ -11,6 +11,10 @@ ACL-policy CRUD surface (G3.15-T2 #1410, defined in
 
 * ``vault.sys.health`` — cluster health (``GET /v1/sys/health``).
 * ``vault.sys.seal_status`` — seal state (``GET /v1/sys/seal-status``).
+* ``vault.sys.ha_status`` — every cluster node (``GET /v1/sys/ha-status``;
+  defined in :mod:`meho_backplane.connectors.vault.ops_sys_cluster`).
+* ``vault.sys.raft.autopilot_state`` — every raft server with its health
+  (``GET /v1/sys/storage/raft/autopilot/state``; same module).
 * ``vault.sys.mounts.list`` — enabled secret backends (``GET /v1/sys/mounts``).
 * ``vault.sys.auth.list`` — enabled auth backends (``GET /v1/sys/auth``).
 * ``vault.sys.policy.read`` — one ACL policy body (``GET /v1/sys/policy/<name>``).
@@ -20,7 +24,7 @@ ACL-policy CRUD surface (G3.15-T2 #1410, defined in
 * ``vault.sys.policy.delete`` — remove an ACL policy
   (``DELETE /v1/sys/policy/<name>``).
 
-The four diagnostics ops are ``safety_level='safe'`` /
+The six diagnostics ops are ``safety_level='safe'`` /
 ``requires_approval=False`` and classify as ``op_class='read'`` via
 :func:`~meho_backplane.broadcast.events.classify_op` (the ``.health`` /
 ``.seal_status`` suffixes are in that classifier's read-suffix tuple so
@@ -112,6 +116,15 @@ from meho_backplane.connectors.vault.ops_sys_bootstrap import (
     vault_sys_mounts_enable,
     vault_sys_mounts_tune,
 )
+from meho_backplane.connectors.vault.ops_sys_cluster import (
+    VAULT_SYS_CLUSTER_PARAMETER_SCHEMA,
+    VAULT_SYS_HA_STATUS_LLM_INSTRUCTIONS,
+    VAULT_SYS_HA_STATUS_RESPONSE_SCHEMA,
+    VAULT_SYS_RAFT_AUTOPILOT_STATE_LLM_INSTRUCTIONS,
+    VAULT_SYS_RAFT_AUTOPILOT_STATE_RESPONSE_SCHEMA,
+    vault_sys_ha_status,
+    vault_sys_raft_autopilot_state,
+)
 from meho_backplane.connectors.vault.ops_sys_policy import (
     VAULT_SYS_POLICY_DELETE_LLM_INSTRUCTIONS,
     VAULT_SYS_POLICY_DELETE_PARAMETER_SCHEMA,
@@ -139,6 +152,7 @@ __all__ = [
     "vault_sys_auth_enable",
     "vault_sys_auth_list",
     "vault_sys_auth_tune",
+    "vault_sys_ha_status",
     "vault_sys_health",
     "vault_sys_mounts_enable",
     "vault_sys_mounts_list",
@@ -147,11 +161,12 @@ __all__ = [
     "vault_sys_policy_list",
     "vault_sys_policy_read",
     "vault_sys_policy_write",
+    "vault_sys_raft_autopilot_state",
     "vault_sys_seal_status",
 ]
 
 
-#: Shared empty-parameter schema. None of the four sys read ops take a
+#: Shared empty-parameter schema. None of the six sys read ops take a
 #: parameter — they each return a fixed cluster-wide view. ``additional
 #: Properties=False`` rejects a stray key (e.g. a typo'd ``{"mount":
 #: ...}``) with a clear dispatcher-side validation error rather than
@@ -266,7 +281,9 @@ _VAULT_SYS_HEALTH_LLM_INSTRUCTIONS: dict[str, Any] = {
         "sealed?' question before attempting a secret read. Read-only and "
         "unauthenticated on Vault's side — never mutates state and never "
         "returns secret content. Shares its implementation with the "
-        "backplane's own Vault readiness probe."
+        "backplane's own Vault readiness probe. Answers for the one node "
+        "behind the target's address; use vault.sys.raft.autopilot_state "
+        "to see every node."
     ),
     "parameter_hints": {},
     "output_shape": (
@@ -284,7 +301,9 @@ _VAULT_SYS_SEAL_STATUS_LLM_INSTRUCTIONS: dict[str, Any] = {
         "Read Vault's seal state and unseal progress (type, threshold t, "
         "shares n, progress). Use when an operator asks about seal status "
         "or unseal progress specifically — finer-grained than "
-        "vault.sys.health. Read-only; no secret content."
+        "vault.sys.health. Read-only; no secret content. Answers for the "
+        "one node behind the target's address; use "
+        "vault.sys.raft.autopilot_state to see every node."
     ),
     "parameter_hints": {},
     "output_shape": (
@@ -515,7 +534,7 @@ async def register_vault_sys_typed_operations(
 ) -> None:
     """Upsert the Vault ``sys`` ops into ``endpoint_descriptor``.
 
-    Registers the four read-only diagnostics ops plus the four
+    Registers the six read-only diagnostics ops plus the four
     ACL-policy ops (G3.15-T2 #1410: ``policy.read`` / ``policy.list``
     safe, ``policy.write`` / ``policy.delete`` dangerous + approval-
     gated). The policy handlers and schemas live in
@@ -544,8 +563,10 @@ async def register_vault_sys_typed_operations(
         "introspection, and ACL-policy management: 'is this Vault "
         "reachable / unsealed / serving traffic?' (sys.health), 'is "
         "it sealed and how many key shares are needed?' "
-        "(sys.seal_status), 'which secret engines are mounted at "
-        "which paths?' (sys.mounts.list), 'which auth methods are "
+        "(sys.seal_status), 'is every node of the cluster up, and how "
+        "many more may fail?' (sys.ha_status / sys.raft.autopilot_state "
+        "— health and seal_status answer for one node only), 'which "
+        "secret engines are mounted at which paths?' (sys.mounts.list), 'which auth methods are "
         "mounted?' (sys.auth.list), 'what does this policy grant / "
         "which policies exist?' (sys.policy.read / sys.policy.list), "
         "and creating, replacing, or deleting an ACL policy "
@@ -571,7 +592,9 @@ async def register_vault_sys_typed_operations(
             "the backplane's Vault readiness probe — they cannot drift. "
             "Read-only; never returns secret content. Unreachable Vault "
             "surfaces as a connector_error OperationResult with the "
-            "requests/hvac error class in extras.exception_class."
+            "requests/hvac error class in extras.exception_class. Answers "
+            "for the one node behind the target's address; use "
+            "vault.sys.raft.autopilot_state to see every node."
         ),
         parameter_schema=_NO_PARAMS_SCHEMA,
         response_schema=_VAULT_SYS_HEALTH_RESPONSE_SCHEMA,
@@ -593,9 +616,9 @@ async def register_vault_sys_typed_operations(
         description=(
             "Reads GET /v1/sys/seal-status and returns the raw seal-"
             "status object (type, sealed, initialized, threshold t, "
-            "shares n, progress, version). Read-only; no secret "
-            "content. Login/transport failures surface as a structured "
-            "connector_error OperationResult."
+            "shares n, progress, version). Read-only; no secret content. "
+            "Answers for the one node behind the target's address; use "
+            "vault.sys.raft.autopilot_state to see every node."
         ),
         parameter_schema=_NO_PARAMS_SCHEMA,
         response_schema=_VAULT_SYS_SEAL_STATUS_RESPONSE_SCHEMA,
@@ -651,6 +674,57 @@ async def register_vault_sys_typed_operations(
         safety_level="safe",
         requires_approval=False,
         llm_instructions=_VAULT_SYS_AUTH_LIST_LLM_INSTRUCTIONS,
+        embedding_service=embedding_service,
+    )
+    # Cluster-wide node reads. health / seal_status answer for the one
+    # node behind the target's address; these two list every node so a
+    # standby that came back sealed after a restart is visible.
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.sys.ha_status",
+        handler=vault_sys_ha_status,
+        summary="List every node of a HashiCorp Vault cluster and which one is active.",
+        description=(
+            "Reads GET /v1/sys/ha-status and returns one row per cluster "
+            "node under 'nodes' (hostname, api_address, active_node, "
+            "last_echo, version). Shows the whole cluster, not only the "
+            "node behind the target's address. Read-only; no secret "
+            "content. Needs 'read' on 'sys/ha-status'."
+        ),
+        parameter_schema=VAULT_SYS_CLUSTER_PARAMETER_SCHEMA,
+        response_schema=VAULT_SYS_HA_STATUS_RESPONSE_SCHEMA,
+        group_key="sys",
+        when_to_use=sys_when_to_use,
+        tags=["read-only", "diagnostics", "cluster", "ha"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=VAULT_SYS_HA_STATUS_LLM_INSTRUCTIONS,
+        embedding_service=embedding_service,
+    )
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.sys.raft.autopilot_state",
+        handler=vault_sys_raft_autopilot_state,
+        summary="Show the health of every raft server in a HashiCorp Vault cluster.",
+        description=(
+            "Reads GET /v1/sys/storage/raft/autopilot/state and returns "
+            "healthy, failure_tolerance, leader, and one row per raft "
+            "server under 'servers'. A sealed standby shows as "
+            "healthy=false. Raft storage only. Read-only; no secret "
+            "content. Needs 'read' on 'sys/storage/raft/autopilot/state'."
+        ),
+        parameter_schema=VAULT_SYS_CLUSTER_PARAMETER_SCHEMA,
+        response_schema=VAULT_SYS_RAFT_AUTOPILOT_STATE_RESPONSE_SCHEMA,
+        group_key="sys",
+        when_to_use=sys_when_to_use,
+        tags=["read-only", "diagnostics", "cluster", "raft"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=VAULT_SYS_RAFT_AUTOPILOT_STATE_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )
     # G3.15-T2 (#1410) ACL-policy ops. Reads are safe; writes/deletes are

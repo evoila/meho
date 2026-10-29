@@ -31,11 +31,15 @@ spec:
       # No `<SERVICE>_PORT` variables from other Services in the namespace
       # in the PostgreSQL environment.
       enableServiceLinks: false
+      {{- with include "meho.core.imagePullSecrets" . }}
+      imagePullSecrets:
+        {{- . | nindent 8 }}
+      {{- end }}
       securityContext:
         {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.podSecurityContext "global" .Values.global) | nindent 8 }}
       containers:
         - name: postgres
-          image: {{ include "meho.core.image" .Values.image | quote }}
+          image: {{ include "meho.core.image" (dict "image" .Values.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
             # A sub-directory of the mount, not the mount itself: initdb
@@ -111,7 +115,7 @@ spec:
         # mounted password changes (see reconcile.sh in the ConfigMap). It
         # has no access to the superuser Secret.
         - name: reconcile
-          image: {{ include "meho.core.image" .Values.image | quote }}
+          image: {{ include "meho.core.image" (dict "image" .Values.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/bin/sh", "/etc/core-postgres/config/reconcile.sh"]
           resources:

@@ -360,9 +360,10 @@ def _project_rows(result: AuditQueryResult, *, is_admin: bool) -> list[dict[str,
 def _project_replay_node(node: ReplayNode, *, is_admin: bool) -> dict[str, object]:
     """Project one :class:`ReplayNode` to the row template shape, recursively.
 
-    Reuses the T1 row projection so each tree node renders through the SAME
-    ``_results_rows.html`` partial (identical badge palette + the "details"
-    affordance that opens the T2 detail drawer on click) -- a replayed
+    Reuses the T1 row projection so each tree node in ``_replay_tree.html``
+    renders with the SAME fields as a ``_results_rows.html`` row (identical
+    badge palette, the tenant label, and the "details" affordance that
+    opens the T2 detail drawer on click) -- a replayed
     ``credential_read`` node therefore shows the 🔒 placeholder through the
     T2 drawer's aggregate-only gate, per-node, exactly as a flat-query row
     does. Two structural fields are added on top of the flat shape:

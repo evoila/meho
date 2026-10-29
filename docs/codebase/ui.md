@@ -486,11 +486,13 @@ FK is intentionally soft; the chassis logs
 
 One person can work in several tenants, so these pages name the tenant:
 
-- **Audit list** (`audit/_results_rows.html`, also used by the replay
-  tree): each row starts with its tenant. The label comes from
-  `AuditEntry.tenant_name` (joined from the `tenant` table, see
-  [audit_query.md](audit_query.md)), with the tenant id as fallback
-  (`_tenant_label` in `ui/routes/audit/routes.py`).
+- **Audit list** (`audit/_results_rows.html`): each row starts with its
+  tenant. The label comes from `AuditEntry.tenant_name` (joined from the
+  `tenant` table, see [audit_query.md](audit_query.md)), with the tenant
+  id as fallback (`_tenant_label` in `ui/routes/audit/routes.py`).
+- **Session replay tree** (`audit/_replay_tree.html`, its own partial):
+  each node shows the same tenant label, built by `_project_replay_node`
+  from `ReplayNode.tenant_name` with the id as fallback.
 - **Audit detail drawer** (`audit/_drawer.html`): a "Tenant" line. The
   drawer reads the row's tenant name from the `tenant` table, with the
   id as fallback.

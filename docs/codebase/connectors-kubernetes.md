@@ -354,6 +354,7 @@ real operator through the same loader.
 | `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap. |
 | `k8s.exec`             | **dangerous** (`requires_approval=True`) | `CoreV1Api.connect_get_namespaced_pod_exec()` over the `WsApiClient` websocket transport -- bounded argv command-and-capture: stdout / stderr demuxed from the `v4.channel.k8s.io` channels + exit code parsed from the channel-3 status frame, per-stream 1 MiB cap, bounded timeout. Interactive `-it` deferred. |
 | `k8s.secret.read_to_ref` | **caution** (`requires_approval=True`) | `CoreV1Api.read_namespaced_secret()` -- reads one Secret's `data[data_key]` (default `value`), decodes it, and stages the value to a **tenant-scoped Vault `secret_ref`** via `vault.kv.put`; returns **only** the ref + provenance (SHA-256 / byte length), never the value. Classified `credential_read` (audit + broadcast aggregate-only). The governed VKS guest-kubeconfig read (`ops_secret_read.py`, #3496). |
+| `k8s.secret.compare_to_ref` | safe | `CoreV1Api.read_namespaced_secret()` -- checks that one Secret key holds the same value as its Vault copy `{path, key, mount?}`. Answers only `same` and, per copy, `found` / `matches_first` / version; never a value or a hash. Classified `credential_read`. (`ops_secret_compare.py`) |
 
 The multi-step read `k8s.migration.inventory` (group `migration`, `safe`)
 collects the cluster's nodes and workloads in the common migration inventory
@@ -699,6 +700,36 @@ A missing `data_key`, or a value that is not valid base64 / UTF-8, raises
 `KubernetesSecretDataError` naming the Secret + key (never the value);
 the error surfaces through the dispatcher's `connector_error` envelope,
 and nothing is written to Vault on failure.
+
+### Check a Secret against its Vault copy -- `k8s.secret.compare_to_ref`
+
+A Helm chart often reads a password from a Secret while the same password
+is kept in Vault. After a change the operator must prove that both copies
+match. `ops_secret_compare.py` answers that without showing the value.
+
+- Params: `namespace`, `name`, `key` and the Vault copy
+  `ref: {path, key, mount?}`.
+- The Secret is read with the connector's normal Kubernetes access. Its
+  value is base64-decoded, so it is compared with the plain text in Vault.
+- The Vault copy is read with the caller's own Vault login and tenant
+  guard. Like `k8s.secret.read_to_ref`, it uses no Vault target
+  (`target=None`), so the deployment's Vault and the default role apply.
+  The read and the compare are the shared `read_kv_copy` /
+  `compare_copies` of `vault.kv.compare` (`connectors/vault/kv_compare.py`).
+- The two values are compared with `hmac.compare_digest` (constant time)
+  and dropped.
+- Answer: `{same, copies: [k8s copy, vault copy]}`. Each copy has
+  `source`, its names, `key`, `found`, `matches_first`, `version` (the
+  Secret's `resourceVersion` or the Vault version) and `reason`. Never a
+  value or a hash.
+- A copy that cannot be read answers `found: false` with `reason`
+  `forbidden` (Kubernetes 403, Vault 403, or a Vault path outside the
+  caller's tenant), `not_found` or `key_not_found`; the call does not
+  fail. Other Kubernetes errors, a Vault login failure or an unreachable
+  Vault fail the call.
+- `safe`, no approval. The op id is on `_CREDENTIAL_READ_OPS`, so the
+  flight recorder never stores the Secret body and the broadcast shows
+  only the outcome.
 
 ### Shared list-op request shape (`ops_listparams.py`)
 

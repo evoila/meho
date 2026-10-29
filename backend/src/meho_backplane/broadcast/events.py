@@ -108,6 +108,13 @@ _CREDENTIAL_READ_OPS: Final[frozenset[str]] = frozenset(
         # so audit + broadcast collapse to aggregate-only on top of its
         # requires_approval gate; the result is value-free by construction.
         "k8s.secret.read_to_ref",
+        # #5230 -- the two compare reads. The backplane reads the secret
+        # values itself to compare them and returns only same/different, so
+        # the answer is value-free by construction. The pin makes the flight
+        # recorder drop the vendor bodies of these reads (they carry the
+        # values) and collapses the broadcast to aggregate-only.
+        "vault.kv.compare",
+        "k8s.secret.compare_to_ref",
         # #4617 -- the ingested SDDC Manager reads whose answer holds
         # credentials. Same posture as ``sddc.credential.list``: the catalog
         # row ``sddc`` / ``9.0`` raises them to caution with approval, and

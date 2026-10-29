@@ -188,15 +188,12 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
     ``k8s.exec`` + the write ops + ``CRONJOB_OPS`` (``k8s.cronjob.run``:
     start a CronJob's job now) + ``SECRET_READ_OPS`` (#3496 governed
     guest-cluster kubeconfig read: ``k8s.secret.read_to_ref``) +
-    ``SECRET_WRITE_OPS`` (``k8s.secret.update`` / ``k8s.secret.delete``).
+    ``SECRET_WRITE_OPS`` (``k8s.secret.update`` / ``k8s.secret.delete``) +
+    ``SECRET_COMPARE_OPS`` (``k8s.secret.compare_to_ref``).
 
-    Implemented as a function call rather than a literal-and-splat at
-    module level so the import order stays linear: ``ops.py`` defines
-    :class:`KubernetesOp` + ``_K8S_ABOUT_OP``, then imports the op tuples
-    from their ``ops_*`` modules. The arrangement keeps the canary op's
-    metadata co-located with the dataclass definition while letting
-    the larger surfaces live in their own modules next to their
-    helpers.
+    A function, not a module-level literal, so the import order stays
+    linear: ``ops.py`` defines :class:`KubernetesOp` + ``_K8S_ABOUT_OP``
+    first, then imports the op tuples from their ``ops_*`` modules.
     """
     from meho_backplane.connectors.kubernetes.ops_config import CONFIG_OPS
     from meho_backplane.connectors.kubernetes.ops_core import CORE_OPS
@@ -210,6 +207,7 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
         K8S_LOGS_RESPONSE_SCHEMA,
     )
     from meho_backplane.connectors.kubernetes.ops_network import NETWORK_OPS
+    from meho_backplane.connectors.kubernetes.ops_secret_compare import SECRET_COMPARE_OPS
     from meho_backplane.connectors.kubernetes.ops_secret_read import SECRET_READ_OPS
     from meho_backplane.connectors.kubernetes.ops_secret_write import SECRET_WRITE_OPS
     from meho_backplane.connectors.kubernetes.ops_storage import STORAGE_OPS
@@ -269,6 +267,7 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
         *WRITE_DANGEROUS_OPS,
         *SECRET_READ_OPS,
         *SECRET_WRITE_OPS,
+        *SECRET_COMPARE_OPS,
     )
 
 

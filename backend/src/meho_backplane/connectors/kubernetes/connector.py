@@ -172,8 +172,10 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "password), ``k8s.secret.delete`` removes one after a preview "
         "that lists the workloads using it, and ``k8s.secret.read_to_ref`` "
         "copies a Secret value into the credential store and returns only "
-        "a reference. No Secret op ever shows a value; all of them wait "
-        "for approval."
+        "a reference. ``k8s.secret.compare_to_ref`` checks that a Secret "
+        "key holds the same value as its Vault copy and answers only "
+        "same or different. No Secret op ever shows a value; all of them "
+        "except the compare wait for approval."
     ),
     "events": (
         "Use for cluster-event observability and troubleshooting: "
@@ -1657,6 +1659,19 @@ class KubernetesConnector(Connector):
         )
 
         return await k8s_secret_read_to_ref(self, target, operator, params)
+
+    async def k8s_secret_compare_to_ref(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.secret.compare_to_ref``."""
+        from meho_backplane.connectors.kubernetes.ops_secret_compare import (
+            k8s_secret_compare_to_ref,
+        )
+
+        return await k8s_secret_compare_to_ref(self, target, operator, params)
 
     async def k8s_secret_update(
         self,

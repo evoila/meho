@@ -433,8 +433,34 @@ target registration) is documented in
 | `vault.kv.patch` | `patch` | caution | `credential_write` |
 | `vault.kv.delete` | `delete_secret_versions` | dangerous | `write` |
 | `vault.kv.metadata.delete` | `delete_metadata_and_all_versions` | destructive | `write` |
+| `vault.kv.compare` | `read_secret_version` (per copy) | safe | `credential_read` |
 
-All seven register into operation group `kv`.
+All eight register into operation group `kv`.
+
+**Compare copies (`vault.kv.compare`, `kv_compare.py`).** Checks that 2 to
+10 copies of one secret hold the same value, without showing it. Params:
+`paths`, a list of `{path, key, mount?}`. The first item is the reference.
+
+- Each copy is read with the caller's own Vault login (same role and same
+  tenant guard as `vault.kv.read`).
+- The value under `key` becomes bytes (a string as UTF-8, any other JSON
+  value as canonical JSON). It is compared with the first copy by
+  `hmac.compare_digest` (constant time) and then dropped.
+- Answer: `{same, copies: [{mount, path, key, found, matches_first,
+  version, reason}]}`. `same` is true only when every copy was found and
+  matches. Never a value, never a hash: a hash of a short password can be
+  guessed offline.
+- A copy that cannot be read does not fail the call. It answers
+  `found: false` with `reason` `forbidden` (Vault 403, or a path outside
+  the caller's tenant), `not_found` (no secret, or the latest version is
+  deleted) or `key_not_found`. A login failure, an unreachable Vault or a
+  path that repeats the mount segment still fails the whole call.
+- The op id is on `_CREDENTIAL_READ_OPS`. The backplane reads secret
+  values to answer it, so the flight recorder never stores a vendor body
+  for it and the broadcast feed shows only the outcome.
+- `read_kv_copy` and `compare_copies` are shared with
+  `k8s.secret.compare_to_ref` (a Kubernetes Secret key against one Vault
+  copy; see `connectors-kubernetes.md`).
 
 **Permanent delete (`vault.kv.metadata.delete`, #3424).** `kv.delete` is a
 soft delete: Vault keeps the data and an undelete brings it back.
@@ -546,7 +572,8 @@ The G6 broadcast publisher emits an aggregate-only payload for
 `credential_read` and `audit_query` ops. The sensitivity class is
 derived **from the op-id**, not a per-descriptor field:
 `broadcast.events.classify_op` consults the `_CREDENTIAL_READ_OPS`
-allowlist (currently `{vault.kv.read, vault.kv.list}`), the
+allowlist (for this connector `{vault.kv.read, vault.kv.list,
+vault.kv.compare}`), the
 `_CREDENTIAL_WRITE_OPS` allowlist (G11.7-T1 #1401 / G3.15-T1 #1409 —
 `{vault.kv.put, vault.kv.patch, vault.auth.userpass.write,
 vault.auth.userpass.update_password, k8s.secret.create, k8s.job.create}`),

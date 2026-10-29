@@ -1559,8 +1559,9 @@ async def register_vault_typed_operations(
     kv_when_to_use = (
         "Use for HashiCorp Vault KV-v2 secret CRUD: read a secret, "
         "write a new version, list child paths under a folder, "
-        "enumerate version history, soft-delete a version, or "
-        "permanently remove a whole secret. The right "
+        "enumerate version history, soft-delete a version, "
+        "permanently remove a whole secret, or check that copies of "
+        "one secret hold the same value without showing it. The right "
         "group when the question names a specific secret path "
         "(``kubeconfig/<cluster>``, ``oidc/clients/<id>``, etc.) and "
         "the operator wants the value, the existence, or the "
@@ -1570,7 +1571,11 @@ async def register_vault_typed_operations(
         "mountpoint is this secret stored at?' rather than the "
         "value itself."
     )
-    for spec in _KV_OP_SPECS:
+    # Lazy import: kv_compare imports this module's shared schema
+    # fragments, so a top-level import here would be circular.
+    from meho_backplane.connectors.vault.kv_compare import KV_COMPARE_OP_SPEC
+
+    for spec in (*_KV_OP_SPECS, KV_COMPARE_OP_SPEC):
         # Every spec states ``safety_level`` and ``requires_approval``. The
         # mutating KV ops (put / patch / delete) set it True so the
         # dispatcher routes human principals to the approval queue rather

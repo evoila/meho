@@ -71,8 +71,12 @@ Limits:
   route always refreshes `updated_at`, also when the same `secret_ref`
   is sent again. A new value drops the kept logins once, then the next
   login uses the new values. The runner gets `updated_at` in its target
-  descriptor from the gateway. Paths that call a connector without the
-  dispatcher (topology refresh, scope repair) do not run this check.
+  descriptor from the gateway. The check and the drop run under a lock
+  per target, and the new `updated_at` is recorded only when every hook
+  is done. So a call that arrives while a hook still runs waits for the
+  drop, instead of treating the version as handled and reusing the old
+  login. Paths that call a connector without the dispatcher (topology
+  refresh, scope repair) do not run this check.
 - The handler does not commit on its own: the request's session
   commits after the response is sent, and the UI import calls it for
   many targets in one transaction. So the drop runs twice: once in the
@@ -82,8 +86,12 @@ Limits:
   a dispatch that read the old row before the commit. A login that
   started before the change and finishes after the second drop can
   still be kept, except for SSH: `SshConnector` counts drops per
-  target, and a login that finishes after a drop is closed and raises
-  `SshTargetChangedError` instead of landing in the pool.
+  target. A call reads the count when it starts, checks it again once
+  it holds the connect lock, and once more after the handshake. When
+  the count moved, the call raises `SshTargetChangedError`: a call that
+  was waiting for the lock does not log in with its old target values,
+  and a login that finished after the drop is closed instead of landing
+  in the pool.
 - The Proxmox hook drops both the credential and the login ticket
   minted from it; dropping only the credential would still send the
   old ticket.

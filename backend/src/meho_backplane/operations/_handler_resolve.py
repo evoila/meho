@@ -33,6 +33,7 @@ Two related concerns the dispatcher needs but that don't belong in
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import inspect
 from collections.abc import Awaitable, Callable
@@ -71,6 +72,11 @@ _CONNECTOR_INSTANCE_CACHE: dict[type[Connector], Connector] = {}
 # target. Per process, like the connector caches it guards (#3879).
 _SEEN_TARGET_VERSIONS: dict[tuple[str, str], Any] = {}
 
+# ``target_cache_key`` -> the lock a drop for the target runs under. A call
+# that arrives while a drop runs waits for it, instead of reading the new
+# version as already handled and reusing an old login (#3879).
+_TARGET_FORGET_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
+
 
 def reset_handler_cache() -> None:
     """Empty the handler-ref cache. Test-only."""
@@ -81,6 +87,7 @@ def reset_connector_instance_cache() -> None:
     """Empty the connector-instance cache and the seen target versions. Test-only."""
     _CONNECTOR_INSTANCE_CACHE.clear()
     _SEEN_TARGET_VERSIONS.clear()
+    _TARGET_FORGET_LOCKS.clear()
 
 
 def import_handler(handler_ref: str) -> Callable[..., Awaitable[Any]]:
@@ -181,10 +188,26 @@ async def forget_target_in_connectors(target: Any) -> None:
     logged and skipped: the target change must still go through, and one
     connector must not stop the others from forgetting the target.
 
-    The target's ``updated_at`` is recorded as seen, so the next dispatch in
-    this process does not drop the same change a second time.
+    The drop runs under the target's lock, and the target's ``updated_at``
+    is recorded as seen only when every hook is done. So a dispatch that
+    arrives while a hook still runs waits for the drop, and does not reuse a
+    login that is about to be dropped. After that, the next dispatch in this
+    process does not drop the same change a second time.
     """
-    _record_seen_version(target)
+    async with _forget_lock(target):
+        await _run_forget_hooks(target)
+        _record_seen_version(target)
+
+
+def _forget_lock(target: Any) -> asyncio.Lock:
+    key = target_cache_key(target)
+    lock = _TARGET_FORGET_LOCKS.get(key)
+    if lock is None:
+        lock = _TARGET_FORGET_LOCKS[key] = asyncio.Lock()
+    return lock
+
+
+async def _run_forget_hooks(target: Any) -> None:
     for instance in list(_CONNECTOR_INSTANCE_CACHE.values()):
         for hook_name in _TARGET_FORGET_HOOKS:
             hook = getattr(instance, hook_name, None)
@@ -202,14 +225,9 @@ async def forget_target_in_connectors(target: Any) -> None:
                 )
 
 
-def _record_seen_version(target: Any) -> tuple[bool, Any]:
-    """Store *target*'s ``updated_at``; return ``(seen_before, previous_value)``."""
-    updated_at = getattr(target, "updated_at", None)
-    key = target_cache_key(target)
-    seen_before = key in _SEEN_TARGET_VERSIONS
-    previous = _SEEN_TARGET_VERSIONS.get(key)
-    _SEEN_TARGET_VERSIONS[key] = updated_at
-    return seen_before, previous
+def _record_seen_version(target: Any) -> None:
+    """Store *target*'s ``updated_at`` as the version this process saw last."""
+    _SEEN_TARGET_VERSIONS[target_cache_key(target)] = getattr(target, "updated_at", None)
 
 
 async def forget_target_if_changed(target: Any) -> bool:
@@ -225,6 +243,11 @@ async def forget_target_if_changed(target: Any) -> bool:
     from the one this process saw last, the kept logins are dropped and the
     next login uses the new values.
 
+    The check and the drop run under the target's lock. A second call with
+    the same new version waits until the first call's drop is done, then
+    sees the version as handled. Without the lock, it would see the version
+    as handled while a hook still runs, and reuse the old login.
+
     The first sighting only records the value: nothing was kept for the
     target by a dispatch yet. A target object with no ``updated_at`` (a test
     double) is never treated as changed. Returns ``True`` when a drop ran.
@@ -232,16 +255,21 @@ async def forget_target_if_changed(target: Any) -> bool:
     updated_at = getattr(target, "updated_at", None)
     if updated_at is None:
         return False
-    seen_before, previous = _record_seen_version(target)
-    if not seen_before or previous == updated_at:
-        return False
-    _log.info(
-        "target_changed_since_last_seen",
-        target_id=str(getattr(target, "id", "?")),
-        target=getattr(target, "name", None),
-    )
-    await forget_target_in_connectors(target)
-    return True
+    key = target_cache_key(target)
+    async with _forget_lock(target):
+        if key not in _SEEN_TARGET_VERSIONS:
+            _record_seen_version(target)
+            return False
+        if _SEEN_TARGET_VERSIONS[key] == updated_at:
+            return False
+        _log.info(
+            "target_changed_since_last_seen",
+            target_id=str(getattr(target, "id", "?")),
+            target=getattr(target, "name", None),
+        )
+        await _run_forget_hooks(target)
+        _record_seen_version(target)
+        return True
 
 
 def is_unbound_method(handler: Any, connector_cls: type[Connector]) -> bool:

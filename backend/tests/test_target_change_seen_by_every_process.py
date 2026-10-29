@@ -184,6 +184,50 @@ async def test_a_target_without_updated_at_is_never_treated_as_changed() -> None
     assert recorder.calls == []
 
 
+@pytest.mark.asyncio
+async def test_a_call_during_a_running_drop_waits_until_the_drop_is_done() -> None:
+    """One hook is slow. A second call with the same new version must not skip the drop.
+
+    Without the wait, the second call would see the new version as handled
+    while the slow hook still runs, and go on with a login that the other
+    connector (here: the fast one) has not dropped yet.
+    """
+    hook_started, hook_may_finish = asyncio.Event(), asyncio.Event()
+    events: list[str] = []
+
+    class _SlowConnector:
+        async def invalidate_credentials(self, target: Any) -> None:
+            hook_started.set()
+            await hook_may_finish.wait()
+            events.append("slow_dropped")
+
+    class _FastConnector:
+        async def invalidate_credentials(self, target: Any) -> None:
+            events.append("fast_dropped")
+
+    _CONNECTOR_INSTANCE_CACHE[type("Slow", (), {})] = _SlowConnector()  # type: ignore[index, assignment]
+    _CONNECTOR_INSTANCE_CACHE[type("Fast", (), {})] = _FastConnector()  # type: ignore[index, assignment]
+    target = _Target()
+    assert await forget_target_if_changed(target) is False  # first sighting
+    changed = _Target(id=target.id, updated_at=_T1)
+
+    async def _second_call() -> bool:
+        dropped = await forget_target_if_changed(changed)
+        events.append("second_call_done")
+        return dropped
+
+    first = asyncio.create_task(forget_target_if_changed(changed))
+    await hook_started.wait()
+    second = asyncio.create_task(_second_call())
+    await asyncio.sleep(0)
+    assert events == []  # the second call waits; it did not go on
+
+    hook_may_finish.set()
+    assert await first is True
+    assert await second is False
+    assert events == ["slow_dropped", "fast_dropped", "second_call_done"]
+
+
 # ---------------------------------------------------------------------------
 # Two independent caches
 # ---------------------------------------------------------------------------

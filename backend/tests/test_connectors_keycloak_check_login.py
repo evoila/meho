@@ -12,6 +12,8 @@ What is proven:
   group, and classifies as ``credential_write``;
 * an accepted login sends one token request with the password grant, then
   ends the new session with the refresh token;
+* when that logout fails (400 or no connection), the login still answers
+  ``accepted`` with ``session_ended: false`` and is not sent twice;
 * a wrong password answers ``refused`` / 401 / ``invalid_grant`` and is not
   retried;
 * a disabled user answers ``refused`` / 400 / ``Account disabled``;
@@ -32,12 +34,12 @@ from typing import Any
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs
 
+import httpx
 import pytest
 import respx
 from sqlalchemy import select
 from structlog.testing import capture_logs
 
-import meho_backplane.connectors.keycloak  # noqa: F401 -- import for registry side-effects
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast.events import classify_op, redact_payload
 from meho_backplane.connectors.keycloak import KeycloakConnector
@@ -309,6 +311,36 @@ async def test_accepted_login_ends_the_session_at_once(
     assert "authorization" not in token.calls.last.request.headers
     assert logout.call_count == 1
     assert _form(logout) == {"client_id": ["admin-cli"], "refresh_token": [_REFRESH_TOKEN]}
+
+
+@pytest.mark.parametrize(
+    "logout_answer",
+    [
+        pytest.param({"status_code": 400, "json": {"error": "invalid_grant"}}, id="logout-400"),
+        pytest.param({"side_effect": httpx.ConnectError("connection refused")}, id="logout-down"),
+    ],
+)
+async def test_accepted_login_with_failed_logout(
+    kc: KeycloakConnector, logout_answer: dict[str, Any]
+) -> None:
+    with (
+        capture_logs() as logs,
+        respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock,
+    ):
+        token = mock.post(_TOKEN_PATH).respond(200, json=_ACCEPTED)
+        logout_route = mock.post(_LOGOUT_PATH)
+        if "side_effect" in logout_answer:
+            logout = logout_route.mock(side_effect=logout_answer["side_effect"])
+        else:
+            logout = logout_route.respond(**logout_answer)
+        result = await _run(_PARAMS)
+    assert result.status == "ok", result.error
+    assert result.result["result"] == "accepted"
+    assert result.result["session_ended"] is False
+    assert token.call_count == 1
+    assert logout.call_count == 1
+    _assert_nothing_leaks("the result", result.model_dump_json())
+    _assert_nothing_leaks("the structlog events", json.dumps(logs, default=str))
 
 
 async def test_wrong_password_is_refused_and_not_retried(kc: KeycloakConnector) -> None:

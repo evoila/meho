@@ -3476,6 +3476,42 @@ class VmwareRestConnector(HttpConnector):
 
         return await license_assigned_list_impl(self, operator, target, params)
 
+    async def content_library_find(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.content_library.find`` -- library ids by name or type.
+
+        A ``source_kind="typed"`` read. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_content_library_find.content_library_find_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_content_library_find import (
+            content_library_find_impl,
+        )
+
+        return await content_library_find_impl(self, operator, target, params)
+
+    async def content_library_item_find(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.content_library.item.find`` -- library item ids by name, library or type.
+
+        A ``source_kind="typed"`` read. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_content_library_find.content_library_item_find_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_content_library_find import (
+            content_library_item_find_impl,
+        )
+
+        return await content_library_item_find_impl(self, operator, target, params)
+
     # The four ``vmware.appliance.local_account.*`` typed ops. Each delegates to
     # :mod:`.appliance_local_accounts` (imported lazily, like the other typed ops).
 

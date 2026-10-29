@@ -396,6 +396,10 @@ from meho_backplane.connectors.vmware_rest.license_common import (
     LICENSE_KEY_TAG,
     LICENSE_WHEN_TO_USE,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_content_library_find import (
+    CONTENT_LIBRARY_GROUP_KEY,
+    CONTENT_LIBRARY_WHEN_TO_USE,
+)
 from meho_backplane.operations.typed_register import register_composite_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
 
@@ -637,29 +641,9 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "'content_library' for the TKr library id the namespace binds, and "
         "'networking' for the workload / management network context."
     ),
-    "content_library": (
-        "Use for the governed SUBSCRIBED content-library surface -- create a "
-        "content library subscribed to a remote publisher, force / confirm its "
-        "synchronisation, and list its items. The right group for standing up "
-        "the Tanzu Kubernetes release (TKr / VKr) image source a vSphere "
-        "Supervisor needs: pre-create a SUBSCRIBED library pointed at the "
-        "upstream VMware repo (subscribed.create, approval-gated, returns the "
-        "library id the Supervisor enable spec consumes as "
-        "default_kubernetes_service_content_library), trigger a sync "
-        "(subscribed.sync, approval-gated, asynchronous), and read readiness "
-        "back -- subscribed.status (last_sync_time) and subscribed.items.list "
-        "(the synchronised TKr versions, JSONFlux-reduced). The right group for "
-        "'create the TKr content library', 'sync the Kubernetes release "
-        "library', or 'which TKr images are available?'. Distinct from the "
-        "content-library *item* deploy/import (the 'vm' group's "
-        "deploy_from_library / import_from_library) -- this group is the "
-        "library-container lifecycle, not the VM deploy. Teardown "
-        "(destructive, always needs approval): delete a whole local or "
-        "subscribed library (content_library.delete -- refused while another "
-        "library subscribes to it; a library with items needs "
-        "delete_items=true) or one item of a local library "
-        "(content_library.item.delete)."
-    ),
+    # Shared with the two typed finds vmware.content_library.find and
+    # vmware.content_library.item.find (#3550): the same key and text.
+    CONTENT_LIBRARY_GROUP_KEY: CONTENT_LIBRARY_WHEN_TO_USE,
     # Shared with the two typed licence reads: the same key and text.
     LICENSE_GROUP_KEY: LICENSE_WHEN_TO_USE,
     # #4383: shared with the typed read vmware.alarm.triggered.list, which

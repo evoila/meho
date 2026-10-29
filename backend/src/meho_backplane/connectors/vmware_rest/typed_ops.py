@@ -388,6 +388,12 @@ from meho_backplane.connectors.vmware_rest.typed_ops_appliance_local_accounts im
     APPLIANCE_LOCAL_ACCOUNTS_OPS,
     APPLIANCE_LOCAL_ACCOUNTS_WHEN_TO_USE,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_content_library_find import (  # noqa: E402
+    CONTENT_LIBRARY_GROUP_KEY,
+    CONTENT_LIBRARY_WHEN_TO_USE,
+    VMWARE_CONTENT_LIBRARY_FIND_OP,
+    VMWARE_CONTENT_LIBRARY_ITEM_FIND_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_host_network_uplinks import (  # noqa: E402
     HOST_NETWORK_UPLINKS_GROUP_KEY,
     HOST_NETWORK_UPLINKS_WHEN_TO_USE,
@@ -481,6 +487,8 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     LICENSE_GROUP_KEY: LICENSE_WHEN_TO_USE,
     APPLIANCE_LOCAL_ACCOUNTS_GROUP_KEY: APPLIANCE_LOCAL_ACCOUNTS_WHEN_TO_USE,
     ALARM_TRIGGERED_GROUP_KEY: ALARM_TRIGGERED_WHEN_TO_USE,
+    # Shared with the content-library composites: the same key and text.
+    CONTENT_LIBRARY_GROUP_KEY: CONTENT_LIBRARY_WHEN_TO_USE,
 }
 
 VMWARE_HOST_USAGE_OP = VmwareTypedOp(
@@ -552,8 +560,9 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 #: that wait for approval); the triggered-alarm list
 #: ``alarm.triggered.list`` (#4383); and the VM question read and answer
 #: ``vm.question.get`` / ``vm.question.answer`` (the answer waits for
-#: approval). The tuple shape lets future typed ops join without touching
-#: the registrar.
+#: approval); and the two content-library finds ``content_library.find`` +
+#: ``content_library.item.find`` (#3550). The tuple shape lets future typed
+#: ops join without touching the registrar.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
     VMWARE_HOST_NETWORK_UPLINKS_OP,
@@ -572,6 +581,8 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_ALARM_TRIGGERED_LIST_OP,
     VMWARE_VM_QUESTION_GET_OP,
     VMWARE_VM_QUESTION_ANSWER_OP,
+    VMWARE_CONTENT_LIBRARY_FIND_OP,
+    VMWARE_CONTENT_LIBRARY_ITEM_FIND_OP,
 )
 
 

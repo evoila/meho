@@ -1460,7 +1460,11 @@ error="insufficient_user_authentication", max_age=<N>`
 (`fresh_sign_in_challenge`, RFC 9470 section 3). The CLI prints the
 message and says to run `meho login` again. The MCP edit tool never
 loosens, so this check has no MCP path. The check is meant to be shared:
-the approval decision on CLI and REST (#3979) reuses it.
+the approval decision on CLI and REST (#3979) reuses it. Two edits of
+the same operation cannot slip past the check together: edits and
+removals of one operation run one at a time, across all scopes, under
+a per-operation lock (see `spec-ingestion.md`, "Edits of one operation
+run one at a time").
 
 ## Catalog `safety_level` on every envelope (#1855)
 

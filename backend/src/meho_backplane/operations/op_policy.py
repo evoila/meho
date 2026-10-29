@@ -35,6 +35,11 @@ The rules:
   approval ends for any of them, the approval-off checks apply, and the
   audit row names those tenants. An install-wide "require approval" is
   kept when any tenant copy needs it.
+* **One at a time.** Edits and removals of the same operation run one
+  after the other, across all scopes: both take a transaction-level
+  PostgreSQL advisory lock on the operation name before they read any
+  override (:func:`_lock_operation`). So the checks always see what the
+  edit before them wrote, also when two requests arrive at once.
 
 Dispatch, preview, search and the operation contract all read the
 effective values through :func:`apply_effective_policy` /
@@ -43,13 +48,14 @@ effective values through :func:`apply_effective_policy` /
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final, Literal
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
@@ -241,6 +247,42 @@ async def apply_effective_policy(
     row.safety_level = policy.safety_level
     row.requires_approval = policy.requires_approval
     return row
+
+
+# ---------------------------------------------------------------------------
+# One editor at a time per operation
+# ---------------------------------------------------------------------------
+
+
+def _lock_key(key: OpKey) -> int:
+    """Map an operation name to a stable, non-negative 63-bit advisory-lock key.
+
+    A blake2b digest of the four name parts, masked to 63 bits so it fits
+    the ``bigint`` that ``pg_advisory_xact_lock`` takes without touching
+    the sign bit. The same shape as the other advisory-lock keys in the
+    code base.
+    """
+    label = "\0".join(("meho:operation-policy", key.product, key.version, key.impl_id, key.op_id))
+    digest = hashlib.blake2b(label.encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big") & 0x7FFF_FFFF_FFFF_FFFF
+
+
+async def _lock_operation(session: AsyncSession, key: OpKey) -> None:
+    """Make edits and removals of *key* run one at a time, across all scopes.
+
+    Takes a transaction-level PostgreSQL advisory lock on the operation
+    name, before any override is read. A second editor waits until the
+    first commits or rolls back, and then reads what it wrote. Without
+    this, two removals in different scopes could each see the other's
+    row, both pass the approval-off checks, and leave the operation
+    without approval. PostgreSQL releases the lock with the transaction,
+    so a crash never leaves it behind. On other databases (the
+    single-writer SQLite test path) it does nothing.
+    """
+    conn = await session.connection()
+    if conn.dialect.name != "postgresql":
+        return
+    await session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _lock_key(key)})
 
 
 # ---------------------------------------------------------------------------
@@ -501,9 +543,12 @@ async def apply_policy_edit(
     *row* holds the classification; it is never changed. *scope_tenant_id*
     is where the override is stored: a tenant UUID (that tenant only) or
     ``None`` (the whole install). Raises :class:`OpPolicyEditError` when a
-    rule refuses the edit; nothing is written then.
+    rule refuses the edit; nothing is written then. Edits of the same
+    operation run one at a time (:func:`_lock_operation`), so the checks
+    see the edit before them.
     """
     key = OpKey.of(row)
+    await _lock_operation(session, key)
     overrides = (await load_overrides(session, tenant_id=scope_tenant_id, keys=[key])).get(key, [])
     mine, others = _split(overrides, scope_tenant_id)
     old = effective_policy(row.safety_level, row.requires_approval, overrides)
@@ -595,8 +640,11 @@ async def remove_override(
     that scope. When the removal ends approval in that scope, or for a
     tenant that an install-wide override reaches, it passes the same
     checks as turning approval off. Raises :class:`OverrideNotFoundError`
-    when the scope has no override.
+    when the scope has no override. Removals and edits of the same
+    operation run one at a time (:func:`_lock_operation`), also across
+    scopes, so two removals cannot both pass on each other's row.
     """
+    await _lock_operation(session, key)
     overrides = (await load_overrides(session, tenant_id=scope_tenant_id, keys=[key])).get(key, [])
     mine, others = _split(overrides, scope_tenant_id)
     if mine is None:

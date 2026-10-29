@@ -1169,6 +1169,18 @@ does not require approval, or because an approved tenant override turned
 approval off. So a platform admin can lower the level, or require
 approval again after a tenant exception, and it holds for everyone.
 
+**Edits of one operation run one at a time.** `apply_policy_edit` and
+`remove_override` first take a transaction-level PostgreSQL advisory
+lock on the operation name (`_lock_operation`), before they read any
+override. A second edit or removal of the same operation, in any scope,
+waits until the first commits and then reads what it wrote. Without the
+lock, two removals in different scopes (the install-wide override and a
+tenant's, both requiring approval) could each see the other's row, both
+pass the approval-off checks, and leave the tenant without approval.
+PostgreSQL releases the lock with the transaction. On SQLite the call
+does nothing; `tests/integration/test_operation_policy_override_pg.py`
+proves the rule against the real database.
+
 **Each scope's override stands on its own.** The stored value is
 measured against the classification, not against the other scopes'
 overrides. A tenant that selects `destructive` while the install-wide

@@ -2371,11 +2371,13 @@ Each `ConnectorReviewGroup` carries `advisory`
     that the ops it is about break (#4971). Each sentence is checked on
     its own, and the subject of the sentence decides which ops it is
     about:
-    * a sentence with "all" or "every" that names no change ("All
-      operations are approval-required.", "Every call is dangerous.") is
-      about every op in the group. The approval claim is flagged while an
-      op does not need approval. The level claim is flagged while an op
-      is at another level, higher or lower;
+    * a sentence that names a read ("All read and write operations
+      require approval.", "Reads and writes are dangerous."), or that has
+      "all" or "every" and names no change ("All operations are
+      approval-required.", "Every call is dangerous."), is about every op
+      in the group. The approval claim is flagged while an op does not
+      need approval. The level claim is flagged while an op is at another
+      level, higher or lower;
     * any other sentence ("Write operations are approval-required.",
       "Every change requires approval.", "Delete operations are
       dangerous.") is about the changes: the ops that are not `safe`, or
@@ -2384,10 +2386,16 @@ Each `ConnectorReviewGroup` carries `advisory`
       flagged while a change op is below the named level.
 
     So with one `safe` read without approval and one `caution` write
-    that needs approval, "Every change requires approval." is true and
-    "All operations are approval-required." is flagged. A change is
-    named by a word such as "write", "change", "update", "create",
-    "delete", "remove", "edit", "modify", or "mutate";
+    that needs approval, "Every change requires approval." is true, and
+    both "All operations are approval-required." and "All read and
+    write operations require approval." are flagged. A change is named
+    by a word such as "write", "change", "update", "create", "delete",
+    "remove", "edit", "modify", or "mutate". A read is named by a word
+    such as "read", "get", "list", "query", "fetch", "retrieve", "view",
+    "inspect", or "search". A sentence that says one thing about reads
+    and another about writes ("Reads run at once, writes need
+    approval.") is checked against every op as a whole; two sentences
+    say it better;
   * the text shares no word with the op ids and summaries.
 
 A `staged` group has no enabled op until the operator enables it. Then

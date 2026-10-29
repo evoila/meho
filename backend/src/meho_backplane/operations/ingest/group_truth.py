@@ -28,11 +28,13 @@ An approval claim ("approval-required", "require(s) approval",
 about either every op in the group or only its changes. The subject of
 the sentence decides, not the wording of the claim:
 
-* A sentence with "all" or "every" that does not name a change ("All
-  operations are approval-required.", "Every call is dangerous.") is
-  about every op. The approval claim is broken by any op that does not
-  need approval. The level claim is broken by any op at another level,
-  higher or lower, so text that understates the risk is flagged too.
+* A sentence that names a read ("All read and write operations
+  require approval.", "Reads and writes are dangerous."), or that has
+  "all" or "every" and does not name a change ("All operations are
+  approval-required.", "Every call is dangerous."), is about every op.
+  The approval claim is broken by any op that does not need approval.
+  The level claim is broken by any op at another level, higher or
+  lower, so text that understates the risk is flagged too.
 * Any other sentence ("Writes are dangerous.", "Every change requires
   approval.", "Delete operations need approval.") is about the changes
   in the group: the ops that are not ``safe`` (or every op, when all of
@@ -43,7 +45,9 @@ the sentence decides, not the wording of the claim:
 So "Every change requires approval." and "All operations are
 approval-required." are checked against different ops, and the same
 wording is read the same way in both the review advice and the ingest
-check.
+check. A sentence that says one thing about reads and another about
+writes ("Reads run at once, writes need approval.") is checked against
+every op as a whole; two sentences say it better.
 
 :func:`drop_unsupported_claims` uses the same checks at ingest (#4971).
 It removes each sentence of a new group's text that makes a claim the
@@ -97,11 +101,16 @@ _LEVEL_RE = re.compile(r"(?<!non-)(?<!non )\b(dangerous|destructive)\b")
 _APPROVAL_RE = re.compile(
     r"(?<!no )\bapproval[- ]required\b|(?<!not )(?<!n't )\b(?:require|need)s? (?:an? )?approval\b"
 )
-# A sentence with "all" / "every" that names no change is about every op.
+# A sentence that names a read, or has "all" / "every" and names no
+# change, is about every op.
 _ALL_RE = re.compile(r"\b(?:all|every)\b")
 _CHANGE_WORD_RE = re.compile(
     r"\b(?:writes?|changes?|modif\w*|mutat\w*|updates?|edits?|creates?|creation|"
     r"deletes?|deletion|removes?|removal)\b"
+)
+_READ_WORD_RE = re.compile(
+    r"\b(?:reads?|gets?|lists?|listing|lookups?|quer(?:y|ies)|fetch\w*|retriev\w*|"
+    r"views?|inspect\w*|searche?s?)\b"
 )
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
@@ -208,10 +217,13 @@ def _changes(ops: Sequence[_OpRisk]) -> list[_OpRisk]:
 def _claim_scope(sentence: str, ops: Sequence[_OpRisk]) -> tuple[bool, list[_OpRisk]]:
     """Which ops a claim in *sentence* is about.
 
-    Returns ``(True, every op)`` for a sentence with "all" or "every"
-    that names no change, and ``(False, the change ops)`` otherwise.
+    Returns ``(True, every op)`` for a sentence that names a read, or
+    that has "all" or "every" and names no change. Returns ``(False,
+    the change ops)`` otherwise.
     """
-    if _ALL_RE.search(sentence) and not _CHANGE_WORD_RE.search(sentence):
+    names_read = _READ_WORD_RE.search(sentence) is not None
+    names_change = _CHANGE_WORD_RE.search(sentence) is not None
+    if names_read or (_ALL_RE.search(sentence) and not names_change):
         return True, list(ops)
     return False, _changes(ops)
 

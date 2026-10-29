@@ -212,6 +212,30 @@ async def test_change_claim_stays_and_all_ops_claim_goes_for_the_same_ops() -> N
 
 
 @pytest.mark.asyncio
+async def test_all_claim_that_names_reads_goes_when_the_read_runs_at_once() -> None:
+    """One safe read without approval, one gated write: naming reads puts them in the claim.
+
+    "All read and write operations require approval." names a change,
+    but it names the reads as well. So it is false and goes, like "All
+    operations are approval-required.".
+    """
+    await _register([_LIST, _CREATE_GATED])
+    propose = json.dumps(
+        [
+            _group(
+                "gadgets",
+                "Use to list and create gadgets. All read and write operations require approval.",
+            )
+        ]
+    )
+    assign = json.dumps({op.op_id: "gadgets" for op in (_LIST, _CREATE_GATED)})
+
+    await _run([propose, assign])
+
+    assert (await _texts())["gadgets"] == "Use to list and create gadgets."
+
+
+@pytest.mark.asyncio
 async def test_text_with_only_broken_claims_gets_a_plain_text() -> None:
     """When no sentence is left, the group gets a plain text with no claim."""
     await _register([_CREATE, _STOP])
@@ -280,6 +304,18 @@ def test_level_claim_about_all_ops_is_removed_when_the_read_is_safe() -> None:
 def test_all_with_a_change_word_is_a_claim_about_changes() -> None:
     ops = _ops(("safe", False), ("caution", True), ("dangerous", True))
     text = "All write operations require approval."
+    assert drop_unsupported_claims(text, ops) == text
+
+
+def test_claim_that_names_reads_is_about_every_op() -> None:
+    ops = _ops(("safe", False), ("caution", True))
+    assert drop_unsupported_claims("Read and write operations require approval.", ops) == ""
+    assert drop_unsupported_claims("Reads and writes are dangerous.", ops) == ""
+
+
+def test_claim_that_names_reads_stays_when_the_reads_need_approval_too() -> None:
+    ops = _ops(("safe", True), ("caution", True))
+    text = "All read and write operations require approval."
     assert drop_unsupported_claims(text, ops) == text
 
 

@@ -2977,6 +2977,24 @@ async def test_group_advisory_all_ops_approval_claim_is_false_with_a_safe_read()
 
 
 @pytest.mark.asyncio
+async def test_group_advisory_approval_claim_that_names_reads_counts_the_read() -> None:
+    """A claim that names reads and writes is about the read too, so it is flagged."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="Manage virtual machines. All read and write operations require approval.",
+        ops=[
+            ("GET:/vcenter/vm", "List virtual machines", "safe", False, True),
+            ("POST:/vcenter/vm", "Create a virtual machine", "caution", True, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert advisory.flags == ["The text says all ops need approval, but 1 op(s) do not."]
+
+
+@pytest.mark.asyncio
 async def test_group_advisory_all_approval_claim_is_flagged_once() -> None:
     """An "all ... require approval" sentence gives one flag, not two."""
     tenant_id = uuid.uuid4()

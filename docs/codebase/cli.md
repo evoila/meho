@@ -2704,11 +2704,17 @@ fixed-value mappers is upgraded, with a second run changing nothing.
 
 ## Known issues / forward-compat scaffolding
 
-* `meho version` prints CLI metadata only. The Goal #11 contract
-  also calls for a backplane-version line; this is now feasible
-  (the AuthedClient can call `GET /version`) but deferred until
-  Initiative G2.7 wires its CI seam so the format choice doesn't
-  thrash. Filed as a follow-up adjacent to T3.
+* `meho version` prints the CLI line first. When a backplane is
+  known (`--backplane`, or the URL the last `meho login` stored), it
+  also reads the public `GET /version` (3-second cap, no login, no
+  work reference because the route is not audited) and prints a
+  `backplane <release> (commit …, built …) at <url>` line and the
+  connector packages the image carries (#5036): `Connector packages:
+  none`, or one line per package with its version and wheel digest.
+  If the backplane cannot be reached, one warning line goes to stderr
+  and the command still exits 0. With no known backplane the output is
+  the single CLI line, as before. `meho status` prints the same list
+  from `GET /api/v1/health` (`output.FormatConnectorPackages`).
 * Persistent `--config` and `-v/--verbose` flags are registered on
   the root command but not yet consumed; reserved for v0.2.
 * The auth-config endpoint at `/api/v1/auth-config` shipped in v0.3.1

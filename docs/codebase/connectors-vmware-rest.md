@@ -762,22 +762,30 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `HostScsiDisk`-only (null on a non-disk LUN). **`is_boot` needs no
   esxcli seam**: when the host exposes a `bootDeviceSystem`, the op calls
   `HostBootDeviceSystem.QueryBootDevices` — a vim query over the *same*
-  VI-JSON seam the write composites use — and matches its
-  `currentBootDeviceKey` against the rows. That key is **vendor-defined**
-  (it *typically* embeds the canonical name / uuid, but the format is not
-  contractual, and ESXi frequently leaves `bootDeviceSystem` unpopulated),
-  so the match is a **labelled best-effort heuristic** whose outcome the
-  top-level `boot_device_resolution` reports: `matched` (a LUN positively
-  matched — then, and *only* then, `is_boot` is authoritative: `true` on
-  the match, `false` on the rest), `no_match` (the key resolved but matched
-  no LUN), or `unavailable` (no config manager, or an unsupported/erroring
-  query — an **expected** outcome on many hosts, not an error). On both
-  `no_match` and `unavailable` every `is_boot` is `null` — the op **never
-  asserts `false` in an ambiguous state**, so a caller must trust `is_boot`
-  for boot-exclusion only under `boot_device_resolution == 'matched'` and
-  treat `null` as unknown (this is the fail-safe #3332 review B2 hardened).
-  The follow-up to verify the key format on real hardware + tighten the
-  match is `#3336`. Boot resolution is **fail-safe** (an absent/erroring
+  seam the write composites use (SOAP on a standalone ESXi host) — and
+  compares its `currentBootDeviceKey` with the rows. Per the WS-API
+  reference that key is the `key` of one entry in
+  `HostBootDeviceInfo.bootDevices`: an **opaque id of a boot option**, not
+  a device name. On a standalone ESXi 9.1 host that boots from a disk it
+  came back as a bare `"8"` that names no LUN (`#3336`). So a row matches
+  only when the key is **exactly** (case-insensitive) its canonical name or
+  uuid — no substring test, which could pair a short key with an unrelated
+  id. The top-level `boot_device_resolution` reports the outcome: `matched`
+  (a LUN matched — then, and *only* then, `is_boot` is authoritative:
+  `true` on the match, `false` on the rest), `no_match` (the key resolved
+  but matched no LUN — **the usual result**), or `unavailable` (no config
+  manager, or an unsupported/erroring query — an **expected** outcome on
+  many hosts, not an error). On both `no_match` and `unavailable` every
+  `is_boot` is `null` — the op **never asserts `false` in an ambiguous
+  state**, so a caller must trust `is_boot` for boot-exclusion only under
+  `boot_device_resolution == 'matched'` and treat `null` as unknown (this
+  is the fail-safe #3332 review B2 hardened); the op's `next_step` hint
+  tells the agent to ask the operator which disk is the boot disk, not to
+  guess it.
+  No fallback signal is read: the boot-bank volumes in
+  `HostSystem.config.fileSystemVolume` are `HostVfatVolume` rows, which
+  carry no link to a disk, and the authoritative "Is Boot Device" flag is
+  esxcli-only. Boot resolution is **fail-safe** (an absent/erroring
   boot query nulls `is_boot` and records `boot_device_note` without sinking
   the listing); the device read itself is **fail-closed**
   (`status='storage_devices_unreadable'` with an empty set on a VI-JSON

@@ -88,6 +88,37 @@ AKS_API_VERSION: Final[str] = "2026-08-01"
 
 # ---- arc (Task #5084) ----
 
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.HybridCompute/machines``:
+#: the Azure Arc machines of one subscription (Machines - List By Subscription).
+ARC_MACHINES_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.HybridCompute/machines"
+)
+
+#: ``GET .../resourceGroups/{resourceGroupName}/providers/Microsoft.HybridCompute/
+#: machines/{machineName}``: one Azure Arc machine (Machines - Get).
+ARC_MACHINE_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    + "/providers/Microsoft.HybridCompute/machines/{name}"
+)
+
+#: ``POST .../Microsoft.HybridCompute/machines/{name}/assessPatches``: check one
+#: Arc machine for missing updates (Machines - Assess Patches). Long-running.
+ARC_ASSESS_PATCHES_PATH: Final[str] = ARC_MACHINE_PATH + "/assessPatches"
+
+#: The API version of the Azure Arc calls (Microsoft.HybridCompute).
+ARC_API_VERSION: Final[str] = "2026-09-01"
+
+#: ``POST .../Microsoft.Compute/virtualMachines/{vmName}/assessPatches``: check
+#: one Azure VM for missing updates (Virtual Machines - Assess Patches).
+#: Long-running.
+VM_ASSESS_PATCHES_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    + "/providers/Microsoft.Compute/virtualMachines/{name}/assessPatches"
+)
+
+#: The API version of the VM patch assessment (Microsoft.Compute).
+VM_ASSESS_API_VERSION: Final[str] = "2026-04-01"
+
 # ---- automation (Task #5092) ----
 #
 # Azure Automation (Microsoft.Automation). MEHO reads only these lists: the
@@ -124,6 +155,42 @@ AUTOMATION_SCHEDULES_PATH: Final[str] = f"{_AUTOMATION_ACCOUNT}/schedules"
 AUTOMATION_JOB_SCHEDULES_PATH: Final[str] = f"{_AUTOMATION_ACCOUNT}/jobSchedules"
 
 # ---- avs (Task #5091) ----
+#
+# Azure VMware Solution: private clouds, their clusters and hosts, and the host
+# quota in a region. Reads only. MEHO never calls the actions that return the
+# vCenter and NSX passwords (listAdminCredentials) or license keys.
+
+#: The API version of the Azure VMware Solution reads (Microsoft.AVS).
+AVS_API_VERSION: Final[str] = "2026-03-01"
+
+#: ``GET .../providers/Microsoft.AVS/privateClouds``: every Azure VMware
+#: Solution private cloud of the subscription (Private Clouds - List In
+#: Subscription).
+AVS_PRIVATE_CLOUDS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.AVS/privateClouds"
+)
+
+#: ``GET .../privateClouds/{privateCloudName}/clusters``: the clusters of one
+#: private cloud, without the management cluster (Clusters - List).
+AVS_CLUSTERS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.AVS/privateClouds/{private_cloud}/clusters"
+)
+
+#: ``GET .../clusters/{clusterName}/hosts``: the hosts of one cluster of a
+#: private cloud (Hosts - List).
+AVS_HOSTS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.AVS/privateClouds/{private_cloud}/clusters/{cluster}/hosts"
+)
+
+#: ``POST .../providers/Microsoft.AVS/locations/{location}/checkQuotaAvailability``:
+#: the host quota of the subscription in one region (Locations - Check Quota
+#: Availability). A read, even though it is a POST.
+AVS_QUOTA_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.AVS/locations/{location}"
+    "/checkQuotaAvailability"
+)
 
 # ---- compute (Task #5083) ----
 #

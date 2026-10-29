@@ -104,15 +104,11 @@ def _connector_error_to_invalid_params(
       — the connector exists but awaits ingest; ``next_step.verb`` is the
       ``meho connector ingest …`` command to run.
     * :class:`UnknownConnectorError` →
-      ``{"reason": "unknown_connector", "connector_id"}`` — no such
-      connector on this deploy.
+      ``{"reason": "unknown_connector", "connector_id", "did_you_mean"}``
+      — no such connector on this deploy; ``did_you_mean`` lists up to 5
+      close ids (#4136).
     """
-    if isinstance(exc, ConnectorNotIngestedError):
-        return McpInvalidParamsError(str(exc), data=exc.as_error_data())
-    return McpInvalidParamsError(
-        str(exc),
-        data={"reason": "unknown_connector", "connector_id": exc.connector_id},
-    )
+    return McpInvalidParamsError(str(exc), data=exc.as_error_data())
 
 
 async def _list_operation_groups_handler(

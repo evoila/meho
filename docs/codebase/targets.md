@@ -23,7 +23,8 @@ through `resolve_target` (`targets/resolver.py`). Destination checks
 are covered in [`target-ssrf-guard.md`](target-ssrf-guard.md).
 
 This document covers the two **list** paths and how `list_targets`
-bounds its response (#3858).
+bounds its response (#3858), the name and host rules for new targets
+(#5244), and removing a target.
 
 ## Key types
 
@@ -105,6 +106,41 @@ rows about 165 bytes each):
 End-to-end call time (warm median of 7 calls each, same setup) was
 about the same in both versions: about 6–8 ms for an 89-row page and
 about 12 ms for a 500-row page.
+
+## Name and host rules for new and changed targets
+
+`TargetCreate` and `TargetUpdate` (`targets/schemas.py`) check the name,
+the aliases, the host and the fqdn. The checks live in
+`targets/field_rules.py` (#5244). All write paths build one of these two
+models, so the same rules apply to `POST` and `PATCH /api/v1/targets`,
+`meho targets add`, `meho targets import` and `targets.register`. A broken
+value gives a 422 that names the field.
+
+**Name and each alias:**
+
+- must not be blank;
+- must not contain a space, a tab, a line break or any other control
+  character;
+- must not contain `/`. The routes take the name as one path part, so a
+  target with `/` in its name could not be read, changed or deleted.
+
+**Host and fqdn:**
+
+- The check looks at the host part MEHO connects to, the same part the
+  SSRF guard screens (`_dialed_host` in `targets/ssrf_guard.py`). So a port
+  after the host (`db-01:27017`) and a path after the host (`owner/repo`,
+  `api.github.com/repos/owner/repo`) still work.
+- The host part must be a valid IPv4 address, a valid IPv6 address, or a
+  valid DNS host name: parts of letters, digits and `-`, each 1 to 63
+  characters long, not starting or ending with `-`. A trailing dot is fine.
+- When every part is a number, the value is an IPv4 address and must be
+  complete and valid. `10.0.0.` and `10.0.0` are refused.
+- The format check runs first. The SSRF guard then runs unchanged. The
+  format check does no DNS lookup, so its message never shows an address.
+
+**Targets saved before these rules:** nothing changes. They still resolve
+by name or alias and can still be changed or deleted by name. Tests:
+`tests/test_targets_name_host_rules.py`.
 
 ## Removing a target (`targets.remove`)
 

@@ -15,7 +15,9 @@ Covers the partial-regrouping rules in
 * ops that fit no existing group get an "extend" Pass 1 that may
   create new groups for them;
 * the result reports, per group, how many ops the run added and how
-  many typed, composite, and ingested ops the group holds.
+  many typed, composite, and ingested ops the group holds;
+* ops still without a group get more "extend" rounds, up to a limit,
+  and the result names the ones left over (#4972).
 """
 
 from __future__ import annotations
@@ -30,12 +32,16 @@ from sqlalchemy import select
 
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor, OperationGroup
+from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
 from meho_backplane.operations.ingest import (
     GroupSummary,
+    IngestionPipelineResult,
+    IngestionResult,
+    llm_groups,
     register_ingested_operations,
     run_llm_grouping,
 )
+from meho_backplane.operations.ingest._internals import OP_LLM_GROUPING
 from meho_backplane.operations.ingest._llm_grouping_internals import (
     parse_proposal_response,
     render_propose_groups_prompt,
@@ -181,7 +187,7 @@ async def _seed(
         await session.commit()
 
 
-async def _run(stub: _StubLlm) -> Any:
+async def _run(stub: _StubLlm, **knobs: int) -> Any:
     return await run_llm_grouping(
         llm_client=stub,
         operator_sub=_OPERATOR_SUB,
@@ -189,6 +195,7 @@ async def _run(stub: _StubLlm) -> Any:
         product=_PRODUCT,
         version=_VERSION,
         impl_id=_IMPL,
+        **knobs,
     )
 
 
@@ -382,6 +389,11 @@ async def test_regroup_extend_may_propose_nothing(
     assert result.groups_created == 0
     assert result.operations_assigned == 2
     assert result.operations_unassigned == 3
+    assert result.unassigned_op_ids == (
+        "DELETE:/api/vcenter/vm/{vm}",
+        "POST:/api/vcenter/vm",
+        "POST:/api/vcenter/vm/{vm}/snapshot",
+    )
     assert await _group_of("POST:/api/vcenter/vm") is None
 
 
@@ -420,3 +432,199 @@ def test_render_propose_groups_prompt_extend_mode() -> None:
     assert "return an empty array: []" in rendered
     assert "between" not in rendered
     assert "Anchor your\ngroupings on the existing OpenAPI tags" in rendered
+
+
+def _one_group(group_key: str) -> str:
+    """A Pass-1 answer that proposes one group."""
+    return json.dumps(
+        [
+            {
+                "group_key": group_key,
+                "name": group_key.replace("_", " ").title(),
+                "when_to_use": f"Use for the {group_key} operations of the connector.",
+            }
+        ]
+    )
+
+
+class _RecordingLog:
+    """Stand-in for the module logger; keeps every event name."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, dict[str, Any]]] = []
+
+    def info(self, event: str, **kw: Any) -> None:
+        self.events.append(("info", event, kw))
+
+    def warning(self, event: str, **kw: Any) -> None:
+        self.events.append(("warning", event, kw))
+
+    def bind(self, **_kw: Any) -> _RecordingLog:
+        return self
+
+
+@pytest.mark.asyncio
+async def test_full_run_at_group_limit_files_leftovers_in_more_rounds(
+    stub_embedding_service: Any,
+) -> None:
+    """Pass 1 proposes the most groups allowed and Pass 2 says "none"
+    for three ops. Extend rounds add groups until every op has one.
+    No op is moved and no group is renamed on the way."""
+    await _seed(stub_embedding_service, ingested_group=False)
+    first_pass2 = json.dumps(
+        {
+            "GET:/api/vcenter/cluster": "inventory",
+            "GET:/api/vcenter/vm": "inventory",
+            "POST:/api/vcenter/vm": "none",
+            "DELETE:/api/vcenter/vm/{vm}": "none",
+            "POST:/api/vcenter/vm/{vm}/snapshot": "none",
+        }
+    )
+    round1_pass2 = json.dumps(
+        {
+            "POST:/api/vcenter/vm": "vm_admin",
+            "DELETE:/api/vcenter/vm/{vm}": "vm_admin",
+            "POST:/api/vcenter/vm/{vm}/snapshot": "none",
+        }
+    )
+    round2_pass2 = json.dumps({"POST:/api/vcenter/vm/{vm}/snapshot": "snapshots"})
+    stub = _StubLlm(
+        [
+            small_corpus.STUB_PROPOSE_RESPONSE,
+            first_pass2,
+            _one_group("vm_admin"),
+            round1_pass2,
+            _one_group("snapshots"),
+            round2_pass2,
+        ]
+    )
+
+    result = await _run(stub, min_groups=1, max_groups=2)
+
+    assert result.llm_call_count == 6
+    assert result.groups_created == 4
+    assert result.operations_assigned == 5
+    assert result.operations_unassigned == 0
+    assert result.unassigned_op_ids == ()
+    # Round 2 sees every group made so far and is offered only its new one.
+    assert "- inventory (Inventory)" in stub.prompts[4]
+    assert "- vm_admin (Vm Admin)" in stub.prompts[4]
+    assert "- vm_admin (" not in stub.prompts[5]
+    assert "- snapshots (" in stub.prompts[5]
+    assert all(_TYPED_GROUP_KEY not in prompt for prompt in stub.prompts)
+    assert await _group_of("GET:/api/vcenter/cluster") == "inventory"
+    assert await _group_of("POST:/api/vcenter/vm") == "vm_admin"
+    assert await _group_of("POST:/api/vcenter/vm/{vm}/snapshot") == "snapshots"
+    assert await _group_of(_TYPED_OP_ID) == _TYPED_GROUP_KEY
+    assert _summary(result, _TYPED_GROUP_KEY).ingested_operation_count == 0
+
+
+@pytest.mark.asyncio
+async def test_round_limit_stops_and_names_the_ops_left(
+    stub_embedding_service: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each extend round files one op. After the round limit one op is
+    still without a group: the run logs a warning and the result, the
+    audit row and the API model name it. A round that tries to move an
+    op that already has a group, or to file one into the typed group,
+    changes nothing."""
+    recorder = _RecordingLog()
+    monkeypatch.setattr(llm_groups, "_log", recorder)
+    await _seed(stub_embedding_service, ingested_group=True)
+    responses = [json.dumps({"GET:/api/vcenter/cluster": "inventory"})]
+    leftovers = [
+        "DELETE:/api/vcenter/vm/{vm}",
+        "GET:/api/vcenter/vm",
+        "POST:/api/vcenter/vm",
+    ]
+    for index, op_id in enumerate(leftovers):
+        key = f"extra_{index}"
+        responses.append(_one_group(key))
+        responses.append(
+            json.dumps(
+                {
+                    op_id: key,
+                    "GET:/api/vcenter/cluster": key,
+                    "POST:/api/vcenter/vm/{vm}/snapshot": _TYPED_GROUP_KEY,
+                }
+            )
+        )
+    stub = _StubLlm(responses)
+
+    result = await _run(stub)
+
+    rounds = llm_groups.DEFAULT_MAX_EXTEND_ROUNDS
+    assert rounds == len(leftovers)
+    assert result.llm_call_count == 1 + 2 * rounds
+    assert result.operations_assigned == 4
+    assert result.operations_unassigned == 1
+    assert result.unassigned_op_ids == ("POST:/api/vcenter/vm/{vm}/snapshot",)
+    assert await _group_of("GET:/api/vcenter/cluster") == "inventory"
+    assert await _group_of("POST:/api/vcenter/vm/{vm}/snapshot") is None
+    assert _summary(result, _TYPED_GROUP_KEY).ingested_operation_count == 0
+    warnings = [e for level, e, _ in recorder.events if level == "warning"]
+    assert warnings == ["llm_grouping_extend_round_limit_reached"]
+
+    async with get_sessionmaker()() as session:
+        payload = (
+            (await session.execute(select(AuditLog).where(AuditLog.path == OP_LLM_GROUPING)))
+            .scalars()
+            .one()
+            .payload
+        )
+    assert payload["unassigned_op_ids"] == ["POST:/api/vcenter/vm/{vm}/snapshot"]
+    model = IngestionPipelineResult(
+        connector_id=result.connector_id,
+        ingestion=IngestionResult(
+            inserted_count=0,
+            updated_count=0,
+            skipped_count=0,
+            connector_registered=False,
+            operations_grouped=True,
+        ),
+        grouping=result,
+    ).to_api_models()[1]
+    assert model is not None
+    assert model.unassigned_op_ids == ["POST:/api/vcenter/vm/{vm}/snapshot"]
+
+
+@pytest.mark.asyncio
+async def test_round_that_files_nothing_stops_the_rounds(
+    stub_embedding_service: Any,
+) -> None:
+    """A round whose new group gets no op ends the run; no more calls."""
+    await _seed(stub_embedding_service, ingested_group=True)
+    stub = _StubLlm(
+        [
+            json.dumps({"GET:/api/vcenter/cluster": "inventory"}),
+            _one_group("extra"),
+            json.dumps({}),
+        ]
+    )
+
+    result = await _run(stub)
+
+    assert result.llm_call_count == 3
+    assert result.operations_unassigned == 4
+    assert len(result.unassigned_op_ids) == 4
+    assert result.unassigned_op_ids == tuple(sorted(result.unassigned_op_ids))
+
+
+@pytest.mark.asyncio
+async def test_unassigned_op_ids_are_capped(
+    stub_embedding_service: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The list stops at the limit; the count keeps the full total."""
+    monkeypatch.setattr(llm_groups, "UNASSIGNED_OP_IDS_LIMIT", 2)
+    await _seed(stub_embedding_service, ingested_group=True)
+    stub = _StubLlm([json.dumps({}), "[]"])
+
+    result = await _run(stub)
+
+    assert result.operations_unassigned == 5
+    assert result.unassigned_op_ids == (
+        "DELETE:/api/vcenter/vm/{vm}",
+        "GET:/api/vcenter/cluster",
+    )

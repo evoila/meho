@@ -30314,6 +30314,13 @@
             "type": "integer",
             "title": "Operations Unassigned"
           },
+          "unassigned_op_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unassigned Op Ids"
+          },
           "llm_call_count": {
             "type": "integer",
             "title": "Llm Call Count"
@@ -30340,7 +30347,7 @@
           "llm_duration_ms"
         ],
         "title": "GroupingResultModel",
-        "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.\n\nMirrors the dataclass; rendered alongside :class:`IngestionResultModel`\nin the ingest response so the operator sees both counts."
+        "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.\n\nMirrors the dataclass; rendered alongside :class:`IngestionResultModel`\nin the ingest response so the operator sees both counts.\n``unassigned_op_ids`` names the operations still without a group\n(sorted, capped); ``operations_unassigned`` is the full count."
       },
       "HTTPValidationError": {
         "properties": {

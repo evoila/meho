@@ -12,9 +12,12 @@ file, and the copy is written back by the safe dumper. Comments and
 repeated keys are not in the copy: the dumper writes only what the loader
 built, so a secret the loader dropped never comes back either.
 
-:func:`check_yaml` serves a YAML file; :func:`check_yaml_text` serves a
-YAML example inside an HTML page (a ``<pre>`` block that holds text
-alone).
+:func:`check_yaml` serves a YAML file. :func:`check_yaml_example` serves
+a YAML example inside an HTML page (a ``<pre>`` or ``<code>`` block). It
+fails closed: an example it cannot read whole raises :exc:`WithheldError`
+with the reason, and the caller withholds the block. That is an example
+with more than one document, one that does not parse, and one that names
+a key twice in one mapping, at any depth.
 """
 
 from __future__ import annotations
@@ -24,22 +27,30 @@ from typing import Any, Final
 import yaml
 
 from meho_backplane.connectors._shared.api_file_values import (
+    MORE_THAN_ONE_DOCUMENT,
+    NOT_PARSED,
     REDACTED,
+    REPEATED_KEY,
+    TOO_DEEP,
     ApiFileFormatError,
     Scrubber,
     TextRule,
+    WithheldError,
     is_secret_name,
 )
 
-__all__ = ["check_yaml", "check_yaml_text"]
+__all__ = ["check_yaml", "check_yaml_example"]
 
 _YAML_STR_TAG: Final[str] = "tag:yaml.org,2002:str"
 _YAML_LOADER: Final[type[yaml.SafeLoader]] = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 _YAML_DUMPER: Final[type[yaml.SafeDumper]] = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
 
+#: What PyYAML's composer says when the text holds a second document.
+_SECOND_DOCUMENT: Final[str] = "expected a single document in the stream"
 
-def check_yaml(text: str, path: str, text_rule: TextRule | None) -> tuple[str, int]:
-    """*text*, a YAML file, with every secret value replaced, and the count.
+
+def check_yaml(text: str, path: str, text_rule: TextRule | None) -> tuple[str, Scrubber]:
+    """*text*, a YAML file, with every secret value replaced, and the scrubber that counted.
 
     Raises :exc:`ApiFileFormatError` when the file does not parse or
     cannot be written back; the message names the reason, never the text.
@@ -53,36 +64,93 @@ def check_yaml(text: str, path: str, text_rule: TextRule | None) -> tuple[str, i
         raise ApiFileFormatError(
             f"{path} is not well-formed YAML ({_yaml_reason(exc)}); the file is not returned"
         ) from None
+    scrubber = Scrubber(count, text_rule=text_rule, strict=True)
     if root is None:
-        return "", 0
-    scrubber = Scrubber(count, text_rule=text_rule)
+        return "", scrubber
     copy = scrubber.tree(data, {})
     try:
-        return _dump(copy), scrubber.count
+        return _dump(copy), scrubber
     except yaml.YAMLError as exc:
         raise ApiFileFormatError(
             f"{path} cannot be written back as YAML ({type(exc).__name__}); not returned"
         ) from None
 
 
-def check_yaml_text(text: str, scrubber: Scrubber) -> str | None:
-    """*text*, a YAML mapping or list, checked and written back; ``None`` when it is not one.
+def check_yaml_example(text: str, scrubber: Scrubber) -> tuple[str | None, Any]:
+    """*text*, an example in YAML, checked and written back; or the one scalar it is.
 
-    Almost any text is a YAML scalar, so only a mapping or a list counts.
-    Text the loader refuses, for any reason, is not one either. The
-    replaced values are counted on *scrubber*. Raises :exc:`yaml.YAMLError`
-    when the checked copy cannot be written back.
+    Returns ``(copy, None)`` for a mapping or a list: every secret value
+    replaced (counted on *scrubber*) and the copy written back by the
+    safe dumper. Returns ``(None, value)`` when the text is one scalar
+    (``value``) or holds no document at all (``None``): such text has no
+    names, and the caller treats it as plain text.
+
+    Raises :exc:`WithheldError` when the example cannot be checked whole: it
+    holds more than one document, it does not parse or its values cannot
+    be built, a mapping at any depth names a key twice (the loader would
+    keep the last value only), or a key is not a scalar.
     """
+    loader = _YAML_LOADER(text)
     try:
-        root, data, count = _parse(text)
-    except RecursionError:
+        root = _single_node(loader)
+        if root is None:
+            return None, None
+        if isinstance(root, yaml.ScalarNode):
+            return None, loader.construct_document(root)
+        _refuse_repeated_keys(loader, root, set())
+        count = _redact_yaml_nodes(root)
+        data = loader.construct_document(root)
+    except WithheldError:
         raise
-    except Exception:
-        return None
-    if not isinstance(root, (yaml.MappingNode, yaml.SequenceNode)):
-        return None
+    except RecursionError:
+        raise WithheldError(TOO_DEEP) from None
+    except Exception:  # any failure to read the example means it cannot be checked
+        raise WithheldError(NOT_PARSED) from None
+    finally:
+        loader.dispose()
     scrubber.count += count
-    return _dump(scrubber.tree(data, {}))
+    copy = scrubber.tree(data, {})
+    try:
+        return _dump(copy), None
+    except yaml.YAMLError:
+        raise WithheldError(NOT_PARSED) from None
+
+
+def _single_node(loader: Any) -> yaml.Node | None:
+    """The root node of the one document in the text; :exc:`WithheldError` for a second one."""
+    try:
+        node: yaml.Node | None = loader.get_single_node()
+    except yaml.composer.ComposerError as exc:
+        if exc.context == _SECOND_DOCUMENT:
+            raise WithheldError(MORE_THAN_ONE_DOCUMENT) from None
+        raise
+    return node
+
+
+def _refuse_repeated_keys(loader: Any, node: yaml.Node, seen: set[int]) -> None:
+    """Raise :exc:`WithheldError` when a mapping under *node* repeats a key or has a non-scalar key.
+
+    The loader builds a mapping by assigning key after key, so a repeated
+    key keeps the last value only. Keys are compared as the loader builds
+    them (``1`` and ``"1"`` differ, ``yes`` and ``true`` do not). An alias
+    stands for a node already seen, which is checked once.
+    """
+    if id(node) in seen:
+        return
+    seen.add(id(node))
+    if isinstance(node, yaml.MappingNode):
+        keys: set[Any] = set()
+        for key_node, value_node in node.value:
+            if not isinstance(key_node, yaml.ScalarNode):
+                raise WithheldError(NOT_PARSED)
+            key = loader.construct_object(key_node)
+            if key in keys:
+                raise WithheldError(REPEATED_KEY)
+            keys.add(key)
+            _refuse_repeated_keys(loader, value_node, seen)
+    elif isinstance(node, yaml.SequenceNode):
+        for item in node.value:
+            _refuse_repeated_keys(loader, item, seen)
 
 
 def _parse(text: str) -> tuple[yaml.Node | None, Any, int]:

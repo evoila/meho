@@ -340,10 +340,12 @@ session has expired"), is raised so the dispatcher drops the cached
 session, logs in once more and asks once more. When the second try fails
 too, the dispatcher copies the body of that answer into the error result.
 So the read checks that body first, the same way as a file (see below):
-the error result gets the checked copy, or no body when it is not UTF-8
-text or does not parse. The status stays, so the retry still runs. Every
-other status (for example `404`) is reported in `status` with the checked
-copy of the body as text.
+the error result gets the checked copy, or no body when the body cannot
+be read or checked for any reason. That includes a content encoding the
+read cannot decode, text that is not UTF-8, a file that does not parse
+and a lone surrogate. The status always stays, so the login retry always
+runs. Every other status (for example `404`) is reported in `status`
+with the checked copy of the body as text.
 
 The fetch is the shared step in `connectors/_shared/api_file_read.py`.
 The body is read in a stream. The read asks for `gzip` or `deflate` only
@@ -373,6 +375,17 @@ parse, or whose format is unknown (JavaScript, CSS, plain text), is
 refused with the reason and never the text. A redirect's query string
 goes through the same name check. `secrets_replaced` counts every
 replaced value.
+
+The check fails closed. A part of the file it cannot read whole is
+withheld: it becomes the placeholder, and the answer says how many parts
+were withheld (`withheld`) and why (`withheld_reasons`), never what they
+held. On an API reference page, a `<pre>` or `<code>` example comes back
+only as one JSON or YAML document read whole (maybe after a request
+line), or as plain text. An example with two YAML documents, a key named
+twice at any depth, or text that does not parse is withheld. So is a
+text value that gives a secret name a value in plain text
+(`sessionId: ...`). See `connectors-shared-api-file-secrets.md` for the
+full rule.
 
 A page or file can also hold free text that looks like a secret. The
 vendor's Logs 9.0 API file has `Authorization: Bearer ...` examples in
@@ -405,7 +418,9 @@ The answer:
 | `content_type` | The `Content-Type` header. |
 | `size` | Size of the checked copy in bytes. |
 | `sha256` | SHA-256 of the checked copy, hex. |
-| `secrets_replaced` | How many values were replaced: values under a secret name (`[REDACTED:param_name]`) and text the general redaction rules match. |
+| `secrets_replaced` | How many values were replaced: values under a secret name (`[REDACTED:param_name]`), text the general redaction rules match, and withheld parts. |
+| `withheld` | How many parts of the file (an example block, a text value) the check could not read whole and withheld. |
+| `withheld_reasons` | Each reason with how many parts it covers, for example `{"holds more than one document": 1}`. Never the text of a part. |
 | `version`, `build` | The system version and build, as the fingerprint reports them. |
 | `version_error` | Why the version read failed; `null` when it worked. The file still comes back. |
 | `redirect_to` | Path of a redirect answer; `null` otherwise. |
@@ -476,16 +491,13 @@ External: `httpx>=0.27` (Bearer header + `AsyncClient`), `structlog`
   `/rest-api/` as `GET`, marked "documentation path, not in the API
   file", and keeps them out of the served check.
 - `vrli.api_file.get` replaces values by their name. Free text in a page
-  (prose, a `<pre>` block that is neither JSON nor YAML) has no names;
-  only MEHO's general redaction rules check it, and they replace only
-  what they match. Every JSON document in a text is checked, also after
-  a request line. A `<pre>` or `<code>` block that holds text alone and
-  is a YAML document is checked like a YAML file and comes back from
-  the parsed copy. A `<pre>` or `<code>` block that a page colours with
-  child elements comes back only when its text is one JSON or YAML
-  document with nothing to replace; any other such block is withheld
-  whole. A licence key under a name that is not a secret name (the Logs
-  licence API calls it `key`) is not replaced.
+  (prose, a shell command in a `<pre>` block) has no structure; MEHO's
+  general redaction rules check it, and they replace only what they
+  match. Free text that gives a secret name a value (`sessionId: ...`,
+  `password=...`) is withheld. An example block that the check cannot
+  read whole is withheld; it comes back without its colour markup when
+  it can. A licence key under a name that is not a secret name (the
+  Logs licence API calls it `key`) is not replaced.
 - No DELETE-revoke on `aclose()` — a per-target network call during
   lifespan shutdown is more risk than benefit (same posture NSX
   takes). Revoke-on-close is v0.2.next.

@@ -49,13 +49,20 @@ What the helper does, in order:
      Any other script content becomes the placeholder; the helper cannot
      parse JavaScript, so it does not return it.
    * Every JSON object in a text value (a sample request in a
-     description, the body after a request line in a ``<pre>`` block) is
-     parsed and checked the same way, and written back from the parsed
-     copy. A text value whose JSON names a key twice is withheld whole.
-   * An HTML ``<pre>`` or ``<code>`` block that holds text alone and is
-     a YAML mapping or list is checked like a YAML file; one split by
-     child elements fails closed (:mod:`.api_file_markup`).
+     description, the body after a request line) is parsed and checked
+     the same way, and written back from the parsed copy.
    * A text value that holds a private key in PEM form, under any name.
+
+   The check fails closed: what it cannot read whole is withheld, never
+   passed through. A withheld part becomes the placeholder, is counted,
+   and its reason is kept in :attr:`CheckedApiFile.withheld`, never its
+   text (:mod:`.api_file_values`). In a text value that is JSON that
+   names a key twice, a start that looks like JSON but does not parse,
+   a secret name next to a value in plain text (``sessionId: ...``) and
+   text that is not valid Unicode. An HTML ``<pre>`` or ``<code>`` block
+   is an example: it comes back only as one JSON or YAML document parsed
+   whole, or as plain text, and is withheld otherwise
+   (:mod:`.api_file_markup`).
 
 4. Runs the caller's text rule, when one is given, on every text value
    that was not replaced whole (``text_rule``: one text value in, the
@@ -66,7 +73,8 @@ What the helper does, in order:
    written back, so the writer quotes the changed value as the format
    needs and no value changes its type.
 5. Writes the checked copy in the same format and counts the replaced
-   values.
+   values. A copy that cannot be written as UTF-8 (a key with a lone
+   surrogate) is refused.
 
 :func:`scrub_query_string` does the same for the query of a redirect
 path: the names are decoded first (``license%4Bey`` reads as
@@ -89,6 +97,7 @@ from meho_backplane.connectors._shared.api_file_values import (
     TextRule,
     dump_json,
     is_secret_name,
+    is_unicode,
 )
 from meho_backplane.connectors._shared.api_file_yaml import check_yaml
 
@@ -133,10 +142,17 @@ _ENDINGS: Final[dict[str, str]] = {
 
 @dataclass(frozen=True, slots=True)
 class CheckedApiFile:
-    """The checked copy of a file and how many values were replaced in it."""
+    """The checked copy of a file, how many values were replaced, and what was withheld.
+
+    ``secrets_replaced`` counts every placeholder in the copy, the
+    withheld parts too. ``withheld`` holds one reason for each part the
+    check could not read whole and withheld (an example block, a text
+    value), in order; never the text.
+    """
 
     text: str
     secrets_replaced: int
+    withheld: tuple[str, ...] = ()
 
 
 def detect_format(content_type: str | None, path: str) -> str | None:
@@ -180,10 +196,12 @@ def check_api_file(
             "returned"
         )
     try:
-        copy, count = _CHECKERS[fmt](text, path, text_rule)
+        copy, scrubber = _CHECKERS[fmt](text, path, text_rule)
     except RecursionError:
         raise ApiFileFormatError(f"{path} is nested too deeply to check; not returned") from None
-    return CheckedApiFile(copy, count)
+    if not is_unicode(copy):
+        raise ApiFileFormatError(f"{path} holds text that is not valid Unicode; not returned")
+    return CheckedApiFile(copy, scrubber.count, tuple(scrubber.withheld))
 
 
 def scrub_query_string(path: str) -> tuple[str, int]:
@@ -214,7 +232,7 @@ def scrub_query_string(path: str) -> tuple[str, int]:
 # ---------------------------------------------------------------------------
 
 
-def _check_json(text: str, path: str, text_rule: TextRule | None) -> tuple[str, int]:
+def _check_json(text: str, path: str, text_rule: TextRule | None) -> tuple[str, Scrubber]:
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -222,12 +240,12 @@ def _check_json(text: str, path: str, text_rule: TextRule | None) -> tuple[str, 
             f"{path} is not well-formed JSON ({exc.msg} at line {exc.lineno}, column "
             f"{exc.colno}); the file is not returned"
         ) from None
-    scrubber = Scrubber(text_rule=text_rule)
+    scrubber = Scrubber(text_rule=text_rule, strict=True)
     copy = scrubber.tree(data, {})
-    return dump_json(copy), scrubber.count
+    return dump_json(copy), scrubber
 
 
-_CHECKERS: Final[dict[str, Callable[[str, str, TextRule | None], tuple[str, int]]]] = {
+_CHECKERS: Final[dict[str, Callable[[str, str, TextRule | None], tuple[str, Scrubber]]]] = {
     "json": _check_json,
     "yaml": check_yaml,
     "xml": check_xml,

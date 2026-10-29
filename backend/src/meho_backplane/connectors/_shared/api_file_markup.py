@@ -15,24 +15,21 @@ its content, a secret-named attribute loses its value, and an element
 that a ``name``, ``id``, ``key`` or ``type`` attribute marks as secret
 loses its content and every attribute value except the label that marks
 it. A ``<script>`` block comes back only when its content is JSON. Every
-JSON object in a text or attribute value (the body after a request line
-in a ``<pre>`` block, for example; also a list that holds an object) is
-checked like a JSON file and written back from the parsed copy
-(:meth:`Scrubber.text`). A ``<pre>`` or ``<code>`` block that holds text
-alone and is a YAML mapping or list (not JSON) is an example in YAML: it
-is checked like a YAML file and written back from the parsed copy, so a
-comment or a repeated key does not come back. A ``<pre>`` or ``<code>``
-block with child elements (syntax highlighting with
-``<span>``) fails closed: it comes back as it was only when every child
-passes its own check unchanged and the text joined over the children is
-one JSON or YAML object or list that the structured check leaves
-unchanged. Text that names a key twice in one object, at any depth, or
-YAML text that holds a comment, is no such document: the parser would
-keep only part of it, and the block would come back with text the check
-never saw. A text value inside the document that is itself JSON with a
-key named twice counts as a replacement for the same reason. Any other
-such block is withheld: the placeholder stands in its place, counted
-once.
+JSON object in a text or attribute value is checked like a JSON file and
+written back from the parsed copy (:meth:`Scrubber.text`).
+
+An HTML ``<pre>`` or ``<code>`` block is an example, and the check of an
+example fails closed (:func:`_html_example_block`). The block comes back
+only when the check could read all of it: one JSON or YAML document,
+maybe after one request line (``POST /sessions``), parsed whole and
+checked key by key, or plain text. It then comes back written from the
+parsed copy, with the secret values replaced. Any other block is
+withheld: the placeholder stands in its place, counted once, and the
+reason is kept, never the text. A block is withheld when it does not
+parse, holds more than one document, names a key twice at any depth,
+holds text that is not valid Unicode, has a child element that is
+secret or a script, or is plain text that names a secret next to a
+value.
 """
 
 from __future__ import annotations
@@ -40,28 +37,32 @@ from __future__ import annotations
 import html
 import io
 import json
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any, Final
 
 import defusedxml.ElementTree as DefusedET
-import yaml
 from defusedxml import DefusedXmlException
 
 from meho_backplane.connectors._shared.api_file_values import (
     REDACTED,
+    REPEATED_KEY,
+    SECRET_CHILD_ELEMENT,
+    SECRET_NAME_IN_TEXT,
+    TOO_DEEP,
     ApiFileFormatError,
     RepeatedKeyError,
     Scrubber,
     TextRule,
+    WithheldError,
     dump_json,
     is_secret_name,
     is_secret_name_lowercased,
-    json_documents,
     load_json,
 )
-from meho_backplane.connectors._shared.api_file_yaml import check_yaml_text
+from meho_backplane.connectors._shared.api_file_yaml import check_yaml_example
 
 __all__ = ["check_html", "check_xml"]
 
@@ -92,14 +93,19 @@ _HTML_VOID: Final[frozenset[str]] = frozenset(
 
 _XML_NAMESPACE: Final[str] = "http://www.w3.org/XML/1998/namespace"
 
-#: HTML blocks that hold a whole example: a YAML document in one, as text
-#: alone, is checked like a YAML file; one split by child elements
-#: (syntax highlighting) fails closed. A ``<span>`` is neither: it is an
-#: inline element of ordinary page text, which the element check covers
-#: (every JSON document in its text is checked like in any other text).
+#: HTML blocks that hold an example. Their check fails closed
+#: (:func:`_html_example_block`). A ``<span>`` is not one: it is an inline
+#: element of ordinary page text, which the element check covers.
 _HTML_DOCUMENT_BLOCKS: Final[frozenset[str]] = frozenset({"pre", "code"})
 
-_YAML_LOADER: Final[type[yaml.SafeLoader]] = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+#: A request line before the body of an example: a method and a path,
+#: maybe the HTTP version, alone on the first line. A path with a query
+#: (``?``) is no request line, so the whole text must then be one
+#: document.
+_REQUEST_LINE: Final[re.Pattern[str]] = re.compile(
+    r"[ \t]*(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)[ \t]+/[^\s?#]*"
+    r"(?:[ \t]+HTTP/\d(?:\.\d)?)?[ \t]*(?:\r?\n|\Z)"
+)
 
 #: One namespace declaration: ``(prefix, uri)``; the default namespace
 #: has the empty prefix, ``xmlns=""`` has the empty uri too.
@@ -111,7 +117,7 @@ _Declaration = tuple[str, str]
 # ---------------------------------------------------------------------------
 
 
-def check_xml(text: str, path: str, text_rule: TextRule | None = None) -> tuple[str, int]:
+def check_xml(text: str, path: str, text_rule: TextRule | None = None) -> tuple[str, Scrubber]:
     declared_on: dict[int, list[_Declaration]] = {}
     pending: list[_Declaration] = []
     try:
@@ -134,7 +140,7 @@ def check_xml(text: str, path: str, text_rule: TextRule | None = None) -> tuple[
     writer = _XmlWriter(declared_on, text_rule)
     out: list[str] = []
     writer.element(root, out, ())
-    return "".join(out), writer.scrubber.count
+    return "".join(out), writer.scrubber
 
 
 def _split_tag(tag: str) -> tuple[str, str]:
@@ -162,7 +168,7 @@ class _XmlWriter:
     def __init__(
         self, declared_on: dict[int, list[_Declaration]], text_rule: TextRule | None = None
     ) -> None:
-        self.scrubber = Scrubber(text_rule=text_rule)
+        self.scrubber = Scrubber(text_rule=text_rule, strict=True)
         self._declared_on = declared_on
 
     def element(self, el: Any, out: list[str], outer: tuple[list[_Declaration], ...]) -> None:
@@ -368,14 +374,14 @@ class _HtmlTree(HTMLParser):
         self._open[-1].children.append(_HtmlNode("!", [], [decl]))
 
 
-def check_html(text: str, _path: str, text_rule: TextRule | None = None) -> tuple[str, int]:
+def check_html(text: str, _path: str, text_rule: TextRule | None = None) -> tuple[str, Scrubber]:
     parser = _HtmlTree()
     parser.feed(text)
     parser.close()
-    scrubber = Scrubber(text_rule=text_rule)
+    scrubber = Scrubber(text_rule=text_rule, strict=True)
     out: list[str] = []
     _html_children(parser.root, out, scrubber)
-    return "".join(out), scrubber.count
+    return "".join(out), scrubber
 
 
 def _html_children(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
@@ -410,10 +416,8 @@ def _html_element(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
         out.append(REDACTED)
     elif node.tag == "script":
         out.append(_html_script(node, scrubber))
-    elif node.tag in _HTML_DOCUMENT_BLOCKS and _has_elements(node):
-        out.append(_html_block(node, scrubber))
     elif node.tag in _HTML_DOCUMENT_BLOCKS:
-        out.append(_html_example(node, scrubber))
+        out.append(_html_example_block(node, scrubber))
     elif node.tag == "style":
         out.extend(scrubber.text(c) for c in node.children if isinstance(c, str))
     else:
@@ -421,165 +425,107 @@ def _html_element(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
     out.append(f"</{node.tag}>")
 
 
-def _has_elements(node: _HtmlNode) -> bool:
-    return any(not isinstance(child, str) for child in node.children)
+def _html_example_block(node: _HtmlNode, scrubber: Scrubber) -> str:
+    """A ``<pre>`` or ``<code>`` block: the checked example, or the placeholder.
 
-
-def _html_block(node: _HtmlNode, scrubber: Scrubber) -> str:
-    """A ``<pre>`` or ``<code>`` block with child elements: as it was, or the placeholder.
-
-    The block fails closed. Two checks run on it, and it comes back as it
-    was only when neither would replace anything: every child element is
-    checked as it would be on its own (a secret-marked child, a
-    secret-named attribute, a script that is not JSON), and the block's
-    text, joined over the children as the page wrote it, is checked as
-    one JSON or YAML object or list. Text that is no such document, or a
-    check that would replace anything, withholds the whole block: the
-    placeholder in its place, counted once. The checks are never
-    combined into a rebuilt block: a child element can split a secret
-    name (``{"<span>pass</span>word": ...}``) or stand inside a key, so
-    that text with the children replaced is another document than the
-    one the page shows. The block comes back as the page wrote it, so
-    the parsed copy must hold all of its text: a key named twice in one
-    object (the parser keeps one value and drops the other) or a YAML
-    comment makes the text no document, see :func:`_parse_document`.
-    The same holds one level down: a text value in the document that is
-    itself JSON with a key named twice is withheld and counted by
-    :meth:`Scrubber.text`, so the probe's count is never zero while the
-    text holds a value the parser dropped. A block with no text has only
-    the element check.
+    The block fails closed. Its text, joined over its child elements as
+    the page wrote it (syntax highlighting splits an example into
+    ``<span>`` elements), is one example, checked by :func:`_example`.
+    The block comes back only when that check read all of the text; it
+    then comes back as the checked text, without the child elements.
+    Any other block is withheld: the placeholder, counted once, with the
+    reason kept on *scrubber*, never the text. A block is withheld
+    whole, without its text, when a child element is secret (its name,
+    a naming attribute or a secret-named attribute says so) or is a
+    script: its text belongs to that element, not to the example. A
+    block with no text keeps its child elements, each with its own
+    check.
     """
-    probe = scrubber.fresh()
-    checked: list[str] = []
-    _html_children(node, checked, probe)
+    if _hides_a_secret(node):
+        return scrubber.withhold(SECRET_CHILD_ELEMENT)
     text = "".join(_html_text(node))
-    parsed = _parse_document(text)
-    if parsed is not None:
-        probe.tree(parsed, {})
-    if probe.count or (parsed is None and text.strip()):
-        scrubber.count += 1
-        return REDACTED
-    return "".join(checked)
-
-
-def _parse_document(text: str) -> dict[str, Any] | list[Any] | None:
-    """*text* as one JSON or YAML object or list; ``None`` when it is not one.
-
-    JSON is tried first, then YAML with the safe loader. A YAML scalar is
-    not a document: almost any text is one. Text the loader refuses or
-    cannot build, for any reason, is not a document either. Neither is
-    text that names a key twice in one object, at any depth, nor YAML
-    text with a ``#`` in it: the parser keeps only part of such text (one
-    of the two values; the text without the comment), and a check of the
-    parsed copy says nothing about the rest. The caller returns the text
-    as the page wrote it, so all of it must be in the parsed copy. A
-    text value inside the document that is itself JSON gets the same
-    rule from :meth:`Scrubber.text`, which withholds and counts it.
-    """
+    if not text.strip():
+        out: list[str] = []
+        _html_children(node, out, scrubber)
+        return "".join(out)
+    probe = scrubber.fresh()
     try:
-        parsed: Any = load_json(text)
-    except RepeatedKeyError:
-        return None
-    except ValueError:
-        parsed = _load_yaml(text)
-    except RecursionError:
-        return None
-    return parsed if isinstance(parsed, (dict, list)) else None
+        checked = _example(text, probe)
+    except WithheldError as exc:
+        return scrubber.withhold(exc.reason)
+    scrubber.absorb(probe)
+    return html.escape(checked, quote=False)
 
 
-def _load_yaml(text: str) -> Any:
-    if "#" in text:
-        return None
-    loader = _YAML_LOADER(text)
-    try:
-        node = loader.get_single_node()
-        if node is None or _yaml_repeats_a_key(loader, node, set()):
-            return None
-        return loader.construct_document(node)
-    except Exception:  # any failure to read the text means it is no document
-        return None
-    finally:
-        loader.dispose()
-
-
-def _yaml_repeats_a_key(loader: Any, node: Any, seen: set[int]) -> bool:
-    """True when a mapping under *node* names a key twice, or has a key that is no scalar.
-
-    The loader builds a mapping by assigning key after key, so a repeated
-    key keeps the last value only. Keys are compared as the loader
-    builds them (``1`` and ``"1"`` differ, ``yes`` and ``true`` do not).
-    A key that is a mapping or a list, and a merge key (``<<``), are not
-    accepted: the block fails closed on them. An alias stands for a node
-    already seen, which is checked once.
-    """
-    if id(node) in seen:
-        return False
-    seen.add(id(node))
-    if isinstance(node, yaml.MappingNode):
-        return _yaml_mapping_repeats_a_key(loader, node, seen)
-    items = node.value if isinstance(node, yaml.SequenceNode) else ()
-    return any(_yaml_repeats_a_key(loader, item, seen) for item in items)
-
-
-def _yaml_mapping_repeats_a_key(loader: Any, node: Any, seen: set[int]) -> bool:
-    keys: set[Any] = set()
-    for key_node, value_node in node.value:
-        if not isinstance(key_node, yaml.ScalarNode):
+def _hides_a_secret(node: _HtmlNode) -> bool:
+    """True when an element under *node* is secret, has a secret-named attribute, or is a script."""
+    for child in node.children:
+        if isinstance(child, str) or child.tag == "!":
+            continue
+        if (
+            child.tag == "script"
+            or _html_element_is_secret(child)
+            or any(is_secret_name_lowercased(key) for key, _ in child.attrs)
+            or _hides_a_secret(child)
+        ):
             return True
-        key = loader.construct_object(key_node)
-        if key in keys or _yaml_repeats_a_key(loader, value_node, seen):
-            return True
-        keys.add(key)
     return False
 
 
-def _html_example(node: _HtmlNode, scrubber: Scrubber) -> str:
-    """A ``<pre>`` or ``<code>`` block that holds text alone, checked and escaped.
+def _example(text: str, scrubber: Scrubber) -> str:
+    """*text*, one example, checked whole; :exc:`WithheldError` when it cannot be.
 
-    A page writes an example as one text, often with the request line
-    before the body (``POST /sessions`` and then the JSON). Every JSON
-    document in the text is checked like a JSON file and written back
-    from the parsed copy, and the text around them goes through the text
-    rule (:meth:`Scrubber.text`). A block whose text is not JSON but a
-    YAML mapping or list (``sessionId: ...``) is checked like a YAML file
-    and written back from the parsed copy (:func:`check_yaml_text`): a
-    comment or a repeated key is not in the copy, so a secret the parser
-    dropped does not come back. YAML is tried before the JSON documents
-    in the text, so a YAML example with a flow mapping in it is checked
-    whole. A block the check cannot finish (JSON that names a key twice,
-    brackets that open over and over, a copy the dumper cannot write)
-    comes back as the placeholder. Any other text (a request line, a
-    shell command, prose) goes through the text rule.
+    An example is one JSON or YAML document, maybe after one request line
+    (:data:`_REQUEST_LINE`), or plain text:
+
+    * JSON is parsed whole and strict, so a key named twice in one object,
+      at any depth, withholds the example. An object or a list comes back
+      written from the parsed copy, every secret value replaced.
+    * Text that is not JSON is read as one YAML document
+      (:func:`check_yaml_example`). A mapping or a list comes back from
+      the parsed copy too. A second document, a parse error or a key
+      named twice withholds the example.
+    * A text that is one scalar (a shell command, a path, a word) or no
+      document at all is plain text. It has no names, so the check runs
+      the rules for any text value (:meth:`Scrubber.text`): every JSON
+      document in it is checked, a start that looks like JSON must
+      parse, and a secret name next to a value (``sessionId:x``)
+      withholds the text. When YAML reads the scalar as other words
+      than the text shows (quotes, escapes), the value is checked too,
+      and anything that check would replace withholds the example: a
+      YAML escape (``"pass\\x77ord: ..."``) cannot hide a name.
+
+    The request line stays as written, and so does the white space around
+    the document.
     """
-    text = "".join(_html_text(node))
-    if json_documents(text) is None:
-        scrubber.count += 1
-        return REDACTED
-    if not _is_json(text):
-        probe = scrubber.fresh()
-        try:
-            document = check_yaml_text(text, probe)
-        except yaml.YAMLError:
-            scrubber.count += 1
-            return REDACTED
-        if document is not None:
-            scrubber.count += probe.count
-            if not text.endswith("\n"):
-                document = document.rstrip("\n")
-            return html.escape(document, quote=False)
-    return html.escape(scrubber.text(text), quote=False)
-
-
-def _is_json(text: str) -> bool:
-    """True when *text* is one JSON value, whole (surrounding whitespace aside)."""
-    stripped = text.strip()
-    if not stripped or stripped[0] not in "{[":
-        return False
+    match = _REQUEST_LINE.match(text)
+    head = match.group(0) if match else ""
+    body = text[len(head) :]
+    core = body.strip()
+    if not core:
+        return scrubber.text(text)
+    lead = body[: len(body) - len(body.lstrip())]
+    trail = body[len(body.rstrip()) :]
+    value: Any
     try:
-        load_json(stripped)
+        value = load_json(core)
+    except RepeatedKeyError:
+        raise WithheldError(REPEATED_KEY) from None
+    except RecursionError:
+        raise WithheldError(TOO_DEEP) from None
     except ValueError:
-        return False
-    return True
+        copy, value = check_yaml_example(core, scrubber)
+        if copy is not None:
+            return head + lead + copy.rstrip("\n") + trail
+    else:
+        if isinstance(value, (dict, list)):
+            return head + lead + dump_json(scrubber.tree(value, {})) + trail
+    if value is not None and str(value).split() != core.split():
+        check = scrubber.fresh()
+        check.text(str(value))
+        if check.count:
+            raise WithheldError(check.withheld[0] if check.withheld else SECRET_NAME_IN_TEXT)
+    return scrubber.text(text)
 
 
 def _html_text(node: _HtmlNode) -> Iterable[str]:

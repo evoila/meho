@@ -883,13 +883,17 @@ async def test_page_the_redaction_rules_would_change_stops_with_an_error(
 async def test_secret_that_crosses_a_part_boundary_stops_with_an_error(
     _stub_embedding: AsyncMock, session: AsyncSession
 ) -> None:
-    """``password=`` ends the first part and the value starts the second."""
+    """``Bearer`` ends the first part and the token starts the second.
+
+    A secret name next to a value (``password=...``) never gets this far:
+    the file check withholds that text.
+    """
     await _register_and_resolve(_stub_embedding)
     set_default_reducer(JsonFluxReducer(store=ResultHandleStore(_FakeValkey())))  # type: ignore[arg-type]
-    label = b" password="
+    label = b" Bearer "
     page = b"x" * (PART_BYTES - len(label)) + label + b"example-secret-value-0123456789 tail\n"
     parts = [part.decode() for part in split_parts(page)]
-    assert parts[0].endswith("password=")
+    assert parts[0].endswith("Bearer ")
     assert parts[1].startswith("example-secret-value")
     for index, text in enumerate(parts):
         alone = apply_connector_boundary_redaction(

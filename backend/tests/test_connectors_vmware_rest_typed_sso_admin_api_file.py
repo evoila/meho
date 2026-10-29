@@ -504,16 +504,21 @@ async def test_non_utf8_text_is_refused() -> None:
     await connector.aclose()
 
 
-_WSDL_WITH_TOKEN_TYPE = _WSDL.replace(
+#: A ``Bearer`` example in free text: the redaction rules match it, and the
+#: file check has no name to replace it by. (A secret name next to a value,
+#: such as ``type="token:SecurityToken"``, never gets this far: the file
+#: check withholds that value.)
+_WSDL_WITH_A_BEARER_EXAMPLE = _WSDL.replace(
     '<xsd:include schemaLocation="admin-faults.xsd"/>',
     '<xsd:include schemaLocation="admin-faults.xsd"/>\n'
-    '      <xsd:element name="token" type="token:SecurityToken"/>',
+    "      <xsd:annotation><xsd:documentation>Send Bearer made-up-token-value-0123"
+    "</xsd:documentation></xsd:annotation>",
 )
 
 
 async def test_file_whose_text_redaction_would_change_is_refused() -> None:
-    body = _WSDL_WITH_TOKEN_TYPE.encode()
-    assert _redact_like_the_dispatcher({"text": _WSDL_WITH_TOKEN_TYPE}).manifest
+    body = _WSDL_WITH_A_BEARER_EXAMPLE.encode()
+    assert _redact_like_the_dispatcher({"text": _WSDL_WITH_A_BEARER_EXAMPLE}).manifest
     connector = _connector()
     async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
         _mock_session_and_version(mock)
@@ -524,26 +529,26 @@ async def test_file_whose_text_redaction_would_change_is_refused() -> None:
 
     message = str(excinfo.value)
     assert _WSDL_PATH in message
-    assert "strip-api-key" in message
+    assert "strip-bearer-token" in message
     assert "text_parts.0.text" in message
     assert "not returned" in message
-    assert "SecurityToken" not in message
+    assert "made-up-token-value" not in message
 
 
 def _xml_with_a_secret_across_the_part_cut() -> bytes:
-    """Valid one-line XML whose ``password=...`` label straddles the first part cut.
+    """Valid one-line XML whose ``Bearer ...`` example straddles the first part cut.
 
-    The label sits in free text (not under a secret-named key, so the
-    file check leaves it), and the file is written as the check writes it
-    back, so the copy is the file. All characters are ASCII, so the cut
-    falls exactly at ``PART_MAX_BYTES``: ``pass`` ends part 0 and
-    ``word=...`` starts part 1.
+    The example sits in free text (no secret name, so the file check
+    leaves it), and the file is written as the check writes it back, so
+    the copy is the file. All characters are ASCII, so the cut falls
+    exactly at ``PART_MAX_BYTES``: ``Bear`` ends part 0 and ``er ...``
+    starts part 1.
     """
     head = '<root><pad n="'
     joint = '"/><note>'
     before = head + "a" * (PART_MAX_BYTES - 4 - len(head) - len(joint)) + joint
     assert len(before) == PART_MAX_BYTES - 4
-    body = (before + "password=made-up-pass-value-0123</note></root>").encode()
+    body = (before + "Bearer made-up-pass-value-0123</note></root>").encode()
     assert _copy_of(body) == body
     return body
 
@@ -551,7 +556,7 @@ def _xml_with_a_secret_across_the_part_cut() -> bytes:
 async def test_secret_split_across_the_part_cut_is_refused() -> None:
     body = _xml_with_a_secret_across_the_part_cut()
     parts = split_text_parts(body)
-    assert parts[0].endswith("pass") and parts[1].startswith("word=")
+    assert parts[0].endswith("Bear") and parts[1].startswith("er ")
     # The per-part check alone misses the split label; the whole text trips it.
     per_part = _redact_like_the_dispatcher(
         {"text_parts": [{"index": i, "text": text} for i, text in enumerate(parts)]}
@@ -568,7 +573,7 @@ async def test_secret_split_across_the_part_cut_is_refused() -> None:
     await connector.aclose()
 
     message = str(excinfo.value)
-    assert "strip-api-key" in message
+    assert "strip-bearer-token" in message
     assert "file_text" in message
     assert "not returned" in message
     assert "made-up-pass-value" not in message

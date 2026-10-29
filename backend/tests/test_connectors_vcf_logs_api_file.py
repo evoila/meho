@@ -37,8 +37,13 @@ What is covered, with a respx-mocked Logs system and no ingested catalog:
   placeholder and is counted in ``secrets_replaced``, also across a part
   boundary and in a redirect query; a file that does not parse is
   refused without its text;
+* the check fails closed: an example block it cannot read whole (two
+  YAML documents, a key named twice at any depth, a block that does not
+  parse) is withheld, and the answer counts it and names the reason,
+  never the text;
 * the body of a 401 or 440 is the checked copy, or withheld when it cannot
-  be checked, and the login retry still runs; the flight recorder gets
+  be checked, and the login retry still runs, also when the body has an
+  unknown content encoding or a lone surrogate; the flight recorder gets
   only the checked copy, on success and on a 401 or 440;
 * content that is not text is refused with its content type;
 * the version read fails (HTTP 500, no connection, an answer with no
@@ -76,6 +81,11 @@ from meho_backplane.connectors._shared.api_file_read import (
     split_parts,
 )
 from meho_backplane.connectors._shared.api_file_secrets import REDACTED
+from meho_backplane.connectors._shared.api_file_values import (
+    MORE_THAN_ONE_DOCUMENT,
+    NOT_PARSED,
+    REPEATED_KEY,
+)
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.vcf_logs import (
@@ -831,6 +841,8 @@ def _largest_file_that_passes_the_check(limit: int) -> bytes:
         "version_error": None,
         "redirect_to": None,
         "secrets_replaced": 0,
+        "withheld": 0,
+        "withheld_reasons": {},
         "parts": 0,
     }
     size = limit
@@ -908,7 +920,11 @@ async def test_every_part_of_a_file_that_passes_the_check_is_read_back_from_stor
 async def test_example_the_redaction_rules_match_comes_back_replaced_and_counted(
     _stub_embedding: AsyncMock, session: AsyncSession
 ) -> None:
-    """A documentation example that looks like a secret comes back as the placeholder."""
+    """A documentation example that looks like a secret comes back as the placeholder.
+
+    The header after the request line is read as a YAML mapping; the
+    general rules replace its value.
+    """
     await _register_and_resolve(_stub_embedding)
     set_default_reducer(JsonFluxReducer(store=ResultHandleStore(_FakeValkey())))  # type: ignore[arg-type]
     page = (
@@ -925,7 +941,7 @@ async def test_example_the_redaction_rules_match_comes_back_replaced_and_counted
     assert result.status == "ok", result.error
     body = result.result
     joined = "".join(item["text"] for item in body["items"])
-    assert "[REDACTED:authorization_header]" in joined
+    assert "Authorization: '[REDACTED:bearer_token]'" in joined
     assert body["secrets_replaced"] == 1
     assert body["size"] == len(joined.encode())
     assert body["sha256"] == hashlib.sha256(joined.encode()).hexdigest()
@@ -1089,9 +1105,59 @@ _SECRET_PAGES: list[Any] = [
     pytest.param(
         "text/html",
         "/rest-api/login.html",
-        "<pre><span>user</span>: admin\n# password: example-secret-value-0123456789</pre>",
+        "<pre><span>user</span>: admin\n# password: example-secret-value-0123456789\n"
+        "sessionId: example-session-id-0123456789</pre>",
         "example-secret-value-0123456789",
         id="yaml-with-a-comment-in-a-highlighted-block",
+    ),
+    pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        "<pre>sessionId: example-session-id-0123456789\n---\nok: true</pre>",
+        "example-session-id-0123456789",
+        id="two-yaml-documents-session-id",
+    ),
+    pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        "<code>licenseKey: example-licence-key-value-0123456789\n---\nok: true</code>",
+        "example-licence-key-value-0123456789",
+        id="two-yaml-documents-licence-key-in-code",
+    ),
+    pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        '<pre>{"a": {"b": {"x": {"password": "example-secret-value-0123456789"}, "x": 1}}}</pre>',
+        "example-secret-value-0123456789",
+        id="json-with-a-repeated-key-three-levels-down",
+    ),
+    pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        "<pre>a:\n  b:\n    x:\n      sessionId: example-session-id-0123456789\n    x: 1\n</pre>",
+        "example-session-id-0123456789",
+        id="yaml-with-a-repeated-key-three-levels-down",
+    ),
+    pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        '<pre>{"password": "example-secret-value-0123456789" "x"}</pre>',
+        "example-secret-value-0123456789",
+        id="json-example-that-does-not-parse",
+    ),
+    pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        "<p>Send sessionId: example-session-id-0123456789 on each call.</p>",
+        "example-session-id-0123456789",
+        id="session-id-with-a-value-in-prose",
+    ),
+    pytest.param(
+        "application/json",
+        _API_DOCS,
+        '{"example": "sessionId: example-session-id-0123456789\\n---\\nok: true"}',
+        "example-session-id-0123456789",
+        id="yaml-example-inside-a-json-string",
     ),
     pytest.param(
         "text/html",
@@ -1345,6 +1411,38 @@ async def test_secret_in_the_redirect_query_is_replaced_and_counted(
     assert "made-up-session-4" not in _rendered(result)
 
 
+@pytest.mark.asyncio
+async def test_withheld_blocks_are_counted_with_their_reasons_and_never_their_text(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """Fail closed: each block the check cannot read whole is withheld, and the answer says why."""
+    await _register_and_resolve(_stub_embedding)
+    page = (
+        "<pre>sessionId: made-up-withheld-1\n---\nok: true</pre>"
+        '<pre>{"password": "made-up-withheld-2" "x"}</pre>'
+        '<pre>{"a": {"x": {"password": "made-up-withheld-3"}, "x": 1}}</pre>'
+        '<pre>{"user": "admin", "password": "made-up-replaced-4"}</pre>'
+    )
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        mock.get("/rest-api/blocks.html").respond(
+            200, text=page, headers={"Content-Type": "text/html"}
+        )
+        result = await _dispatch("/rest-api/blocks.html")
+
+    assert result.status == "ok", result.error
+    body = result.result
+    joined = "".join(item["text"] for item in body["items"])
+    assert joined == (
+        f"<pre>{REDACTED}</pre><pre>{REDACTED}</pre><pre>{REDACTED}</pre>"
+        f'<pre>{{"user":"admin","password":"{REDACTED}"}}</pre>'
+    )
+    assert body["withheld"] == 3
+    assert body["withheld_reasons"] == {MORE_THAN_ONE_DOCUMENT: 1, NOT_PARSED: 1, REPEATED_KEY: 1}
+    assert body["secrets_replaced"] == 4
+    assert "made-up-" not in _rendered(result)
+
+
 # ---------------------------------------------------------------------------
 # The body of a 401 or 440 answer
 # ---------------------------------------------------------------------------
@@ -1494,6 +1592,72 @@ async def test_flight_recorder_gets_the_checked_copy_of_a_session_expiry_body(
     assert raised.value.response.status_code == status
     assert secret not in raised.value.response.text
     assert secret not in json.dumps(_recorded_call(scope, path), default=str)
+
+
+#: Bodies of a 401 or 440 that the check cannot read as they came:
+#: ``(content, headers)``. The status must still reach the dispatcher.
+_BAD_SESSION_EXPIRY_BODIES: list[Any] = [
+    pytest.param(
+        b"\x0b\x00\x80made-up-7",
+        {"Content-Type": "application/json", "Content-Encoding": "br"},
+        id="unknown-content-encoding",
+    ),
+    pytest.param(
+        b'{"message": "\\ud800", "password": "made-up-7"}',
+        {"Content-Type": "application/json"},
+        id="json-with-a-lone-surrogate",
+    ),
+]
+
+
+@pytest.mark.parametrize("status", [401, 440])
+@pytest.mark.parametrize(("content", "headers"), _BAD_SESSION_EXPIRY_BODIES)
+@pytest.mark.asyncio
+async def test_session_expiry_with_a_body_the_check_cannot_read_still_logs_in_again(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    status: int,
+    content: bytes,
+    headers: dict[str, str],
+) -> None:
+    """The status stays and the body is dropped or checked, so the login retry runs."""
+    _, loader = await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        login = _mock_login(mock)
+        mock.get(_VERSION).respond(200, json=_VERSION_PAYLOAD)
+        docs = mock.get(_API_DOCS).respond(status, content=content, headers=headers)
+        result = await _dispatch(_API_DOCS)
+
+    assert result.status == "error"
+    assert str(status) in (result.error or "")
+    assert docs.call_count == 2
+    assert login.call_count == 2
+    assert loader.calls == 1
+    assert "made-up-7" not in _rendered(result)
+
+
+@pytest.mark.parametrize("status", [401, 440])
+@pytest.mark.parametrize(("content", "headers"), _BAD_SESSION_EXPIRY_BODIES)
+@pytest.mark.asyncio
+async def test_flight_recorder_gets_only_the_checked_part_of_a_bad_session_expiry_body(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    status: int,
+    content: bytes,
+    headers: dict[str, str],
+) -> None:
+    instance, _ = await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        mock.get(_API_DOCS).respond(status, content=content, headers=headers)
+        with _recording() as scope, pytest.raises(httpx.HTTPStatusError) as raised:
+            await instance.api_file_get(_make_operator(), _LogsTarget(), {"path": _API_DOCS})
+
+    assert raised.value.response.status_code == status
+    raised_body = raised.value.response.content
+    assert raised_body in (b"", f'{{"message":"{REDACTED}","password":"{REDACTED}"}}'.encode())
+    assert b"made-up-7" not in raised_body
+    assert "made-up-7" not in json.dumps(_recorded_call(scope, _API_DOCS), default=str)
 
 
 @pytest.mark.asyncio

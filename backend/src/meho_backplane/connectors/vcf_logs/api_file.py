@@ -59,11 +59,18 @@ rules run on the whole text and on the answer, so a secret that spans
 two parts is found as well, and ``sha256`` always names what the caller
 gets.
 
+The check fails closed: a part of the file it cannot read whole (an
+example block that does not parse, holds two documents or names a key
+twice) is withheld. ``withheld`` counts such parts and
+``withheld_reasons`` says why, never what they held.
+
 The flight recorder gets the checked copy, never the body as it came. The
 body of a ``401`` or ``440`` answer goes through the same check before the
-read raises it for the login retry; a body that is not text, or does not
-parse, is withheld. So the error result and the recorder see only a
-checked body.
+read raises it for the login retry; a body that cannot be read or checked
+for any reason (an unknown content encoding, text that is not UTF-8, a
+file that does not parse, a lone surrogate) is dropped, and the status
+stays. So the error result and the recorder see only a checked body, and
+the login retry always runs.
 
 Version and build come from the connector's own version detection
 (``GET /api/v2/version``, which needs no login). If that read fails, the
@@ -78,6 +85,7 @@ reuses the handler.
 from __future__ import annotations
 
 import hashlib
+from collections import Counter
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl
 
@@ -239,6 +247,7 @@ async def vrli_api_file_get_impl(
             headers=headers,
             extensions=connector._request_extensions(target),
             max_bytes=max_bytes,
+            login_statuses=_SESSION_EXPIRED_STATUSES,
         )
     except httpx.TransportError as exc:
         flight_recorder_capture.record_vendor_call_error(span, method="GET", exc=exc)
@@ -269,6 +278,8 @@ async def vrli_api_file_get_impl(
         "size": len(body),
         "sha256": hashlib.sha256(body).hexdigest(),
         "secrets_replaced": checked.secrets_replaced + redirect_replaced,
+        "withheld": len(checked.withheld),
+        "withheld_reasons": dict(sorted(Counter(checked.withheld).items())),
         "version": version,
         "build": build,
         "version_error": version_error,
@@ -304,10 +315,11 @@ def _session_expired_response(
     fails too, it copies the body of the second answer into the error
     result. So the body goes through the same file check as a page first,
     with the same text rule: a secret-named value comes back as the
-    placeholder, text the general rules match too, and a body that is not
-    text or does not parse is withheld. The status and the headers stay,
-    so the dispatcher still sees the session as expired and the login
-    retry still runs.
+    placeholder, text the general rules match too. A body that cannot be
+    read or checked, for any reason (not text, does not parse, a lone
+    surrogate the copy cannot encode), is dropped. The status and the
+    headers stay, so the dispatcher still sees the session as expired and
+    the login retry still runs.
     """
     try:
         content = check_api_file(
@@ -316,7 +328,7 @@ def _session_expired_response(
             path=path,
             text_rule=text_rule,
         ).text.encode("utf-8")
-    except (ApiFileNotTextError, ApiFileFormatError):
+    except Exception:  # any failure drops the body; the status must reach the dispatcher
         content = b""
     return httpx.Response(
         status_code=response.status_code,

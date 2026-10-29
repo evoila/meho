@@ -17,6 +17,19 @@ hides and however it is written. A text scan was tried first (#4690,
 a YAML alias, an escaped key, a quoted `>` inside an HTML attribute. The
 parser sees the structure, so those tricks do not exist for it.
 
+**The check fails closed.** What it cannot read whole, it does not
+return. It withholds that part instead:
+
+- The part becomes the placeholder `[REDACTED:param_name]`.
+- The count `secrets_replaced` includes it.
+- The result names the reason (`CheckedApiFile.withheld`), never the
+  text of the part.
+
+Only a part that the parser read fully, and that passed the secret-name
+rules key by key, comes back. It comes back redacted. Before this rule,
+each code review found one more form that a parser could not read and
+the check let through. Now every such form is withheld.
+
 Every API file read uses this helper (#4780): `fleet.api_file.get`,
 `hcx.api_file.get` and `vcenter.sso_admin.api_file.get` on main, and the
 reads of #4690 (VCF Operations) and #4731 (Aria Automation 8) after it.
@@ -31,10 +44,12 @@ copy keeps its format and every value keeps its type.
 ## Key types
 
 - `check_api_file(text, *, content_type, path, text_rule=None) ->
-  CheckedApiFile` — the entry point. Returns the checked copy (`text`)
-  and the number of replaced values (`secrets_replaced`). Raises
-  `ApiFileFormatError` when the format is unknown or the file does not
-  parse. An empty file comes back empty. `text_rule` is an optional
+  CheckedApiFile` — the entry point. Returns the checked copy (`text`),
+  the number of placeholders in it (`secrets_replaced`, withheld parts
+  included) and one reason for each withheld part (`withheld`, in
+  order). Raises `ApiFileFormatError` when the format is unknown, the
+  file does not parse, or the copy cannot be written as UTF-8. An empty
+  file comes back empty. `text_rule` is an optional
   function for one text value: it returns the changed value and how many
   places changed. It runs on every text value that is not replaced
   whole, in every format, and its count joins `secrets_replaced`.
@@ -50,12 +65,20 @@ copy keeps its format and every value keeps its type.
   returns for a secret-named value.
 - `ApiFileFormatError` (a `ValueError`) — the message names the reason
   (format, line, column), never the text.
+- `WithheldError` (in `api_file_values.py`) — raised inside the check
+  when one part cannot be read whole. It carries the reason; the check
+  catches it and withholds the part. The reasons are fixed texts, for
+  example "holds more than one document" or "names a key twice".
 
 The three sibling modules hold the parts: `api_file_values.py` has the
-`Scrubber` walk over parsed values, the placeholder and the search for
-JSON documents inside a text value; `api_file_yaml.py` has the YAML
-check on the node graph, for a YAML file and for a YAML example in an
-HTML page; `api_file_markup.py` has the XML and HTML parsers and writers.
+`Scrubber` walk over parsed values, the placeholder, the withheld
+reasons and the search for JSON documents inside a text value;
+`api_file_yaml.py` has the YAML check on the node graph, for a YAML file
+and for a YAML example in an HTML page; `api_file_markup.py` has the XML
+and HTML parsers and writers, and the check of an example block. The
+fail-closed rules for text values are on only for the API file checks
+(`Scrubber(strict=True)`). The Salt connector uses the same walk without
+them, so its results do not change.
 
 ## What counts as a secret name
 
@@ -120,57 +143,52 @@ is how `{"credentials": {"default": "..."}}` got through a text scan.
      Any other script content becomes the placeholder; the helper cannot
      parse JavaScript, so it does not return it. `<style>` content is
      free text.
-   - An HTML `<pre>` or `<code>` block that holds text alone is an
-     example. When its text is not JSON but a YAML mapping or list
-     (`sessionId: ...`, a YAML request body), it is checked like a YAML
-     file and written back from the parsed copy: a comment or a repeated
-     key is not in the copy, so a secret the parser dropped does not come
-     back either, and the dropped value is counted. YAML is tried before
-     the JSON documents in the text, so a YAML example with a flow
-     mapping in it (`body: {"sessionId": "..."}`) is checked whole. The
-     copy comes from the safe dumper, so the text can change its look
-     (`roles: [reader]` comes back as a block list; an unquoted `12:30`
-     is a number in YAML 1.1). Any other text in such a block (a request
-     line and its JSON body, a shell command, prose) is checked like any
-     text value: every JSON document in it is checked, the rest goes
-     through the general rules. A `<span>` is ordinary page text and is
-     not an example in YAML.
-   - An HTML `<pre>` or `<code>` block with child elements (a page
-     colours its example with `<span>`) fails closed. Two checks run:
-     every child element gets the check it would get on its own (a
-     secret-marked child, a secret-named attribute, a `<script>` that is
-     not JSON), and the text joined over the children, as the page wrote
-     it, must be one JSON or YAML object or list, which is then checked
-     like a file. The block comes back as it was only when neither check
-     would replace anything. Otherwise the whole block is the placeholder,
-     counted once; it is never rebuilt from the two checks, because a
-     child element can split a secret name or stand inside a key, so the
-     text with the children replaced is another document than the one
-     the page shows. Because the block comes back as the page wrote it,
-     the parsed copy must hold all of its text: text that names a key
-     twice in one object, at any depth (the parser keeps one value and
-     drops the other), or YAML text with a comment, is no document, and
-     the block is withheld. The same holds for a text value inside the
-     document that is itself JSON with a key named twice: the value
-     check withholds and counts it (next point), so the block is
-     withheld too. A `<span>` with child elements is ordinary page text
-     and gets the element check.
-   - Every JSON object in a text value (or list that holds one) is
-     parsed and checked the same way, and written back from the parsed
-     copy, also when nothing was replaced. This holds for every text
-     value in every format: a sample request in a description, a `<pre>`
-     block, prose in a `<p>`, an attribute value. A request line before
-     the body (`"example": "POST /sessions\n{...}"`) does not hide the
-     body: each `{` or `[` in the text is tried as the start of a
-     document, so a document inside other text is found. The text around
-     the documents goes through the general rules. A text value whose
-     JSON names a key twice in one object, at any depth, is withheld
-     whole and counted once: the parser would keep one value and drop
-     the other, so neither the parsed copy nor the count would say
-     anything about the dropped one. The rule holds at every depth of
-     nesting, also for JSON text inside a text value inside JSON text.
-     So is a text value the parser cannot finish within a bounded amount
-     of work (brackets that open over and over and never close).
+   - An HTML `<pre>` or `<code>` block is an example. Its check fails
+     closed. The check joins the text of the block over its child
+     elements, as the page wrote it (a page often colours an example
+     with `<span>` elements). Then it reads that text in one of three
+     ways:
+     1. One JSON document, maybe after one request line
+        (`POST /api/v2/sessions`). JSON is read whole and strict.
+     2. One YAML document (a mapping or a list), maybe after one
+        request line.
+     3. Plain text: one YAML scalar, such as a shell command, a path or
+        a word.
+
+     A JSON or YAML document comes back written from the parsed copy,
+     every secret value replaced. The child elements do not come back;
+     the request line does. Plain text comes back as written, after
+     the checks for any text value (next point). When YAML reads a
+     quoted scalar as other words than the text shows (an escape such
+     as `\x77`), that value is checked too.
+   - A block is withheld whole when:
+     - it does not parse as one JSON or YAML document, and is not plain
+       text either;
+     - it holds more than one document (`---` in YAML, two JSON
+       objects);
+     - a mapping at any depth names a key twice (the parser would keep
+       only the last value);
+     - a child element is secret (by its name, a naming attribute or a
+       secret-named attribute) or is a `<script>`;
+     - it is plain text that names a secret next to a value.
+   - Every text value, in every format, is free text that can hold an
+     example. Every JSON object in it (or list that holds one) is
+     parsed and checked like a JSON file, and written back from the
+     parsed copy. A request line before the body does not hide the
+     body. The text around the documents goes through the general
+     rules. A text value is withheld whole when:
+     - its JSON names a key twice in one object, at any depth;
+     - a part that starts like a JSON object (`{"`, `[{`) does not
+       parse;
+     - it names a secret next to a value outside its JSON documents:
+       a secret name followed by `:` or `=` (`sessionId: ...`,
+       `"licenseKey": ...`, `password=...`). Plain text has no
+       structure, so the check cannot tell where such a value ends;
+     - it is not valid Unicode (JSON can spell a lone surrogate,
+       `\ud800`);
+     - the parser cannot finish it within a bounded amount of work.
+
+     A secret name without a value (`the sessionId field`) stays.
    - Any text value that holds a private key in PEM form
      (`-----BEGIN ... PRIVATE KEY-----`), under any name.
 4. Write the copy in the same format from the parsed file. JSON is
@@ -189,7 +207,9 @@ Each read runs the helper on the whole file before it cuts the text into
 parts, so a part boundary cannot hide a secret. The answer carries
 `secrets_replaced`; `size` and `sha256` describe the checked copy, and
 joining the parts gives the copy. A redirect path goes through
-`scrub_query_string`, and its count is added.
+`scrub_query_string`, and its count is added. The Logs read
+(`vrli.api_file.get`) also returns `withheld` (how many parts were
+withheld) and `withheld_reasons` (each reason with its count).
 
 The size limit stays as before: a file too big for one stored result is
 refused with its size, before parsing. The last check stays too: the
@@ -211,13 +231,15 @@ it off.
 - Inline JavaScript does not come back. JavaScript, CSS and plain text
   files are refused.
 - Free text that is not JSON, such as "the password is abc", cannot be
-  parsed; MEHO's general redaction rules check it, as before. A YAML
-  example is parsed only in a `<pre>` or `<code>` block that holds text
-  alone; `sessionId: ...` in a `<p>` or a `<span>` is free text.
-- A YAML example in a `<pre>` or `<code>` block comes back from the safe
-  dumper, like a YAML file: comments gone, keys in order, flow lists as
-  block lists, the YAML 1.1 reading of an unquoted value (`yes` is
-  `true`).
+  parsed; MEHO's general redaction rules check it, as before. Free text
+  that gives a secret name a value (`password: abc`) is withheld whole.
+- An example block comes back without its child elements (the colour
+  markup) and written from the parsed copy, like a file: JSON compact,
+  YAML from the safe dumper (comments gone, keys in order, flow lists as
+  block lists, the YAML 1.1 reading of a value: `yes` is `true`). A
+  YAML flow mapping such as `{id}` comes back as `id: null`.
+- A withheld block or text value is gone from the copy. The reasons say
+  how many there were and why.
 
 ## Dependencies
 
@@ -228,7 +250,11 @@ PyYAML (`yaml`, the C loader and dumper when libyaml is present);
 ## Known issues
 
 - A YAML file with several documents (`---`) does not parse as one
-  document and is refused. OpenAPI files are single documents.
+  document and is refused. OpenAPI files are single documents. A YAML
+  example with several documents inside a page is withheld.
+- The check reads a secret by its name. Free text that holds a secret
+  without a name and without a form the general rules know (`the
+  password is abc`) still comes back. The general rules run on it.
 - The HTML parser does not close elements the way a browser does
   (`<p>` and `<li>` are not closed by the next one). The written copy
   keeps everything in order, so this changes nesting only.

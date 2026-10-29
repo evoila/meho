@@ -87,8 +87,25 @@ VRLI_API_FILE_GET_OP = VrliTypedOp(
                 "type": "integer",
                 "description": (
                     "How many values under a secret name (password, token, session id, "
-                    "licence key, ...) were replaced by [REDACTED:param_name] in the copy."
+                    "licence key, ...) were replaced by [REDACTED:param_name] in the copy. "
+                    "Withheld parts are counted too."
                 ),
+            },
+            "withheld": {
+                "type": "integer",
+                "description": (
+                    "How many parts of the file (an example block, a text value) MEHO could "
+                    "not check whole and withheld; each one is [REDACTED:param_name] in the "
+                    "copy."
+                ),
+            },
+            "withheld_reasons": {
+                "type": "object",
+                "description": (
+                    "Why parts were withheld: each reason with how many parts it covers. "
+                    "Never what a withheld part held."
+                ),
+                "additionalProperties": {"type": "integer"},
             },
             "version": {
                 "type": ["string", "null"],
@@ -140,14 +157,16 @@ VRLI_API_FILE_GET_OP = VrliTypedOp(
             ),
         },
         "output_shape": (
-            "{path, status, content_type, size, sha256, secrets_replaced, version, build, "
-            "version_error, redirect_to, parts, items: [{index, text}]}. A short page comes "
-            "back inline; a longer file returns a result handle with the scalars inline and "
-            "the parts as rows. The copy is the parsed file written back (JSON, YAML, XML "
-            "or HTML) with every value under a secret name replaced by "
-            "[REDACTED:param_name]; secrets_replaced counts them. Read the rows with "
-            "result_query in index order and join their text to rebuild the copy; its "
-            "SHA-256 equals sha256."
+            "{path, status, content_type, size, sha256, secrets_replaced, withheld, "
+            "withheld_reasons, version, build, version_error, redirect_to, parts, items: "
+            "[{index, text}]}. A short page comes back inline; a longer file returns a result "
+            "handle with the scalars inline and the parts as rows. The copy is the parsed "
+            "file written back (JSON, YAML, XML or HTML) with every value under a secret "
+            "name replaced by [REDACTED:param_name]; secrets_replaced counts them. A part "
+            "MEHO could not check whole (an example that does not parse, holds two "
+            "documents or names a key twice) is withheld: withheld counts such parts and "
+            "withheld_reasons says why. Read the rows with result_query in index order and "
+            "join their text to rebuild the copy; its SHA-256 equals sha256."
         ),
         "next_step": (
             "If status is 3xx, read redirect_to next. If status is 404, the page is not "

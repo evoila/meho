@@ -376,8 +376,8 @@ async def test_fetch_checked_gives_the_recorder_no_body_for_a_refused_file(
         (_CREDENTIAL_IN_TEXT, _JSON, _REDACTED_HEADER),
         (b"password=made-up-recorder-secret", {"Content-Type": "text/plain"}, b""),
         (b"\xff\xfe", {"Content-Type": "application/octet-stream"}, b""),
-        # A lone surrogate parses, but the checked copy cannot be encoded.
-        (b'{"message": "\\ud800"}', _JSON, b""),
+        # A lone surrogate parses; the check withholds that value, the rest stays.
+        (b'{"message": "\\ud800"}', _JSON, REDACTED.encode()),
         # A number longer than Python parses from text stops the JSON parse.
         (b'{"n": ' + b"9" * 4500 + b"}", _JSON, b""),
     ],

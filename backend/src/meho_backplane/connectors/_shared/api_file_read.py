@@ -16,7 +16,8 @@ This module holds the steps that do not depend on the vendor:
   past the limit (:class:`ApiFileTooLargeError`). A compressed stream
   that ends early, or bytes after a ``deflate`` stream, are refused. A
   ``401`` whose body cannot be read comes back with no body, so the
-  dispatcher still sees the ``401``.
+  dispatcher still sees the ``401``; a read names its other "log in
+  again" statuses in ``login_statuses`` (the Logs ``440``).
 * :func:`fetch_checked_api_file` is the step every read starts with: the
   fetch and the file check. A refused file is recorded with no body. A
   ``401`` is recorded and raised with a checked body (or none), so the
@@ -53,7 +54,7 @@ rule, its version read and its answer.
 from __future__ import annotations
 
 import zlib
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from typing import Any, NoReturn
 
 import httpx
@@ -285,6 +286,7 @@ async def fetch_without_redirects(
     headers: dict[str, str],
     extensions: dict[str, Any],
     max_bytes: int,
+    login_statuses: Collection[int] = (httpx.codes.UNAUTHORIZED,),
 ) -> httpx.Response:
     """Send one ``GET`` and read the body, capped at *max_bytes* after decoding.
 
@@ -306,7 +308,9 @@ async def fetch_without_redirects(
     the limit, in an encoding the read cannot bound, or compressed in a
     way that does not decode, the ``401`` comes back with no body instead
     of a body-read error: the dispatcher must see the ``401`` to log in
-    again and retry. Only a transport fault raises.
+    again and retry. Only a transport fault raises. *login_statuses*
+    names every status that means "log in again" for this system; the
+    Logs read adds its own ``440``.
     """
     request = client.build_request(
         "GET", url, headers={**headers, "accept-encoding": _ACCEPT_ENCODING}, extensions=extensions
@@ -315,7 +319,7 @@ async def fetch_without_redirects(
     try:
         chunks = await _read_body_bounded(response, url, max_bytes=max_bytes)
     except _BODY_READ_ERRORS:
-        if response.status_code != httpx.codes.UNAUTHORIZED:
+        if response.status_code not in login_statuses:
             raise
         chunks = []
     finally:

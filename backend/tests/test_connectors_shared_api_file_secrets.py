@@ -22,6 +22,16 @@ from meho_backplane.connectors._shared.api_file_secrets import (
     detect_format,
     scrub_query_string,
 )
+from meho_backplane.connectors._shared.api_file_values import (
+    JSON_NOT_PARSED,
+    MORE_THAN_ONE_DOCUMENT,
+    NOT_PARSED,
+    NOT_UNICODE,
+    REPEATED_KEY,
+    SECRET_CHILD_ELEMENT,
+    SECRET_NAME_IN_TEXT,
+    Scrubber,
+)
 
 _SECRET = "madeup-value-1234"
 _JSON = "application/json"
@@ -43,7 +53,13 @@ def _pem(kind: str = "", indent: str = "") -> str:
 def _check(text: str, content_type: str | None = None, path: str = "/x") -> tuple[str, int]:
     checked = check_api_file(text, content_type=content_type, path=path)
     assert _SECRET not in checked.text
+    assert all(_SECRET not in reason for reason in checked.withheld)
     return checked.text, checked.secrets_replaced
+
+
+def _withheld(text: str, content_type: str | None = None) -> tuple[str, ...]:
+    """The reasons the check gives for the parts it withheld from *text*."""
+    return check_api_file(text, content_type=content_type, path="/x").withheld
 
 
 # ---------------------------------------------------------------------------
@@ -590,24 +606,24 @@ def test_html_pre_block_with_json_is_checked() -> None:
     [
         (
             f'<pre>{{<span class="k">"password"</span>: <span class="s">"{_SECRET}"</span>}}</pre>',
-            f"<pre>{REDACTED}</pre>",
+            f'<pre>{{"password":"{REDACTED}"}}</pre>',
         ),
         (
             f'<pre><code class="json">{{\n  <span>"user"</span>: <span>"admin"</span>,\n'
             f'  <span>"secret"</span>: <span>"{_SECRET}"</span>\n}}</code></pre>',
-            f"<pre>{REDACTED}</pre>",
+            f'<pre>{{"user":"admin","secret":"{REDACTED}"}}</pre>',
         ),
         (
             f'<p>Body:</p><code>[<span>{{"token": "{_SECRET}"}}</span>]</code>',
-            f"<p>Body:</p><code>{REDACTED}</code>",
+            f'<p>Body:</p><code>[{{"token":"{REDACTED}"}}]</code>',
         ),
         (
             f'<pre><span class="k">password</span>: <span class="s">{_SECRET}</span></pre>',
-            f"<pre>{REDACTED}</pre>",
+            f"<pre>password: '{REDACTED}'</pre>",
         ),
         (
             f'<pre>{{"<span>pass</span>word": "{_SECRET}"}}</pre>',
-            f"<pre>{REDACTED}</pre>",
+            f'<pre>{{"password":"{REDACTED}"}}</pre>',
         ),
     ],
     ids=[
@@ -618,23 +634,41 @@ def test_html_pre_block_with_json_is_checked() -> None:
         "secret-name-split-over-a-span",
     ],
 )
-def test_html_highlighted_block_with_a_secret_is_withheld(document: str, expected: str) -> None:
-    """The text joined over the children is the document; a secret in it withholds the block."""
+def test_html_highlighted_block_comes_back_redacted_from_the_parsed_copy(
+    document: str, expected: str
+) -> None:
+    """The text joined over the children is the example; it comes back parsed and redacted."""
     text, count = _check(document, _HTML)
     assert text == expected
     assert count == 1
 
 
 @pytest.mark.parametrize(
-    "document",
+    ("document", "expected"),
     [
-        '<pre>{<span class="k">"user"</span>: <span class="s">"admin"</span>}</pre>',
-        '<pre><code class="json">{\n  <span>"user"</span>: <span>"admin"</span>\n}</code></pre>',
-        '<p>Body:</p><code>[<span>{"user":"admin"}</span>]</code>',
-        '<pre>{<span>"example"</span>:"{\\"x\\":{\\"y\\":1},\\"z\\":2}"}</pre>',
-        "<pre><span>[</span>1<span>]</span></pre>",
-        '<pre><span class="k">user</span>: <span class="s">admin</span>\nroles: [reader]</pre>',
-        "<pre><br></pre>",
+        (
+            '<pre>{<span class="k">"user"</span>: <span class="s">"admin"</span>}</pre>',
+            '<pre>{"user":"admin"}</pre>',
+        ),
+        (
+            '<pre><code class="json">{\n  <span>"user"</span>: '
+            '<span>"admin"</span>\n}</code></pre>',
+            '<pre>{"user":"admin"}</pre>',
+        ),
+        (
+            '<p>Body:</p><code>[<span>{"user":"admin"}</span>]</code>',
+            '<p>Body:</p><code>[{"user":"admin"}]</code>',
+        ),
+        (
+            '<pre>{<span>"example"</span>:"{\\"x\\":{\\"y\\":1},\\"z\\":2}"}</pre>',
+            '<pre>{"example":"{\\"x\\":{\\"y\\":1},\\"z\\":2}"}</pre>',
+        ),
+        ("<pre><span>[</span>1<span>]</span></pre>", "<pre>[1]</pre>"),
+        (
+            '<pre><span class="k">user</span>: <span class="s">admin</span>\nroles: [reader]</pre>',
+            "<pre>user: admin\nroles:\n- reader</pre>",
+        ),
+        ("<pre><br></pre>", "<pre><br></pre>"),
     ],
     ids=[
         "json-with-spans",
@@ -646,31 +680,41 @@ def test_html_highlighted_block_with_a_secret_is_withheld(document: str, expecte
         "no-text",
     ],
 )
-def test_html_highlighted_block_without_a_secret_comes_back_as_it_was(document: str) -> None:
+def test_html_highlighted_block_without_a_secret_comes_back_from_the_parsed_copy(
+    document: str, expected: str
+) -> None:
+    """The child elements do not come back; the checked text does. A block with no text stays."""
     text, count = _check(document, _HTML)
-    assert text == document
+    assert text == expected
     assert count == 0
 
 
 @pytest.mark.parametrize(
-    "document",
+    ("document", "expected"),
     [
-        '<pre><span class="p">$</span> meho connector list</pre>',
-        '<pre><span class="kw">GET</span> /api/v2/hosts\nAccept: application/json</pre>',
-        '<pre><span class="n">1</span>, 2, 3</pre>',
+        (
+            '<pre><span class="p">$</span> meho connector list</pre>',
+            "<pre>$ meho connector list</pre>",
+        ),
+        (
+            '<pre><span class="kw">GET</span> /api/v2/hosts\nAccept: application/json</pre>',
+            "<pre>GET /api/v2/hosts\nAccept: application/json</pre>",
+        ),
+        ('<pre><span class="n">1</span>, 2, 3</pre>', "<pre>1, 2, 3</pre>"),
     ],
     ids=["shell-line", "request-with-a-header", "list-of-words"],
 )
-def test_html_highlighted_block_that_is_no_document_is_withheld(document: str) -> None:
-    """A block split over child elements must be a JSON or YAML object or list."""
+def test_html_highlighted_plain_text_comes_back_without_its_markup(
+    document: str, expected: str
+) -> None:
     text, count = _check(document, _HTML)
-    assert text == f"<pre>{REDACTED}</pre>"
-    assert count == 1
+    assert text == expected
+    assert count == 0
 
 
-@pytest.mark.parametrize("tag", ["pre", "code", "span"])
+@pytest.mark.parametrize("tag", ["pre", "code"])
 def test_html_example_with_a_request_line_before_the_json_is_checked(tag: str) -> None:
-    """The request line and the body are one text; the body is not JSON on its own."""
+    """The request line stays; the body after it is parsed whole and checked."""
     example = f'POST /api/v2/sessions\n{{"username": "admin", "password": "{_SECRET}"}}'
     text, count = _check(f"<{tag}>{example}</{tag}>", _HTML)
     checked = f'POST /api/v2/sessions\n{{"username":"admin","password":"{REDACTED}"}}'
@@ -678,23 +722,97 @@ def test_html_example_with_a_request_line_before_the_json_is_checked(tag: str) -
     assert count == 1
 
 
-def test_html_example_with_two_json_documents_checks_both() -> None:
-    document = (
-        f'<pre>Request:\n{{"username": "admin", "password": "{_SECRET}"}}\n'
-        f'Response:\n{{"userId": "u1", "sessionId": "{_SECRET}"}}\n</pre>'
-    )
-    text, count = _check(document, _HTML)
-    assert text == (
-        f'<pre>Request:\n{{"username":"admin","password":"{REDACTED}"}}\n'
-        f'Response:\n{{"userId":"u1","sessionId":"{REDACTED}"}}\n</pre>'
-    )
-    assert count == 2
-
-
-def test_html_example_json_inside_text_that_is_not_json_as_a_whole_is_checked() -> None:
-    text, count = _check(f'<pre>{{"body": {{"password": "{_SECRET}"}} ...}}</pre>', _HTML)
-    assert text == f'<pre>{{"body": {{"password":"{REDACTED}"}} ...}}</pre>'
+def test_span_with_a_request_line_before_the_json_is_page_text_and_checked() -> None:
+    example = f'POST /api/v2/sessions\n{{"username": "admin", "password": "{_SECRET}"}}'
+    text, count = _check(f"<span>{example}</span>", _HTML)
+    checked = f'POST /api/v2/sessions\n{{"username":"admin","password":"{REDACTED}"}}'
+    assert text == f"<span>{checked}</span>"
     assert count == 1
+
+
+@pytest.mark.parametrize(
+    ("document", "reason"),
+    [
+        (
+            f'<pre>Request:\n{{"username": "admin", "password": "{_SECRET}"}}\n'
+            f'Response:\n{{"userId": "u1", "sessionId": "{_SECRET}"}}\n</pre>',
+            NOT_PARSED,
+        ),
+        (f'<pre>{{"body": {{"password": "{_SECRET}"}} ...}}</pre>', NOT_PARSED),
+        (f'<pre>{{"password": "{_SECRET}" "x"}}</pre>', NOT_PARSED),
+        (f'<pre>{{"a": 1}}{{"password": "{_SECRET}"}}</pre>', NOT_PARSED),
+        (f"<pre>sessionId: {_SECRET}\n---\nok: true</pre>", MORE_THAN_ONE_DOCUMENT),
+        (f"<code>licenseKey: {_SECRET}\n---\nok: true</code>", MORE_THAN_ONE_DOCUMENT),
+        (f"<pre>ok: true\n---\nsessionId: {_SECRET}\n</pre>", MORE_THAN_ONE_DOCUMENT),
+        (
+            f"<pre><span>user</span>: admin\n---\n<span>password</span>: {_SECRET}</pre>",
+            MORE_THAN_ONE_DOCUMENT,
+        ),
+        (f"<pre>Note: the password: {_SECRET}</pre>", NOT_PARSED),
+        (f"<pre>sessionId:{_SECRET}</pre>", SECRET_NAME_IN_TEXT),
+        (f'<pre>"pass\\x77ord: {_SECRET}"</pre>', SECRET_NAME_IN_TEXT),
+        (f"<pre>curl -d password={_SECRET} https://x/api</pre>", SECRET_NAME_IN_TEXT),
+    ],
+    ids=[
+        "two-json-documents",
+        "json-inside-text-that-is-not-json-as-a-whole",
+        "json-that-does-not-parse",
+        "two-json-documents-on-one-line",
+        "two-yaml-documents-session-id",
+        "two-yaml-documents-licence-key-in-code",
+        "two-yaml-documents-secret-in-the-second",
+        "two-yaml-documents-highlighted",
+        "prose-that-is-no-yaml",
+        "secret-name-and-value-in-plain-text",
+        "yaml-escape-hides-the-name",
+        "shell-command-with-a-password",
+    ],
+)
+def test_html_example_the_check_cannot_read_whole_is_withheld_with_the_reason(
+    document: str, reason: str
+) -> None:
+    """Fail closed: a block that is not one parsed document or plain text is withheld whole.
+
+    The reason says why; it never holds the block's text.
+    """
+    text, count = _check(document, _HTML)
+    tag = document[1 : document.index(">")]
+    assert text == f"<{tag}>{REDACTED}</{tag}>"
+    assert count == 1
+    assert _withheld(document, _HTML) == (reason,)
+
+
+@pytest.mark.parametrize(
+    ("document", "reason"),
+    [
+        (f'<pre>{{"a":{{"b":{{"x":{{"password":"{_SECRET}"}},"x":1}}}}}}</pre>', REPEATED_KEY),
+        (f'<pre>[{{"a":[{{"x":{{"password":"{_SECRET}"}},"x":1}}]}}]</pre>', REPEATED_KEY),
+        (f"<pre>a:\n  b:\n    x:\n      password: {_SECRET}\n    x: 1\n</pre>", REPEATED_KEY),
+        (f"<pre>- a:\n    x:\n      sessionId: {_SECRET}\n    x: 1\n</pre>", REPEATED_KEY),
+        (f"<code>a: {{x: {{licenseKey: {_SECRET}}}, x: 1}}</code>", REPEATED_KEY),
+    ],
+    ids=["json-three-deep", "json-in-lists", "yaml-three-deep", "yaml-in-a-list", "yaml-flow"],
+)
+def test_html_example_with_a_repeated_key_at_any_depth_is_withheld(
+    document: str, reason: str
+) -> None:
+    text, count = _check(document, _HTML)
+    tag = document[1 : document.index(">")]
+    assert text == f"<{tag}>{REDACTED}</{tag}>"
+    assert count == 1
+    assert _withheld(document, _HTML) == (reason,)
+
+
+def test_withheld_reasons_are_counted_once_per_block_in_order() -> None:
+    document = (
+        f"<pre>sessionId: {_SECRET}\n---\nok: true</pre>"
+        f'<p>between</p><pre>{{"password": "{_SECRET}",, }}</pre>'
+        f'<pre>{{"password": "{_SECRET}"}}</pre>'
+    )
+    checked = check_api_file(document, content_type=_HTML, path="/x")
+    assert checked.withheld == (MORE_THAN_ONE_DOCUMENT, NOT_PARSED)
+    assert checked.secrets_replaced == 3
+    assert _SECRET not in checked.text
 
 
 def test_html_example_with_brackets_that_open_no_json_is_unchanged() -> None:
@@ -758,30 +876,37 @@ def test_json_after_a_request_line_inside_a_yaml_block_value_is_checked() -> Non
         ),
         (
             _HTML,
-            '<pre>{<span>"example"</span>:"POST /sessions\\n{\\"password\\":\\"'
-            + _SECRET
-            + '\\"}"}</pre>',
-            f"<pre>{REDACTED}</pre>",
-        ),
-        (
-            _HTML,
             '<pre>{<span>"example"</span>:"POST /sessions\\n{\\"x\\":{\\"password\\":\\"'
             + _SECRET
             + '\\"},\\"x\\":1}"}</pre>',
-            f"<pre>{REDACTED}</pre>",
+            f'<pre>{{"example":"{REDACTED}"}}</pre>',
         ),
     ],
     ids=[
         "repeated-key-after-a-request-line",
-        "highlighted-block",
         "highlighted-block-repeated-key",
     ],
 )
 def test_json_after_a_request_line_that_cannot_come_back_is_withheld(
     content_type: str, document: str, expected: str
 ) -> None:
+    """Only the text value with the repeated key is withheld; the rest of the example stays."""
     text, count = _check(document, content_type)
     assert text == expected
+    assert count == 1
+    assert _withheld(document, content_type) == (REPEATED_KEY,)
+
+
+def test_json_after_a_request_line_in_a_highlighted_block_is_checked() -> None:
+    document = (
+        '<pre>{<span>"example"</span>:"POST /sessions\\n{\\"password\\":\\"'
+        + _SECRET
+        + '\\"}"}</pre>'
+    )
+    text, count = _check(document, _HTML)
+    assert (
+        text == f'<pre>{{"example":"POST /sessions\\n{{\\"password\\":\\"{REDACTED}\\"}}"}}</pre>'
+    )
     assert count == 1
 
 
@@ -793,7 +918,7 @@ def test_json_after_a_request_line_that_cannot_come_back_is_withheld(
         (f"licenseKey: {_SECRET}", f"licenseKey: '{REDACTED}'", 1),
         (f"user: admin\npassword: {_SECRET}\n", f"user: admin\npassword: '{REDACTED}'\n", 1),
         (f"# login\nsessionId: {_SECRET}\n", f"sessionId: '{REDACTED}'\n", 1),
-        (f"x:\n  sessionId: {_SECRET}\nx: 1", "x: 1", 1),
+        (f"x:\n  sessionId: {_SECRET}\nx: 1", REDACTED, 1),
         (f"sessionId: &s {_SECRET}\nother: *s", f"sessionId: '{REDACTED}'\nother: '{REDACTED}'", 2),
         (
             f'user: admin\nbody: {{"sessionId": "{_SECRET}"}}',
@@ -818,9 +943,9 @@ def test_html_example_in_yaml_is_checked_like_a_yaml_file(
 ) -> None:
     """A text-only block that is a YAML mapping or list comes back from the parsed copy.
 
-    A comment is not in the copy. A key named twice keeps the last value;
-    the dropped value was marked on the node graph and is counted, and it
-    does not come back. An alias to a secret value is replaced too.
+    A comment is not in the copy. A key named twice withholds the block:
+    the loader would keep the last value only. An alias to a secret value
+    is replaced too.
     """
     text, count = _check(f"<{tag}>{example}</{tag}>", _HTML)
     assert text == f"<{tag}>{expected}</{tag}>"
@@ -896,14 +1021,6 @@ def test_html_block_with_a_secret_child_element_is_withheld(document: str) -> No
         f"<pre><span>a</span>:\n  x:\n    password: {_SECRET}\n  x: 1</pre>",
         f"<pre><span>a</span>: {{x: {{password: {_SECRET}}}, x: 1}}</pre>",
         f"<pre><span>yes</span>:\n  password: {_SECRET}\ntrue: 1</pre>",
-        f"<pre><span>user</span>: admin\n# password: {_SECRET}</pre>",
-        '<pre>{"example":"{\\"x\\":{\\"password\\":\\"'
-        + _SECRET
-        + '\\"},\\"x\\":<span>1</span>}"}</pre>',
-        '<pre>{<span>"a"</span>:'
-        + json.dumps(json.dumps({"b": '{"x":{"password":"' + _SECRET + '"},"x":1}'}))
-        + "}</pre>",
-        f'<pre><span>a</span>: \'{{"x":{{"password":"{_SECRET}"}},"x":1}}\'</pre>',
     ],
     ids=[
         "json-repeated-key",
@@ -914,41 +1031,80 @@ def test_html_block_with_a_secret_child_element_is_withheld(document: str) -> No
         "yaml-repeated-key-nested",
         "yaml-repeated-key-in-a-flow-mapping",
         "yaml-repeated-key-spelled-two-ways",
-        "yaml-comment",
+    ],
+)
+def test_html_block_with_a_repeated_key_is_withheld(document: str) -> None:
+    """A key named twice keeps the last value only, so the block cannot be read whole."""
+    assert _SECRET in document
+    text, count = _check(document, _HTML)
+    assert text == f"<pre>{REDACTED}</pre>"
+    assert count == 1
+    assert _withheld(document, _HTML) == (REPEATED_KEY,)
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        (
+            '<pre>{"example":"{\\"x\\":{\\"password\\":\\"'
+            + _SECRET
+            + '\\"},\\"x\\":<span>1</span>}"}</pre>',
+            f'<pre>{{"example":"{REDACTED}"}}</pre>',
+        ),
+        (
+            '<pre>{<span>"a"</span>:'
+            + json.dumps(json.dumps({"b": '{"x":{"password":"' + _SECRET + '"},"x":1}'}))
+            + "}</pre>",
+            '<pre>{"a":'
+            + json.dumps(json.dumps({"b": REDACTED}, separators=(",", ":")))
+            + "}</pre>",
+        ),
+        (
+            f'<pre><span>a</span>: \'{{"x":{{"password":"{_SECRET}"}},"x":1}}\'</pre>',
+            f"<pre>a: '{REDACTED}'</pre>",
+        ),
+    ],
+    ids=[
         "json-repeated-key-in-an-embedded-json-string",
         "json-repeated-key-in-a-string-two-levels-down",
         "yaml-string-holding-json-with-a-repeated-key",
     ],
 )
-def test_html_block_whose_text_the_parser_keeps_only_in_part_is_withheld(document: str) -> None:
-    """The block comes back as the page wrote it, so the parsed copy must hold all of its text.
-
-    A key named twice keeps the last value only: the first value is in the
-    text but not in the checked copy. A YAML comment is not in the copy at
-    all. Such text is no document; the block is withheld. A text value in
-    the document that is itself JSON with a key named twice is withheld
-    and counted by the value check, so the block is withheld as well.
-    """
+def test_html_block_text_value_with_a_repeated_key_is_withheld_alone(
+    document: str, expected: str
+) -> None:
+    """The example parses; the text value inside it whose JSON names a key twice is withheld."""
     assert _SECRET in document
     text, count = _check(document, _HTML)
-    assert text == f"<pre>{REDACTED}</pre>"
+    assert text == expected
     assert count == 1
+    assert _withheld(document, _HTML) == (REPEATED_KEY,)
+
+
+def test_html_block_yaml_comment_does_not_come_back() -> None:
+    """The copy is written from the parsed example, and a comment is not in it."""
+    text, count = _check(f"<pre><span>user</span>: admin\n# password: {_SECRET}</pre>", _HTML)
+    assert text == "<pre>user: admin</pre>"
+    assert count == 0
 
 
 @pytest.mark.parametrize(
-    "document",
+    ("document", "expected"),
     [
-        '<pre>{"x":{"y":1},"z":{<span>"y"</span>:2}}</pre>',
-        "<pre><span>x</span>:\n  y: 1\nz:\n  y: 2</pre>",
-        "<pre><span>a</span>: {y: 1}\nb: {y: 2}</pre>",
+        (
+            '<pre>{"x":{"y":1},"z":{<span>"y"</span>:2}}</pre>',
+            '<pre>{"x":{"y":1},"z":{"y":2}}</pre>',
+        ),
+        ("<pre><span>x</span>:\n  y: 1\nz:\n  y: 2</pre>", "<pre>x:\n  y: 1\nz:\n  y: 2</pre>"),
+        ("<pre><span>a</span>: {y: 1}\nb: {y: 2}</pre>", "<pre>a:\n  y: 1\nb:\n  y: 2</pre>"),
     ],
     ids=["json", "yaml", "yaml-flow-mappings"],
 )
-def test_html_block_with_the_same_key_under_two_parents_comes_back_as_it_was(
-    document: str,
+def test_html_block_with_the_same_key_under_two_parents_comes_back(
+    document: str, expected: str
 ) -> None:
     text, count = _check(document, _HTML)
-    assert text == document
+    assert text == expected
     assert count == 0
 
 
@@ -979,6 +1135,163 @@ def test_html_pem_private_key_in_text_is_replaced() -> None:
     assert count == 1
 
 
+# ---------------------------------------------------------------------------
+# A text value the check cannot read whole is withheld
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("content_type", "document", "expected", "reason"),
+    [
+        (
+            _JSON,
+            json.dumps({"example": f"sessionId: {_SECRET}"}),
+            {"example": REDACTED},
+            SECRET_NAME_IN_TEXT,
+        ),
+        (
+            _JSON,
+            json.dumps({"example": f"licenseKey: {_SECRET}\n---\nok: true"}),
+            {"example": REDACTED},
+            SECRET_NAME_IN_TEXT,
+        ),
+        (
+            _JSON,
+            json.dumps({"example": f"POST /login?password={_SECRET}"}),
+            {"example": REDACTED},
+            SECRET_NAME_IN_TEXT,
+        ),
+        (
+            _JSON,
+            json.dumps({"example": '{"password": "' + _SECRET + '",}'}),
+            {"example": REDACTED},
+            JSON_NOT_PARSED,
+        ),
+        (
+            _YAML,
+            f'example: "token = {_SECRET}"\n',
+            {"example": REDACTED},
+            SECRET_NAME_IN_TEXT,
+        ),
+    ],
+    ids=[
+        "yaml-in-a-json-string",
+        "two-yaml-documents-in-a-json-string",
+        "query-in-a-json-string",
+        "json-that-does-not-parse-in-a-json-string",
+        "key-value-in-a-yaml-string",
+    ],
+)
+def test_text_value_the_check_cannot_read_whole_is_withheld(
+    content_type: str, document: str, expected: object, reason: str
+) -> None:
+    """Text is not data: a secret name next to a value, or JSON that does not parse, is withheld."""
+    text, count = _check(document, content_type)
+    parsed = json.loads(text) if content_type == _JSON else yaml.safe_load(text)
+    assert parsed == expected
+    assert count == 1
+    assert _withheld(document, content_type) == (reason,)
+
+
+@pytest.mark.parametrize(
+    ("content_type", "document", "expected"),
+    [
+        (_HTML, f"<p>Send sessionId: {_SECRET} on each call</p>", f"<p>{REDACTED}</p>"),
+        (_HTML, f'<a title="password={_SECRET}">x</a>', f'<a title="{REDACTED}">x</a>'),
+        (
+            _XML,
+            f"<doc><note>licenseKey: {_SECRET}</note></doc>",
+            f"<doc><note>{REDACTED}</note></doc>",
+        ),
+    ],
+    ids=["html-prose", "html-attribute", "xml-text"],
+)
+def test_markup_text_that_names_a_secret_next_to_a_value_is_withheld(
+    content_type: str, document: str, expected: str
+) -> None:
+    text, count = _check(document, content_type)
+    assert text == expected
+    assert count == 1
+    assert _withheld(document, content_type) == (SECRET_NAME_IN_TEXT,)
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "<p>The session id comes back as sessionId.</p>",
+        "<p>Read /api/v2/events/{id} with GET.</p>",
+        "<p>sessionTimeout: 1800</p>",
+        "<code>sessionId</code>",
+        "<p>Authorization: Bearer &lt;token&gt;</p>",
+    ],
+    ids=[
+        "name-without-a-value",
+        "path-template",
+        "not-a-secret-name",
+        "name-in-code",
+        "placeholder",
+    ],
+)
+def test_text_that_names_a_secret_without_a_value_stays(document: str) -> None:
+    text, count = _check(document, _HTML)
+    assert text == document
+    assert count == 0
+
+
+@pytest.mark.parametrize(
+    ("document", "expected", "replaced"),
+    [
+        (
+            f'<pre>curl -X POST \\\n  -d \'{{"password":"{_SECRET}"}}\' https://h/api</pre>',
+            f'<pre>curl -X POST \\\n  -d \'{{"password":"{REDACTED}"}}\' https://h/api</pre>',
+            1,
+        ),
+        ('<code>"Local"</code>', '<code>"Local"</code>', 0),
+        (
+            f'<pre>"{{\\"pass\\x77ord\\": \\"{_SECRET}\\"}}"</pre>',
+            f"<pre>{REDACTED}</pre>",
+            1,
+        ),
+    ],
+    ids=["shell-command-over-two-lines", "quoted-word", "yaml-escape-inside-quoted-json"],
+)
+def test_html_plain_text_example_is_checked_as_text_and_as_its_yaml_value(
+    document: str, expected: str, replaced: int
+) -> None:
+    """Plain text keeps its form; a quoted scalar is also checked as the value YAML reads."""
+    text, count = _check(document, _HTML)
+    assert text == expected
+    assert count == replaced
+
+
+def test_text_value_that_is_not_valid_unicode_is_withheld() -> None:
+    """JSON can spell a lone surrogate (``\\ud800``); such text cannot be written as UTF-8."""
+    document = '{"message": "\\ud800", "ok": "yes"}'
+    text, count = _check(document, _JSON)
+    assert json.loads(text) == {"message": REDACTED, "ok": "yes"}
+    assert count == 1
+    assert _withheld(document, _JSON) == (NOT_UNICODE,)
+
+
+def test_file_whose_key_is_not_valid_unicode_is_refused() -> None:
+    with pytest.raises(ApiFileFormatError, match="not valid Unicode"):
+        check_api_file('{"\\ud800": 1}', content_type=_JSON, path="/x.json")
+
+
+def test_secret_child_element_withholds_the_block_with_its_reason() -> None:
+    document = f'<pre><span id="password">{_SECRET}</span>{{"ok": true}}</pre>'
+    assert _withheld(document, _HTML) == (SECRET_CHILD_ELEMENT,)
+
+
+def test_the_plain_walk_for_other_callers_keeps_text_as_it_is() -> None:
+    """Only the API file checks are strict; the Salt connector's walk keeps its text."""
+    scrubber = Scrubber()
+    assert scrubber.text(f"sessionId: {_SECRET}") == f"sessionId: {_SECRET}"
+    assert scrubber.count == 0
+    assert scrubber.withheld == []
+
+
+# ---------------------------------------------------------------------------
 # A session id is a login token
 # ---------------------------------------------------------------------------
 

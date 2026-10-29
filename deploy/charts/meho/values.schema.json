@@ -897,6 +897,8 @@
         "enabled": { "type": "boolean" },
         "hostname": { "type": "string", "description": "MEHO's public DNS name, equal to `ingress.host`. Keycloak's public address is `https://<hostname>/auth`. Required when enabled." },
         "firstTenantId": { "type": "string", "description": "The first tenant's id (a UUID). Every realm group carries it as `tenant_id`. Required when enabled." },
+        "tenantName": { "type": "string", "description": "The first tenant's short name. The five role groups carry it in `meho_tenant`." },
+        "tenants": { "type": "array", "description": "More tenants, as `{name, id}`. The bootstrap Job makes the five groups `MEHO-<name>-<Role>` for each one." },
         "ingress": { "type": "object", "description": "`exposeAdmin`: also route the admin console on the MEHO host." },
         "image": { "type": "object" },
         "waitForDatabase": { "type": "object" },
@@ -1310,7 +1312,7 @@
     },
     "migrationJob": {
       "type": "object",
-      "description": "Pre-install / pre-upgrade migration Job (Helm hook) running `python -m meho_backplane.db.migrate` before the Deployment rolls forward.",
+      "description": "Pre-install / pre-upgrade migration Job (Helm hook) running `python -m meho_backplane.db.migrate` before the Deployment rolls forward. With `corePostgres.enabled: true` the Job is not rendered; the same runner runs as the backplane Deployment's `migrate` init container with `resources` from this block (#5233).",
       "additionalProperties": false,
       "required": ["backoffLimit", "ttlSecondsAfterFinished"],
       "properties": {

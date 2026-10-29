@@ -89,6 +89,7 @@ from pydantic import BaseModel, ConfigDict
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.checks.watchdog import sensor_runner_liveness
+from meho_backplane.connector_packages import ConnectorPackage, installed_connector_packages
 from meho_backplane.connectors._shared.credential_backend import (
     UnknownCredentialBackendError,
     resolve_credential_backend,
@@ -445,6 +446,10 @@ class HealthResponse(BaseModel):
     OPERATOR-gated, so unlike ``/ready`` no metrics token is needed.
     ``None`` / empty defaults keep older response decoders working; the
     handler always fills them.
+
+    ``connector_packages`` (#5036) lists the connector packages this image
+    carries, the same list ``GET /version`` shows. It is empty for the
+    plain public image.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -462,6 +467,7 @@ class HealthResponse(BaseModel):
     readiness: ReadinessStatus | None = None
     approvals: ApprovalsStatus | None = None
     features: list[FeatureStatus] = []
+    connector_packages: list[ConnectorPackage] = []
 
 
 class LivenessResponse(BaseModel):
@@ -865,6 +871,7 @@ async def build_health_response(operator: Operator) -> HealthResponse:
         readiness=await _readiness_status(),
         approvals=approvals,
         features=features,
+        connector_packages=list(installed_connector_packages()),
     )
 
 

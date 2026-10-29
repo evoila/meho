@@ -192,7 +192,12 @@ lookups in `_lookups.py`, paths in `_paths.py`, and park-time previews in
   `needs-approval` is satisfied only by this op's own approval park (the
   approved re-dispatch), so a service principal whose standing grant covers
   this op but not the Vault write is refused rather than writing under the
-  target's role. The target should carry its own `extras.vault_role` — one
+  target's role. When a reviewer approves the request, the call runs as
+  the reviewer, but the **requester's** policy for that write is checked
+  too, so an agent denied `vault.kv.patch` on that target is refused before
+  the mint. The park card shows it as `requester_denied` /
+  `requester_reason` in `permission_preflight` (#3898; see
+  [approvals.md](approvals.md) "The requester's policy on a second target"). The target should carry its own `extras.vault_role` — one
   without falls back to the caller's role, the #3895 failure. The park card
   carries the Vault write ops'
   `sys/capabilities-self` `permission_preflight` (`will_be_denied`, plus
@@ -685,8 +690,9 @@ for ingested breadth on connectors that *do* publish a convertible spec.
   ships no swagger artifact at all. The ingest parser is
   OpenAPI-3.x-only by decision (#2090, reaffirming #1532) and rejects
   native 2.0 with a structured `UnsupportedSpecError` naming the
-  conversion on-ramp — convert with `swagger2openapi` /
-  `converter.swagger.io` first, then ingest the 3.x output (see the
+  conversion on-ramp — pass the file to `meho connector ingest` as
+  `file://` (the CLI converts it on your machine), or convert it with a
+  local `swagger2openapi` run first (see the
   ["Product ships only Swagger
   2.0"](../cross-repo/connector-ingestion.md#product-ships-only-swagger-20)
   runbook section, which uses VCFA as the worked example). This is

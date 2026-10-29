@@ -32,6 +32,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest.host_target import STANDALONE_ESXI_HOST_MOID
+from meho_backplane.connectors.vmware_rest.soap import parse_boot_devices
 from meho_backplane.connectors.vmware_rest.typed_ops import VMWARE_TYPED_OPS
 from meho_backplane.connectors.vmware_rest.typed_ops_host_storage_devices import (
     HOST_STORAGE_DEVICES_GROUP_KEY,
@@ -537,18 +538,26 @@ def test_retrieve_body_targets_the_scsi_lun_path() -> None:
 _BOOT_SYSTEM_MOID = "bootDeviceSystem-1"
 
 
-def test_matches_boot_key_embedding_canonical_name() -> None:
-    """A boot key embedding the LUN's canonical name matches (containment)."""
-    assert _matches_boot("0200000000600a", "naa.6000c290", "key-vim.host.BootDevice-naa.6000c290:1")
+def test_matches_boot_exact_canonical_name_or_uuid() -> None:
+    """A boot key equal to the canonical name or uuid matches (case-insensitive)."""
+    assert _matches_boot("0200000000600a", "naa.6000c290", "naa.6000c290")
+    assert _matches_boot("0200000000600a", "naa.6000c290", " NAA.6000C290 ")
+    assert _matches_boot("0200000000600a", "naa.6000c290", "0200000000600A")
 
 
-def test_matches_boot_unrelated_key_does_not_match() -> None:
-    assert not _matches_boot("0200000000600a", "naa.6000c290", "key-vim.host.BootDevice-naa.ffff:1")
+def test_matches_boot_substring_no_longer_matches() -> None:
+    """A key that only embeds (or is embedded in) an id does not match (#3336)."""
+    assert not _matches_boot(
+        "0200000000600a", "naa.6000c290", "key-vim.host.BootDevice-naa.6000c290:1"
+    )
+    assert not _matches_boot("0200000000600a", "naa.6000c290", "naa.6000")
 
 
-def test_matches_boot_short_key_cannot_spuriously_match() -> None:
-    """A key shorter than the min-match length never matches (fail-safe guard)."""
-    assert not _matches_boot("0200000000600a", "naa.6000c290", "sd")
+def test_matches_boot_bare_boot_option_key_never_matches() -> None:
+    """The real-host key shape -- a bare boot-option id like "8" -- names no LUN."""
+    assert not _matches_boot("0200000000600a", "naa.6000c290", "8")
+    assert not _matches_boot(None, None, "8")
+    assert not _matches_boot("0200000000600a", "naa.6000c290", "  ")
 
 
 def test_map_scsi_lun_passes_through_is_boot_value() -> None:
@@ -569,7 +578,7 @@ async def test_boot_device_matched_flags_the_boot_lun() -> None:
                 boot_system_moid=_BOOT_SYSTEM_MOID,
             )
         },
-        boot_info=_boot_info("key-vim.host.BootDevice-naa.6000c290:1"),
+        boot_info=_boot_info("naa.6000c290"),
     )
     out = await host_storage_devices_impl(
         conn,  # type: ignore[arg-type]
@@ -578,7 +587,7 @@ async def test_boot_device_matched_flags_the_boot_lun() -> None:
         {},
     )
     assert out["boot_device_resolution"] == "matched"
-    assert out["current_boot_device_key"] == "key-vim.host.BootDevice-naa.6000c290:1"
+    assert out["current_boot_device_key"] == "naa.6000c290"
     assert out["boot_device_note"] is None
     by_type = {d["device_type"]: d["is_boot"] for d in out["devices"]}
     assert by_type == {"disk": True, "cdrom": False}
@@ -616,6 +625,48 @@ async def test_boot_device_no_match_all_null_key_echoed() -> None:
     assert out["boot_device_resolution"] == "no_match"
     assert out["current_boot_device_key"] == "key-vim.host.BootDevice-naa.ffffffff:1"
     assert all(d["is_boot"] is None for d in out["devices"])
+
+
+@pytest.mark.asyncio
+async def test_boot_device_soap_bare_numeric_key_is_no_match() -> None:
+    """Regression (#3336): the SOAP QueryBootDevices shape a real standalone
+    ESXi 9.1 host returns -- a bare boot-option key "8" -- resolves to
+    no_match with every is_boot null, never to a guessed boot disk."""
+    xml = (
+        "<soapenv:Envelope "
+        'xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
+        'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+        "<soapenv:Body>"
+        '<QueryBootDevicesResponse xmlns="urn:vim25"><returnval>'
+        "<bootDevices><key>1</key><description>CD-ROM</description></bootDevices>"
+        "<bootDevices><key>8</key><description>Hard Drive</description></bootDevices>"
+        "<currentBootDeviceKey>8</currentBootDeviceKey>"
+        "</returnval></QueryBootDevicesResponse>"
+        "</soapenv:Body></soapenv:Envelope>"
+    )
+    boot_info = parse_boot_devices(xml)
+    assert boot_info["currentBootDeviceKey"] == "8"
+    conn = _FakeConnector(
+        props_by_host={
+            STANDALONE_ESXI_HOST_MOID: _retrieve_result(
+                STANDALONE_ESXI_HOST_MOID,
+                _boxed_scsi_luns([_DISK_LUN, _CDROM_LUN]),
+                boot_system_moid=_BOOT_SYSTEM_MOID,
+            )
+        },
+        boot_info=boot_info,
+    )
+    out = await host_storage_devices_impl(
+        conn,  # type: ignore[arg-type]
+        _make_operator(),
+        _esxi_target(),  # type: ignore[arg-type]
+        {},
+    )
+    assert out["status"] == "ok"
+    assert out["boot_device_resolution"] == "no_match"
+    assert out["current_boot_device_key"] == "8"
+    assert out["boot_device_note"] is None
+    assert [d["is_boot"] for d in out["devices"]] == [None, None]
 
 
 @pytest.mark.asyncio

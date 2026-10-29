@@ -16,7 +16,8 @@ and the write gate (``enforce_subop_policy``) with a recorder. They check:
 * that a parked gate is returned as is and stops the call;
 * that an approved pull step continues at that step and opens no second
   session, and that a resume with no saved state is refused;
-* the approval previews, and that a signed URL's query stays out of them;
+* the approval previews, and that a signed URL's query stays out of them,
+  also out of the add-file step's own preview when that step waits;
 * that every answer fits the registered response schema.
 """
 
@@ -46,7 +47,12 @@ from meho_backplane.connectors.vmware_rest.composites._library_local_schemas imp
 from meho_backplane.connectors.vmware_rest.composites._library_upload import (
     content_library_item_upload_composite,
 )
-from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext
+from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.operations._preview import (
+    _PREVIEW_BUILDERS,
+    PreviewContext,
+    build_proposed_effect,
+)
 from meho_backplane.operations.composite import (
     CompositeResumeState,
     composite_resume_scope_var,
@@ -172,19 +178,26 @@ class _Gate:
     """Stub for ``enforce_subop_policy``; parks the op ids in *park*.
 
     ``resume_states`` keeps what each write passed as ``resume_state`` (or
-    ``None``), in call order.
+    ``None``), and ``params`` what it passed as ``params``, in call order.
     """
 
     def __init__(self, park: set[str] | None = None) -> None:
         self.op_ids: list[str] = []
         self.resume_states: list[dict[str, Any] | None] = []
+        self.params: list[dict[str, Any]] = []
         self._park = park or set()
 
     async def __call__(
-        self, *, op_id: str, resume_state: dict[str, Any] | None = None, **_: Any
+        self,
+        *,
+        op_id: str,
+        params: dict[str, Any],
+        resume_state: dict[str, Any] | None = None,
+        **_: Any,
     ) -> OperationResult | None:
         self.op_ids.append(op_id)
         self.resume_states.append(resume_state)
+        self.params.append(params)
         if op_id in self._park:
             return OperationResult(
                 status="awaiting_approval", op_id=op_id, result=None, duration_ms=1.0
@@ -733,6 +746,56 @@ async def test_upload_preview_hides_the_query_of_a_signed_url(gate: _Gate) -> No
     out = await _upload(conn, source_url=_SIGNED_URL)
     assert out["status"] == "uploaded"
     assert conn.body_of(_ADD_FILE)["source_endpoint"] == {"uri": _SIGNED_URL}
+
+
+async def test_add_file_step_preview_hides_the_query_of_a_signed_url(gate: _Gate) -> None:
+    """The add-file step's own approval preview shows no token; the download uses the full URL.
+
+    The step's preview is built from the params the step hands the gate, through
+    the shared resolver, so the registered builder (not the generic echo) runs.
+    """
+    conn = _Connector(_upload_responses())
+    out = await _upload(conn, source_url=_SIGNED_URL, ssl_certificate_thumbprint="AA:BB")
+    assert out["status"] == "uploaded"
+    assert conn.body_of(_ADD_FILE)["source_endpoint"] == {
+        "uri": _SIGNED_URL,
+        "ssl_certificate_thumbprint": "AA:BB",
+    }
+
+    step_params = gate.params[gate.op_ids.index(_UPLOAD_WRITES[2])]
+    assert step_params["source_endpoint"]["uri"] == _SIGNED_URL
+    descriptor = EndpointDescriptor(
+        product="vmware",
+        version="9.0",
+        impl_id="rest",
+        op_id=_UPLOAD_WRITES[2],
+        source_kind="composite",
+        safety_level="caution",
+        requires_approval=True,
+        parameter_schema={},
+    )
+    effect = await build_proposed_effect(
+        PreviewContext(
+            descriptor=descriptor,
+            connector_instance=None,
+            operator=_operator(),
+            target=object(),
+            params=step_params,
+        )
+    )
+    assert effect is not None
+    assert "params_echo" not in effect
+    preview = effect["preview"]
+    assert preview["source_url"] == _URL
+    assert preview["source_url_note"] == (
+        "The URL is shown without its query part, user name and password."
+    )
+    assert preview["file_name"] == "installer.iso"
+    assert preview["session_id"] == _SESSION
+    assert preview["ssl_certificate_thumbprint"] == "AA:BB"
+    assert _URL in preview["summary"]
+    assert "signedsecret" not in str(effect)
+    assert "X-Amz" not in str(effect)
 
 
 async def test_upload_preview_hides_a_password_in_a_refused_url() -> None:

@@ -16,8 +16,10 @@ into an item of a LOCAL library. MEHO sends no file bytes. The steps:
 An item with the same name that already has content gives ``unchanged``. An
 empty one (left by an earlier failed try) is filled again, so a retry needs no
 clean-up first. The URL must be http or https and must not hold a user name or
-password. The approval preview shows it without its query part, so the token
-of a signed URL stays out of the preview. vCenter itself would also take
+password. The approval previews show it without its query part, so the
+token of a signed URL stays out of the preview: the parent operation's own,
+and the add-file step's when that step waits for approval by itself (the
+generic step preview would echo the full URL). vCenter itself would also take
 ``file`` and ``ds`` URLs; MEHO does not send them.
 
 Steps 2 to 4 run after the item exists, so each saves where its resume
@@ -150,6 +152,18 @@ def _shown_url(url: Any) -> Any:
         return url
     parts = urlsplit(url)
     return urlunsplit(parts._replace(netloc=parts.netloc.rpartition("@")[2], query="", fragment=""))
+
+
+_SOURCE_URL_NOTE: Final = "The URL is shown without its query part, user name and password."
+
+
+def _shown_url_fields(url: Any) -> dict[str, Any]:
+    """The ``source_url`` a preview shows, and a note when a part was cut."""
+    shown = _shown_url(url)
+    fields: dict[str, Any] = {"source_url": shown}
+    if shown != url:
+        fields["source_url_note"] = _SOURCE_URL_NOTE
+    return fields
 
 
 def _file_name(params: dict[str, Any]) -> str:
@@ -565,16 +579,13 @@ async def _content_library_item_upload_preview(ctx: PreviewContext) -> dict[str,
         return None
     connector: VmwareRestConnector = ctx.connector_instance  # type: ignore[assignment]
     params = dict(ctx.params)
-    shown_url = _shown_url(params.get("source_url"))
+    url_fields = _shown_url_fields(params.get("source_url"))
+    shown_url = url_fields["source_url"]
     effect: dict[str, Any] = {
         "item_name": params.get("item_name"),
-        "source_url": shown_url,
+        **url_fields,
         "item_type": params.get("item_type"),
     }
-    if shown_url != params.get("source_url"):
-        effect["source_url_note"] = (
-            "The URL is shown without its query part, user name and password."
-        )
     problem = _source_problem(params.get("source_url"))
     if problem is not None:
         return {**effect, "summary": f"The call will be refused: {problem}."}
@@ -610,7 +621,35 @@ async def _content_library_item_upload_preview(ctx: PreviewContext) -> dict[str,
     return {**effect, "summary": summary, "library": library, "existing_item": existing}
 
 
+async def _add_session_file_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Show the approver the add-file step with the URL's query part cut.
+
+    The step waits for approval on its own when a rule parks it (#4217).
+    Without a builder it would get the generic preview, which echoes the
+    full ``source_endpoint.uri``; the shared redaction does not know a
+    signed URL's token. The full URL stays in the step's parameters, so
+    vCenter still downloads from it.
+    """
+    params = ctx.params
+    endpoint = params.get("source_endpoint")
+    endpoint = endpoint if isinstance(endpoint, dict) else {}
+    url_fields = _shown_url_fields(endpoint.get("uri"))
+    effect: dict[str, Any] = {
+        "summary": (
+            f"vCenter downloads {url_fields['source_url']} as file "
+            f"{params.get('name')!r} into the open update session."
+        ),
+        "file_name": params.get("name"),
+        **url_fields,
+        "session_id": params.get("updateSessionId"),
+    }
+    if "ssl_certificate_thumbprint" in endpoint:
+        effect["ssl_certificate_thumbprint"] = endpoint["ssl_certificate_thumbprint"]
+    return effect
+
+
 register_preview_builder(OP_ID_CONTENT_LIBRARY_ITEM_UPLOAD, _content_library_item_upload_preview)
+register_preview_builder(_OP_ADD_SESSION_FILE, _add_session_file_preview)
 
 
 #: The registration row, as ``_CompositeSpec`` keyword arguments.

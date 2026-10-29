@@ -550,6 +550,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     the URL without its query part, user name and password (`source_url_note`
     says so when something was cut), so the token of a signed download URL
     stays out of the approval row; the call still downloads from the full URL.
+    The add-file step has its own preview builder for the same reason: when
+    that step waits for approval by itself, the generic step preview would
+    echo the full `source_endpoint.uri`, and the shared redaction does not
+    know a signed URL's token.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
   lifespan startup. Iterates a single `_COMPOSITES` tuple of 78

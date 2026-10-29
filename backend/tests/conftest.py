@@ -1184,7 +1184,9 @@ def _perf_lifespan_step_timing(request: pytest.FixtureRequest) -> Iterator[None]
     production code.
     """
     import asyncio
+    import inspect
     import json
+    from contextlib import asynccontextmanager
 
     path = os.environ.get("MEHO_LIFESPAN_TIMING")
     if not path:
@@ -1221,11 +1223,26 @@ def _perf_lifespan_step_timing(request: pytest.FixtureRequest) -> Iterator[None]
 
         return w
 
+    def _wrap_async_context(orig: Any, name: str) -> Any:
+        # The catalog write is an ``asynccontextmanager``: the time it
+        # takes is in entering the block (registrars) and leaving it
+        # (commit), so time the whole ``async with``.
+        @asynccontextmanager
+        async def w(*a: Any, **k: Any) -> Any:
+            t = time.perf_counter()
+            try:
+                async with orig(*a, **k):
+                    yield
+            finally:
+                _record(name, time.perf_counter() - t)
+
+        return w
+
     names = [
         "get_engine",
         "get_broadcast_client",
         "_eager_import_connectors",
-        "run_typed_op_registrars",
+        "operation_catalog_write",
         "eager_import_mcp_modules",
         "_preload_embedding_model",
         "start_topology_refresh_scheduler",
@@ -1234,8 +1251,12 @@ def _perf_lifespan_step_timing(request: pytest.FixtureRequest) -> Iterator[None]
     for name in names:
         orig = getattr(main_mod, name)
         originals[name] = orig
-        is_async = asyncio.iscoroutinefunction(orig)
-        wrapper = _wrap_async(orig, name) if is_async else _wrap_sync(orig, name)
+        if inspect.isasyncgenfunction(getattr(orig, "__wrapped__", None)):
+            wrapper = _wrap_async_context(orig, name)
+        elif asyncio.iscoroutinefunction(orig):
+            wrapper = _wrap_async(orig, name)
+        else:
+            wrapper = _wrap_sync(orig, name)
         setattr(main_mod, name, wrapper)
     try:
         yield

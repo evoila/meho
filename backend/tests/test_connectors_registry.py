@@ -20,7 +20,8 @@ Coverage matrix (per Task #241 acceptance criteria):
 from __future__ import annotations
 
 import types
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -293,6 +294,12 @@ def test_eager_import_no_subpackages_is_noop() -> None:
 # ---------------------------------------------------------------------------
 
 
+@asynccontextmanager
+async def _no_catalog_write() -> AsyncIterator[None]:
+    """Stand-in for the operation catalog write: no database, no rows."""
+    yield
+
+
 def test_lifespan_calls_eager_import_connectors() -> None:
     """Lifespan hook calls _eager_import_connectors at startup.
 
@@ -317,7 +324,7 @@ def test_lifespan_calls_eager_import_connectors() -> None:
             patch(
                 "meho_backplane.main._eager_import_connectors", side_effect=lambda: called.append(1)
             ),
-            patch("meho_backplane.main.run_typed_op_registrars", new=AsyncMock()),
+            patch("meho_backplane.main.operation_catalog_write", new=_no_catalog_write),
             patch("meho_backplane.main.eager_import_mcp_modules"),
             patch("meho_backplane.main._assert_mcp_resource_uri_configured"),
             # #4622: the sandbox-mode boot step reads the stored mode from
@@ -529,7 +536,7 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                 new=broadcast_disposed,
             ),
             patch("meho_backplane.main._eager_import_connectors"),
-            patch("meho_backplane.main.run_typed_op_registrars", new=AsyncMock()),
+            patch("meho_backplane.main.operation_catalog_write", new=_no_catalog_write),
             patch("meho_backplane.main.eager_import_mcp_modules"),
             patch("meho_backplane.main._assert_mcp_resource_uri_configured"),
             # #4622: the sandbox-mode boot step reads the stored mode from

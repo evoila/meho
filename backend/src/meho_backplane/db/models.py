@@ -5977,6 +5977,26 @@ class SandboxModeState(Base):
     __table_args__ = (sa.CheckConstraint("id = 1", name="ck_sandbox_mode_state_single_row"),)
 
 
+class OperationCatalogState(Base):
+    """Which release last wrote the built-in operation rows: one row (#5019).
+
+    Written by :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
+    in the same transaction as the typed and composite
+    :class:`EndpointDescriptor` rows, so it changes only when those rows
+    change. ``written_by_release`` is the commit hash of the build
+    (``GIT_SHA``, as ``GET /version`` reports it). A pod compares it with
+    its own release to notice rows written by another release.
+    """
+
+    __tablename__ = "operation_catalog_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    written_by_release: Mapped[str] = mapped_column(Text, nullable=False)
+    written_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (sa.CheckConstraint("id = 1", name="ck_operation_catalog_state_single_row"),)
+
+
 class ScheduledTriggerKind(StrEnum):
     """Closed enum of trigger shapes the G11.3 scheduler dispatches.
 

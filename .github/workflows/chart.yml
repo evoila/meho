@@ -740,9 +740,7 @@ jobs:
        needs.changes.outputs.chart == 'true')
     # Pinned 2026-10-29: kind image load fails on ubuntu-26.04's Docker (ubuntu-latest moved there); revisit when kind/docker support it.
     runs-on: ubuntu-24.04
-    # The install now waits until the backplane is Ready (#5233): about two
-    # more minutes for its start-up than the old hook-only install.
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

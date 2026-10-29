@@ -26,8 +26,11 @@ parts that do not fit are named in `parts_not_inline` (with
 `parts_not_inline_count` when the names list is cut), and `parts_note` says how
 to read them, or that they cannot be read because the store dropped them to
 keep the rows. The limit is one budget for the whole summary, hints and notes
-included. When the names and the note leave no room, the largest scalars
-(hinted or not) move out: they are counted under `omitted_scalar_count`, stored
-with the rows, and read back with `path="/<field name>"`. Credential-class ops
+included. When the names and the note leave no room, the largest values move
+out and are stored with the rows. A scalar (hinted or not) is counted under
+`omitted_scalar_count` and read back with `path="/<field name>"`. An object or
+list (a digest list such as `failed`, or the projection of a `result_objects`
+object) is named in `parts_not_inline` like a part, and `path="/<name>"` returns
+it whole. Only the reducer's own keys never move. Credential-class ops
 keep the old rule: no part is copied or stored without their hint. The
 `result_objects` hint only chooses the inline fields of the objects it names.

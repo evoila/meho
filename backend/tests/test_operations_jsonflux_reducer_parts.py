@@ -302,8 +302,103 @@ def test_fit_inline_takes_the_largest_plain_value_first_and_places_parts_again()
     assert json_text_bytes(fitted) < reducer_module._INLINE_SUMMARY_BYTE_LIMIT
 
 
+async def test_a_digest_list_moves_out_and_is_named_when_it_fills_the_summary() -> None:
+    """The review's example: a task digest of 60 rows with one 3,800-character failure.
+
+    The ``failed`` digest list alone made a 4,034-byte summary; naming the
+    ``milestones`` part took it to 4,225 bytes. Now the list moves out, is
+    named under ``parts_not_inline`` and stored with the rows, and the part
+    fits inline.
+    """
+    store = ResultHandleStore(_Valkey())  # type: ignore[arg-type]
+    rows = [{"name": f"task-{i}", "status": "COMPLETED"} for i in range(59)]
+    rows.append({"name": "task-59", "status": "FAILED", "errors": [{"message": "e" * 3800}]})
+    payload = {"subTasks": rows, "milestones": {"current": "deploy", "done": 3}}
+    context = _context(
+        result_digest={
+            "collection": "subTasks",
+            "status_field": "status",
+            "failed_states": ["FAILED"],
+        }
+    )
+
+    reduced, handle = await JsonFluxReducer(store=store).reduce(payload, None, context)
+
+    assert handle is not None
+    assert json_text_bytes(reduced) < 4096
+    assert reduced["status_counts"] == {"COMPLETED": 59, "FAILED": 1}
+    assert "failed" not in reduced
+    assert "omitted_scalar_count" not in reduced
+    assert reduced["milestones"] == payload["milestones"]
+    assert reduced["parts_not_inline"] == ["failed"]
+    assert reduced["parts_note"] in handle.fetch_more.drill_in.rationale
+    assert await _path_read(store, handle.handle_id, "/failed") == [rows[59]]
+    assert await _path_read(store, handle.handle_id, "/milestones") == payload["milestones"]
+
+
+async def test_a_hinted_object_projection_moves_out_and_the_whole_object_stays_readable() -> None:
+    """A ``result_objects`` projection near its own 4,096-byte budget fills the summary.
+
+    The projection moves out whole, is named under ``parts_not_inline``, and
+    the ``path`` read returns the complete object, which the spill stores
+    anyway. The part that was left out before now fits.
+    """
+    store = ResultHandleStore(_Valkey())  # type: ignore[arg-type]
+    # Four of these fields fill the projection's 4,096-byte budget exactly.
+    whole = {f"field_{i}": "v" * 997 for i in range(8)}
+    payload = {"items": [{"i": i} for i in range(60)], "config": whole, "totals": {"n": 60}}
+    context = _context(result_objects={"objects": {"config": list(whole)}})
+
+    reduced, handle = await JsonFluxReducer(store=store).reduce(payload, None, context)
+
+    assert handle is not None
+    assert json_text_bytes(reduced) < 4096
+    assert "config" not in reduced
+    assert "result_object_truncations" not in reduced
+    assert "result_object_note" not in reduced
+    assert reduced["totals"] == {"n": 60}
+    assert reduced["parts_not_inline"] == ["config"]
+    assert await _path_read(store, handle.handle_id, "/config") == whole
+
+
+def test_fit_inline_names_a_moved_object_and_drops_its_truncation_note() -> None:
+    summary = {
+        "config": {"text": "c" * 3900},
+        "result_object_truncations": {"config": ["text"]},
+        "row_count": 60,
+        "total": 60,
+    }
+
+    fitted, displaced, not_inline = reducer_module._fit_inline(
+        summary, {"totals": {"n": 60}}, movable=frozenset({"config"})
+    )
+
+    assert displaced == {"config": summary["config"]}
+    assert not_inline == ["config"]
+    assert fitted["parts_not_inline"] == ["config"]
+    assert fitted["totals"] == {"n": 60}
+    assert "result_object_truncations" not in fitted
+    assert "omitted_scalar_count" not in fitted
+    assert json_text_bytes(fitted) < reducer_module._INLINE_SUMMARY_BYTE_LIMIT
+
+
+def test_fit_inline_names_a_moved_list_before_the_parts_that_do_not_fit() -> None:
+    summary = {"failed": [{"e": "x" * 3900}], "note": "n", "row_count": 60, "total": 60}
+    parts = {"inputs": {"servers": [f"srv-{i}" for i in range(500)]}}
+
+    fitted, displaced, not_inline = reducer_module._fit_inline(
+        summary, parts, movable=frozenset({"failed", "note"})
+    )
+
+    assert displaced == {"failed": summary["failed"]}
+    assert not_inline == ["failed", "inputs"]
+    assert fitted["note"] == "n"
+    assert "omitted_scalar_count" not in fitted
+    assert json_text_bytes(fitted) < reducer_module._INLINE_SUMMARY_BYTE_LIMIT
+
+
 def test_fit_inline_stops_when_nothing_can_move() -> None:
-    """Reducer keys and the digest never move; a part that does not fit is still named."""
+    """With nothing movable the summary is sent as is; a part that does not fit is still named."""
     summary = {"failed": [{"e": "x" * 4000}], "row_count": 60, "total": 60}
 
     fitted, displaced, not_inline = reducer_module._fit_inline(

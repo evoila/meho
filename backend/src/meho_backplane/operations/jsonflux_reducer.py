@@ -358,9 +358,11 @@ _DEFAULT_SCALAR_VALUE_BYTE_CAP = 512
 #: rows. Whole parts are copied inline while the summary stays under the
 #: limit; the rest are named under ``parts_not_inline``. The names list has
 #: its own budget, so many long names cannot grow the summary either. When
-#: the names and the note still leave no room, the largest plain values are
-#: moved out to the store (:func:`_fit_inline`), so the limit always holds
-#: and nothing moved out is lost.
+#: the names and the note still leave no room, the largest values move out
+#: to the store (:func:`_fit_inline`): a plain value is counted under
+#: ``omitted_scalar_count``, an object or list (a digest list, a hinted
+#: object's projection) is named under ``parts_not_inline``. So the limit
+#: always holds and nothing moved out is lost.
 _INLINE_SUMMARY_BYTE_LIMIT = 4096
 _PARTS_NAMES_BYTE_BUDGET = 512
 
@@ -423,10 +425,11 @@ class _InlinePlan:
     ``summary`` is the inline summary without the two notes whose text
     depends on the spill outcome (``parts_note``, ``result_object_note``);
     :meth:`JsonFluxReducer._assemble` writes those. ``sample_rows`` is the
-    bounded preview. ``displaced`` holds the plain values the byte budget
-    moved out of the summary; :meth:`JsonFluxReducer.reduce` stores them
-    with the rows, like the scalars the default rule left out, so a ``path``
-    read returns them. ``parts_not_inline`` names the parts that did not fit.
+    bounded preview. ``displaced`` holds the values the byte budget moved
+    out of the summary; :meth:`JsonFluxReducer.reduce` stores them with the
+    rows, like the scalars the default rule left out, so a ``path`` read
+    returns them. ``parts_not_inline`` names the parts that did not fit and
+    the objects and lists that moved out.
     """
 
     summary: dict[str, Any]
@@ -956,9 +959,12 @@ class JsonFluxReducer:
         next to the rows (:func:`_sibling_parts`), all stored with the rows.
         :func:`_fit_inline` runs last: it copies whole parts while the summary
         stays under :data:`_INLINE_SUMMARY_BYTE_LIMIT`, names the rest, and
-        moves the largest plain values out when the names and the note leave
-        no room. The plan returns those under ``displaced`` so
-        :meth:`reduce` stores them with the rows before the spill.
+        moves the largest values out when the names and the note leave no
+        room: the scalars, the digest lists and the ``result_objects``
+        projection alike. The plan returns the moved values under
+        ``displaced`` so :meth:`reduce` stores them with the rows before the
+        spill; a hinted object is left out of it, because :meth:`reduce`
+        already stores the whole object.
 
         The inline sample is serialized **exactly once** (#134): it lives
         only on :attr:`ResultHandle.sample_rows` -- the audit hoist
@@ -987,10 +993,11 @@ class JsonFluxReducer:
         # collection digest (#3122); the reducer-owned bookkeeping keys are
         # written after all three and therefore always win.
         summary: dict[str, Any] = dict(preserved_scalars or {})
-        movable = frozenset(summary) - _RESERVED_SUMMARY_KEYS
         summary.update(_project_hinted_objects(hinted_objects or {}))
         if digest:
             summary.update(digest)
+        # Everything but the reducer's own keys can move out of the summary.
+        movable = frozenset(summary) - _RESERVED_SUMMARY_KEYS
         summary.update(
             {
                 "row_count": total_rows,
@@ -1009,6 +1016,8 @@ class JsonFluxReducer:
                 "Preview omitted because the selected row exceeds the byte budget."
             )
         summary, displaced, parts_not_inline = _fit_inline(summary, parts or {}, movable=movable)
+        for key in hinted_objects or {}:
+            displaced.pop(key, None)
         return _InlinePlan(
             summary=summary,
             sample_rows=sample_rows,
@@ -1481,29 +1490,26 @@ def _fit_inline(
     :data:`_INLINE_SUMMARY_BYTE_LIMIT`, always with room kept for the notes
     :meth:`JsonFluxReducer._assemble` writes after the spill (the longer of
     their two texts). :func:`_place_parts` copies whole parts and names the
-    rest. When the summary still reaches the limit -- a hinted scalar is the
-    one inline value no earlier budget bounds, so the names and the note can
-    push it over -- the largest *movable* value (a plain value next to the
-    rows, hinted or not) is taken out, counted under ``omitted_scalar_count``,
-    and the parts are placed again in the room it left. The values taken out
+    rest. When the summary still reaches the limit -- a hinted scalar, a
+    digest list of whole failed rows and the ``result_objects`` projection
+    are the inline values no earlier budget keeps under it, so the names and
+    the note can push it over -- the largest *movable* value is taken out,
+    and the parts are placed again in the room it left. A plain value is
+    counted under ``omitted_scalar_count``; an object or list is named under
+    ``parts_not_inline`` with the parts that did not fit, and a hinted
+    object loses its ``result_object_truncations`` entry (the whole object
+    is stored, so there is nothing cut to tell about). The values taken out
     come back as ``displaced``; the caller stores them with the rows so a
     ``path`` read returns them. The loop ends when the summary fits, or when
-    nothing movable is left (the reducer's own keys, the ``result_objects``
-    projection and the digest never move).
+    nothing movable is left (the reducer's own keys never move).
     """
-    notes = 0
-    truncations = summary.get(_RESULT_OBJECT_TRUNCATIONS_KEY)
-    if truncations:
-        notes += _longest_entry(
-            _RESULT_OBJECT_NOTE_KEY,
-            _result_object_note(truncations, True),
-            _result_object_note(truncations, False),
-        )
     parts_note_bytes = _longest_entry("parts_note", _parts_note(True), _parts_note(False))
     base = dict(summary)
     displaced: dict[str, Any] = {}
+    moved: list[str] = []
     while True:
-        fitted, not_inline = _place_parts(base, parts, notes + parts_note_bytes)
+        notes = _result_object_note_bytes(base)
+        fitted, not_inline = _place_parts(base, parts, notes + parts_note_bytes, moved=tuple(moved))
         # A summary that is not plain JSON cannot be measured; it is sent as is.
         measured = _json_bytes_or_none(fitted)
         candidates = [key for key in base if key in movable]
@@ -1515,12 +1521,35 @@ def _fit_inline(
         ):
             return fitted, displaced, not_inline
         key = max(candidates, key=lambda name: json_text_bytes({name: base[name]}))
-        displaced[key] = base.pop(key)
-        base["omitted_scalar_count"] = base.get("omitted_scalar_count", 0) + 1
+        value = base.pop(key)
+        displaced[key] = value
+        if _is_scalar(value):
+            base["omitted_scalar_count"] = base.get("omitted_scalar_count", 0) + 1
+            continue
+        moved.append(key)
+        truncations = base.get(_RESULT_OBJECT_TRUNCATIONS_KEY)
+        if isinstance(truncations, dict) and key in truncations:
+            truncations = {name: cut for name, cut in truncations.items() if name != key}
+            if truncations:
+                base[_RESULT_OBJECT_TRUNCATIONS_KEY] = truncations
+            else:
+                del base[_RESULT_OBJECT_TRUNCATIONS_KEY]
+
+
+def _result_object_note_bytes(summary: dict[str, Any]) -> int:
+    """The most bytes the ``result_object_note`` written after the spill can add."""
+    truncations = summary.get(_RESULT_OBJECT_TRUNCATIONS_KEY)
+    if not truncations:
+        return 0
+    return _longest_entry(
+        _RESULT_OBJECT_NOTE_KEY,
+        _result_object_note(truncations, True),
+        _result_object_note(truncations, False),
+    )
 
 
 def _place_parts(
-    base: dict[str, Any], parts: dict[str, Any], notes: int
+    base: dict[str, Any], parts: dict[str, Any], notes: int, *, moved: tuple[str, ...] = ()
 ) -> tuple[dict[str, Any], list[str]]:
     """Copy whole *parts* onto a copy of *base* while it fits; name the rest (#5139).
 
@@ -1528,16 +1557,19 @@ def _place_parts(
     would push the summary to :data:`_INLINE_SUMMARY_BYTE_LIMIT` bytes or
     more (room is kept for the names list and *notes*, the bytes of the
     notes written later), when its key is a reducer key, or when it would
-    replace a key the summary already has. The names of the parts left out
-    go under ``parts_not_inline`` (cut to :data:`_PARTS_NAMES_BYTE_BUDGET`
-    bytes, with ``parts_not_inline_count`` when cut).
+    replace a key the summary already has or one in *moved*. The names of
+    the parts left out go under ``parts_not_inline``, after *moved* (the
+    objects and lists :func:`_fit_inline` took out of the summary), cut to
+    :data:`_PARTS_NAMES_BYTE_BUDGET` bytes, with ``parts_not_inline_count``
+    when cut.
     """
     summary = dict(base)
-    if not parts:
+    not_inline = list(moved)
+    if not parts and not not_inline:
         return summary, []
-    reserve = _PARTS_NAMES_BYTE_BUDGET + notes + _entry_bytes("parts_not_inline_count", len(parts))
+    count = _entry_bytes("parts_not_inline_count", len(parts) + len(not_inline))
+    reserve = _PARTS_NAMES_BYTE_BUDGET + notes + count
     used = _json_bytes_or_none(summary) or 0
-    not_inline: list[str] = []
     for key, value in parts.items():
         cost = _json_bytes_or_none({key: value})
         if (
@@ -1546,7 +1578,8 @@ def _place_parts(
             or cost is None
             or used + cost - 1 + reserve >= _INLINE_SUMMARY_BYTE_LIMIT
         ):
-            not_inline.append(key)
+            if key not in not_inline:
+                not_inline.append(key)
             continue
         summary[key] = value
         used += cost - 1  # the braces are already counted; add one comma

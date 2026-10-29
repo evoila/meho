@@ -769,10 +769,14 @@ says they cannot be read. The 4,096 bytes are one budget for the whole summary:
 the reducer's own keys, the scalars (hinted or not), the `result_objects`
 projection, the digest, the parts, the names and the notes. The fit runs before
 the spill (`_plan_inline` → `_fit_inline`): the notes get room for their longer
-text, and when the names and the note still leave no room, the largest scalar
-moves out, is counted under `omitted_scalar_count` and stored with the rows,
-and the parts are placed again in the room it left. The reducer's own keys, the
-projection and the digest never move. Credential-class ops keep the old rule: no part is
+text, and when the names and the note still leave no room, the largest value
+moves out, is stored with the rows, and the parts are placed again in the room
+it left. A scalar that moves out is counted under `omitted_scalar_count`. An
+object or list that moves out (a digest list such as `failed`, or the projection
+of a `result_objects` object) is named in `parts_not_inline`, and the `path`
+read returns it whole; a moved projection also drops its
+`result_object_truncations` entry, since nothing of it is cut any more. Only the
+reducer's own keys never move. Credential-class ops keep the old rule: no part is
 copied or stored without their own hint. The registry sweep in
 `tests/test_operations_jsonflux_conformance.py` reduces a large sample for every
 typed and multi-step op whose declared answer has rows plus parts and fails

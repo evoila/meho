@@ -28,6 +28,13 @@ The rules:
 * **Removal.** :func:`remove_override` deletes one scope's override. A
   platform admin can remove any tenant's; a tenant admin only their own.
   Ending approval this way passes the same checks as turning it off.
+* **Reach.** An install-wide override also applies to a tenant's own copy
+  of the operation (a tenant row with the same name), whose
+  classification may differ from the built-in one. Before an install-wide
+  override is lowered or removed, every tenant it reaches is checked: when
+  approval ends for any of them, the approval-off checks apply, and the
+  audit row names those tenants. An install-wide "require approval" is
+  kept when any tenant copy needs it.
 
 Dispatch, preview, search and the operation contract all read the
 effective values through :func:`apply_effective_policy` /
@@ -243,10 +250,116 @@ async def apply_effective_policy(
 
 @dataclass(frozen=True)
 class PolicyEditResult:
-    """What an edit changed, for the audit row."""
+    """What an edit changed, for the audit row.
+
+    ``approval_ended_for_tenants`` names the tenants whose own copy of the
+    operation lost its approval requirement through an install-wide
+    change, while the built-in operation kept it.
+    """
 
     changes: dict[str, dict[str, Any]]
     scope: Literal["tenant", "install"]
+    approval_ended_for_tenants: tuple[UUID, ...] = ()
+
+
+@dataclass(frozen=True)
+class _TenantScope:
+    """One tenant that an install-wide override reaches, with that tenant's values."""
+
+    tenant_id: UUID
+    code_safety: str
+    code_approval: bool
+    own: list[OperationPolicyOverride]
+
+
+def _key_clause(model: type[EndpointDescriptor] | type[OperationPolicyOverride], key: OpKey) -> Any:
+    return and_(
+        model.product == key.product,
+        model.version == key.version,
+        model.impl_id == key.impl_id,
+        model.op_id == key.op_id,
+    )
+
+
+async def _tenant_scopes(
+    session: AsyncSession, key: OpKey, *, code_safety: str, code_approval: bool
+) -> list[_TenantScope]:
+    """Return every tenant an install-wide override of *key* reaches.
+
+    A tenant with its own copy of the operation keeps that copy's
+    classification. A tenant with only its own override keeps the
+    built-in one (*code_safety*, *code_approval*).
+    """
+    copies: dict[UUID, EndpointDescriptor] = {}
+    for row in (
+        await session.execute(
+            select(EndpointDescriptor).where(
+                _key_clause(EndpointDescriptor, key), EndpointDescriptor.tenant_id.is_not(None)
+            )
+        )
+    ).scalars():
+        if row.tenant_id is not None:
+            copies[row.tenant_id] = row
+    own: dict[UUID, list[OperationPolicyOverride]] = {}
+    for override in (
+        await session.execute(
+            select(OperationPolicyOverride).where(
+                _key_clause(OperationPolicyOverride, key),
+                OperationPolicyOverride.tenant_id.is_not(None),
+            )
+        )
+    ).scalars():
+        if override.tenant_id is not None:
+            own.setdefault(override.tenant_id, []).append(override)
+    scopes: list[_TenantScope] = []
+    for tenant_id in sorted(copies.keys() | own.keys()):
+        copy = copies.get(tenant_id)
+        scopes.append(
+            _TenantScope(
+                tenant_id=tenant_id,
+                code_safety=copy.safety_level if copy is not None else code_safety,
+                code_approval=copy.requires_approval if copy is not None else code_approval,
+                own=own.get(tenant_id, []),
+            )
+        )
+    return scopes
+
+
+def _tenants_losing_approval(
+    scopes: Sequence[_TenantScope],
+    *,
+    before: OperationPolicyOverride | None,
+    after: OperationPolicyOverride | None,
+) -> tuple[UUID, ...]:
+    """The tenants in *scopes* where approval ends when *before* becomes *after*."""
+    lost: list[UUID] = []
+    for scope in scopes:
+        old = effective_policy(scope.code_safety, scope.code_approval, [before, *scope.own])
+        new = effective_policy(scope.code_safety, scope.code_approval, [after, *scope.own])
+        if old.requires_approval and not new.requires_approval:
+            lost.append(scope.tenant_id)
+    return tuple(lost)
+
+
+def _refuse_unless_may_end_approval(
+    op_id: str,
+    *,
+    old: EffectivePolicy,
+    new: EffectivePolicy,
+    lost: Sequence[UUID],
+    who: _Requester,
+) -> None:
+    """Run the approval-off checks when approval ends in any scope the edit reaches.
+
+    That is the edited scope itself (*old* to *new*) or a tenant in
+    *lost*. A level of ``destructive`` always keeps approval, so when
+    approval ends anywhere, *new* is not destructive.
+    """
+    if not (old.requires_approval and not new.requires_approval) and not lost:
+        return
+    if who.tighten_only:
+        raise _edit_tool_cannot_loosen()
+    _check_may_turn_approval_off(op_id, new.safety_level, who)
 
 
 def _split(
@@ -306,20 +419,23 @@ def _new_approval_field(
     *,
     row: EndpointDescriptor,
     others: list[OperationPolicyOverride],
+    tenants: Sequence[_TenantScope],
     requested: bool,
     new_safety: str,
     who: _Requester,
 ) -> bool | None:
     """Check a requested approval flag; return the value to store (``None`` = no override).
 
-    ``True`` is stored unless the classification requires approval and no
-    other scope's override turns it off. Like the risk level, the choice is
-    kept apart from the other scopes' overrides.
+    ``True`` is stored unless the classification requires approval, no
+    other scope's override turns it off, and every tenant copy in
+    *tenants* requires it too. Like the risk level, the choice is kept
+    apart from the other scopes' overrides.
     """
     base = _approval(row.requires_approval, others)
     if requested:
         turned_off = any(o.requires_approval is False for o in others)
-        return None if row.requires_approval and not turned_off else True
+        needed_by_a_tenant = any(not t.code_approval for t in tenants)
+        return None if row.requires_approval and not turned_off and not needed_by_a_tenant else True
     if who.tighten_only:
         raise _edit_tool_cannot_loosen()
     if not base:
@@ -388,6 +504,11 @@ async def apply_policy_edit(
     mine, others = _split(overrides, scope_tenant_id)
     old = effective_policy(row.safety_level, row.requires_approval, overrides)
     who = _Requester(operator, reason, person_present, tighten_only, max_age_seconds)
+    tenants: list[_TenantScope] = []
+    if scope_tenant_id is None:
+        tenants = await _tenant_scopes(
+            session, key, code_safety=row.safety_level, code_approval=row.requires_approval
+        )
 
     safety_field = mine.safety_level if mine is not None else None
     if safety_level is not None:
@@ -402,18 +523,18 @@ async def apply_policy_edit(
         approval_field = _new_approval_field(
             row=row,
             others=others,
+            tenants=tenants,
             requested=requires_approval,
             new_safety=new_safety,
             who=who,
         )
     candidate = OperationPolicyOverride(safety_level=safety_field, requires_approval=approval_field)
     new = effective_policy(row.safety_level, row.requires_approval, [*others, candidate])
-    if old.requires_approval and not new.requires_approval:
-        # Every edit that ends approval passes the same checks, also one
-        # that only removes an override or lowers a raised risk level.
-        if tighten_only:
-            raise _edit_tool_cannot_loosen()
-        _check_may_turn_approval_off(row.op_id, new.safety_level, who)
+    # Every edit that ends approval passes the same checks, also one that
+    # only removes an override or lowers a raised risk level, and one that
+    # ends approval for a tenant's own copy of a built-in operation.
+    lost = _tenants_losing_approval(tenants, before=mine, after=candidate)
+    _refuse_unless_may_end_approval(row.op_id, old=old, new=new, lost=lost, who=who)
     await _store(
         session,
         key=key,
@@ -433,6 +554,7 @@ async def apply_policy_edit(
             approval_touched=requires_approval is not None,
         ),
         scope=_scope_label(scope_tenant_id),
+        approval_ended_for_tenants=lost,
     )
 
 
@@ -466,9 +588,10 @@ async def remove_override(
 
     *scope_tenant_id* names the override: a tenant UUID or ``None`` for
     the install-wide one. The caller checks that *operator* may act on
-    that scope. When the removal ends approval in that scope, it passes
-    the same checks as turning approval off. Raises
-    :class:`OverrideNotFoundError` when the scope has no override.
+    that scope. When the removal ends approval in that scope, or for a
+    tenant that an install-wide override reaches, it passes the same
+    checks as turning approval off. Raises :class:`OverrideNotFoundError`
+    when the scope has no override.
     """
     overrides = (await load_overrides(session, tenant_id=scope_tenant_id, keys=[key])).get(key, [])
     mine, others = _split(overrides, scope_tenant_id)
@@ -477,9 +600,14 @@ async def remove_override(
     code_safety, code_approval = await _classification(session, key, scope_tenant_id)
     old = effective_policy(code_safety, code_approval, overrides)
     new = effective_policy(code_safety, code_approval, others)
-    if old.requires_approval and not new.requires_approval:
-        who = _Requester(operator, reason, person_present, False, max_age_seconds)
-        _check_may_turn_approval_off(key.op_id, new.safety_level, who)
+    tenants: list[_TenantScope] = []
+    if scope_tenant_id is None:
+        tenants = await _tenant_scopes(
+            session, key, code_safety=code_safety, code_approval=code_approval
+        )
+    lost = _tenants_losing_approval(tenants, before=mine, after=None)
+    who = _Requester(operator, reason, person_present, False, max_age_seconds)
+    _refuse_unless_may_end_approval(key.op_id, old=old, new=new, lost=lost, who=who)
     await session.delete(mine)
     await session.flush()
     return PolicyEditResult(
@@ -490,6 +618,7 @@ async def remove_override(
             approval_touched=mine.requires_approval is not None,
         ),
         scope=_scope_label(scope_tenant_id),
+        approval_ended_for_tenants=lost,
     )
 
 
@@ -596,10 +725,7 @@ async def _classification(
         (
             await session.execute(
                 select(EndpointDescriptor).where(
-                    EndpointDescriptor.product == key.product,
-                    EndpointDescriptor.version == key.version,
-                    EndpointDescriptor.impl_id == key.impl_id,
-                    EndpointDescriptor.op_id == key.op_id,
+                    _key_clause(EndpointDescriptor, key),
                     or_(
                         EndpointDescriptor.tenant_id.is_(None),
                         EndpointDescriptor.tenant_id == tenant_id,

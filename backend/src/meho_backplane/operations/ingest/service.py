@@ -993,7 +993,9 @@ class ReviewService:
         ``{connector_id, op_id, fields_updated, changes, scope, reason,
         is_enabled_set_to?}``. ``changes`` holds ``{"old", "new"}`` for the
         risk level, the approval flag and ``is_enabled`` (#4711); ``scope``
-        is ``"tenant"`` or ``"install"``.
+        is ``"tenant"`` or ``"install"``; ``approval_ended_for_tenants``
+        lists the tenants whose own copy of a built-in operation lost its
+        approval requirement through an install-wide change.
         The ``is_enabled_set_to`` key is included verbatim only
         when ``is_enabled`` was edited — that's the key the cascade
         query reads. The ``llm_instructions`` value itself is NOT
@@ -1081,6 +1083,7 @@ class ReviewService:
                 "fields_updated": fields_updated,
                 "changes": changes,
                 "scope": policy.scope if policy.changes else _scope_name(scope.tenant_id),
+                "approval_ended_for_tenants": [str(t) for t in policy.approval_ended_for_tenants],
                 "reason": reason,
             }
             if is_enabled is not None:
@@ -1157,14 +1160,16 @@ class ReviewService:
         and the install-wide one is
         :class:`BuiltinConnectorWriteForbiddenError`.
 
-        When the removal ends approval in that scope, it passes the same
-        checks as turning approval off: ``platform_admin``, a reason and
-        *person_present* (:class:`OpPolicyEditError` otherwise). A scope
-        without an override raises
+        When the removal ends approval in that scope, or for a tenant whose
+        own copy of the operation the install-wide override reached, it
+        passes the same checks as turning approval off: ``platform_admin``,
+        a reason and *person_present* (:class:`OpPolicyEditError`
+        otherwise). A scope without an override raises
         :class:`~meho_backplane.operations.op_policy.OverrideNotFoundError`.
 
         Writes one ``meho_connector_edit_op`` audit row with
-        ``override_removed=True`` and ``override_tenant_id``.
+        ``override_removed=True``, ``override_tenant_id`` and
+        ``approval_ended_for_tenants``.
         """
         scope = self._resolve_scope(
             connector_id, override_tenant_id, allow_platform_admin_cross_tenant=True
@@ -1192,6 +1197,9 @@ class ReviewService:
                     "fields_updated": [*result.changes],
                     "changes": result.changes,
                     "scope": result.scope,
+                    "approval_ended_for_tenants": [
+                        str(t) for t in result.approval_ended_for_tenants
+                    ],
                     "reason": reason,
                     "override_removed": True,
                     "override_tenant_id": (

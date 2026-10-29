@@ -642,6 +642,127 @@ async def test_tenant_admin_removes_own_risk_override(embedding: AsyncMock) -> N
     assert payload["changes"] == {"safety_level": {"old": "dangerous", "new": "caution"}}
 
 
+async def _ingest_tenant_copy(
+    embedding: AsyncMock, tenant_id: uuid.UUID, *, requires_approval: bool
+) -> None:
+    """Give *tenant_id* its own copy of the typed op, with its own classification."""
+    await register_ingested_operations(
+        **_TYPED,
+        spec_source="typedpets.yaml",
+        operations=[
+            EndpointDescriptorProto(
+                op_id="typedpets.pet.update",
+                method="POST",
+                path="/pets",
+                summary="Change a pet.",
+                description="Change a pet.",
+                tags=["pets"],
+                parameter_schema={"type": "object", "properties": {}},
+                response_schema={"type": "object"},
+                safety_level="caution",
+                requires_approval=requires_approval,
+            )
+        ],
+        tenant_id=tenant_id,
+        embedding_service=embedding,
+    )
+    await ReviewService(_operator(tenant_id)).edit_op(
+        _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=tenant_id, is_enabled=True
+    )
+
+
+async def _install_destructive_over_a_tenant_copy(
+    embedding: AsyncMock, tenant_id: uuid.UUID
+) -> Operator:
+    """The built-in op requires approval, the tenant's copy does not; install-wide destructive."""
+    await _register_typed(embedding, requires_approval=True)
+    await _ingest_tenant_copy(embedding, tenant_id, requires_approval=False)
+    assert await _effective(tenant_id) == ("caution", False)
+    admin = _operator(uuid.uuid4(), platform_admin=True)
+    await ReviewService(admin).edit_op(
+        _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=None, safety_level="destructive"
+    )
+    assert await _effective(tenant_id) == ("destructive", True)
+    assert await _effective(uuid.uuid4()) == ("destructive", True)
+    return admin
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_clean_registry")
+async def test_removing_an_install_override_checks_every_tenant_it_reaches(
+    embedding: AsyncMock,
+) -> None:
+    """Removal that ends approval for a tenant's own copy needs the approval-off rules."""
+    tenant_id = uuid.uuid4()
+    admin = await _install_destructive_over_a_tenant_copy(embedding, tenant_id)
+
+    for kwargs, code in (
+        ({}, "approval_off_needs_reason"),
+        ({"reason": "x"}, "approval_off_needs_fresh_sign_in"),
+        ({"person_present": True}, "approval_off_needs_reason"),
+    ):
+        with pytest.raises(OpPolicyEditError) as caught:
+            await _remove(admin, None, **kwargs)
+        assert caught.value.code == code
+    assert await _effective(tenant_id) == ("destructive", True)
+
+    await _remove(admin, None, reason="too strict", person_present=True)
+    assert await _effective(tenant_id) == ("caution", False)
+    assert await _effective(uuid.uuid4()) == ("caution", True)
+    payload = await _last_edit_audit()
+    assert payload["changes"] == {"safety_level": {"old": "destructive", "new": "caution"}}
+    assert payload["approval_ended_for_tenants"] == [str(tenant_id)]
+    assert payload["override_removed"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_clean_registry")
+async def test_lowering_an_install_override_checks_every_tenant_it_reaches(
+    embedding: AsyncMock,
+) -> None:
+    """Setting the install-wide level back ends approval for a tenant's copy: same rules."""
+    tenant_id = uuid.uuid4()
+    admin = await _install_destructive_over_a_tenant_copy(embedding, tenant_id)
+    service = ReviewService(admin)
+
+    async def lower(**kwargs: Any) -> None:
+        await service.edit_op(
+            _TYPED_CONNECTOR,
+            "typedpets.pet.update",
+            tenant_id=None,
+            safety_level="caution",
+            **kwargs,
+        )
+
+    for kwargs, code in (
+        ({}, "approval_off_needs_reason"),
+        ({"reason": "x"}, "approval_off_needs_fresh_sign_in"),
+        ({"reason": "x", "person_present": True, "tighten_only": True}, "edit_tool_cannot_loosen"),
+    ):
+        with pytest.raises(OpPolicyEditError) as caught:
+            await lower(**kwargs)
+        assert caught.value.code == code
+    assert await _effective(tenant_id) == ("destructive", True)
+
+    await lower(reason="not needed", person_present=True)
+    assert await _effective(tenant_id) == ("caution", False)
+    assert await _effective(uuid.uuid4()) == ("caution", True)
+    payload = await _last_edit_audit()
+    assert payload["approval_ended_for_tenants"] == [str(tenant_id)]
+    assert payload["scope"] == "install"
+
+    # Keeping approval while lowering needs no checks. The install-wide
+    # "require approval" is stored, because the tenant's copy needs it.
+    await service.edit_op(
+        _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=None, safety_level="destructive"
+    )
+    await lower(requires_approval=True)
+    assert await _effective(tenant_id) == ("caution", True)
+    assert await _effective(uuid.uuid4()) == ("caution", True)
+    assert (await _last_edit_audit())["approval_ended_for_tenants"] == []
+    assert (await _install_override()).requires_approval is True
+
+
 @pytest.mark.asyncio
 async def test_lowering_from_destructive_that_ends_approval_needs_the_rules(
     embedding: AsyncMock,

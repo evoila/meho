@@ -1439,7 +1439,9 @@ Turning approval off for an operation is the one loosening edit. It
 needs `platform_admin`, a written reason, and a person. This holds for
 every edit that ends approval, also removing an override that required
 it (`meho connector remove-override`, `DELETE
-/api/v1/connectors/{id}/operation-overrides/{op_id}`): in the console
+/api/v1/connectors/{id}/operation-overrides/{op_id}`), and also when
+approval ends only for a tenant's own copy of a built-in operation that
+an install-wide override reached: in the console
 the web session is the person (the same rule as an approval click); on
 REST it is the **fresh sign-in check**,
 `auth/fresh_sign_in.py:has_fresh_sign_in`:

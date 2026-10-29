@@ -1155,6 +1155,18 @@ override that required approval, and setting a level back from
 tenant admin who lowers their own `destructive` override can keep
 approval by also sending `requires_approval=true`.
 
+**An install-wide change is checked in every scope it reaches.** An
+install-wide override also applies to a tenant's own copy of the
+operation (a tenant row with the same name), and that copy may have its
+own classification. Before an install-wide override is lowered or
+removed, `apply_policy_edit` / `remove_override` look at every tenant
+with its own copy or its own override: when approval ends for any of
+them, the approval-off checks apply, even when the built-in operation
+keeps approval. The audit row names those tenants in
+`approval_ended_for_tenants`. An install-wide `requires_approval=true`
+is stored when any tenant copy needs it, so a platform admin can lower
+the level and keep approval for everyone.
+
 **Each scope's override stands on its own.** The stored value is
 measured against the classification, not against the other scopes'
 overrides. A tenant that selects `destructive` while the install-wide
@@ -1202,8 +1214,11 @@ max_age=<N>` (RFC 9470).
 (`{field: {"old", "new"}}` for the risk level, approval and
 `is_enabled`, with effective values; a field that changed as a side
 effect is recorded too, for example approval when a raise to
-`destructive` turns it on), `scope` (`tenant` / `install`) and
-`reason`, next to the existing `fields_updated` and `is_enabled_set_to`.
+`destructive` turns it on), `scope` (`tenant` / `install`),
+`approval_ended_for_tenants` (the tenants whose own copy of a built-in
+operation lost its approval requirement through an install-wide change)
+and `reason`, next to the existing `fields_updated` and
+`is_enabled_set_to`.
 
 **Report.** `GET /api/v1/connectors/operation-overrides`
 (`?reduced_approval=true` for the operations running with reduced

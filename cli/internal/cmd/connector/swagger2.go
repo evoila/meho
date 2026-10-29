@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"net/url"
 	"os"
 	"slices"
@@ -207,11 +206,10 @@ func resolvePathRefs(root map[string]any) (bool, error) {
 		if !ok || !strings.HasPrefix(ref, "#") {
 			continue
 		}
-		target, err := followPathRef(root, ref)
+		merged, err := followPathRef(root, ref)
 		if err != nil {
 			return false, fmt.Errorf("path %q: %w", name, err)
 		}
-		merged := maps.Clone(target)
 		for k, v := range item {
 			if k != "$ref" {
 				merged[k] = v
@@ -223,10 +221,14 @@ func resolvePathRefs(root map[string]any) (bool, error) {
 	return changed, nil
 }
 
-// followPathRef returns the object a path item reference points to,
-// following a reference that points to another reference.
+// followPathRef returns a fresh object with the keys of the object a
+// path item reference points to. When that object is itself a reference,
+// the chain is followed and every object in it is merged, so that an
+// operation declared on any link survives. The object nearer to the path
+// wins a clash with the object it references.
 func followPathRef(root map[string]any, ref string) (map[string]any, error) {
 	seen := map[string]bool{}
+	var chain []map[string]any
 	for {
 		if seen[ref] {
 			return nil, fmt.Errorf("the reference %q runs in a loop", ref)
@@ -236,15 +238,25 @@ func followPathRef(root map[string]any, ref string) (map[string]any, error) {
 		if !ok {
 			return nil, fmt.Errorf("the reference %q points to nothing in this file", ref)
 		}
+		chain = append(chain, target)
 		next, isRef := target["$ref"].(string)
 		if !isRef {
-			return target, nil
+			break
 		}
 		if !strings.HasPrefix(next, "#") {
 			return nil, fmt.Errorf("the reference %q points to %q, which is another file or a URL", ref, next)
 		}
 		ref = next
 	}
+	merged := map[string]any{}
+	for i := len(chain) - 1; i >= 0; i-- {
+		for k, v := range chain[i] {
+			if k != "$ref" {
+				merged[k] = v
+			}
+		}
+	}
+	return merged, nil
 }
 
 // lookupPointer resolves a JSON pointer in a URI fragment ("#/a/b~1c")

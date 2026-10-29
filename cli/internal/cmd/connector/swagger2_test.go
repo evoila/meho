@@ -852,6 +852,62 @@ func TestConvertSwagger2ResolvesPathReferences(t *testing.T) {
 	}
 }
 
+// chainedPathRefSwagger2YAML declares a path that references a path item
+// which itself references another one. The base item has GET; the
+// extended item adds POST and sets its own summary on GET.
+const chainedPathRefSwagger2YAML = `swagger: "2.0"
+info:
+  title: Widget API
+  version: "1"
+x-path-items:
+  base:
+    get:
+      operationId: listThings
+      summary: base
+      responses:
+        200:
+          description: ok
+  extended:
+    $ref: "#/x-path-items/base"
+    get:
+      operationId: listThings
+      summary: extended
+      responses:
+        200:
+          description: ok
+    post:
+      operationId: createThing
+      responses:
+        201:
+          description: created
+paths:
+  /things:
+    $ref: "#/x-path-items/extended"
+`
+
+func TestConvertSwagger2MergesChainedPathReferences(t *testing.T) {
+	out, conv, err := convertSwagger2([]byte(chainedPathRefSwagger2YAML))
+	if err != nil {
+		t.Fatalf("convertSwagger2: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("converted output is not JSON: %v", err)
+	}
+	if conv.Paths != 1 || conv.Operations != 2 {
+		t.Errorf("summary = %+v, want 1 path, 2 operations", conv)
+	}
+	if got := dig(t, doc, "paths", "/things", "get", "operationId"); got != "listThings" {
+		t.Errorf("GET from the base item: operationId = %v, want listThings", got)
+	}
+	if got := dig(t, doc, "paths", "/things", "post", "operationId"); got != "createThing" {
+		t.Errorf("POST from the extended item: operationId = %v, want createThing", got)
+	}
+	if got := dig(t, doc, "paths", "/things", "get", "summary"); got != "extended" {
+		t.Errorf("the item nearer to the path must win a clash: summary = %v, want extended", got)
+	}
+}
+
 func TestConvertSwagger2RefusesDanglingPathReference(t *testing.T) {
 	for name, tc := range map[string]struct{ ref, want string }{
 		"missing": {`"#/paths/~1nothing"`, "points to nothing"},

@@ -2840,8 +2840,11 @@ All three delegate to `ReviewService.delete_connector`
     and refuse the file). A path item that is only a reference to
     another place in the same file (`$ref: "#/paths/~1widgets"`) is
     replaced by a copy of what it points to before the conversion; the
-    library alone would write an empty path and drop its operations. A
-    reference that points nowhere is refused. An array query
+    library alone would write an empty path and drop its operations.
+    When the referenced item is itself a reference, the whole chain is
+    merged, so an operation declared on any link survives; the item
+    nearer to the path wins a clash. A reference that points nowhere,
+    or runs in a loop, is refused. An array query
     parameter with no `collectionFormat` keeps the Swagger 2.0 default,
     one comma-separated value (`ids=1,2`); the library alone would
     leave the OpenAPI 3 default, which repeats the name (`ids=1&ids=2`).

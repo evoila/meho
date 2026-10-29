@@ -37,10 +37,11 @@ from meho_backplane.connectors.registry import (
     register_connector_v2,
 )
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor, IngestedAuthProfile
+from meho_backplane.db.models import AuditLog, EndpointDescriptor, IngestedAuthProfile
 from meho_backplane.operations.dispatcher import _resolve_connector_instance
 from meho_backplane.operations.ingest.api_schemas import SpecSource
 from meho_backplane.operations.ingest.connector_registration import resolve_authoring_kind
+from meho_backplane.operations.ingest.exceptions import ConnectorNotFoundError
 from meho_backplane.operations.ingest.ingest_auth_store import (
     restore_ingested_profiled_connectors,
 )
@@ -69,6 +70,16 @@ paths:
       responses:
         "200":
           description: Stats.
+"""
+
+#: A valid API file with no paths. Ingested with a login type it still saves
+#: the choice, while the connector has no operation rows.
+_EMPTY_SPEC_YAML = """
+openapi: "3.1.0"
+info:
+  title: Widgetco empty fixture
+  version: "3.1.0"
+paths: {}
 """
 
 
@@ -127,11 +138,12 @@ async def _ingest(
     secret_fields: tuple[str, ...] | None = None,
     impl_id: str = _IMPL_ID,
     tenant_id: uuid.UUID | None = None,
+    spec: str = _SPEC_YAML,
 ) -> None:
     """Run the real register phase; only the LLM grouping is stubbed.
 
     With *tenant_id* the ingest goes into that tenant's own scope, by an
-    operator of that tenant.
+    operator of that tenant. *spec* is the API file text to ingest.
     """
     service = IngestionPipelineService(
         _operator(tenant_id),
@@ -154,7 +166,7 @@ async def _ingest(
         product=_PRODUCT,
         version=_VERSION,
         impl_id=impl_id,
-        specs=[SpecSource(uri="fixture://widgetco/spec.yaml", content=_SPEC_YAML)],
+        specs=[SpecSource(uri="fixture://widgetco/spec.yaml", content=spec)],
         tenant_id=tenant_id,
         dry_run=False,
         auth_scheme=auth_scheme,
@@ -173,6 +185,14 @@ async def _descriptor(impl_id: str = _IMPL_ID) -> EndpointDescriptor:
 async def _saved_rows() -> list[IngestedAuthProfile]:
     async with get_sessionmaker()() as session:
         return list((await session.execute(select(IngestedAuthProfile))).scalars().all())
+
+
+async def _delete_audit_payloads() -> list[dict[str, Any]]:
+    async with get_sessionmaker()() as session:
+        stmt = select(AuditLog).where(
+            AuditLog.method == "SERVICE", AuditLog.path == "meho_connector_delete"
+        )
+        return [row.payload for row in (await session.execute(stmt)).scalars().all()]
 
 
 def _registered_profiled() -> type[ProfiledRestConnector]:
@@ -346,6 +366,61 @@ async def test_delete_removes_the_saved_choice(monkeypatch: pytest.MonkeyPatch) 
     assert await _saved_rows() == []
     assert await restore_ingested_profiled_connectors() == 0
     assert _TRIPLE not in all_connectors_v2()
+
+
+@pytest.mark.asyncio
+async def test_delete_of_connector_without_operations_removes_the_saved_choice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An API file with no paths, ingested with a login type, can be deleted.
+
+    Such an ingest saves the login type but lands no operation rows. The
+    delete then takes the no-rows path. Before the fix that path answered
+    404 (a profiled class is not a bare shim) and left the saved row, so
+    the start-up restore built the unwanted connector again at every
+    start. Now the delete removes the row, audits it, and the second
+    delete answers 404 like any other repeat.
+    """
+    await _ingest(monkeypatch, auth_scheme="basic", spec=_EMPTY_SPEC_YAML)
+    assert len(await _saved_rows()) == 1
+    assert shim_kind(_registered_profiled()) == "profiled"
+    service = ReviewService(_operator())
+
+    result = await service.delete_connector(f"{_IMPL_ID}-{_VERSION}", tenant_id=None)
+
+    assert result.registry_only is True
+    assert result.operations_deleted == 0
+    assert await _saved_rows() == []
+    payloads = await _delete_audit_payloads()
+    assert len(payloads) == 1
+    assert payloads[0]["auth_profile_deleted"] is True
+    assert payloads[0]["registry_only"] is True
+
+    # A restart empties the in-memory connector table; nothing restores it.
+    clear_registry()
+    assert await restore_ingested_profiled_connectors() == 0
+    assert _TRIPLE not in all_connectors_v2()
+
+    with pytest.raises(ConnectorNotFoundError):
+        await service.delete_connector(f"{_IMPL_ID}-{_VERSION}", tenant_id=None)
+
+
+@pytest.mark.asyncio
+async def test_tenant_delete_leaves_the_built_in_saved_choice_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The no-rows delete keeps the tenant check: a tenant cannot remove the built-in row."""
+    await _ingest(monkeypatch, auth_scheme="basic", spec=_EMPTY_SPEC_YAML)
+    tenant_id = uuid.uuid4()
+
+    with pytest.raises(ConnectorNotFoundError):
+        await ReviewService(_operator(tenant_id)).delete_connector(
+            f"{_IMPL_ID}-{_VERSION}", tenant_id=tenant_id
+        )
+
+    assert [row.tenant_id for row in await _saved_rows()] == [None]
+    clear_registry()
+    assert await restore_ingested_profiled_connectors() == 1
 
 
 @pytest.mark.asyncio

@@ -1135,6 +1135,9 @@ failed with `no_connector` and the list showed `ingested-shim`. Now:
   class is skipped, so the read is one small query per call. Until the
   first call that replica's `meho connector list` still shows the old kind.
 * A connector delete removes the row, so the class does not come back.
+  This also holds for a connector that has no operation rows (an API file
+  with no paths, ingested with a login type): the delete removes the saved
+  row and answers 204, instead of 404 for "nothing to delete".
 * Restoring never enables an op, lowers a risk level, or removes an
   approval; the review gate stays the interlock.
 
@@ -2843,7 +2846,10 @@ All three delegate to `ReviewService.delete_connector`
   durable truth and are gone everywhere immediately. The delete also
   removes the saved login type (`ingested_auth_profile`, #5016), so the
   start-up restore does not build a profiled class for a deleted
-  connector.
+  connector. The audit payload's `auth_profile_deleted` says whether
+  such a row went. A connector with no operation rows but a saved login
+  type is deleted the same way (`registry_only=true`); only a connector
+  with no rows, no saved login type and no bare shim answers 404.
 
 ## Known issues
 

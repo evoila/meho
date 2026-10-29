@@ -116,9 +116,10 @@ class DeleteConnectorWarning:
 class DeleteConnectorResult:
     """Outcome of one connector delete, as returned by the service layer.
 
-    ``registry_only`` distinguishes the zero-op-stub path (no DB rows
-    existed anywhere; only the auto-shim class was removed — the
-    primary #1700 consumer scenario) from the row-bearing path.
+    ``registry_only`` distinguishes the zero-op path (no operation rows
+    existed under the caller's scope; only the auto-shim class and/or
+    the saved login type were removed — the primary #1700 consumer
+    scenario) from the row-bearing path.
     ``class_deregistered`` reports whether the delete removed the
     triple's auto-shim from the process-local v2 registry; it stays
     ``False`` when rows survive under another tenant scope or when
@@ -312,27 +313,33 @@ async def _delete_scoped_rows(
     # see through AsyncSession.execute's Result annotation.
     descriptor_result: CursorResult[Any] = await session.execute(descriptor_stmt)  # type: ignore[assignment]
     group_result: CursorResult[Any] = await session.execute(group_stmt)  # type: ignore[assignment]
-    await session.execute(_saved_auth_profile_delete(scope))
     return (
         max(descriptor_result.rowcount or 0, 0),
         max(group_result.rowcount or 0, 0),
     )
 
 
-def _saved_auth_profile_delete(scope: ConnectorScope) -> Delete:
-    """Build the delete of the scope's saved login type (#5016).
+async def _delete_saved_auth_profile(
+    session: AsyncSession,
+    scope: ConnectorScope,
+) -> bool:
+    """Delete the scope's saved login type (#5016); return whether one existed.
 
     Without it a deleted connector's profiled class would be built again
-    at the next start.
+    at the next start. Filters by tenant scope like the row deletes, so a
+    tenant's delete never removes the built-in choice and vice versa.
     """
-    stmt = delete(IngestedAuthProfile).where(
+    stmt: Delete = delete(IngestedAuthProfile).where(
         IngestedAuthProfile.product == scope.product,
         IngestedAuthProfile.version == scope.version,
         IngestedAuthProfile.impl_id == scope.impl_id,
     )
     if scope.tenant_id is None:
-        return stmt.where(IngestedAuthProfile.tenant_id.is_(None))
-    return stmt.where(IngestedAuthProfile.tenant_id == scope.tenant_id)
+        stmt = stmt.where(IngestedAuthProfile.tenant_id.is_(None))
+    else:
+        stmt = stmt.where(IngestedAuthProfile.tenant_id == scope.tenant_id)
+    result: CursorResult[Any] = await session.execute(stmt)  # type: ignore[assignment]
+    return (result.rowcount or 0) > 0
 
 
 async def _tenants_that_use_scope(
@@ -429,34 +436,55 @@ def _build_warnings(
     )
 
 
-def _registry_only_stage(
+async def _stage_rowless_delete(
+    session: AsyncSession,
     scope: ConnectorScope,
     connector_id: str,
+    product: str,
+    version: str,
+    impl_id: str,
 ) -> StagedConnectorDelete:
-    """Stage the zero-op-stub delete (no rows anywhere; pop the shim only).
+    """Stage the delete of a connector with no operation rows in the scope.
 
-    Raises :class:`ConnectorNotFoundError` when no auto-shim matches
-    the triple either — nothing exists to delete, and the unified
-    404 keeps the probe surface identical to every other connector
-    route. A registered *hand-coded* class without rows also 404s
-    here: its registration is a deploy artefact, not deletable
-    operator state.
+    Two things can still exist for such a connector: the scope's saved
+    login type (#5016 — an API file with no paths, ingested with a login
+    type, saves one and would be built again at every start) and the
+    triple's bare auto-shim (the zero-op stub of #1700). The saved login
+    type is deleted first, under the caller's tenant scope only. The shim
+    is staged for the pop only when no rows exist for the triple under
+    any scope, as in the row-bearing path.
+
+    Raises :class:`ConnectorNotFoundError` when the scope had no saved
+    login type and either the rows live under another scope (the caller
+    cannot delete rows their scope cannot see) or no bare auto-shim
+    matches the triple — nothing exists to delete, and the unified 404
+    keeps the probe surface identical to every other connector route. A
+    registered *hand-coded* class without rows also 404s here: its
+    registration is a deploy artefact, not deletable operator state.
     """
-    shim_keys = _auto_shim_keys_for_triple(scope.product, scope.version, scope.impl_id)
-    if not shim_keys:
+    profile_deleted = await _delete_saved_auth_profile(session, scope)
+    residual = await _rows_exist_any_scope(session, product, version, impl_id)
+    if residual and not profile_deleted:
+        raise ConnectorNotFoundError(connector_id=connector_id, tenant_id=scope.tenant_id)
+    shim_keys: tuple[tuple[str, str, str], ...] = ()
+    if not residual:
+        shim_keys = _auto_shim_keys_for_triple(product, version, impl_id)
+    if not shim_keys and not profile_deleted:
         raise ConnectorNotFoundError(connector_id=connector_id, tenant_id=scope.tenant_id)
     result = DeleteConnectorResult(
         connector_id=connector_id,
         groups_deleted=0,
         operations_deleted=0,
         enabled_operations_deleted=0,
-        class_deregistered=True,
+        class_deregistered=bool(shim_keys),
         registry_only=True,
         warnings=(),
     )
     return StagedConnectorDelete(
         result=result,
-        audit_payload=_audit_payload(scope, result, deleted_group_keys=[]),
+        audit_payload=_audit_payload(
+            scope, result, deleted_group_keys=[], auth_profile_deleted=profile_deleted
+        ),
         shim_keys=shim_keys,
     )
 
@@ -466,12 +494,16 @@ def _audit_payload(
     result: DeleteConnectorResult,
     *,
     deleted_group_keys: list[str],
+    auth_profile_deleted: bool,
 ) -> dict[str, Any]:
     """Build the JSON-safe ``meho_connector_delete`` audit payload.
 
     ``product`` is the product the deleted rows were stored under. It
     equals the id's product except for an old tenant copy under a
     former product name (#4889), where it records which copy went.
+    ``auth_profile_deleted`` says whether the scope's saved login type
+    (#5016) was removed, so a delete that removed only that row does
+    not read as a no-op in the audit trail.
     """
     return {
         "connector_id": result.connector_id,
@@ -483,6 +515,7 @@ def _audit_payload(
         "enabled_operations_deleted": result.enabled_operations_deleted,
         "class_deregistered": result.class_deregistered,
         "registry_only": result.registry_only,
+        "auth_profile_deleted": auth_profile_deleted,
     }
 
 
@@ -498,14 +531,15 @@ async def stage_connector_delete(
 
     Two paths:
 
-    * **Zero rows under the caller's scope.** If rows exist for the
-      triple under *another* scope, raise
+    * **Zero rows under the caller's scope.** Delete the scope's saved
+      login type (#5016), if any. Then, if rows exist for the triple
+      under *another* scope and nothing was deleted, raise
       :class:`ConnectorNotFoundError` — the caller cannot delete rows
       their scope cannot see (the same 404 conflation every connector
       route uses; a tenant-scoped REST call must not be able to nuke
       a built-in connector, and vice versa). If no rows exist
       anywhere, this is the zero-op stub: stage the auto-shim pop, or
-      404 when no auto-shim matches either.
+      404 when no auto-shim matches and no login type was saved either.
     * **Rows present.** Count + bulk-delete the scoped descriptor and
       group rows, then re-probe the triple unscoped *inside the same
       transaction* (the session sees its own deletes): only when
@@ -526,9 +560,7 @@ async def stage_connector_delete(
     op_total, op_enabled = await _scoped_descriptor_counts(session, scope)
 
     if not groups and op_total == 0:
-        if await _rows_exist_any_scope(session, product, version, impl_id):
-            raise ConnectorNotFoundError(connector_id=connector_id, tenant_id=scope.tenant_id)
-        return _registry_only_stage(scope, connector_id)
+        return await _stage_rowless_delete(session, scope, connector_id, product, version, impl_id)
 
     if scope.product == product:
         await _refuse_if_in_use(
@@ -541,6 +573,7 @@ async def stage_connector_delete(
 
     group_keys = [group.group_key for group in groups]
     ops_deleted, groups_deleted = await _delete_scoped_rows(session, scope)
+    profile_deleted = await _delete_saved_auth_profile(session, scope)
     residual = await _rows_exist_any_scope(session, product, version, impl_id)
     shim_keys: tuple[tuple[str, str, str], ...] = ()
     if not residual:
@@ -557,7 +590,9 @@ async def stage_connector_delete(
     )
     return StagedConnectorDelete(
         result=result,
-        audit_payload=_audit_payload(scope, result, deleted_group_keys=group_keys),
+        audit_payload=_audit_payload(
+            scope, result, deleted_group_keys=group_keys, auth_profile_deleted=profile_deleted
+        ),
         shim_keys=shim_keys,
     )
 

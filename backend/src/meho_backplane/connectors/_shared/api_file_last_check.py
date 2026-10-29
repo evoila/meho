@@ -17,8 +17,10 @@ How a text is read (:func:`secret_in_text`):
    until nothing changes. The text is read three ways: with its tags, with
    the tags removed, and with a space for each tag.
 2. Search the flattened text for a secret name with a value: the name,
-   maybe a quote, then ``:``, ``=``, ``=>`` or only white space, maybe a
-   quote, then a value (a word or a number). A value that already is a
+   maybe a quote, then ``:``, ``=`` or ``=>``, maybe a quote, then a
+   value (any word or number). After a name and only white space, the
+   value counts only when it looks like a token (:func:`_is_token`), so
+   prose ("the credentials by ...") stays. A value that already is a
    placeholder (``[REDACTED:...]``) does not count. A name is secret by
    the rule the text check before uses
    (:func:`~meho_backplane.connectors._shared.api_file_values.is_secret_name_lowercased`).
@@ -139,18 +141,29 @@ _PLACEHOLDER: Final[str] = (
 )
 _PLACEHOLDER_VALUE: Final[re.Pattern[str]] = re.compile(_PLACEHOLDER)
 
-#: What makes the text after a name a value: maybe quotes, a separator
-#: (``:``, ``=``, ``=>`` or only white space), maybe quotes, then a word or
-#: a number within a short run of characters. A placeholder is no value.
+#: What makes the text after a name a value: maybe quotes, ``:``, ``=`` or
+#: ``=>``, maybe quotes, then a word or a number within a short run of
+#: characters. A placeholder is no value.
 _QUOTES: Final[str] = "[\"'`]*+"
 _VALUE_AFTER_NAME: Final[re.Pattern[str]] = re.compile(
-    _QUOTES
-    + r"(?:\s*+(?:=>|[:=])\s*+|\s++)"
-    + _QUOTES
-    + r"(?!"
-    + _PLACEHOLDER
-    + r")\S{0,63}?[A-Za-z0-9]"
+    _QUOTES + r"\s*+(?:=>|[:=])\s*+" + _QUOTES + r"(?!" + _PLACEHOLDER + r")\S{0,63}?[A-Za-z0-9]"
 )
+
+#: The text after a name and only white space: maybe quotes, then the run
+#: of characters a token can hold (base64 and its URL-safe form). Whether
+#: the run is a token is :func:`_is_token`'s call.
+_TOKEN_AFTER_SPACE: Final[re.Pattern[str]] = re.compile(
+    _QUOTES + r"\s++" + _QUOTES + r"(?P<run>[A-Za-z0-9+/=_\-]++)"
+)
+_HEX: Final[re.Pattern[str]] = re.compile(r"[0-9A-Fa-f]{16,}")
+_LETTERS_AND_DIGITS: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9]{16,}")
+_HAS_LETTER: Final[re.Pattern[str]] = re.compile(r"[A-Za-z]")
+_HAS_DIGIT: Final[re.Pattern[str]] = re.compile(r"[0-9]")
+
+#: How long a run must be to count as a token: hex or letters mixed with
+#: digits from 16 characters, any other base64 run from 20.
+_TOKEN_MIN: Final[int] = 16
+_BASE64_MIN: Final[int] = 20
 
 
 class LastCheckTooCostlyError(ValueError):
@@ -223,11 +236,31 @@ def _readings(pieces: Sequence[str], work: Work) -> set[str]:
     return readings
 
 
-def _shows_a_name_with_a_value(reading: str) -> bool:
+def _is_token(run: str) -> bool:
+    """True when *run*, a run without spaces, looks like a token, not a word.
+
+    A token is 16 or more characters of hex, or of letters mixed with
+    digits, or 20 or more characters of base64 (``A-Z a-z 0-9 + / = - _``).
+    Plain words ("by", "first", "combining") are no token.
+    """
+    if len(run) >= _BASE64_MIN or _HEX.fullmatch(run):
+        return True
     return any(
-        _is_secret_word(match.group()) and _VALUE_AFTER_NAME.match(reading, match.end())
-        for match in _NAME.finditer(reading)
+        _HAS_LETTER.search(part) and _HAS_DIGIT.search(part)
+        for part in _LETTERS_AND_DIGITS.findall(run)
     )
+
+
+def _shows_a_name_with_a_value(reading: str) -> bool:
+    for match in _NAME.finditer(reading):
+        if not _is_secret_word(match.group()):
+            continue
+        if _VALUE_AFTER_NAME.match(reading, match.end()):
+            return True
+        spaced = _TOKEN_AFTER_SPACE.match(reading, match.end())
+        if spaced is not None and _is_token(spaced.group("run")):
+            return True
+    return False
 
 
 def names_a_secret(name: str, work: Work) -> bool:

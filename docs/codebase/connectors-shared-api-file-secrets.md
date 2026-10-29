@@ -193,9 +193,7 @@ is how `{"credentials": {"default": "..."}}` got through a text scan.
        `\ud800`);
      - the parser cannot finish it within a bounded amount of work.
 
-     A secret name without `:` or `=` (`the sessionId field`) passes
-     this step. The last check then holds it back, because a word
-     follows the name.
+     A secret name without a value (`the sessionId field`) stays.
    - Any text value that holds a private key in PEM form
      (`-----BEGIN ... PRIVATE KEY-----`), under any name.
 4. Write the copy in the same format from the parsed file. JSON is
@@ -229,11 +227,16 @@ How it reads a text:
    (`%49`). Repeat until nothing changes. Read the text three ways: with
    its tags, without its tags, and with a space for each tag.
 2. **Search.** Look for a secret name with a value: the name, maybe a
-   quote, then `:`, `=`, `=>` or only white space, maybe a quote, then a
-   word or a number. A value that already is a placeholder
-   (`[REDACTED:...]`) does not count. The names are the same as for the
-   step before (`is_secret_name_lowercased`), so there is no second list.
-   A full stop after a name ends the sentence (`Set the password.`).
+   quote, then `:`, `=` or `=>`, maybe a quote, then any word or number.
+   After a name and only white space, the value counts only when it
+   looks like a token: one run of 16 or more characters without spaces
+   that is hex, or letters mixed with digits, or base64 (`A-Z a-z 0-9 +
+   / = - _`) of 20 or more characters. So `sessionId 3f9a8c71e2b44d0a9c1f`
+   is held back, and plain words ("the credentials by first combining")
+   stay. A value that already is a placeholder (`[REDACTED:...]`) does
+   not count. The names are the same as for the step before
+   (`is_secret_name_lowercased`), so there is no second list. A full stop
+   after a name ends the sentence (`Set the password.`).
 3. **Look inside.** Parse every JSON or YAML document in the flattened
    text. Check each key and each text value the same way. A secret-named
    key whose value is not a placeholder is a secret too.
@@ -294,15 +297,15 @@ it off.
   attribute values go too, also a schema `type`.
 - Inline JavaScript does not come back. JavaScript, CSS and plain text
   files are refused.
-- Free text that gives a secret name a value (`password: abc`) is
-  withheld whole.
-- The last check also holds back prose where a word follows a secret
-  name, because it cannot tell a word from a value: "the password is
-  abc", but also "Password for the administrator user." In the pinned
-  9.1 vendor files this holds back 2 descriptions of the SRM file
-  (among them the long API introduction, for "construct the credentials
-  by ..."), 1 of the vSphere Replication file (its API introduction) and
-  6 of the appliance file both reads share.
+- Free text that is not JSON, such as "the password is abc", cannot be
+  parsed; MEHO's general redaction rules check it, as before. Free text
+  that gives a secret name a value (`password: abc`) is withheld whole.
+- After a secret name and a space, the last check holds back only a
+  token-shaped value. A very long word (20 or more letters) or a path
+  such as `/appliance/settings/access/token` has the shape of base64,
+  so it is held back too. The pinned 9.1 vendor files (SRM, vSphere
+  Replication and the appliance file both share) come back with nothing
+  held back by the last check.
 - An example block comes back without its child elements (the colour
   markup) and written from the parsed copy, like a file: JSON compact,
   YAML from the safe dumper (comments gone, keys in order, flow lists as
@@ -323,8 +326,8 @@ PyYAML (`yaml`, the C loader and dumper when libyaml is present);
   document and is refused. OpenAPI files are single documents. A YAML
   example with several documents inside a page is withheld.
 - The check reads a secret by its name. Free text that holds a secret
-  without any secret name and without a form the general rules know
-  still comes back. The general rules run on it.
+  without a name and without a form the general rules know (`the
+  password is abc`) still comes back. The general rules run on it.
 - The HTML parser does not close elements the way a browser does
   (`<p>` and `<li>` are not closed by the next one). The written copy
   keeps everything in order, so this changes nesting only.

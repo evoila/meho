@@ -1466,11 +1466,6 @@ _FLATTENED_FORMS: list[object] = [
     ),
     pytest.param(
         _HTML,
-        f"<table><tr><td>password</td><td>{_SECRET}</td></tr></table>",
-        id="name-and-value-in-two-table-cells",
-    ),
-    pytest.param(
-        _HTML,
         f"<p><span>&#115;ession</span>&#73;d: {_SECRET}</p>",
         id="name-made-of-html-entities-split-by-a-tag",
     ),
@@ -1497,11 +1492,6 @@ _FLATTENED_FORMS: list[object] = [
         _JSON,
         json.dumps({"description": f"Open /ui?session%2549d={_SECRET} now."}),
         id="name-percent-encoded-twice",
-    ),
-    pytest.param(
-        _JSON,
-        json.dumps({"description": f"Run: login --password {_SECRET}"}),
-        id="name-and-value-with-white-space-only",
     ),
     pytest.param(
         _JSON,
@@ -1539,6 +1529,55 @@ def test_last_check_holds_back_a_secret_name_with_a_value_once_flattened(
     assert _SECRET not in checked.text
     assert REDACTED in checked.text
     assert SECRET_NAME_AFTER_FLATTENING in checked.withheld
+
+
+#: Made-up tokens: hex, and base64 of a made-up text.
+_HEX_TOKEN = "3f9a8c71e2b44d0a9c1f"
+_BASE64_TOKEN = "c2Vzc2lvbi1rZXktZm9yLXRlc3Rz"
+
+
+@pytest.mark.parametrize(
+    ("content_type", "document", "secret"),
+    [
+        (_JSON, json.dumps({"d": f"sessionId {_HEX_TOKEN}"}), _HEX_TOKEN),
+        (_JSON, json.dumps({"d": f"sessionId {_BASE64_TOKEN}"}), _BASE64_TOKEN),
+        (_JSON, json.dumps({"d": f"Run: login --password '{_HEX_TOKEN}'"}), _HEX_TOKEN),
+        (_JSON, json.dumps({"d": "token abc123def456ghi789"}), "abc123def456ghi789"),
+        (
+            _HTML,
+            f"<table><tr><td>sessionId</td><td>{_HEX_TOKEN}</td></tr></table>",
+            _HEX_TOKEN,
+        ),
+    ],
+    ids=["hex", "base64", "quoted-after-a-flag", "letters-and-digits", "two-table-cells"],
+)
+def test_token_after_a_secret_name_and_a_space_is_held_back(
+    monkeypatch: pytest.MonkeyPatch, content_type: str, document: str, secret: str
+) -> None:
+    assert secret in _without_the_last_check(monkeypatch, document, content_type).text
+    checked = check_api_file(document, content_type=content_type, path="/x")
+    assert secret not in checked.text
+    assert checked.withheld == (SECRET_NAME_AFTER_FLATTENING,)
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "construct the credentials by first combining the username and the password",
+        "Password for the administrator user.",
+        "The sessionId field holds the session.",
+        "Send the token abc123 in a header.",
+        "Send the token 0123456789abcde in a header.",
+        f"sessionId {REDACTED}",
+    ],
+)
+def test_word_or_placeholder_after_a_secret_name_and_a_space_comes_back(
+    description: str,
+) -> None:
+    document = json.dumps({"d": description})
+    checked = check_api_file(document, content_type=_JSON, path="/x")
+    assert json.loads(checked.text) == {"d": description}
+    assert checked.withheld == ()
 
 
 def test_last_check_holds_back_the_texts_that_hold_the_secret_whole() -> None:

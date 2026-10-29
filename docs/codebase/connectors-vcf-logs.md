@@ -500,8 +500,8 @@ External: `httpx>=0.27` (Bearer header + `AsyncClient`), `structlog`
   (prose, a shell command in a `<pre>` block) has no structure; MEHO's
   general redaction rules check it, and they replace only what they
   match. Free text that gives a secret name a value (`sessionId: ...`,
-  `password=...`) is withheld, and so is prose where a word follows a
-  secret name ("the credentials by ..."). An example block that the
+  `password=...`) is withheld, and so is a token after a secret name
+  and a space (`sessionId 3f9a8c71e2b44d0a9c1f`). An example block that the
   check cannot read whole is withheld; it comes back without its colour
   markup when it can. A licence key under a name that is not a secret name (the
   Logs licence API calls it `key`) is not replaced.

@@ -569,16 +569,54 @@ class VcfAutomationConnector(HttpConnector):
     ) -> dict[str, Any]:
         """Shared per-plane 401 retry-once dance for _request_json + _post_json.
 
+        Sends through :meth:`_send_with_retry` and parses the body. A ``204
+        No Content`` / empty-body response maps to ``{}`` via
+        :func:`~meho_backplane.connectors.adapters.http.json_payload_or_empty`
+        — contract parity with the base transport helpers (#3082).
+        """
+        resp = await self._send_with_retry(
+            target,
+            method,
+            path,
+            operator=operator,
+            params=params,
+            json=json,
+            data=data,
+            extra_headers=extra_headers,
+            timeout=timeout,
+        )
+        payload = json_payload_or_empty(resp)
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"vcf-automation {method} {path} for target {target.name!r} "
+                f"returned a non-object JSON payload of type {type(payload).__name__}"
+            )
+        return payload
+
+    async def _send_with_retry(
+        self,
+        target: VcfAutomationTargetLike,
+        method: str,
+        path: str,
+        *,
+        operator: Operator,
+        params: Mapping[str, Any] | None = None,
+        json: Mapping[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+        timeout: Any = httpx.USE_CLIENT_DEFAULT,
+    ) -> httpx.Response:
+        """Send one request with the per-plane 401 retry-once; return the response.
+
         Build headers, fire the request; on 401 invalidate the relevant
         plane's token, refresh headers, retry once. A second 401
-        surfaces as :exc:`RuntimeError`. ``extra_headers`` (header-located
+        surfaces as :exc:`RuntimeError`; any other 4xx/5xx raises
+        :exc:`httpx.HTTPStatusError`. ``extra_headers`` (header-located
         op params) merge onto the plane auth headers; ``data`` carries a
         form-encoded body. ``timeout`` overrides the pooled client's default
         per-request timeout, defaulting to :data:`httpx.USE_CLIENT_DEFAULT`
-        so reads keep the client default unchanged (#3076). A ``204 No
-        Content`` / empty-body response maps to ``{}`` via
-        :func:`~meho_backplane.connectors.adapters.http.json_payload_or_empty`
-        — contract parity with the base transport helpers (#3082).
+        so reads keep the client default unchanged (#3076). Callers that
+        need a response header (the feature-flag ``ETag``) use this directly.
         """
 
         # vhost routing is applied per-request (never baked into the pooled
@@ -620,13 +658,7 @@ class VcfAutomationConnector(HttpConnector):
                     "HTTP 401 after refresh"
                 )
         resp.raise_for_status()
-        payload = json_payload_or_empty(resp)
-        if not isinstance(payload, dict):
-            raise RuntimeError(
-                f"vcf-automation {method} {path} for target {target.name!r} "
-                f"returned a non-object JSON payload of type {type(payload).__name__}"
-            )
-        return payload
+        return resp
 
     # ------------------------------------------------------------------
     # fingerprint / probe -- unauthenticated per-plane version endpoints
@@ -1044,6 +1076,37 @@ class VcfAutomationConnector(HttpConnector):
         return await tenant_login_test(self, operator, target, params)
 
     # ------------------------------------------------------------------
+    # Feature-flag ops -- thin shims over :mod:`._feature_flags`; metadata in
+    # :mod:`.feature_flag_ops`.
+    # ------------------------------------------------------------------
+
+    async def provider_feature_flag_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.feature_flag.list`` — see :mod:`._feature_flags`."""
+        from meho_backplane.connectors.vcf_automation._feature_flags import (
+            provider_feature_flag_list,
+        )
+
+        return await provider_feature_flag_list(self, operator, target, params)
+
+    async def provider_feature_flag_set(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.feature_flag.set`` — see :mod:`._feature_flags`."""
+        from meho_backplane.connectors.vcf_automation._feature_flags import (
+            provider_feature_flag_set,
+        )
+
+        return await provider_feature_flag_set(self, operator, target, params)
+
+    # ------------------------------------------------------------------
     # Image ops -- thin shims over :mod:`._images`; metadata in :mod:`.image_ops`.
     # ------------------------------------------------------------------
 
@@ -1210,8 +1273,9 @@ class VcfAutomationConnector(HttpConnector):
         plus
         :data:`~meho_backplane.connectors.vcf_automation.provisioning_ops.VCFA_PROVISIONING_OPS`,
         :data:`~meho_backplane.connectors.vcf_automation.image_ops.VCFA_IMAGE_OPS`,
-        :data:`~meho_backplane.connectors.vcf_automation.network_ops.VCFA_NETWORK_OPS` and
-        :data:`~meho_backplane.connectors.vcf_automation.deploy_ops.VCFA_DEPLOY_OPS`,
+        :data:`~meho_backplane.connectors.vcf_automation.network_ops.VCFA_NETWORK_OPS`,
+        :data:`~meho_backplane.connectors.vcf_automation.deploy_ops.VCFA_DEPLOY_OPS` and
+        :data:`~meho_backplane.connectors.vcf_automation.feature_flag_ops.VCFA_FEATURE_FLAG_OPS`,
         resolves each op's ``handler_attr`` to the bound method, looks the
         group's curated ``when_to_use`` up in
         :data:`~meho_backplane.connectors.vcf_automation.typed_ops.VCFA_TYPED_WHEN_TO_USE_BY_GROUP`,
@@ -1226,6 +1290,9 @@ class VcfAutomationConnector(HttpConnector):
         # pipeline (ONNX runtime + model) which pure fingerprint/probe unit
         # tests should not pay. Lifespan callers have it warmed by now.
         from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
+        from meho_backplane.connectors.vcf_automation.feature_flag_ops import (
+            VCFA_FEATURE_FLAG_OPS,
+        )
         from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
         from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
         from meho_backplane.connectors.vcf_automation.provisioning_ops import (
@@ -1243,6 +1310,7 @@ class VcfAutomationConnector(HttpConnector):
             *VCFA_IMAGE_OPS,
             *VCFA_NETWORK_OPS,
             *VCFA_DEPLOY_OPS,
+            *VCFA_FEATURE_FLAG_OPS,
         )
         for op in all_ops:
             handler = getattr(cls, op.handler_attr, None)

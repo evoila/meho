@@ -220,7 +220,8 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "and regions (vcfa.provider.region.list), check that the provider login "
         "works (vcfa.provider.health), and look up rights "
         "(vcfa.provider.right.list) and roles (vcfa.provider.role.list) before "
-        "you build a role or a user. These ops use the provider login; a tenant "
+        "you build a role or a user, and see which appliance feature flags are on "
+        "(vcfa.provider.feature_flag.list). These ops use the provider login; a tenant "
         "token does not work here. All reads; nothing here changes anything."
     ),
     "vcfa-tenant-reads": (
@@ -243,9 +244,10 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "and a local user "
         "(vcfa.provider.user.create), then create that user's API token and "
         "store it in Vault (vcfa.provider.api_token.create), or revoke it "
-        "(vcfa.provider.api_token.revoke). A person must approve each call. A "
-        "create is safe to run twice: when the object exists, it answers "
-        "'unchanged'."
+        "(vcfa.provider.api_token.revoke). Turn an appliance feature flag on or "
+        "off (vcfa.provider.feature_flag.set), for example the one a VM Apps org "
+        "needs. A person must approve each call. A create is safe to run twice: "
+        "when the object exists, it answers 'unchanged'."
     ),
     "vcfa-tenant-writes": (
         "Changes on the VCF Automation tenant plane, to give a team its own "

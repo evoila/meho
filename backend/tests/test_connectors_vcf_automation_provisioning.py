@@ -58,6 +58,8 @@ from tests._vcfa_provisioning_support import (
 _ORGS = "/cloudapi/1.0.0/orgs"
 _GLOBAL_ROLES = "/cloudapi/1.0.0/globalRoles"
 _RIGHTS = "/cloudapi/1.0.0/rights"
+#: The flag a VM Apps org create reads first (#3893).
+_CLASSIC_FLAG = "/cloudapi/1.0.0/featureFlags/urn%3Avcloud%3Afeatureflag%3ACLASSIC_TENANT_CREATION"
 
 _EXPECTED_TIERS: dict[str, tuple[str, bool]] = {
     "vcfa.provider.right.list": ("safe", False),
@@ -164,6 +166,7 @@ async def test_provisioning_ops_register_as_typed_rows() -> None:
 async def test_org_create_created(vcfa: VcfAutomationConnector) -> None:
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         mount_logins(mock)
+        mock.get(_CLASSIC_FLAG).respond(200, json={"id": "x", "enabled": True})
         mock.get(_ORGS).mock(side_effect=by_filter({}))
         post = mock.post(_ORGS).respond(201, json={**ORG, "isEnabled": True})
         result = await run("vcfa.provider.org.create", {"name": "example-org"})
@@ -189,6 +192,7 @@ async def test_org_create_async_202_rereads_by_name(vcfa: VcfAutomationConnector
     lists = iter([[], [ORG]])
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         mount_logins(mock)
+        mock.get(_CLASSIC_FLAG).respond(200, json={"id": "x", "enabled": True})
         mock.get(_ORGS).mock(side_effect=lambda _r: httpx.Response(200, json=page(next(lists))))
         mock.post(_ORGS).respond(202)
         result = await run(
@@ -222,6 +226,9 @@ async def test_org_create_system_is_invalid_request(vcfa: VcfAutomationConnector
 async def test_org_create_upstream_400_is_connector_error(vcfa: VcfAutomationConnector) -> None:
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         mount_logins(mock)
+        # An appliance without the flag: the create goes ahead and the
+        # upstream answer is passed on.
+        mock.get(_CLASSIC_FLAG).respond(404, json={"message": "not found"})
         mock.get(_ORGS).mock(side_effect=by_filter({}))
         mock.post(_ORGS).respond(400, json={"message": "Classic tenant creation is disabled"})
         result = await run("vcfa.provider.org.create", {"name": "example-org"})

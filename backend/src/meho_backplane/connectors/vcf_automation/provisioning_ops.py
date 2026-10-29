@@ -428,9 +428,11 @@ _ORG_CREATE = VcfaTypedOp(
     llm_instructions=guidance(
         when_to_call="Call to create the tenant org that a VCF Automation tenant plane needs.",
         preconditions=(
-            "The name is not 'System'. A VM Apps org may need the appliance feature "
-            "flags CLASSIC_TENANT_CREATION and MIXED_TENANCY_MODE. A person must "
-            "approve the call."
+            "The name is not 'System'. A VM Apps org needs the appliance feature "
+            "flag CLASSIC_TENANT_CREATION on (check with vcfa.provider.feature_flag.list); "
+            "when it is off, the op answers 'invalid_request' and you turn it on with "
+            "vcfa.provider.feature_flag.set. Some appliances also need MIXED_TENANCY_MODE. "
+            "A person must approve the call."
         ),
         output_shape=(
             "{status: created | unchanged | invalid_request, org: {id, name, "

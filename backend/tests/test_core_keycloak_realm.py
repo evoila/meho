@@ -245,15 +245,7 @@ def test_service_clients(realm: dict[str, Any]) -> None:
 def test_admin_service_account_roles(realm: dict[str, Any]) -> None:
     (user,) = realm["users"]
     assert user["serviceAccountClientId"] == "meho-admin"
-    # The last two let the bootstrap Job set up the company login (#4592).
-    assert user["clientRoles"] == {
-        "realm-management": [
-            "manage-clients",
-            "manage-users",
-            "manage-identity-providers",
-            "manage-realm",
-        ]
-    }
+    assert user["clientRoles"] == {"realm-management": ["manage-clients", "manage-users"]}
 
 
 def test_only_known_placeholders(realm: dict[str, Any]) -> None:

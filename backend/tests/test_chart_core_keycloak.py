@@ -26,6 +26,8 @@ from typing import Any
 import pytest
 import yaml
 
+from meho_backplane.core.company_login import ROLES
+
 _CHART_DIR = Path(__file__).resolve().parents[2] / "deploy" / "charts" / "meho"
 _REALM_FILE = _CHART_DIR / "charts" / "keycloak" / "files" / "meho-realm.json"
 _TENANT = "3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c"
@@ -219,7 +221,9 @@ def test_realm_configmap_is_the_file_and_mounted_for_import() -> None:
     docs = _keycloak_docs()
     cm = docs["ConfigMap"]
     assert cm["metadata"]["name"] == "test-keycloak-realm"
-    assert json.loads(cm["data"]["meho-realm.json"]) == json.loads(_REALM_FILE.read_text())
+    # Byte for byte: with the company login off (the default), the realm
+    # is the file and nothing else.
+    assert cm["data"]["meho-realm.json"].strip() == _REALM_FILE.read_text().strip()
     pod = _pod(docs)
     (mount,) = pod["containers"][0]["volumeMounts"]
     assert mount["mountPath"] == "/opt/keycloak/data/import"
@@ -552,6 +556,19 @@ _COMPANY_ON = [
     "--set",
     "coreKeycloak.companyLogin.clientSecret.secretName=company-login",
 ]
+
+
+def test_the_job_account_gets_two_more_roles_only_with_the_company_login() -> None:
+    realm = json.loads(_REALM_FILE.read_text())
+    (account,) = realm["users"]
+    assert account["serviceAccountClientId"] == "meho-admin"
+    assert account["clientRoles"]["realm-management"] == ["manage-clients", "manage-users"]
+
+    rendered = json.loads(_keycloak_docs(*_COMPANY_ON)["ConfigMap"]["data"]["meho-realm.json"])
+
+    account["clientRoles"]["realm-management"] += list(ROLES)
+    assert rendered == realm
+    assert "${MEHO_REALM_TENANT_ID}" in json.dumps(rendered)
 
 
 def test_company_login_ca_bundle_is_mounted_as_the_truststore() -> None:

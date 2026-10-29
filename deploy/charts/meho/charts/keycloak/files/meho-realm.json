@@ -621,9 +621,7 @@
       "clientRoles": {
         "realm-management": [
           "manage-clients",
-          "manage-users",
-          "manage-identity-providers",
-          "manage-realm"
+          "manage-users"
         ]
       }
     }

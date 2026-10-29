@@ -16,7 +16,10 @@ and come back with a MEHO token from Keycloak:
 * one "Advanced Claim to Group" mapper per ``groupMap`` line (sync mode
   FORCE). Mappers this stage made carry the name prefix ``meho-group-``;
   the stage removes those that are no longer listed and never touches
-  other mappers;
+  other mappers. When a line goes away or points at another MEHO group, the
+  people the company login put into the old group leave it, because
+  Keycloak's FORCE sync fixes a membership only through a mapper that
+  still exists;
 * the company login as the default of the "Identity Provider Redirector"
   step when ``autoRedirect`` is on; that default is removed when it is off.
 
@@ -33,11 +36,12 @@ from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from meho_backplane.core.keycloak_api import REALM, Admin, RealmStageError, expect
+from meho_backplane.core.keycloak_api import REALM, Admin, RealmStageError, Reply, expect
 
 __all__ = [
     "MAPPER_PREFIX",
     "REDIRECT_CONFIG_ALIAS",
+    "ROLES",
     "SECRET_ENV",
     "CompanyLoginPlan",
     "ensure_company_login",
@@ -46,6 +50,10 @@ __all__ = [
 SECRET_ENV = "MEHO_COMPANY_LOGIN_CLIENT_SECRET"
 MAPPER_PREFIX = "meho-group-"
 REDIRECT_CONFIG_ALIAS = "meho-company-login-redirect"
+# The realm-management roles the Job's account needs on top of manage-clients
+# and manage-users. The chart gives them to meho-admin when the company login
+# is on; Keycloak applies that at the realm's first start only.
+ROLES = ("manage-identity-providers", "manage-realm")
 _GROUP_MAPPER = "oidc-advanced-group-idp-mapper"
 _REDIRECTOR = "identity-provider-redirector"
 _FIRST_LOGIN_FLOW = "first broker login"
@@ -63,6 +71,7 @@ _FROM_DISCOVERY = (
     "metadataDescriptorUrl",
 )
 _SECRET_KEY = "clientSecret"
+_PAGE = 100
 
 GroupLookup = Callable[[str], Awaitable[str | None]]
 
@@ -112,18 +121,25 @@ class _CompanyLogin:
         When the company login cannot be reached but the provider already
         exists with the same discovery address, the saved addresses stay. So
         a ``helm upgrade`` that turns ``autoRedirect`` off still works while
-        the company login is down.
+        the company login is down. "Cannot be reached" is an error reply
+        from Keycloak or no reply at all, when the request to Keycloak times
+        out while Keycloak waits for the company login.
         """
-        reply = await self.admin.call(
-            "POST",
-            f"{self.base}/identity-provider/import-config",
-            json={
-                "providerId": "oidc",
-                "alias": self.plan.alias,
-                "fromUrl": self.plan.discovery_url,
-            },
-        )
-        if reply.status == 200 and isinstance(reply.data, dict):
+        reply: Reply | None
+        try:
+            reply = await self.admin.call(
+                "POST",
+                f"{self.base}/identity-provider/import-config",
+                json={
+                    "providerId": "oidc",
+                    "alias": self.plan.alias,
+                    "fromUrl": self.plan.discovery_url,
+                },
+            )
+        except RealmStageError as exc:
+            reply = None
+            failure = str(exc)
+        if reply is not None and reply.status == 200 and isinstance(reply.data, dict):
             found = {k: str(v) for k, v in reply.data.items() if k in _FROM_DISCOVERY and v}
             if found.get("validateSignature") != "true" or not found.get("jwksUrl"):
                 raise RealmStageError(
@@ -136,7 +152,10 @@ class _CompanyLogin:
         if saved.get("metadataDescriptorUrl") == self.plan.discovery_url:
             _say(f"{self.label}: discovery document not readable, kept the saved addresses")
             return {k: saved[k] for k in _FROM_DISCOVERY if k in saved}
-        expect(reply, 200, what=f"Keycloak cannot read the discovery document of {self.label}")
+        what = f"Keycloak cannot read the discovery document of {self.label}"
+        if reply is None:
+            raise RealmStageError(f"{what}: {failure}")
+        expect(reply, 200, what=what)
         raise RealmStageError(f"the discovery document of {self.label} is not a JSON object")
 
     def _want(self, discovered: Mapping[str, str]) -> tuple[dict[str, Any], dict[str, str]]:
@@ -232,12 +251,14 @@ class _CompanyLogin:
                     "which the realm does not have"
                 )
 
-    async def ensure_mappers(self) -> None:
+    async def ensure_mappers(self, groups: GroupLookup) -> None:
         url = f"{self.idp_url}/mappers"
         listed = expect(
             await self.admin.call("GET", url), 200, what=f"cannot list the mappers of {self.label}"
         ).data
         ours = {m["name"]: m for m in listed if str(m.get("name", "")).startswith(MAPPER_PREFIX)}
+        # The MEHO groups that a removed or changed line granted until now.
+        old_groups: set[str] = set()
         for company_group, meho_group in sorted(self.plan.group_map.items()):
             want = self._mapper(company_group, meho_group)
             name = want["name"]
@@ -260,6 +281,8 @@ class _CompanyLogin:
                     what=f"cannot update mapper {name}",
                 )
                 _say(f"mapper {name}: updated")
+                if self._group_of(have) != want["config"]["group"]:
+                    old_groups.add(self._group_of(have))
         for name, stale in sorted(ours.items()):
             expect(
                 await self.admin.call("DELETE", f"{url}/{stale['id']}"),
@@ -267,6 +290,67 @@ class _CompanyLogin:
                 what=f"cannot remove mapper {name}",
             )
             _say(f"mapper {name}: removed")
+            old_groups.add(self._group_of(stale))
+        await self._leave_groups(old_groups - {""}, groups)
+
+    @staticmethod
+    def _group_of(mapper: Mapping[str, Any]) -> str:
+        return str((mapper.get("config") or {}).get("group") or "")
+
+    async def _members(self, group_id: str) -> list[dict[str, Any]]:
+        members: list[dict[str, Any]] = []
+        while True:
+            page = expect(
+                await self.admin.call(
+                    "GET",
+                    f"{self.base}/groups/{group_id}/members",
+                    params={
+                        "first": str(len(members)),
+                        "max": str(_PAGE),
+                        "briefRepresentation": "true",
+                    },
+                ),
+                200,
+                what="cannot list the members of a group",
+            ).data
+            members.extend(page)
+            if len(page) < _PAGE:
+                return members
+
+    async def _linked(self, user_id: str) -> bool:
+        links = expect(
+            await self.admin.call("GET", f"{self.base}/users/{user_id}/federated-identity"),
+            200,
+            what="cannot read the linked logins of a person",
+        ).data
+        return any(link.get("identityProvider") == self.plan.alias for link in links)
+
+    async def _leave_groups(self, paths: set[str], groups: GroupLookup) -> None:
+        """Take the company login's people out of groups no line grants any more.
+
+        Keycloak's FORCE sync fixes a membership only through a mapper that
+        still exists, so without this a person would keep the old group.
+        Only people linked to this provider leave, and only these groups;
+        local accounts and other memberships stay. A person whom another
+        line still maps to the group gets it back at the next login.
+        """
+        for path in sorted(paths):
+            group_id = await groups(path.lstrip("/"))
+            if group_id is None:
+                continue
+            left = 0
+            for member in await self._members(group_id):
+                if not await self._linked(member["id"]):
+                    continue
+                expect(
+                    await self.admin.call(
+                        "DELETE", f"{self.base}/users/{member['id']}/groups/{group_id}"
+                    ),
+                    204,
+                    what=f"cannot take a person out of group {path}",
+                )
+                left += 1
+            _say(f"group {path}: {left} company login member(s) removed")
 
     async def _redirector(self) -> dict[str, Any] | None:
         realm = expect(
@@ -355,13 +439,12 @@ async def ensure_company_login(
     try:
         await login.check_groups(groups)
         await login.ensure_provider()
-        await login.ensure_mappers()
+        await login.ensure_mappers(groups)
         await login.ensure_redirect()
     except RealmStageError as exc:
         if "HTTP 403" in str(exc):
             raise RealmStageError(
                 f"{exc}. The Job's Keycloak account needs the realm-management roles "
-                "manage-identity-providers and manage-realm; see "
-                "docs/codebase/core-bootstrap.md"
+                f"{' and '.join(ROLES)}; see docs/codebase/core-bootstrap.md"
             ) from None
         raise

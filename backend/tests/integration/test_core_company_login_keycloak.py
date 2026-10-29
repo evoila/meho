@@ -4,12 +4,13 @@
 """#4592 — the company login of the realm stage against a real Keycloak.
 
 One Keycloak runs two realms. Realm ``meho`` comes from the subchart's realm
-file, as in ``test_core_bootstrap_keycloak.py``. A second realm,
-``company``, plays the company login system: it has a confidential client
-for MEHO's Keycloak, two groups and one person. The realm stage then sets up
-the company login in realm ``meho`` from the second realm's discovery
-document, exactly as the Job does (the stage logs in as ``meho-admin``, so
-this also proves that the realm file gives that account enough rights).
+file with the two roles the chart's ConfigMap adds to ``meho-admin`` when
+the company login is on, as in ``test_core_bootstrap_keycloak.py``
+otherwise. A second realm, ``company``, plays the company login system: it
+has a confidential client for MEHO's Keycloak, two groups and one person.
+The realm stage then sets up the company login in realm ``meho`` from the
+second realm's discovery document, exactly as the Job does (the stage logs
+in as ``meho-admin``, so this also proves that the two roles are enough).
 
 The test drives a browser login with ``httpx``: realm ``meho`` sends the
 person straight to the company login (auto-redirect), the person types the
@@ -25,8 +26,12 @@ tokens carry one issuer, whichever port the browser used.
 2. After the person leaves the company group and logs in again, the fields
    are gone.
 3. A second run changes nothing, and no secret is in the output.
-4. A changed ``groupMap`` line changes its mapper; a removed line removes it.
-5. With ``autoRedirect`` off, the Keycloak login form shows again.
+4. A changed ``groupMap`` line changes its mapper and takes the person out
+   of the old group; the next login gives the new group only.
+5. A removed line removes its mapper and takes the person out of its group;
+   the next login gives no MEHO group.
+6. With ``autoRedirect`` off, the Keycloak login form shows again, also
+   when the request for the discovery document times out.
 
 Set ``MEHO_TEST_CORE_KEYCLOAK_IMAGE`` to use a mirror of the subchart's
 image. Skips when Docker is missing or the container cannot start.
@@ -55,7 +60,7 @@ import yaml
 
 from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt_for_audience
 from meho_backplane.auth.operator import TenantRole
-from meho_backplane.core.company_login import MAPPER_PREFIX, SECRET_ENV
+from meho_backplane.core.company_login import MAPPER_PREFIX, ROLES, SECRET_ENV
 from meho_backplane.core.keycloak import (
     ADMIN_SECRET_ENV,
     HttpAdmin,
@@ -184,8 +189,17 @@ def _company_realm(password: str, broker_secret: str) -> dict[str, Any]:
     }
 
 
+def _realm_file_with_the_company_login_roles(folder: Path) -> Path:
+    """The realm file as the chart's ConfigMap renders it with the login on."""
+    realm = json.loads((_SUBCHART / "files" / "meho-realm.json").read_text())
+    (account,) = realm["users"]
+    account["clientRoles"]["realm-management"] += list(ROLES)
+    (folder / "meho-realm.json").write_text(json.dumps(realm, indent=2))
+    return folder
+
+
 @pytest.fixture(scope="module")
-def keycloak() -> Iterator[_Keycloak]:
+def keycloak(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Keycloak]:
     """Keycloak with realm ``meho`` imported and realm ``company`` added."""
     if not DOCKER_AVAILABLE:
         pytest.skip(SKIP_REASON)
@@ -210,7 +224,11 @@ def keycloak() -> Iterator[_Keycloak]:
         .with_env("KC_HTTP_RELATIVE_PATH", "/auth")
         .with_env("KC_BOOTSTRAP_ADMIN_CLIENT_ID", bootstrap[0])
         .with_env("KC_BOOTSTRAP_ADMIN_CLIENT_SECRET", bootstrap[1])
-        .with_volume_mapping(str(_SUBCHART / "files"), "/opt/keycloak/data/import", "ro")
+        .with_volume_mapping(
+            str(_realm_file_with_the_company_login_roles(tmp_path_factory.mktemp("realm"))),
+            "/opt/keycloak/data/import",
+            "ro",
+        )
         .with_exposed_ports(8080)
     )
     for name in (
@@ -410,6 +428,24 @@ def _company_login(kc: _Keycloak) -> dict[str, Any]:
     return claims
 
 
+def _company_groups(kc: _Keycloak, names: list[str]) -> None:
+    """Put the person into exactly these groups of realm ``company``."""
+    headers = _master_headers(kc)
+    company = f"{kc.base_url}/admin/realms/company"
+    (person,) = httpx.get(
+        f"{company}/users", headers=headers, params={"username": _PERSON, "exact": "true"}
+    ).json()
+    for group in httpx.get(f"{company}/users/{person['id']}/groups", headers=headers).json():
+        httpx.delete(
+            f"{company}/users/{person['id']}/groups/{group['id']}", headers=headers
+        ).raise_for_status()
+    groups = {g["name"]: g["id"] for g in httpx.get(f"{company}/groups", headers=headers).json()}
+    for name in names:
+        httpx.put(
+            f"{company}/users/{person['id']}/groups/{groups[name]}", headers=headers
+        ).raise_for_status()
+
+
 def _meho_admin_headers(kc: _Keycloak) -> dict[str, str]:
     resp = httpx.post(
         f"{kc.base_url}/realms/meho/protocol/openid-connect/token",
@@ -421,6 +457,18 @@ def _meho_admin_headers(kc: _Keycloak) -> dict[str, str]:
     )
     resp.raise_for_status()
     return {"Authorization": f"Bearer {resp.json()['access_token']}"}
+
+
+def _meho_groups(kc: _Keycloak) -> list[str]:
+    """The person's groups in realm ``meho``, read with the Job's account."""
+    headers = _meho_admin_headers(kc)
+    admin = f"{kc.base_url}/admin/realms/meho"
+    (person,) = httpx.get(
+        f"{admin}/users", headers=headers, params={"username": _PERSON, "exact": "true"}
+    ).json()
+    groups = httpx.get(f"{admin}/users/{person['id']}/groups", headers=headers)
+    groups.raise_for_status()
+    return sorted(g["name"] for g in groups.json())
 
 
 def _mappers(kc: _Keycloak) -> dict[str, dict[str, Any]]:
@@ -490,15 +538,7 @@ async def test_a_person_in_a_mapped_group_gets_the_meho_group(
 
 
 def test_after_leaving_the_company_group_the_fields_are_gone(keycloak: _Keycloak) -> None:
-    headers = _master_headers(keycloak)
-    company = f"{keycloak.base_url}/admin/realms/company"
-    (person,) = httpx.get(
-        f"{company}/users", headers=headers, params={"username": _PERSON, "exact": "true"}
-    ).json()
-    (group,) = httpx.get(f"{company}/users/{person['id']}/groups", headers=headers).json()
-    httpx.delete(
-        f"{company}/users/{person['id']}/groups/{group['id']}", headers=headers
-    ).raise_for_status()
+    _company_groups(keycloak, [])
 
     claims = _company_login(keycloak)
 
@@ -538,33 +578,100 @@ async def test_second_run_changes_nothing_and_prints_no_secret(
         assert status == 200, client_id
 
 
-async def test_a_changed_line_changes_its_mapper_and_a_removed_line_removes_it(
+async def test_a_changed_line_changes_its_mapper_and_takes_the_old_group_away(
     keycloak: _Keycloak, store: _FakeStore, capfd: pytest.CaptureFixture[str]
 ) -> None:
+    _company_groups(keycloak, ["acme-ops"])
+    assert _company_login(keycloak)["groups"] == ["MEHO-Operators"]
     ops_id = _mappers(keycloak)[f"{MAPPER_PREFIX}acme-ops"]["id"]
+    capfd.readouterr()
+
+    await _run_stage(
+        keycloak, store, group_map={"acme-ops": "MEHO-Admins", "acme-readers": "MEHO-Readers"}
+    )
+
+    output = capfd.readouterr().out
+    assert f"mapper {MAPPER_PREFIX}acme-ops: updated" in output
+    assert "group /MEHO-Operators: 1 company login member(s) removed" in output
+    mappers = _mappers(keycloak)
+    assert mappers[f"{MAPPER_PREFIX}acme-ops"]["id"] == ops_id
+    assert mappers[f"{MAPPER_PREFIX}acme-ops"]["config"]["group"] == "/MEHO-Admins"
+    assert _meho_groups(keycloak) == []
+    claims = _company_login(keycloak)
+    assert claims["groups"] == ["MEHO-Admins"]
+    assert claims["tenant_role"] == "tenant_admin"
+
+
+async def test_a_removed_line_removes_its_mapper_and_takes_its_group_away(
+    keycloak: _Keycloak, store: _FakeStore, capfd: pytest.CaptureFixture[str]
+) -> None:
+    _company_groups(keycloak, ["acme-readers"])
+    assert _company_login(keycloak)["groups"] == ["MEHO-Readers"]
     capfd.readouterr()
 
     await _run_stage(keycloak, store, group_map={"acme-ops": "MEHO-Admins"})
 
     output = capfd.readouterr().out
-    assert f"mapper {MAPPER_PREFIX}acme-ops: updated" in output
     assert f"mapper {MAPPER_PREFIX}acme-readers: removed" in output
-    mappers = _mappers(keycloak)
-    assert set(mappers) == {f"{MAPPER_PREFIX}acme-ops"}
-    assert mappers[f"{MAPPER_PREFIX}acme-ops"]["id"] == ops_id
-    assert mappers[f"{MAPPER_PREFIX}acme-ops"]["config"]["group"] == "/MEHO-Admins"
+    assert "group /MEHO-Readers: 1 company login member(s) removed" in output
+    assert set(_mappers(keycloak)) == {f"{MAPPER_PREFIX}acme-ops"}
+    assert _meho_groups(keycloak) == []
+    claims = _company_login(keycloak)
+    assert "tenant_id" not in claims
+    assert "tenant_role" not in claims
+    assert not claims.get("groups")
 
 
-async def test_auto_redirect_off_shows_the_keycloak_login_form_again(
-    keycloak: _Keycloak, store: _FakeStore, capfd: pytest.CaptureFixture[str]
-) -> None:
-    await _run_stage(keycloak, store, auto_redirect=False)
-    assert "auto-redirect: removed" in capfd.readouterr().out
-
-    browser = _Browser(keycloak)
+def _login_form_shows(kc: _Keycloak) -> None:
+    browser = _Browser(kc)
     try:
         response = _start_login(browser, _pkce()[1])
     finally:
         browser.close()
     assert response.status_code == 200, response.headers.get("location")
     assert "/realms/meho/" in _form(response.text, "kc-form-login")
+
+
+async def test_auto_redirect_off_shows_the_keycloak_login_form_again(
+    keycloak: _Keycloak, store: _FakeStore, capfd: pytest.CaptureFixture[str]
+) -> None:
+    await _run_stage(keycloak, store, group_map={"acme-ops": "MEHO-Admins"}, auto_redirect=False)
+    assert "auto-redirect: removed" in capfd.readouterr().out
+    _login_form_shows(keycloak)
+
+
+class _DiscoveryTimesOut(httpx.AsyncHTTPTransport):
+    """Keycloak answers, except that the request for the discovery document
+    times out, as it does when Keycloak waits for a company login that is
+    down longer than the Job waits for Keycloak."""
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/identity-provider/import-config"):
+            raise httpx.ReadTimeout("the company login does not answer", request=request)
+        return await super().handle_async_request(request)
+
+
+async def test_auto_redirect_off_works_while_the_company_login_does_not_answer(
+    keycloak: _Keycloak, store: _FakeStore, capfd: pytest.CaptureFixture[str]
+) -> None:
+    await _run_stage(keycloak, store, group_map={"acme-ops": "MEHO-Admins"})
+    assert "auto-redirect: set to company" in capfd.readouterr().out
+    before = _snapshot(keycloak)
+
+    async with httpx.AsyncClient(
+        base_url=keycloak.base_url, timeout=30, transport=_DiscoveryTimesOut()
+    ) as http:
+        await finish_realm(
+            _plan(group_map={"acme-ops": "MEHO-Admins"}, auto_redirect=False),
+            keycloak.env,
+            HttpAdmin(http),
+            store,
+        )
+
+    output = capfd.readouterr().out
+    assert "discovery document not readable, kept the saved addresses" in output
+    assert "auto-redirect: removed" in output
+    after = _snapshot(keycloak)
+    assert after["provider"] == before["provider"]
+    assert after["redirect"] is None
+    _login_form_shows(keycloak)

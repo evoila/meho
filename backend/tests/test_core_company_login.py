@@ -4,9 +4,10 @@
 """The company login of the realm stage (#4592), against a fake Keycloak.
 
 The fake is the one of ``test_core_keycloak_stage.py`` plus the Admin REST
-calls for identity providers, their mappers and the login flow's
-"Identity Provider Redirector" step. A real Keycloak, with a second realm as
-the company login, is in ``tests/integration/test_core_company_login_keycloak.py``.
+calls for identity providers, their mappers, the login flow's
+"Identity Provider Redirector" step, group members and linked logins. A real
+Keycloak, with a second realm as the company login, is in
+``tests/integration/test_core_company_login_keycloak.py``.
 """
 
 from __future__ import annotations
@@ -66,8 +67,11 @@ class CompanyKeycloak(FakeKeycloak):
             "id": "exec-idp",
             "providerId": "identity-provider-redirector",
         }
-        self.discovery: Reply = Reply(200, dict(_FOUND))
+        # The reply to the discovery request, or the error that request raises.
+        self.discovery: Reply | RealmStageError = Reply(200, dict(_FOUND))
         self.forbidden = False
+        # Usernames of the people that came in through the company login.
+        self.linked: set[str] = set()
 
     def state(self) -> dict[str, Any]:
         return {
@@ -84,6 +88,14 @@ class CompanyKeycloak(FakeKeycloak):
 
     def _company_path(self, path: str) -> bool:
         return "/identity-provider/" in path or "/authentication/" in path or path == _BASE
+
+    def person(self, username: str, groups: list[str], *, linked: bool) -> None:
+        self.users[username] = {"id": str(uuid.uuid4()), "username": username, "groups": groups}
+        if linked:
+            self.linked.add(username)
+
+    def _user_by_id(self, user_id: str) -> dict[str, Any]:
+        return next(u for u in self.users.values() if u["id"] == user_id)
 
     async def call(self, method: str, path: str, *, json: Any = None, params: Any = None) -> Reply:
         if self.forbidden and self._company_path(path):
@@ -105,6 +117,20 @@ class CompanyKeycloak(FakeKeycloak):
         if match := re.fullmatch(rf"{_BASE}/authentication/config/([^/]+)", path):
             config = self.auth_configs.get(match.group(1))
             return Reply(200, copy.deepcopy(config)) if config else Reply(404, None)
+        if match := re.fullmatch(rf"{_BASE}/groups/([^/]+)/members", path):
+            assert params["briefRepresentation"] == "true"
+            name = next(n for n, g in self.groups.items() if g["id"] == match.group(1))
+            members = [
+                {"id": u["id"], "username": u["username"]}
+                for u in self.users.values()
+                if name in u["groups"]
+            ]
+            first, limit = int(params["first"]), int(params["max"])
+            return Reply(200, members[first : first + limit])
+        if match := re.fullmatch(rf"{_BASE}/users/([^/]+)/federated-identity", path):
+            user = self._user_by_id(match.group(1))
+            links = [{"identityProvider": "company", "userId": "x", "userName": user["username"]}]
+            return Reply(200, links if user["username"] in self.linked else [])
         if match := re.fullmatch(rf"{_IDP}/([^/]+)/mappers", path):
             alias = match.group(1)
             return Reply(
@@ -127,6 +153,8 @@ class CompanyKeycloak(FakeKeycloak):
     def _post(self, path: str, body: Any, params: dict[str, str]) -> Reply:
         if path == f"{_BASE}/identity-provider/import-config":
             assert body == {"providerId": "oidc", "alias": "company", "fromUrl": _DISCOVERY}
+            if isinstance(self.discovery, RealmStageError):
+                raise self.discovery
             return self.discovery
         if path == _IDP:
             if body["alias"] in self.providers:
@@ -172,6 +200,11 @@ class CompanyKeycloak(FakeKeycloak):
         if match := re.fullmatch(rf"{_BASE}/authentication/config/([^/]+)", path):
             del self.auth_configs[match.group(1)]
             self.redirector.pop("authenticationConfig", None)
+            return Reply(204, None)
+        if match := re.fullmatch(rf"{_BASE}/users/([^/]+)/groups/([^/]+)", path):
+            user = self._user_by_id(match.group(1))
+            name = next(n for n, g in self.groups.items() if g["id"] == match.group(2))
+            user["groups"] = [g for g in user["groups"] if g != name]
             return Reply(204, None)
         return super()._delete(path, body, params)
 
@@ -307,6 +340,49 @@ async def test_a_changed_line_changes_its_mapper_and_a_removed_line_removes_it(
     assert f"mapper {MAPPER_PREFIX}Readers: removed" in output
 
 
+async def test_people_leave_the_groups_of_a_removed_or_changed_line(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    kc = _fresh()
+    await _run(kc)
+    # Jane came in through the company login: Ops and Readers gave her two
+    # groups, and someone made her an approver by hand.
+    kc.person("jane", ["MEHO-Operators", "MEHO-Readers", "MEHO-Approvers"], linked=True)
+    kc.person("bob", ["MEHO-Readers"], linked=True)
+    # A local account is never touched.
+    kc.person("local", ["MEHO-Operators", "MEHO-Readers"], linked=False)
+    capfd.readouterr()
+
+    # Ops now gives another group; Readers is no longer mapped.
+    await _run(kc, group_map={"Ops": "MEHO-Admins"})
+
+    assert kc.users["jane"]["groups"] == ["MEHO-Approvers"]
+    assert kc.users["bob"]["groups"] == []
+    assert kc.users["local"]["groups"] == ["MEHO-Operators", "MEHO-Readers"]
+    output = capfd.readouterr().out
+    assert "group /MEHO-Operators: 1 company login member(s) removed" in output
+    assert "group /MEHO-Readers: 2 company login member(s) removed" in output
+
+
+async def test_a_line_that_keeps_its_group_takes_nobody_out() -> None:
+    kc = _fresh()
+    await _run(kc)
+    kc.person("jane", ["MEHO-Operators"], linked=True)
+    await _run(kc, groups_claim="roles")
+    assert kc.users["jane"]["groups"] == ["MEHO-Operators"]
+    assert not any(path.endswith("/members") for _, path in kc.calls)
+
+
+async def test_a_big_group_is_read_page_by_page() -> None:
+    kc = _fresh()
+    await _run(kc)
+    for n in range(250):
+        kc.person(f"p{n}", ["MEHO-Readers"], linked=True)
+    await _run(kc, group_map={"Ops": "MEHO-Operators"})
+    assert all(kc.users[f"p{n}"]["groups"] == [] for n in range(250))
+    assert sum(path.endswith("/members") for _, path in kc.calls) == 3
+
+
 async def test_a_changed_groups_claim_changes_every_mapper() -> None:
     kc = _fresh()
     await _run(kc)
@@ -383,6 +459,32 @@ async def test_unreachable_discovery_on_the_first_run_stops_the_stage() -> None:
     kc = _fresh()
     kc.discovery = Reply(500, {"error": "unknown_error"})
     with pytest.raises(RealmStageError, match="cannot read the discovery document"):
+        await _run(kc)
+    assert kc.providers == {}
+
+
+async def test_a_timed_out_discovery_keeps_the_saved_addresses(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    # Keycloak waits for the company login longer than the Job waits for
+    # Keycloak: the request raises instead of answering.
+    kc = _fresh()
+    await _run(kc)
+    kc.discovery = RealmStageError("Keycloak request failed: ReadTimeout")
+
+    await _run(kc, auto_redirect=False)
+
+    assert kc.providers["company"]["config"]["tokenUrl"] == _FOUND["tokenUrl"]
+    assert kc.default_provider() is None
+    output = capfd.readouterr().out
+    assert "discovery document not readable, kept the saved addresses" in output
+    assert "auto-redirect: removed" in output
+
+
+async def test_a_timed_out_discovery_on_the_first_run_stops_the_stage() -> None:
+    kc = _fresh()
+    kc.discovery = RealmStageError("Keycloak request failed: ReadTimeout")
+    with pytest.raises(RealmStageError, match=r"cannot read the discovery document.*ReadTimeout"):
         await _run(kc)
     assert kc.providers == {}
 

@@ -113,7 +113,9 @@ stage (`core/company_login.py`, `ensure_company_login`) does this, in order:
    Secret reaches Keycloak at the next `helm upgrade`. If the discovery
    document cannot be read but the provider exists with the same discovery
    address, the saved addresses stay, so an upgrade that turns
-   `autoRedirect` off works while the company login is down.
+   `autoRedirect` off works while the company login is down. "Cannot be
+   read" covers an error reply from Keycloak and a request to Keycloak that
+   times out while Keycloak waits for the company login.
 3. **Group rules.** One "Advanced Claim to Group" mapper
    (`oidc-advanced-group-idp-mapper`, sync mode FORCE) per `groupMap` line,
    named `meho-group-<company group>`. It puts the person into the MEHO
@@ -121,7 +123,12 @@ stage (`core/company_login.py`, `ensure_company_login`) does this, in order:
    Keycloak checks again at every company login and takes the person out of
    a group that no longer matches. A changed line updates its mapper; a
    mapper with the `meho-group-` prefix that is no longer listed is
-   removed. Other mappers stay.
+   removed. Other mappers stay. FORCE fixes a membership only through a
+   mapper that still exists, so when a line goes away or points at another
+   MEHO group, the Job takes the people who came in through the company
+   login out of the old group. Local accounts and other memberships stay. A
+   person whom another line still maps to that group gets it back at the
+   next login.
 4. **Auto-redirect.** With `autoRedirect: true`, the "Identity Provider
    Redirector" step of the realm's browser login flow gets the company
    login as its default (config alias `meho-company-login-redirect`), so
@@ -147,16 +154,19 @@ usual public CAs too. The Keycloak NetworkPolicy limits only incoming
 traffic, so Keycloak can call the company login.
 
 **Rights.** Setting up the provider needs `manage-identity-providers`; the
-redirect step needs `manage-realm`. The realm file gives both to
-`meho-admin`'s service account, because Keycloak does not let an account
-give itself a role it does not have. This also means the backplane, which
-uses `meho-admin`, can change login settings of realm `meho`; it could
-already change people and groups with `manage-users`. An install made with
-an older realm file lacks the two roles; with the company login on, its Job
-stops with a sentence that names them. Add them once to the service account
-of `meho-admin` (realm-management client roles), with a Keycloak admin
-login or a temporary one from Keycloak's `bootstrap-admin` recovery
-command, then run `helm upgrade` again.
+redirect step needs `manage-realm`. With the company login on, the realm
+ConfigMap of the Keycloak subchart adds both to `meho-admin`'s service
+account; with it off, the rendered realm is the realm file and nothing
+else. Keycloak applies the realm at the first start only, and it does not
+let an account give itself a role it does not have. So an install whose
+first start had the company login off lacks the two roles; when the company
+login is turned on later, its Job stops with a sentence that names them.
+Add them once to the service account of `meho-admin` (realm-management
+client roles), with a Keycloak admin login or a temporary one from
+Keycloak's `bootstrap-admin` recovery command, then run `helm upgrade`
+again. With the two roles, the backplane, which uses `meho-admin`, can
+also change login settings of realm `meho`; it could already change people
+and groups with `manage-users`.
 
 ## Key types and files
 
@@ -223,10 +233,11 @@ Steps of the realm stage, in order:
    account's client in realm `master`. If `meho-admin` cannot log in, the
    first-start account stays and the Job stops.
 
-Rights: `meho-admin` has `manage-clients`, `manage-users`,
-`manage-identity-providers` and `manage-realm` on realm `meho` (from the
-realm file), which covers steps 3 to 5. Only the
-first-start account can do step 6, and only it is needed there.
+Rights: `meho-admin` has `manage-clients` and `manage-users` on realm
+`meho` (from the realm file), which covers steps 3 to 5; with the company
+login on, the chart adds `manage-identity-providers` and `manage-realm`
+(see "Rights" under the company login). Only the first-start account can do
+step 6, and only it is needed there.
 
 ### Network rules
 

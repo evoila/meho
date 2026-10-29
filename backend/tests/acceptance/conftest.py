@@ -224,7 +224,7 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # ``0110``, #3753), so it must be truncated in the same statement.
     "kb_revision",
     "endpoint_descriptor",
-    # ``operation_policy_override`` (migration ``0119``, #4711) holds the
+    # ``operation_policy_override`` (migration ``0120``, #4711) holds the
     # operator's stricter risk levels; reset it with the descriptors.
     "operation_policy_override",
     # ``event_outbox.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from

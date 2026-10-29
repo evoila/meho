@@ -1100,7 +1100,7 @@ upgrade and a new ingest of the API description.
   or from the API description plus its safety floors (ingested
   operations). Typed registration at every start and every re-ingest
   write only these columns.
-* `operation_policy_override` (migration `0119`, model
+* `operation_policy_override` (migration `0120`, model
   `OperationPolicyOverride`) holds the operator's choice, one row per
   scope and operation name `(product, version, impl_id, op_id)`.
   `tenant_id` is the scope: a tenant UUID (that tenant only) or `NULL`

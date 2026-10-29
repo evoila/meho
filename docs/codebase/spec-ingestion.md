@@ -2697,7 +2697,7 @@ catalog shows a permanent `state="registered"` stub with nothing to
 dispatch. The DELETE surface removes it:
 
 * **REST** — `DELETE /api/v1/connectors/{connector_id}` → `204 No
-  Content`. `tenant_admin` role. Always scoped to the calling
+  Content` (`409 connector_in_use` while something uses it). `tenant_admin` role. Always scoped to the calling
   operator's tenant (the #1699 contract: the route exposes no
   `tenant_id` parameter).
 * **CLI** — `meho connector delete <connector_id> [--confirm] [--json]`
@@ -2738,6 +2738,58 @@ All three delegate to `ReviewService.delete_connector`
 * **404 conflation.** Unknown id, cross-tenant probe, rows visible
   only under a scope the caller did not name, and repeat deletes all
   return the same 404 the other connector routes use.
+* **A connector that is still used is not deleted (#5027).** Before
+  any row goes, the delete looks for things that still use the
+  connector. If it finds any, it deletes nothing, writes no audit row,
+  and raises `ConnectorInUseError`. The things it looks for:
+  * a **sensor** whose `connector_id` is the connector;
+  * a **runbook template**, draft or published, with a step or a verify
+    call whose `op_id` is one of the connector's operations
+    (deprecated templates do not count);
+  * a **hosted agent** whose `toolset.connectors` list names the
+    connector, and an active or paused **schedule** that starts such
+    an agent;
+  * an **approval request** that waits, or that is approved and nobody
+    has started it (`resumed_at IS NULL`). This is exactly the row that
+    `claim_resume` in `operations/approval_queue.py` could still claim
+    and run. That claim has no time limit (the approval time limit
+    expires waiting requests only), so an approved request that nobody
+    ever started blocks the delete however old it is, until someone runs
+    it;
+  * an **operation run** that is queued (`pending`) or `running`.
+
+  Which tenants count: for a tenant copy, that tenant. For the
+  built-in copy, every tenant that has no copy of its own (a tenant's
+  own rows replace the built-in ones completely, #3870). The search
+  lives in `operations/ingest/connector_users.py`.
+
+  The refusal lists each user: kind, id, name and operation. REST
+  answers `409` with the detail `connector_in_use` (`connector_id`,
+  `users[]`, `other_tenant_user_count`, `message`). MCP answers
+  `-32602` with the same detail as `data`. The CLI prints one line per
+  user. The console registry shows the list in its error panel. Users
+  in another tenant are counted in `other_tenant_user_count` but not
+  named, unless the caller is a platform admin. An old tenant copy
+  under a former product name (#4889) skips the check, because nothing
+  can call it. A zero-op stub skips it too: it has no rows to use.
+
+  The check and the delete are one step. The delete takes a PostgreSQL
+  advisory lock in exclusive mode as the first statement of its
+  transaction (`db/connector_usage_lock.py`). The writers of sensors,
+  runbook templates (create and edit), hosted agents (create and
+  update) and schedules (create) take the same lock in shared mode as
+  the first statement of their write. Shared locks do not wait for each
+  other, so these writes only wait while a delete runs. A writer that
+  was first is committed before the check, so the delete sees it and is
+  refused. A sensor create that comes second reads the operation again
+  after the lock and fails with `sensor_operation_not_found`, so no
+  sensor is saved for a deleted connector. Approval requests and
+  operation runs are made by the dispatch path, which does not take the
+  lock; one made during a delete fails when it runs, because the
+  operation is gone. On SQLite (tests) the lock does nothing.
+  `tests/test_operations_ingest_delete_in_use.py` covers each kind;
+  `tests/integration/test_connector_delete_in_use_pg.py` covers the two
+  race orders on PostgreSQL.
 * **Enabled ops warn, never block.** The delete completes; the
   advisory rides the MCP response body (`warnings[]`, the `edit_op`
   #1630 discipline), the `connector_delete_enabled_ops` log event,

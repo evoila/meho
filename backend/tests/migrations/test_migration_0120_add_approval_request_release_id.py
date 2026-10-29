@@ -8,7 +8,7 @@ the MEHO release a request was made under. Rows saved before it keep
 NULL, which counts as an older release.
 
 Every step targets this migration's own revision (``0120``) and its
-``down_revision`` (``0118``), never ``head``, so a later migration cannot
+``down_revision`` (``0119``), never ``head``, so a later migration cannot
 break these tests.
 """
 
@@ -28,7 +28,7 @@ from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
 _REVISION = "0120"
-_DOWN_REVISION = "0118"
+_DOWN_REVISION = "0119"
 _COLUMN = "release_id"
 
 

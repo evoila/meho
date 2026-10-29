@@ -190,6 +190,13 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 	if d.DecidedAt != nil {
 		fmt.Fprintf(w, "Decided at:   %s\n", *d.DecidedAt)
 	}
+	// Withdrawn by the sender (#4987): not a decision, so no reviewer.
+	if d.WithdrawnAt != nil {
+		fmt.Fprintf(w, "Withdrawn:    by the sender at %s\n", *d.WithdrawnAt)
+	}
+	if d.WithdrawReason != nil && *d.WithdrawReason != "" {
+		fmt.Fprintf(w, "Reason:       %s\n", *d.WithdrawReason)
+	}
 	// Delegated decision (#3692): the reviewer acted on another human's
 	// written instruction, read off the decision audit row.
 	if dl := d.Delegation; dl != nil {

@@ -330,7 +330,7 @@ func TestListRejectsUnknownStatus(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for --status done")
 	}
-	if !strings.Contains(stderr.String(), "pending, approved, rejected, expired, all") {
+	if !strings.Contains(stderr.String(), "pending, approved, rejected, expired, withdrawn, all") {
 		t.Errorf("error should list every accepted value; got:\n%s", stderr.String())
 	}
 }
@@ -339,7 +339,7 @@ func TestListRejectsUnknownStatus(t *testing.T) {
 // the server default is pending, and `all` is offered (#5129).
 func TestListStatusHelpNamesDefaultAndAll(t *testing.T) {
 	usage := newListCmd().Flags().Lookup("status").Usage
-	for _, want := range []string{"all", "(default: pending)"} {
+	for _, want := range []string{"withdrawn", "all", "(default: pending)"} {
 		if !strings.Contains(usage, want) {
 			t.Errorf("--status help missing %q: %q", want, usage)
 		}

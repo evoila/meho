@@ -56,7 +56,8 @@ accepted; other modes raise `NotImplementedError`.
 ## Key types
 
 - `SaltConnector` (`connector.py`) -- the connector class. Caches one
-  session per target and tenant (`target_cache_key`). `rpc(target,
+  session per credential (`credential_cache_key`: tenant, secret and
+  login host), so two targets that share one credential share one session. `rpc(target,
   operator, call, kwarg)` calls one RPC method and returns its `ret`.
 - `SaltTargetLike`, `SaltSessionLoader`, `load_session_credentials_from_vault`
   (`session.py`) -- the minimum target shape and the credential loader

@@ -114,8 +114,11 @@ out in two steps. `auth_headers` returns `Authorization: Bearer <token>`:
 3. **Stored token (fallback).** If the secret has a `token`, MEHO sends it as
    is and does not log in. This is the old way. A stored token expires, so
    it is only a fallback.
-4. **Login (the normal way).** Otherwise MEHO logs in once per target and
-   keeps the token (`_session_tokens`, keyed by `(tenant_id, target.id)`):
+4. **Login (the normal way).** Otherwise MEHO logs in once per credential
+   and keeps the token (`_session_tokens`, keyed by `credential_cache_key`:
+   tenant, secret and the resolved login address, see below). Two targets
+   with one secret and one `vcf_ops_url` share one token, one login and one
+   renewal, whatever their own hosts are (#5033):
    - `POST /suite-api/api/auth/token/acquire` with
      `{"username", "password"}` → `{"token": ...}` (a VCF Operations token).
    - `POST /suite-api/api/auth/token/exchange` with
@@ -132,6 +135,10 @@ for example `https://[fd00::10]:8443`. The login always uses its own pooled
 client (`_LoginEndpoint`). It gets the same address check (SSRF guard) and the
 same TLS rules (`verify_tls`, `tls_ca_pin`) as the target. A target's
 `tls_server_name` is used only when the login goes to the target's own host.
+The token key is built from this resolved login address. The login does not
+send the target's `fqdn`, and the key does not hold it. The connector keeps,
+per target, the key its token sits under (`_login_keys`), so the `401` path
+(`invalidate_session`) finds the token without reading the secret again.
 
 **Renewal.** When a fleet call answers `401`, the dispatcher calls
 `invalidate_session(target)` and runs the call once more. `invalidate_session`

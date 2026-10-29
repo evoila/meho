@@ -110,7 +110,7 @@ Safety rules:
   path, so no flight-recorder trace holds the token. No log line, error
   or `repr` holds the token or the password.
 - No cache and no retry in the helper. The connector keeps the token per
-  tenant and target (`target_cache_key`).
+  credential and org (`credential_cache_key`).
 
 
 ### A vROps / Fleet consumer (HTTP Basic on every request)

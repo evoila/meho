@@ -551,6 +551,11 @@ _WRITE_OPS: Final[frozenset[str]] = frozenset(
         # sessions) whose ``.logout`` suffix is not a write suffix. Its params
         # are a user id or username only, so plain ``write``.
         "keycloak.user.logout",
+        # phpIPAM address writes: ``.reserve`` / ``.release`` are not write
+        # suffixes. The params carry a subnet id, an address and a host name
+        # only, so plain ``write``.
+        "phpipam.address.reserve",
+        "phpipam.address.release",
         # MEHO's own registry writes, run through the dispatcher on synthetic
         # connectors. None of their verbs is a write suffix, so without a pin
         # they showed as ``other``. Their params carry no secret material

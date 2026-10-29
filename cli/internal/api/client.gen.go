@@ -688,6 +688,7 @@ const (
 	TargetCreateProductMssql      TargetCreateProduct = "mssql"
 	TargetCreateProductNsx        TargetCreateProduct = "nsx"
 	TargetCreateProductPfsense    TargetCreateProduct = "pfsense"
+	TargetCreateProductPhpipam    TargetCreateProduct = "phpipam"
 	TargetCreateProductPostgres   TargetCreateProduct = "postgres"
 	TargetCreateProductPrometheus TargetCreateProduct = "prometheus"
 	TargetCreateProductProxmox    TargetCreateProduct = "proxmox"

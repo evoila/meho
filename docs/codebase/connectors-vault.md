@@ -486,10 +486,13 @@ target registration) is documented in
 
   1. Check the destination before the token exists. `vault_kv`: the path
      shape and the tenant check. `k8s_secret`: the target exists in the
-     caller's tenant and resolves to the Kubernetes connector, the
-     dispatcher's `policy_gate` allows `k8s.secret.update` on it (a
-     `needs-approval` verdict counts only on this op's own approved run),
-     and the Secret exists and is not immutable (key names only).
+     caller's tenant and resolves to the Kubernetes connector, MEHO policy
+     allows `k8s.secret.update` on it (the shared second-target check,
+     `operations/secondary_target_policy.py`: the caller's `deny` refuses,
+     a `needs-approval` verdict counts only on this op's own approved
+     run, and when a reviewer runs the approved request the requester's
+     policy on that target is checked again), and the Secret exists and
+     is not immutable (key names only).
   2. Make the token under the target's Vault role
      (`vault_client_for_target`): `POST auth/token/create/<role_name>`,
      or `auth/token/create-orphan` when no role is given.
@@ -501,13 +504,18 @@ target registration) is documented in
      revokes the token at once (still inside the login) and stops; the
      error says the token role must set `orphan=true`.
   4. Write the token by calling the handlers directly: `vault_kv_patch`
-     (`vault_kv_put` when the path is new), or `k8s_secret_update` in
+     (`vault_kv_put` with `cas=0` when the path is new, so Vault creates
+     it only when it is still missing; a path another writer made in the
+     meantime is kept and the call fails), or `k8s_secret_update` in
      `patch` mode. No second operation is started, so the token is never
      in any operation's parameters or audit row.
   5. On any failure after step 2, also a cancellation, revoke the new token
      with the token itself (`auth/token/revoke-self`, in Vault's `default`
-     policy), shielded from cancellation. When that revoke also fails, the
-     error names the accessor and `vault.token.revoke_accessor`.
+     policy), shielded from cancellation. A cancellation that arrives
+     while Vault is still making the token waits for Vault's answer
+     (`_create_token`), so the token Vault may have made is revoked too.
+     When that revoke also fails, the error names the accessor and
+     `vault.token.revoke_accessor`.
   6. Return `{accessor, expire_time, ttl_seconds, policies, stored_to}`;
      `expire_time` is the creation time plus `auth.lease_duration`.
 
@@ -518,9 +526,11 @@ target registration) is documented in
   the destination. A permission preflight probes, under the target's role,
   `update` on the create path and, for a `vault_kv` store, `create` +
   `read` + `update` on `<mount>/data/<path>` (what `vault.kv.put` and
-  `vault.kv.patch` need). The token role and policy setup is in
+  `vault.kv.patch` need). For a `k8s_secret` store it also records the
+  requester's policy for `k8s.secret.update` on that target on the
+  approval card (`requester_denied`). The token role and policy setup is in
   [`docs/cross-repo/connector-vault-policy.md`](../cross-repo/connector-vault-policy.md)
-  §6.5. Coverage in `test_connectors_vault_token_store.py` and the
+  §6.7. Coverage in `test_connectors_vault_token_store.py` and the
   dev-mode lane of `tests/integration/test_connectors_vault_dev_e2e.py`.
 
   Both groups register from `ops_identity.py` / `ops_token.py` /

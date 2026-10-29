@@ -1946,6 +1946,55 @@ async def test_token_create_and_store_with_a_parent_leaves_no_token_against_dev_
     assert _live_accessors(addr) <= before
 
 
+@pytest.mark.asyncio
+async def test_token_create_and_store_keeps_a_path_made_in_the_meantime_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new path is created with ``cas=0``: a path another writer made first is kept.
+
+    The patch handler is replaced by one that reads the path as missing,
+    which is what happens when the other writer lands right after the
+    read. The put then runs with ``cas=0`` against the real Vault, which
+    refuses it; the other writer's fields stay and no new token is left.
+    """
+    from meho_backplane.connectors.vault import ops as kv_ops
+
+    target, addr = vault_e2e
+    _seed_token_store(addr)
+    monkeypatch.setattr(_auth_vault, "vault_client_for_operator", _production_like_login(addr))
+    root = _root_client(addr)
+    root.secrets.kv.v2.create_or_update_secret(
+        path="e2e-store/raced", secret={"owner": "other-writer"}, mount_point=_KV_MOUNT
+    )
+    before = _live_accessors(addr)
+
+    async def _read_as_missing(*_args: Any) -> dict[str, Any]:
+        raise hvac.exceptions.InvalidPath("no secret")
+
+    monkeypatch.setattr(kv_ops, "vault_kv_patch", _read_as_missing)
+
+    result = await dispatch(
+        operator=_make_operator(sub="op-token-store-raced"),
+        connector_id="vault-1.x",
+        op_id="vault.token.create_and_store",
+        target=target,
+        params={
+            "role_name": "e2e-store",
+            "store": {"vault_kv": {"path": "e2e-store/raced"}},
+        },
+        _approved=True,
+    )
+
+    assert result.status == "error"
+    assert "could not be written" in result.extras["remediation"]
+    stored = root.secrets.kv.v2.read_secret_version(
+        path="e2e-store/raced", mount_point=_KV_MOUNT, raise_on_deleted_version=True
+    )["data"]["data"]
+    assert stored == {"owner": "other-writer"}
+    assert _live_accessors(addr) <= before
+
+
 # ---------------------------------------------------------------------------
 # auth group — JWT/OIDC login roles and mount config
 # ---------------------------------------------------------------------------

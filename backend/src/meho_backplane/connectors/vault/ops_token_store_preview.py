@@ -15,6 +15,10 @@ the other Vault write previews.
   may make the token, and for a ``vault_kv`` store whether it may write
   the KV path. When it may not, MEHO does not ask for approval
   (``write_capability_denied``). The answer holds capability names only.
+  For a ``k8s_secret`` store it also records the requester's MEHO policy
+  for ``k8s.secret.update`` on that Kubernetes target (``requester``,
+  ``requester_denied``, ``requester_reason``, #3898), so the reviewer sees
+  a denied requester, and the reviewer's run checks the requester again.
 """
 
 from __future__ import annotations
@@ -56,6 +60,28 @@ def kv_destination(store: Mapping[str, Any]) -> tuple[str, str, str]:
     )
 
 
+async def _k8s_requester_preflight(operator: Operator, store: Mapping[str, Any]) -> dict[str, Any]:
+    """The requester's MEHO policy for ``k8s.secret.update`` on the named target.
+
+    Runs as the requester (the park runs on the requester's call). Returns
+    the ``requester`` / ``requester_denied`` / ``requester_reason`` keys of
+    the approval card (#3898). Empty when the target cannot be resolved:
+    the handler then refuses the run itself, before any token exists.
+    """
+    from meho_backplane.connectors.vault.ops_token_store import (
+        K8S_SECRET_WRITE,
+        TokenStoreError,
+        resolve_k8s_target,
+    )
+    from meho_backplane.operations.secondary_target_policy import requester_policy_preflight
+
+    try:
+        k8s_target, _connector = await resolve_k8s_target(operator, str(store.get("target")))
+    except TokenStoreError:
+        return {}
+    return await requester_policy_preflight(operator, K8S_SECRET_WRITE, k8s_target)
+
+
 async def vault_token_create_and_store_preflight(
     operator: Operator, params: dict[str, Any], target: Any = None
 ) -> dict[str, Any] | None:
@@ -65,7 +91,9 @@ async def vault_token_create_and_store_preflight(
     on :func:`token_create_auth_path`. For a ``vault_kv`` store it must also
     grant what ``vault.kv.put`` and ``vault.kv.patch`` need on
     ``<mount>/data/<path>``. Returns the first check that says the call will
-    be denied, else the token check; ``None`` when no probe answered.
+    be denied, else the token check; ``None`` when no probe answered. For a
+    ``k8s_secret`` store the requester's policy record
+    (:func:`_k8s_requester_preflight`) is merged into the answer.
     """
     role_name = params.get("role_name")
     create_check = await _kv_ops.vault_capability_preflight(
@@ -76,7 +104,10 @@ async def vault_token_create_and_store_preflight(
         target,
     )
     checks = [create_check]
+    requester: dict[str, Any] = {}
     store = params.get("store")
+    if isinstance(store, Mapping) and isinstance(store.get("k8s_secret"), Mapping):
+        requester = await _k8s_requester_preflight(operator, store["k8s_secret"])
     if isinstance(store, Mapping) and isinstance(store.get("vault_kv"), Mapping):
         mount, path, _field = kv_destination(store["vault_kv"])
         required = (
@@ -94,9 +125,10 @@ async def vault_token_create_and_store_preflight(
         )
     answered = [check for check in checks if check is not None]
     denied = [check for check in answered if check.get("will_be_denied") is True]
-    if denied:
-        return denied[0]
-    return answered[0] if answered else None
+    chosen = denied[0] if denied else (answered[0] if answered else None)
+    if not requester:
+        return chosen
+    return {**(chosen or {}), **requester}
 
 
 async def _preflight(ctx: PreviewContext) -> dict[str, Any] | None:

@@ -10,21 +10,26 @@ What these tests prove:
   builder and a permission preflight; the flight recorder keeps no bodies.
 * **Vault KV store.** The token is made from the role under the target's
   Vault role, checked to be an orphan, and written with the ``vault.kv.patch``
-  handler (``vault.kv.put`` for a new path). The result has the accessor,
+  handler (``vault.kv.put`` with ``cas=0`` for a new path, so a path another
+  writer made in the meantime is kept). The result has the accessor,
   expiry, policies and destination only.
 * **Kubernetes store.** The token is written to one key of an existing
   Secret through the ``k8s.secret.update`` handler in ``patch`` mode.
 * **Checks before the token exists.** A refused tenant check, a missing
   target, a refused MEHO policy and a missing Secret all stop the call
   before Vault is asked for a token.
-* **Clean up.** A failed write, a cancellation (also while MEHO's own
-  Vault login ends) and ``orphan: false`` revoke
-  the new token with the token itself; when that revoke fails the error
-  names the accessor and ``vault.token.revoke_accessor``.
+* **Clean up.** A failed write, a cancellation (also while Vault is still
+  making the token, and also while MEHO's own Vault login ends) and
+  ``orphan: false`` revoke the new token with the token itself; when that
+  revoke fails the error names the accessor and ``vault.token.revoke_accessor``.
 * **No token anywhere.** The token is in no result, audit row (``payload``
   and ``raw_payload``), approval preview or log line.
 * **Before approval.** Without ``update`` on ``auth/token/create/<role>`` (or
   without the KV write rights) MEHO does not ask for approval.
+* **Request and approve.** For a Kubernetes store, the approval card shows
+  whether the requester may run ``k8s.secret.update`` on that target. When
+  a second person approves a denied requester's request, the run is refused
+  before any token exists; an allowed requester's request completes.
 
 Vault is faked in-process (``tests/_vault_fakes.py``); the Kubernetes API is
 a fake ``CoreV1Api``. All names and values are obvious fakes.
@@ -46,7 +51,7 @@ from kubernetes_asyncio import client as k8s
 from kubernetes_asyncio.client.exceptions import ApiException
 from sqlalchemy import select
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast.events import _CREDENTIAL_MINT_OPS, classify_op
 from meho_backplane.connectors.kubernetes import KubernetesConnector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -63,6 +68,7 @@ from meho_backplane.connectors.vault.ops_token_store import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
+    AgentPermission,
     ApprovalRequest,
     AuditLog,
     EndpointDescriptor,
@@ -268,9 +274,54 @@ async def test_kv_store_uses_put_when_the_path_is_new(fake: _FakeClient, _regist
 
     assert result.status == "ok", result.error
     assert fake.secrets.kv.v2.put_calls == [
-        {"path": _KV_PATH, "secret": {"t": _token(fake)}, "cas": None, "mount_point": "secret"}
+        {"path": _KV_PATH, "secret": {"t": _token(fake)}, "cas": 0, "mount_point": "secret"}
     ]
     assert result.result["stored_to"]["field"] == "t"
+
+
+async def test_a_path_another_writer_made_in_the_meantime_is_kept(
+    fake: _FakeClient, _registered: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """patch reads the path as missing; another writer creates it before put runs.
+
+    put carries ``cas=0``, so Vault refuses the create; the other writer's
+    fields stay, the call fails and the new token is revoked.
+    """
+    stored: dict[str, Any] = {}
+    other_writer = {"owner": "someone-else", "db_password": "not-ours"}
+
+    def _patch(path: str, secret: dict[str, Any], mount_point: str = "secret") -> dict[str, Any]:
+        assert not stored
+        stored.update(other_writer)  # the other writer lands right after the read
+        raise hvac.exceptions.InvalidPath(f"no secret at {mount_point}/{path}")
+
+    def _put(
+        path: str, secret: dict[str, Any], cas: int | None = None, mount_point: str = "secret"
+    ) -> dict[str, Any]:
+        fake.secrets.kv.v2.put_calls.append(
+            {"path": path, "secret": secret, "cas": cas, "mount_point": mount_point}
+        )
+        if cas == 0 and stored:
+            raise hvac.exceptions.InvalidRequest(
+                "check-and-set parameter did not match the current version"
+            )
+        stored.clear()
+        stored.update(secret)
+        return {"data": {"version": 1}}
+
+    monkeypatch.setattr(fake.secrets.kv.v2, "patch", _patch)
+    monkeypatch.setattr(fake.secrets.kv.v2, "create_or_update_secret", _put)
+
+    result = await _run(_KV_PARAMS)
+
+    assert result.status == "error"
+    assert stored == other_writer
+    assert fake.secrets.kv.v2.put_calls[0]["cas"] == 0
+    assert _token(fake) in fake.auth.token.revoked_tokens
+    remediation = result.extras["remediation"]
+    assert "could not be written" in remediation
+    assert "MEHO revoked the new token" in remediation
+    assert _token(fake) not in json.dumps(result.model_dump(mode="json"))
 
 
 async def test_without_a_role_the_token_comes_from_create_orphan(
@@ -399,6 +450,72 @@ async def test_a_cancellation_during_the_write_still_revokes(
         await vault_token_create_and_store(_operator(), None, dict(_KV_PARAMS))
 
     assert _token(fake) in fake.auth.token.revoked_tokens
+
+
+async def test_a_cancellation_while_vault_makes_the_token_still_revokes(
+    fake: _FakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancellation while the create call runs in its thread waits for Vault's answer.
+
+    The thread goes on and Vault makes the token. The op must not lose it:
+    it waits for the answer, revokes the token, and then raises the
+    cancellation.
+    """
+    import threading
+
+    vault_asked = threading.Event()
+    vault_answers = threading.Event()
+    original_create = fake.auth.token.create
+
+    def _slow_create(**kwargs: Any) -> dict[str, Any]:
+        vault_asked.set()
+        assert vault_answers.wait(timeout=10)
+        return original_create(**kwargs)
+
+    monkeypatch.setattr(fake.auth.token, "create", _slow_create)
+
+    task = asyncio.create_task(vault_token_create_and_store(_operator(), None, dict(_KV_PARAMS)))
+    while not vault_asked.is_set():
+        await asyncio.sleep(0.01)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    assert not task.done()  # still waiting for Vault's answer
+    assert _token(fake) not in fake.auth.token.revoked_tokens
+    vault_answers.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert fake.auth.token.create_calls == [{"role_name": _ROLE, "ttl": "24h"}]
+    assert _token(fake) in fake.auth.token.revoked_tokens
+    assert fake.secrets.kv.v2.patch_calls == []
+
+
+async def test_a_cancellation_while_vault_fails_to_make_the_token_raises_the_cancellation(
+    fake: _FakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    vault_asked = threading.Event()
+    vault_answers = threading.Event()
+
+    def _slow_failing_create(**_kwargs: Any) -> dict[str, Any]:
+        vault_asked.set()
+        assert vault_answers.wait(timeout=10)
+        raise hvac.exceptions.Forbidden("permission denied")
+
+    monkeypatch.setattr(fake.auth.token, "create", _slow_failing_create)
+
+    task = asyncio.create_task(vault_token_create_and_store(_operator(), None, dict(_KV_PARAMS)))
+    while not vault_asked.is_set():
+        await asyncio.sleep(0.01)
+    task.cancel()
+    vault_answers.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert _token(fake) not in fake.auth.token.revoked_tokens  # no token was made
 
 
 async def test_a_cancellation_while_the_vault_login_ends_still_revokes(
@@ -621,6 +738,179 @@ async def test_k8s_failed_write_revokes_the_new_token(
     assert _token(fake) in fake.auth.token.revoked_tokens
     assert "MEHO revoked the new token" in result.extras["remediation"]
     assert _token(fake) not in json.dumps(result.model_dump(mode="json"))
+
+
+# ---------------------------------------------------------------------------
+# Request and approve: the requester's policy on the Kubernetes target
+# ---------------------------------------------------------------------------
+
+_REQUESTER = "agent:ci-bot"
+_APPROVER = "op-approver"
+
+
+def _agent() -> Operator:
+    return Operator(
+        sub=_REQUESTER,
+        name=None,
+        email=None,
+        raw_jwt="fake.jwt.value",
+        tenant_id=_TENANT_ID,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.AGENT,
+        client_id=_REQUESTER,
+    )
+
+
+def _approver() -> Operator:
+    return Operator(
+        sub=_APPROVER,
+        name=None,
+        email=None,
+        raw_jwt="fake.jwt.value",
+        tenant_id=_TENANT_ID,
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+
+async def _agent_permission(op_pattern: str, verdict: str, target_scope: str) -> None:
+    async with get_sessionmaker()() as session:
+        session.add(
+            AgentPermission(
+                tenant_id=_TENANT_ID,
+                principal_sub=_REQUESTER,
+                op_pattern=op_pattern,
+                target_scope=target_scope,
+                verdict=verdict,
+                created_by_sub="op-admin",
+            )
+        )
+        await session.commit()
+
+
+async def _change_agent_permission(op_pattern: str, verdict: str) -> None:
+    async with get_sessionmaker()() as session:
+        row = (
+            await session.execute(
+                select(AgentPermission).where(
+                    AgentPermission.principal_sub == _REQUESTER,
+                    AgentPermission.op_pattern == op_pattern,
+                )
+            )
+        ).scalar_one()
+        row.verdict = verdict
+        await session.commit()
+
+
+async def _k8s_target_id() -> str:
+    async with get_sessionmaker()() as session:
+        row = (await session.execute(select(Target).where(Target.name == _K8S_TARGET))).scalar_one()
+    return str(row.id)
+
+
+async def _park_k8s_store(fake: _FakeClient, requester: Operator) -> ApprovalRequest:
+    fake.sys.capabilities_by_path = {_CREATE_PATH: ["update"]}
+    parked = await dispatch(
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id=TOKEN_STORE_OP,
+        target=None,
+        params=_K8S_PARAMS,
+    )
+    assert parked.status == "awaiting_approval", parked
+    rows = await _approval_rows()
+    assert len(rows) == 1
+    return rows[0]
+
+
+async def _approve_and_run(request_id: uuid.UUID) -> OperationResult:
+    """Approve as a second person and run the request, as the REST approve routes do."""
+    from meho_backplane.operations.approval_queue import (
+        approve_request,
+        resume_dispatch_after_approval,
+    )
+
+    async with get_sessionmaker()() as session:
+        request = await approve_request(session, request_id, operator=_approver())
+        await session.commit()
+    result: OperationResult = await resume_dispatch_after_approval(
+        operator=_approver(), request=request, params=None
+    )
+    return result
+
+
+async def test_a_denied_requester_is_shown_on_the_card_and_the_approval_fails_closed(
+    fake: _FakeClient, core_v1: MagicMock, _registered: None
+) -> None:
+    """The agent may not run ``k8s.secret.update`` on the target; the approver may."""
+    await _seed_target(_K8S_TARGET, "k8s")
+    await _agent_permission(TOKEN_STORE_OP, "needs-approval", "*")
+    await _agent_permission("k8s.secret.update", "deny", await _k8s_target_id())
+
+    request = await _park_k8s_store(fake, _agent())
+
+    preflight = dict(request.proposed_effect)["permission_preflight"]
+    assert preflight["will_be_denied"] is False
+    assert preflight["requester_denied"] is True
+    assert preflight["requester_reason"].startswith(
+        f"policy_denied: k8s.secret.update on Kubernetes target {_K8S_TARGET!r}"
+    )
+    assert preflight["requester"]["sub"] == _REQUESTER
+    assert preflight["requester"]["principal_kind"] == "agent"
+    assert _made_no_token(fake)
+
+    result = await _approve_and_run(request.id)
+
+    assert result.status == "error", result
+    remediation = result.extras["remediation"]
+    assert remediation.startswith(f"policy_denied: requester {_REQUESTER!r}: k8s.secret.update")
+    assert "No token was made" in remediation
+    assert _made_no_token(fake)
+    core_v1.read_namespaced_secret.assert_not_awaited()
+    core_v1.patch_namespaced_secret.assert_not_awaited()
+
+
+async def test_a_deny_added_while_the_request_waits_still_stops_it(
+    fake: _FakeClient, core_v1: MagicMock, _registered: None
+) -> None:
+    """The requester's policy is checked again at run time, not only on the card."""
+    await _seed_target(_K8S_TARGET, "k8s")
+    await _agent_permission(TOKEN_STORE_OP, "needs-approval", "*")
+    await _agent_permission("k8s.secret.update", "needs-approval", await _k8s_target_id())
+
+    request = await _park_k8s_store(fake, _agent())
+    assert dict(request.proposed_effect)["permission_preflight"]["requester_denied"] is False
+    await _change_agent_permission("k8s.secret.update", "deny")
+
+    result = await _approve_and_run(request.id)
+
+    assert result.status == "error", result
+    assert result.extras["remediation"].startswith(f"policy_denied: requester {_REQUESTER!r}")
+    assert _made_no_token(fake)
+    core_v1.patch_namespaced_secret.assert_not_awaited()
+
+
+async def test_an_allowed_requesters_request_completes_after_approval(
+    fake: _FakeClient, core_v1: MagicMock, _registered: None
+) -> None:
+    """A person asks, a second person approves: the token is made and stored."""
+    await _seed_target(_K8S_TARGET, "k8s")
+
+    request = await _park_k8s_store(fake, _operator())
+    preflight = dict(request.proposed_effect)["permission_preflight"]
+    assert preflight["requester_denied"] is False
+    assert preflight["requester_reason"] is None
+    assert preflight["requester"]["sub"] == _operator().sub
+
+    result = await _approve_and_run(request.id)
+
+    assert result.status == "ok", result
+    assert result.result["stored_to"]["kind"] == "k8s_secret"
+    core_v1.patch_namespaced_secret.assert_awaited_once_with(
+        name="vault-token", namespace="ci", body={"stringData": {"token": _token(fake)}}
+    )
+    assert _token(fake) not in fake.auth.token.revoked_tokens
+    assert _token(fake) not in json.dumps(result.model_dump(mode="json"))
+    assert _token(fake) not in json.dumps(dict(request.proposed_effect), default=str)
 
 
 # ---------------------------------------------------------------------------

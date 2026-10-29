@@ -2504,6 +2504,9 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      `meho_tenant` (`extraTenantGroups` in `tenants.go`). The tenant's
      UUID comes from `--add-tenant-id`, else from the `meho_tenant` value
      its groups already carry, else a new one that the summary prints.
+     The UUID is stored in its standard form (lowercase, with dashes)
+     whatever form the flag used, so the `meho_tenant` value keeps its
+     three colon-separated parts.
      Names are checked before any Keycloak call: lowercase letters,
      digits and dashes, not `sa` / `platform` / `ci`, and not the first
      tenant's name or id. Each group spec names the keys the command owns

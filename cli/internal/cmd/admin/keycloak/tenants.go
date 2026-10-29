@@ -83,15 +83,29 @@ func (o BootstrapOptions) validateTenants() error {
 			"(--tenant-name); pick another name", o.AddTenantName)
 	}
 	if o.AddTenantID != "" {
-		if _, err := uuid.Parse(o.AddTenantID); err != nil {
+		id, err := uuid.Parse(o.AddTenantID)
+		if err != nil {
 			return fmt.Errorf("--add-tenant-id %q is not a UUID", o.AddTenantID)
 		}
-		if strings.EqualFold(o.AddTenantID, o.TenantID) {
+		if id.String() == standardUUID(o.TenantID) {
 			return errors.New("--add-tenant-id is the first tenant's id " +
 				"(--tenant-id); pick another UUID")
 		}
 	}
 	return nil
+}
+
+// standardUUID returns s in the standard UUID form (lowercase, with
+// dashes) when s is a UUID in any form uuid.Parse accepts, such as
+// `urn:uuid:<uuid>` or `{<uuid>}`. Only that form goes into
+// `meho_tenant`, whose parts a colon separates. A string that is not a
+// UUID comes back unchanged.
+func standardUUID(s string) string {
+	id, err := uuid.Parse(s)
+	if err != nil {
+		return s
+	}
+	return id.String()
 }
 
 // firstTenantGroups are the five role groups of the first tenant. They
@@ -167,7 +181,7 @@ func resolveAddTenantID(
 	ctx context.Context, c *adminClient, opts BootstrapOptions,
 ) (id string, created bool, err error) {
 	if opts.AddTenantID != "" {
-		return strings.ToLower(opts.AddTenantID), false, nil
+		return standardUUID(opts.AddTenantID), false, nil
 	}
 	for _, spec := range extraTenantGroups("", opts.AddTenantName) {
 		found, ferr := c.findGroup(ctx, spec.Name)
@@ -183,8 +197,8 @@ func resolveAddTenantID(
 		}
 		for _, v := range existing.Attributes["meho_tenant"] {
 			head, _, _ := strings.Cut(v, ":")
-			if _, perr := uuid.Parse(head); perr == nil {
-				return strings.ToLower(head), false, nil
+			if id, perr := uuid.Parse(head); perr == nil {
+				return id.String(), false, nil
 			}
 		}
 	}

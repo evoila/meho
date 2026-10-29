@@ -102,6 +102,42 @@ func TestBootstrap_AddTenantWithoutIDMakesOneAndReusesIt(t *testing.T) {
 	}
 }
 
+// --add-tenant-id in the urn:uuid form (or in upper case) is stored in
+// the standard form, so the meho_tenant value keeps its three parts and
+// a later run without --add-tenant-id reads the same id back.
+func TestBootstrap_AddTenantIDInUrnFormIsStoredInStandardForm(t *testing.T) {
+	fake := newFakeKeycloak()
+	opts := fullOpts()
+	opts.AddTenantName = "lab-b"
+	opts.AddTenantID = "urn:uuid:" + strings.ToUpper(labBID)
+	res, _, err := runBootstrapOnce(t, fake, opts)
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if res.AddedTenantID != labBID || res.AddedTenantIDNew {
+		t.Errorf("AddedTenantID = %q new=%v, want %q new=false",
+			res.AddedTenantID, res.AddedTenantIDNew, labBID)
+	}
+	got := fake.groupByName("MEHO-lab-b-Admins").Attributes["meho_tenant"]
+	if !slices.Equal(got, []string{labBID + ":lab-b:Admins"}) {
+		t.Errorf("MEHO-lab-b-Admins meho_tenant = %v", got)
+	}
+
+	before := groupWrites(fake)
+	opts.AddTenantID = ""
+	res, _, err = runBootstrapOnce(t, fake, opts)
+	if err != nil {
+		t.Fatalf("second Bootstrap: %v", err)
+	}
+	if res.AddedTenantID != labBID || res.AddedTenantIDNew {
+		t.Errorf("second run id = %q new=%v, want %q new=false",
+			res.AddedTenantID, res.AddedTenantIDNew, labBID)
+	}
+	if after := groupWrites(fake); after != before {
+		t.Errorf("second run wrote groups: %d -> %d", before, after)
+	}
+}
+
 // A realm made by the older command (groups with tenant_id and
 // tenant_role only, no platform group) gets meho_tenant on the five
 // groups and the platform group. The values it had stay; other
@@ -195,6 +231,10 @@ func TestBootstrap_TenantFlagsAreChecked(t *testing.T) {
 		{"id of the first tenant", func(o *BootstrapOptions) {
 			o.AddTenantName = "lab-b"
 			o.AddTenantID = strings.ToUpper(o.TenantID)
+		}, "first tenant's id"},
+		{"id of the first tenant as a urn", func(o *BootstrapOptions) {
+			o.AddTenantName = "lab-b"
+			o.AddTenantID = "urn:uuid:" + o.TenantID
 		}, "first tenant's id"},
 		{"id without a name", func(o *BootstrapOptions) { o.AddTenantID = labBID }, "needs --add-tenant"},
 	}

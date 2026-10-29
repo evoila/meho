@@ -744,7 +744,7 @@ func dryRunSummary(
 	fmt.Fprintln(out, "==> groups (top-level, with attributes):")
 	specs := append(opts.firstTenantGroups(), platformAdminGroup())
 	if opts.AddTenantName != "" {
-		id := opts.AddTenantID
+		id := standardUUID(opts.AddTenantID)
 		if id == "" {
 			id = "<id>"
 			fmt.Fprintf(out, "==> tenant %s: <id> is the id its groups "+

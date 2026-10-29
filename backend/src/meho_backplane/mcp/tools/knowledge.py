@@ -74,7 +74,12 @@ from typing import Any, Final
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.kb.schemas import InvalidKbSlugError, KbEntrySearchHit
 from meho_backplane.kb.service import KbService
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.resources.kb import read_kb_entry
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
@@ -278,6 +283,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="memory_knowledge",
         name="search_knowledge",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Search the tenant's knowledge base for distilled operator "
@@ -403,7 +409,7 @@ register_mcp_tool(
             "body — the same-slug re-add updates in place via the "
             "body-hash short-circuit). "
             "Do NOT use this for ephemeral session notes — those belong "
-            "in `add_to_memory` (G5). The kb is durable team knowledge. "
+            "in `add_to_memory`. The kb is durable team knowledge. "
             "Surface-name note: every non-MCP MEHO surface calls this "
             "substrate `kb`, not `knowledge` — REST is `/api/v1/kb` "
             "(`GET`/`POST /api/v1/kb`, `GET`/`DELETE /api/v1/kb/{slug}`), "

@@ -24,6 +24,10 @@ Route inventory
   request; the original dispatch is not executed. Body:
   :class:`RejectRequestBody` (optional ``reason`` string). Access:
   approvals-plane.
+* ``POST /api/v1/approvals/{request_id}/withdraw`` — the sender takes
+  back its own pending request (#4987). Not a decision. Body:
+  :class:`WithdrawRequestBody` (optional ``reason``). Access: any
+  authenticated principal, but only the sender of the request.
 
 Access model — approve-only, decoupled from dispatch (#3243)
 ------------------------------------------------------------
@@ -105,6 +109,7 @@ from meho_backplane.operations.approval_queue import (
     ResultAccessForbiddenError,
     SelfApprovalForbiddenError,
     UnauthorizedApprovalError,
+    WithdrawForbiddenError,
     approval_result_state,
     approve_request,
     get_decision_delegation,
@@ -113,6 +118,7 @@ from meho_backplane.operations.approval_queue import (
     record_approval_step_event,
     reject_request,
     resume_dispatch_after_approval,
+    withdraw_request,
 )
 from meho_backplane.operations.operation_run_service import get_operation_run_service
 
@@ -259,6 +265,12 @@ class ApprovalRequestView(BaseModel):
     #: ``name`` claim (fail-open to the ``reviewed_by`` GUID). Additive.
     reviewed_by_name: str | None = None
     decided_at: str | None
+    #: When the sender withdrew the request (#4987). ``None`` unless
+    #: ``status`` is ``withdrawn``. A withdrawal is not a decision, so
+    #: ``reviewed_by`` and ``decided_at`` stay ``None``. Additive.
+    withdrawn_at: str | None = None
+    #: The sender's reason for the withdrawal, or ``None``. Additive.
+    withdraw_reason: str | None = None
     created_at: str
     expires_at: str | None
     work_ref: str | None
@@ -349,6 +361,18 @@ class RejectRequestBody(BaseModel):
             "End it with Instructed-by: / Instruction: / Refs: lines when "
             "another human instructed this decision."
         ),
+    )
+
+
+class WithdrawRequestBody(BaseModel):
+    """POST body for ``…/withdraw`` (#4987)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(
+        default="",
+        max_length=_MAX_REASON_LENGTH,
+        description="Optional reason why the sender takes the request back.",
     )
 
 
@@ -445,6 +469,8 @@ def _view(
         reviewed_by=row.reviewed_by,
         reviewed_by_name=row.reviewed_by_name,
         decided_at=row.decided_at.isoformat() if row.decided_at else None,
+        withdrawn_at=row.withdrawn_at.isoformat() if row.withdrawn_at else None,
+        withdraw_reason=row.withdraw_reason,
         created_at=row.created_at.isoformat(),
         expires_at=row.expires_at.isoformat() if row.expires_at else None,
         work_ref=row.work_ref,
@@ -588,8 +614,9 @@ async def list_approvals(
     status: str = Query(
         default="pending",
         description=(
-            "Filter by status. One of: pending, approved, rejected, expired, all. "
-            "'all' returns requests in every state. Defaults to 'pending'."
+            "Filter by status. One of: pending, approved, rejected, expired, "
+            "withdrawn, all. 'all' returns requests in every state. "
+            "Defaults to 'pending'."
         ),
     ),
     work_ref: str | None = Query(
@@ -617,8 +644,9 @@ async def list_approvals(
 
     Defaults to listing only ``pending`` requests. Supports filtering
     by status via ``?status=approved`` / ``?status=rejected`` /
-    ``?status=expired``, ``?status=all`` for every state (the same
-    sentinel ``meho_approvals_list`` accepts), and by change ticket via
+    ``?status=expired`` / ``?status=withdrawn``, ``?status=all`` for every
+    state (the same sentinel ``meho_approvals_list`` accepts), and by
+    change ticket via
     ``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first
     (``created_at DESC``). ``limit`` / ``offset`` page through the
     result; no ``limit`` returns every match.
@@ -637,7 +665,7 @@ async def list_approvals(
                 status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=(
                     f"unknown status {status!r}; "
-                    "choose from: pending, approved, rejected, expired, all"
+                    "choose from: pending, approved, rejected, expired, withdrawn, all"
                 ),
             ) from exc
 
@@ -993,6 +1021,66 @@ async def reject_approval_request(
         decision="rejected",
         reason=body.reason,
     )
+
+
+@router.post("/{request_id}/withdraw", response_model=ApprovalRequestView)
+async def withdraw_approval_request(
+    request_id: Annotated[uuid.UUID, Path()],
+    body: WithdrawRequestBody,
+    operator: Operator = Depends(verify_jwt_and_bind),
+) -> ApprovalRequestView:
+    """The sender takes back its own pending request (#4987).
+
+    Not a decision, so this route is not on the approvals-plane gate and
+    not human-only: a person, an agent or a service principal may withdraw
+    a request **it sent** (``operator.sub == principal_sub``). The request
+    moves to ``withdrawn`` and the operation never runs. One
+    ``approval.withdraw`` audit row records it. The response is the updated
+    request, so a sender without approvals-plane access still sees the
+    result.
+
+    HTTP status codes:
+
+    * 200 — withdrawn.
+    * 403 — the caller did not send the request (an approver included).
+    * 404 — request not found (or belongs to another tenant).
+    * 409 — the request is already closed (decided, expired or withdrawn).
+    * 422 — a reason over 2000 characters.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="approval.withdraw",
+        audit_op_class="write",
+        audit_approval_request_id=str(request_id),
+    )
+    sessionmaker = get_sessionmaker()
+    try:
+        async with sessionmaker() as session:
+            request = await withdraw_request(
+                session, request_id, operator=operator, reason=body.reason
+            )
+            await session.commit()
+    except ApprovalNotFoundError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="approval_request_not_found",
+        ) from exc
+    except WithdrawForbiddenError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="not_request_sender",
+        ) from exc
+    except ApprovalRequestAlreadyDecidedError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=f"approval_request_already_{exc.status}",
+        ) from exc
+    await record_approval_step_event(
+        tenant_id=operator.tenant_id,
+        request=request,
+        decision="withdrawn",
+        audit_id=request._audit_id,  # type: ignore[attr-defined]
+    )
+    return _view(request)
 
 
 # ---------------------------------------------------------------------------

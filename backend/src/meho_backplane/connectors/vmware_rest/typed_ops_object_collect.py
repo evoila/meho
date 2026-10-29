@@ -145,9 +145,10 @@ def _extract_object_content(
       ``missingSet`` member: the property ``path`` plus, when the collector
       returned a per-property fault, its concrete vim fault **type name**
       (:func:`fault_type_name` -- e.g. ``NoPermission`` / ``InvalidProperty``
-      / ``ManagedObjectNotFound``). An entry with **no** ``fault_type`` is a
-      genuinely-unset property, so an operator can tell "absent" from a
-      per-property permission/auth/invalid fault (#3708).
+      / ``ManagedObjectNotFound``). vCenter sends a fault with every
+      ``missingSet`` entry; an entry with no usable fault class gets no
+      ``fault_type``. Requested paths that are in neither list are added
+      later by :func:`_add_unreturned_paths` (#5131).
     * ``fault_counts`` -- a per-fault-type count summary (``{"NoPermission":
       12}``); a ``missingSet`` with no faulted entries yields ``{}``.
 
@@ -224,6 +225,30 @@ def _all_properties_missing_with_auth_fault(
     return all(
         entry.get("fault_type") in _AUTH_CLASS_MISSING_FAULT_TYPES for entry in missing_properties
     )
+
+
+def _add_unreturned_paths(
+    requested: list[str],
+    read_props: dict[str, Any],
+    missing: list[str],
+    missing_properties: list[dict[str, str]],
+) -> None:
+    """Add every requested path that vCenter left out of the answer to ``missing``.
+
+    vCenter puts a property it could not read in ``missingSet``, always with a
+    fault. A property that is not set, or whose value is a link to an object the
+    login cannot see, is in neither ``propSet`` nor ``missingSet`` (#5131). Each
+    such path is added to ``missing`` and ``missing_properties``, without a
+    ``fault_type``, in request order. ``missing_fault_summary`` is not changed:
+    it counts real faults only.
+    """
+    seen = set(read_props) | set(missing)
+    for path in requested:
+        if path in seen:
+            continue
+        seen.add(path)
+        missing.append(path)
+        missing_properties.append({"path": path})
 
 
 async def _collect_with_auth_health_reset(
@@ -338,12 +363,14 @@ async def object_collect_impl(
 
     Returns ``{"type", "moid", "properties": {name: val, ...}, "missing":
     [path, ...], "missing_properties": [{path, fault_type?}, ...],
-    "missing_fault_summary": {fault_type: count}}`` -- ``missing`` names any
-    requested path the collector could not read; ``missing_properties`` adds
-    the per-property vim fault **type name** for each (names only, never
-    fault text) and ``missing_fault_summary`` counts them by type, so an
-    operator can tell a genuinely-unset property from a per-property
-    permission/auth/invalid fault (#3708).
+    "missing_fault_summary": {fault_type: count}}`` -- ``missing`` names every
+    requested path that came back without a value, so each requested path is
+    either in ``properties`` or in ``missing``. ``missing_properties`` adds the
+    per-property vim fault **type name** where vCenter sent one (names only,
+    never fault text) and ``missing_fault_summary`` counts them by type
+    (#3708). An entry without ``fault_type`` is a path vCenter left out of the
+    answer with no fault: the property is not set, or its value is a link to
+    an object this login cannot see (#5131).
     """
     mo_type = params["type"]
     moid = params["moid"]
@@ -358,6 +385,9 @@ async def object_collect_impl(
     ) = await _collect_with_auth_health_reset(
         connector, operator, target, mo_type, moid, properties
     )
+    # Here, not in the shared helper: the session reset check (#3773) and the
+    # ESXi probe judge the raw answer and must not change.
+    _add_unreturned_paths(properties, read_props, missing, missing_properties)
 
     _log().info(
         "vmware_object_collect_read",
@@ -454,22 +484,23 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": {"type": "string"},
             "description": (
-                "Requested paths the collector could not read (permission or "
-                "not-applicable), from the ObjectContent ``missingSet``."
+                "Requested paths that came back without a value. Every requested "
+                "path is either in 'properties' or here. Empty means every "
+                "requested path came back."
             ),
         },
         "missing_properties": {
             "type": "array",
             "description": (
-                "Per-property detail for every ``missingSet`` entry: the "
-                "requested ``path`` plus, when the collector returned a "
-                "per-property fault, its vim fault ``fault_type`` (the "
+                "One entry per path in 'missing': the ``path`` plus, when "
+                "vCenter sent a fault for it, its vim fault ``fault_type`` (the "
                 "concrete fault class name only -- e.g. 'NoPermission', "
                 "'InvalidProperty', 'ManagedObjectNotFound', "
                 "'NotAuthenticated' -- never fault text, which can echo a "
                 "property value or a private identifier). An entry with no "
-                "``fault_type`` is a genuinely-unset property, distinguishing "
-                "'absent' from a permission/auth/invalid per-property fault."
+                "``fault_type`` means vCenter sent no value and no fault: the "
+                "property is not set, or its value is a link to an object "
+                "this login cannot see."
             ),
             "items": {
                 "type": "object",
@@ -479,8 +510,9 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
                         "type": "string",
                         "description": (
                             "Concrete vim fault type name for this property "
-                            "(names only, no fault text); absent when the "
-                            "property is genuinely unset rather than faulted."
+                            "(names only, no fault text); absent when vCenter "
+                            "sent no value and no fault (not set, or a link "
+                            "to an object this login cannot see)."
                         ),
                     },
                 },
@@ -576,14 +608,18 @@ VMWARE_OBJECT_COLLECT_OP = VmwareTypedOp(
             "{type, moid, properties: {path: raw_value}, missing: [path], "
             "missing_properties: [{path, fault_type}], missing_fault_summary: "
             "{fault_type: count}, session_health_reset}. Values are raw VI-JSON. "
-            "fault_type is a vim fault name only (never fault text); an entry with no "
-            "fault_type is a property that is not set. session_health_reset is there "
-            "only when MEHO logged in again and read a second time."
+            "Every requested path is in properties or in missing. fault_type is a vim "
+            "fault name only (never fault text). An entry with no fault_type means "
+            "vCenter sent no value and no fault: the property is not set, or its value "
+            "is a link to an object this login cannot see. session_health_reset is "
+            "there only when MEHO logged in again and read a second time."
         ),
         "next_step": (
             "For a path in missing with fault_type InvalidProperty, read the parent path "
-            "whole. With NoPermission, the MEHO account cannot see it; report that. A "
-            "moref value in properties ({type, value}) can be read next with this op."
+            "whole. With NoPermission, the MEHO account cannot see it; report that. With "
+            "no fault_type, if you expected a value, report that the login may not have "
+            "the right to see the linked object. A moref value in properties "
+            "({type, value}) can be read next with this op."
         ),
     },
 )

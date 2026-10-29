@@ -125,12 +125,18 @@ func newPreviewCmd() *cobra.Command {
 			"request tuple). An approval-gated op that writes a credential " +
 			"(for example `vault.kv.put`) is not previewable and stays " +
 			"`status=\"unavailable\"`, so its secret params never surface.\n\n" +
+			"When the real call would be refused because the target's version " +
+			"is outside what the connector's catalog supports, and no other " +
+			"catalog of the same connector serves it, the preview is refused " +
+			"too: `status=\"error\"` with `extras.error_code` " +
+			"`unqualified_target_version` and the same reason the call gives. " +
+			"It has no `preview_hash`.\n\n" +
 			"For such an op the preview prints the plan of what will change " +
 			"(`proposed_effect`) when the plan can be built without contacting " +
 			"the target. When the plan needs the target, the preview says so: " +
 			"the plan is built when you send the call and is shown on the " +
 			"approval request.\n\n" +
-			"Every preview whose op resolved also says the risk level and what " +
+			"Every other preview whose op resolved also says the risk level and what " +
 			"MEHO would do with this call for you and this target: run it at " +
 			"once, wait for a second person's approval, or refuse it. The " +
 			"decision is made the same way `meho operation call` makes it, but " +

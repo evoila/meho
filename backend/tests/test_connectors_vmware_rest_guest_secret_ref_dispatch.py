@@ -178,6 +178,9 @@ class _FakeTransferClient:
 class _RecordingConnector:
     """Serves canned VI-JSON answers and records every guest call."""
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     vmomi: dict[str, Any] = field(default_factory=dict)
     vmomi_calls: list[dict[str, Any]] = field(default_factory=list)
     put_calls: list[dict[str, Any]] = field(default_factory=list)

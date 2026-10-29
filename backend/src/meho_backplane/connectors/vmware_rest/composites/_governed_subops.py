@@ -49,9 +49,10 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _write,
 )
 
-#: Connector the vmware-rest composites dispatch against. The composites are
-#: registered for vCenter 9.0 (``vmware-rest-9.0``); the discovery surface
-#: uses it only to resolve a best-effort ``safety_level`` per child.
+#: Default connector of the step list when the caller names none. A write
+#: step is checked under the connector the target resolves to (#4991), so the
+#: caller asks with ``connector_id=vmware-rest-8.0`` for a vCenter 8.0.x target
+#: and the answer names that connector for the step grants.
 _VMWARE_REST_CONNECTOR_ID: Final[str] = "vmware-rest-9.0"
 
 #: composite op_id -> the child op ids it may dispatch, concatenated from its

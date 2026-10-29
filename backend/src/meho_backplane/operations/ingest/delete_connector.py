@@ -66,6 +66,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 import structlog
 from sqlalchemy import CursorResult, case, delete, func, select
@@ -76,7 +77,8 @@ from meho_backplane.connectors.registry import all_connectors_v2, deregister_con
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations.ingest._internals import ConnectorScope
 from meho_backplane.operations.ingest._llm_grouping_internals import build_connector_id
-from meho_backplane.operations.ingest.exceptions import ConnectorNotFoundError
+from meho_backplane.operations.ingest.connector_users import TenantFilter, find_connector_users
+from meho_backplane.operations.ingest.exceptions import ConnectorInUseError, ConnectorNotFoundError
 from meho_backplane.operations.ingest.parser import parse_connector_id
 
 __all__ = [
@@ -316,6 +318,78 @@ async def _delete_scoped_rows(
     )
 
 
+async def _tenants_that_use_scope(
+    session: AsyncSession,
+    scope: ConnectorScope,
+) -> TenantFilter:
+    """Return the tenants that call the scope's rows today.
+
+    A tenant scope is used by that tenant. A built-in scope is used by
+    every tenant that has no rows of its own for the connector: a tenant's
+    own rows replace the built-in ones completely
+    (:func:`~meho_backplane.operations._lookup.visible_scope_clause`).
+    """
+    if scope.tenant_id is not None:
+        return TenantFilter(only=[scope.tenant_id])
+    owners = await session.execute(
+        select(EndpointDescriptor.tenant_id)
+        .where(
+            EndpointDescriptor.product == scope.product,
+            EndpointDescriptor.version == scope.version,
+            EndpointDescriptor.impl_id == scope.impl_id,
+            EndpointDescriptor.tenant_id.is_not(None),
+        )
+        .distinct()
+    )
+    return TenantFilter(exclude=[tenant for (tenant,) in owners if tenant is not None])
+
+
+async def _refuse_if_in_use(
+    session: AsyncSession,
+    scope: ConnectorScope,
+    connector_id: str,
+    *,
+    viewer_tenant_id: UUID | None,
+    viewer_sees_all_tenants: bool,
+) -> None:
+    """Raise :class:`ConnectorInUseError` when anything still uses the scope's rows (#5027).
+
+    Runs before any row is deleted, inside the delete's transaction. The
+    caller took the exclusive connector-usage lock first, so no new user
+    can be saved between this check and the delete. Users outside the
+    viewer's tenant are counted but not named, unless the viewer may see
+    every tenant.
+    """
+    op_rows = await session.execute(
+        select(EndpointDescriptor.op_id).where(
+            EndpointDescriptor.product == scope.product,
+            EndpointDescriptor.version == scope.version,
+            EndpointDescriptor.impl_id == scope.impl_id,
+            (
+                EndpointDescriptor.tenant_id.is_(None)
+                if scope.tenant_id is None
+                else EndpointDescriptor.tenant_id == scope.tenant_id
+            ),
+        )
+    )
+    users = await find_connector_users(
+        session,
+        connector_id=connector_id,
+        op_ids=frozenset(op_id for (op_id,) in op_rows),
+        tenants=await _tenants_that_use_scope(session, scope),
+    )
+    if not users:
+        return
+    visible = [
+        user for user in users if viewer_sees_all_tenants or user.tenant_id == viewer_tenant_id
+    ]
+    raise ConnectorInUseError(
+        connector_id=connector_id,
+        users=visible,
+        other_tenant_user_count=len(users) - len(visible),
+    )
+
+
 def _build_warnings(
     connector_id: str,
     enabled_count: int,
@@ -399,6 +473,9 @@ async def stage_connector_delete(
     session: AsyncSession,
     scope: ConnectorScope,
     connector_id: str,
+    *,
+    viewer_tenant_id: UUID | None,
+    viewer_sees_all_tenants: bool = False,
 ) -> StagedConnectorDelete:
     """Delete the scope's rows in *session* and stage the registry follow-up.
 
@@ -435,6 +512,15 @@ async def stage_connector_delete(
         if await _rows_exist_any_scope(session, product, version, impl_id):
             raise ConnectorNotFoundError(connector_id=connector_id, tenant_id=scope.tenant_id)
         return _registry_only_stage(scope, connector_id)
+
+    if scope.product == product:
+        await _refuse_if_in_use(
+            session,
+            scope,
+            connector_id,
+            viewer_tenant_id=viewer_tenant_id,
+            viewer_sees_all_tenants=viewer_sees_all_tenants,
+        )
 
     group_keys = [group.group_key for group in groups]
     ops_deleted, groups_deleted = await _delete_scoped_rows(session, scope)

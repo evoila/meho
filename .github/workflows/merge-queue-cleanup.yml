@@ -1,0 +1,109 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Merge-queue cleanup (#5292). Every 5 minutes, cancels the merge-queue
+# runs of every workflow whose group the queue no longer holds, so their
+# jobs stop waiting for and using our CI runners.
+#
+# Why: the queue drops a group when a required check of the group fails,
+# or when it takes out a pull request ahead of the group and builds the
+# group again. GitHub does not stop the dropped group's runs. Its webhook
+# docs leave that to us: on a destroyed group you "may want to cancel any
+# checks that are running on the head SHA"
+# (https://docs.github.com/en/webhooks/webhook-events-and-payloads#merge_group).
+# The watchdog in ci.yml (#4732) stops only its own CI run. The other
+# workflows that run in the queue went on to the end: from 27 Oct 17:00 to
+# 28 Oct 18:25 UTC, 114 of their runs were still going after the queue had
+# dropped their group (median 9 minutes, up to 92 minutes), and most of
+# their jobs took a runner from the main pool only after the drop.
+#
+# Why not `concurrency` with `cancel-in-progress`: GitHub cancels a run only
+# when a new run joins the same concurrency group. Every queue group has its
+# own branch, so a dropped group never gets a new run that cancels the old
+# one.
+#
+# What a sweep does is in scripts/ci/merge_queue_cleanup.sh. In short: it
+# cancels an open merge-queue run only when the run's commit is not in the
+# queue, its queue branch is gone, and its commit is not on `main`, and it
+# reads the queue and the branch once more right before each cancel. Any
+# failed read stops the sweep. The reads and the cancel are separate API
+# calls, so this makes a wrong cancel very unlikely, not impossible.
+#
+# Both jobs run on GitHub-hosted runners, so they never take a slot from
+# the jobs they free. A pull request that changes the cleanup runs one
+# sweep as a dry run with a read-only token: it does every read and only
+# prints what it would cancel. The schedule starts once this file is on
+# `main`. GitHub runs schedules on a best-effort basis: a run can start
+# late or be skipped under load.
+
+name: Merge queue cleanup
+
+on:
+  schedule:
+    # Every 5 minutes (the shortest interval GitHub allows), but not at
+    # minute 0: GitHub delays scheduled runs at the start of every hour.
+    - cron: '2-59/5 * * * *'
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/merge-queue-cleanup.yml
+      - scripts/ci/merge_queue_cleanup.sh
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    name: Cancel runs of dropped merge-queue groups
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # One sweep at a time, scheduled or started by hand. A new sweep waits
+    # for the running one instead of stopping it halfway.
+    concurrency:
+      group: merge-queue-cleanup
+      cancel-in-progress: false
+    # `actions: write` is what cancelling a run needs. Only this job gets it.
+    # `contents: read` is listed again because a job-level block replaces
+    # the workflow-wide one.
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Check out the cleanup script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          sparse-checkout: scripts/ci/merge_queue_cleanup.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Cancel merge-queue runs whose group is gone
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # The branch the merge queue merges into.
+          BASE_BRANCH: main
+          DRY_RUN: 'false'
+        run: bash scripts/ci/merge_queue_cleanup.sh
+
+  dry-run:
+    name: Merge queue cleanup (dry run)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Read-only token: a dry run must not be able to cancel anything.
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out the cleanup script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          sparse-checkout: scripts/ci/merge_queue_cleanup.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Show which merge-queue runs a sweep would cancel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_BRANCH: main
+          DRY_RUN: 'true'
+        run: bash scripts/ci/merge_queue_cleanup.sh

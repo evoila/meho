@@ -158,7 +158,7 @@ def test_connector_id_triple_round_trips() -> None:
 
 def test_op_surface_ids_and_safety_tiers() -> None:
     by_id = {op.op_id: op for op in WINSRV_OPS}
-    assert len(by_id) == 23
+    assert len(by_id) == 24
     safe = {k for k, v in by_id.items() if v.safety_level == "safe"}
     caution = {k for k, v in by_id.items() if v.safety_level == "caution"}
     dangerous = {k for k, v in by_id.items() if v.safety_level == "dangerous"}
@@ -176,7 +176,12 @@ def test_op_surface_ids_and_safety_tiers() -> None:
     assert "winsrv.feature.install" in caution
     assert "winsrv.feature.remove" not in caution
     assert "winsrv.storage.disk.format" in caution
-    assert {"winsrv.about", "winsrv.service.list", "winsrv.storage.disk.list"} <= safe
+    assert {
+        "winsrv.about",
+        "winsrv.service.list",
+        "winsrv.storage.disk.list",
+        "winsrv.system.hardware",
+    } <= safe
 
 
 def test_every_group_has_a_curated_when_to_use() -> None:

@@ -1,6 +1,6 @@
 # Sandbox mode: a standing grant may also cover deletes on an instance for disposable test systems (decision)
 
-**Status:** decided — program owner, 2026-10-19. This record: 2026-10-20, revised the same day after a second review.
+**Status:** decided — program owner, 2026-10-19. This record: 2026-10-20, revised the same day after a second review. Amended 2026-10-26: a scoped login on a shared vCenter.
 **Issue:** [#4622](https://github.com/evoila/meho/issues/4622), step 2. Source: the [step 1 review](https://github.com/evoila/meho/issues/4622#issuecomment-6286729259).
 **Initiative:** [#4621](https://github.com/evoila/meho/issues/4621) — sandbox mode for disposable test systems
 **Adds one exception to:** requirement 1 of [governed-delete-operations.md](governed-delete-operations.md), on a sandbox instance only
@@ -16,6 +16,7 @@
 - A sandbox runs on its own site: its own MEHO, Keycloak and Vault, and no network route to any other system. Only disposable systems are registered there as targets. These walls take the place of a person's approval of each delete. They belong to the site, not to MEHO code.
 - The walls protect other sites. They do not protect one test from another on the same sandbox, or the sandbox's own control systems (see "Limits").
 - On a sandbox, AI agents sign in as service principals, on purpose. #3325 and #3980 describe service principals as fixed automation, such as build pipelines; this record does not change that for other instances.
+- **A target on a shared vCenter** (amended 2026-10-26). A sandbox may also have a target on a shared vCenter, but only with a scoped login. For that target, the scoped login's permission scope is the wall. MEHO cannot check it, because a grant names a target, not the VMs behind it. So the scoped login must reach only disposable systems. The sandbox still holds only disposable systems: the vCenter itself is not one, but through the scoped login MEHO reaches nothing else.
 
 ## Words used
 
@@ -29,6 +30,8 @@
 - **Blast radius:** what a delete affects: the object, its child objects, and whether it can be undone.
 - **Multi-step operation:** one operation that runs several steps (the code calls it a composite). Each step that writes passes its own check, the step gate.
 - **Older build:** a MEHO release from before sandbox mode. It does not know the mode.
+- **Shared vCenter:** a vCenter that also holds systems that are not disposable.
+- **Scoped login:** a vCenter login whose role reaches only the sandbox's own folder, resource pool and datastore.
 
 ## The one requirement it narrows
 
@@ -89,6 +92,7 @@ The same exception applies wherever that record says that no standing grant can 
 - A grant names a target (for example a vCenter), not the VMs behind it. MEHO cannot tell a disposable VM from another one, and it does not check that a test deletes only its own systems. That is why the site must hold only disposable systems.
 - So tests on one sandbox can delete each other's systems. Tests that must not touch each other use different targets, or run one after the other.
 - The sandbox's own control systems (its MEHO, Keycloak and Vault, and what they run on) must not sit inside a target that has delete grants. For example, they do not run as VMs in the vCenter that the tests use.
+- On a shared vCenter, the sandbox's own control systems may run as VMs, but only outside the scoped login's folder, resource pool and datastore. The scoped login has no rights on them.
 
 ## Display and audit mark
 
@@ -111,9 +115,15 @@ Test 1 (`backend/tests/test_sandbox_mode_verdict_table.py`) checks the verdict (
 
 - **Mode off, on every instance that does not set the mode:** the full test suite passes with only the test edits named below, and the verdict table gives the same verdicts as before the change. After the release, `/ready` on every instance we run shows `"sandbox_mode": "off"`.
 - **On the first sandbox instance, before its first test run:**
-  1. **Network walls, tested actively.** From inside the sandbox, a person tries to reach addresses outside it, over IPv4 and IPv6, and over HTTPS, SSH and DNS. Every try must fail. Quiet network logs alone prove nothing. Repeat this after every network change.
+  1. **Network walls, tested actively.** From inside the sandbox, a person tries to reach addresses outside it, over IPv4 and IPv6, and over HTTPS, SSH and DNS. Every try must fail. Quiet network logs alone prove nothing. Repeat this after every network change. One exception: the sandbox may reach the address of a shared vCenter, for its scoped-login target only. Every other try to reach an address outside the sandbox must still fail.
   2. **Rollback drill.** On the sandbox site, start the last release before sandbox mode against a copy of the sandbox database. A service principal's delete and a delete step must wait for a person. Then delete the copy.
   3. **Grant failures.** An expired grant, a revoked grant, a grant for another target or operation, and a grant revoked between two steps of one multi-step operation: the call or step does not run, and no "auto-approved" row is written.
+  4. **Permission scope, for a target on a shared vCenter.** Run through the sandbox MEHO with the scoped login:
+     - the lists of VMs, hosts, datastores and networks show only the sandbox's own objects;
+     - a change outside the scope fails with a permission error (for example a power-off of a control VM, or a file write on another datastore);
+     - a delete outside the scope is only previewed, never sent;
+     - a person makes delete grants on that target only after this test passed;
+     - the test runs again after every change to the role or the login. If it fails, a person revokes the delete grants on that target until the cause is fixed.
 - **Over the first 20 completed test runs.** A completed run builds, changes and deletes its own disposable systems through MEHO, and its clean-up is confirmed. A run with failed calls does not count: zero approval requests can also mean that nothing ran.
   1. zero approval requests from service principals;
   2. after each run, its systems are gone, and no object that the run did not create was changed or deleted (an inventory of the targets before and after the run);

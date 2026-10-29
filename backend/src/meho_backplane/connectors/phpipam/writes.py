@@ -22,7 +22,11 @@ After a write
 
 The handler reads the address back and reports ``verification``:
 ``verified`` (the read-back shows the change), ``not_verified`` (it does
-not) or ``unknown`` (the read-back failed). When the answer to the write is
+not) or ``unknown`` (the read-back failed). A failed read-back never hides
+the change: the result still says what was written, and ``guidance`` says
+that only the check failed. When phpIPAM refused the token during the
+read-back, MEHO also forgets the cached secret, so a corrected secret works
+on the next call without a restart. When the answer to the write is
 lost (time-out, broken connection), the result is ``status: unknown`` and
 ``verification: unknown``, and MEHO makes no other call: the write is never
 sent twice. Running the same reserve or release again is safe and shows what
@@ -38,6 +42,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
+from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.phpipam._common import (
     PhpipamRefusedError,
     Subnet,
@@ -83,6 +88,17 @@ _LOST_ANSWER: Final[str] = (
     "The answer from phpIPAM was lost, so MEHO does not know whether the change was made. "
     "MEHO did not send it again. Run the same call again: it is safe to run twice and shows "
     "the result."
+)
+
+_READBACK_FAILED: Final[str] = (
+    "The change was made, but the read-back after it failed, so MEHO could not check it. "
+    "Run the same call again: it is safe to run twice and shows the result."
+)
+
+_READBACK_REFUSED: Final[str] = (
+    "The change was made, but phpIPAM refused the token when MEHO read the address back. "
+    "MEHO forgot the cached secret. Check the secret of the target, then run the same call "
+    "again: it is safe to run twice and shows the result."
 )
 
 
@@ -148,13 +164,20 @@ async def _verify(
     *,
     hostname: str | None,
     reserved: bool,
-) -> tuple[str, dict[str, Any] | None]:
-    """Read the address back. A failed read gives ``unknown``."""
+) -> tuple[str, dict[str, Any] | None, str | None]:
+    """Read the address back: ``(verification, row, guidance)``.
+
+    A failed read gives ``unknown`` and a guidance text; it never raises,
+    because the write before it was made and the result must say so.
+    """
     try:
         row = await read_address(conn, operator, target, subnet.id, ip)
     except (httpx.TransportError, PhpipamApiError):
-        return "unknown", None
-    return _readback(row, hostname=hostname, reserved=reserved), row
+        return "unknown", None, _READBACK_FAILED
+    except ConnectorAuthError:
+        await conn.invalidate_credentials(target)
+        return "unknown", None, _READBACK_REFUSED
+    return _readback(row, hostname=hostname, reserved=reserved), row, None
 
 
 def _reserve_result(subnet: Subnet, ip: str | None, hostname: str, **fields: Any) -> dict[str, Any]:
@@ -291,13 +314,15 @@ async def _finish_reserve(
                 changed=None,
                 guidance="phpIPAM did not say which address it reserved. " + _LOST_ANSWER,
             )
-    verification, row = await _verify(
+    verification, row, guidance = await _verify(
         conn, operator, target, subnet, ip, hostname=hostname, reserved=True
     )
     address_id = as_int(answer.get("id"))
     if address_id is None and row is not None:
         address_id = as_int(row.get("id"))
-    return _reserve_result(subnet, ip, hostname, verification=verification, address_id=address_id)
+    return _reserve_result(
+        subnet, ip, hostname, verification=verification, address_id=address_id, guidance=guidance
+    )
 
 
 async def release_impl(
@@ -344,10 +369,10 @@ async def release_impl(
         )
     except httpx.TransportError:
         return {**result, "status": "unknown", "changed": None, "guidance": _LOST_ANSWER}
-    verification, _row = await _verify(
+    verification, _row, guidance = await _verify(
         conn, operator, target, subnet, ip, hostname=None, reserved=False
     )
-    return {**result, "verification": verification}
+    return {**result, "verification": verification, "guidance": guidance}
 
 
 # ---------------------------------------------------------------------------

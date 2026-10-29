@@ -23,7 +23,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.phpipam import PhpipamConnector, PhpipamCredentials
 from meho_backplane.connectors.phpipam._common import PhpipamRefusedError
-from meho_backplane.connectors.phpipam._errors import PhpipamAddressTakenError
+from meho_backplane.connectors.phpipam._errors import PhpipamAddressTakenError, PhpipamApiError
 from meho_backplane.connectors.phpipam.session import (
     PhpipamConfigError,
     parse_credentials,
@@ -372,17 +372,51 @@ async def test_release_readback_still_present_is_not_verified() -> None:
     assert result["verification"] == "not_verified"
 
 
-# ---------------------------------------------------------------------------
-# Login
-# ---------------------------------------------------------------------------
-
-
 def _user_fake() -> FakePhpipam:
     fake = _fake()
     fake.app_token = None
     fake.username = "meho-api"
     fake.password = "pw-fake-0001"
     return fake
+
+
+@pytest.mark.parametrize("user_login", [False, True])
+@pytest.mark.parametrize(
+    ("handler", "params", "status", "reserved_after"),
+    [
+        (
+            "address_reserve",
+            {"subnet_id": 7, "ip": "192.0.2.10", "hostname": "web-01.example.test"},
+            "reserved",
+            True,
+        ),
+        ("address_release", {"subnet_id": 7, "ip": "192.0.2.2"}, "released", False),
+    ],
+)
+async def test_refused_readback_keeps_the_write_result_and_forgets_the_secret(
+    handler: str, params: dict[str, Any], status: str, reserved_after: bool, user_login: bool
+) -> None:
+    fake = _user_fake() if user_login else _fake()
+    # An app code is refused once; a user token is refused, logged in again, refused again.
+    fake.refuse_tokens_after_write = 2 if user_login else 1
+    conn = _connector(fake)
+    target = _Target()
+    async with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mock.route().mock(side_effect=fake.handler)
+        result = await getattr(conn, handler)(_operator(), target, params)
+    assert result["status"] == status
+    assert result["changed"] is True
+    assert result["verification"] == "unknown"
+    assert "refused the token" in result["guidance"]
+    assert ((7, params["ip"]) in fake.addresses) is reserved_after
+    assert len(fake.calls_of("POST", f"/api/{APP_ID}/addresses/") + fake.calls_of("DELETE")) == 1
+    assert conn._credentials == {}
+    assert conn._tokens == {}
+
+
+# ---------------------------------------------------------------------------
+# Login
+# ---------------------------------------------------------------------------
 
 
 async def test_user_login_runs_once_and_sends_the_token() -> None:
@@ -418,6 +452,31 @@ async def test_second_refusal_is_a_connector_auth_error() -> None:
         await _run(fake, "subnet_list", {})
     assert info.value.status_code == 401
     assert info.value.stage == "after_relogin"
+
+
+async def test_failed_login_forgets_the_secret_so_a_corrected_one_works() -> None:
+    fake = _user_fake()
+    stored = {"password": "pw-wrong-0001"}
+    loads = 0
+
+    async def _loader(target: Any, operator: Operator) -> PhpipamCredentials:
+        nonlocal loads
+        loads += 1
+        return PhpipamCredentials(username=fake.username, password=stored["password"])
+
+    conn = PhpipamConnector(credentials_loader=_loader)
+    target = _Target()
+    async with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mock.route().mock(side_effect=fake.handler)
+        with pytest.raises(PhpipamApiError) as info:
+            await conn.subnet_list(_operator(), target, {})
+        stored["password"] = fake.password
+        result = await conn.subnet_list(_operator(), target, {})
+    assert info.value.http_status == 500
+    assert "secret" in (info.value.remediation or "")
+    assert result["total"] == 1
+    assert loads == 2
+    assert len(fake.calls_of("POST", f"/api/{APP_ID}/user/")) == 2
 
 
 async def test_refused_app_token_is_not_retried() -> None:

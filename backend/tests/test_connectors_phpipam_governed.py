@@ -10,6 +10,8 @@
 * A long list of free addresses comes back as a link to the stored result.
 * Planted secret values (app code, user, password, phpIPAM token) never show
   up in a result, an audit row, an approval row or an error text.
+* A wrong user password fails the call; after the secret is corrected in
+  Vault, the next call works without a restart.
 
 The vendor is :class:`tests._phpipam_fake.FakePhpipam` behind respx; the
 secret comes from the fake Vault client. Documentation addresses only.
@@ -63,6 +65,7 @@ _PLANTED_APP_TOKEN = "planted-app-code-5070-zz"  # gitleaks:allow NOSONAR -- pla
 _PLANTED_USER = "planted-user-5070"
 _PLANTED_PASSWORD = "planted-pass-5070-zz"  # gitleaks:allow NOSONAR -- planted test value
 _PLANTED_SESSION = "planted-session-5070-zz"  # gitleaks:allow NOSONAR -- planted test value
+_PLANTED_WRONG_PASSWORD = "planted-wrong-5070-zz"  # gitleaks:allow NOSONAR -- planted test value
 _PLANTED = (_PLANTED_APP_TOKEN, _PLANTED_PASSWORD, _PLANTED_SESSION)
 
 
@@ -167,13 +170,12 @@ def _fake(*, user_login: bool = False) -> FakePhpipam:
     return fake
 
 
-def _install_secret(monkeypatch: pytest.MonkeyPatch, fake: FakePhpipam) -> None:
+def _install_secret(monkeypatch: pytest.MonkeyPatch, fake: FakePhpipam) -> Any:
     if fake.app_token is not None:
-        install_fake_client(monkeypatch, secret={"token": fake.app_token})
-    else:
-        install_fake_client(
-            monkeypatch, secret={"username": fake.username, "password": fake.password}
-        )
+        return install_fake_client(monkeypatch, secret={"token": fake.app_token})
+    return install_fake_client(
+        monkeypatch, secret={"username": fake.username, "password": fake.password}
+    )
 
 
 async def _db_text() -> str:
@@ -368,3 +370,38 @@ async def test_planted_secrets_stay_out_of_results_audit_and_errors(
     blob = "\n".join(texts)
     for planted in _PLANTED:
         assert planted not in blob
+
+
+# ---------------------------------------------------------------------------
+# A corrected secret works on the next call, without a restart
+# ---------------------------------------------------------------------------
+
+
+async def test_corrected_password_works_on_the_next_call(
+    _stub_embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await register_phpipam_typed_operations(embedding_service=_stub_embedding)
+    await _seed_target()
+    fake = _fake(user_login=True)
+    vault = _install_secret(monkeypatch, fake)
+    vault.secrets.kv.v2.secret = {"username": fake.username, "password": _PLANTED_WRONG_PASSWORD}
+
+    async def _list() -> Any:
+        return await dispatch(
+            operator=_operator(),
+            connector_id=PHPIPAM_CONNECTOR_ID,
+            op_id="phpipam.subnet.list",
+            target=_Target(),
+            params={},
+        )
+
+    async with respx.mock(base_url=f"https://{HOST}", assert_all_called=False) as mock:
+        mock.route().mock(side_effect=fake.handler)
+        wrong = await _list()
+        vault.secrets.kv.v2.secret = {"username": fake.username, "password": fake.password}
+        fixed = await _list()
+    assert wrong.status == "error", wrong
+    assert fixed.status == "ok", fixed.error
+    assert fixed.result["total"] == 1
+    assert len(fake.calls_of("POST", f"/api/{APP_ID}/user/")) == 2
+    assert len(vault.secrets.kv.v2.read_calls) == 2

@@ -21,6 +21,11 @@ and sends the call again. phpIPAM checks the token before it runs a call, so
 a refused call changed nothing and sending it again is safe. A second refusal
 becomes ``connector_auth_failed``.
 
+A failed login (phpIPAM refuses the user, or answers any other error, for
+example HTTP 500 for a wrong password) forgets the cached secret of the
+target, so the next call reads the secret again: a corrected secret works
+without a restart.
+
 The login call is sent without a trace, so the token in its answer is never
 recorded. :meth:`PhpipamConnector.trace_response_body` also masks every
 ``token`` or ``password`` field in the answers that are recorded.
@@ -44,6 +49,7 @@ from meho_backplane.connectors._shared.vcf_auth import (
 )
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.phpipam._errors import (
+    AUTH_REMEDIATION,
     PhpipamApiError,
     auth_error,
     phpipam_message,
@@ -148,7 +154,12 @@ class PhpipamConnector(HttpConnector):
                 return {TOKEN_HEADER: credentials.app_token}
             token = self._tokens.get(key) if use_cache else None
             if token is None:
-                token = await self._login(target, credentials)
+                try:
+                    token = await self._login(target, credentials)
+                except Exception:
+                    # The secret may be wrong: the next call must read it again.
+                    self._credentials.pop(key, None)
+                    raise
                 self._tokens[key] = token
             return {TOKEN_HEADER: token}
 
@@ -169,11 +180,13 @@ class PhpipamConnector(HttpConnector):
         if response.status_code in (401, 403):
             raise auth_error(response, target=target, stage="login")
         if response.status_code >= 400:
+            # phpIPAM answers HTTP 500 to a wrong user name or password.
             raise PhpipamApiError(
                 f"phpIPAM user login for target {target.name!r} failed with HTTP "
                 f"{response.status_code}",
                 http_status=response.status_code,
                 upstream_message=phpipam_message(response),
+                remediation=AUTH_REMEDIATION,
             )
         try:
             body: Any = response.json()

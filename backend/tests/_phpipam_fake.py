@@ -53,6 +53,8 @@ class FakePhpipam:
     lose_write: bool = False
     readback_hostname: str | None = None
     refuse_tokens: int = 0
+    #: After a write is made, refuse this many later tokens (the read-back).
+    refuse_tokens_after_write: int = 0
     _next_id: int = 100
 
     def add_subnet(self, subnet_id: int, cidr: str, **fields: Any) -> None:
@@ -190,6 +192,7 @@ class FakePhpipam:
         row["note"] = body.get("note")
         if self.readback_hostname is not None:
             row["hostname"] = self.readback_hostname
+        self.refuse_tokens = self.refuse_tokens_after_write
         return _answer(201, None, message="Address created", id=self._next_id)
 
     def _subnet_address(self, subnet_id: int, ip: str) -> httpx.Response:
@@ -214,5 +217,6 @@ class FakePhpipam:
                 return _error(404, "No addresses found")
             if self.readback_hostname is None:
                 del self.addresses[(subnet_id, ip)]
+            self.refuse_tokens = self.refuse_tokens_after_write
             return _answer(200, None, message="Address deleted")
         return _error(400, "Invalid request")

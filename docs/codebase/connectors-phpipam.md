@@ -90,6 +90,9 @@ names it found, never a value.
 - A second refusal, or a refused app code, becomes `connector_auth_failed`.
   MEHO then forgets the cached secret, so a corrected secret works on the next
   call without a restart.
+- A failed login (phpIPAM answers HTTP 500 to a wrong user name or password)
+  also forgets the cached secret. The error carries the same advice: check the
+  secret of the target.
 
 The secret and the token never appear in a parameter, a result, an audit row,
 an error text or a log. The login call is sent without a trace (the flight
@@ -152,7 +155,11 @@ however large the subnet is.
    `description`, `note`), or `POST /api/{app_id}/addresses/first_free/{subnet_id}/`.
    A 409 (someone reserved it a moment before) is handled like steps 3 and 4.
 6. Reads the address back: `verification` is `verified` when it has the host
-   name, `not_verified` when not, `unknown` when the read-back failed.
+   name, `not_verified` when not, `unknown` when the read-back failed. A
+   failed read-back never hides the change: the result still says
+   `status: reserved`, and `guidance` says that only the check failed. When
+   phpIPAM refused the token during the read-back, MEHO also forgets the
+   cached secret.
 
 ### phpipam.address.release
 
@@ -160,7 +167,9 @@ however large the subnet is.
 2. Sends `DELETE /api/{app_id}/addresses/{ip}/{subnet_id}/` (this call finds
    every address of the subnet, not only the first). MEHO never sends
    `remove_dns`: DNS records stay with the DNS connectors.
-3. Reads the address back: `verified` when it is gone.
+3. Reads the address back: `verified` when it is gone. A failed read-back
+   is handled like the reserve read-back: `verification: unknown`, the result
+   keeps `status: released`, and `guidance` says only the check failed.
 
 The result names the host name the address had (`released_hostname`).
 

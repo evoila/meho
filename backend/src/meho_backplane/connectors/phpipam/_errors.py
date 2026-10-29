@@ -27,6 +27,7 @@ from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import ConnectorUpstreamError
 
 __all__ = [
+    "AUTH_REMEDIATION",
     "PhpipamAddressTakenError",
     "PhpipamApiError",
     "auth_error",
@@ -39,7 +40,7 @@ _MESSAGE_CAP: Final[int] = 200
 #: Host names from phpIPAM are cut to this many characters in MEHO's texts.
 HOSTNAME_CAP: Final[int] = 255
 
-_AUTH_REMEDIATION: Final[str] = (
+AUTH_REMEDIATION: Final[str] = (
     "Check the secret of the target: 'token' must be the app code of an API app with "
     "'SSL with App code token', or 'username' and 'password' must be a phpIPAM user for an "
     "app with 'SSL with User token'. Check extras.app_id. A change (reserve, release) also "
@@ -113,6 +114,6 @@ def auth_error(
         target_name=getattr(target, "name", None),
         host=getattr(target, "host", None),
         secret_ref=getattr(target, "secret_ref", None),
-        remediation=_AUTH_REMEDIATION,
+        remediation=AUTH_REMEDIATION,
         stage="after_relogin" if after_relogin else ("establish" if stage == "login" else "call"),
     )

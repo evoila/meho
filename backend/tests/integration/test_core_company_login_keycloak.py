@@ -4,11 +4,11 @@
 """#4592 — the company login of the realm stage against a real Keycloak.
 
 One Keycloak runs two realms. Realm ``meho`` comes from the subchart's realm
-file with the two roles the chart's ConfigMap adds to ``meho-admin`` when
-the company login is on, as in ``test_core_bootstrap_keycloak.py``
-otherwise. A second realm, ``company``, plays the company login system: it
-has a confidential client for MEHO's Keycloak, two groups and one person.
-The realm stage then sets up the company login in realm ``meho`` from the
+file, as in ``test_core_bootstrap_keycloak.py``, plus the two roles that
+the chart's realm ConfigMap gives ``meho-admin`` when the company login is
+on. A second realm, ``company``, plays the company login system: it has a
+confidential client for MEHO's Keycloak, two groups and one person. The
+realm stage then sets up the company login in realm ``meho`` from the
 second realm's discovery document, exactly as the Job does (the stage logs
 in as ``meho-admin``, so this also proves that the two roles are enough).
 
@@ -46,8 +46,6 @@ import json
 import os
 import re
 import secrets
-import shutil
-import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
@@ -191,22 +189,37 @@ def _company_realm(password: str, broker_secret: str) -> dict[str, Any]:
     }
 
 
-def _realm_file_with_the_company_login_roles() -> Path:
-    """The realm file as the chart's ConfigMap renders it with the login on.
+def _give_meho_admin_the_company_login_roles(kc: _Keycloak) -> None:
+    """What the chart's realm ConfigMap does with the company login on.
 
-    It goes into a folder of its own that the container's user can read
-    (pytest's temp folders are private to the runner), removed by the
-    fixture at the end.
+    The realm file here is the one of an install without the company login,
+    so the two roles are given after the import, with the first-start
+    account, which the Job's account cannot do for itself.
     """
-    realm = json.loads((_SUBCHART / "files" / "meho-realm.json").read_text())
-    (account,) = realm["users"]
-    account["clientRoles"]["realm-management"] += list(ROLES)
-    folder = Path(tempfile.mkdtemp(prefix="meho-company-login-realm-"))
-    folder.chmod(0o755)
-    realm_file = folder / "meho-realm.json"
-    realm_file.write_text(json.dumps(realm, indent=2))
-    realm_file.chmod(0o644)
-    return folder
+    headers = _master_headers(kc)
+    admin = f"{kc.base_url}/admin/realms/meho"
+
+    def client_uuid(client_id: str) -> str:
+        found = httpx.get(f"{admin}/clients", headers=headers, params={"clientId": client_id})
+        found.raise_for_status()
+        (client,) = found.json()
+        return str(client["id"])
+
+    management = client_uuid("realm-management")
+    roles = []
+    for role in ROLES:
+        rep = httpx.get(f"{admin}/clients/{management}/roles/{role}", headers=headers)
+        rep.raise_for_status()
+        roles.append(rep.json())
+    account = httpx.get(
+        f"{admin}/clients/{client_uuid('meho-admin')}/service-account-user", headers=headers
+    )
+    account.raise_for_status()
+    httpx.post(
+        f"{admin}/users/{account.json()['id']}/role-mappings/clients/{management}",
+        headers=headers,
+        json=roles,
+    ).raise_for_status()
 
 
 @pytest.fixture(scope="module")
@@ -229,14 +242,13 @@ def keycloak() -> Iterator[_Keycloak]:
         SECRET_ENV: secrets.token_hex(16),
     }
     image = os.environ.get("MEHO_TEST_CORE_KEYCLOAK_IMAGE") or _subchart_image()
-    import_dir = _realm_file_with_the_company_login_roles()
     container = (
         DockerContainer(image)
         .with_command("start-dev --import-realm")
         .with_env("KC_HTTP_RELATIVE_PATH", "/auth")
         .with_env("KC_BOOTSTRAP_ADMIN_CLIENT_ID", bootstrap[0])
         .with_env("KC_BOOTSTRAP_ADMIN_CLIENT_SECRET", bootstrap[1])
-        .with_volume_mapping(str(import_dir), "/opt/keycloak/data/import", "ro")
+        .with_volume_mapping(str(_SUBCHART / "files"), "/opt/keycloak/data/import", "ro")
         .with_exposed_ports(8080)
     )
     for name in (
@@ -250,7 +262,6 @@ def keycloak() -> Iterator[_Keycloak]:
     try:
         container.start()
     except Exception as exc:
-        shutil.rmtree(import_dir, ignore_errors=True)
         pytest.skip(f"Keycloak container failed to start ({type(exc).__name__}): {exc}")
     try:
 
@@ -271,6 +282,7 @@ def keycloak() -> Iterator[_Keycloak]:
             password=secrets.token_hex(12),
             logs=logs,
         )
+        _give_meho_admin_the_company_login_roles(kc)
         httpx.post(
             f"{base_url}/admin/realms",
             headers=_master_headers(kc),
@@ -279,7 +291,6 @@ def keycloak() -> Iterator[_Keycloak]:
         yield kc
     finally:
         container.stop()
-        shutil.rmtree(import_dir, ignore_errors=True)
 
 
 @pytest.fixture(scope="module")

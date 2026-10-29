@@ -382,8 +382,10 @@ VMWARE_CLUSTER_LIST_OP = VmwareTypedOp(
             "read_note says why. A long list comes back as a result handle."
         ),
         "next_step": (
-            "For one cluster in full (HA, DRS, resource use), call vmware.cluster.info with "
-            "the id. For DRS advice, call vmware.composite.cluster.drs_recommendations."
+            "For more fields of one cluster, call vmware.object.collect with type "
+            "'ClusterComputeResource', the id as moid, and the property paths you need "
+            "(request 'configurationEx' whole for HA and DRS settings). For DRS advice, "
+            "call vmware.composite.cluster.drs_recommendations with the id as cluster."
         ),
     },
 )

@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid4
@@ -29,6 +30,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector, VsphereTargetLike
 from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
+from meho_backplane.connectors.vmware_rest.composites._register import _COMPOSITES
 from meho_backplane.connectors.vmware_rest.typed_ops import (
     VMWARE_TYPED_OPS,
     VMWARE_TYPED_WHEN_TO_USE_BY_GROUP,
@@ -396,6 +398,15 @@ def test_op_is_a_safe_typed_read_that_runs_at_once() -> None:
     assert op.group_key is not None
     assert VMWARE_TYPED_WHEN_TO_USE_BY_GROUP[op.group_key].strip()
     assert callable(getattr(VmwareRestConnector, op.handler_attr))
+
+
+def test_next_step_names_only_operations_that_exist() -> None:
+    """The hint must not send the agent to an op MEHO would refuse as unknown."""
+    next_step = VMWARE_CLUSTER_LIST_OP.llm_instructions["next_step"]
+    named = set(re.findall(r"vmware\.[a-z_.]*[a-z_]", next_step))
+    assert named == {"vmware.object.collect", "vmware.composite.cluster.drs_recommendations"}
+    known = {op.op_id for op in VMWARE_TYPED_OPS} | {spec.op_id for spec in _COMPOSITES}
+    assert named <= known
 
 
 def test_schema_takes_only_the_three_optional_filters() -> None:

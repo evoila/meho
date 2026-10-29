@@ -17,7 +17,9 @@ import "github.com/spf13/cobra"
 // row. A built-in copy of the same connector is never touched. When a
 // tenant has an old copy stored under a former product name next to a
 // copy under the current product (#4889), the old copy goes first, so
-// the delete hint on `meho connector list` is safe to follow.
+// the delete hint on `meho connector list` is safe to follow. The route
+// answers 409 connector_in_use while something still uses the
+// connector (#5027); the verb prints each user.
 //
 // The verb reuses the enable / disable transition machinery: same
 // flags, same confirmation prompt, same 204 success shape.
@@ -34,6 +36,9 @@ func newDeleteCmd() *cobra.Command {
 			"touched. If your tenant has an old copy stored under a former product\n" +
 			"name next to a copy under the current product, the old copy is removed\n" +
 			"first; run the command again to remove the current copy.\n\n" +
+			"The delete is refused while a sensor, runbook template, hosted agent,\n" +
+			"schedule, waiting approval or queued operation run still uses the\n" +
+			"connector. The error lists each one; remove or change them first.\n\n" +
 			"The route is not idempotent: once the connector is gone, a repeat call\n" +
 			"answers 404.\n\n" +
 			"Without --confirm, the verb prompts on stdin for confirmation;\n" +

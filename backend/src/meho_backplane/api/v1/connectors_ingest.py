@@ -208,6 +208,7 @@ from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
     BuiltinConnectorWriteForbiddenError,
     CatalogListResponse,
+    ConnectorInUseError,
     ConnectorListResponse,
     ConnectorNotFoundError,
     ConnectorReviewPayload,
@@ -1759,6 +1760,11 @@ async def delete_endpoint(
     into the same 404 the other connector routes use; a repeat
     DELETE therefore returns 404 once the first one landed.
 
+    A connector that something still uses is not deleted (#5027): the
+    route answers ``409`` with the ``connector_in_use`` detail, which
+    lists each sensor, runbook template, hosted agent, schedule, waiting
+    approval or queued operation run (kind, id, name, operation).
+
     A connector that still has enabled operations is deleted anyway —
     the advisory is deliberate, not an error: it surfaces as the
     ``connector_delete_enabled_ops`` structured log event plus the
@@ -1775,6 +1781,11 @@ async def delete_endpoint(
             connector_id,
             tenant_id=operator.tenant_id,
         )
+    except ConnectorInUseError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=dict(exc.detail),
+        ) from exc
     except ConnectorNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,

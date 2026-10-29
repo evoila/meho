@@ -72,6 +72,7 @@ from meho_backplane.db.models import (
     EndpointDescriptor,
     OperationGroup,
     Tenant,
+    TenantOperationSetting,
 )
 from meho_backplane.db.models import (
     Target as TargetORM,
@@ -343,6 +344,36 @@ def _seed_group_and_op(
 
     asyncio.run(_do())
     return group_id, desc_id
+
+
+def _seed_tenant_operation_setting(
+    *,
+    tenant_id: uuid.UUID,
+    product: str,
+    version: str,
+    impl_id: str,
+    op_id: str,
+    enabled: bool,
+) -> None:
+    """Seed one tenant's own on/off choice for one built-in operation (#5029)."""
+
+    async def _do() -> None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            session.add(
+                TenantOperationSetting(
+                    tenant_id=tenant_id,
+                    product=product,
+                    version=version,
+                    impl_id=impl_id,
+                    op_id=op_id,
+                    enabled=enabled,
+                    set_by_sub="test-operator",
+                    set_at=datetime.now(UTC),
+                ),
+            )
+
+    asyncio.run(_do())
 
 
 def _seed_session_sync(
@@ -1156,6 +1187,76 @@ def test_detail_renders_ops_matrix_when_connector_resolves() -> None:
     assert "approval" in body
     # Resolved connector_id rendered.
     assert "fakeprod-1.0" in body
+
+
+def _seed_fakeprod_target_with_group(*, review_status: str, is_enabled: bool) -> None:
+    """One resolvable target plus one built-in group with one operation."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    register_connector_v2(product="fakeprod", version="1.0", impl_id="fakeprod", cls=_FakeConnector)
+    _seed_target(
+        tenant_id=_TENANT_A,
+        name="fp-target",
+        product="fakeprod",
+        fingerprint={"version": "1.0"},
+    )
+    _seed_group_and_op(
+        tenant_id=None,
+        product="fakeprod",
+        version="1.0",
+        impl_id="fakeprod",
+        group_key="vm-lifecycle",
+        group_name="VM lifecycle",
+        when_to_use="When you need to start, stop, or query VM state.",
+        op_id="fakeprod.vm.start",
+        review_status=review_status,
+        is_enabled=is_enabled,
+    )
+
+
+def test_detail_ops_matrix_shows_a_tenant_enabled_op_in_a_disabled_group() -> None:
+    """#5029 -- a tenant turned an operation on inside a group that is off
+    install-wide. Discovery lists the group for that tenant, so the console
+    operations table must show it too."""
+    _seed_fakeprod_target_with_group(review_status="disabled", is_enabled=False)
+    _seed_tenant_operation_setting(
+        tenant_id=_TENANT_A,
+        product="fakeprod",
+        version="1.0",
+        impl_id="fakeprod",
+        op_id="fakeprod.vm.start",
+        enabled=True,
+    )
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/connectors/fp-target")
+    assert response.status_code == 200, response.text
+    assert "VM lifecycle" in response.text
+    assert "fakeprod.vm.start" in response.text
+
+
+def test_detail_ops_matrix_hides_a_group_the_tenant_turned_off() -> None:
+    """#5029 -- a tenant turned the only operation of an enabled group off
+    for itself. The group and the operation leave that tenant's console
+    operations table; the install default is unchanged."""
+    _seed_fakeprod_target_with_group(review_status="enabled", is_enabled=True)
+    _seed_tenant_operation_setting(
+        tenant_id=_TENANT_A,
+        product="fakeprod",
+        version="1.0",
+        impl_id="fakeprod",
+        op_id="fakeprod.vm.start",
+        enabled=False,
+    )
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/connectors/fp-target")
+    assert response.status_code == 200, response.text
+    assert "VM lifecycle" not in response.text
+    assert "fakeprod.vm.start" not in response.text
 
 
 def test_detail_renders_ambiguous_connector_alert_when_resolver_returns_ambiguous() -> None:

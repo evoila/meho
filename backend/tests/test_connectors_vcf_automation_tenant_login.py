@@ -30,7 +30,6 @@ import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vcf_automation import (
@@ -38,6 +37,7 @@ from meho_backplane.connectors.vcf_automation import (
     VcfAutomationTargetLike,
 )
 from meho_backplane.connectors.vcf_automation import session as session_module
+from meho_backplane.connectors.vcf_automation.connector import _plane_cache_key
 
 _HOST = "vcfa-login.test.invalid"
 _BASE_URL = f"https://{_HOST}"
@@ -180,7 +180,7 @@ async def test_legacy_400_falls_back_to_csp_token_exchange() -> None:
     assert _body(login, 0) == {"username": "svc-meho", "password": "stub-password"}
     assert _body(login, 1) == {"refreshToken": "minted-refresh"}
     assert csp.call_count == 1
-    assert connector._tenant_tokens == {target_cache_key(target): "bearer-after-fallback"}
+    assert connector._tenant_tokens == {_plane_cache_key(target, "tenant"): "bearer-after-fallback"}
     await connector.aclose()
 
 
@@ -351,7 +351,7 @@ async def test_data_path_401_re_mints_through_the_token_exchange() -> None:
     assert [_body(login, i) for i in range(2)] == [{"refreshToken": "r1"}, {"refreshToken": "r2"}]
     assert projects.calls[0].request.headers["authorization"] == "Bearer stale"
     assert projects.calls[1].request.headers["authorization"] == "Bearer fresh"
-    assert connector._tenant_tokens == {target_cache_key(target): "fresh"}
+    assert connector._tenant_tokens == {_plane_cache_key(target, "tenant"): "fresh"}
     await connector.aclose()
 
 

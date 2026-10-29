@@ -30,8 +30,9 @@ checks:
   value.
 
 A control runs the same case after it removes the tag from the stored
-operation. Then the made-up password is in the trace and in the agent's copy,
-so the checks above are not empty.
+operation. Then the trace keeps the bodies, so the checks above are not
+empty. The made-up password is still not in the trace: it sits under a
+secret-named field, and the trace scrub replaces such values (#5031).
 
 All values are made up, the hosts use the reserved ``.invalid`` domain, and no
 live system is called.
@@ -492,7 +493,11 @@ async def _drop_the_tag(op_id: str) -> None:
 async def test_without_the_tag_the_trace_would_hold_the_body(
     case: _Case, session: AsyncSession, result_store: MemoryResultStore
 ) -> None:
-    """Control: the tag is what keeps the body out, so the test above is not empty."""
+    """Control: the tag is what keeps the body out, so the test above is not empty.
+
+    Without the tag the bodies are recorded. The password is still masked,
+    because it sits under a secret-named field (#5031).
+    """
     await _register_operations(session)
     await _drop_the_tag(case.op_id)
 
@@ -501,5 +506,6 @@ async def test_without_the_tag_the_trace_would_hold_the_body(
     assert result.audit_id is not None
     _, spans = await _stored_trace(result.audit_id)
     assert all(span.attributes["body_recorded"] for span in _vendor_spans(spans, case))
-    assert _PASSWORD in _as_text(spans)
-    assert _PASSWORD in await _agent_copy(result)
+    assert "[REDACTED:param_name]" in _as_text(spans)
+    assert _PASSWORD not in _as_text(spans)
+    assert _PASSWORD not in await _agent_copy(result)

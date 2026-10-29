@@ -568,7 +568,7 @@ _INGEST_DESCRIPTION: Final[str] = (
     "audited. The REST "
     "endpoint POST /api/v1/connectors/ingest accepts the same optional "
     "tenant_id body field with identical semantics — omitted or null "
-    "resolves to the built-in / global scope on both surfaces (#2085), "
+    "resolves to the built-in / global scope on both surfaces, "
     "so the same body means the same scope over MCP and REST. "
     "Re-ingesting the same spec under a different scope creates a "
     "shadow copy in the other namespace (the dedup lookup is "

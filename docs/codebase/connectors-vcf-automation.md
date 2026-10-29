@@ -192,7 +192,12 @@ lookups in `_lookups.py`, paths in `_paths.py`, and park-time previews in
   `needs-approval` is satisfied only by this op's own approval park (the
   approved re-dispatch), so a service principal whose standing grant covers
   this op but not the Vault write is refused rather than writing under the
-  target's role. The target should carry its own `extras.vault_role` — one
+  target's role. When a reviewer approves the request, the call runs as
+  the reviewer, but the **requester's** policy for that write is checked
+  too, so an agent denied `vault.kv.patch` on that target is refused before
+  the mint. The park card shows it as `requester_denied` /
+  `requester_reason` in `permission_preflight` (#3898; see
+  [approvals.md](approvals.md) "The requester's policy on a second target"). The target should carry its own `extras.vault_role` — one
   without falls back to the caller's role, the #3895 failure. The park card
   carries the Vault write ops'
   `sys/capabilities-self` `permission_preflight` (`will_be_denied`, plus
@@ -515,8 +520,16 @@ the consumer repo, validated 2026-05-17):
 5. `POST /cloudapi/1.0.0/sessions/provider` with HTTP Basic and
    `Accept: application/json;version=9.0.0`. A 2xx response carries
    `X-VMWARE-VCLOUD-ACCESS-TOKEN` (a JWT) — the connector caches it under
-   `target.name`. Absence of the header on a 2xx response surfaces as a
-   `RuntimeError` rather than caching an empty token.
+   the provider credential (`_plane_cache_key(target, "provider")`: the
+   tenant, `provider_secret_ref` when set else `target.secret_ref`, the
+   login address, the `fqdn` sent as the `Host` header, and the login user
+   from `provider_login_inputs`:
+   `provider_username` when set, else the `domain` with `System` as the
+   default), so two targets with one provider secret and one provider user
+   share one provider session, whatever their tenant domains are (#5033).
+   Absence of
+   the header on a 2xx response surfaces as a `RuntimeError` rather than
+   caching an empty token.
 6. `auth_headers` returns `{"Authorization": f"Bearer {jwt}", "Accept": <path-aware>}`.
 
 ### Tenant-plane session establishment

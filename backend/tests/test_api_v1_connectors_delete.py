@@ -55,7 +55,7 @@ from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
+from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup, OperationRun
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.operations.ingest import (
     default_llm_client_factory,
@@ -259,6 +259,49 @@ async def test_delete_returns_204_then_404_on_repeat(client: TestClient) -> None
     assert await _row_counts(tenant) == (0, 0)
     assert (_PRODUCT, _VERSION, _IMPL_ID) not in all_connectors_v2()
     assert await _service_delete_audit_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_in_use_returns_409_listing_the_users(client: TestClient) -> None:
+    """#5027: a running operation run blocks the delete; the 409 body lists it."""
+    tenant = uuid.uuid4()
+    key, token = _token(tenant_id=tenant)
+    await _seed_rows(tenant_id=tenant)
+    run_id = uuid.uuid4()
+    async with get_sessionmaker()() as session:
+        session.add(
+            OperationRun(
+                id=run_id,
+                tenant_id=tenant,
+                identity_sub="someone",
+                origin="direct",
+                connector_id=_CONNECTOR_ID,
+                op_id="GET:/api/v1/group-0/0",
+                status="running",
+            )
+        )
+        await session.commit()
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.delete(f"/api/v1/connectors/{_CONNECTOR_ID}", headers=_authed(token))
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["detail"] == "connector_in_use"
+    assert detail["connector_id"] == _CONNECTOR_ID
+    assert detail["users"] == [
+        {
+            "kind": "operation_run",
+            "id": str(run_id),
+            "name": None,
+            "op_id": "GET:/api/v1/group-0/0",
+            "tenant_id": str(tenant),
+        }
+    ]
+    assert detail["other_tenant_user_count"] == 0
+    assert await _row_counts(tenant) != (0, 0)
+    assert await _service_delete_audit_count() == 0
 
 
 @pytest.mark.asyncio

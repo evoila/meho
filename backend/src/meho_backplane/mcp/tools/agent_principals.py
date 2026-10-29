@@ -114,8 +114,8 @@ register_mcp_tool(
         name="meho_agent_principals_list",
         surface=ToolSurface.OPERATOR,
         description=(
-            "List agent principals registered for the operator's tenant "
-            "(G11.2-T1 #815). Returns {principals: [...]} sorted by name. "
+            "List agent principals registered for the operator's tenant. "
+            "Returns {principals: [...]} sorted by name. "
             "Revoked principals are excluded by default; pass "
             "include_revoked=true to include them."
         ),
@@ -197,8 +197,8 @@ register_mcp_tool(
         name="meho_agent_principals_register",
         surface=ToolSurface.OPERATOR,
         description=(
-            "Register a new agent principal for the operator's tenant "
-            "(G11.2-T1 #815). Creates a Keycloak client tagged kind=agent "
+            "Register a new agent principal for the operator's tenant. "
+            "Creates a Keycloak client tagged kind=agent "
             "and inserts a DB row. "
             "Returns the created principal record. "
             "409 when a principal with the same name already exists. "
@@ -283,7 +283,7 @@ register_mcp_tool(
         name="meho_agent_principals_revoke",
         surface=ToolSurface.OPERATOR,
         description=(
-            "Revoke an agent principal — kill switch (G11.2-T1 #815). "
+            "Revoke an agent principal — kill switch. "
             "Disables the Keycloak client immediately (no new token grants) "
             "and marks the DB row revoked. "
             "In-flight tokens remain valid until their exp. "

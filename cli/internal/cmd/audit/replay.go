@@ -274,17 +274,21 @@ func printReplayNode(
 
 // formatReplayNode renders one node's single line:
 //
-//	<occurred_at> <op_id> [<result_status>] (<duration_ms>ms)
+//	<occurred_at> <op_id> [<result_status>] (<duration_ms>ms) tenant=<tenant>
 //
 // `occurred_at` is the node's `ts` field (the audit row's
 // `occurred_at`). A null duration renders as `(-ms)` so the column
-// stays present and grep-friendly across nodes.
+// stays present and grep-friendly across nodes. `tenant` is the
+// tenant name, or the tenant id when the backend has no name for it
+// (#5238); it comes last so the op_id stays easy to find.
 func formatReplayNode(node *api.ReplayNode) string {
 	dur := strDeref(node.DurationMs)
 	if dur == "" {
 		dur = "-"
 	}
-	return fmt.Sprintf("%s %s [%s] (%sms)", formatTS(node.Ts), node.OpId, node.ResultStatus, dur)
+	return fmt.Sprintf("%s %s [%s] (%sms) tenant=%s",
+		formatTS(node.Ts), node.OpId, node.ResultStatus, dur,
+		tenantLabel(node.TenantName, node.TenantId))
 }
 
 // countDescendants counts every node strictly below `node` (its whole

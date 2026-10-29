@@ -68,6 +68,7 @@ from meho_backplane.connectors.vault.ops_auth import (
     VaultAuthBackendNotMountedError,
     register_vault_auth_operations,
 )
+from meho_backplane.connectors.vault.ops_auth_jwt import register_vault_auth_jwt_operations
 from meho_backplane.connectors.vault.ops_identity_token import (
     register_vault_identity_token_operations,
 )
@@ -116,10 +117,15 @@ register_typed_op_registrar(register_vault_sys_typed_operations)
 # Importing the registrar also imports ops_token_role, which registers
 # the park-time permission preflight for vault.token.role.write.
 register_typed_op_registrar(register_vault_identity_token_operations)
+# The JWT/OIDC login-role ops (#3694) join the ``auth`` group, which
+# register_vault_typed_operations creates first. Importing the module also
+# registers the park-time permission preflight for vault.auth.jwt.role.write.
+register_typed_op_registrar(register_vault_auth_jwt_operations)
 
 __all__ = [
     "VaultAuthBackendNotMountedError",
     "VaultConnector",
+    "register_vault_auth_jwt_operations",
     "register_vault_auth_operations",
     "register_vault_identity_token_operations",
     "register_vault_sys_typed_operations",

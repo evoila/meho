@@ -21,6 +21,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -916,6 +917,7 @@ async def test_inventory_csv_operation(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(result["csv_lines"]) == 3
     assert result["sources"] == [
         {
+            "origin": "stored",
             "handle_id": handle,
             "connector_id": "vmware-rest-9.0",
             "target": "vc-lab-a",
@@ -923,6 +925,127 @@ async def test_inventory_csv_operation(monkeypatch: pytest.MonkeyPatch) -> None:
         }
     ]
     assert set(migration_ops.MIGRATION_INVENTORY_CSV_RESPONSE_SCHEMA["properties"]) >= set(result)
+
+
+def _one_vm_inventory() -> dict[str, Any]:
+    return _envelope([_linux_vm()], "vmware-rest-9.0", "vc-lab-a")
+
+
+async def test_inventory_csv_operation_takes_an_inline_inventory() -> None:
+    """A one-VM inventory given inline gives a CSV with one server (#5143)."""
+    result = await migration_ops.migration_inventory_csv(
+        _operator(uuid4()), None, {"inventories": [_one_vm_inventory()]}
+    )
+
+    assert result["row_count"] == 1
+    assert len(result["csv_lines"]) == 2
+    assert result["sources"] == [
+        {
+            "origin": "inline",
+            "connector_id": "vmware-rest-9.0",
+            "target": "vc-lab-a",
+            "collected_at": "2026-10-20T08:00:00+00:00",
+        }
+    ]
+
+
+async def test_load_merges_stored_then_inline_inventories() -> None:
+    store = ResultHandleStore(_MemoryValkey())  # type: ignore[arg-type]
+    tenant = uuid4()
+    guest = await _store_through_reducer(store, tenant, _guest_inventory())
+
+    loaded = await load_inventories(
+        _operator(tenant), [guest], inventories=[_one_vm_inventory()], store=store
+    )
+
+    assert loaded.handle_ids == [guest, None]
+    assert [source["origin"] for source in loaded.sources()] == ["stored", "inline"]
+    assert [(d.source_id, d.same_as, d.match) for d in loaded.duplicates] == [
+        (_linux_vm()["source_id"], "linux:db-lnx-01:machine-id-0f1e2d3c", "bios_uuid")
+    ]
+
+
+async def test_load_refuses_an_inline_inventory_like_a_stored_one() -> None:
+    """An inline inventory of another schema version gets the stored-handle message."""
+    store = ResultHandleStore(_MemoryValkey())  # type: ignore[arg-type]
+    tenant = uuid4()
+    newer = _one_vm_inventory()
+    newer["schema_version"] = "2"
+    newer_handle = await _store_through_reducer(store, tenant, newer)
+    rule = "holds inventory schema version '2'; this MEHO reads version '1'"
+
+    with pytest.raises(InventoryLoadError) as stored:
+        await load_inventories(_operator(tenant), [newer_handle], store=store)
+    with pytest.raises(InventoryLoadError) as inline:
+        await load_inventories(_operator(tenant), inventories=[newer], store=store)
+
+    assert str(stored.value) == f"handle {newer_handle} {rule}"
+    assert str(inline.value) == f"inline inventory 1 {rule}"
+
+    broken = _one_vm_inventory()
+    broken["counts"]["server"] = 9
+    with pytest.raises(InventoryLoadError, match="inline inventory 1 does not hold a valid"):
+        await load_inventories(_operator(tenant), inventories=[broken], store=store)
+    with pytest.raises(InventoryLoadError, match="inline inventory 1 does not hold an inventory"):
+        await load_inventories(_operator(tenant), inventories=["not an inventory"], store=store)
+
+
+async def test_load_needs_one_inventory_and_caps_both_kinds_together() -> None:
+    store = ResultHandleStore(_MemoryValkey())  # type: ignore[arg-type]
+    with pytest.raises(InventoryLoadError, match="at least one inventory handle or one inline"):
+        await load_inventories(_operator(uuid4()), [], inventories=[], store=store)
+    with pytest.raises(InventoryLoadError, match="at most 20 inventories"):
+        await load_inventories(
+            _operator(uuid4()),
+            [str(uuid4()) for _ in range(10)],
+            inventories=[_one_vm_inventory()] * 11,
+            store=store,
+        )
+
+
+def test_inventory_csv_parameters_need_handles_or_inventories() -> None:
+    validator = Draft202012Validator(migration_ops.MIGRATION_INVENTORY_CSV_PARAMETER_SCHEMA)
+
+    assert not validator.is_valid({})
+    assert validator.is_valid({"inventory_handles": [str(uuid4())]})
+    assert validator.is_valid({"inventories": [_one_vm_inventory()]})
+    assert validator.is_valid(
+        {"inventory_handles": [str(uuid4())], "inventories": [_one_vm_inventory()]}
+    )
+
+
+async def test_one_vm_inventory_read_with_the_hint_gives_a_handle_the_csv_accepts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default limits: a one-VM inventory is small, and the hint still gives a handle."""
+    store = ResultHandleStore(_MemoryValkey())  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        "meho_backplane.connectors.migration.inventory_load.get_result_handle_store",
+        lambda: store,
+    )
+    tenant = uuid4()
+    inventory = _one_vm_inventory()
+    context = {
+        "tenant_id": str(tenant),
+        "operator_sub": _OPERATOR_SUB,
+        "op_id": "vmware.inventory.read",
+    }
+    reducer = JsonFluxReducer(store=store)
+
+    plain, no_handle = await reducer.reduce(inventory, None, context)
+    result, handle = await reducer.reduce(
+        inventory, None, {**context, "result_handle": {"always": True}}
+    )
+
+    assert (plain, no_handle) == (inventory, None)
+    assert result == inventory
+    assert handle is not None
+    export = await migration_ops.migration_inventory_csv(
+        _operator(tenant), None, {"inventory_handles": [str(handle.handle_id)]}
+    )
+    assert export["row_count"] == 1
+    assert export["sources"][0]["origin"] == "stored"
+    assert export["sources"][0]["handle_id"] == str(handle.handle_id)
 
 
 def _small_server(number: int) -> dict[str, Any]:

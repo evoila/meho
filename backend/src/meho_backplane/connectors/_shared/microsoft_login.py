@@ -3,8 +3,9 @@
 
 """Get an access token from Microsoft Entra ID with a client id and a client secret.
 
-The Azure connector uses this module. The Entra ID connector can use it too:
-only the scope (the API the token is for) changes.
+The Azure connector and the Entra ID connector use this module. Only the
+scope (the API the token is for) differs: Azure Resource Manager or
+Microsoft Graph.
 
 How it works
 ============
@@ -132,6 +133,12 @@ class MicrosoftAccessToken:
     ``app_id``, ``object_id`` and ``tenant_id`` come from the token's claims
     (``appid`` or ``azp``, ``oid`` and ``tid``). Microsoft may change the token
     format at any time, so each one is ``None`` when the token cannot be read.
+
+    ``roles`` holds the application permissions the token carries (claim
+    ``roles``, for example ``User.Read.All``), sorted. It is empty when the
+    token carries none, and ``None`` when the token cannot be read. A token
+    keeps the permissions it was made with: a permission an admin grants
+    later is only in the next token.
     """
 
     value: str = field(repr=False)
@@ -139,6 +146,7 @@ class MicrosoftAccessToken:
     app_id: str | None = None
     object_id: str | None = None
     tenant_id: str | None = None
+    roles: tuple[str, ...] | None = None
 
 
 async def fetch_client_credentials_token(
@@ -272,6 +280,7 @@ def _parse_token_answer(
         app_id=_text_claim(claims, "appid") or _text_claim(claims, "azp"),
         object_id=_text_claim(claims, "oid"),
         tenant_id=_text_claim(claims, "tid"),
+        roles=_roles_claim(claims),
     )
 
 
@@ -314,3 +323,18 @@ def _text_claim(claims: Mapping[str, Any], name: str) -> str | None:
     """Return the claim *name* when it is a non-empty string."""
     value = claims.get(name)
     return value if isinstance(value, str) and value else None
+
+
+def _roles_claim(claims: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """Return the ``roles`` claim (the application permissions), sorted.
+
+    ``None`` when the token could not be read (no claims at all) or the claim
+    is not a list. A readable token without the claim carries no application
+    permission, so the answer is empty then.
+    """
+    if not claims:
+        return None
+    value = claims.get("roles", [])
+    if not isinstance(value, list):
+        return None
+    return tuple(sorted({role for role in value if isinstance(role, str) and role}))

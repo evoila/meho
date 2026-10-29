@@ -1031,6 +1031,11 @@ sandboxMode:
   # otherwise. Rendered into `MEHO_SANDBOX_MODE_CONFIRM`, which the
   # backplane checks against the host of its MCP resource URI at boot.
   confirmHost: ""
+  # -- Lets a tenant admin create a delete grant through REST and the CLI
+  # too, not only in the web console (#5251). Rendered into
+  # `MEHO_SANDBOX_DELETE_GRANTS_FROM_API` only when `enabled` is true as
+  # well. Default false: delete grants are made only in the web console.
+  deleteGrantsFromApi: false
 
 # Operator-console (`/ui/*`) OAuth confidential credentials (#2594,
 # Goal #336). The browser BFF login flow served at `/ui/auth/*` needs two

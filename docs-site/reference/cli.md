@@ -4522,7 +4522,7 @@ meho service-principals grants create [flags]
 - `--connector-id` — exact connector id; globs are refused (required)
 - `--expires` — optional ISO 8601 UTC expiry
 - `--json` — emit raw ServiceGrantRead JSON
-- `--op-id` — exact operation id; globs are refused, and a delete operation is refused (delete grants are made in the web console, only in sandbox mode) (required)
+- `--op-id` — exact operation id; globs are refused. A delete operation needs a delete grant: only in sandbox mode, by a tenant admin, with --expires within 30 days. REST and the CLI refuse it unless MEHO_SANDBOX_DELETE_GRANTS_FROM_API is on; the server decides (required)
 - `--principal` — JWT sub of the service principal (required)
 - `--reason` — operator justification for this standing grant (required)
 - `--target` — target UUID (optional; targetless is not a wildcard)

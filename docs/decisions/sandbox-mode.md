@@ -5,6 +5,7 @@
 **Initiative:** [#4621](https://github.com/evoila/meho/issues/4621) — sandbox mode for disposable test systems
 **Adds one exception to:** requirement 1 of [governed-delete-operations.md](governed-delete-operations.md), on a sandbox instance only
 **Same pattern as:** the boot-only switch for delegated decisions ([#3693](https://github.com/evoila/meho/issues/3693))
+**Amended 2026-10-28:** a boot setting lets REST and the CLI create delete grants too ([#5251](https://github.com/evoila/meho/issues/5251)); see "Grants in sandbox mode".
 
 ## The decision
 
@@ -37,7 +38,7 @@
 
 Requirement 1 of the delete decision says today: "Mandatory human approval, always. No standing grant applies, no self-approval, no autonomous-session approval." The new wording:
 
-> 1. **Mandatory human approval, always — except on an instance in sandbox mode.** There, a standing grant may cover a delete by a service principal. A person creates that grant in the web console, and it expires within 30 days. The rest of this requirement is unchanged: no self-approval, no autonomous-session approval.
+> 1. **Mandatory human approval, always — except on an instance in sandbox mode.** There, a standing grant may cover a delete by a service principal. A tenant admin creates that grant in the web console, or, with the setting `MEHO_SANDBOX_DELETE_GRANTS_FROM_API` on, through REST or the CLI, and it expires within 30 days. The rest of this requirement is unchanged: no self-approval, no autonomous-session approval.
 
 The same exception applies wherever that record says that no standing grant can cover a delete, and to the cell "service principal, destructive" in the rules table of #3325. The 30 days are answer 2 in "Answered (2026-10-20)".
 
@@ -64,7 +65,7 @@ The same exception applies wherever that record says that no standing grant can 
 
 ## Guards at boot
 
-- Two settings, read at boot only: `MEHO_SANDBOX_MODE` (default `false`) and `MEHO_SANDBOX_MODE_CONFIRM`. No request, REST route, MCP tool, CLI command or console page can change them.
+- Three settings, read at boot only: `MEHO_SANDBOX_MODE` (default `false`), `MEHO_SANDBOX_MODE_CONFIRM` and `MEHO_SANDBOX_DELETE_GRANTS_FROM_API` (default `false`, see "Grants in sandbox mode"). No request, REST route, MCP tool, CLI command or console page can change them.
 - MEHO refuses to start, with a plain message, when:
   1. the mode is on, and `MEHO_SANDBOX_MODE_CONFIRM` is missing or is not the host name of the MCP resource URI (the public address of the instance, which MEHO already checks at boot);
   2. the mode is on, and no dot-separated part of that host name is exactly `sandbox`: `meho.sandbox.example` passes, `meho.example` and `meho-sandbox.example` are refused;
@@ -80,6 +81,8 @@ The same exception applies wherever that record says that no standing grant can 
 - **Only a tenant admin creates a delete grant, in the web console.** REST and the CLI refuse it, also with a person's token: an AI tool can use a person's login, so a token is never treated as a person (#3325, #3980).
 - **The server checks where the request came from.** The check reads a mark that only MEHO's server sets, from its own console session. No token claim, header or request field can set it. #3980 adds this mark (`web_session` on the caller). If this code lands first, the console route sets the same fact in server code, and #3980 replaces it with the mark.
 - **A console session does not prove that a person clicked.** An AI tool can drive a browser too. Keeping AI tools out of people's console sessions stays an operating rule. MEHO cannot check it.
+
+With the setting `MEHO_SANDBOX_DELETE_GRANTS_FROM_API` on, REST and the CLI may create them too, with a tenant admin's token. The setting is read at boot and cannot be changed by any request. Decided by the program owner on 2026-10-28: a sandbox instance needs no human step, and the walls of the sandbox site are the control.
 - **Every delete grant expires within 30 days** of its creation. Without an expiry, or with a later one, MEHO refuses it. The check sits in `ServicePrincipalGrantService.create`, so REST and the console both get it.
 - **Reminders and renewal.** The sandbox banner shows how many delete grants expire within 7 days, with a link to them. A person reviews the delete grants of one service principal together and renews them as one set. Each renewal is checked like a new grant. MEHO never renews a grant by itself.
 - A delete grant may name one target or a target selector, like any other grant: test systems are often registered during the run.
@@ -145,6 +148,7 @@ Test 1 (`backend/tests/test_sandbox_mode_verdict_table.py`) checks the verdict (
 The program owner answered on 2026-10-20, in the approving review of [pull request #4633](https://github.com/evoila/meho/pull/4633). All five choices stay as written.
 
 1. **Delete grants only in the web console.** Yes: no automation and no CLI can create a delete grant, also not with a person's token.
+   The decision of 2026-10-28 ([#5251](https://github.com/evoila/meho/issues/5251)) changes this when `MEHO_SANDBOX_DELETE_GRANTS_FROM_API` is on: then a tenant admin's token may create one through REST or the CLI.
 2. **30 days for a delete grant.** Yes: every delete grant expires within 30 days of its creation.
 3. **Wording for other instances.** The wording stays: AI agents on service principal logins are on purpose on a sandbox, and the record changes nothing for other instances.
 4. **The review after 20 completed runs.** Yes: the results go into this record, and the program owner keeps or changes the decision.

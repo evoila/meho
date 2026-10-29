@@ -357,6 +357,7 @@ target registration) is documented in
   | `vault.token.role.write` | `adapter.post` on `/v1/auth/token/roles/<role_name>` | dangerous | True | `write` |
   | `vault.token.role.read` | `auth.token.read_role` | safe | False | `other` |
   | `vault.token.role.list` | `auth.token.list_roles` | safe | False | `read` |
+  | `vault.token.create_and_store` | `auth.token.create(role_name=...)` / `auth.token.create_orphan`, then the `vault.kv.patch` / `vault.kv.put` or `k8s.secret.update` handler | dangerous | True | `credential_mint` |
 
   `token.create` mints a client token in its **response** →
   `credential_mint` (aggregate-only broadcast; the token reaches only the
@@ -412,8 +413,55 @@ target registration) is documented in
   target's `extras["vault_role"]` decides which Vault role makes the
   change.
 
+  **Make a token and store it** (`ops_token_store.py`, with
+  `ops_token_store_schemas.py` and `ops_token_store_preview.py`).
+  `vault.token.create_and_store` makes a token and writes it straight to
+  the place the caller names, so nobody sees it: a KV v2 path on the same
+  Vault target (`store.vault_kv`: `path`, `field` default `token`, `mount`
+  default `secret`), or one key of an existing Kubernetes Secret
+  (`store.k8s_secret`: `target`, `namespace`, `name`, `key`). The steps:
+
+  1. Check the destination before the token exists. `vault_kv`: the path
+     shape and the tenant check. `k8s_secret`: the target exists in the
+     caller's tenant and resolves to the Kubernetes connector, the
+     dispatcher's `policy_gate` allows `k8s.secret.update` on it (a
+     `needs-approval` verdict counts only on this op's own approved run),
+     and the Secret exists and is not immutable (key names only).
+  2. Make the token under the target's Vault role
+     (`vault_client_for_target`): `POST auth/token/create/<role_name>`,
+     or `auth/token/create-orphan` when no role is given.
+  3. Check `auth.orphan`. **Why the token must be an orphan:** MEHO's own
+     Vault login token is revoked when the login block ends
+     (`vault_client_for_operator` calls `revoke-self`), and Vault revokes
+     every child token with its parent. A token with a parent would die
+     right after the call. So when Vault answers `orphan: false`, MEHO
+     revokes the token at once (still inside the login) and stops; the
+     error says the token role must set `orphan=true`.
+  4. Write the token by calling the handlers directly: `vault_kv_patch`
+     (`vault_kv_put` when the path is new), or `k8s_secret_update` in
+     `patch` mode. No second operation is started, so the token is never
+     in any operation's parameters or audit row.
+  5. On any failure after step 2, also a cancellation, revoke the new token
+     with the token itself (`auth/token/revoke-self`, in Vault's `default`
+     policy), shielded from cancellation. When that revoke also fails, the
+     error names the accessor and `vault.token.revoke_accessor`.
+  6. Return `{accessor, expire_time, ttl_seconds, policies, stored_to}`;
+     `expire_time` is the creation time plus `auth.lease_duration`.
+
+  The op is pinned `credential_mint` (aggregate-only broadcast, no
+  flight-recorder bodies) and its tags mark it secret-bearing, so the
+  dispatcher withholds error message text; every error carries MEHO's own
+  text as `remediation`. A preview builder shows the token settings and
+  the destination. A permission preflight probes, under the target's role,
+  `update` on the create path and, for a `vault_kv` store, `create` +
+  `read` + `update` on `<mount>/data/<path>` (what `vault.kv.put` and
+  `vault.kv.patch` need). The token role and policy setup is in
+  [`docs/cross-repo/connector-vault-policy.md`](../cross-repo/connector-vault-policy.md)
+  §6.5. Coverage in `test_connectors_vault_token_store.py` and the
+  dev-mode lane of `tests/integration/test_connectors_vault_dev_e2e.py`.
+
   Both groups register from `ops_identity.py` / `ops_token.py` /
-  `ops_token_role.py` spec tables, composed by the thin
+  `ops_token_role.py` / `ops_token_store.py` spec tables, composed by the thin
   `register_vault_identity_token_operations()` registrar
   (`ops_identity_token.py`), which is queued from the package `__init__`
   as its own lifespan registrar entry (independent of the KV / sys / auth
@@ -570,7 +618,9 @@ secret in full. The auth-write ops (G3.15-T3 #1411)
 `vault.auth.userpass.write` / `vault.auth.userpass.update_password` are
 also `credential_write` — the password is in their request params.
 Response-side secret-mint ops (`vault.token.create`,
-`vault.auth.approle.generate_secret_id`) classify `credential_mint`
+`vault.auth.approle.generate_secret_id`, and
+`vault.token.create_and_store`, which never returns its token) classify
+`credential_mint`
 alongside `harbor.robot.create`: the minted value is in the response, so
 the broadcast collapses to aggregate-only and the audit row keeps only a
 `params_hash`, while the caller's `OperationResult` still carries the

@@ -182,6 +182,13 @@ _CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
         # flight recorder drop its bodies (the OAuth form carries the session
         # JWT as the ``assertion``; the token response carries the token).
         "vcfa.provider.api_token.create",
+        # ``vault.token.create_and_store`` makes a Vault token and writes it
+        # straight to a Vault KV path or a Kubernetes Secret; the handler
+        # returns only the accessor, expiry, policies and destination. Same
+        # posture as ``vcfa.provider.api_token.create``: aggregate-only
+        # broadcast, and the flight recorder keeps no bodies (the token rides
+        # in the Vault create response and in the write request).
+        "vault.token.create_and_store",
     }
 )
 

@@ -8,13 +8,15 @@ The identity surface (entity / entity-alias / group lifecycle) lives in
 (create / revoke_accessor / list_accessors / lookup_accessor) lives in
 :mod:`meho_backplane.connectors.vault.ops_token`; the token-role surface
 (role.write / role.read / role.list, also in the ``token`` group) lives
-in :mod:`meho_backplane.connectors.vault.ops_token_role`. Each module
+in :mod:`meho_backplane.connectors.vault.ops_token_role`; the
+make-and-store op (``vault.token.create_and_store``, also in the ``token``
+group) lives in :mod:`meho_backplane.connectors.vault.ops_token_store`. Each module
 owns its handlers, schemas import and per-op spec table; the token group
 shares one ``when_to_use`` blurb.
 
 This thin module is the single lifespan-driven registrar entry (queued
 from the package ``__init__`` alongside the KV / sys / auth registrars):
-it walks the three spec tables and upserts every row into
+it walks the four spec tables and upserts every row into
 ``endpoint_descriptor``. Writes register ``requires_approval=True``
 (privilege assignment / irreversible removal / secret mint); the read
 primitives register safe + approval-free so create-if-absent flows do
@@ -52,6 +54,10 @@ from meho_backplane.connectors.vault.ops_token_role import (
     vault_token_role_read,
     vault_token_role_write,
 )
+from meho_backplane.connectors.vault.ops_token_store import (
+    TOKEN_STORE_OP_SPECS,
+    vault_token_create_and_store,
+)
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
 
@@ -65,6 +71,7 @@ __all__ = [
     "vault_identity_group_write",
     "vault_identity_list",
     "vault_token_create",
+    "vault_token_create_and_store",
     "vault_token_list_accessors",
     "vault_token_lookup_accessor",
     "vault_token_revoke_accessor",
@@ -95,6 +102,7 @@ async def register_vault_identity_token_operations(
         *IDENTITY_OP_SPECS,
         *TOKEN_OP_SPECS,
         *TOKEN_ROLE_OP_SPECS,
+        *TOKEN_STORE_OP_SPECS,
     )
     for spec in specs:
         when_to_use = TOKEN_WHEN_TO_USE if spec["group_key"] == "token" else IDENTITY_WHEN_TO_USE

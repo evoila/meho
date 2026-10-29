@@ -570,14 +570,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     An oversized / malformed request fails `validate_params` in the
     dispatcher and returns a structured `invalid_params` result before
     any read is issued. Returns `{properties: {path: val}, missing:
-    [path]}`, surfacing the `ObjectContent.missingSet`. It additionally
+    [path]}`. Every requested path is in one of the two, so an empty
+    `missing` really means every path came back. It additionally
     surfaces the per-property `missingSet` fault **type names** —
     `missing_properties: [{path, fault_type?}]` plus a
     `missing_fault_summary: {fault_type: count}` roll-up (concrete vim
     fault class names only, e.g. `NoPermission` / `InvalidProperty`,
-    **never** fault text, which can echo a property value) — so an
-    operator can tell a genuinely-unset property from a per-property
-    permission/auth/invalid fault (#3708). The op passes paths through
+    **never** fault text, which can echo a property value) (#3708).
+    vCenter sends a fault with every `missingSet` entry. A property that
+    is not set, or whose value is a link to an object the login cannot
+    see, is in neither `propSet` nor `missingSet`. `object_collect_impl`
+    adds each such path to `missing` and `missing_properties` without a
+    `fault_type`, in request order; `missing_fault_summary` counts only
+    real faults. This runs after `_collect_with_auth_health_reset`, so
+    the stale-session reset and the ESXi probe, which share that helper,
+    still judge the raw answer (#5131). The op passes paths through
     as given. Its description and `properties` hint tell callers that
     vCenter 8.0.x rejects a path into a cluster's `configurationEx`
     (`configurationEx.rule` / `.group` / `.drsConfig`), so they request
@@ -1178,10 +1185,14 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
      excluded composite with its reason. The test
      `test_connectors_vmware_rest_catalog_parity.py` fails when a composite
      or typed op on 9.0 is neither on 8.0 nor in that list.
-   - The governed child ops inside a composite keep their
-     `vmware-rest-9.0` keys on both catalogs. One grant set covers the
-     composite on either catalog, and approving a parked child op re-runs
-     the composite on the 9.0 catalog, where it is also registered.
+   - The write steps inside a composite are checked under the connector
+     the target resolves to (#4991): `vmware-rest-8.0` for an 8.0.x
+     target, `vmware-rest-9.0` for a 9.x target. The handlers read it off
+     the connector instance (`_step_connector_id` in `composites/_write.py`).
+     So a step grant for an 8.0.x target names `vmware-rest-8.0`, and
+     approving a parked step re-runs the composite on the 8.0 catalog.
+     The Supervisor and namespace composites are not on that catalog, so an
+     approved step of one of them on an 8.0.x target cannot resume there.
    - VI-JSON needs vCenter 8.0 U1 or later, so the VI-JSON composites do
      not work on an 8.0 GA target.
    - When the 9.0 catalog refuses an ingested op for an 8.0.x target
@@ -1254,7 +1265,9 @@ does **not** serve the VI-JSON surface and its `/api/*` is a **JSON-RPC
   `defusedxml` parser, per-method string-template envelope builders with a
   local XML escaper, parsers that return the **exact VI-JSON dict shapes**
   the unchanged downstream consumers already read — lives in
-  `connectors/vmware_rest/soap.py`; the connector wires it onto the pooled
+  `connectors/vmware_rest/soap.py` (the SOAP fault parser and its small XML
+  helpers sit in the public `connectors/_shared/soap_fault.py`, because the
+  core error builders read SOAP faults too); the connector wires it onto the pooled
   `httpx` client (inheriting its TLS-pin → insecure → default precedence and
   `sni_hostname` extension for free — no separate `SSLContext`). **No new
   dependency, no `pyvmomi`, no resolver change, no separate impl class.**
@@ -4001,6 +4014,56 @@ waits for approval; the shelf-gated lane checks every rule against the
 pinned `vcenter.yaml` and `vi-json.yaml` files) and `test_delete_names.py`
 (the vSAN prefixes and the `action=delete` query).
 
+### Older-API VM power, clone, snapshot and migrate calls wait for approval (#3869)
+
+These generic calls on the older vCenter API (VI-JSON) now wait until a
+second person approves. VI-JSON sends every method as a `POST` to
+`/<Type>/{moId}/<Method>`, so the parser gave them `caution` without
+approval, and a person's call ran at once. The typed operations for the
+same work (`vm.power`, `vm.power.bulk`, `vm.clone`, `vm.snapshot.revert`,
+`vm.snapshot.create`, `vm.migrate`) already waited.
+
+`ingest_safety.py` raises them on the 8.0 and 9.0 catalogs:
+
+| What it does | Methods | Risk level |
+|---|---|---|
+| Power a VM on, off, reset, suspend; shut down, restart or put the guest on standby | `VirtualMachine`: `PowerOnVM_Task`, `PowerOffVM_Task`, `ResetVM_Task`, `SuspendVM_Task`, `ShutdownGuest`, `RebootGuest`, `StandbyGuest` | `dangerous`, waits for approval |
+| Stop a VM process at once; stop a fault-tolerance secondary VM | `VirtualMachine`: `TerminateVM`, `TerminateFaultTolerantVM_Task` | `dangerous`, waits for approval |
+| Power on many VMs; power a vApp; start or stop the VMs of a host in autostart order | `Datacenter.PowerOnMultiVM_Task`; `VirtualApp`: `PowerOnVApp_Task`, `PowerOffVApp_Task`, `SuspendVApp_Task`; `HostAutoStartManager`: `AutoStartPowerOn`, `AutoStartPowerOff` | `dangerous`, waits for approval |
+| Clone a VM or a vApp | `VirtualMachine`: `CloneVM_Task`, `InstantClone_Task`; `VirtualApp.CloneVApp_Task` | `dangerous`, waits for approval |
+| Go back to a snapshot | `VirtualMachine.RevertToCurrentSnapshot_Task`, `VirtualMachineSnapshot.RevertToSnapshot_Task` | `dangerous`, waits for approval |
+| Move a VM to another host or pool | `VirtualMachine.MigrateVM_Task` | `dangerous`, waits for approval |
+| Take a snapshot | `VirtualMachine`: `CreateSnapshot_Task`, `CreateSnapshotEx_Task` | stays `caution`, waits for approval |
+
+The lists are `VMWARE_VIM_VM_STATE_WRITES` (checked by
+`is_vmware_vim_vm_state_write`) and `VMWARE_VIM_SNAPSHOT_CREATES` (checked
+by `is_vmware_vim_snapshot_create`). A rule matches with or without the
+`/api` mount and with any spelling of the path parameter; a path with a
+query does not match. A floor only raises a level; a row that is already
+`destructive` stays `destructive`. The snapshot create stays `caution`,
+like the typed `vm.snapshot.create`: a new snapshot does not change the
+running VM. `RelocateVM_Task` has its own rule (#4749). The snapshot
+removals (`RemoveSnapshot_Task`, `RemoveAllSnapshots_Task`) are deletes, so
+the parser's delete-name rule already makes them wait. Checks such as
+`CheckPowerOn_Task` and `CheckClone_Task` keep their level.
+
+**One approval is enough.** Typed operations that use these methods (for
+example `vm.snapshot.create`, `vm.snapshot.revert` and
+`vm.clone_from_template`) send them as governed sub-steps with the shared
+sub-op posture (an in-memory descriptor). The raised generic rows do not reach that gate, so a typed
+operation still waits for one approval only.
+
+**Running installs.** Rows already in the database change only on the next
+ingest. To get the new levels, run the catalog ingest again for `vmware/9.0`
+and `vmware/8.0` (the same `--spec` ingest of `vi-json.yaml` the install
+used before).
+
+Tests: `test_connectors_vmware_rest_vim_vm_state_approval.py` (a hand-made
+spec for 8.0 and 9.0, the checks that keep their level, no rule lowers a
+level, a person's `TerminateVM` and `CreateSnapshot_Task` calls wait for
+approval; the shelf-gated lane checks every rule against the pinned 9.0
+`vi-json.yaml`).
+
 ### Alarms: list, acknowledge, reset to green (`#4383`, part 1)
 
 What an operator or agent can do now, through MEHO:
@@ -4227,7 +4290,7 @@ flight-recorder span holds a full key.**
   (`vrops.licensing.*`). The guidance of the write says so; if vCenter 9
   refuses the change, the caller gets the vendor fault as an error.
 - **The mask.** The shared `mask_license_key` in
-  `connectors/_shared/license_key.py` keeps the last 5 characters and turns
+  `connectors/vmware_shared/license_key.py` keeps the last 5 characters and turns
   every other letter and digit into `*`; dashes stay, for example
   `*****-*****-*****-*****-AB12C`. A value of 10 characters or fewer is
   hidden in full. It is the same rule `vrops.license.info` and

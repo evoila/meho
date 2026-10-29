@@ -167,7 +167,7 @@ from meho_backplane.targets.schemas import (
     project_target_to_summary,
 )
 
-__all__ = ["router"]
+__all__ = ["count_graph_node_refs", "router", "soft_delete_target"]
 
 _log = structlog.get_logger(__name__)
 
@@ -1628,19 +1628,42 @@ async def delete_target(
         audit_op_class="write",
     )
     t = await resolve_target(session, operator.tenant_id, name)
+    await soft_delete_target(session, t, operator=operator, force=force)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    # Cascade count -- only graph_node references. The audit_log
-    # table accumulates a row per authenticated request against
-    # the target; counting them would block every DELETE forever
-    # and is not the intent of the cascade check.
-    count_stmt = (
-        select(func.count())
-        .select_from(GraphNode)
-        .where(
-            GraphNode.target_id == t.id,
-        )
-    )
-    graph_node_ref_count = int((await session.execute(count_stmt)).scalar_one())
+
+async def count_graph_node_refs(session: AsyncSession, target_id: uuid.UUID) -> int:
+    """Count the ``graph_node`` rows that point at *target_id*.
+
+    The cascade check of :func:`soft_delete_target` uses this count, and
+    the ``targets.remove`` preview shows it. Audit rows are not counted:
+    every authenticated request against a target writes one, so counting
+    them would block every delete.
+    """
+    count_stmt = select(func.count()).select_from(GraphNode).where(GraphNode.target_id == target_id)
+    return int((await session.execute(count_stmt)).scalar_one())
+
+
+async def soft_delete_target(
+    session: AsyncSession,
+    t: TargetORM,
+    *,
+    operator: Operator,
+    force: bool,
+) -> int:
+    """Soft-delete the live target row *t* and return its ``graph_node`` count.
+
+    The one delete service. ``DELETE /api/v1/targets/{name}`` and the
+    ``targets.remove`` typed op both call it after they have looked the row
+    up in the caller's tenant, so the checks cannot drift apart.
+
+    When ``graph_node`` rows point at the target and *force* is false, it
+    raises a 409 :class:`fastapi.HTTPException` with the count and the
+    ``force=true`` hint. Otherwise it stamps ``deleted_at`` and flushes; the
+    caller owns the transaction. The row, its Vault secret and the system
+    itself stay; only the registry entry stops resolving.
+    """
+    graph_node_ref_count = await count_graph_node_refs(session, t.id)
 
     if graph_node_ref_count > 0 and not force:
         raise HTTPException(
@@ -1670,4 +1693,4 @@ async def delete_target(
         graph_node_refs=graph_node_ref_count,
         force=force,
     )
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return graph_node_ref_count

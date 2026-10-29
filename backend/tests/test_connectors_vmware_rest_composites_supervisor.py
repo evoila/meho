@@ -111,6 +111,9 @@ def gate(monkeypatch: pytest.MonkeyPatch) -> _GateRecorder:
 class _RecordingConnector:
     """Recording connector double serving the status read + recording writes."""
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(
         self,
         *,

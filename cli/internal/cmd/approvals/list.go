@@ -59,7 +59,7 @@ func newListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&statusFilter, "status", "",
-		"filter by status: pending, approved, rejected, expired, all (default: pending)")
+		"filter by status: pending, approved, rejected, expired, withdrawn, all (default: pending)")
 	cmd.Flags().StringVar(&workRef, "work-ref", "",
 		"filter by external change-ticket reference, exact match (e.g. gh:evoila/meho#1)")
 	// 0 means "not set": the flag is then left off the request and the
@@ -86,13 +86,14 @@ type listOpts struct {
 
 func runList(cmd *cobra.Command, opts listOpts) error {
 	validStatuses := map[string]bool{
-		"pending": true, "approved": true, "rejected": true, "expired": true, "all": true,
+		"pending": true, "approved": true, "rejected": true, "expired": true,
+		"withdrawn": true, "all": true,
 	}
 	if opts.StatusFilter != "" && !validStatuses[opts.StatusFilter] {
 		return output.RenderError(
 			cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf(
-				"--status must be one of: pending, approved, rejected, expired, all; got %q",
+				"--status must be one of: pending, approved, rejected, expired, withdrawn, all; got %q",
 				opts.StatusFilter,
 			)),
 			opts.JSONOut,

@@ -19,7 +19,7 @@ REST route (see :mod:`meho_backplane.api.v1.operations`). The CLI
 share these handlers verbatim — the wire-shape unification is the point.
 
 Per CLAUDE.md postulate 5, the agent never sees per-op MCP tools like
-``k8s.pod.list``; it sees a small fixed set of meta-tools and picks
+``vsphere.vm.list``; it sees a small fixed set of meta-tools and picks
 operations through them. This module ships three of the ~17 meta-tools
 that comprise that surface:
 
@@ -97,8 +97,10 @@ from meho_backplane.operations._errors import (
     result_no_target,
     result_target_invalid_type,
     result_target_required,
+    unknown_connector_message,
 )
 from meho_backplane.operations._lookup import (
+    close_connector_ids,
     connector_class_registered,
     connector_exists,
     parse_connector_id,
@@ -165,14 +167,44 @@ class UnknownConnectorError(ValueError):
     domain exceptions (e.g. the missing-target ``ValueError`` mapped
     to ``400`` in :mod:`meho_backplane.api.v1.operations`).
 
-    Carries :attr:`connector_id` (the id the caller passed) so the MCP
-    transport can thread it onto the ``error.data`` discriminator
-    alongside its :class:`ConnectorNotIngestedError` sibling.
+    Carries :attr:`connector_id` (the id the caller passed) and
+    :attr:`did_you_mean` (up to 5 close ids the caller can see, #4136) so
+    the MCP transport can thread them onto the ``error.data``
+    discriminator alongside its :class:`ConnectorNotIngestedError` sibling.
     """
 
-    def __init__(self, message: str, *, connector_id: str) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        connector_id: str,
+        did_you_mean: list[str] | None = None,
+    ) -> None:
         super().__init__(message)
         self.connector_id = connector_id
+        self.did_you_mean = did_you_mean or []
+
+    def as_error_data(self) -> dict[str, Any]:
+        """Render the structured ``error.data`` payload for the MCP surface.
+
+        Shape: ``{"reason": "unknown_connector", "connector_id": ...,
+        "did_you_mean": [...]}``.
+        """
+        return {
+            "reason": "unknown_connector",
+            "connector_id": self.connector_id,
+            "did_you_mean": self.did_you_mean,
+        }
+
+    @classmethod
+    async def for_caller(cls, *, tenant_id: uuid.UUID, connector_id: str) -> UnknownConnectorError:
+        """Build the error with the close ids *tenant_id* can see (#4136)."""
+        did_you_mean = await close_connector_ids(tenant_id=tenant_id, connector_id=connector_id)
+        return cls(
+            unknown_connector_message(connector_id, did_you_mean),
+            connector_id=connector_id,
+            did_you_mean=did_you_mean,
+        )
 
 
 class ConnectorNotIngestedError(ValueError):
@@ -420,11 +452,11 @@ class CallOperationBody(BaseModel):
     and the MCP handler share validation. ``target`` accepts either
     shape and ``None``:
 
-    * **Bare string** -- ``target: "prod-k8s"``. The forward-preferred
+    * **Bare string** -- ``target: "rdc-vcenter"``. The forward-preferred
       shape; matches ``query_topology`` / ``query_audit`` so an agent
       can carry a target name across the read and the write surfaces
       without reshape. G0.13-T2 (#1132) widening of #780.
-    * **Dict** -- ``target: {"name": "prod-k8s"}``. The original
+    * **Dict** -- ``target: {"name": "rdc-vcenter"}``. The original
       shape; the handler resolves the ``name`` field and (optionally)
       reads ``fqdn`` for vhost routing. Still accepted unchanged.
     * **None** -- the operation does not need a target (typed handlers
@@ -806,18 +838,6 @@ def _build_operation_groups_query(
     return stmt
 
 
-def _raise_unknown_connector(connector_id: str) -> None:
-    """Raise :class:`UnknownConnectorError` with the long-form recovery hint."""
-    raise UnknownConnectorError(
-        f"unknown connector_id {connector_id!r} — expected <impl_id>-<version> "
-        f"(e.g. 'k8s-1.x', 'vault-1.x'). If this id appeared in "
-        f"GET /api/v1/connectors, the listing is inconsistent with the "
-        f"dispatcher's resolve path — please file a bug report; otherwise "
-        f"the id is mistyped or the connector is not registered on this deploy",
-        connector_id=connector_id,
-    )
-
-
 async def _require_dispatchable_connector(
     *,
     operator: Operator,
@@ -847,8 +867,8 @@ async def _require_dispatchable_connector(
       ``meho connector ingest …`` verb instead of receiving an opaque
       unknown-connector error (#1482).
     * **No DB rows, no class** — genuinely unknown. Raise
-      :class:`UnknownConnectorError` (the long-form mistyped-id recovery
-      hint).
+      :class:`UnknownConnectorError`, which names up to 5 close ids the
+      caller can see (#4136).
     """
     if await connector_exists(
         tenant_id=operator.tenant_id,
@@ -873,7 +893,9 @@ async def _require_dispatchable_connector(
             connector_id=connector_id,
             next_step=next_step.model_dump(mode="json") if next_step is not None else None,
         )
-    _raise_unknown_connector(connector_id)
+    raise await UnknownConnectorError.for_caller(
+        tenant_id=operator.tenant_id, connector_id=connector_id
+    )
 
 
 async def list_operation_groups(
@@ -1342,8 +1364,8 @@ def _normalize_target_arg(
     """Normalise ``call_operation``'s ``target`` to the canonical dict shape.
 
     G0.13-T2 (#1132) additive widening: ``call_operation`` accepts either
-    a bare string ``"prod-vault"`` (matches ``query_topology`` /
-    ``query_audit``) or the existing dict ``{"name": "prod-vault"}``.
+    a bare string ``"rdc-vault"`` (matches ``query_topology`` /
+    ``query_audit``) or the existing dict ``{"name": "rdc-vault"}``.
     Both reduce to the same dict before dispatch so downstream code
     (resolver, connectors, audit) sees one canonical form.
 
@@ -1474,8 +1496,8 @@ async def _call_operation_impl(
 
     ``arguments`` shape: ``{"connector_id": str, "op_id": str,
     "target": str | dict | None, "params": dict}``. The ``target`` value is
-    normalised via :func:`_normalize_target_arg` (bare string ``"prod-k8s"``
-    or partial dict ``{"name": "prod-k8s"}`` both reduce to the canonical
+    normalised via :func:`_normalize_target_arg` (bare string ``"rdc-vcenter"``
+    or partial dict ``{"name": "rdc-vcenter"}`` both reduce to the canonical
     dict form before :func:`~meho_backplane.targets.resolver.resolve_target`
     is called). Passing ``target=None`` is valid for typed operations whose
     handler does not consume a target.
@@ -1589,8 +1611,8 @@ async def call_operation(
     "target": str | dict | None, "params": dict}``.
 
     The handler accepts a ``target`` value as either a bare string
-    ``"prod-k8s"`` (matches ``query_topology`` / ``query_audit``) or
-    the partial dict ``{"name": "prod-k8s"}``. Both are normalised by
+    ``"rdc-vcenter"`` (matches ``query_topology`` / ``query_audit``) or
+    the partial dict ``{"name": "rdc-vcenter"}``. Both are normalised by
     :func:`_normalize_target_arg` to the canonical dict form before
     :func:`~meho_backplane.targets.resolver.resolve_target` is called.
     Passing ``target=None`` is valid for typed operations whose handler

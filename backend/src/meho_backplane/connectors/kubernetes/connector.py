@@ -1479,6 +1479,17 @@ class KubernetesConnector(Connector):
 
         return await _k8s_deployment_info(self, target, operator, params)
 
+    async def k8s_workload_list(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``k8s.workload.list`` op."""
+        from meho_backplane.connectors.kubernetes.ops_workload_set import k8s_workload_list as _h
+
+        return await _h(self, target, operator, params)
+
     async def k8s_job_list(
         self,
         operator: Operator,

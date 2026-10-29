@@ -133,8 +133,10 @@ from uuid import UUID
 __all__ = [
     "AmbiguousConnectorScopeError",
     "BuiltinConnectorWriteForbiddenError",
+    "ConnectorInUseError",
     "ConnectorNotFoundError",
     "ConnectorScopeCandidate",
+    "ConnectorUser",
     "InvalidSchemaError",
     "InvalidSpecError",
     "InvalidStateTransitionError",
@@ -748,6 +750,83 @@ class LegacyTenantConnectorCopyError(Exception):
             "legacy_product": legacy_product,
             "product": product,
             "tenant_id": str(tenant_id),
+            "message": self.message,
+        }
+        super().__init__(self.message)
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectorUser:
+    """One thing that still uses a connector a delete wants to remove (#5027).
+
+    ``kind`` is one of ``sensor``, ``runbook_template``, ``hosted_agent``,
+    ``schedule``, ``approval_request`` or ``operation_run``. ``id`` is the
+    row id; ``name`` is the name an operator knows it by (``None`` when the
+    row has none); ``op_id`` is the operation it calls (``None`` for a
+    hosted agent or schedule, which name the whole connector).
+    """
+
+    kind: str
+    id: str
+    name: str | None
+    op_id: str | None
+    tenant_id: UUID
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "kind": self.kind,
+            "id": self.id,
+            "name": self.name,
+            "op_id": self.op_id,
+            "tenant_id": str(self.tenant_id),
+        }
+
+    def label(self) -> str:
+        text = f"{self.kind} {self.name!r}" if self.name else f"{self.kind} {self.id}"
+        if self.op_id:
+            text += f" (operation {self.op_id})"
+        return text
+
+
+class ConnectorInUseError(Exception):
+    """Raised when a connector delete is refused because something still uses it (#5027).
+
+    The delete checks sensors, runbook templates, hosted agents, schedules,
+    waiting approvals and queued or running operation runs first. When any
+    exist, nothing is deleted and this error lists them, so the operator
+    can remove or change each one and try again. The fronts map it to REST
+    ``409`` / MCP ``-32602`` with the structured :attr:`detail` (code
+    ``connector_in_use``).
+
+    ``users`` holds only the users the caller may see (their own tenant, or
+    every tenant for a platform admin). ``other_tenant_user_count`` counts
+    the rest, with no names, so a built-in delete never shows another
+    tenant's data.
+    """
+
+    def __init__(
+        self,
+        *,
+        connector_id: str,
+        users: Sequence[ConnectorUser],
+        other_tenant_user_count: int = 0,
+    ) -> None:
+        self.connector_id = connector_id
+        self.users = tuple(users)
+        self.other_tenant_user_count = other_tenant_user_count
+        total = len(self.users) + other_tenant_user_count
+        lines = [f"- {user.label()}" for user in self.users]
+        if other_tenant_user_count:
+            lines.append(f"- {other_tenant_user_count} more in other tenants")
+        self.message = (
+            f"connector {connector_id!r} is still used by {total} item(s), so it was "
+            f"not deleted. Remove or change each one, then try again:\n" + "\n".join(lines)
+        )
+        self.detail: dict[str, object] = {
+            "detail": "connector_in_use",
+            "connector_id": connector_id,
+            "users": [user.as_dict() for user in self.users],
+            "other_tenant_user_count": other_tenant_user_count,
             "message": self.message,
         }
         super().__init__(self.message)

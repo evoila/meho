@@ -82,9 +82,13 @@ self_approval_forbidden: operator '<your-sub>' may not approve approval_request
 ```
 
 That is a REST `403`, an MCP invalid-params error, and a disabled
-**Approve** button in the console — all naming the same flag. Rejecting
-your *own* request is always allowed: withdrawing a write you asked for
-is not a privilege escalation.
+**Approve** button in the console — all naming the same flag. To take
+back your *own* pending request, withdraw it:
+`meho approvals withdraw <id> [--reason TEXT]` (or
+`POST /api/v1/approvals/{id}/withdraw`). The request then shows
+"withdrawn by the sender", nobody can approve it, and the operation does
+not run. A person, an agent or a service account can each withdraw its
+own request.
 
 On a team this is invisible: your colleague approves your write. On a
 **one-operator** deploy it looks like a dead end — you are both the
@@ -264,8 +268,11 @@ What stays the same on a sandbox:
 
 How delete grants work:
 
-- Only a tenant admin creates one, and only in the web console. The REST
-  API and the CLI refuse it, also with a person's token.
+- Only a tenant admin creates one, in the web console. The REST API and
+  the CLI refuse it, also with a person's token, unless the instance has
+  the chart value `sandboxMode.deleteGrantsFromApi: true`. Then a tenant
+  admin who signed in with `meho login` may create one through REST or
+  `meho service-principals grants create`, with the same checks.
 - Every delete grant expires within 30 days. MEHO never renews one by
   itself; the banner on every console page counts the delete grants that
   expire within 7 days. A tenant admin renews the delete grants of one
@@ -400,7 +407,8 @@ single-account hole for every operation.
 
 **The Approve button is greyed out in the console.** Same cause: you are
 the requester. The modal names both options inline and links back here.
-Deny stays enabled — you can always withdraw your own request.
+Deny stays enabled. To take back your own request, use
+`meho approvals withdraw <id>` instead.
 
 **I set the flag but `/ready` still says `four_eyes_enforced`.** The
 backplane reads `APPROVAL_ALLOW_SELF_APPROVAL` at startup. Confirm the

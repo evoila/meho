@@ -535,6 +535,46 @@ compat gate, or a readiness check that reintroduces strict revision
 equality. Both are CI/test-pinned (`test_migration_compat.py`,
 `test_alembic_probe.py`).
 
+## Testing a migration (the saved databases, #5295)
+
+Tests for one migration live in `backend/tests/migrations/`. Most of them
+start from a database at some revision (often the one just before the
+migration under test), add rows, and then run the step they check.
+
+Do not build that start point with `command.upgrade(cfg, "<rev>")` on an
+empty file. That replays every migration from the first one, in every test,
+and it made the migrations job run close to its time limit. Use the
+`copy_migrated_db` fixture from `backend/tests/migrations/conftest.py`
+instead:
+
+```python
+def test_backfill(
+    alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
+) -> None:
+    cfg, sync_url = alembic_cfg
+    copy_migrated_db(cfg, _DOWN_REVISION)  # a copy of a saved database
+    _insert_old_row(sync_url)
+    command.upgrade(cfg, _REVISION)  # runs only the step under test
+```
+
+How it works:
+
+- The fixture builds a SQLite file at each revision a test asks for, once
+  per test session, and keeps it. A file is built from the saved file of
+  the nearest earlier revision, so the chain is replayed at most once.
+- Each test gets its own byte copy, so no test sees another test's data.
+  The copy fails if the test's file already holds data.
+- A migration whose code reads `starting_heads` (today only `0115`) acts
+  differently when the database is created from empty in the same run. The
+  builder never steps over such a migration from a saved file. So every saved
+  file is the same as a database built from empty in one upgrade.
+- A test that checks what happens on a database created from empty keeps a
+  plain `command.upgrade(cfg, ...)` call (for example the "new database" test
+  of `0115`).
+- The PostgreSQL container tests (`test_migration_rollback.py`,
+  `test_migration_0103_audit_log_raw_payload_ageoff.py`) do not use it.
+
 ## Async and sync engine interaction
 
 `backend/alembic/env.py` provides an async runner that wraps `upgrade()` and
@@ -568,6 +608,7 @@ avoid "event loop already running" errors.
 - `backend/alembic/versions/0038_backfill_endpoint_descriptor_product_splits.py`:
   the canonical collision-guarded backfill-rewrite (correlated `NOT EXISTS`
   twin check on a partial-unique natural key, documented no-op downgrade).
+- `backend/tests/migrations/conftest.py`: the `copy_migrated_db` fixture (saved databases per revision, #5295).
 - `backend/tests/migrations/test_alembic_uuid_param_consistency.py`: drift-guard test.
 - `backend/tests/migrations/test_alembic_seed_rdc_conventions.py`: 0018 behavioural tests.
 - `backend/tests/migrations/test_migration_compat.py`: additive-only CI guard tests.

@@ -52,6 +52,7 @@ from meho_backplane.connectors.vcf_logs import (
     VcfLogsConnector,
     VcfLogsTargetLike,
 )
+from meho_backplane.connectors.vcf_logs.connector import _session_cache_key
 
 
 def _make_operator(raw_jwt: str = "op.test.jwt") -> Operator:
@@ -316,8 +317,8 @@ async def test_per_target_isolation_keeps_session_tokens_separate() -> None:
     assert h_a == {"Authorization": "Bearer token-a"}
     assert h_b == {"Authorization": "Bearer token-b"}
     assert connector._session_tokens == {
-        target_cache_key(_TARGET_A): "token-a",
-        target_cache_key(_TARGET_B): "token-b",
+        _session_cache_key(_TARGET_A): "token-a",
+        _session_cache_key(_TARGET_B): "token-b",
     }
     await connector.aclose()
 
@@ -331,8 +332,8 @@ async def test_public_invalidate_session_evicts_only_the_targets_slot() -> None:
     preserves per-``(tenant_id, target.id)`` isolation.
     """
     connector = _make_connector()
-    key_a = target_cache_key(_TARGET_A)
-    key_b = target_cache_key(_TARGET_B)
+    key_a = _session_cache_key(_TARGET_A)
+    key_b = _session_cache_key(_TARGET_B)
     connector._session_tokens[key_a] = "token-a"
     connector._session_tokens[key_b] = "token-b"
 
@@ -531,7 +532,7 @@ async def test_downstream_401_triggers_relogin_and_retry_once() -> None:
     # Downstream GET fired twice -- the original 401 + the post-relogin retry.
     assert events_route.call_count == 2
     # The post-relogin token replaced the stale one.
-    assert connector._session_tokens == {target_cache_key(_TARGET_A): "token-second"}
+    assert connector._session_tokens == {_session_cache_key(_TARGET_A): "token-second"}
     # Both downstream GETs carried Bearer headers (first the stale
     # token, second the refreshed one).
     requests = events_route.calls
@@ -715,7 +716,7 @@ async def test_aclose_clears_session_token_cache_and_credentials_and_pool() -> N
         mock.post("/api/v2/sessions").respond(200, json={"sessionId": "token", "ttl": 1800})
         await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
-    assert connector._session_tokens == {target_cache_key(_TARGET_A): "token"}
+    assert connector._session_tokens == {_session_cache_key(_TARGET_A): "token"}
     # Credentials cache should also be populated after the first call.
     assert target_cache_key(_TARGET_A) in connector._credentials.cached_targets
     await connector.aclose()

@@ -23,7 +23,7 @@ the head on ``origin/main``): the chain is the single linear head
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -78,10 +78,12 @@ def _column_specs(sync_url: str) -> dict[str, dict[str, object]]:
     return {column["name"]: column for column in columns}
 
 
-def test_upgrade_adds_nullable_display_name_columns(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_nullable_display_name_columns(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0097`` adds both display-name columns as nullable."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     specs = _column_specs(sync_url)
     for name in _COLUMNS:
@@ -91,10 +93,12 @@ def test_upgrade_adds_nullable_display_name_columns(alembic_cfg: tuple[Config, s
         assert specs[name]["nullable"] is True
 
 
-def test_downgrade_drops_display_name_columns(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_drops_display_name_columns(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade 0096`` drops both display-name columns."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert all(name in _column_specs(sync_url) for name in _COLUMNS)
 
     command.downgrade(cfg, _DOWN_REVISION)
@@ -103,10 +107,12 @@ def test_downgrade_drops_display_name_columns(alembic_cfg: tuple[Config, str]) -
         assert name not in specs
 
 
-def test_upgrade_round_trips_after_clean_downgrade(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_round_trips_after_clean_downgrade(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0097`` → ``downgrade 0096`` → ``upgrade 0097`` restores both columns."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     command.downgrade(cfg, _DOWN_REVISION)
     command.upgrade(cfg, _REVISION)
 

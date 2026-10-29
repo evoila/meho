@@ -14,7 +14,7 @@ reads one of two files (input ``file``):
 
 The read itself (bounded fetch, secret check, parts, size check) is
 shared with ``vr.api_file.get`` and lives in
-:mod:`meho_backplane.connectors._shared.dr_api_file`.
+:mod:`meho_backplane.connectors.vmware_shared.dr_api_file`.
 """
 
 from __future__ import annotations

@@ -98,7 +98,10 @@ said the opposite; that was wrong.
 ### The fast way: `meho admin keycloak bootstrap-clients`
 
 The CLI does Steps 1 and 2 for you, and puts the first admin user in
-`MEHO-Admins`. It is safe to run twice:
+`MEHO-Admins` and `MEHO-Platform-Admins`. It also adds the
+`meho_tenant` attribute and the `meho-tenants` mapper (see
+[Several tenants](#several-tenants-the-meho_tenants-list)). It is safe
+to run twice:
 
 ```bash
 KEYCLOAK_ADMIN_PASSWORD=... KEYCLOAK_ADMIN_USER_PASSWORD=... \
@@ -230,8 +233,10 @@ The rules:
   of whichever group it finds first.
 - **No group, no access.** A person in none of the five groups gets no
   `tenant_id`, and the backplane answers `401 missing_tenant_claim`.
-- **Leave the person's own `tenant_id` / `tenant_role` / `approver`
-  attributes empty.** A value on the person wins over the group.
+- **Leave the person's own `tenant_id` / `tenant_role` / `approver` /
+  `meho_tenant` attributes empty.** A value on the person wins over the
+  group, and a `meho_tenant` value on the person is added to their
+  tenant list.
 - **People must not be able to set these attributes on themselves.**
   Keep **Realm settings → General → Unmanaged Attributes** at
   **Disabled** (the Keycloak default), **Admin can view** or **Admin
@@ -248,6 +253,41 @@ A company directory (Active Directory, LDAP) or a login system in front
 of Keycloak (Entra ID) can fill the groups for you: map the directory
 group to one of the five Keycloak groups. The recipes for that come
 with [#3959](https://github.com/evoila/meho/issues/3959).
+
+### Several tenants: the `meho_tenants` list
+
+One person can be in role groups of several tenants, one role group per
+tenant. The design is in
+[2026-10-28-several-tenants-per-person.md](../decisions/2026-10-28-several-tenants-per-person.md).
+The realm side:
+
+- **The attribute.** Every role group carries `meho_tenant` =
+  `<tenant-uuid>:<tenant>:<Role>`, for example
+  `3f0c…:main:Operators`. `<tenant>` is a short name (lowercase letters,
+  digits, dashes). `<Role>` is `Readers`, `Operators`, `SA-Operators`,
+  `Admins` or `Approvers`. The five groups of the first tenant keep
+  `tenant_id`, `tenant_role` and `approver` as well.
+- **Extra tenants.** Each one gets five groups
+  `MEHO-<tenant>-Readers|Operators|SA-Operators|Admins|Approvers` that
+  carry **only** `meho_tenant`. No `tenant_id`, no `tenant_role`: an
+  older MEHO refuses a person who is only in these groups.
+- **The mapper** `meho-tenants`, on the clients people log in with:
+  stock User Attribute mapper, **User Attribute** `meho_tenant`,
+  **Token Claim Name** `meho_tenants`, **Claim JSON Type** `String`,
+  **Multivalued** on, **Aggregate attribute values** on, access token
+  and userinfo on, ID token off. Keycloak then lists the value of every
+  group of the person.
+- **The standard setups make all of this, safe to run twice.**
+  `meho admin keycloak bootstrap-clients --tenant-name <name>` names the
+  first tenant (default `main`), and `--add-tenant <name>
+  [--add-tenant-id <uuid>]` adds one tenant's five groups. The built-in
+  Keycloak reads `coreKeycloak.tenantName` and the list
+  `coreKeycloak.tenants` (`{name, id}` each).
+- **A site with one tenant** gets a list with one entry. Every other
+  claim stays the same.
+
+How MEHO reads the list is a separate step; until then MEHO keeps
+reading `tenant_id` and `tenant_role` only.
 
 ### Upgrading a realm that still has fixed values
 
@@ -465,10 +505,11 @@ not a list of strings) or an absent role resolves to `False`, and a
 malformed shape is logged under `malformed_platform_admin_realm_access`.
 
 > Status: the backplane primitive (the `platform_admin` field + claim
-> extraction) landed under [#1638]; no surface consumes it yet — it is
-> the substrate a later cross-tenant authorization gate checks. The
-> realm-side mapper is applied by the lab operator when the first
-> cross-tenant platform role is provisioned.
+> extraction) landed under [#1638]. Both standard setups now make the
+> group `MEHO-Platform-Admins` (attribute `platform_admin` = `true`) and
+> a User Attribute mapper `platform-admin`, and put the first admin in
+> the group: the built-in Keycloak since #4043, and
+> `meho admin keycloak bootstrap-clients` since #5237.
 
 ## The `approver` approve-only capability — group-based recipe (#3243)
 

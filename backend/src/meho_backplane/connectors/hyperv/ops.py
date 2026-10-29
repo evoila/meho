@@ -15,7 +15,7 @@ Structurally it is a copy of the ``winsrv`` estate mold (#3261): identity canary
 JSONFlux envelope for list reads, and the ``rke2`` approval-parked-write mold
 for its destructive ops (checkpoint revert / delete).
 
-Op surface (18 ops across six groups; safety tier per the Initiative #3259
+Op surface (19 ops across six groups; safety tier per the Initiative #3259
 satellite table — reads ``safe``, recoverable writes ``caution``, destructive
 ``dangerous`` + ``requires_approval``):
 
@@ -27,6 +27,7 @@ satellite table — reads ``safe``, recoverable writes ``caution``, destructive
 * ``hyperv.vms.get``            [safe]   Get-VM -Name (one VM's identity + state + generation).
 * ``hyperv.vms.config``         [safe]   deep config: memory / processors / generation / firmware.
 * ``hyperv.vms.state``          [safe]   runtime state: State / Status / Uptime / Heartbeat.
+* ``hyperv.vms.guest.list``     [safe]   BIOS GUID + guest OS per VM (integration services; list).
 * ``hyperv.disks.vm.list``      [safe]   Get-VMHardDiskDrive (a VM's attached disks; list).
 * ``hyperv.disks.vhd.get``      [safe]   Get-VHD (one VHD/VHDX's format/size/parent/fragmentation).
 * ``hyperv.disks.vhd.chain``    [safe]   differencing-disk parent chain (leaf → base; list).
@@ -298,6 +299,7 @@ def _hyperv_ops() -> tuple[HypervOp, ...]:
     from meho_backplane.connectors.hyperv.ops_checkpoints import CHECKPOINT_OPS
     from meho_backplane.connectors.hyperv.ops_disks import DISK_OPS
     from meho_backplane.connectors.hyperv.ops_export import EXPORT_OPS
+    from meho_backplane.connectors.hyperv.ops_guest import GUEST_OPS
     from meho_backplane.connectors.hyperv.ops_host import HOST_OPS
     from meho_backplane.connectors.hyperv.ops_power import POWER_OPS
     from meho_backplane.connectors.hyperv.ops_vms import VMS_OPS
@@ -306,6 +308,7 @@ def _hyperv_ops() -> tuple[HypervOp, ...]:
         _HYPERV_ABOUT_OP,
         *HOST_OPS,
         *VMS_OPS,
+        *GUEST_OPS,
         *DISK_OPS,
         *CHECKPOINT_OPS,
         *EXPORT_OPS,

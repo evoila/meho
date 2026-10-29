@@ -56,7 +56,7 @@ from meho_backplane.broadcast import (
 from meho_backplane.broadcast.announce_gate import reset_announce_gate_cache_for_testing
 from meho_backplane.broadcast.history import ADVISORY_EXTRAS_KEY
 from meho_backplane.broadcast.reflex import (
-    _ANNOUNCE_NUDGE,
+    _ANNOUNCE_NUDGES,
     _READ_NUDGE,
     REFLEX_ADVISORY_EXTRAS_KEY,
     build_reflex_advisory,
@@ -358,22 +358,34 @@ async def test_read_nudge_fires_for_direct_mcp_session_via_header_fallback() -> 
 # ---------------------------------------------------------------------------
 
 
-async def test_announce_nudge_fires_for_write_without_claim() -> None:
-    """A write-class op with no covering claim fires the announce nudge."""
+@pytest.mark.parametrize(
+    ("gap", "says"),
+    [
+        ("no_claim", "without an active announce claim"),
+        ("expired", "has expired"),
+        ("other_target", "on a target that none of your active announce claims name"),
+        ("other_op_class", "planned_op_class 'write'"),
+    ],
+)
+async def test_announce_nudge_fires_for_write_without_claim(gap: str, says: str) -> None:
+    """A write-class op with no covering claim fires the nudge naming why (#4091)."""
     await _seed_broadcast_recent(_SESSION)  # satisfy read so announce is reached
     store = _FakeSetStore()
     with (
         _patch_set(store),
         patch(
-            "meho_backplane.broadcast.reflex.caller_has_active_announce_claim",
-            new=AsyncMock(return_value=False),
+            "meho_backplane.broadcast.reflex.announce_claim_gap",
+            new=AsyncMock(return_value=gap),
         ),
         _bound_session(_SESSION),
     ):
         advisory = await build_reflex_advisory(
             _operator(), op_id="vault.kv.delete", target_name="vault-1"
         )
-    assert advisory == {REFLEX_ADVISORY_EXTRAS_KEY: _ANNOUNCE_NUDGE}
+    nudge = advisory[REFLEX_ADVISORY_EXTRAS_KEY]
+    assert says in nudge
+    assert "meho_broadcast_announce" in nudge
+    assert "{op_class}" not in nudge
 
 
 async def test_announce_nudge_silent_when_claim_covers_op() -> None:
@@ -383,8 +395,8 @@ async def test_announce_nudge_silent_when_claim_covers_op() -> None:
     with (
         _patch_set(store),
         patch(
-            "meho_backplane.broadcast.reflex.caller_has_active_announce_claim",
-            new=AsyncMock(return_value=True),
+            "meho_backplane.broadcast.reflex.announce_claim_gap",
+            new=AsyncMock(return_value=None),
         ),
         _bound_session(_SESSION),
     ):
@@ -399,10 +411,10 @@ async def test_read_class_op_never_trips_announce() -> None:
     """A read-class op never trips announce, even with no claim."""
     await _seed_broadcast_recent(_SESSION)
     store = _FakeSetStore()
-    claim = AsyncMock(return_value=False)
+    claim = AsyncMock(return_value="no_claim")
     with (
         _patch_set(store),
-        patch("meho_backplane.broadcast.reflex.caller_has_active_announce_claim", new=claim),
+        patch("meho_backplane.broadcast.reflex.announce_claim_gap", new=claim),
         _bound_session(_SESSION),
     ):
         advisory = await build_reflex_advisory(
@@ -424,8 +436,8 @@ async def test_read_has_priority_then_announce_on_next_call() -> None:
     with (
         _patch_set(store),
         patch(
-            "meho_backplane.broadcast.reflex.caller_has_active_announce_claim",
-            new=AsyncMock(return_value=False),
+            "meho_backplane.broadcast.reflex.announce_claim_gap",
+            new=AsyncMock(return_value="no_claim"),
         ),
         _bound_session(_SESSION),
     ):
@@ -441,7 +453,7 @@ async def test_read_has_priority_then_announce_on_next_call() -> None:
             _operator(), op_id="vault.kv.delete", target_name="vault-1"
         )
     assert first == {REFLEX_ADVISORY_EXTRAS_KEY: _READ_NUDGE}
-    assert second == {REFLEX_ADVISORY_EXTRAS_KEY: _ANNOUNCE_NUDGE}
+    assert second == {REFLEX_ADVISORY_EXTRAS_KEY: _ANNOUNCE_NUDGES["no_claim"]}
 
 
 # ---------------------------------------------------------------------------

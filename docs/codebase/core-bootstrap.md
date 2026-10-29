@@ -85,7 +85,10 @@ Design: `docs/decisions/2026-10-28-several-tenants-per-person.md`.
 - `coreKeycloak.tenants` is a list of `{name, id}`. For each entry the Job
   makes `MEHO-<name>-Readers`, `-Operators`, `-SA-Operators`, `-Admins` and
   `-Approvers`. They carry only `meho_tenant`, never `tenant_id` or
-  `tenant_role`. The plan field is `Plan.tenants` (`TenantPlan`). A name
+  `tenant_role`. When such a group exists already, the Job removes
+  `tenant_id`, `tenant_role` and `approver` from it
+  (`OLD_ACCESS_ATTRIBUTES`) and keeps every other attribute. The plan
+  field is `Plan.tenants` (`TenantPlan`). A name
   must be lowercase letters, digits and dashes, and not `sa`, `platform`
   or `ci` (those would clash with shipped groups). Names and ids must
   differ from each other and from the first tenant; the Job stops before

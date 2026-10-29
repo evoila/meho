@@ -20,8 +20,9 @@ running realm up to date through the Admin REST API:
   ``coreKeycloak.tenants`` (``MEHO-<tenant>-<Role>``); these carry only the
   ``meho_tenant`` attribute;
 * it sets the attributes of the realm file's groups and of the extra
-  tenants' groups on groups that exist already, and leaves other
-  attributes alone;
+  tenants' groups on groups that exist already, removes ``tenant_id``,
+  ``tenant_role`` and ``approver`` from an extra tenant's groups, and
+  leaves other attributes alone;
 * when ``coreKeycloak.ci.enabled`` is on, it also makes a CI-only service
   client and a group for a second tenant;
 * on the first run it checks that ``meho-admin`` can log in, then removes
@@ -106,6 +107,9 @@ FIRST_LOGIN_KEYS = ("admin_username", "admin_password", "approver_username", "ap
 # The role part of a role group's name, and of its ``meho_tenant`` value
 # ``<tenant-uuid>:<tenant>:<Role>`` (docs/decisions/login-role-groups.md).
 TENANT_ROLES = ("Readers", "Operators", "SA-Operators", "Admins", "Approvers")
+# The attributes an older MEHO reads for access. An extra tenant's groups
+# must not carry them, so the stage removes them from such a group.
+OLD_ACCESS_ATTRIBUTES = ("tenant_id", "tenant_role", "approver")
 # A tenant's short name. Tenant names that would make a group name that
 # differs from a shipped group only in case are refused.
 _TENANT_NAME = r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
@@ -244,11 +248,14 @@ class _Realm:
                 return self._group_ids[name]
         return None
 
-    async def ensure_group(self, group: Mapping[str, Any]) -> None:
+    async def ensure_group(self, group: Mapping[str, Any], drop: tuple[str, ...] = ()) -> None:
+        """Make the group, or set its attributes; ``drop`` names attributes to remove."""
         name = group["name"]
         group_id = await self.group_id(name)
         if group_id is not None:
-            changed = await self._set_attributes(group_id, name, group.get("attributes") or {})
+            changed = await self._set_attributes(
+                group_id, name, group.get("attributes") or {}, drop
+            )
             _say(f"group {name}: " + ("kept (attributes set)" if changed else "kept"))
             return
         reply = expect(
@@ -260,19 +267,22 @@ class _Realm:
         _say(f"group {name}: created")
 
     async def _set_attributes(
-        self, group_id: str, name: str, want: Mapping[str, list[str]]
+        self, group_id: str, name: str, want: Mapping[str, list[str]], drop: tuple[str, ...]
     ) -> bool:
-        """Set the wanted attributes on an existing group; keep every other one."""
-        if not want:
+        """Set ``want`` and remove ``drop`` on an existing group; keep every other attribute."""
+        if not want and not drop:
             return False
         url = f"{self.base}/groups/{group_id}"
         current = expect(
             await self.admin.call("GET", url), 200, what=f"cannot read group {name}"
         ).data
         attributes = dict(current.get("attributes") or {})
-        if all(attributes.get(key) == list(value) for key, value in want.items()):
+        wanted = all(attributes.get(key) == list(value) for key, value in want.items())
+        if wanted and not any(key in attributes for key in drop):
             return False
         attributes.update({key: list(value) for key, value in want.items()})
+        for key in drop:
+            attributes.pop(key, None)
         current["attributes"] = attributes
         expect(
             await self.admin.call("PUT", url, json=current),
@@ -466,7 +476,8 @@ def tenant_groups(tenant: TenantPlan) -> list[dict[str, Any]]:
     """The five groups of an extra tenant. They carry only ``meho_tenant``.
 
     No ``tenant_id`` or ``tenant_role``: an older MEHO, which reads only
-    those, refuses a person who is only in these groups.
+    those, refuses a person who is only in these groups. ``finish_realm``
+    removes ``OLD_ACCESS_ATTRIBUTES`` from such a group that exists already.
     """
     return [
         {
@@ -630,7 +641,7 @@ async def finish_realm(
         await realm.ensure_group(group)
     for tenant in plan.tenants:
         for group in tenant_groups(tenant):
-            await realm.ensure_group(group)
+            await realm.ensure_group(group, drop=OLD_ACCESS_ATTRIBUTES)
     for want in realm_file.get("clients") or []:
         await realm.ensure_client(want, scope_ids)
     if plan.ci.enabled:

@@ -757,6 +757,44 @@ async def test_extra_tenant_gets_five_groups_with_only_meho_tenant(
     assert not [c for c in kc.calls if c[0] == "PUT" and "/groups/" in c[1]]
 
 
+async def test_existing_extra_tenant_group_loses_the_old_access_attributes(
+    realm_file: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A group made by hand with tenant_id and tenant_role keeps only meho_tenant and the rest."""
+    kc = _fresh()
+    kc.groups["MEHO-lab-b-Operators"] = {
+        "id": "g-lab-b-operators",
+        "name": "MEHO-lab-b-Operators",
+        "attributes": {
+            "tenant_id": [_LAB_B],
+            "tenant_role": ["operator"],
+            "approver": ["true"],
+            "note": ["kept"],
+        },
+    }
+    plan = _plan(realm_file, tenants=[{"name": "lab-b", "id": _LAB_B}])
+
+    store = FakeStore()
+    await finish_realm(plan, _ENV, kc, store)
+
+    assert kc.groups["MEHO-lab-b-Operators"]["attributes"] == {
+        "meho_tenant": [f"{_LAB_B}:lab-b:Operators"],
+        "note": ["kept"],
+    }
+    assert kc.groups["MEHO-lab-b-Readers"]["attributes"] == {
+        "meho_tenant": [f"{_LAB_B}:lab-b:Readers"]
+    }
+    assert kc.groups["MEHO-Operators"]["attributes"]["tenant_id"] == [_TENANT]
+    out = capfd.readouterr().out
+    assert "group MEHO-lab-b-Operators: kept (attributes set)" in out
+
+    state = kc.state()
+    kc.calls.clear()
+    await finish_realm(plan, _ENV, kc, store)
+    assert kc.state() == state
+    assert not [c for c in kc.calls if c[0] == "PUT" and "/groups/" in c[1]]
+
+
 async def test_one_tenant_install_gets_meho_tenant_on_its_groups(
     capfd: pytest.CaptureFixture[str],
 ) -> None:

@@ -206,8 +206,10 @@ scp_build() {
     scp -q "${SSH_OPTIONS[@]}" "$@"
 }
 
+# Not govc vm.info: it also reads the VM's host, and a login with rights only
+# on the folder, the pool, the datastore and the network may not read it.
 vm_power_state() {
-    govc vm.info "$VM" | awk '/Power state:/ { print $3; exit }'
+    govc object.collect -s "$VM" runtime.powerState
 }
 
 # user_data: the cloud-config for the build VM's first boot. Only the build
@@ -274,7 +276,7 @@ download_base_image() {
 
 deploy_build_vm() {
     local spec disk
-    if govc vm.info "$VM" 2>/dev/null | grep -q '^Name:'; then
+    if [[ -n $(govc find -type m -name "$VM") ]]; then
         fail "The VM $VM already exists in vCenter." \
             "destroy it with 'govc vm.destroy $VM', or go on from a later step with --from-step."
     fi
@@ -391,7 +393,7 @@ export_ova() {
     [[ -f $ovf ]] || fail "govc export.ovf wrote no $ovf." "look at the lines above."
     grep -q "<vssd:VirtualSystemType>vmx-$HARDWARE_VERSION</vssd:VirtualSystemType>" "$ovf" ||
         fail "The exported OVF is not at hardware version $HARDWARE_VERSION." \
-            "check 'govc vm.info $VM' and the ESXi version of the build host."
+            "check 'govc object.collect -s $VM config.version' and the ESXi version of the build host."
     "$APPLIANCE_DIR/rewrite-ovf.sh" "$ovf" "$APPLIANCE_DIR/product-section.xml" "$VERSION"
     name=meho-appliance-$VERSION
     manifest=$export_dir/$VM.mf

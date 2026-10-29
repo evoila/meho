@@ -74,7 +74,7 @@ the tests set it, as `install.sh` does.
    `systemd-run --unit=meho-clean --collect -p StandardOutput=journal+console`,
    outside the SSH session, because it deletes the build user and closes
    SSH. Its lines go to the VM console as well as the journal. The build
-   polls `govc vm.info` until the VM is powered off. When it is still on
+   reads the VM's power state (`govc object.collect`) until it is off. When it is still on
    after 20 minutes, the script stopped or its check found something, and
    the build fails with the advice to read the console. `--from-step 4`
    works only when `clean.sh` stopped in its step 1, while RKE2 still
@@ -203,8 +203,11 @@ test (#4816).
 ## Dependencies
 
 - `govc` v0.56.2 (vmware/govmomi), pinned with its sha256 in the workflow.
-  Commands used: `import.ova`, `vm.change`, `device.ls`, `vm.disk.change`,
-  `vm.power`, `vm.info`, `vm.upgrade`, `export.ovf`, `vm.destroy`.
+  Commands used: `find`, `import.ova`, `vm.change`, `device.ls`,
+  `vm.disk.change`, `vm.power`, `object.collect`, `vm.upgrade`,
+  `export.ovf`, `vm.destroy`. No `vm.info`: it also reads the VM's host,
+  so it fails for a login that has rights only on the folder, the pool,
+  the datastore and the network, and none on the host.
 - The Ubuntu 24.04 cloud image OVA, serial `release-20261017`, pinned with
   its sha256 in `build.sh`. Its properties and its cloud-init are used
   only at the build; the appliance has cloud-init off.

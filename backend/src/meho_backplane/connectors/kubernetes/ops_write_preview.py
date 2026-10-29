@@ -47,8 +47,9 @@ What is never shown
 :func:`apply_subject` from this module to also show the manifest it applies
 (#3877). The echo hides the same kind of values:
 
-* A Secret document's ``data`` and ``stringData`` values: only the key names
-  stay.
+* A Secret's ``data`` and ``stringData`` values: only the key names stay.
+  This also applies to a Secret nested inside another document, for
+  example a custom resource that carries a Secret in its spec.
 * Every ``env`` entry's ``value``: only the variable name stays.
 * Every ``httpHeaders`` entry's ``value`` in a probe or lifecycle hook
   ``httpGet``: only the header name stays.
@@ -56,8 +57,10 @@ What is never shown
   ephemeral containers, probe and lifecycle ``exec``): only its size in
   bytes stays, as ``{"hidden": true, "bytes": N}``, for the same reason as
   the Job preview above.
-* The ``kubectl.kubernetes.io/last-applied-configuration`` annotation: it is
-  a full copy of an earlier object and can hold all of the above.
+* The ``kubectl.kubernetes.io/last-applied-configuration`` annotation, in
+  any ``annotations`` map at any depth (the document's own metadata, a pod
+  template's metadata, a nested object): it is a full copy of an earlier
+  object and can hold all of the above.
 
 The Secret and Job builders read only ``ctx.params`` and do no network
 calls. The CronJob builder reads the CronJob once; a missing CronJob raises,
@@ -80,9 +83,11 @@ _HIDDEN = "***REDACTED***"
 #: This annotation holds a full JSON copy of an earlier object, Secret values included.
 _LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration"
 
-#: Most bytes of manifest the ``k8s.apply`` echo keeps. A document that does
-#: not fit is shown by its identity only, so a huge manifest cannot fill the
-#: approval row.
+#: Most bytes of manifest the ``k8s.apply`` echo keeps, counting every entry
+#: of the echo. A document that does not fit in full is shown by its identity
+#: only; when not even that fits, the rest of the documents are summed up in
+#: one closing entry. So a huge manifest, or a huge number of documents,
+#: cannot fill the approval row.
 MANIFEST_ECHO_MAX_BYTES = 16_384
 
 #: Most objects named in the ``k8s.apply`` subject line.
@@ -244,13 +249,34 @@ _NAME_VALUE_LISTS = ("env", "httpHeaders")
 _COMMAND_LISTS = ("command", "args")
 
 
-def _hide_values(node: Any) -> Any:
-    """Copy *node*, hiding env and header values and command lines at any depth.
+#: Fields of a Secret whose values are hidden; the key names stay.
+_SECRET_VALUE_FIELDS = ("data", "stringData")
 
-    The ``value`` of every entry in an ``env`` or ``httpHeaders`` list is
-    hidden; the name stays. Every ``command`` or ``args`` list becomes
-    ``{"hidden": true, "bytes": <size>}``, like the ``k8s.job.create``
-    preview's ``command_bytes``.
+
+def _hide_secret_values(secret: dict[str, Any]) -> dict[str, Any]:
+    """Copy a ``kind: Secret`` dict with every ``data`` / ``stringData`` value hidden."""
+    out = dict(secret)
+    for field in _SECRET_VALUE_FIELDS:
+        if field in out:
+            value = out[field]
+            out[field] = (
+                {str(key): _HIDDEN for key in value} if isinstance(value, dict) else _HIDDEN
+            )
+    return out
+
+
+def _hide_values(node: Any) -> Any:
+    """Copy *node*, hiding at any depth every value that can hold a secret.
+
+    * The ``value`` of every entry in an ``env`` or ``httpHeaders`` list is
+      hidden; the name stays.
+    * Every ``command`` or ``args`` list becomes ``{"hidden": true, "bytes":
+      <size>}``, like the ``k8s.job.create`` preview's ``command_bytes``.
+    * Every dict with ``kind: Secret`` keeps only the key names of its
+      ``data`` and ``stringData``. This catches a Secret nested in another
+      object, not only a top-level Secret document.
+    * The last-applied annotation is hidden in every ``annotations`` map,
+      so a pod template's copy is caught too.
     """
     if isinstance(node, dict):
         out: dict[str, Any] = {}
@@ -264,29 +290,14 @@ def _hide_values(node: Any) -> Any:
                 ]
             elif key in _COMMAND_LISTS and isinstance(item, list):
                 out[key] = {"hidden": True, "bytes": _parts_bytes(item)}
+            elif key == "annotations" and isinstance(item, dict) and _LAST_APPLIED in item:
+                out[key] = _hide_values({**item, _LAST_APPLIED: _HIDDEN})
             else:
                 out[key] = _hide_values(item)
-        return out
+        return _hide_secret_values(out) if out.get("kind") == "Secret" else out
     if isinstance(node, list):
         return [_hide_values(item) for item in node]
     return node
-
-
-def _hide_document_secrets(doc: dict[str, Any]) -> dict[str, Any]:
-    """Copy one manifest document with the values that can hold a secret hidden."""
-    hidden: dict[str, Any] = _hide_values(doc)
-    if hidden.get("kind") == "Secret":
-        for field in ("data", "stringData"):
-            if field in hidden:
-                value = hidden[field]
-                hidden[field] = (
-                    {str(key): _HIDDEN for key in value} if isinstance(value, dict) else _HIDDEN
-                )
-    metadata = hidden.get("metadata")
-    annotations = metadata.get("annotations") if isinstance(metadata, dict) else None
-    if isinstance(annotations, dict) and _LAST_APPLIED in annotations:
-        annotations[_LAST_APPLIED] = _HIDDEN
-    return hidden
 
 
 def _identity_only(doc: dict[str, Any], size: int) -> dict[str, Any]:
@@ -303,26 +314,59 @@ def _identity_only(doc: dict[str, Any], size: int) -> dict[str, Any]:
     }
 
 
+def _omitted_summary(count: int) -> dict[str, Any]:
+    """The closing entry that counts the documents the echo has no room for."""
+    return {
+        "omitted_documents": count,
+        "echo_omitted": f"{count} more document(s) not shown; the echo keeps at most "
+        f"{MANIFEST_ECHO_MAX_BYTES} bytes of manifest",
+    }
+
+
+def _entry_bytes(entry: dict[str, Any]) -> int:
+    """UTF-8 size of one echo entry as JSON, plus the two bytes it costs in the list.
+
+    Summed over the entries, this is the size of the whole echo as JSON:
+    each entry adds a ``, `` separator, and the ``[`` and ``]`` of the list
+    take the place of the separator the last entry does not need.
+    """
+    return len(json.dumps(entry, default=str).encode("utf-8")) + 2
+
+
 def apply_manifest_echo(manifest: str) -> list[dict[str, Any]]:
     """The ``k8s.apply`` manifest as one dict per document, safe to show.
 
     Secret ``data`` / ``stringData`` values, ``env`` and ``httpHeaders``
     values, ``command`` / ``args`` text and the last-applied annotation are
-    hidden (see the module docstring). The
-    documents are kept in order until :data:`MANIFEST_ECHO_MAX_BYTES` is
-    used up; each document after that keeps only its identity. The caller
-    still runs the shared params redaction over the result.
+    hidden at any depth (see the module docstring). The documents are kept
+    in order, and every entry of the result counts toward
+    :data:`MANIFEST_ECHO_MAX_BYTES`: a document that does not fit in full
+    keeps only its identity, and once not even an identity fits, one last
+    entry counts the documents left out. The caller still runs the shared
+    params redaction over the result.
     """
+    docs = list(_parse_manifest(manifest))
+    # Room is kept for the closing summary while documents may still follow,
+    # so the whole echo stays within the budget, summary included.
+    summary_bytes = _entry_bytes(_omitted_summary(len(docs)))
     echo: list[dict[str, Any]] = []
     used = 0
-    for doc in _parse_manifest(manifest):
-        hidden = _hide_document_secrets(doc)
-        size = len(json.dumps(hidden, default=str).encode("utf-8"))
-        if used + size > MANIFEST_ECHO_MAX_BYTES:
-            echo.append(_identity_only(hidden, size))
+    for index, doc in enumerate(docs):
+        budget = MANIFEST_ECHO_MAX_BYTES - (summary_bytes if index < len(docs) - 1 else 0)
+        hidden = _hide_values(doc)
+        size = _entry_bytes(hidden)
+        if used + size <= budget:
+            echo.append(hidden)
+            used += size
             continue
-        used += size
-        echo.append(hidden)
+        identity = _identity_only(hidden, size)
+        identity_size = _entry_bytes(identity)
+        if used + identity_size <= budget:
+            echo.append(identity)
+            used += identity_size
+            continue
+        echo.append(_omitted_summary(len(docs) - index))
+        break
     return echo
 
 

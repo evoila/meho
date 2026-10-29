@@ -1300,10 +1300,12 @@ approver sees what the apply sets, not only which objects it touches
 `httpHeaders` value of a probe or lifecycle hook, every `command` / `args`
 list (only its size in bytes stays) and the
 `kubectl.kubernetes.io/last-applied-configuration` annotation are hidden
-first (`connectors/kubernetes/ops_write_preview.py`), then the echo goes
-through the same two-pass redaction as the generic params echo. The echo
-keeps at most 16 KB of manifest; a document that does not fit keeps only
-its identity. When the API server rejects the dry-run (for example an
+first, at any depth (`connectors/kubernetes/ops_write_preview.py`), then
+the echo goes through the same two-pass redaction as the generic params
+echo. The echo keeps at most 16 KB in total, counting every entry: a
+document that does not fit in full keeps only its identity, and when not
+even that fits, one closing entry counts the documents left out. When the
+API server rejects the dry-run (for example an
 admission webhook denial), the handler raises `ApplyRejectedError` and the
 row gets the `preview_unavailable` marker with the server's message in
 `preview_error`, so the reviewer sees that the apply will be rejected

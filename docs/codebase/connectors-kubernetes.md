@@ -518,9 +518,13 @@ the manifest itself (`preview.manifest`, one dict per document) and a
 manifest is stored, `apply_manifest_echo` in `ops_write_preview.py` hides
 Secret `data` / `stringData` values (key names stay), every `env` value
 (variable names stay), every `httpHeaders` value of a probe or lifecycle
-hook (header names stay), the text of every `command` / `args` list at any
-depth (only its size in bytes stays, as `{"hidden": true, "bytes": N}`)
-and the last-applied annotation.
+hook (header names stay), the text of every `command` / `args` list (only
+its size in bytes stays, as `{"hidden": true, "bytes": N}`) and the
+last-applied annotation. All of this is done at any depth: a Secret nested
+in a custom resource and a pod template's copy of the annotation are hidden
+too. The echo keeps at most 16 KB in total, counting every entry. A
+document that does not fit in full keeps only its identity; when not even
+that fits, one closing entry counts the documents left out.
 
 **`k8s.apply` API-server rejections (#3876).** `DynamicClient.request`
 calls the API with `_preload_content=False`, and kubernetes_asyncio only

@@ -13,8 +13,11 @@ approver could not see which fields the apply sets. These tests pin:
   lifecycle ``httpHeaders`` values, ``command`` / ``args`` text and the
   last-applied annotation never reach the echo; key, variable and header
   names do, and a command line keeps only its size;
+* a Secret nested in another document and a last-applied annotation in a
+  pod template are hidden too, not only the document root;
 * a manifest larger than the echo budget keeps only the identity of the
-  documents that do not fit.
+  documents that do not fit, and a manifest with more documents than the
+  budget can name ends in one entry that counts the rest.
 
 The dry-run itself is stubbed: the echo is built from the parked params.
 """
@@ -336,6 +339,96 @@ async def test_multi_document_manifest_is_echoed_with_secret_values_hidden(
     assert _STRING_DATA_VALUE not in text
 
 
+_NESTED = f"""
+apiVersion: example.test/v1
+kind: Bundle
+metadata:
+  name: app
+  namespace: prod
+spec:
+  template:
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: db
+    data:
+      pw: {_SECRET_VALUE}
+    stringData:
+      url: {_STRING_DATA_VALUE}
+  objects:
+    - apiVersion: v1
+      kind: Secret
+      metadata:
+        name: api
+      stringData: {_STRING_DATA_VALUE}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: prod
+spec:
+  template:
+    metadata:
+      annotations:
+        team: payments
+        kubectl.kubernetes.io/last-applied-configuration: '{{"data": {{"pw": "{_SECRET_VALUE}"}}}}'
+    spec:
+      containers:
+        - name: app
+          image: registry.example.test/web:1.2
+"""
+
+
+@pytest.mark.asyncio
+async def test_nested_secrets_and_annotations_are_hidden_below_the_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preview = await _preview(monkeypatch, _NESTED)
+
+    bundle, deployment = preview["manifest"]
+    # A Secret inside a custom resource keeps its key names, never a value.
+    nested = bundle["spec"]["template"]
+    assert nested["kind"] == "Secret"
+    assert nested["data"] == {"pw": "***REDACTED***"}
+    assert nested["stringData"] == {"url": "***REDACTED***"}
+    # A Secret in a list, with a scalar where a map is expected, is hidden too.
+    assert bundle["spec"]["objects"][0]["stringData"] == "***REDACTED***"
+    # The pod template's copy of the last-applied annotation is hidden.
+    annotations = deployment["spec"]["template"]["metadata"]["annotations"]
+    assert annotations == {
+        "team": "payments",
+        "kubectl.kubernetes.io/last-applied-configuration": "***REDACTED***",
+    }
+
+    text = json.dumps(preview)
+    assert _SECRET_VALUE not in text
+    assert _STRING_DATA_VALUE not in text
+
+
+@pytest.mark.asyncio
+async def test_many_small_documents_end_in_one_omitted_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    count = 1000
+    manifest = "\n---\n".join(
+        f"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-{i}\n  namespace: prod\n"
+        f"data:\n  mode: fast\n"
+        for i in range(count)
+    )
+    preview = await _preview(monkeypatch, manifest)
+
+    echo = preview["manifest"]
+    *shown, last = echo
+    assert shown[0]["metadata"]["name"] == "cm-0"
+    assert all(doc["data"] == {"mode": "fast"} for doc in shown)
+    # The closing entry counts every document the echo had no room for.
+    assert last["omitted_documents"] == count - len(shown)
+    assert "echo_omitted" in last
+    assert 0 < len(shown) < count
+    assert len(json.dumps(echo).encode("utf-8")) <= MANIFEST_ECHO_MAX_BYTES
+
+
 @pytest.mark.asyncio
 async def test_documents_past_the_echo_budget_keep_only_their_identity(
     monkeypatch: pytest.MonkeyPatch,
@@ -354,7 +447,7 @@ async def test_documents_past_the_echo_budget_keep_only_their_identity(
         assert doc["metadata"] == {"name": name, "namespace": "prod"}
         assert "data" not in doc
         assert "echo_omitted" in doc
-    assert len(json.dumps(preview["manifest"])) < MANIFEST_ECHO_MAX_BYTES + 2048
+    assert len(json.dumps(preview["manifest"]).encode("utf-8")) <= MANIFEST_ECHO_MAX_BYTES
 
 
 def test_subject_names_five_objects_and_counts_the_rest() -> None:

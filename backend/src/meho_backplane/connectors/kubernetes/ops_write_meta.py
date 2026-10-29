@@ -496,7 +496,9 @@ _APPLY_LLM: dict[str, Any] = {
     },
     "output_shape": (
         "{dry_run, field_manager, applied: [{api_version, kind, name, namespace, "
-        "resource_version, uid}], total}."
+        "resource_version, uid, warnings}], total}. warnings lists the API "
+        "server's warnings for that document, such as a deprecated apiVersion; "
+        "read them before the real apply."
     ),
 }
 _DELETE_LLM: dict[str, Any] = {

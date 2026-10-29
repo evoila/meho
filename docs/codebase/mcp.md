@@ -1081,6 +1081,7 @@ Five synthetic connectors follow this mould (natural key
 | `secret-broker-1.x` | `secret.move` | (dispatch-only) | #1577 |
 | `topology-graph-1.x` | `topology.create_node` / `.annotate` / … | `meho_topology_create_node` / `_annotate` / … | #2537 |
 | `targets-registry-1.x` | `targets.register` | `meho_targets_register` | #2861 |
+| `targets-registry-1.x` | `targets.remove` | (dispatch-only; `dangerous` + `requires_approval`, a second person approves) | #4623 |
 | `audit-integrity-1.x` | `audit.loose_rows` | (dispatch-only; a `safe` read a Sensor pins) | #4670 |
 | `migration-assess-1.x` | `migration.inventory.csv` | (dispatch-only; a `safe` read of stored or inline inventories) | #5099 |
 
@@ -1102,6 +1103,18 @@ host, tenant_id}` payload and the `awaiting_approval` envelope conform
 model's `ValidationError` to `ValueError` at its boundary so the
 dispatcher's `connector_error` maps them to `-32602` with a clean
 message.
+
+`targets.remove` (#4623) is the opposite write and does not follow the
+`caution` dial above. Like `DELETE /api/v1/targets/{name}`, it needs the
+`tenant_admin` role; after approval, the approver's role counts. It is
+`dangerous` with `requires_approval=True`, and
+its name ends in `.remove`, so the rules for deletes apply: a person's call
+waits until a second person approves it, an agent login is refused, a
+service principal waits for a person and cannot get a standing grant for
+it, and only in sandbox mode can a delete grant made in the web console let
+a service principal run it at once. It is reached through
+`call_operation` only; there is no `meho_*` tool for it. See
+[`targets.md`](targets.md#removing-a-target-targetsremove).
 
 ## Audit URI redaction for query-bearing resources
 

@@ -127,6 +127,9 @@ class _RecordingConnector:
     the ``RetrievePropertiesEx`` object type).
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(self, reads: dict[str, Any], *, vmomi: dict[str, Any] | None = None) -> None:
         self._reads = reads
         self._vmomi = vmomi or {}
@@ -312,6 +315,9 @@ class _DiskGrowRecordingConnector:
     the gate parks / denies.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(self, *, capacity_bytes: int = 10 * 1024**3) -> None:
         self._capacity_bytes = capacity_bytes
         self.reconfig_writes: list[Any] = []
@@ -447,6 +453,9 @@ class _DiskAttachRecordingConnector:
     never fired when the gate parks / denies.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(self) -> None:
         self.reconfig_writes: list[Any] = []
 
@@ -571,6 +580,9 @@ class _CloneRecordingConnector:
     object type) and records every ``CloneVM_Task`` write, so the tests can
     assert the mutating vmomi POST never fired when the gate parks / denies.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     def __init__(self) -> None:
         self.clone_writes: list[Any] = []
@@ -727,6 +739,9 @@ class _DeployRecordingConnector:
     tests can assert the mutating POST never fired when the gate parks/denies.
     id-passthrough params → no content-library find reads are needed.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     def __init__(self) -> None:
         self.deploy_writes: list[Any] = []
@@ -897,6 +912,9 @@ class _DrsRuleRecordingConnector:
     read answers like vCenter 8.0.x: a path into ``configurationEx`` fails.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     _MOUNT = "/api"
 
     def __init__(self) -> None:
@@ -1025,6 +1043,9 @@ class _FolderRecordingConnector:
     returns the new Folder MoRef directly with no ``RetrievePropertiesEx`` poll.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     _MOUNT = "/api"
 
     def __init__(self) -> None:
@@ -1131,6 +1152,9 @@ _GUEST_FILE_WRITE_OP_ID = "POST:/GuestFileManager/{moId}/InitiateFileTransferToG
 
 class _GuestWriteRecordingConnector:
     """Records vmomi calls + PUTs so the gate tests can assert nothing fired."""
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     def __init__(self) -> None:
         self.vmomi_calls: list[str] = []

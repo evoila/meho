@@ -1,0 +1,5 @@
+busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e library/busybox:1.37
+pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d pgvector/pgvector:0.8.7-pg17-bookworm
+quay.io/keycloak/keycloak@sha256:79c623a22abacf3fe6c00a5fb30f5b7843d717b234033b80995891c06116d244 keycloak/keycloak:26.8.1
+quay.io/openbao/openbao-ubi@sha256:33c4c3a7aeb8b812d570939bd7275f829901031e0a6b3e655207d8f0945bd248 openbao/openbao-ubi:2.7.1
+valkey/valkey@sha256:2d04268dfa26ab31cfa3fdc538866e76438b2d00e41db41b8cb86d780ac5a416 valkey/valkey:9.0-alpine

@@ -30,6 +30,8 @@ container cannot start.
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import secrets
 import time
@@ -37,6 +39,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -133,6 +136,7 @@ def _run_keycloak(**extra_env: str) -> Iterator[_Keycloak]:
         .with_env("KC_BOOTSTRAP_ADMIN_CLIENT_SECRET", kc.bootstrap_secret)
         .with_env("MEHO_REALM_PUBLIC_URL", _PUBLIC_URL)
         .with_env("MEHO_REALM_TENANT_ID", _TENANT_ID)
+        .with_env("MEHO_REALM_TENANT_NAME", "main")
         .with_env("MEHO_REALM_ADMIN_CLIENT_SECRET", kc.client_secrets["meho-admin"])
         .with_env("MEHO_REALM_WEB_CLIENT_SECRET", kc.client_secrets["meho-web"])
         .with_env("MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET", kc.client_secrets["meho-check-runner"])
@@ -263,6 +267,37 @@ async def test_approver_gets_the_approver_flag(
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role is TenantRole.READ_ONLY
     assert operator.approver is True
+
+
+def _token_claims(access_token: str) -> dict[str, Any]:
+    payload = access_token.split(".")[1]
+    claims: dict[str, Any] = json.loads(
+        base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+    )
+    return claims
+
+
+def test_one_tenant_login_lists_one_tenant(keycloak: _Keycloak) -> None:
+    """The ``meho-tenants`` mapper lists the one tenant; the old claims stay."""
+    password = _add_person(keycloak, "operator-one", "MEHO-Operators")
+    _allow_password_grant_on_cli(keycloak)
+    resp = _token(
+        keycloak.base_url,
+        "meho",
+        {
+            "grant_type": "password",
+            "client_id": "meho-cli",
+            "username": "operator-one",
+            "password": password,
+            "scope": "openid",
+        },
+    )
+    resp.raise_for_status()
+    claims = _token_claims(resp.json()["access_token"])
+    assert claims["meho_tenants"] == [f"{_TENANT_ID}:main:Operators"]
+    assert claims["tenant_id"] == _TENANT_ID
+    assert claims["tenant_role"] == "operator"
+    assert "approver" not in claims
 
 
 def test_confidential_clients_use_the_secrets_from_the_environment(keycloak: _Keycloak) -> None:

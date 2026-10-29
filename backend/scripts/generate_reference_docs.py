@@ -77,9 +77,10 @@ _ABBREVIATIONS = ("e.g.", "i.e.", "etc.", "cf.", "vs.")
 #: Internal planning identifiers that must never reach a public page:
 #: GitHub issue numbers (``#3153``), Goal/Initiative/Task identifiers
 #: (``G11.2-T6``, ``G0.7``), and internal design-doc section markers
-#: (``§6``). Tool descriptions are the agent-facing contract text and
-#: several embed these; the published reference must strip them.
-_INTERNAL_REF = r"(?:#\d+|G\d[\dA-Za-z.]*(?:-T\d+)?|§\d+)"
+#: (``§6``). A ``#`` right after a word (``gh:org/repo#7``, a
+#: change-ticket reference format) is not one. The same pattern guards
+#: the text MEHO sends to a model (``tests/test_model_text_no_internal_refs.py``).
+_INTERNAL_REF = r"(?<!\w)(?:#\d+|G\d[\dA-Za-z.]*(?:-T\d+)?|§\d+)"
 
 
 def _redact(text: str) -> str:

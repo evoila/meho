@@ -13,7 +13,7 @@ still inserts, and that ``downgrade`` removes everything again.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -98,9 +98,11 @@ def _insert(conn: sa.Connection, **values: object) -> None:
     conn.execute(sa.text(f"INSERT INTO {_TABLE} ({names}) VALUES ({params})"), row)
 
 
-def test_upgrade_adds_nullable_columns_and_indexes(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_nullable_columns_and_indexes(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     columns, indexes = _schema(sync_url)
     assert set(columns) >= _COLUMNS
@@ -110,9 +112,10 @@ def test_upgrade_adds_nullable_columns_and_indexes(alembic_cfg: tuple[Config, st
 
 def test_indexes_enforce_one_completion_and_one_key_per_owner(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     tenant = uuid.uuid4().hex
     claim = uuid.uuid4().hex
     sync_eng = sa_create_engine(sync_url)
@@ -148,9 +151,11 @@ def test_indexes_enforce_one_completion_and_one_key_per_owner(
         sync_eng.dispose()
 
 
-def test_downgrade_removes_columns_and_indexes(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_removes_columns_and_indexes(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     command.downgrade(cfg, _DOWN_REVISION)
 
     columns, indexes = _schema(sync_url)

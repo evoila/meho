@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
@@ -20,7 +21,7 @@ import (
 // newDiscoverCmd returns the `meho targets discover <product>` command.
 //
 //	meho targets discover <product> [--seed-target <name>]
-//	  [--json] [--backplane <url>]
+//	  [--json | --import-yaml] [--backplane <url>]
 //	# GET /api/v1/targets/discover?product=<p>&seed_target=...
 //
 // The G0.3-deferred verb (#256 explicitly defers it to G9.1-T6).
@@ -30,7 +31,8 @@ import (
 // them with `meho targets import`. --seed-target scopes discovery to one
 // already-registered target's reach (e.g. peer clusters in the same
 // kubeconfig); it is resolved tenant-scoped server-side so a 404 on a
-// cross-tenant seed name is identical to a typo.
+// cross-tenant seed name is identical to a typo. --import-yaml prints the
+// candidates as a `targets:` file that `meho targets import` reads.
 //
 // Exit codes mirror the sibling targets verbs:
 //   - 0   discovery ran (including the zero-candidate case — an empty
@@ -44,6 +46,7 @@ func newDiscoverCmd() *cobra.Command {
 	var (
 		seedTarget        string
 		jsonOut           bool
+		importYAML        bool
 		backplaneOverride string
 	)
 	cmd := &cobra.Command{
@@ -59,7 +62,9 @@ func newDiscoverCmd() *cobra.Command {
 			"scoped server-side; a cross-tenant seed 404s like a typo). " +
 			"Connectors that contributed nothing are listed under " +
 			"SKIPPED with the reason so an expected-but-missing " +
-			"candidate is explainable.",
+			"candidate is explainable. --import-yaml prints the " +
+			"candidates as a file for `meho targets import` instead " +
+			"(the skipped connectors go to stderr).",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -68,6 +73,7 @@ func newDiscoverCmd() *cobra.Command {
 				Product:           args[0],
 				SeedTarget:        seedTarget,
 				JSONOut:           jsonOut,
+				ImportYAML:        importYAML,
 				BackplaneOverride: backplaneOverride,
 			})
 		},
@@ -76,8 +82,11 @@ func newDiscoverCmd() *cobra.Command {
 		"scope discovery to one already-registered target's reach (resolved tenant-scoped)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit machine-readable JSON to stdout instead of the human tables")
+	cmd.Flags().BoolVar(&importYAML, "import-yaml", false,
+		"print the candidates as a file for `meho targets import` instead of the tables")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
+	cmd.MarkFlagsMutuallyExclusive("json", "import-yaml")
 	return cmd
 }
 
@@ -85,6 +94,7 @@ type discoverOptions struct {
 	Product           string
 	SeedTarget        string
 	JSONOut           bool
+	ImportYAML        bool
 	BackplaneOverride string
 }
 
@@ -103,6 +113,9 @@ func runDiscover(cmd *cobra.Command, opts discoverOptions) error {
 	result := resp.JSON200
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), result)
+	}
+	if opts.ImportYAML {
+		return printImportYAML(cmd.OutOrStdout(), cmd.ErrOrStderr(), opts.Product, result)
 	}
 	printDiscoverTables(cmd.OutOrStdout(), result)
 	return nil
@@ -178,4 +191,43 @@ func printDiscoverTables(w io.Writer, r *api.TargetsDiscoverResult) {
 		fmt.Fprintln(w, strings.TrimSpace(
 			"\nreview candidates, then register with `meho targets import` (one-shot auto-registration is not yet available)"))
 	}
+}
+
+// importEntry is one entry of the `targets:` file `meho targets import`
+// reads: the target fields a candidate carries, plus the product.
+type importEntry struct {
+	Name      string         `yaml:"name"`
+	Product   string         `yaml:"product"`
+	Host      string         `yaml:"host"`
+	Port      *int           `yaml:"port,omitempty"`
+	SecretRef *string        `yaml:"secret_ref,omitempty"`
+	Extras    map[string]any `yaml:"extras,omitempty"`
+}
+
+// printImportYAML writes the candidates as a `targets:` file that
+// `meho targets import` reads. The skipped connectors (and the note
+// when nothing was found) go to errOut, so out stays a clean file.
+func printImportYAML(out, errOut io.Writer, product string, r *api.TargetsDiscoverResult) error {
+	entries := make([]importEntry, 0, len(r.Discovered))
+	for _, c := range r.Discovered {
+		entry := importEntry{Name: c.Name, Product: product, Host: c.Host, Port: c.Port, SecretRef: c.SecretRef}
+		if c.Extras != nil && len(*c.Extras) > 0 {
+			entry.Extras = *c.Extras
+		}
+		entries = append(entries, entry)
+	}
+	if len(entries) == 0 {
+		fmt.Fprintln(errOut, "no candidate targets discovered for this product")
+	}
+	for _, s := range r.Skipped {
+		fmt.Fprintf(errOut, "skipped %s: %s\n", s.Name, s.Reason)
+	}
+	encoder := yaml.NewEncoder(out)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(struct {
+		Targets []importEntry `yaml:"targets"`
+	}{Targets: entries}); err != nil {
+		return err
+	}
+	return encoder.Close()
 }

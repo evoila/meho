@@ -262,6 +262,9 @@ class _RecordingVmwareConnector:
     resolve the same class), so one call log captures the whole tree.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     _MOUNT = "/api"
 
     def __init__(self) -> None:
@@ -1410,6 +1413,9 @@ class _DiskGrowVmwareConnector:
     the approved-resume path.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     _MOUNT = "/api"
 
     def __init__(self, *, capacity_bytes: int = _TEN_GIB) -> None:
@@ -1618,6 +1624,9 @@ class _CloneFromTemplateVmwareConnector:
     ``specSet`` object type). Records both surfaces so the test can prove the
     mutating vmomi write fires only on the approved-resume path.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     _MOUNT = "/api"
 
@@ -2868,6 +2877,9 @@ class _DrsRuleVmwareConnector:
     ``configurationEx`` fails.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     _MOUNT = "/api"
 
     def __init__(self, *, existing_rules: list[dict[str, Any]] | None = None) -> None:
@@ -3079,6 +3091,9 @@ class _FolderCreateVmwareConnector:
     poll ever fires. Records both surfaces so the test can prove the mutating
     CreateFolder fires only on the approved resume and is never polled.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     _MOUNT = "/api"
 

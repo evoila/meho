@@ -1,7 +1,8 @@
 {{- /*
   G0.4-T6 (#263) -- helm test that asserts the deployed Postgres has
   the ``vector`` extension enabled and the ``documents`` table present
-  after the migration Job ran.
+  after the migration ran (the hook Job, or with the built-in PostgreSQL
+  the backplane pod's ``migrate`` init container, #5233).
 
   Triggered via ``helm test <release>`` (CI runs it after
   ``helm install --wait`` lands). The Job is annotated with

@@ -37,6 +37,20 @@ prove, against a real Keycloak:
   ``tenant-role`` mappers), a run replaces the fixed mappers, and a
   second run changes nothing.
 
+For several tenants (docs/decisions/2026-10-28-several-tenants-per-person.md)
+the role groups also carry ``meho_tenant``, the ``meho-tenants`` mapper
+lists them in the ``meho_tenants`` claim, and ``--add-tenant`` makes the
+five groups of one more tenant. The tests prove:
+
+- a person in ``MEHO-Readers`` and ``MEHO-lab-b-Operators`` gets both
+  tenants in ``meho_tenants``;
+- a person in one group gets one entry, and the same ``tenant_id``,
+  ``tenant_role`` and ``approver`` as before;
+- a person only in ``MEHO-lab-b-*`` groups gets no ``tenant_id``;
+- the first admin is in ``MEHO-Platform-Admins`` and gets
+  ``platform_admin``;
+- a second run with ``--add-tenant`` changes nothing.
+
 Skips when ``MEHO_TEST_KEYCLOAK_IMAGE`` is unset, when Docker is missing,
 or when the Go toolchain is missing (CI provides all three).
 """
@@ -79,6 +93,7 @@ _OPERATOR_USER = "operator-4002"
 _OPERATOR_PASSWORD = "operator-pass-4002"
 _GROUP_USER_PASSWORD = "group-user-pass-4590"
 _UPGRADE_REALM = "meho-upgrade"
+_LAB_B_ID = "5d0f7a3e-1c2b-4e8d-9f6a-7b3c2d1e0f9a"
 
 # The five role groups and what a member must get (docs/decisions/login-role-groups.md).
 _ROLE_GROUPS = {
@@ -147,7 +162,7 @@ def _build_meho_cli(out_dir: Path) -> Path:
     return binary
 
 
-def _run_bootstrap(binary: Path, base_url: str, realm: str = _REALM) -> str:
+def _run_bootstrap(binary: Path, base_url: str, realm: str = _REALM, *extra: str) -> str:
     """Run ``bootstrap-clients`` against *realm*; return its stdout."""
     env = {
         **os.environ,
@@ -174,6 +189,7 @@ def _run_bootstrap(binary: Path, base_url: str, realm: str = _REALM) -> str:
             _OPERATOR_USER,
             "--admin-user-email",
             f"{_OPERATOR_USER}@example.com",
+            *extra,
         ],
         env=env,
         stdin=subprocess.DEVNULL,
@@ -215,8 +231,8 @@ def _group_id(base_url: str, realm: str, name: str) -> str:
     return str(next(g["id"] for g in resp.json() if g["name"] == name))
 
 
-def _create_user(base_url: str, username: str, group: str | None) -> str:
-    """Create a user with a password (and a full profile); put it in *group*."""
+def _create_user(base_url: str, username: str, group: str | None, *more: str) -> str:
+    """Create a user with a password (and a full profile); put it in *group* and *more*."""
     headers = _admin_headers(base_url)
     httpx.post(
         f"{base_url}/admin/realms/{_REALM}/users",
@@ -240,10 +256,10 @@ def _create_user(base_url: str, username: str, group: str | None) -> str:
     )
     found.raise_for_status()
     user_id = str(found.json()[0]["id"])
-    if group is not None:
+    for name in ([group] if group is not None else []) + list(more):
         httpx.put(
             f"{base_url}/admin/realms/{_REALM}/users/{user_id}/groups/"
-            f"{_group_id(base_url, _REALM, group)}",
+            f"{_group_id(base_url, _REALM, name)}",
             headers=headers,
         ).raise_for_status()
     return user_id
@@ -435,10 +451,11 @@ async def test_plugin_login_succeeds_on_bootstrapped_realm(
 
     assert {"mcp:read", "mcp:execute"} <= operator.scopes
     assert ("mcp:admin" in operator.scopes) is add_admin
-    # The admin user bootstrap made is in MEHO-Admins.
+    # The admin user bootstrap made is in MEHO-Admins and MEHO-Platform-Admins.
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role.value == "tenant_admin"
     assert operator.approver is False
+    assert operator.platform_admin is True
 
 
 @pytest.mark.asyncio
@@ -458,6 +475,10 @@ async def test_role_group_gives_tenant_and_role(
     claims = _example_access_token(fresh_keycloak, "meho-cli", user_id)
     assert claims.get("tenant_id") == _TENANT_ID
     assert claims.get("tenant_role") == want_role
+    # One group, one tenant in the list.
+    role = group.removeprefix("MEHO-")
+    assert claims.get("meho_tenants") == [f"{_TENANT_ID}:main:{role}"]
+    assert "platform_admin" not in claims
     if want_approver:
         assert claims.get("approver") is True
     else:
@@ -492,7 +513,8 @@ async def test_user_in_no_group_is_refused(
     with pytest.raises(HTTPException) as refused:
         await _verify(fresh_keycloak, access_token, monkeypatch)
     assert refused.value.status_code == 401
-    assert refused.value.detail == "missing_tenant_claim"
+    assert refused.value.detail.startswith("missing_tenant_claim: ")
+    assert "role group" in refused.value.detail
 
 
 def _old_fixed_mapper(name: str, claim: str, value: str) -> dict:
@@ -557,3 +579,49 @@ def test_upgrade_replaces_fixed_mappers_and_second_run_changes_nothing(
         if re.search(r"\[(created|updated)\] (mapper|group|user|client scope)", line)
     ]
     assert changed == [], f"second run changed the realm:\n{second}"
+
+
+@pytest.fixture(scope="module")
+def lab_b_runs(fresh_keycloak: str, meho_binary: Path) -> tuple[str, str]:
+    """Add the tenant ``lab-b`` twice; return the output of both runs."""
+    extra = ("--add-tenant", "lab-b", "--add-tenant-id", _LAB_B_ID)
+    first = _run_bootstrap(meho_binary, fresh_keycloak, _REALM, *extra)
+    second = _run_bootstrap(meho_binary, fresh_keycloak, _REALM, *extra)
+    return first, second
+
+
+def test_add_tenant_twice_changes_nothing_the_second_time(lab_b_runs: tuple[str, str]) -> None:
+    first, second = lab_b_runs
+    assert "[created] group MEHO-lab-b-Operators" in first, first
+    changed = [
+        line
+        for line in second.splitlines()
+        if re.search(r"\[(created|updated)\] (mapper|group|user|client scope)", line)
+    ]
+    assert changed == [], f"second run changed the realm:\n{second}"
+
+
+def test_person_in_two_tenants_gets_both_in_meho_tenants(
+    fresh_keycloak: str, lab_b_runs: tuple[str, str]
+) -> None:
+    user_id = _create_user(
+        fresh_keycloak, "user-two-tenants", "MEHO-Readers", "MEHO-lab-b-Operators"
+    )
+    for client_id in ("meho-cli", "meho-mcp"):
+        claims = _example_access_token(fresh_keycloak, client_id, user_id)
+        assert sorted(claims["meho_tenants"]) == sorted(
+            [f"{_TENANT_ID}:main:Readers", f"{_LAB_B_ID}:lab-b:Operators"]
+        ), client_id
+        # The claims MEHO reads today still come from the first tenant's group.
+        assert claims.get("tenant_id") == _TENANT_ID
+        assert claims.get("tenant_role") == "read_only"
+
+
+def test_person_only_in_extra_tenant_gets_no_tenant_id(
+    fresh_keycloak: str, lab_b_runs: tuple[str, str]
+) -> None:
+    user_id = _create_user(fresh_keycloak, "user-lab-b-only", "MEHO-lab-b-Admins")
+    claims = _example_access_token(fresh_keycloak, "meho-cli", user_id)
+    assert claims.get("meho_tenants") == [f"{_LAB_B_ID}:lab-b:Admins"]
+    for name in ("tenant_id", "tenant_role", "approver", "platform_admin"):
+        assert name not in claims, name

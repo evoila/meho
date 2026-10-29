@@ -88,6 +88,8 @@ __all__ = [
     "DATASTORE_DIR_CREATE_RESPONSE_SCHEMA",
     "DATASTORE_FILE_DELETE_PARAMETER_SCHEMA",
     "DATASTORE_FILE_DELETE_RESPONSE_SCHEMA",
+    "DATASTORE_FILE_LIST_PARAMETER_SCHEMA",
+    "DATASTORE_FILE_LIST_RESPONSE_SCHEMA",
     "DATASTORE_MOID_PATTERN",
     "DATASTORE_PATH_PATTERN",
     "DATASTORE_REFRESH_PARAMETER_SCHEMA",
@@ -568,6 +570,157 @@ DATASTORE_REFRESH_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["datastore", "refreshed", "storage_info_refreshed", "summary"],
+}
+
+
+#: ``vmware.composite.datastore.file.list`` parameter schema (#3432).
+#:
+#: One folder of one datastore, by datastore name. ``path`` is relative to
+#: the datastore root (empty = the root); the handler also refuses ``.`` /
+#: ``..`` segments and empty segments.
+DATASTORE_FILE_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "datastore": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "description": (
+                "Datastore name, e.g. 'datastore1'. On vCenter a moid such as "
+                "'datastore-17' also works (use it when two datastores share a name)."
+            ),
+        },
+        "path": {
+            "type": "string",
+            "maxLength": 1024,
+            "pattern": r"^[^\\\[\]*?\x00-\x1f\x7f]*$",
+            "default": "",
+            "description": (
+                "Folder relative to the datastore root, e.g. 'iso' or 'images/esxi'. "
+                "Empty (the default) lists the root."
+            ),
+        },
+        "pattern": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": r"^[^/\\\x00-\x1f\x7f]+$",
+            "description": (
+                "Optional file name pattern, e.g. '*.iso' or 'ks-host??.iso' "
+                "('*' and '?' are wildcards). Leave it out to list everything."
+            ),
+        },
+        "include_usage": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "When true, also sum each folder (size of all files below it, file "
+                "count, latest change) and name the registered VMs that use each "
+                "entry. Slower: it reads the whole folder tree and the VMs of the "
+                "datastore."
+            ),
+        },
+    },
+    "required": ["datastore"],
+    "additionalProperties": False,
+    "examples": [{"datastore": "datastore1", "path": "iso", "pattern": "*.iso"}],
+}
+
+
+#: ``vmware.composite.datastore.file.list`` response schema (#3432).
+DATASTORE_FILE_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "ok",
+                "not_found",
+                "ambiguous",
+                "invalid_request",
+                "unsupported_host_target",
+            ],
+            "description": (
+                "ok: entries holds the folder. not_found: no such datastore or folder. "
+                "ambiguous: two datastores share the name. invalid_request: a bad "
+                "path or pattern. unsupported_host_target: the target is not a "
+                "vCenter or an ESXi host. Each one but ok has guidance."
+            ),
+        },
+        "datastore": {"type": "string", "description": "Datastore name."},
+        "datastore_moid": {"type": ["string", "null"], "description": "Datastore moid."},
+        "datastore_type": {
+            "type": ["string", "null"],
+            "description": "Datastore type, e.g. VMFS, NFS, NFS41, vsan.",
+        },
+        "path": {"type": "string", "description": "The listed folder (relative)."},
+        "datastore_path": {
+            "type": ["string", "null"],
+            "description": "The listed folder as '[datastore] path'.",
+        },
+        "pattern": {"type": ["string", "null"], "description": "The file name pattern used."},
+        "count": {"type": "integer", "description": "Number of entries."},
+        "entries": {
+            "type": "array",
+            "description": "One row per file or folder directly in the listed folder.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "path": {
+                        "type": "string",
+                        "description": "Path relative to the datastore root.",
+                    },
+                    "kind": {"type": "string", "enum": ["file", "folder"]},
+                    "file_type": {
+                        "type": ["string", "null"],
+                        "description": "vSphere file type, e.g. IsoImageFileInfo, FolderFileInfo.",
+                    },
+                    "size_bytes": {
+                        "type": ["integer", "null"],
+                        "description": (
+                            "File size. For a folder: null, or with include_usage the "
+                            "size of all files below it."
+                        ),
+                    },
+                    "modified": {
+                        "type": ["string", "null"],
+                        "description": "Last change (ISO 8601).",
+                    },
+                    "file_count": {
+                        "type": "integer",
+                        "description": "include_usage, folders only: files below the folder.",
+                    },
+                    "latest_modified": {
+                        "type": ["string", "null"],
+                        "description": "include_usage, folders only: newest file change below.",
+                    },
+                    "vms": {
+                        "type": ["array", "null"],
+                        "items": {"type": "string"},
+                        "description": (
+                            "include_usage only: names of registered VMs that use a "
+                            "file at or below this path; null when not checked."
+                        ),
+                    },
+                },
+                "required": ["name", "path", "kind", "file_type", "size_bytes", "modified"],
+                "additionalProperties": False,
+            },
+        },
+        "vm_check": {
+            "type": ["string", "null"],
+            "enum": ["complete", "incomplete", "not_supported", None],
+            "description": (
+                "include_usage only. complete: vms is exact. incomplete: vSphere "
+                "answered only in part, so vms may miss a VM. not_supported: vSAN / "
+                "vVol datastore, vms not checked. null: include_usage was false."
+            ),
+        },
+        "guidance": {"type": ["string", "null"], "description": "Why the status is not ok."},
+    },
+    "required": ["status", "datastore", "path", "count", "entries"],
+    "additionalProperties": True,
 }
 
 

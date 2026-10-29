@@ -11,7 +11,7 @@ They cover:
 - the host steps: the etcd user and group, and RKE2's kernel settings file,
   copied to /etc/sysctl.d and loaded, after RKE2's installer and before RKE2
   starts, wherever the installer put the file;
-- a second run, which changes nothing;
+- a second run, which is the update and changes nothing;
 - cis_state, which meho-host check (#4638) can call.
 
 fixtures/rke2-pod-security-cis.yaml is restrictedPSAConfig of
@@ -343,10 +343,11 @@ class SecondRunTests(CisTestCase):
 
     def test_a_second_run_changes_nothing(self) -> None:
         self.assert_succeeds(self.machine.run())
+        self.machine.mark_installed()
         before = self.snapshot()
         self.machine.answer("calls.log", "")
 
-        result = self.machine.run()
+        result = self.machine.run("--confirm-backup")
 
         self.assert_succeeds(result)
         self.assertEqual(before, self.snapshot())
@@ -359,9 +360,10 @@ class SecondRunTests(CisTestCase):
 
     def test_a_changed_settings_file_is_replaced_by_rke2s_file(self) -> None:
         self.assert_succeeds(self.machine.run())
+        self.machine.mark_installed()
         self.machine.host_file(SYSCTL_FILE, "vm.overcommit_memory=0\n")
 
-        self.assert_succeeds(self.machine.run())
+        self.assert_succeeds(self.machine.run("--confirm-backup"))
 
         self.assertEqual(RKE2_CIS_SYSCTL, self.host_text(SYSCTL_FILE))
         self.assertEqual("1", self.kernel("vm.overcommit_memory"))

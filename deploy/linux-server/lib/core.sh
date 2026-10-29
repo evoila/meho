@@ -47,9 +47,10 @@ read_download_version() {
     ok "the download holds MEHO $MEHO_VERSION, the chart $CHART_VERSION and RKE2 $RKE2_VERSION"
 }
 
-# tenant_id: the id in an existing values-place.yaml, so a second run keeps
-# the id Keycloak already uses; on a fresh machine, a new one. The kernel
-# gives a new random UUID every time its uuid file is read.
+# tenant_id: the id in an existing values-place.yaml, so a run of
+# --from-disk keeps the id Keycloak already uses; on a fresh machine, a new
+# one. The kernel gives a new random UUID every time its uuid file is read.
+# The update takes the id from the install record instead.
 tenant_id() {
     local file="${HOST_ROOT}${MEHO_PLACE_VALUES}" stored=""
     if [[ -f $file ]]; then
@@ -66,7 +67,8 @@ tenant_id() {
 # print the answers of this place as Helm values (form-2 design, section 6).
 # shortcut: the two network-policy ranges are wiring, not a place answer,
 # until the chart derives them from its built-in parts (#4047); drop them
-# then, and the update (#4736) removes them from existing place files.
+# then. The update writes this file again from the install record, so the
+# next update removes them from existing place files.
 render_place_values() {
     local hostname=$1 tenant_id=$2 admin_user=$3 approver_user=$4 pod_range=$5
     cat <<EOF
@@ -82,7 +84,7 @@ coreKeycloak:
     approverUsername: "${approver_user}"
 # shortcut: the pod range, so MEHO may reach the built-in PostgreSQL and
 # OpenBao, until the chart derives these from its built-in parts (#4047).
-# The update (#4736) removes the two keys.
+# Then the next update removes the two keys.
 networkPolicy:
   postgresCIDR: "${pod_range}"
   vaultCIDR: "${pod_range}"
@@ -158,14 +160,15 @@ install_cli() {
 }
 
 # render_install_record <date> <hostname> <public address> <tenant id>
-# <admin user> <approver user> <pod range> <service range> <from disk 0|1>:
-# print /etc/meho/install.json. A later run of install.sh reads it to find
-# the install and its answers (form-2 design, section 7). No secret is in
-# it. The values need no escaping: install.sh accepts only letters, digits
-# and a few signs in them.
+# <admin user> <approver user> <pod range> <service range> <join address>
+# <from disk 0|1>: print /etc/meho/install.json. A later run of install.sh
+# reads it to find the install and its answers (form-2 design, section 7),
+# with read_install_record in lib/update.sh, which reads one key per line.
+# No secret is in it. The values need no escaping: install.sh accepts only
+# letters, digits and a few signs in them.
 render_install_record() {
     local from_disk=false
-    if (($9)); then
+    if ((${10})); then
         from_disk=true
     fi
     cat <<EOF
@@ -182,6 +185,7 @@ render_install_record() {
     "approver_user": "$6",
     "cluster_cidr": "$7",
     "service_cidr": "$8",
+    "join_address": "$9",
     "from_disk": ${from_disk}
   }
 }

@@ -40,7 +40,6 @@ import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.registry import (
     clear_registry,
@@ -53,6 +52,7 @@ from meho_backplane.connectors.vcf_automation import (
     VcfAutomationTargetLike,
 )
 from meho_backplane.connectors.vcf_automation._routing import vhost_header
+from meho_backplane.connectors.vcf_automation.connector import _plane_cache_key
 from meho_backplane.settings import get_settings
 
 
@@ -489,8 +489,8 @@ async def test_provider_and_tenant_caches_are_independent_per_target() -> None:
             _TARGET_A, operator=_make_operator(), path="/iaas/api/projects"
         )
 
-    assert connector._provider_tokens == {target_cache_key(_TARGET_A): "p-jwt-1"}
-    assert connector._tenant_tokens == {target_cache_key(_TARGET_A): "t-tok-1"}
+    assert connector._provider_tokens == {_plane_cache_key(_TARGET_A, "provider"): "p-jwt-1"}
+    assert connector._tenant_tokens == {_plane_cache_key(_TARGET_A, "tenant"): "t-tok-1"}
     await connector.aclose()
 
 
@@ -523,12 +523,12 @@ async def test_per_target_isolation_keeps_both_plane_caches_separate() -> None:
         )
 
     assert connector._provider_tokens == {
-        target_cache_key(_TARGET_A): "p-a",
-        target_cache_key(_TARGET_B): "p-b",
+        _plane_cache_key(_TARGET_A, "provider"): "p-a",
+        _plane_cache_key(_TARGET_B, "provider"): "p-b",
     }
     assert connector._tenant_tokens == {
-        target_cache_key(_TARGET_A): "t-a",
-        target_cache_key(_TARGET_B): "t-b",
+        _plane_cache_key(_TARGET_A, "tenant"): "t-a",
+        _plane_cache_key(_TARGET_B, "tenant"): "t-b",
     }
     await connector.aclose()
 
@@ -589,12 +589,12 @@ async def test_same_name_targets_in_different_tenants_get_distinct_tokens() -> N
         )
 
     assert connector._provider_tokens == {
-        target_cache_key(tenant_one): "p-one",
-        target_cache_key(tenant_two): "p-two",
+        _plane_cache_key(tenant_one, "provider"): "p-one",
+        _plane_cache_key(tenant_two, "provider"): "p-two",
     }
     assert connector._tenant_tokens == {
-        target_cache_key(tenant_one): "t-one",
-        target_cache_key(tenant_two): "t-two",
+        _plane_cache_key(tenant_one, "tenant"): "t-one",
+        _plane_cache_key(tenant_two, "tenant"): "t-two",
     }
     await connector.aclose()
 
@@ -669,6 +669,146 @@ async def test_provider_secret_ref_override_invokes_loader_for_distinct_provider
     _, password = _decode_basic_auth(auth)
     assert password == "provider-secret"
     assert "vcfa/provider" in seen_secret_refs
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_targets_with_one_provider_secret_share_one_provider_session() -> None:
+    """Different tenant secrets, one provider secret: one provider login, two tenant logins.
+
+    The provider plane logs in with ``provider_secret_ref``, so that secret
+    is the one in its cache key. The tenant plane keeps one token per
+    tenant secret.
+    """
+    first = _StubTarget(
+        name="vcfa-prov-a",
+        host="vcfa-shared.test.invalid",
+        port=443,
+        secret_ref="vcfa/sso-a",
+        provider_secret_ref="vcfa/provider",
+        provider_username="admin@System",
+    )
+    second = _StubTarget(
+        name="vcfa-prov-b",
+        host="vcfa-shared.test.invalid",
+        port=None,
+        secret_ref="vcfa/sso-b",
+        provider_secret_ref="vcfa/provider",
+        provider_username="admin@System",
+    )
+    assert _plane_cache_key(first, "provider") == _plane_cache_key(second, "provider")
+    assert _plane_cache_key(first, "tenant") != _plane_cache_key(second, "tenant")
+
+    connector = _make_connector()
+    async with respx.mock(base_url="https://vcfa-shared.test.invalid") as mock:
+        provider = mock.post("/cloudapi/1.0.0/sessions/provider").respond(
+            200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-shared"}
+        )
+        tenant = mock.post("/iaas/api/login")
+        tenant.side_effect = [
+            httpx.Response(200, json={"token": "t-a"}),
+            httpx.Response(200, json={"token": "t-b"}),
+        ]
+        operator = _make_operator()
+        for target in (first, second, first, second):
+            headers = await connector.auth_headers(
+                target, operator=operator, path="/cloudapi/1.0.0/orgs"
+            )
+            assert headers["Authorization"] == "Bearer p-shared"
+        h_a = await connector.auth_headers(first, operator=operator, path="/iaas/api/projects")
+        h_b = await connector.auth_headers(second, operator=operator, path="/iaas/api/projects")
+
+    assert provider.call_count == 1
+    assert tenant.call_count == 2
+    assert h_a["Authorization"] == "Bearer t-a"
+    assert h_b["Authorization"] == "Bearer t-b"
+    await connector.aclose()
+
+
+def test_provider_key_reads_the_domain_only_without_provider_username() -> None:
+    """The key changes only when the provider login user changes."""
+    base: dict[str, Any] = {"host": "vcfa-shared.test.invalid", "port": 443, "secret_ref": "x"}
+    explicit_a = _StubTarget(name="a", provider_username="admin@System", domain="org-a", **base)
+    explicit_b = _StubTarget(name="b", provider_username="admin@System", domain="org-b", **base)
+    legacy_none = _StubTarget(name="c", **base)
+    legacy_system = _StubTarget(name="d", domain="System", **base)
+    legacy_a = _StubTarget(name="e", domain="org-a", **base)
+    legacy_b = _StubTarget(name="f", domain="org-b", **base)
+    assert _plane_cache_key(explicit_a, "provider") == _plane_cache_key(explicit_b, "provider")
+    assert _plane_cache_key(legacy_none, "provider") == _plane_cache_key(legacy_system, "provider")
+    assert _plane_cache_key(legacy_a, "provider") != _plane_cache_key(legacy_b, "provider")
+    assert _plane_cache_key(legacy_a, "provider") != _plane_cache_key(explicit_a, "provider")
+    assert _plane_cache_key(explicit_a, "tenant") != _plane_cache_key(explicit_b, "tenant")
+
+
+def test_both_plane_keys_read_the_fqdn_the_login_sends_as_host() -> None:
+    """Two targets with different vhosts log in to different organisations.
+
+    The appliance picks the organisation from the ``Host`` header, so the
+    ``fqdn`` is part of both plane keys here, although the shared key leaves
+    it out for logins that never send it. Case does not matter in a host.
+    """
+    base: dict[str, Any] = {"host": "10.0.0.5", "port": 443, "secret_ref": "x"}
+    unset = _StubTarget(name="a", **base)
+    org_a = _StubTarget(name="b", fqdn="org-a.vcfa.test.invalid", **base)
+    org_a_upper = _StubTarget(name="c", fqdn="Org-A.VCFA.test.invalid", **base)
+    org_b = _StubTarget(name="d", fqdn="org-b.vcfa.test.invalid", **base)
+    for plane in ("provider", "tenant"):
+        assert _plane_cache_key(org_a, plane) == _plane_cache_key(org_a_upper, plane)
+        assert _plane_cache_key(org_a, plane) != _plane_cache_key(org_b, plane)
+        assert _plane_cache_key(org_a, plane) != _plane_cache_key(unset, plane)
+
+
+@pytest.mark.asyncio
+async def test_one_provider_user_with_different_domains_shares_one_provider_session() -> None:
+    """Same explicit provider user, secret and address, different tenant domains: one login.
+
+    The provider login sends ``provider_username`` as is, so the tenant
+    domain plays no part in it. Both targets share one provider token and
+    one renewal: after a ``401`` on the first target the second target
+    sends the renewed token without a login of its own.
+    """
+    first = _StubTarget(
+        name="vcfa-dom-a",
+        host="vcfa-shared.test.invalid",
+        port=443,
+        secret_ref="vcfa/sso-a",
+        provider_secret_ref="vcfa/provider",
+        provider_username="admin@System",
+        domain="org-a",
+    )
+    second = _StubTarget(
+        name="vcfa-dom-b",
+        host="vcfa-shared.test.invalid",
+        port=443,
+        secret_ref="vcfa/sso-b",
+        provider_secret_ref="vcfa/provider",
+        provider_username="admin@System",
+        domain="org-b",
+    )
+    connector = _make_connector()
+    operator = _make_operator()
+    async with respx.mock(base_url="https://vcfa-shared.test.invalid") as mock:
+        login = mock.post("/cloudapi/1.0.0/sessions/provider")
+        login.side_effect = [
+            httpx.Response(200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-first"}),
+            httpx.Response(200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-second"}),
+        ]
+        orgs = mock.get("/cloudapi/1.0.0/orgs")
+        orgs.side_effect = [
+            httpx.Response(200, json={"values": []}),
+            httpx.Response(401),
+            httpx.Response(200, json={"values": []}),
+            httpx.Response(200, json={"values": []}),
+        ]
+        await connector._request_json(second, "GET", "/cloudapi/1.0.0/orgs", operator=operator)
+        await connector._request_json(first, "GET", "/cloudapi/1.0.0/orgs", operator=operator)
+        await connector._request_json(second, "GET", "/cloudapi/1.0.0/orgs", operator=operator)
+
+    assert login.call_count == 2
+    sent = [call.request.headers["Authorization"] for call in orgs.calls]
+    assert sent == ["Bearer p-first", "Bearer p-first", "Bearer p-second", "Bearer p-second"]
+    assert connector._provider_tokens == {_plane_cache_key(first, "provider"): "p-second"}
     await connector.aclose()
 
 
@@ -870,7 +1010,7 @@ async def test_provider_plane_401_triggers_relogin_and_retry_once() -> None:
     assert login.call_count == 2
     assert orgs.call_count == 2
     # Cache holds the refreshed token; tenant cache untouched.
-    assert connector._provider_tokens == {target_cache_key(_TARGET_A): "p-jwt-second"}
+    assert connector._provider_tokens == {_plane_cache_key(_TARGET_A, "provider"): "p-jwt-second"}
     assert connector._tenant_tokens == {}
     await connector.aclose()
 
@@ -931,8 +1071,8 @@ async def test_tenant_plane_401_triggers_independent_relogin_and_retry_once() ->
     assert tenant_login.call_count == 2
     assert projects.call_count == 2
     # The provider cache survived the tenant-plane re-login.
-    assert connector._provider_tokens == {target_cache_key(_TARGET_A): "p-jwt-stable"}
-    assert connector._tenant_tokens == {target_cache_key(_TARGET_A): "t-second"}
+    assert connector._provider_tokens == {_plane_cache_key(_TARGET_A, "provider"): "p-jwt-stable"}
+    assert connector._tenant_tokens == {_plane_cache_key(_TARGET_A, "tenant"): "t-second"}
     await connector.aclose()
 
 
@@ -1114,8 +1254,8 @@ async def test_aclose_clears_both_plane_caches_and_pool() -> None:
             _TARGET_A, operator=_make_operator(), path="/iaas/api/projects"
         )
 
-    assert connector._provider_tokens == {target_cache_key(_TARGET_A): "p-jwt"}
-    assert connector._tenant_tokens == {target_cache_key(_TARGET_A): "t-tok"}
+    assert connector._provider_tokens == {_plane_cache_key(_TARGET_A, "provider"): "p-jwt"}
+    assert connector._tenant_tokens == {_plane_cache_key(_TARGET_A, "tenant"): "t-tok"}
     await connector.aclose()
     assert connector._provider_tokens == {}
     assert connector._tenant_tokens == {}
@@ -1472,8 +1612,8 @@ async def test_same_fqdn_two_alias_ips_dial_own_host_and_stay_isolated() -> None
     # ``target_cache_key``, no cross-contamination; the tenant plane, never
     # exercised by these ``/cloudapi`` calls, stays empty.
     assert connector._provider_tokens == {
-        target_cache_key(target_a): "p-jwt-a",
-        target_cache_key(target_b): "p-jwt-b",
+        _plane_cache_key(target_a, "provider"): "p-jwt-a",
+        _plane_cache_key(target_b, "provider"): "p-jwt-b",
     }
     assert connector._tenant_tokens == {}
     await connector.aclose()

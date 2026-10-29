@@ -11,8 +11,8 @@ What is covered, with a respx-mocked RaaS server and no ingested catalog:
 * each of the six reads through ``dispatch()``: the RPC resource, method
   and kwarg sent, and the flat rows returned;
 * an RPC ``error`` answer and an HTTP error reach the answer;
-* a ``401`` on an RPC call logs in again for that target only and the read
-  then succeeds;
+* a ``401`` on an RPC call logs in again for that credential only (a second
+  target with its own credential keeps its session) and the read then succeeds;
 * a job return is shown only when its content can be checked (a state run
   reduced to known fields, a number or a boolean), secret-named values are
   replaced, the arguments of functions outside a short list are withheld,
@@ -267,7 +267,9 @@ async def session() -> AsyncIterator[AsyncSession]:
 class _Target:
     """Target satisfying the connector Protocols and the resolver shape."""
 
-    def __init__(self, *, version: str = SALT_VERSION) -> None:
+    def __init__(
+        self, *, version: str = SALT_VERSION, secret_ref: str = "targets/op-reads/salt-typed"
+    ) -> None:
         self.product = SALT_PRODUCT
         self.fingerprint = type("_FP", (), {"version": version})()
         self.preferred_impl_id: str | None = None
@@ -276,7 +278,7 @@ class _Target:
         self.name = f"salt-typed-{self.id.hex[:6]}"
         self.host = _HOST
         self.port = 443
-        self.secret_ref = "targets/op-reads/salt-typed"
+        self.secret_ref = secret_ref
         self.auth_model = "shared_service_account"
 
 
@@ -476,7 +478,7 @@ async def test_401_on_rpc_logs_in_again_for_that_target_only(
     _stub_embedding: AsyncMock, session: AsyncSession
 ) -> None:
     await _register(_stub_embedding)
-    first, second = _Target(), _Target()
+    first, second = _Target(), _Target(secret_ref="targets/op-reads/salt-typed-second")
     calls: list[dict[str, Any]] = []
     rejected = {"done": False}
     ok = _fake_raas(_ALL_ANSWERS, calls)

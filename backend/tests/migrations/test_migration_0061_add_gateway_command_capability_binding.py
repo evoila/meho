@@ -21,7 +21,7 @@ generic DDL, so PG parity holds.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -75,22 +75,26 @@ def _columns(sync_url: str) -> set[str]:
     return {str(row[1]) for row in rows}
 
 
-def test_upgrade_adds_capability_columns(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_capability_columns(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0061`` adds the four capability-binding columns."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     assert _columns(sync_url) >= _CAPABILITY_COLUMNS
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade "0060"`` drops the four columns; ``upgrade "0061"`` re-adds them.
 
     Pinned to this migration's own revision on both legs (never ``head``) so
     a future head migration cannot break the round-trip.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert _columns(sync_url) >= _CAPABILITY_COLUMNS
 
     command.downgrade(cfg, _DOWN_REVISION)
@@ -102,7 +106,9 @@ def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> 
     assert _columns(sync_url) >= _CAPABILITY_COLUMNS
 
 
-def test_expires_at_is_not_null_with_sentinel_default(alembic_cfg: tuple[Config, str]) -> None:
+def test_expires_at_is_not_null_with_sentinel_default(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """The NOT NULL ``expires_at``/``params_hash`` ADD COLUMN lands on the empty table.
 
     A raw insert that omits the two NOT NULL capability columns succeeds via
@@ -111,7 +117,7 @@ def test_expires_at_is_not_null_with_sentinel_default(alembic_cfg: tuple[Config,
     dialects rather than requiring a backfill.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     sync_eng = sa_create_engine(sync_url)
     try:

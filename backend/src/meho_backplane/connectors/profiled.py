@@ -105,7 +105,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.profile_auth import (
     SESSION_SCHEME_SPECS,
     STATELESS_SCHEMES,
@@ -115,6 +115,7 @@ from meho_backplane.connectors._shared.profile_auth import (
     SessionToken,
     build_static_headers,
 )
+from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.vault_creds import (
     VaultCredentialsReadError,
     load_basic_credentials,
@@ -161,6 +162,12 @@ def _mounted_path(fallback: LegacyFallback, login_path: str, descriptor_path: st
     mount = fallback.op_mount_for_login_path(login_path)
     normalised = descriptor_path if descriptor_path.startswith("/") else f"/{descriptor_path}"
     return f"{mount}{normalised}"
+
+
+def _token_headers(spec: SessionSchemeSpec, token: str) -> dict[str, str]:
+    """Return the header a session-stateful scheme sends *token* in."""
+    value = f"Bearer {token}" if spec.token_value_kind == "bearer" else token
+    return {spec.token_header: value}
 
 
 class _CachedSessionToken:
@@ -232,18 +239,18 @@ class ProfiledRestConnector(HttpConnector):
         if profile is not None:
             self.profile = profile
         self._injected_loader = credentials_loader
-        # Per-target session-token cache keyed on the tenant-unique
-        # ``(tenant_id, id)`` tuple (#1642), guarded by one lock per
-        # connector instance. Only the two session-stateful schemes
+        # Session-token cache keyed on the credential
+        # (``credential_cache_key``: tenant, secret and login host, #5033),
+        # guarded by one lock per connector instance. Only the two session-stateful schemes
         # (session_login / oauth2_mint) populate it.
-        self._session_tokens: dict[tuple[str, str], _CachedSessionToken] = {}
-        # The login path that actually minted each target's session (#2031).
+        self._session_tokens: dict[tuple[str, ...], _CachedSessionToken] = {}
+        # The login path that actually minted each session (#2031), on the same key.
         # Only a scheme with a LegacyFallback (session_login_basic) ever
         # records anything other than its modern path here; the recorded path
         # drives op-path mount (see :meth:`mount_op_path`) and session
         # teardown so a legacy-only target (vcsim) routes ops to ``/rest``
         # instead of defaulting to the modern ``/api`` mount.
-        self._session_login_paths: dict[tuple[str, str], str] = {}
+        self._session_login_paths: dict[tuple[str, ...], str] = {}
         self._session_lock = asyncio.Lock()
 
     # -- auth -----------------------------------------------------------
@@ -318,8 +325,7 @@ class ProfiledRestConnector(HttpConnector):
 
         spec = self._session_spec(auth.scheme)
         token = await self._session_token(target, operator)
-        value = f"Bearer {token}" if spec.token_value_kind == "bearer" else token
-        return {spec.token_header: value}
+        return _token_headers(spec, token)
 
     # -- op-path mount (modern/legacy endpoint fallback) ----------------
 
@@ -358,7 +364,7 @@ class ProfiledRestConnector(HttpConnector):
             return path
         await self._session_token(target, operator)
         login_path = self._session_login_paths.get(
-            target_cache_key(target), spec.login_path(profile.auth)
+            credential_cache_key(target), spec.login_path(profile.auth)
         )
         return _mounted_path(fallback, login_path, path)
 
@@ -384,7 +390,7 @@ class ProfiledRestConnector(HttpConnector):
                 f"target={getattr(target, 'name', '?')!r} has no operator JWT "
                 "(system-initiated calls cannot read per-target vendor credentials)"
             )
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target)
         async with self._session_lock:
             now = time.monotonic()
             cached = self._session_tokens.get(cache_key)
@@ -431,7 +437,7 @@ class ProfiledRestConnector(HttpConnector):
             )
         # Record the login path that won so op-path mount + teardown follow
         # the live endpoint (modern /api vs legacy /rest for vCenter). #2031
-        self._session_login_paths[target_cache_key(target)] = established_path
+        self._session_login_paths[credential_cache_key(target)] = established_path
         _log.info(
             "profiled_session_established",
             target=getattr(target, "name", None),
@@ -583,7 +589,9 @@ class ProfiledRestConnector(HttpConnector):
             )
         return spec
 
-    async def invalidate_session(self, target: Any) -> None:
+    async def invalidate_session(
+        self, target: Any, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Public duck-typed session-eviction hook for the dispatch path.
 
         The seam the generic-ingested dispatch path calls on an auth-class
@@ -595,9 +603,11 @@ class ProfiledRestConnector(HttpConnector):
         (#1974) without an ``isinstance`` ladder, and without #2067 depending
         on that migration.
         """
-        await self._invalidate_session(target)
+        await self._invalidate_session(target, rejected=rejected)
 
-    async def _invalidate_session(self, target: Any) -> None:
+    async def _invalidate_session(
+        self, target: Any, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Drop the cached session token for *target*.
 
         Called on a downstream session-expiry status so the next
@@ -606,13 +616,24 @@ class ProfiledRestConnector(HttpConnector):
         the lock so a concurrent re-establish doesn't race the invalidation.
         Mirrors the typed connectors' re-login-once recovery seam; the
         dispatcher owns the wire call + the retry.
+
+        With *rejected*, the token is dropped only when that request sent it;
+        a newer token another call just logged in for stays (#5033).
         """
         async with self._session_lock:
-            cache_key = target_cache_key(target)
-            self._session_tokens.pop(cache_key, None)
-            # Drop the recorded login path too so a re-establish re-discovers
-            # the live endpoint from a clean state (#2031).
-            self._session_login_paths.pop(cache_key, None)
+            cache_key = credential_cache_key(target)
+            dropped = drop_rejected_token(
+                self._session_tokens,
+                cache_key,
+                rejected,
+                lambda cached: _token_headers(
+                    self._session_spec(self._require_profile(target).auth.scheme), cached.token
+                ),
+            )
+            if dropped:
+                # Drop the recorded login path too so a re-establish
+                # re-discovers the live endpoint from a clean state (#2031).
+                self._session_login_paths.pop(cache_key, None)
 
     # -- fingerprint / probe (G0.28-T6 #1972) ---------------------------
 

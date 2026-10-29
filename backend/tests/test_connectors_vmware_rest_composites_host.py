@@ -212,6 +212,9 @@ class _HostRecordingConnector(PagedVim):
     the wire.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(
         self,
         *,

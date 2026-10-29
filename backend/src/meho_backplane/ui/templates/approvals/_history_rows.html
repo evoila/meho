@@ -52,6 +52,18 @@
             <span aria-hidden="true">&middot;</span>
             <time datetime="{{ req.created_at }}">{{ req.created_at }}</time>
           {% endif %}
+        {% elif req.status == "withdrawn" %}
+          {#- Withdrawn (#4987): the sender took it back; no reviewer. -#}
+          <span aria-hidden="true">&middot;</span>
+          <span>withdrawn by the sender</span>
+          {% if req.withdrawn_at %}
+            <span aria-hidden="true">&middot;</span>
+            <time datetime="{{ req.withdrawn_at }}">{{ req.withdrawn_at }}</time>
+          {% endif %}
+          {% if req.withdraw_reason %}
+            <span aria-hidden="true">&middot;</span>
+            <span>{{ req.withdraw_reason }}</span>
+          {% endif %}
         {% else %}
           {% if req.reviewer %}
             <span aria-hidden="true">&middot;</span>

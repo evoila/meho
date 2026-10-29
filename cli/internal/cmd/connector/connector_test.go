@@ -813,6 +813,52 @@ func TestPrintIngestSummaryGroupLines(t *testing.T) {
 	}
 }
 
+// TestPrintIngestSummaryUnassignedOps checks that the summary names the
+// operations still without a group, and says how many more there are
+// when the server cut the list (#4972).
+func TestPrintIngestSummaryUnassignedOps(t *testing.T) {
+	ids := []string{"GET:/api/about", "POST:/OptionManager/{moId}/UpdateOptions"}
+	r := &api.IngestResponse{
+		Ingestion: api.IngestionResultModel{ConnectorId: "vmware-rest-9.0"},
+		Grouping: &api.GroupingResultModel{
+			ConnectorId:          "vmware-rest-9.0",
+			OperationsAssigned:   10,
+			OperationsUnassigned: 5,
+			UnassignedOpIds:      &ids,
+		},
+	}
+	var buf bytes.Buffer
+	printIngestSummary(&buf, ingestOptions{}, r)
+	out := buf.String()
+	for _, want := range []string{
+		"  operations without a group (5):\n",
+		"    GET:/api/about\n",
+		"    POST:/OptionManager/{moId}/UpdateOptions\n",
+		"    ... and 3 more (see `meho connector review vmware-rest-9.0`)\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render missing %q in:\n%s", want, out)
+		}
+	}
+
+	all := []string{"GET:/api/about"}
+	r.Grouping.OperationsUnassigned = 1
+	r.Grouping.UnassignedOpIds = &all
+	buf.Reset()
+	printIngestSummary(&buf, ingestOptions{}, r)
+	if strings.Contains(buf.String(), "more (see") {
+		t.Errorf("a full list must not say there are more:\n%s", buf.String())
+	}
+
+	r.Grouping.OperationsUnassigned = 0
+	r.Grouping.UnassignedOpIds = nil
+	buf.Reset()
+	printIngestSummary(&buf, ingestOptions{}, r)
+	if strings.Contains(buf.String(), "without a group") {
+		t.Errorf("no line when every operation has a group:\n%s", buf.String())
+	}
+}
+
 // TestIngestResponseDecodesCanonical pins the wire shape: the
 // canonical IngestionResultModel + GroupingResultModel (PR #488
 // api_schemas.py) ship snake_case field names that mirror the

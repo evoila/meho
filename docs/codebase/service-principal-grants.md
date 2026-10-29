@@ -108,9 +108,13 @@ cover the composite. So a service principal that runs a composite
 unattended needs **both**:
 
 - a grant on the composite op id, naming the connector of the call, and
-- a grant on each write step, naming the connector the step check uses
-  (for the vCenter composites that is `vmware-rest-9.0` today, whatever the
-  target's version; see #4991).
+- a grant on each write step, naming the connector the step check uses.
+  For the vCenter composites that is the connector the target resolves to:
+  `vmware-rest-8.0` for a vCenter 8.0.x target, `vmware-rest-9.0` for a
+  9.x target (#4991). Before #4991 every step was checked under
+  `vmware-rest-9.0`; a step grant for a vCenter 8 target that names
+  `vmware-rest-9.0` no longer matches and must be written again with
+  `vmware-rest-8.0`.
 
 What happens when one kind is missing:
 
@@ -502,6 +506,13 @@ supported alternative:
 | Verb | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/v1/operations/governed-subops?op_id=<composite>&connector_id=<id>` | List the governed child ops a composite may dispatch (role: `operator`). |
+
+**Which connector id a step grant names.** Ask the route with the
+`connector_id` of the target's connector, and write each step grant with the
+`connector_id` the answer carries. A vCenter write step is checked under the
+connector the target resolves to (#4991): ask with `vmware-rest-8.0` for a
+vCenter 8.0.x target and with `vmware-rest-9.0` for a 9.x target. Without
+`connector_id` the route answers for `vmware-rest-9.0`.
 
 Each entry carries the child `op_id`, a best-effort `safety_level`
 (descriptor-resolved; `null` for a code-shipped vim sub-op with no

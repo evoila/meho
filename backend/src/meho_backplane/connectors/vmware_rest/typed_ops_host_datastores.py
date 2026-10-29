@@ -5,7 +5,7 @@
 
 Lists the datastores mounted on one ESXi host: per datastore its moid,
 ``name``, ``type`` (``VMFS`` / ``NFS`` / ``vsan`` ...), capacity, free
-space and whether it is accessible. Works on a vCenter target and on a
+space and whether **this host** can reach it. Works on a vCenter target and on a
 **standalone ESXi** target, so a mount made by
 ``vmware.composite.host.datastore_mount_nfs`` can be checked by a separate
 read, not only by the mount op's own ``result_status``.
@@ -18,8 +18,16 @@ vCenter, SOAP ``/sdk`` on ESXi), the same seam ``vmware.host.storage_devices``
 uses:
 
 1. ``HostSystem.datastore`` -> the host's ``Datastore`` MoRefs.
-2. ``Datastore.summary.{name,type,capacity,freeSpace,accessible}`` over
-   those moids, mapped **per object** (one row per datastore).
+2. ``Datastore.summary.{name,type,capacity,freeSpace}`` plus
+   ``Datastore.host`` (the per-host mount list) over those moids, mapped
+   **per object** (one row per datastore). This read goes through
+   :func:`~meho_backplane.connectors.vmware_rest.vim_retrieve.retrieve_all_pages`,
+   so a split answer is read whole and a lost page fails the read.
+
+``accessible`` is the selected host's ``mountInfo.accessible`` from
+``Datastore.host``, not ``summary.accessible``: on vCenter the summary flag
+is true when *any* host reaches the datastore, which says nothing about
+the host that was asked for.
 
 Host resolution branches on the probe fingerprint
 (:func:`~meho_backplane.connectors.vmware_rest.host_target.classify_host_target`):
@@ -51,6 +59,7 @@ from meho_backplane.connectors.vmware_rest.vim_body import (
     retrieve_properties_body,
     unwrap_vim_value,
 )
+from meho_backplane.connectors.vmware_rest.vim_retrieve import retrieve_all_pages
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
@@ -74,8 +83,8 @@ _PROP_NAME = "summary.name"
 _PROP_TYPE = "summary.type"
 _PROP_CAPACITY = "summary.capacity"
 _PROP_FREE_SPACE = "summary.freeSpace"
-_PROP_ACCESSIBLE = "summary.accessible"
-_SUMMARY_PATH_SET = (_PROP_NAME, _PROP_TYPE, _PROP_CAPACITY, _PROP_FREE_SPACE, _PROP_ACCESSIBLE)
+_PROP_HOST_MOUNTS = "host"
+_SUMMARY_PATH_SET = (_PROP_NAME, _PROP_TYPE, _PROP_CAPACITY, _PROP_FREE_SPACE, _PROP_HOST_MOUNTS)
 
 HOST_DATASTORES_GROUP_KEY = "vmware-host-datastores"
 
@@ -124,7 +133,7 @@ def build_host_datastores_retrieve_params(host_moid: str) -> dict[str, Any]:
 
 
 def build_datastore_summary_retrieve_params(datastore_moids: list[str]) -> dict[str, Any]:
-    """RetrievePropertiesEx body for the ``Datastore.summary`` leaves over *datastore_moids*."""
+    """RetrievePropertiesEx body for ``summary.*`` + ``host`` over *datastore_moids*."""
     return retrieve_properties_body(_DATASTORE_MO_TYPE, datastore_moids, _SUMMARY_PATH_SET)
 
 
@@ -173,8 +182,29 @@ def _str_or_none(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _map_datastore_summaries(retrieve_result: Any) -> dict[str, dict[str, Any]]:
-    """Map a multi-datastore ``summary`` read to one row per datastore moid."""
+def _host_mount_accessible(mounts: Any, host_moid: str) -> bool | None:
+    """``mountInfo.accessible`` of the *host_moid* entry in ``Datastore.host``.
+
+    ``None`` when the datastore has no mount entry for that host or the flag
+    is missing / not a bool.
+    """
+    if isinstance(mounts, dict):
+        mounts = [mounts]
+    if not isinstance(mounts, list):
+        return None
+    for mount in mounts:
+        if not isinstance(mount, dict) or _moref_value(mount.get("key")) != host_moid:
+            continue
+        info = mount.get("mountInfo")
+        return _bool_or_none(info.get("accessible")) if isinstance(info, dict) else None
+    return None
+
+
+def _map_datastore_summaries(retrieve_result: Any, host_moid: str) -> dict[str, dict[str, Any]]:
+    """Map a multi-datastore ``summary`` + ``host`` read to one row per datastore moid.
+
+    ``accessible`` is taken from *host_moid*'s own mount entry.
+    """
     rows: dict[str, dict[str, Any]] = {}
     for obj in _result_objects(retrieve_result):
         moid = _moref_value(obj.get("obj"))
@@ -187,7 +217,7 @@ def _map_datastore_summaries(retrieve_result: Any) -> dict[str, dict[str, Any]]:
             "type": _str_or_none(props.get(_PROP_TYPE)),
             "capacity_bytes": _int_or_none(props.get(_PROP_CAPACITY)),
             "free_space_bytes": _int_or_none(props.get(_PROP_FREE_SPACE)),
-            "accessible": _bool_or_none(props.get(_PROP_ACCESSIBLE)),
+            "accessible": _host_mount_accessible(props.get(_PROP_HOST_MOUNTS), host_moid),
         }
     return rows
 
@@ -211,9 +241,10 @@ async def host_datastores_impl(
 ) -> dict[str, Any]:
     """Implementation of ``vmware.host.datastores`` -- the datastores mounted on one host.
 
-    Resolves the host, reads ``HostSystem.datastore``, then the summary of
-    each datastore. Fail-closed: a failed read returns
-    ``datastores_unreadable`` with an empty set.
+    Resolves the host, reads ``HostSystem.datastore``, then the summary and
+    mount list of each datastore (every page). Fail-closed: a failed read,
+    including a lost continuation page, returns ``datastores_unreadable``
+    with an empty set.
     """
     host_moid, refusal = await _resolve_host_moid(connector, operator, target, params.get("host"))
     if refusal is not None:
@@ -233,15 +264,12 @@ async def host_datastores_impl(
     summaries: dict[str, dict[str, Any]] = {}
     if moids:
         try:
-            summary_result = await connector._post_vmomi_json(
-                target,
-                _RETRIEVE_PROPERTIES_PATH,
-                operator=operator,
-                json=build_datastore_summary_retrieve_params(moids),
+            summary_result = await retrieve_all_pages(
+                connector, target, operator, build_datastore_summary_retrieve_params(moids)
             )
         except (httpx.HTTPError, RuntimeError) as exc:
             return _unreadable(host_moid, "Datastore.summary read", exc)
-        summaries = _map_datastore_summaries(summary_result)
+        summaries = _map_datastore_summaries(summary_result, host_moid)
     # One row per mounted datastore, in host order; a datastore the summary
     # read did not return keeps its moid with null fields.
     datastores = [
@@ -320,7 +348,11 @@ _DATASTORE_ITEM_SCHEMA: dict[str, Any] = {
         },
         "accessible": {
             "type": ["boolean", "null"],
-            "description": "Datastore.summary.accessible — false when the host cannot reach it.",
+            "description": (
+                "Whether this host can reach the datastore: the host's own entry in "
+                "Datastore.host (mountInfo.accessible). Null when the datastore has no "
+                "mount entry for the host."
+            ),
         },
     },
     "required": ["datastore", "name"],
@@ -384,7 +416,8 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
 HOST_DATASTORES_WHEN_TO_USE = (
     "Use to list the datastores mounted on one ESXi host — per datastore its "
     "moid, name, type (VMFS / NFS / vsan), capacity_bytes, free_space_bytes and "
-    "whether the host can reach it (accessible). The right op for 'which "
+    "whether this host can reach it (accessible, from the host's own mount "
+    "entry). The right op for 'which "
     "datastores does this host see?' or 'did the NFS mount work?', including on "
     "a standalone ESXi host no vCenter manages yet (host param ignored), where "
     "the vCenter datastore list and datastore.usage do not work. Read-only."
@@ -396,8 +429,9 @@ VMWARE_HOST_DATASTORES_OP = VmwareTypedOp(
     summary="Datastores mounted on one ESXi host: name, type, size, free space, reachable.",
     description=(
         "Returns one row per datastore mounted on an ESXi host: moid, name, type, "
-        "capacity, free space and accessible. Works through vCenter (host is required) "
-        "and on a standalone ESXi host (host is ignored). Read-only."
+        "capacity, free space and accessible (whether this host can reach it). Works "
+        "through vCenter (host is required) and on a standalone ESXi host (host is "
+        "ignored). Read-only."
     ),
     parameter_schema=_PARAMETER_SCHEMA,
     response_schema=_RESPONSE_SCHEMA,

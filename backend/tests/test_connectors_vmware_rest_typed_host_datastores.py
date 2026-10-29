@@ -6,9 +6,11 @@
 The op lists the datastores mounted on one host, on a vCenter target
 (VI-JSON) and on a standalone ESXi target (SOAP ``/sdk``). A fake connector
 records the transport calls, so the tests check host resolution, the two
-``RetrievePropertiesEx`` reads, the per-datastore mapping, the refusals and
-the JSONFlux reduction without a live server. The SOAP tests run real
-SOAP response bytes through the codec and then through this op's mappers.
+``RetrievePropertiesEx`` reads (the second one over every page), the
+per-datastore mapping with the selected host's own ``accessible`` flag, the
+refusals and the JSONFlux reduction without a live server. The SOAP tests
+run real SOAP response bytes through the codec and then through this op's
+mappers.
 """
 
 from __future__ import annotations
@@ -45,6 +47,14 @@ from meho_backplane.settings import get_settings
 
 _SOAP_FIXTURES = Path(__file__).parent / "fixtures" / "vmware_esxi_soap"
 _RETRIEVE_PATH = "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+_CONTINUE_PATH = "/PropertyCollector/propertyCollector/ContinueRetrievePropertiesEx"
+_SUMMARY_PATH_SET = [
+    "summary.name",
+    "summary.type",
+    "summary.capacity",
+    "summary.freeSpace",
+    "host",
+]
 
 
 @pytest.fixture(autouse=True)
@@ -120,8 +130,36 @@ def _boxed(type_name: str, value: Any) -> dict[str, Any]:
     return {"_typeName": type_name, "_value": value}
 
 
-def _summary_object(moid: str, name: str, ds_type: str, cap: int, free: int) -> dict[str, Any]:
-    """One VI-JSON ``Datastore.summary`` result object (boxed primitives)."""
+def _host_mount(host_moid: str, accessible: bool) -> dict[str, Any]:
+    """One VI-JSON ``DatastoreHostMount``: the mount entry of *host_moid*."""
+    return {
+        "_typeName": "DatastoreHostMount",
+        "key": _moref(host_moid, "HostSystem"),
+        "mountInfo": {
+            "_typeName": "HostMountInfo",
+            "path": f"/vmfs/volumes/{host_moid}",
+            "accessMode": "readWrite",
+            "mounted": True,
+            "accessible": accessible,
+        },
+    }
+
+
+def _summary_object(
+    moid: str,
+    name: str,
+    ds_type: str,
+    cap: int,
+    free: int,
+    mounts: dict[str, bool] | None = None,
+) -> dict[str, Any]:
+    """One VI-JSON ``Datastore`` result object: ``summary.*`` leaves plus ``host``.
+
+    *mounts* maps a host moid to its ``mountInfo.accessible``; by default the
+    two hosts the tests use can both reach the datastore.
+    """
+    if mounts is None:
+        mounts = {"host-15": True, STANDALONE_ESXI_HOST_MOID: True}
     return {
         "obj": _moref(moid),
         "propSet": [
@@ -129,31 +167,47 @@ def _summary_object(moid: str, name: str, ds_type: str, cap: int, free: int) -> 
             {"name": "summary.type", "val": _boxed("string", ds_type)},
             {"name": "summary.capacity", "val": _boxed("long", cap)},
             {"name": "summary.freeSpace", "val": _boxed("long", free)},
-            {"name": "summary.accessible", "val": _boxed("boolean", True)},
+            {
+                "name": "host",
+                "val": _boxed(
+                    "ArrayOfDatastoreHostMount",
+                    [_host_mount(h, accessible) for h, accessible in mounts.items()],
+                ),
+            },
         ],
     }
 
 
 class _FakeConnector:
-    """Records the calls ``host_datastores_impl`` makes and serves canned results."""
+    """Records the calls ``host_datastores_impl`` makes and serves canned results.
+
+    The datastore read is served page by page from *summary_pages*: the first
+    page answers ``RetrievePropertiesEx``, every later one a
+    ``ContinueRetrievePropertiesEx`` call. An exception in the list is raised
+    in its turn. *summary_result* / *summary_error* are the one-page shorthand.
+    """
 
     def __init__(
         self,
         *,
         host_results: dict[str, Any] | None = None,
         summary_result: Any = None,
+        summary_pages: list[Any] | None = None,
         hosts: list[dict[str, str]] | None = None,
         host_error: Exception | None = None,
         summary_error: Exception | None = None,
     ) -> None:
         self._host_results = host_results or {}
-        self._summary_result = summary_result
+        if summary_pages is None:
+            summary_pages = [summary_error if summary_error is not None else summary_result]
+        self._summary_pages = list(summary_pages)
         self._hosts = hosts if hosts is not None else [{"host": "host-15", "name": "esxi-01"}]
         self._host_error = host_error
-        self._summary_error = summary_error
         self.get_calls: list[dict[str, Any]] = []
         self.post_calls: list[dict[str, Any]] = []
+        self.post_paths: list[str] = []
         self.promote_calls: list[bool] = []
+        self.continue_sessions: list[str | None] = []
 
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         del target, operator
@@ -179,6 +233,12 @@ class _FakeConnector:
             return [h for h in self._hosts if h["host"] in wanted]
         return list(self._hosts)
 
+    def _next_summary_page(self) -> Any:
+        page = self._summary_pages.pop(0)
+        if isinstance(page, Exception):
+            raise page
+        return page
+
     async def _post_vmomi_json(
         self,
         target: Any,
@@ -187,21 +247,27 @@ class _FakeConnector:
         operator: Operator,
         json: dict[str, Any] | None = None,
         promote_managed_object_not_found: bool = False,
+        session_used: Any = None,
+        session_token: str | None = None,
     ) -> Any:
         del target, operator
-        assert path == _RETRIEVE_PATH
         assert json is not None
         self.post_calls.append(json)
+        self.post_paths.append(path)
         self.promote_calls.append(promote_managed_object_not_found)
+        if session_used is not None:
+            session_used.token = "<session-1>"
+        if path == _CONTINUE_PATH:
+            self.continue_sessions.append(session_token)
+            return self._next_summary_page()
+        assert path == _RETRIEVE_PATH
         mo_type = json["specSet"][0]["propSet"][0]["type"]
         if mo_type == "HostSystem":
             if self._host_error is not None:
                 raise self._host_error
             moid = json["specSet"][0]["objectSet"][0]["obj"]["value"]
             return self._host_results[moid]
-        if self._summary_error is not None:
-            raise self._summary_error
-        return self._summary_result
+        return self._next_summary_page()
 
 
 async def _run(conn: _FakeConnector, target: _Target, params: dict[str, Any]) -> dict[str, Any]:
@@ -235,17 +301,12 @@ async def test_esxi_target_reads_ha_host_without_listing() -> None:
     assert summary_body["specSet"][0]["propSet"][0] == {
         "_typeName": "PropertySpec",
         "type": "Datastore",
-        "pathSet": [
-            "summary.name",
-            "summary.type",
-            "summary.capacity",
-            "summary.freeSpace",
-            "summary.accessible",
-        ],
+        "pathSet": _SUMMARY_PATH_SET,
     }
     assert [o["obj"]["value"] for o in summary_body["specSet"][0]["objectSet"]] == ["ds-a"]
     # Only the host read promotes a missing object to not_found.
     assert conn.promote_calls == [True, False]
+    assert out["datastores"][0]["accessible"] is True
 
 
 @pytest.mark.asyncio
@@ -396,6 +457,107 @@ async def test_datastore_missing_from_summary_keeps_its_row() -> None:
 
 
 # ---------------------------------------------------------------------------
+# accessible is the selected host's own mount flag
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_accessible_comes_from_the_selected_hosts_own_mount_entry() -> None:
+    """Two hosts share a datastore; each host's answer carries its own mount state.
+
+    On vCenter ``summary.accessible`` is true as soon as any host reaches the
+    datastore. The op reads ``Datastore.host`` instead and picks the entry of
+    the host that was asked for, so host-15 sees ``False`` while host-16 sees
+    ``True`` for the same datastore.
+    """
+    shared = _summary_object(
+        "datastore-12", "nfs01", "NFS", 2000, 500, mounts={"host-15": False, "host-16": True}
+    )
+    hosts = [{"host": "host-15", "name": "esxi-01"}, {"host": "host-16", "name": "esxi-02"}]
+    host_results = {
+        "host-15": _host_result("host-15", ["datastore-12"]),
+        "host-16": _host_result("host-16", ["datastore-12"]),
+    }
+
+    def _conn() -> _FakeConnector:
+        return _FakeConnector(
+            host_results=host_results, summary_result={"objects": [shared]}, hosts=hosts
+        )
+
+    first = await _run(_conn(), _vcenter_target(), {"host": "esxi-01"})
+    second = await _run(_conn(), _vcenter_target(), {"host": "esxi-02"})
+
+    assert first["host"] == "host-15" and first["datastores"][0]["accessible"] is False
+    assert second["host"] == "host-16" and second["datastores"][0]["accessible"] is True
+
+
+@pytest.mark.asyncio
+async def test_datastore_without_a_mount_entry_for_the_host_has_null_accessible() -> None:
+    """A mount list that names only other hosts gives ``accessible: null``, never a guess."""
+    conn = _FakeConnector(
+        host_results={"host-15": _host_result("host-15", ["datastore-12"])},
+        summary_result={
+            "objects": [
+                _summary_object("datastore-12", "nfs01", "NFS", 1, 1, mounts={"host-16": True})
+            ]
+        },
+    )
+    out = await _run(conn, _vcenter_target(), {"host": "esxi-01"})
+    assert out["datastores"][0]["name"] == "nfs01"
+    assert out["datastores"][0]["accessible"] is None
+
+
+# ---------------------------------------------------------------------------
+# The datastore read follows every page
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_summary_read_follows_every_continuation_page() -> None:
+    """A split answer still fills every row; the token goes once to the continue call."""
+    conn = _FakeConnector(
+        host_results={"host-15": _host_result("host-15", ["datastore-11", "datastore-12"])},
+        summary_pages=[
+            {
+                "objects": [_summary_object("datastore-11", "local-ds", "VMFS", 1000, 900)],
+                "token": "<token-1>",
+            },
+            {"objects": [_summary_object("datastore-12", "nfs01", "NFS", 2000, 500)]},
+        ],
+    )
+    out = await _run(conn, _vcenter_target(), {"host": "esxi-01"})
+    assert out["status"] == "ok"
+    assert [(d["datastore"], d["name"], d["accessible"]) for d in out["datastores"]] == [
+        ("datastore-11", "local-ds", True),
+        ("datastore-12", "nfs01", True),
+    ]
+    assert conn.post_paths == [_RETRIEVE_PATH, _RETRIEVE_PATH, _CONTINUE_PATH]
+    assert conn.post_calls[2] == {"token": "<token-1>"}
+    # The continuation is pinned to the session the first page used.
+    assert conn.continue_sessions == ["<session-1>"]
+
+
+@pytest.mark.asyncio
+async def test_failed_continuation_page_returns_datastores_unreadable() -> None:
+    """A lost page fails the whole read: no row comes back with null fields."""
+    conn = _FakeConnector(
+        host_results={"host-15": _host_result("host-15", ["datastore-11", "datastore-12"])},
+        summary_pages=[
+            {
+                "objects": [_summary_object("datastore-11", "local-ds", "VMFS", 1000, 900)],
+                "token": "<token-1>",
+            },
+            httpx.ConnectError("page lost"),
+        ],
+    )
+    out = await _run(conn, _vcenter_target(), {"host": "esxi-01"})
+    assert out["status"] == "datastores_unreadable"
+    assert out["datastores"] == [] and out["datastore_count"] == 0
+    assert "Datastore.summary" in out["read_note"] and "page lost" in out["read_note"]
+    assert conn.post_paths == [_RETRIEVE_PATH, _RETRIEVE_PATH, _CONTINUE_PATH]
+
+
+# ---------------------------------------------------------------------------
 # SOAP (standalone ESXi) deserialisation through this op's mappers
 # ---------------------------------------------------------------------------
 
@@ -414,9 +576,9 @@ def _soap_retrieve_response(objects_xml: str) -> str:
 
 
 def test_soap_datastore_summary_maps_one_row_per_datastore() -> None:
-    """The SOAP summary fixture maps per object; longs become int, accessible bool."""
+    """The SOAP fixture maps per object; longs become int, ha-host's mount flag becomes bool."""
     xml = (_SOAP_FIXTURES / "retrieve_datastore_summary.xml").read_text()
-    rows = _map_datastore_summaries(parse_retrieve_result(xml))
+    rows = _map_datastore_summaries(parse_retrieve_result(xml), STANDALONE_ESXI_HOST_MOID)
     assert rows == {
         "nas01.example.invalid:/exports/share": {
             "datastore": "nas01.example.invalid:/exports/share",
@@ -427,7 +589,8 @@ def test_soap_datastore_summary_maps_one_row_per_datastore() -> None:
             "accessible": True,
         },
         # The second object sends bare leaves (no xsi:type): the codec keeps
-        # the numbers as text and the op turns them into int.
+        # the numbers as text and the op turns them into int; the bare
+        # mountInfo accessible=false still lands as a bool.
         "00000000-22222222-3333-444444444444": {
             "datastore": "00000000-22222222-3333-444444444444",
             "name": "datastore1",
@@ -486,11 +649,20 @@ def test_numeric_strings_coerce_and_bad_values_null() -> None:
                         {"name": "summary.name", "val": "x"},
                         {"name": "summary.capacity", "val": "123"},
                         {"name": "summary.freeSpace", "val": "n/a"},
-                        {"name": "summary.accessible", "val": "true"},
+                        {
+                            "name": "host",
+                            "val": [
+                                {
+                                    "key": _moref("ds-1-host", "HostSystem"),
+                                    "mountInfo": {"accessible": "true"},
+                                }
+                            ],
+                        },
                     ],
                 }
             ]
-        }
+        },
+        "ds-1-host",
     )
     row = rows["ds-1"]
     assert row["capacity_bytes"] == 123

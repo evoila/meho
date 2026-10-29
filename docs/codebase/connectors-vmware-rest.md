@@ -788,15 +788,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   resolution uses `host_target.classify_host_target` (ESXi → `ha-host`,
   `host` ignored; vCenter → `GET:/vcenter/host`; anything else →
   `unsupported_host_target`), with its own refusals in the
-  `datastores` / `datastore_count` shape. Two `RetrievePropertiesEx` calls
-  on `_post_vmomi_json` (VI-JSON on vCenter, SOAP on ESXi): first
-  `HostSystem.datastore` (the `Datastore` MoRefs), then
-  `summary.{name,type,capacity,freeSpace,accessible}` over those moids,
-  mapped **per result object** (keyed by the `Datastore` moid). Each row is
+  `datastores` / `datastore_count` shape. Two `RetrievePropertiesEx` reads
+  over the vmomi seam (VI-JSON on vCenter, SOAP on ESXi): first
+  `HostSystem.datastore` (the `Datastore` MoRefs, one object, one call on
+  `_post_vmomi_json`), then `summary.{name,type,capacity,freeSpace}` plus
+  `host` (the `DatastoreHostMount` list) over those moids through
+  `vim_retrieve.retrieve_all_pages`, so a split answer is read whole and a
+  lost continuation page fails the read. The rows are mapped **per result
+  object** (keyed by the `Datastore` moid). Each row is
   `{datastore, name, type, capacity_bytes, free_space_bytes, accessible}`;
-  sizes go through `_int_or_none` because the SOAP codec leaves a bare
-  numeric leaf as text. A datastore the summary read does not return keeps
-  its row with null fields. A failed read returns
+  `accessible` is the selected host's own `mountInfo.accessible` from
+  `Datastore.host`, not `summary.accessible` (on vCenter that flag is true
+  when *any* host reaches the datastore), and is null when the datastore
+  has no mount entry for the host. Sizes go through `_int_or_none` because
+  the SOAP codec leaves a bare numeric leaf as text. A datastore the read
+  does not return keeps its row with null fields. A failed read returns
   `status='datastores_unreadable'` with an empty set. Set-shaped
   (JSONFlux-reduced when large).
 - **`vmware.snapshot.list`** (`typed_ops_snapshot_list.py`, handler

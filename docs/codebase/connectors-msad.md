@@ -166,10 +166,18 @@ for a person to approve it, reads the result back, and is safe to run twice.
   class (`computer`, `user` or `group`) to an OU or container, for that object
   and everything below it. It is the fixed form of `dsacls "<OU>" /I:T /G
   "<group>:CC;computer"`. The class's schema GUID is read from the schema
-  partition; the rule is added only when an equal rule is missing
-  (`changed: false` otherwise). **`msad.ou.revoke-create-child`** removes
-  exactly the rules with that group, class, inheritance and the single
-  CreateChild right, and leaves every other rule alone.
+  partition. A rule counts as "the same" only when its whole scope matches:
+  group, class GUID, allow, inherit to all objects below, and no inherited
+  object type (a rule that reaches only one child type is narrower and is
+  left alone). The rule is added only when no such rule already holds the
+  right (`changed: false` otherwise). **`msad.ou.revoke-create-child`** takes
+  only the "create child" right away from the rules with that scope. A rule
+  that also holds other rights (for example "delete child") is written back
+  without the "create child" bit, so the other rights stay. Every other rule
+  stays as it is. Both ops read the permissions back after the save, fail when
+  the saved state is not what they set, and return it as `rule_present`.
+  Tests check the PowerShell text the ops build; there is no Windows server
+  in the test run.
 
 Code: `ops_domain_config.py`, `ops_groups.py`, `ops_ou_access.py`. Tests:
 `backend/tests/test_connectors_windows_dc_build_ops.py`.

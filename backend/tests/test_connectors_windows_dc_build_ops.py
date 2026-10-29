@@ -391,6 +391,7 @@ _ACL = {
     "group_sid": "S-1-5-21-1-2-3-1104",
     "object_class": "computer",
     "changed": True,
+    "rule_present": True,
 }
 
 
@@ -407,13 +408,45 @@ async def test_grant_create_child_adds_one_rule_only_when_missing() -> None:
     assert "schemaNamingContext" in script
     assert "ActiveDirectorySecurityInheritance]::All" in script
     assert "if ($have.Count -eq 0) {" in script
+    assert "$sid, $rights, 'Allow', $guid, $inh, $anyChild);" in script
     assert "$acl.AddAccessRule($rule); Set-Acl -LiteralPath $adPath -AclObject $acl;" in script
     assert result["action"] == "grant-create-child"
     assert result["group"] == "Server-Joiners"
+    assert result["rule_present"] is True
     assert result["op_class"] == "write"
 
 
-async def test_revoke_create_child_removes_only_the_exact_rule() -> None:
+async def test_access_rule_match_covers_the_whole_inheritance_scope() -> None:
+    """A rule that reaches only one child type is narrower and must not match."""
+    for handler in (msad_ou_grant_create_child, msad_ou_revoke_create_child):
+        _, script = await _call(
+            MsadConnector(),
+            handler,
+            {"path": "OU=Servers,DC=example,DC=test", "group": "Server-Joiners"},
+            _ACL,
+        )
+        assert "$anyChild = [Guid]::Empty;" in script
+        assert (
+            "$_.IdentityReference -eq $sid -and $_.ObjectType -eq $guid -and "
+            "$_.InheritedObjectType -eq $anyChild -and "
+            "$_.AccessControlType -eq 'Allow' -and $_.InheritanceType -eq $inh"
+        ) in script
+        # The rights are not part of the match: a rule may hold more than CreateChild.
+        assert "$_.ActiveDirectoryRights -eq $rights" not in script
+        assert "([int]$r.ActiveDirectoryRights -band [int]$rights) -eq [int]$rights" in script
+
+
+async def test_grant_create_child_treats_a_wider_rule_as_present() -> None:
+    _, script = await _call(
+        MsadConnector(),
+        msad_ou_grant_create_child,
+        {"path": "OU=Servers,DC=example,DC=test", "group": "Server-Joiners"},
+        _ACL,
+    )
+    assert "$have = @($rules | Where-Object { & $hasRight $_ });" in script
+
+
+async def test_revoke_create_child_keeps_the_other_rights_of_a_matched_rule() -> None:
     result, script = await _call(
         MsadConnector(),
         msad_ou_revoke_create_child,
@@ -422,14 +455,41 @@ async def test_revoke_create_child_removes_only_the_exact_rule() -> None:
             "group": "Server-Joiners",
             "object_class": "user",
         },
-        {**_ACL, "object_class": "user", "changed": False},
+        {**_ACL, "object_class": "user", "changed": False, "rule_present": False},
     )
     assert "$cls = 'user';" in script
-    assert "$_.ActiveDirectoryRights -eq $rights" in script
-    assert "RemoveAccessRuleSpecific($r)" in script
-    assert "AddAccessRule" not in script
+    assert "foreach ($r in @($rules | Where-Object { & $hasRight $_ })) {" in script
+    assert "[void]$acl.RemoveAccessRuleSpecific($r);" in script
+    assert "$acl.RemoveAccessRule(" not in script
+    assert "$rest = [int]$r.ActiveDirectoryRights -band (-bnot [int]$rights);" in script
+    assert (
+        "if ($rest -ne 0) { "
+        "$keep = New-Object System.DirectoryServices.ActiveDirectoryAccessRule("
+        "$sid, [System.DirectoryServices.ActiveDirectoryRights]$rest, 'Allow', "
+        "$r.ObjectType, $r.InheritanceType, $r.InheritedObjectType); "
+        "$acl.AddAccessRule($keep) };"
+    ) in script
+    assert "if ($changed) { Set-Acl -LiteralPath $adPath -AclObject $acl };" in script
     assert result["action"] == "revoke-create-child"
     assert result["changed"] is False
+    assert result["rule_present"] is False
+
+
+async def test_access_rule_ops_read_the_saved_permissions_back() -> None:
+    read_back = (
+        "$after = & $find (Get-Acl -LiteralPath $adPath); "
+        "$present = @($after | Where-Object { & $hasRight $_ }).Count -gt 0;"
+    )
+    params = {"path": "OU=Servers,DC=example,DC=test", "group": "Server-Joiners"}
+    _, grant = await _call(MsadConnector(), msad_ou_grant_create_child, params, _ACL)
+    _, revoke = await _call(MsadConnector(), msad_ou_revoke_create_child, params, _ACL)
+    for script in (grant, revoke):
+        assert read_back in script
+        save = "Set-Acl -LiteralPath $adPath -AclObject $acl"
+        assert script.index(read_back) > script.index(save)
+        assert "rule_present = $present }" in script
+    assert "if (-not $present) { throw 'the access rule is not in the saved permissions' }" in grant
+    assert "if ($present) { throw 'the access rule is still in the saved permissions' }" in revoke
 
 
 async def test_access_rule_quotes_operator_input() -> None:

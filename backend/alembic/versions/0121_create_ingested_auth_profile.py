@@ -3,8 +3,8 @@
 
 """Create the ``ingested_auth_profile`` table (#5016).
 
-Revision ID: 0119
-Revises: 0118
+Revision ID: 0121
+Revises: 0120
 Create Date: 2026-10-27
 
 One additive table. It saves the login type (``auth_scheme``) and the
@@ -31,8 +31,8 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "0119"
-down_revision: str | None = "0118"
+revision: str = "0121"
+down_revision: str | None = "0120"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

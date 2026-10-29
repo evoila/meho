@@ -1201,7 +1201,7 @@ failed with `no_connector` and the list showed `ingested-shim`. Now:
 
 * `_stamp_profiled_connector` first saves the choice through
   `ingest/ingest_auth_store.py::save_ingest_auth_profile` into the
-  `ingested_auth_profile` table (migration `0119`). One row per
+  `ingested_auth_profile` table (migration `0121`). One row per
   `(tenant_id, product, version, impl_id)`. It holds the scheme name and the
   secret field **names** only, never values. A re-ingest with a login type
   replaces the row.

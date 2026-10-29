@@ -63,15 +63,19 @@ global):
      persisted ``summary`` / ``description`` / ``custom_description``
      / ``tags`` matches the incoming hash) -- **skip the embedding
      compute**, UPDATE non-embedding fields (parameter_schema,
-     response_schema, safety_level, requires_approval,
-     llm_instructions, handler_ref, group_id, tags-when-unchanged)
-     when changed, advance ``updated_at``. The "skip re-embed"
+     response_schema, llm_instructions, handler_ref, group_id,
+     tags-when-unchanged) when changed, advance ``updated_at``.
+     ``safety_level`` and ``requires_approval`` only move up: a
+     stricter value saved on the row (for example by an operator,
+     #5037) stays. The "skip re-embed"
      branch is the operationally critical path for connector init
      speed on restart -- a connector with 50 typed ops avoids 50
      ONNX inferences (~500-2500 ms total CPU) every pod restart
      when descriptions are unchanged.
    * **Existing row, body changed** -- compute the embedding,
-     UPDATE every body-derived field plus ``embedding``.
+     UPDATE every body-derived field plus ``embedding``. The same
+     only-move-up rule applies to ``safety_level`` and
+     ``requires_approval``.
 
 6. Commit (helper-owned session) or flush (caller-owned session).
 
@@ -508,8 +512,10 @@ type CompositeOpHandler = Callable[..., Awaitable[dict[str, Any] | OperationResu
 # on :attr:`EndpointDescriptor.safety_level` so the helper rejects
 # invalid values at the Python boundary rather than at commit time
 # (where the IntegrityError message names the constraint, not the
-# field that produced it).
-_VALID_SAFETY_LEVELS: frozenset[str] = frozenset({"safe", "caution", "dangerous", "destructive"})
+# field that produced it). The rank orders the levels from least to
+# most strict.
+_SAFETY_RANK: dict[str, int] = {"safe": 0, "caution": 1, "dangerous": 2, "destructive": 3}
+_VALID_SAFETY_LEVELS: frozenset[str] = frozenset(_SAFETY_RANK)
 
 
 class HandlerRefError(ValueError):
@@ -769,6 +775,21 @@ def _validate_op_id(op_id: str) -> str:
     if not isinstance(op_id, str) or not op_id.strip():
         raise ValueError(f"op_id must be a non-empty, non-whitespace string (received {op_id!r})")
     return op_id
+
+
+def _raise_saved_settings(
+    existing: EndpointDescriptor, *, safety_level: str, requires_approval: bool
+) -> None:
+    """Move the row's risk level and approval flag up, never down (#5037).
+
+    A saved row may carry a stricter value than the registrar's default,
+    for example one an operator set. Registration keeps it. A registrar
+    that wants a lower value cannot lower it here; the operator edits the
+    op instead.
+    """
+    if _SAFETY_RANK[safety_level] > _SAFETY_RANK[existing.safety_level]:
+        existing.safety_level = safety_level
+    existing.requires_approval = existing.requires_approval or requires_approval
 
 
 def _validate_safety_level(safety_level: str) -> str:
@@ -1533,8 +1554,9 @@ async def _register_in_session(
             existing.parameter_schema = parameter_schema
             existing.response_schema = response_schema
             existing.llm_instructions = llm_instructions
-            existing.safety_level = safety_level
-            existing.requires_approval = requires_approval
+            _raise_saved_settings(
+                existing, safety_level=safety_level, requires_approval=requires_approval
+            )
             existing.group_id = group_id
             existing.updated_at = now
             await session.flush()
@@ -1565,8 +1587,9 @@ async def _register_in_session(
         existing.parameter_schema = parameter_schema
         existing.response_schema = response_schema
         existing.llm_instructions = llm_instructions
-        existing.safety_level = safety_level
-        existing.requires_approval = requires_approval
+        _raise_saved_settings(
+            existing, safety_level=safety_level, requires_approval=requires_approval
+        )
         existing.group_id = group_id
         existing.embedding = embedding
         existing.updated_at = now

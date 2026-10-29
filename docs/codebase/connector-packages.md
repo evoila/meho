@@ -130,6 +130,10 @@ MEHO (ingested ops are `NULL` too).
 - Nothing is deleted or changed. When the package is installed again,
   the rows are visible again with the operator's settings on them, for
   example an op the operator turned off stays off.
+- When the package registers its ops again, it can raise an op's risk
+  level or turn on its approval requirement, but never lower them. A
+  stricter value saved on the row, for example one an operator set,
+  stays. To lower it, the operator edits the op.
 
 "Installed" is per MEHO process. Two servers with different images can
 share one database: each one hides only the rows of the packages it does

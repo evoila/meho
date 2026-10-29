@@ -9,7 +9,9 @@
   ``search_operations`` and ``list_operation_groups``, and a call or a
   preview answers ``connector_package_not_installed``. Nothing is deleted.
 * When the package is back, the rows are visible again with the
-  operator's settings (an op the operator turned off stays off).
+  operator's settings (an op the operator turned off stays off). When
+  the package registers its ops again with its own defaults, a stricter
+  risk level or approval requirement saved on the row stays.
 * Built-in rows (owner ``NULL``) behave as before.
 
 The package and connector names are made up.
@@ -121,7 +123,13 @@ async def _seed_group(group_key: str) -> UUID:
 
 
 async def _seed_op(
-    *, op_id: str, owner: str | None, group_id: UUID, is_enabled: bool = True
+    *,
+    op_id: str,
+    owner: str | None,
+    group_id: UUID,
+    is_enabled: bool = True,
+    safety_level: str = "safe",
+    requires_approval: bool = False,
 ) -> None:
     now = datetime.now(UTC)
     async with get_sessionmaker()() as session, session.begin():
@@ -142,8 +150,8 @@ async def _seed_op(
                 group_id=group_id,
                 tags=[],
                 parameter_schema={"type": "object"},
-                safety_level="safe",
-                requires_approval=False,
+                safety_level=safety_level,
+                requires_approval=requires_approval,
                 is_enabled=is_enabled,
                 custom_notes="operator note" if owner else None,
                 owner_package=owner,
@@ -154,11 +162,28 @@ async def _seed_op(
 
 
 async def _seed_estate() -> None:
-    """One group of package ops (one turned off by the operator), one built-in group."""
+    """One group of package ops, one built-in group.
+
+    The operator made both package ops stricter than the package default
+    (``safe``, no approval) and turned one of them off.
+    """
     package_group = await _seed_group("items")
     builtin_group = await _seed_group("health")
-    await _seed_op(op_id=_PACKAGE_OP, owner=_PACKAGE, group_id=package_group)
-    await _seed_op(op_id=_PACKAGE_OP_OFF, owner=_PACKAGE, group_id=package_group, is_enabled=False)
+    await _seed_op(
+        op_id=_PACKAGE_OP,
+        owner=_PACKAGE,
+        group_id=package_group,
+        safety_level="dangerous",
+        requires_approval=True,
+    )
+    await _seed_op(
+        op_id=_PACKAGE_OP_OFF,
+        owner=_PACKAGE,
+        group_id=package_group,
+        is_enabled=False,
+        safety_level="caution",
+        requires_approval=True,
+    )
     await _seed_op(op_id=_BUILTIN_OP, owner=None, group_id=builtin_group)
 
 
@@ -197,28 +222,33 @@ def test_connector_package_of_maps_installed_folders_only() -> None:
     assert connector_package_of("meho_backplane.connectors.widget_pkg.ops.Widget.list") is None
 
 
+async def _register(op_id: str, *, description: str = "widget op") -> None:
+    """Register *op_id* the way a package registrar does, with the package defaults."""
+    await register_typed_operation(
+        product=_PRODUCT,
+        version=_VERSION,
+        impl_id=_IMPL_ID,
+        op_id=op_id,
+        handler=typed_sub_op_handler,
+        summary=f"widget op {op_id}",
+        description=description,
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=AsyncMock(encode_one=AsyncMock(return_value=[0.1] * 384)),
+    )
+
+
+def _install_with_fixtures_folder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Install the package and treat the test fixtures folder as one of its folders."""
+    monkeypatch.setattr(connector_packages, "_CONNECTORS_MODULE_PREFIX", "tests.")
+    record_installed_connector_packages({"widget_pkg": _PACKAGE, "fixtures": _PACKAGE})
+
+
 @pytest.mark.asyncio
 async def test_registration_records_the_owner_package(monkeypatch: pytest.MonkeyPatch) -> None:
     """A handler in a package folder is owned by the package; a built-in one is not."""
-
-    async def _register(op_id: str) -> None:
-        await register_typed_operation(
-            product=_PRODUCT,
-            version=_VERSION,
-            impl_id=_IMPL_ID,
-            op_id=op_id,
-            handler=typed_sub_op_handler,
-            summary=f"widget op {op_id}",
-            description="widget op",
-            parameter_schema={"type": "object"},
-            when_to_use=None,
-            embedding_service=AsyncMock(encode_one=AsyncMock(return_value=[0.1] * 384)),
-        )
-
     await _register(_BUILTIN_OP)
-    # Treat the test fixtures folder as a connector folder of the package.
-    monkeypatch.setattr(connector_packages, "_CONNECTORS_MODULE_PREFIX", "tests.")
-    record_installed_connector_packages({"fixtures": _PACKAGE})
+    _install_with_fixtures_folder(monkeypatch)
     await _register(_PACKAGE_OP)
 
     rows = await _rows()
@@ -258,7 +288,9 @@ async def test_call_and_preview_of_a_removed_package_op_are_refused() -> None:
 
 
 @pytest.mark.asyncio
-async def test_returned_package_brings_back_rows_with_operator_settings() -> None:
+async def test_returned_package_brings_back_rows_with_operator_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     await _seed_estate()
     _remove()
     assert await _search() == {_BUILTIN_OP}
@@ -273,6 +305,25 @@ async def test_returned_package_brings_back_rows_with_operator_settings() -> Non
 
     result = await _call(_PACKAGE_OP_OFF)
     assert result.extras["error_code"] == "unknown_op"
+
+    # The package starts again and registers its ops with its own defaults
+    # (``safe``, no approval). One op keeps its text (the update path that
+    # skips the embedding), the other gets a new description (the path
+    # that embeds again). Both keep the operator's stricter settings.
+    _install_with_fixtures_folder(monkeypatch)
+    await _register(_PACKAGE_OP)
+    await _register(_PACKAGE_OP_OFF, description="widget op, new text")
+
+    rows = await _rows()
+    assert rows[_PACKAGE_OP].owner_package == _PACKAGE
+    assert rows[_PACKAGE_OP].safety_level == "dangerous"
+    assert rows[_PACKAGE_OP].requires_approval is True
+    assert rows[_PACKAGE_OP].custom_notes == "operator note"
+    assert rows[_PACKAGE_OP_OFF].description == "widget op, new text"
+    assert rows[_PACKAGE_OP_OFF].safety_level == "caution"
+    assert rows[_PACKAGE_OP_OFF].requires_approval is True
+    assert rows[_PACKAGE_OP_OFF].is_enabled is False
+    assert await _search() == {_BUILTIN_OP, _PACKAGE_OP}
 
 
 @pytest.mark.asyncio

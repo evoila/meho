@@ -830,7 +830,7 @@ def _make_annotated_cr() -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_k8s_cr_list_rows_carry_annotations_and_status() -> None:
-    """A list row lets ``result_query --where`` filter on annotations and status (#3878)."""
+    """A list row carries annotations, version, uid and status (#3878)."""
     connector = _make_connector()
     with (
         patch(

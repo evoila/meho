@@ -211,12 +211,45 @@ CSP does not allow.
     `resources/read` rows carry `op_id = mcp.resource.read` and `read`, like
     their events.
   - **Dispatch rows** (`operations/_audit.py`): the row's `op_id` is
-    always the op that ran, and the row stores its class. A route label
-    that is still bound while the op runs (for example `agent.run` /
-    `write` from an agent run) no longer replaces them.
+    always the op that ran, and the row stores its class
+    (`descriptor_op_class`, see below). A route label that is still bound
+    while the op runs (for example `agent.run` / `write` from an agent
+    run) no longer replaces them.
   - **HTTP rows** (`audit.py`): a route-declared class is stored as
     resolved. Rows with no declared class keep none, and audit query
     derives it the same way.
+
+  **How a hand-written operation gets its class.** The last word of an
+  op id is not enough: reads like `vmware.host.usage` or
+  `vmware.object.collect` and writes like `vmware.composite.vm.destroy`
+  or `k8s.apply` end in words `classify_op` does not know, so they used
+  to get `other`. So for a dispatch, `resolve_operation_op_class` in
+  `broadcast/events.py` uses the risk level (`safety_level`) the
+  operation states where it is registered, and passes it to
+  `resolve_op_class` as the declared class:
+  - Typed or multi-step (composite) operation with risk level
+    `caution`, `dangerous` or `destructive`: `write`.
+  - Typed or multi-step operation with risk level `safe`: `read`, when
+    `classify_op` has nothing better than `other`. The few `safe`
+    operations that make the target do work
+    (`vmware.composite.datastore.refresh`, `rke2.etcd-snapshot.save`,
+    `vcfa.tenant.cloud_account.enumerate_images`) are pinned `write` in
+    `_WRITE_OPS`.
+  - The credential and audit-query classes always win, as above.
+  - Ingested operations keep the class from the HTTP method in their op
+    id (`GET:` → `read`, `POST:` → `write`, ...).
+
+  The dispatcher computes this class once per call
+  (`descriptor_op_class` in `operations/_audit.py`). The audit row
+  stores it, and the dispatcher passes the same value to the announce
+  gate, the announce reminder (reflex advisory) and the target activity
+  warning, so the three write checks and the audit row always agree.
+  `tests/test_operation_op_class.py` checks every registered
+  hand-written operation: a new one can never fall back to `other`.
+  Old audit rows keep the class they were written with. The console
+  drawers still re-derive the class from the op id at render time
+  (`classify_op`), so for a hand-written op they can show `other` where
+  the row stores `read` or `write`.
 
   MEHO's own registry writes that run through the dispatcher
   (`targets.register`, `topology.annotate` / `.unannotate` /
@@ -363,10 +396,11 @@ awareness, not a lock or a block (pre-op checking stays the discipline's
 
 ```text
 dispatcher._reduce_and_audit_success(...)   # after audit + broadcast
-  → build_target_activity_advisory(operator, op_id, target_name)
+  → build_target_activity_advisory(operator, op_class, target_name)
       [gate — returns {} without any stream read when:]
         · settings.dispatch_activity_advisory_window_minutes == 0
-        · classify_op(op_id) not in {write, credential_write, credential_mint}
+        · op_class not in {write, credential_write, credential_mint}
+          (op_class = descriptor_op_class(descriptor), the audit row's class)
         · target_name is None
       [otherwise — one bounded, newest-first read:]
         → XREVRANGE meho:feed:{tenant} + <since-ms> COUNT 100

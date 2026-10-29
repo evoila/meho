@@ -4671,6 +4671,7 @@ meho targets discover <product> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--import-yaml` — print the candidates as a file for `meho targets import` instead of the tables
 - `--json` — emit machine-readable JSON to stdout instead of the human tables
 - `--seed-target` — scope discovery to one already-registered target's reach (resolved tenant-scoped)
 

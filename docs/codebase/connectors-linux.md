@@ -227,6 +227,11 @@ parameter, an `OperationResult`, an audit row, a broadcast event, or a log
 line; the shared SSH seam logs only command length + exit code, and hands
 the command + output to the fail-closed redaction engine.
 
+The multi-step read `linux.migration.inventory` (group `migration`,
+`safe`) returns the host as one server record in the common migration
+inventory shape. It only calls `linux.about` and `linux.file.read`. It lives
+in `connectors/migration/source_hosts.py`; see `connectors-migration.md`.
+
 ## The write surface (T2)
 
 The governed day-2 configuration + remediation tier. It turns the

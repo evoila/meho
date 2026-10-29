@@ -447,6 +447,7 @@ def test_json_schemas_export() -> None:
         "records",
         "omissions",
         "counts",
+        "duplicates",
     }
     assert {"ServerRecord", "ApplicationRecord", "KubernetesWorkloadRecord"} <= set(
         inventory["$defs"]
@@ -743,6 +744,78 @@ def test_csv_keeps_one_row_when_a_repeated_record_adds_the_bios_uuid() -> None:
     assert [(s.source_id, s.reason, s.same_as) for s in export.left_out] == [
         (vm_id, "same_machine_as", vm_id),
         (guest_id, "same_machine_as", vm_id),
+    ]
+
+
+def test_linked_matches_name_one_machine_through_loading_and_export() -> None:
+    """B shares A's BIOS UUID, C shares B's instance UUID: both point to A."""
+    first = _linux_vm()
+    first["source_attributes"] = {"instance_uuid": "50010000-0000-4000-8000-0000000000b1"}
+    copy = _linux_vm()
+    copy["source_id"] = f"{_VCENTER}:vm-103"
+    copy["name"] = "db-lnx-01-copy"
+    copy["source_attributes"] = {"instance_uuid": "50010000-0000-4000-8000-0000000000c1"}
+    again = _linux_vm()
+    again["source_id"] = f"{_VCENTER}:vm-106"
+    again["name"] = "db-lnx-01-again"
+    again["identity_hints"] = {
+        "bios_uuid": "42010000-0000-4000-8000-0000000000cc",
+        "host_name": "db-lnx-01",
+    }
+    again["source_attributes"] = {"instance_uuid": "50010000-0000-4000-8000-0000000000C1"}
+    envelope = InventoryEnvelope.model_validate(
+        _envelope([first, copy, again], "vmware-rest-9.0", "vc-lab-a")
+    )
+
+    records, duplicates = merge_inventories([envelope])
+
+    assert [(d.source_id, d.same_as, d.match) for d in duplicates] == [
+        (copy["source_id"], first["source_id"], "bios_uuid"),
+        (again["source_id"], first["source_id"], "instance_uuid"),
+    ]
+    export = inventory_to_csv(records, duplicates)
+    assert export.row_count == 1
+    assert [(s.source_id, s.reason, s.same_as) for s in export.left_out] == [
+        (copy["source_id"], "same_machine_as", first["source_id"]),
+        (again["source_id"], "same_machine_as", first["source_id"]),
+    ]
+
+
+@pytest.mark.parametrize("c_before_b", [False, True])
+def test_linked_matches_do_not_depend_on_the_record_order(c_before_b: bool) -> None:
+    """A and B share nothing; C shares A's BIOS UUID and B's instance UUID.
+
+    One machine, one row, in either order.
+    """
+    a = _linux_vm()
+    a["source_attributes"] = {"instance_uuid": "50010000-0000-4000-8000-0000000000b1"}
+    b = _linux_vm()
+    b["source_id"] = f"{_VCENTER}:vm-106"
+    b["name"] = "db-lnx-01-b"
+    b["identity_hints"] = {
+        "bios_uuid": "42010000-0000-4000-8000-0000000000cc",
+        "host_name": "db-lnx-01",
+    }
+    b["source_attributes"] = {"instance_uuid": "50010000-0000-4000-8000-0000000000c2"}
+    c = _linux_vm()
+    c["source_id"] = f"{_VCENTER}:vm-107"
+    c["name"] = "db-lnx-01-c"
+    c["source_attributes"] = {"instance_uuid": "50010000-0000-4000-8000-0000000000C2"}
+    ordered = [a, c, b] if c_before_b else [a, b, c]
+    envelope = InventoryEnvelope.model_validate(_envelope(ordered, "vmware-rest-9.0", "vc-lab-a"))
+
+    records, duplicates = merge_inventories([envelope])
+
+    # B shares an instance UUID with the machine, C a BIOS UUID, in either order.
+    match_of = {b["source_id"]: "instance_uuid", c["source_id"]: "bios_uuid"}
+    assert [(d.source_id, d.same_as, d.match) for d in duplicates] == [
+        (r["source_id"], a["source_id"], match_of[r["source_id"]]) for r in ordered[1:]
+    ]
+    export = inventory_to_csv(records, duplicates)
+    assert export.row_count == 1
+    assert [(s.source_id, s.reason, s.same_as) for s in export.left_out] == [
+        (ordered[1]["source_id"], "same_machine_as", a["source_id"]),
+        (ordered[2]["source_id"], "same_machine_as", a["source_id"]),
     ]
 
 

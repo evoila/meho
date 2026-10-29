@@ -247,6 +247,7 @@ class Connector(ABC):
     async def list_candidates(
         self,
         seed_target: Target | None = None,
+        operator: Operator | None = None,
     ) -> list[CandidateHint]:
         """Return potentially-reachable targets the connector inferred.
 
@@ -255,6 +256,12 @@ class Connector(ABC):
         a connector scope the discovery to one known target's reach
         (e.g. for Kubernetes, ``seed_target=cluster-1`` can surface peer
         clusters present in the same kubeconfig context tree).
+
+        ``operator`` (optional) is the caller of the discover route. A
+        connector that must read the seed's secret to ask its vendor
+        (Azure lists the subscriptions the seed's login can see) reads it
+        under this operator's identity, the same way :meth:`fingerprint`
+        does.
 
         The base-class default returns ``[]``. Connectors that can list
         candidates (vSphere — ESXi hosts a vCenter sees but no target

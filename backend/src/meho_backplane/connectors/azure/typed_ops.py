@@ -39,28 +39,38 @@ from meho_backplane.connectors.azure._model import NO_PARAMS, TEXT_OR_NULL, Azur
 # Keep the empty line under each family: Ruff wants one between two imports.
 # isort: off
 # aks (Task #5087)
+from meho_backplane.connectors.azure import aks
 
 # arc (Task #5084)
+from meho_backplane.connectors.azure import arc
 
 # automation (Task #5092)
+from meho_backplane.connectors.azure import automation
 
 # avs (Task #5091)
+from meho_backplane.connectors.azure import avs
 
 # compute (Task #5083)
+from meho_backplane.connectors.azure import compute
 
 # cost (Task #5088)
+from meho_backplane.connectors.azure import cost
 
 # inventory (Task #5082)
+from meho_backplane.connectors.azure import inventory
 
 # migrate (Task #5093)
+from meho_backplane.connectors.azure import migrate
 
 # monitor (Task #5090)
 
 # network (Task #5085)
 
 # security (Task #5089)
+from meho_backplane.connectors.azure import security
 
 # storage (Task #5086)
+from meho_backplane.connectors.azure import storage
 # isort: on
 
 if TYPE_CHECKING:
@@ -356,17 +366,27 @@ AZURE_TYPED_OPS: tuple[AzureTypedOp, ...] = (
     # Each family module adds one line, *<family>.OPS, under its own comment below.
     *_ACCOUNT_OPS,
     # aks (Task #5087)
+    *aks.OPS,
     # arc (Task #5084)
+    *arc.OPS,
     # automation (Task #5092)
+    *automation.OPS,
     # avs (Task #5091)
+    *avs.OPS,
     # compute (Task #5083)
+    *compute.OPS,
     # cost (Task #5088)
+    *cost.OPS,
     # inventory (Task #5082)
+    *inventory.OPS,
     # migrate (Task #5093)
+    *migrate.OPS,
     # monitor (Task #5090)
     # network (Task #5085)
     # security (Task #5089)
+    *security.OPS,
     # storage (Task #5086)
+    *storage.OPS,
 )
 
 #: The text of each group. The AI reads it through ``list_operation_groups``
@@ -375,17 +395,27 @@ AZURE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # Each family module adds one line, **<family>.WHEN_TO_USE, under its own comment below.
     **_ACCOUNT_WHEN_TO_USE,
     # aks (Task #5087)
+    **aks.WHEN_TO_USE,
     # arc (Task #5084)
+    **arc.WHEN_TO_USE,
     # automation (Task #5092)
+    **automation.WHEN_TO_USE,
     # avs (Task #5091)
+    **avs.WHEN_TO_USE,
     # compute (Task #5083)
+    **compute.WHEN_TO_USE,
     # cost (Task #5088)
+    **cost.WHEN_TO_USE,
     # inventory (Task #5082)
+    **inventory.WHEN_TO_USE,
     # migrate (Task #5093)
+    **migrate.WHEN_TO_USE,
     # monitor (Task #5090)
     # network (Task #5085)
     # security (Task #5089)
+    **security.WHEN_TO_USE,
     # storage (Task #5086)
+    **storage.WHEN_TO_USE,
 }
 
 

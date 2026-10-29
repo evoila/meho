@@ -7,7 +7,8 @@ What is covered, with a respx-mocked Orchestrator and no ingested catalog:
 
 * the two logins: HTTP Basic (the default) and the Aria Automation token
   (``extras.login = automation``); a ``401`` drops the login of that
-  target and the read then succeeds; an unknown login mode stops early;
+  target and the read then succeeds; automation targets share a login
+  only when the login domain is the same; an unknown login mode stops early;
   a system or unauthenticated caller never reads or fills the login cache;
 * every read through ``dispatch()``: ``vro.about``, ``vro.health``,
   ``vro.workflow.list`` (flat rows, the name and category conditions,
@@ -366,6 +367,40 @@ async def test_system_caller_does_not_reuse_a_cached_automation_login() -> None:
     assert again == warm
     assert iaas.call_count == 2
     assert callers == ["op-reads-vro", "system:connector-probe"]
+
+
+@pytest.mark.asyncio
+async def test_automation_targets_share_a_login_only_when_the_domain_is_the_same(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """One secret and one host: the same domain shares one login, another domain logs in alone."""
+    await _register(_stub_embedding)
+    first, second, other = (_Target(login="automation") for _ in range(3))
+    first.extras["domain"] = "domain-a"
+    second.extras["domain"] = "domain-a"
+    other.extras["domain"] = "domain-b"
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        csp = mock.post("/csp/gateway/am/api/login").respond(
+            200, json={"refresh_token": "made-up-refresh"}
+        )
+        iaas = mock.post("/iaas/api/login")
+        iaas.side_effect = [
+            httpx.Response(200, json={"tokenType": "Bearer", "token": _TOKEN}),
+            httpx.Response(200, json={"tokenType": "Bearer", "token": "vro-reads-bearer-2"}),
+        ]
+        about = mock.get(_ABOUT).respond(200, json=_ABOUT_PAYLOAD)
+        for target in (first, second, other):
+            assert (await _dispatch("vro.about", target=target)).status == "ok"
+
+    assert [json.loads(call.request.content)["domain"] for call in csp.calls] == [
+        "domain-a",
+        "domain-b",
+    ]
+    assert [call.request.headers["authorization"] for call in about.calls] == [
+        f"Bearer {_TOKEN}",
+        f"Bearer {_TOKEN}",
+        "Bearer vro-reads-bearer-2",
+    ]
 
 
 # ---------------------------------------------------------------------------

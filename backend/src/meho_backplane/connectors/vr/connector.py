@@ -17,13 +17,16 @@ Login
 
 1. ``POST /api/rest/vr/v2/session`` with HTTP Basic: the vCenter single
    sign-on account of the vSphere Replication site, read from Vault.
-2. The JSON answer carries ``session_id``. It is cached per target and
-   tenant (``target_cache_key``), so on a 9.1 appliance registered once
-   as ``srm`` and once as ``vr`` the two targets never share a session.
+2. The JSON answer carries ``session_id``. It is cached per credential
+   (``credential_cache_key``: tenant, secret and login host), so two
+   ``vr`` targets that share one credential share one session. The
+   ``srm`` and ``vr`` connectors keep separate caches, so a 9.1 appliance
+   registered once as ``srm`` and once as ``vr`` keeps two sessions.
 3. Every later call sends the id in the ``x-dr-session`` header.
 4. On ``401`` from a later call the dispatcher calls
-   ``invalidate_session``, which drops only this target's session, and
-   dispatches once more; the next call logs in again.
+   ``invalidate_session`` with the rejected request. The session is
+   dropped only when that request sent it, so a late ``401`` never drops
+   a newer session. The dispatcher then runs the call once more.
 
 Version
 -------

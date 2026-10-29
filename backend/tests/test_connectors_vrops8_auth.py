@@ -32,7 +32,6 @@ import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import VcfTargetLike
 from meho_backplane.connectors.adapters.http import HttpConnector
@@ -42,6 +41,7 @@ from meho_backplane.connectors.registry import (
     register_connector_v2,
 )
 from meho_backplane.connectors.schemas import AuthModel
+from meho_backplane.connectors.vcf_operations.connector import _session_cache_key
 from meho_backplane.connectors.vrops8 import (
     VROPS8_IMPL_ID,
     VROPS8_PRODUCT,
@@ -222,7 +222,7 @@ async def test_token_cached_then_evicted_by_invalidate_session_remints() -> None
             ]
         )
         h1 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
-        assert connector._session_tokens == {target_cache_key(_TARGET_A): "tok-1"}
+        assert connector._session_tokens == {_session_cache_key(_TARGET_A): "tok-1"}
         await connector.invalidate_session(_TARGET_A)
         assert connector._session_tokens == {}
         h2 = await connector.auth_headers(_TARGET_A, operator=_make_operator())

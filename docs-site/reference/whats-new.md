@@ -9,6 +9,29 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.38.0](https://github.com/evoila/meho/releases/tag/v0.38.0) — 2026-10-28
+
+- **Azure, read end to end.** MEHO logs in to Azure with a service
+  principal from Vault and reads inventory, compute, network, storage,
+  AKS, cost, security, Automation and Azure Migrate; Entra ID users,
+  groups and roles come through Microsoft Graph. Every later Azure
+  read gets the same careful HTTP behaviour: one retry budget, waiting
+  when Azure says "too many requests", paging and polling. A CI check
+  compares every hand-written call with Azure's own API files.
+- **Four more connectors.** vSphere Replication, VMware Orchestrator
+  (also through VCF Automation on VCF 9), Salt, and the migration
+  assessment shapes that turn any source estate into one inventory.
+- **A service principal reads only what a person allows.** A read scope
+  limits a machine login to named targets; a read outside it is refused.
+- **Install form 2 is closed by default.** The install script sets the
+  host firewall, and `meho-host` checks the machine, writes a support
+  bundle, changes the admin network and uninstalls.
+- **Fewer secrets in traces and errors.** An operation that sends a
+  secret keeps the vendor's error text back, the audit parameter hash
+  skips secrets, and the flight recorder gets only checked files.
+- **Many smaller fixes** in vCenter reads, approvals, the console, the
+  CLI and MCP tools.
+
 ## [v0.37.0](https://github.com/evoila/meho/releases/tag/v0.37.0) — 2026-10-24
 
 - **Security fix: deployment passwords in traces.** For tenants with the

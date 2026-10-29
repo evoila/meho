@@ -113,8 +113,8 @@ writes the Secret.
 
 **The fix lines of the hardening lines.** The firewall line names the two
 `systemctl` commands that load the MEHO firewall and keep it on, and its
-log. The CIS profile line asks to undo the change it names and to restart
-RKE2. The certificate line sends the customer to support until
+log. The CIS profile line asks to set back what it names, as `install.sh`
+set it up, and to restart RKE2. The certificate line sends the customer to support until
 `meho-host certificate` (#4738) exists; that Task changes the hint.
 
 **Why Succeeded counts as fine.** RKE2's `helm-install-*` Jobs in

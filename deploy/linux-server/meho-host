@@ -441,7 +441,7 @@ check_cis_profile() {
         result cis-profile ok "on: RKE2's settings set profile: $RKE2_CIS_PROFILE, and the machine has the etcd user and the kernel settings the profile needs"
     else
         result cis-profile fail "${state:-off}." \
-            "undo the change this line names, so the files are as install.sh wrote them. Then restart RKE2: $RKE2_RESTART_COMMAND. If the cause is not clear, $SUPPORT_HINT"
+            "set back what this line names, as install.sh set it up for RKE2's CIS profile. Then restart RKE2: $RKE2_RESTART_COMMAND. If the cause is not clear, $SUPPORT_HINT"
     fi
 }
 

@@ -83,7 +83,7 @@ FIREWALL_FIX = (
     "policy drop. If it does not start, see its log: journalctl -u meho-firewall.service -e"
 )
 CIS_FIX = (
-    "Fix: undo the change this line names, so the files are as install.sh wrote them. Then "
+    "Fix: set back what this line names, as install.sh set it up for RKE2's CIS profile. Then "
     f"restart RKE2: systemctl restart rke2-server. If the cause is not clear, {SUPPORT_HINT}"
 )
 CERTIFICATE_FIX = (
@@ -624,7 +624,8 @@ class ConsoleCertificateLineTests(CheckTestCase):
         self.host.console_certificate("", console_certificate()[1])
 
         self.assertEqual(
-            f"[FAIL] console-certificate: the Secret meho-core-tls has no tls.crt. {CERTIFICATE_FIX}",
+            "[FAIL] console-certificate: the Secret meho-core-tls has no tls.crt. "
+            + CERTIFICATE_FIX,
             self.line("console-certificate"),
         )
 

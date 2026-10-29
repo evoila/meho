@@ -42,11 +42,13 @@ from meho_backplane.connectors.azure._model import NO_PARAMS, TEXT_OR_NULL, Azur
 from meho_backplane.connectors.azure import aks
 
 # arc (Task #5084)
+from meho_backplane.connectors.azure import arc
 
 # automation (Task #5092)
 from meho_backplane.connectors.azure import automation
 
 # avs (Task #5091)
+from meho_backplane.connectors.azure import avs
 
 # compute (Task #5083)
 from meho_backplane.connectors.azure import compute
@@ -366,9 +368,11 @@ AZURE_TYPED_OPS: tuple[AzureTypedOp, ...] = (
     # aks (Task #5087)
     *aks.OPS,
     # arc (Task #5084)
+    *arc.OPS,
     # automation (Task #5092)
     *automation.OPS,
     # avs (Task #5091)
+    *avs.OPS,
     # compute (Task #5083)
     *compute.OPS,
     # cost (Task #5088)
@@ -393,9 +397,11 @@ AZURE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # aks (Task #5087)
     **aks.WHEN_TO_USE,
     # arc (Task #5084)
+    **arc.WHEN_TO_USE,
     # automation (Task #5092)
     **automation.WHEN_TO_USE,
     # avs (Task #5091)
+    **avs.WHEN_TO_USE,
     # compute (Task #5083)
     **compute.WHEN_TO_USE,
     # cost (Task #5088)

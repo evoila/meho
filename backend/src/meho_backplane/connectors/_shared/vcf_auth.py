@@ -44,7 +44,7 @@ connector-specific names generalised:
 * The credentials cache + missing-key error shape ← Harbor's
   ``HarborConnector._load_credentials`` (``connector.py`` L209-238).
 * ``vcf_session_login`` ← the session-create round-trip inside
-  :meth:`meho_backplane.connectors.nsx.connector.NsxConnector._session_token`
+  ``NsxConnector._session_token`` in the NSX connector
   (``connector.py`` L213-279), pulled out of the 401-retry loop. The retry
   loop stays in the consumer because the downstream call paths differ
   per connector.

@@ -395,6 +395,18 @@ def test_happy_path_returns_full_federation_response(
     assert approvals["effective_posture"] == "four_eyes_enforced"
     assert approvals["delegated_decision_posture"] == "production_own_hand_only"
 
+    # #5019: the release that wrote the operation rows. This TestClient
+    # never ran the lifespan, so no start has written them yet.
+    from meho_backplane.version import build_git_sha
+
+    catalog = body.pop("operation_catalog")
+    assert catalog == {
+        "state": "not_recorded",
+        "this_release": build_git_sha(),
+        "written_by_release": None,
+        "written_at": None,
+    }
+
     head = ScriptDirectory.from_config(alembic_config()).get_current_head()
     assert body == {
         # #2746: OperatorIdentity now carries tenant_id + tenant_role, so the
@@ -414,6 +426,8 @@ def test_happy_path_returns_full_federation_response(
         "mcp_protocol_version": PROTOCOL_VERSION,
         # #4622: the instance's sandbox mode; off on every ordinary instance.
         "sandbox_mode": "off",
+        # #5036: the plain image carries no connector packages.
+        "connector_packages": [],
         # #2763: the runner is enabled by default but this TestClient never
         # runs the lifespan, so no tick has stamped and no baseline is set —
         # the facet reads unknown-not-stalled (the enabled-but-not-started

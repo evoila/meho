@@ -97,10 +97,14 @@ from meho_backplane.operations._errors import (
     result_no_target,
     result_target_invalid_type,
     result_target_required,
+    unknown_connector_message,
 )
 from meho_backplane.operations._lookup import (
+    close_connector_ids,
     connector_class_registered,
     connector_exists,
+    enabled_for_tenant_clause,
+    group_visible_for_tenant_clause,
     parse_connector_id,
     visible_scope_clause,
 )
@@ -165,14 +169,44 @@ class UnknownConnectorError(ValueError):
     domain exceptions (e.g. the missing-target ``ValueError`` mapped
     to ``400`` in :mod:`meho_backplane.api.v1.operations`).
 
-    Carries :attr:`connector_id` (the id the caller passed) so the MCP
-    transport can thread it onto the ``error.data`` discriminator
-    alongside its :class:`ConnectorNotIngestedError` sibling.
+    Carries :attr:`connector_id` (the id the caller passed) and
+    :attr:`did_you_mean` (up to 5 close ids the caller can see, #4136) so
+    the MCP transport can thread them onto the ``error.data``
+    discriminator alongside its :class:`ConnectorNotIngestedError` sibling.
     """
 
-    def __init__(self, message: str, *, connector_id: str) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        connector_id: str,
+        did_you_mean: list[str] | None = None,
+    ) -> None:
         super().__init__(message)
         self.connector_id = connector_id
+        self.did_you_mean = did_you_mean or []
+
+    def as_error_data(self) -> dict[str, Any]:
+        """Render the structured ``error.data`` payload for the MCP surface.
+
+        Shape: ``{"reason": "unknown_connector", "connector_id": ...,
+        "did_you_mean": [...]}``.
+        """
+        return {
+            "reason": "unknown_connector",
+            "connector_id": self.connector_id,
+            "did_you_mean": self.did_you_mean,
+        }
+
+    @classmethod
+    async def for_caller(cls, *, tenant_id: uuid.UUID, connector_id: str) -> UnknownConnectorError:
+        """Build the error with the close ids *tenant_id* can see (#4136)."""
+        did_you_mean = await close_connector_ids(tenant_id=tenant_id, connector_id=connector_id)
+        return cls(
+            unknown_connector_message(connector_id, did_you_mean),
+            connector_id=connector_id,
+            did_you_mean=did_you_mean,
+        )
 
 
 class ConnectorNotIngestedError(ValueError):
@@ -722,18 +756,21 @@ def _coerce_list_operation_groups_pagination(
 async def _count_ops_per_group(
     session: Any,
     group_ids: list[uuid.UUID],
+    *,
+    tenant_id: uuid.UUID,
 ) -> dict[uuid.UUID, int]:
-    """Count enabled :class:`EndpointDescriptor` rows per group in one query.
+    """Count the ops that are on for *tenant_id*, per group, in one query.
 
-    One SQL round-trip + Python aggregation keeps the
-    application-side group-by portable across PG + SQLite. Excludes
-    NULL ``group_id`` — ungrouped ops don't contribute.
+    "On" is :func:`enabled_for_tenant_clause` (the tenant's own setting
+    first, then the install default, #5029). One SQL round-trip + Python
+    aggregation keeps the application-side group-by portable across PG +
+    SQLite. Excludes NULL ``group_id`` — ungrouped ops don't contribute.
     """
     if not group_ids:
         return {}
     count_stmt = select(EndpointDescriptor.group_id).where(
         EndpointDescriptor.group_id.in_(group_ids),
-        EndpointDescriptor.is_enabled.is_(True),
+        enabled_for_tenant_clause(tenant_id=tenant_id),
     )
     count_rows = (await session.execute(count_stmt)).all()
     counts: dict[uuid.UUID, int] = {}
@@ -773,23 +810,17 @@ def _build_operation_groups_query(
     in sync with ``search_operations`` + dispatch, which already key off
     per-op ``is_enabled``; the marker fields on
     :class:`OperationGroupSummary` tell a fully-enabled group apart from
-    a per-op-only (``partial``) one.
+    a per-op-only (``partial``) one. The predicate lives in
+    :func:`~meho_backplane.operations._lookup.group_visible_for_tenant_clause`
+    so it also reads the tenant's own on/off settings (#5029).
     """
-    has_enabled_op = (
-        select(EndpointDescriptor.id)
-        .where(
-            EndpointDescriptor.group_id == OperationGroup.id,
-            EndpointDescriptor.is_enabled.is_(True),
-        )
-        .exists()
-    )
     stmt = (
         select(OperationGroup)
         .where(
             OperationGroup.product == product,
             OperationGroup.version == version,
             OperationGroup.impl_id == impl_id,
-            (OperationGroup.review_status == "enabled") | has_enabled_op,
+            group_visible_for_tenant_clause(tenant_id=tenant_id),
             visible_scope_clause(
                 OperationGroup,
                 tenant_id=tenant_id,
@@ -804,18 +835,6 @@ def _build_operation_groups_query(
     if cursor is not None:
         stmt = stmt.where(OperationGroup.group_key > cursor)
     return stmt
-
-
-def _raise_unknown_connector(connector_id: str) -> None:
-    """Raise :class:`UnknownConnectorError` with the long-form recovery hint."""
-    raise UnknownConnectorError(
-        f"unknown connector_id {connector_id!r} — expected <impl_id>-<version> "
-        f"(e.g. 'vmware-rest-9.0', 'vault-1.x'). If this id appeared in "
-        f"GET /api/v1/connectors, the listing is inconsistent with the "
-        f"dispatcher's resolve path — please file a bug report; otherwise "
-        f"the id is mistyped or the connector is not registered on this deploy",
-        connector_id=connector_id,
-    )
 
 
 async def _require_dispatchable_connector(
@@ -847,8 +866,8 @@ async def _require_dispatchable_connector(
       ``meho connector ingest …`` verb instead of receiving an opaque
       unknown-connector error (#1482).
     * **No DB rows, no class** — genuinely unknown. Raise
-      :class:`UnknownConnectorError` (the long-form mistyped-id recovery
-      hint).
+      :class:`UnknownConnectorError`, which names up to 5 close ids the
+      caller can see (#4136).
     """
     if await connector_exists(
         tenant_id=operator.tenant_id,
@@ -873,7 +892,9 @@ async def _require_dispatchable_connector(
             connector_id=connector_id,
             next_step=next_step.model_dump(mode="json") if next_step is not None else None,
         )
-    _raise_unknown_connector(connector_id)
+    raise await UnknownConnectorError.for_caller(
+        tenant_id=operator.tenant_id, connector_id=connector_id
+    )
 
 
 async def list_operation_groups(
@@ -955,7 +976,9 @@ async def list_operation_groups(
     )
     async with sessionmaker() as session:
         groups = (await session.execute(group_stmt)).scalars().all()
-        counts = await _count_ops_per_group(session, [g.id for g in groups])
+        counts = await _count_ops_per_group(
+            session, [g.id for g in groups], tenant_id=operator.tenant_id
+        )
     summaries = [
         OperationGroupSummary(
             group_key=g.group_key,
@@ -1020,7 +1043,7 @@ async def _has_enabled_operation(
             EndpointDescriptor.product == product,
             EndpointDescriptor.version == version,
             EndpointDescriptor.impl_id == impl_id,
-            EndpointDescriptor.is_enabled.is_(True),
+            enabled_for_tenant_clause(tenant_id=tenant_id),
         )
         .exists()
     )

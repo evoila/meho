@@ -70,7 +70,7 @@ from meho_backplane.delete_names import write_word_in_op_id
 from meho_backplane.operations import composite_invariant
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.composite_invariant import CompositeDispatchSurface
-from meho_backplane.operations.dispatcher import _result_document_from_descriptor
+from meho_backplane.operations.dispatcher import _result_handle_from_descriptor
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.settings import get_settings
 
@@ -636,8 +636,8 @@ async def test_same_bios_uuid_is_flagged_and_not_counted_twice_in_the_csv() -> N
     ]
 
 
-async def test_a_small_inventory_is_stored_too_with_the_default_size_limit() -> None:
-    """One VM makes a small inventory; it still comes back as a stored result."""
+async def test_a_small_inventory_comes_back_whole_with_a_handle_at_the_default_limits() -> None:
+    """One VM makes a small inventory; it comes back unchanged, plus a readable handle."""
     vms = {"vm-102": dict(_VMS["vm-102"])}
     result = await _run(vcenter=_FakeVcenter(vms=vms, failing=frozenset()))
     assert result["counts"]["server"] == 1
@@ -645,18 +645,26 @@ async def test_a_small_inventory_is_stored_too_with_the_default_size_limit() -> 
     store = ResultHandleStore(_MemoryValkey())  # type: ignore[arg-type]
     operator = _operator()
     descriptor = SimpleNamespace(llm_instructions=MIGRATION_INVENTORY_LLM_INSTRUCTIONS)
-    hint = _result_document_from_descriptor(descriptor)  # type: ignore[arg-type]
+    assert "result_document" not in MIGRATION_INVENTORY_LLM_INSTRUCTIONS
+    hint = _result_handle_from_descriptor(descriptor)  # type: ignore[arg-type]
     assert hint == {"always": True}
-    context = {**_reduce_context(operator), "result_document": hint}
+    context = {**_reduce_context(operator), "result_handle": hint}
 
     _plain, no_handle = await JsonFluxReducer(store=store).reduce(
         result, None, context=_reduce_context(operator)
     )
-    summary, handle = await JsonFluxReducer(store=store).reduce(result, None, context=context)
+    answer, handle = await JsonFluxReducer(store=store).reduce(result, None, context=context)
 
     assert no_handle is None, "without the hint a small inventory would stay inline"
+    assert answer == result, "the small inventory must come back whole, not as a summary"
     assert handle is not None
-    assert summary["result_record"] == "document"
+    assert handle.fetch_more is not None
+    assert handle.fetch_more.drill_in.available is True
+    stored = await store.fetch_document(
+        tenant_id=operator.tenant_id, operator_sub=operator.sub, handle_id=handle.handle_id
+    )
+    assert stored is not None
+    assert stored.document == result
     loaded = await load_inventories(operator, [str(handle.handle_id)], store=store)
     assert [record.name for record in loaded.records] == ["db-lin-01"]
     export = inventory_to_csv(loaded.records, loaded.duplicates)

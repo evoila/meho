@@ -83,6 +83,7 @@ from meho_backplane.connectors.vmware_rest.composite_issues import issue
 from meho_backplane.connectors.vmware_rest.composites._guest_secret_ref import (
     load_guest_override_credentials,
 )
+from meho_backplane.connectors.vmware_rest.composites._write import _step_connector_id
 from meho_backplane.connectors.vmware_rest.vim_body import (
     retrieve_properties_body,
     unwrap_vim_value,
@@ -104,7 +105,6 @@ __all__ = [
 ]
 
 # --- governance facts (mirror the write-composite substrate, #2254) ---------
-_CONNECTOR_ID = "vmware-rest-9.0"
 _WRITE_SAFETY_LEVEL = "dangerous"
 _WRITE_REQUIRES_APPROVAL = False
 
@@ -606,7 +606,7 @@ async def guest_file_write_composite(
 
     gate = await enforce_subop_policy(
         operator=operator,
-        connector_id=_CONNECTOR_ID,
+        connector_id=_step_connector_id(connector),
         op_id=_OP_FILE_TRANSFER_TO,
         safety_level=_WRITE_SAFETY_LEVEL,
         requires_approval=_WRITE_REQUIRES_APPROVAL,
@@ -1019,7 +1019,7 @@ async def guest_program_run_composite(
 
     gate = await enforce_subop_policy(
         operator=operator,
-        connector_id=_CONNECTOR_ID,
+        connector_id=_step_connector_id(connector),
         op_id=_OP_START_PROGRAM,
         safety_level=_WRITE_SAFETY_LEVEL,
         requires_approval=_WRITE_REQUIRES_APPROVAL,

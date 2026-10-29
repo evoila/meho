@@ -773,6 +773,12 @@ class _FakeAdapter:
     # raise instead of the 204 answer.
     raise_on_post: dict[str, Exception] = field(default_factory=dict)
     post_calls: list[dict[str, Any]] = field(default_factory=list)
+    # Raw LIST seam (``vault.auth.jwt.role.list``). ``list_payloads`` maps an
+    # API path to the decoded body; ``raise_on_list`` maps a path to the
+    # exception to raise instead. ``list_calls`` records every path.
+    list_payloads: dict[str, Any] = field(default_factory=dict)
+    raise_on_list: dict[str, Exception] = field(default_factory=dict)
+    list_calls: list[str] = field(default_factory=list)
 
     def get(self, url: str, **_kwargs: Any) -> Any:
         self.get_calls.append(url)
@@ -787,6 +793,13 @@ class _FakeAdapter:
         if exc is not None:
             raise exc
         return _DeleteResponse()
+
+    def list(self, url: str, **_kwargs: Any) -> Any:
+        self.list_calls.append(url)
+        exc = self.raise_on_list.get(url)
+        if exc is not None:
+            raise exc
+        return self.list_payloads.get(url)
 
 
 @dataclass

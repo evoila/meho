@@ -217,6 +217,7 @@ func TestPrintEntrySummaryShowsDashForNullFields(t *testing.T) {
 	out := buf.String()
 	for _, want := range []string{
 		"tenant_id:         -",
+		"tenant_name:       -",
 		"principal_name:    -",
 		"target_id:         -",
 		"target_name:       -",
@@ -240,11 +241,13 @@ func TestPrintEntrySummaryRendersUUIDsAndOptionals(t *testing.T) {
 	var buf bytes.Buffer
 	pname := "Damir"
 	tname := "rdc-vcenter"
+	tenantName := "team-a"
 	dur := "12.3"
 	printEntrySummary(&buf, &api.AuditEntry{
 		Id:               mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 		Ts:               mustTS(t, "2026-05-13T00:00:00Z"),
 		TenantId:         mustUUIDPtr(t, "22222222-2222-2222-2222-222222222222"),
+		TenantName:       &tenantName,
 		PrincipalSub:     "damir",
 		PrincipalName:    &pname,
 		TargetId:         mustUUIDPtr(t, "33333333-3333-3333-3333-333333333333"),
@@ -265,6 +268,7 @@ func TestPrintEntrySummaryRendersUUIDsAndOptionals(t *testing.T) {
 	out := buf.String()
 	for _, want := range []string{
 		"tenant_id:         22222222-2222-2222-2222-222222222222",
+		"tenant_name:       team-a",
 		"principal_name:    Damir",
 		"target_id:         33333333-3333-3333-3333-333333333333",
 		"target_name:       rdc-vcenter",

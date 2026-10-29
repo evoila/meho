@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, Final
 from uuid import UUID, uuid4
@@ -213,6 +213,7 @@ def _column_names(sync_url: str) -> set[str]:
 
 def test_detect_pass_flags_exactly_the_broken_rows(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Only the dangling-ref ingested row is flagged; healthy shapes stay false.
 
@@ -222,7 +223,7 @@ def test_detect_pass_flags_exactly_the_broken_rows(
     not a schema position).
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
 
     dangling = _insert_descriptor_row(sync_url, parameter_schema=_DANGLING_SCHEMA, op_id="POST:/a")
     bundled = _insert_descriptor_row(sync_url, parameter_schema=_BUNDLED_SCHEMA, op_id="POST:/b")
@@ -247,10 +248,11 @@ def test_detect_pass_flags_exactly_the_broken_rows(
 
 def test_tenant_scoped_dangling_row_flagged(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """The pass spans every tenant scope -- the live-hit rows are tenant ingests."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
 
     tenant_row = _insert_descriptor_row(
         sync_url,
@@ -265,6 +267,7 @@ def test_tenant_scoped_dangling_row_flagged(
 
 def test_typed_row_with_dangling_ref_not_flagged(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``source_kind='typed'`` is exempt -- re-ingest is not the remedy there.
 
@@ -273,7 +276,7 @@ def test_typed_row_with_dangling_ref_not_flagged(
     name a remedy that cannot repair it.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
 
     typed_row = _insert_descriptor_row(
         sync_url,
@@ -289,10 +292,11 @@ def test_typed_row_with_dangling_ref_not_flagged(
 
 def test_downgrade_drops_column(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """The downgrade is a real reversal: the column is gone at 0075."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _THIS_REVISION)
+    copy_migrated_db(cfg, _THIS_REVISION)
     assert "needs_reingest" in _column_names(sync_url)
 
     command.downgrade(cfg, _DOWN_REVISION)

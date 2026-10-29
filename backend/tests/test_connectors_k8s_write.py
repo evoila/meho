@@ -36,6 +36,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from kubernetes_asyncio.client.exceptions import ApiException
+from multidict import CIMultiDict, CIMultiDictProxy
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op, redact_payload
@@ -459,21 +460,31 @@ spec:
 class _FakeApplyResponse:
     """The raw aiohttp response ``server_side_apply(serialize=False)`` returns.
 
-    The handler reads only ``status``, ``reason`` and ``await text()``.
+    The handler reads only ``status``, ``reason``, ``headers`` and
+    ``await text()``.
     """
 
-    def __init__(self, status: int, body: str, reason: str = "OK") -> None:
+    def __init__(
+        self,
+        status: int,
+        body: str,
+        reason: str = "OK",
+        warnings: tuple[str, ...] = (),
+    ) -> None:
         self.status = status
         self.reason = reason
         self._body = body
+        self.headers = CIMultiDictProxy(CIMultiDict(("Warning", w) for w in warnings))
 
     async def text(self) -> str:
         return self._body
 
 
-def _applied_obj(rv: str = "123", uid: str = "u-1") -> _FakeApplyResponse:
+def _applied_obj(
+    rv: str = "123", uid: str = "u-1", warnings: tuple[str, ...] = ()
+) -> _FakeApplyResponse:
     body = {"kind": "Deployment", "metadata": {"resourceVersion": rv, "uid": uid}}
-    return _FakeApplyResponse(200, json.dumps(body))
+    return _FakeApplyResponse(200, json.dumps(body), warnings=warnings)
 
 
 def _status_failure(code: int, reason: str, message: str) -> _FakeApplyResponse:
@@ -525,6 +536,7 @@ async def test_apply_persists_by_default() -> None:
     assert dyn.server_side_apply.call_args.kwargs["serialize"] is False
     assert result["applied"][0]["resource_version"] == "123"
     assert result["applied"][0]["uid"] == "u-1"
+    assert result["applied"][0]["warnings"] == []
 
 
 @pytest.mark.asyncio
@@ -715,6 +727,83 @@ async def test_apply_multi_doc() -> None:
         )
     assert result["total"] == 2
     assert {r["kind"] for r in result["applied"]} == {"Deployment", "ConfigMap"}
+
+
+_DEPRECATION = "apps/v1beta1 Deployment is deprecated; use apps/v1 Deployment"
+
+
+async def _apply_with_warnings(*warnings: str, dry_run: str = "none") -> list[str]:
+    """Apply one document whose response carries *warnings*; return the result's list."""
+    conn = _make_connector()
+    dyn = MagicMock()
+    dyn.resources.get = AsyncMock(return_value=MagicMock())
+    dyn.server_side_apply = AsyncMock(return_value=_applied_obj(warnings=warnings))
+    with _patch_kubeconfig(), _dyn_patch() as dyn_cls:
+        dyn_cls.return_value = _awaitable(dyn)
+        result = await conn.k8s_apply(
+            operator=_make_operator(),
+            target=_TARGET,
+            params={"manifest": _SINGLE_MANIFEST, "dry_run": dry_run},
+        )
+    warning_list: list[str] = result["applied"][0]["warnings"]
+    return warning_list
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dry_run", ["none", "server"])
+async def test_apply_returns_api_server_warnings(dry_run: str) -> None:
+    """The ``Warning`` header text is in the result, on the real apply and the dry-run (#3842)."""
+    warnings = await _apply_with_warnings(f'299 - "{_DEPRECATION}"', dry_run=dry_run)
+    assert warnings == [_DEPRECATION]
+
+
+@pytest.mark.asyncio
+async def test_apply_warnings_handles_several_headers_commas_and_escapes() -> None:
+    """Separate header lines, comma-joined warnings and quoted-string escapes all parse."""
+    warnings = await _apply_with_warnings(
+        f'299 - "{_DEPRECATION}"',
+        '299 - "a, b", 299 - "say \\"hi\\" to C:\\\\x"',
+        f'299 - "{_DEPRECATION}"',
+    )
+    assert warnings == [_DEPRECATION, "a, b", 'say "hi" to C:\\x']
+
+
+@pytest.mark.asyncio
+async def test_apply_warnings_keeps_a_header_of_unknown_shape() -> None:
+    """A header that is not ``299 - "text"`` is kept as-is, not dropped."""
+    assert await _apply_with_warnings("  something odd  ") == ["something odd"]
+
+
+@pytest.mark.asyncio
+async def test_apply_warnings_are_redacted() -> None:
+    """A warning that quotes a credential does not carry the value into the result."""
+    secret = "not-a-real" + "-value-123"
+    warnings = await _apply_with_warnings('299 - "webhook saw password=' + secret + ' in env"')
+    assert len(warnings) == 1
+    assert secret not in warnings[0]
+    assert "[REDACTED" in warnings[0]
+
+
+@pytest.mark.asyncio
+async def test_apply_multi_doc_keeps_warnings_per_document() -> None:
+    """Each applied document carries only the warnings from its own response."""
+    conn = _make_connector()
+    multi = (
+        _SINGLE_MANIFEST
+        + "\n---\n"
+        + ("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n  namespace: argocd\n")
+    )
+    dyn = MagicMock()
+    dyn.resources.get = AsyncMock(return_value=MagicMock())
+    dyn.server_side_apply = AsyncMock(
+        side_effect=[_applied_obj("1", warnings=(f'299 - "{_DEPRECATION}"',)), _applied_obj("2")]
+    )
+    with _patch_kubeconfig(), _dyn_patch() as dyn_cls:
+        dyn_cls.return_value = _awaitable(dyn)
+        result = await conn.k8s_apply(
+            operator=_make_operator(), target=_TARGET, params={"manifest": multi}
+        )
+    assert [r["warnings"] for r in result["applied"]] == [[_DEPRECATION], []]
 
 
 @pytest.mark.asyncio
@@ -1170,3 +1259,73 @@ def _awaitable(value: Any) -> Any:
             return _coro().__await__()
 
     return _Awaitable()
+
+
+# ---------------------------------------------------------------------------
+# k8s.secret.create — labels and annotations (#3680)
+# ---------------------------------------------------------------------------
+
+
+def test_secret_create_schema_accepts_labels_and_annotations_only() -> None:
+    """labels / annotations are string maps; other unknown keys stay rejected."""
+    from jsonschema import Draft202012Validator
+
+    op = next(o for o in WRITE_DANGEROUS_OPS if o.op_id == "k8s.secret.create")
+    validator = Draft202012Validator(op.parameter_schema)
+    base = {"name": "repo-creds", "namespace": "argocd", "string_data": {"url": "x"}}
+
+    assert not list(
+        validator.iter_errors(
+            {
+                **base,
+                "labels": {"argocd.argoproj.io/secret-type": "repository"},
+                "annotations": {"owner": "platform"},
+            }
+        )
+    )
+    assert list(validator.iter_errors({**base, "labels": {"a": 1}}))
+    assert list(validator.iter_errors({**base, "annotations": {"a": None}}))
+    assert list(validator.iter_errors({**base, "finalizers": ["x"]}))
+
+
+@pytest.mark.asyncio
+async def test_secret_create_sets_labels_and_annotations_with_ref_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One call creates a label-selected Secret whose value comes from a ref."""
+    install_fake_client(monkeypatch, secret={"sshPrivateKey": _SECRET_REF_SENTINEL})
+    conn = _make_connector()
+    params = {
+        "name": "repo-creds",
+        "namespace": "argocd",
+        "labels": {"argocd.argoproj.io/secret-type": "repository"},
+        "annotations": {"managed-by": "meho"},
+        "string_data": {"url": "ssh://git.example.invalid/charts.git"},
+        "string_data_secret_ref": {"sshPrivateKey": "argocd/repo"},
+    }
+    with _patch_kubeconfig(), _core_v1_patch() as core_cls:
+        core_cls.return_value.create_namespaced_secret = AsyncMock()
+        result = await conn.k8s_secret_create(
+            operator=_make_operator(), target=_TARGET, params=params
+        )
+    body = core_cls.return_value.create_namespaced_secret.call_args.kwargs["body"]
+    assert body.metadata.labels == {"argocd.argoproj.io/secret-type": "repository"}
+    assert body.metadata.annotations == {"managed-by": "meho"}
+    assert body.string_data["sshPrivateKey"] == _SECRET_REF_SENTINEL
+    assert result["data_keys"] == ["sshPrivateKey", "url"]
+    assert _SECRET_REF_SENTINEL not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_secret_create_without_labels_leaves_metadata_maps_unset() -> None:
+    conn = _make_connector()
+    with _patch_kubeconfig(), _core_v1_patch() as core_cls:
+        core_cls.return_value.create_namespaced_secret = AsyncMock()
+        await conn.k8s_secret_create(
+            operator=_make_operator(),
+            target=_TARGET,
+            params={"name": "s", "namespace": "argocd", "string_data": {"k": "v"}},
+        )
+    body = core_cls.return_value.create_namespaced_secret.call_args.kwargs["body"]
+    assert body.metadata.labels is None
+    assert body.metadata.annotations is None

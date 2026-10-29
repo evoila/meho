@@ -165,12 +165,20 @@ async def _api_token_create_preflight(ctx: PreviewContext) -> dict[str, Any] | N
     ``invalid_request``). A probe that itself fails (e.g. the target's
     role refuses the login) is reported ``will_be_denied`` with
     ``reason: probe_failed:<class>`` rather than omitted.
+
+    It also adds the requester's own MEHO policy for that write on the
+    Vault target (``requester_denied`` / ``requester_reason`` /
+    ``requester``, #3898), so the approver sees when the requester itself
+    is denied. A reviewer's resume checks that requester again before the
+    mint.
     """
     from meho_backplane.connectors.vault.ops import vault_kv_write_capability_preflight
     from meho_backplane.connectors.vcf_automation._api_token import (
+        VAULT_TOKEN_WRITE,
         resolve_store_vault_target,
         store_params,
     )
+    from meho_backplane.operations.secondary_target_policy import requester_policy_preflight
 
     p = ctx.params
     if not isinstance(p.get("store_secret_ref"), str):
@@ -192,7 +200,8 @@ async def _api_token_create_preflight(ctx: PreviewContext) -> dict[str, Any] | N
         target=vault_target,
         report_probe_failure=True,
     )
-    return None if result is None else {**result, "vault_target": vault_target.name}
+    requester = await requester_policy_preflight(ctx.operator, VAULT_TOKEN_WRITE, vault_target)
+    return {**(result or {}), "vault_target": vault_target.name, **requester}
 
 
 async def _api_token_revoke_preview(ctx: PreviewContext) -> dict[str, Any] | None:

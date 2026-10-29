@@ -1766,6 +1766,60 @@ so a write Vault would refuse is refused at park time instead of after
 approval. See
 [`docs/codebase/connectors-kubernetes.md`](connectors-kubernetes.md).
 
+### The requester's policy on a second target (#3898)
+
+Some ops write to a second target that the caller names in the params.
+`vcfa.provider.api_token.create` is the first: it writes the minted token
+through `vault.kv.patch` on the caller-named `vault_target`. The handler
+calls the Vault handler directly, so the dispatcher's policy gate never
+sees that write. One shared module checks it:
+`operations/secondary_target_policy.py`.
+
+**Execution runs as the reviewer. The requester's policy on the second
+target is still enforced.** The operator approval surfaces (REST
+`/approve` and `/decide`, the MCP by-id approve) run the approved call as
+the reviewer. Without this module, only the reviewer's policy would be
+checked, and an agent's `deny` on the Vault target would be skipped.
+
+How it works:
+
+1. **At park time** the op's permission preflight calls
+   `requester_policy_preflight`. It runs the policy gate for the requester
+   on the second target and adds three keys to
+   `proposed_effect["permission_preflight"]`:
+   - `requester_denied` — `true` when the requester's policy says `deny`.
+   - `requester_reason` — the `policy_denied: …` reason, or `null`.
+   - `requester` — who asked: `sub`, `principal_kind`, `client_id`,
+     `tenant_role`, `act`. The resume uses this to check them again.
+
+   `needs-approval` counts as allowed: the approval being asked for
+   satisfies it. A `requester_denied: true` does **not** refuse the park.
+   The reviewer sees it on the card and should reject.
+2. **On a reviewer's resume** `_dispatch_resume_with_bound_context` binds
+   the requester for the run (`bind_approved_requester`). Who asked comes
+   from the approval row (`principal_sub` / `principal_act`). The card's
+   `requester` record supplies the rest (kind, role, client id), and only
+   when its `sub` matches the row.
+3. **In the handler** `secondary_target_refusal` checks the caller (the
+   reviewer) as before, then the bound requester, **live**, with
+   `decide_only=True` (no standing grant is marked used). A requester
+   `deny` refuses before any appliance call:
+   `policy_denied: requester '<sub>': <op> on <target label> '<name>': …`.
+   A deny added while the request waited still stops it.
+
+The agent's own resume (`call_operation_with_approval`) runs as the agent,
+so the agent is the caller and the requester check adds nothing. When a
+reviewer runs an opted-in op and the card has no `requester` record, or
+its `sub` does not match the row, the run is refused before any appliance
+call: `policy_denied: the requester's policy … cannot be checked … -- ask
+again`. This covers a park whose preflight failed and a request parked
+before #3898. Ops that do not opt in never read the binding.
+
+**To opt an op in:** describe its second-target write as a
+`SecondaryTargetWrite(connector_id, op_ids, target_label)`. Call
+`requester_policy_preflight` from its registered permission preflight and
+`secondary_target_refusal` from its handler, with the same value.
+
 ## Transports
 
 ### REST (`backend/src/meho_backplane/api/v1/approvals.py`)

@@ -7716,6 +7716,7 @@ type ResolvedTargetDescriptor struct {
 	TenantId        openapi_types.UUID      `json:"tenant_id"`
 	TlsCaPin        *string                 `json:"tls_ca_pin"`
 	TlsServerName   *string                 `json:"tls_server_name"`
+	UpdatedAt       *time.Time              `json:"updated_at"`
 	VerifyTls       *bool                   `json:"verify_tls,omitempty"`
 	Version         *string                 `json:"version"`
 }

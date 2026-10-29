@@ -20,8 +20,25 @@ bounded. Every object the hint names is also stored whole with the spilled
 rows (the same place as an omitted scalar), so a `result_query` read with
 `path="/<object key>"` returns the complete value. When a field was cut,
 `result_object_note` rides inline next to the truncations and names that read,
-or says the object could not be kept when the store dropped it. Objects the
-hint does not name are not persisted.
+or says the object could not be kept when the store dropped it.
+
+Every other top-level object or list next to the rows (a "part", such as
+`assumptions`, `totals` or `unknowns`) is kept by default, with no hint (#5139).
+Each part is stored whole with the rows, so `path="/<part>"` returns it, and a
+list part pages with `offset` / `limit`. Whole parts are also copied inline
+while the inline summary stays under 4,096 bytes; a part is never cut. The
+parts that do not fit are named in `parts_not_inline` (with
+`parts_not_inline_count` when the names list is cut), and `parts_note` says how
+to read them, or that they cannot be read because the store dropped them to
+keep the rows. The limit is one budget for the whole summary, hints and notes
+included. When the names and the note leave no room, the largest values move
+out and are stored with the rows. A scalar (hinted or not) is counted under
+`omitted_scalar_count` and read back with `path="/<field name>"`. An object or
+list (a digest list such as `failed`, or the projection of a `result_objects`
+object) is named in `parts_not_inline` like a part, and `path="/<name>"` returns
+it whole. Only the reducer's own keys never move. Credential-class ops
+keep the old rule: no part is copied or stored without their hint. The
+`result_objects` hint only chooses the inline fields of the objects it names.
 
 An operation may declare `result_handle: {"always": true}` (#5143) when other
 operations take its result by its handle (an inventory read, whose result

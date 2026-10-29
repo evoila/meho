@@ -111,7 +111,10 @@ Detail payloads land in ``extras``. Codes:
   connector-resolution time (G0.20-T6 #1142 follow-up, #1506) before the
   handler proceeds unbound and trips ``dispatch_typed``'s self-guard
   :exc:`RuntimeError`. A module-level handler (no ``self``) needs no
-  target and dispatches unchanged.
+  target and dispatches unchanged. Since #4139 every op that needs a
+  target (:func:`descriptor_requires_target`, which includes every
+  ``ingested`` op) is checked right after the descriptor lookup, before
+  the policy gate, so it never surfaces as ``no_connector``.
 * ``handler_unreachable`` -- ``importlib`` couldn't resolve
   ``handler_ref``, or the resolved symbol is not callable.
 * ``denied`` -- the policy gate issued an outright ``deny`` verdict.
@@ -3279,6 +3282,11 @@ async def dispatch(
             triple=(product, version, impl_id),
             started=started,
         )
+    # #4139: an op that needs a target (every ingested op, or a typed op
+    # bound to a connector) and got none fails here with one clear line,
+    # before the catalog guard, the policy gate or a wait for approval.
+    if target is None and descriptor_requires_target(descriptor):
+        return result_target_required(op_id, _elapsed_ms(started))
 
     # --- Step 3: catalog target guard + parameter_schema validation -------
     # A connector may opt an ingested catalog into a target-compatibility

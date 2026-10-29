@@ -911,14 +911,24 @@ async def _rolled_back_tool_handler(
         raise McpExecutionFailedError(str(exc)) from exc
 
 
-def _register_tool(name: str, handler: Any, *, op_class: str = "write") -> None:
+def _register_tool(
+    name: str,
+    handler: Any,
+    *,
+    op_class: str = "write",
+    properties: dict[str, Any] | None = None,
+) -> None:
     register_mcp_tool(
         ToolDefinition(
             feature=None,
             surface=ToolSurface.WORKING,
             name=name,
             description="Test tool for the wrapper cutover.",
-            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+            inputSchema={
+                "type": "object",
+                "properties": properties or {},
+                "additionalProperties": False,
+            },
             required_role=TenantRole.OPERATOR,
             op_class=op_class,
         ),
@@ -931,9 +941,17 @@ async def test_mcp_reads_and_validation_failures_write_no_audit_row(
 ) -> None:
     client, _holder = mcp
     _register_tool("test.cutover_read", _write_tool_handler, op_class="read")
+    # A read tool with no arguments ignores extra ones (#4137), so the
+    # schema failure uses a read tool that takes one argument.
+    _register_tool(
+        "test.cutover_read_with_args",
+        _write_tool_handler,
+        op_class="read",
+        properties={"limit": {"type": "integer"}},
+    )
     assert "result" in _tool_call(client, "test.cutover_read", {})
     assert "error" in _tool_call(client, "no_such_tool", {}, 2)
-    assert "error" in _tool_call(client, "test.cutover_read", {"unexpected": 1}, 3)
+    assert "error" in _tool_call(client, "test.cutover_read_with_args", {"limit": "x"}, 3)
     read = post_mcp(
         client,
         {

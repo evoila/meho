@@ -61,8 +61,11 @@ Examples in current use:
 - `spec_label_mismatch` / `multi_spec_inconsistent` /
   `uncovered_version_label`
 - `no_connector` (dispatcher resolver miss)
-- `target_required` (dispatcher: connector-bound typed/composite op
-  invoked with no `target` — #1506)
+- `target_required` (`call_operation` and `preview_operation`: the op
+  needs a `target` and none was given — every ingested op, and a
+  connector-bound typed/composite op. Message:
+  `target_required: this operation needs a target; call list_targets and
+  pass a target name` — #1506, #4139)
 - `receipt_too_large` (`call_operation`: the receipt of a completed run
   could not fit `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`, so the call is
   refused before dispatch and nothing runs — #3641)

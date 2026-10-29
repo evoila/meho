@@ -570,14 +570,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     An oversized / malformed request fails `validate_params` in the
     dispatcher and returns a structured `invalid_params` result before
     any read is issued. Returns `{properties: {path: val}, missing:
-    [path]}`, surfacing the `ObjectContent.missingSet`. It additionally
+    [path]}`. Every requested path is in one of the two, so an empty
+    `missing` really means every path came back. It additionally
     surfaces the per-property `missingSet` fault **type names** —
     `missing_properties: [{path, fault_type?}]` plus a
     `missing_fault_summary: {fault_type: count}` roll-up (concrete vim
     fault class names only, e.g. `NoPermission` / `InvalidProperty`,
-    **never** fault text, which can echo a property value) — so an
-    operator can tell a genuinely-unset property from a per-property
-    permission/auth/invalid fault (#3708). The op passes paths through
+    **never** fault text, which can echo a property value) (#3708).
+    vCenter sends a fault with every `missingSet` entry. A property that
+    is not set, or whose value is a link to an object the login cannot
+    see, is in neither `propSet` nor `missingSet`. `object_collect_impl`
+    adds each such path to `missing` and `missing_properties` without a
+    `fault_type`, in request order; `missing_fault_summary` counts only
+    real faults. This runs after `_collect_with_auth_health_reset`, so
+    the stale-session reset and the ESXi probe, which share that helper,
+    still judge the raw answer (#5131). The op passes paths through
     as given. Its description and `properties` hint tell callers that
     vCenter 8.0.x rejects a path into a cluster's `configurationEx`
     (`configurationEx.rule` / `.group` / `.drsConfig`), so they request

@@ -27,10 +27,10 @@ from typing import Any
 
 import pytest
 
-import meho_backplane.operations.jsonflux_reducer as reducer_module
-import meho_backplane.operations.result_query as rq
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
+from meho_backplane.operations import jsonflux_reducer as reducer_module
+from meho_backplane.operations import result_query as rq
 from meho_backplane.operations._errors import wrap_ok_result
 from meho_backplane.operations.delivery_budget import (
     bound_complete_response,

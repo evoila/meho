@@ -295,9 +295,10 @@ both relative to its own folder (`cd -P` and `pwd -P` of
 
 Step 2 of `install.sh` (`install_meho_host`) copies the files of
 `MEHO_HOST_LIB_FILES` there, so every install and every later run of
-`install.sh` brings the versions of its download. When neither place
-holds both files, `meho-host` stops at once with a `[FAIL]` line that
-names the folder to copy them to. Because `lib/firewall.sh` defines the
+`install.sh` brings the versions of its download. It takes the first
+place that holds both files. When neither does, `meho-host` stops at once
+with a `[FAIL]` line that names both places and the folder to copy the
+files to. Because `lib/firewall.sh` defines the
 firewall paths as `readonly`, `meho-host` takes them from there and keeps
 no copy of its own. A function that `meho-host` defines after the
 `source` lines would replace a function of the same name from `lib/`;

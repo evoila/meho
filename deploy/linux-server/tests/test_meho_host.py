@@ -1128,21 +1128,30 @@ class InstallTests(InstallTestCase):
         self.assertIn("check [--json]", help_result.stdout)
 
     def test_meho_host_without_its_lib_files_stops_with_the_fix(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="meho-host-alone-") as folder:
-            alone = Path(folder) / "sbin" / "meho-host"
-            alone.parent.mkdir()
-            shutil.copy2(LINUX_SERVER / "meho-host", alone)
+        cases = {"no lib file": (), "only firewall.sh next to it": ("firewall.sh",)}
+        for case, next_to_it in cases.items():
+            with (
+                self.subTest(case=case),
+                tempfile.TemporaryDirectory(prefix="meho-host-alone-") as folder,
+            ):
+                base = Path(folder).resolve()
+                alone = base / "sbin" / "meho-host"
+                (alone.parent / "lib").mkdir(parents=True)
+                shutil.copy2(LINUX_SERVER / "meho-host", alone)
+                for name in next_to_it:
+                    shutil.copy2(LINUX_SERVER / "lib" / name, alone.parent / "lib" / name)
 
-            result = self.run_help(alone)
+                result = self.run_help(alone)
 
-        self.assertEqual(1, result.returncode)
-        self.assertEqual("", result.stdout)
-        self.assertIn("[FAIL] meho-host cannot find firewall.sh and cis.sh", result.stderr)
-        self.assertIn(
-            "Fix: copy lib/firewall.sh and lib/cis.sh of the MEHO download to "
-            "/usr/local/lib/meho-host/.",
-            result.stderr,
-        )
+                self.assertEqual(1, result.returncode)
+                self.assertEqual("", result.stdout)
+                self.assertEqual(
+                    "[FAIL] meho-host cannot find firewall.sh and cis.sh: neither "
+                    f"{base}/sbin/lib nor {base}/lib/meho-host holds both. Fix: copy "
+                    "lib/firewall.sh and lib/cis.sh of the MEHO download to "
+                    "/usr/local/lib/meho-host/.\n",
+                    result.stderr,
+                )
 
 
 if __name__ == "__main__":

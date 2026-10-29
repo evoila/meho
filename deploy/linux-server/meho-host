@@ -47,16 +47,22 @@ set -Eeuo pipefail
 HOST_ROOT="${MEHO_TEST_ROOT:-}"
 
 MEHO_HOST_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-MEHO_LIB_DIR=$MEHO_HOST_DIR/lib
-if [[ ! -f $MEHO_LIB_DIR/firewall.sh ]]; then
-    MEHO_LIB_DIR=$(cd -- "$MEHO_HOST_DIR/.." && pwd -P)/lib/meho-host
-fi
-readonly MEHO_HOST_DIR MEHO_LIB_DIR
-if [[ ! -f $MEHO_LIB_DIR/firewall.sh || ! -f $MEHO_LIB_DIR/cis.sh ]]; then
-    printf '[FAIL] meho-host cannot find firewall.sh and cis.sh in %s or in %s/lib. Fix: copy lib/firewall.sh and lib/cis.sh of the MEHO download to /usr/local/lib/meho-host/.\n' \
-        "$MEHO_LIB_DIR" "$MEHO_HOST_DIR" >&2
+# The two places of the lib files, in this order: lib/ next to meho-host
+# (the download, the repository), and ../lib/meho-host (the machine).
+MEHO_LIB_DIRS=("$MEHO_HOST_DIR/lib" "$(cd -- "$MEHO_HOST_DIR/.." && pwd -P)/lib/meho-host")
+MEHO_LIB_DIR=""
+for MEHO_LIB_CANDIDATE in "${MEHO_LIB_DIRS[@]}"; do
+    if [[ -f $MEHO_LIB_CANDIDATE/firewall.sh && -f $MEHO_LIB_CANDIDATE/cis.sh ]]; then
+        MEHO_LIB_DIR=$MEHO_LIB_CANDIDATE
+        break
+    fi
+done
+if [[ -z $MEHO_LIB_DIR ]]; then
+    printf '[FAIL] meho-host cannot find firewall.sh and cis.sh: neither %s nor %s holds both. Fix: copy lib/firewall.sh and lib/cis.sh of the MEHO download to /usr/local/lib/meho-host/.\n' \
+        "${MEHO_LIB_DIRS[0]}" "${MEHO_LIB_DIRS[1]}" >&2
     exit 1
 fi
+readonly MEHO_HOST_DIR MEHO_LIB_DIRS MEHO_LIB_DIR
 # shellcheck source=lib/firewall.sh
 source "$MEHO_LIB_DIR/firewall.sh"
 # shellcheck source=lib/cis.sh

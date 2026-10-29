@@ -2,24 +2,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 """Tests of meho-host: the check list, its JSON form and exit codes, the
-support bundle and what is removed from it, the SSH rule of the firewall
-(admin-network), uninstall, and the install of meho-host by install.sh."""
+hardening lines of the check (the firewall, RKE2's CIS profile and the
+console certificate), the support bundle and what is removed from it, the
+SSH rule of the firewall (admin-network), uninstall, and the install of
+meho-host and the files of lib/ it sources by install.sh."""
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
+import subprocess
 import tarfile
+import tempfile
 import unittest
+from pathlib import Path
 
 from harness import LINUX_SERVER, InstallTestCase
 from host_harness import (
     HEALTHY_PODS,
+    INSTALL_RECORD,
     MEHO_PODS,
+    PREROUTING_CHAIN,
     TRAEFIK_POD,
     HostTestCase,
     certificate_table,
+    console_certificate,
     df_answer,
     pod_line,
 )
@@ -33,6 +42,8 @@ RKE2_DROPIN = "/etc/systemd/system/rke2-server.service.d/meho-firewall.conf"
 RKE2_UNIT = "/etc/systemd/system/rke2-server.service"
 RKE2_UNINSTALL = "/usr/local/bin/rke2-uninstall.sh"
 MEHO_COMMANDS = ("/usr/local/bin/meho", "/usr/local/sbin/meho-host")
+MEHO_HOST_LIB = "/usr/local/lib/meho-host"
+LIB_FILES = ("firewall.sh", "cis.sh")
 # The fake rke2-uninstall.sh removes what the real one removes: RKE2's
 # unit, its data, its binaries and itself.
 RKE2_UNINSTALL_STUB = (
@@ -50,7 +61,35 @@ OK_LINES = [
     "[ok]   pods: all 7 pods in meho, kube-system, local-path-storage run",
     "[ok]   disk: /var/lib/rancher has 150 GB free (75%); /var/lib/meho has 150 GB free (75%)",
     "[ok]   certificates: all 2 RKE2 certificates are valid for at least 30 days",
+    "[ok]   firewall: on: the table inet meho is loaded, its chain prerouting drops what it "
+    "does not allow, and meho-firewall.service loads it at every start",
+    "[ok]   cis-profile: on: RKE2's settings set profile: cis, and the machine has the etcd "
+    "user and the kernel settings the profile needs",
+    "[ok]   console-certificate: valid for meho.example.com until 2027-10-23 (365 days left)",
 ]
+CHECK_NAMES = [
+    "node",
+    "pods",
+    "disk",
+    "certificates",
+    "firewall",
+    "cis-profile",
+    "console-certificate",
+]
+FIREWALL_FIX = (
+    "Fix: load the MEHO firewall and keep it on at every start: systemctl enable "
+    "meho-firewall.service && systemctl restart meho-firewall.service. It needs nft (the "
+    "package nftables) and the rules in /etc/meho/firewall.nft, whose chain prerouting keeps "
+    "policy drop. If it does not start, see its log: journalctl -u meho-firewall.service -e"
+)
+CIS_FIX = (
+    "Fix: undo the change this line names, so the files are as install.sh wrote them. Then "
+    f"restart RKE2: systemctl restart rke2-server. If the cause is not clear, {SUPPORT_HINT}"
+)
+CERTIFICATE_FIX = (
+    "Fix: the console needs a certificate for the host name of this install, valid for more "
+    f"than 30 days. {SUPPORT_HINT}"
+)
 BUNDLE_PATH = "/var/lib/meho/support/meho-support-meho.example.com-20261023T120000Z.tar.gz"
 BUNDLE_FILES = {
     "check.json",
@@ -121,7 +160,22 @@ class UsageTests(HostTestCase):
         )
 
 
-class CheckTests(HostTestCase):
+class CheckTestCase(HostTestCase):
+    """A fake machine with the install record, which names the host."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.host.host_file("/etc/meho/install.json", INSTALL_RECORD)
+
+    def line(self, name: str) -> str:
+        """The line of one check in the text output of 'meho-host check'."""
+        result = self.host.run("check")
+        found = [line for line in result.stdout.splitlines() if f" {name}: " in line]
+        self.assertEqual(1, len(found), result.stdout + result.stderr)
+        return found[0]
+
+
+class CheckTests(CheckTestCase):
     def test_a_healthy_machine_is_all_green(self) -> None:
         result = self.host.run("check")
 
@@ -139,9 +193,7 @@ class CheckTests(HostTestCase):
 
         self.assertEqual(0, result.returncode, self.output(result))
         checks = json.loads(result.stdout)["checks"]
-        self.assertEqual(
-            ["node", "pods", "disk", "certificates"], [check["name"] for check in checks]
-        )
+        self.assertEqual(CHECK_NAMES, [check["name"] for check in checks])
         for check in checks:
             with self.subTest(check=check["name"]):
                 self.assertEqual({"name", "status", "detail", "hint"}, set(check))
@@ -160,21 +212,26 @@ class CheckTests(HostTestCase):
             result.stdout.splitlines()[0],
         )
 
-    def test_rke2_that_does_not_answer_is_red_for_the_node_and_the_pods(self) -> None:
+    def test_rke2_that_does_not_answer_is_red_for_the_kubernetes_lines(self) -> None:
         self.host.answer("kubectl_rc", "1")
 
         result = self.host.run("check")
 
         self.assertEqual(1, result.returncode)
         lines = result.stdout.splitlines()
-        self.assertEqual(4, len(lines), result.stdout)
+        self.assertEqual(7, len(lines), result.stdout)
         self.assertEqual(
             "[FAIL] node: RKE2 does not answer. Fix: check that RKE2 runs: "
             "systemctl status rke2-server; see RKE2's log: journalctl -u rke2-server -e",
             lines[0],
         )
         self.assertEqual(f"[FAIL] pods: RKE2 does not answer. Fix: {SUPPORT_HINT}", lines[1])
-        self.assertEqual(OK_LINES[2:], lines[2:])
+        self.assertEqual(OK_LINES[2:6], lines[2:6])
+        self.assertEqual(
+            "[FAIL] console-certificate: the Secret meho-core-tls with the certificate cannot be "
+            f"read. Fix: check the node and pods lines first. Then {SUPPORT_HINT}",
+            lines[6],
+        )
 
     def test_a_pod_that_waits_or_is_not_ready_is_named(self) -> None:
         self.host.answer(
@@ -383,10 +440,213 @@ class CheckTests(HostTestCase):
         )
 
 
+class FirewallLineTests(CheckTestCase):
+    """The firewall line, from firewall_state in lib/firewall.sh."""
+
+    def assert_off(self, reason: str) -> None:
+        result = self.host.run("check")
+        self.assertEqual(1, result.returncode)
+        self.assertIn(f"[FAIL] firewall: off: {reason}. {FIREWALL_FIX}\n", result.stdout)
+
+    def test_on_when_the_table_is_loaded_closed_and_enabled(self) -> None:
+        self.assertEqual(OK_LINES[4], self.line("firewall"))
+        calls = self.host.calls()
+        self.assertIn("nft list table inet meho\n", calls)
+        self.assertIn("nft list chain inet meho prerouting\n", calls)
+        self.assertIn("systemctl is-enabled --quiet meho-firewall.service\n", calls)
+
+    def test_off_when_nft_is_not_found(self) -> None:
+        (self.host.stubs / "nft").unlink()
+
+        self.assert_off("nft not found, so no firewall rule can be read or loaded")
+
+    def test_off_when_the_table_is_not_loaded(self) -> None:
+        self.host.answer("nft_table_rc", "1")
+
+        self.assert_off("the table inet meho is not loaded")
+
+    def test_off_when_the_chain_prerouting_does_not_drop(self) -> None:
+        missing = "off: the table inet meho has no chain prerouting with policy drop"
+        cases = {
+            "policy accept": ("0", PREROUTING_CHAIN.replace("policy drop;", "policy accept;")),
+            "another hook": ("0", PREROUTING_CHAIN.replace("hook prerouting", "hook input")),
+            "no chain": ("1", ""),
+        }
+        for case, (rc, chain) in cases.items():
+            with self.subTest(case=case):
+                self.host.answer("nft_chain_rc", rc)
+                self.host.answer("nft_chain_out", chain)
+
+                self.assertIn(missing.removeprefix("off: "), self.line("firewall"))
+
+        self.assert_off(missing.removeprefix("off: ") + ", so it lets every packet in")
+
+    def test_off_when_the_unit_is_not_enabled(self) -> None:
+        self.host.answer("enabled_units", "")
+
+        self.assert_off(
+            "meho-firewall.service is not enabled, so the next start of the machine loads no "
+            "firewall"
+        )
+
+
+class CisProfileLineTests(CheckTestCase):
+    """The CIS profile line, from cis_state in lib/cis.sh."""
+
+    def test_on_when_the_profile_is_set_up(self) -> None:
+        self.assertEqual(OK_LINES[5], self.line("cis-profile"))
+
+    def test_off_names_the_reason(self) -> None:
+        cases = {
+            "no profile": (
+                "/etc/rancher/rke2/config.yaml",
+                'write-kubeconfig-mode: "0600"\n',
+                "RKE2's settings (/etc/rancher/rke2/config.yaml) do not set profile: cis",
+            ),
+            "no etcd user": (
+                "/etc/passwd",
+                "root:x:0:0:root:/root:/bin/bash\n",
+                "the etcd user or group is missing in /etc/passwd or /etc/group, so RKE2 "
+                "does not start with the profile",
+            ),
+            "another kernel value": (
+                "/proc/sys/vm/overcommit_memory",
+                "0\n",
+                "the kernel setting vm.overcommit_memory is 0, but RKE2 needs 1, so RKE2 "
+                "does not start with the profile",
+            ),
+        }
+        for case, (path, content, reason) in cases.items():
+            with self.subTest(case=case):
+                before = self.host.host_path(path).read_text()
+                self.host.host_file(path, content)
+
+                result = self.host.run("check")
+
+                self.assertEqual(1, result.returncode)
+                self.assertIn(f"[FAIL] cis-profile: off: {reason}. {CIS_FIX}\n", result.stdout)
+                self.host.host_file(path, before)
+
+
+class ConsoleCertificateLineTests(CheckTestCase):
+    """The console certificate line: the rule of certificate_state."""
+
+    def test_a_valid_certificate_for_the_host_name_is_green(self) -> None:
+        self.assertEqual(OK_LINES[6], self.line("console-certificate"))
+        calls = self.host.calls()
+        self.assertIn("kubectl --kubeconfig", calls)
+        self.assertIn("-n meho get secret meho-core-tls -o go-template=", calls)
+        self.assertIn("openssl verify -attime 1792756800 -partial_chain -CAfile ", calls)
+        self.assertNotIn("tls.key", calls)
+
+    def test_a_chain_with_an_intermediate_ca_is_green(self) -> None:
+        chain, ca = console_certificate()
+        self.host.console_certificate(chain + ca, ca)
+
+        self.assertEqual(OK_LINES[6], self.line("console-certificate"))
+
+    def test_30_days_or_less_left_warns_and_more_is_green(self) -> None:
+        cases = {
+            20: "[WARN] console-certificate: only 20 days left: it expires on 2026-11-12. "
+            + CERTIFICATE_FIX,
+            30: "[WARN] console-certificate: only 30 days left: it expires on 2026-11-22. "
+            + CERTIFICATE_FIX,
+            31: "[ok]   console-certificate: valid for meho.example.com until 2026-11-23 "
+            "(31 days left)",
+        }
+        for days, line in cases.items():
+            with self.subTest(days=days):
+                self.host.console_certificate(*console_certificate(end=days))
+
+                result = self.host.run("check")
+
+                self.assertEqual(0, result.returncode, self.output(result))
+                self.assertIn(line + "\n", result.stdout)
+        checks = json.loads(self.host.run("check", "--json").stdout)["checks"]
+        self.assertEqual("ok", checks[6]["status"])
+        self.host.console_certificate(*console_certificate(end=20))
+        checks = json.loads(self.host.run("check", "--json").stdout)["checks"]
+        self.assertEqual("warn", checks[6]["status"])
+        self.assertEqual(CERTIFICATE_FIX.removeprefix("Fix: "), checks[6]["hint"])
+
+    def test_red_lines_name_every_problem(self) -> None:
+        cases = {
+            "another name": (
+                console_certificate("other.example.com"),
+                "it does not name meho.example.com, the host name of this install",
+            ),
+            "expired": (
+                console_certificate(start=-400, end=-5),
+                "it expired on 2026-10-18",
+            ),
+            "not yet valid": (
+                console_certificate(start=3, end=400),
+                "it is valid only from 2026-10-26, so the clock of this machine or the "
+                "certificate is wrong",
+            ),
+            "expired and another name": (
+                console_certificate("other.example.com", start=-400, end=-5),
+                "it expired on 2026-10-18; it does not name meho.example.com, the host name of "
+                "this install",
+            ),
+            "signed by another CA": (
+                (console_certificate()[0], console_certificate(ca="Another CA")[1]),
+                "its chain to ca.crt is not valid: unable to get local issuer certificate",
+            ),
+            "no ca.crt": (
+                (console_certificate()[0], ""),
+                "its chain to ca.crt is not valid: unable to get local issuer certificate",
+            ),
+            "not a certificate": (
+                ("not a certificate\n", console_certificate()[1]),
+                "tls.crt holds no certificate that openssl can read",
+            ),
+        }
+        for case, ((chain, ca), problems) in cases.items():
+            with self.subTest(case=case):
+                self.host.console_certificate(chain, ca)
+
+                result = self.host.run("check")
+
+                self.assertEqual(1, result.returncode)
+                self.assertIn(
+                    f"[FAIL] console-certificate: {problems}. {CERTIFICATE_FIX}\n", result.stdout
+                )
+
+    def test_a_secret_that_cannot_be_read_is_red(self) -> None:
+        self.host.answer("console_tls_rc", "1")
+
+        self.assertEqual(
+            "[FAIL] console-certificate: the Secret meho-core-tls with the certificate cannot be "
+            f"read. Fix: check the node and pods lines first. Then {SUPPORT_HINT}",
+            self.line("console-certificate"),
+        )
+
+    def test_without_the_host_name_of_the_install_it_is_red(self) -> None:
+        self.host.host_path("/etc/meho/install.json").unlink()
+
+        self.assertEqual(
+            "[FAIL] console-certificate: the host name is not in /etc/meho/install.json, so the "
+            f"certificate cannot be checked. Fix: {SUPPORT_HINT}",
+            self.line("console-certificate"),
+        )
+
+    def test_without_openssl_it_is_red(self) -> None:
+        (self.host.tools / "openssl").unlink()
+
+        self.assertEqual(
+            "[FAIL] console-certificate: openssl not found, so the certificate cannot be "
+            "checked. Fix: install the package openssl from your distribution's mirror, then run "
+            "the check again.",
+            self.line("console-certificate"),
+        )
+
+
 class SupportBundleTests(HostTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.host.host_file("/etc/meho/install.json", '{"meho_version": "0.36.0"}\n')
+        record = INSTALL_RECORD.replace("{\n", '{\n  "meho_version": "0.36.0",\n', 1)
+        self.host.host_file("/etc/meho/install.json", record)
 
     def bundle(self) -> dict[str, str]:
         """Run support-bundle, check the printed path, and return the archive's files."""
@@ -419,9 +679,8 @@ class SupportBundleTests(HostTestCase):
 
         self.assertEqual(BUNDLE_FILES, set(files))
         checks = json.loads(files["check.json"])["checks"]
-        self.assertEqual(
-            ["node", "pods", "disk", "certificates"], [check["name"] for check in checks]
-        )
+        self.assertEqual(CHECK_NAMES, [check["name"] for check in checks])
+        self.assertEqual({"ok"}, {check["status"] for check in checks})
         self.assertTrue(files["os/os-release.txt"].startswith('PRETTY_NAME="Ubuntu 24.04'))
         self.assertIn("fake journal line", files["rke2-server.journal.txt"])
         self.assertIn("fake log line", files[f"pods/kube-system.{TRAEFIK_POD}.log"])
@@ -520,6 +779,9 @@ class SupportBundleTests(HostTestCase):
         for value in secrets:
             with self.subTest(value=value):
                 self.assertNotIn(value, calls)
+        # The check reads the console certificate, never its private key.
+        self.assertIn('meho-core-tls -o go-template={{with index .data "tls.crt"}}', calls)
+        self.assertNotIn("tls.key", calls)
         folder = self.host.host_path("/var/lib/meho/support")
         self.assertEqual(
             [self.host.host_path(BUNDLE_PATH).name], [path.name for path in folder.iterdir()]
@@ -734,6 +996,8 @@ class UninstallTests(HostTestCase):
         self.host.host_file(RKE2_UNIT, "[Unit]\n")
         for command in MEHO_COMMANDS:
             self.host.host_file(command, "#!/bin/sh\n")
+        for name in LIB_FILES:
+            self.host.host_file(f"{MEHO_HOST_LIB}/{name}", "# fake\n")
         self.host.host_file("/var/lib/rancher/rke2/server/db/state.db", "etcd\n")
         uninstall = self.host.host_path(RKE2_UNINSTALL)
         uninstall.write_text(RKE2_UNINSTALL_STUB)
@@ -745,6 +1009,7 @@ class UninstallTests(HostTestCase):
             "/etc/meho/install.json",
             RKE2_UNIT,
             *MEHO_COMMANDS,
+            MEHO_HOST_LIB,
         ):
             self.assertTrue(self.host.host_path(path).exists(), path)
         self.assertNotIn("rke2-uninstall.sh", self.host.calls())
@@ -771,6 +1036,7 @@ class UninstallTests(HostTestCase):
             RKE2_DROPIN,
             RKE2_DROPIN.rsplit("/", 1)[0],
             *MEHO_COMMANDS,
+            MEHO_HOST_LIB,
         ):
             self.assertFalse(self.host.host_path(path).exists(), path)
         self.assertEqual(["firewall.nft"], os.listdir(self.host.host_path("/etc/meho")))
@@ -809,14 +1075,58 @@ class UninstallTests(HostTestCase):
 
 
 class InstallTests(InstallTestCase):
-    def test_install_sh_puts_meho_host_on_the_machine(self) -> None:
+    def run_help(self, meho_host: Path) -> subprocess.CompletedProcess[str]:
+        """Run 'meho-host --help' from the path: it sources its two lib files first."""
+        return subprocess.run(
+            [str(meho_host), "--help"],
+            capture_output=True,
+            text=True,
+            env={"PATH": str(self.machine.tools), "LC_ALL": "C"},
+            check=False,
+            timeout=30,
+        )
+
+    def test_install_sh_puts_meho_host_and_its_lib_files_on_the_machine(self) -> None:
         result = self.machine.run()
 
         self.assert_succeeds(result)
         installed = self.machine.host_path("/usr/local/sbin/meho-host")
         self.assertEqual((LINUX_SERVER / "meho-host").read_text(), installed.read_text())
         self.assertEqual(0o755, stat.S_IMODE(installed.stat().st_mode))
-        self.assertIn("[ok]   installed meho-host to /usr/local/sbin/meho-host", result.stdout)
+        lib = self.machine.host_path(MEHO_HOST_LIB)
+        self.assertEqual(sorted(LIB_FILES), sorted(os.listdir(lib)))
+        for name in LIB_FILES:
+            with self.subTest(file=name):
+                self.assertEqual(
+                    (LINUX_SERVER / "lib" / name).read_text(), (lib / name).read_text()
+                )
+                self.assertEqual(0o644, stat.S_IMODE((lib / name).stat().st_mode))
+        self.assertIn(
+            "[ok]   installed meho-host to /usr/local/sbin/meho-host, and the files it sources "
+            "to /usr/local/lib/meho-host",
+            result.stdout,
+        )
+        # The installed meho-host finds the files at ../lib/meho-host.
+        help_result = self.run_help(installed)
+        self.assertEqual(0, help_result.returncode, help_result.stderr)
+        self.assertIn("check [--json]", help_result.stdout)
+
+    def test_meho_host_without_its_lib_files_stops_with_the_fix(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="meho-host-alone-") as folder:
+            alone = Path(folder) / "sbin" / "meho-host"
+            alone.parent.mkdir()
+            shutil.copy2(LINUX_SERVER / "meho-host", alone)
+
+            result = self.run_help(alone)
+
+        self.assertEqual(1, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertIn("[FAIL] meho-host cannot find firewall.sh and cis.sh", result.stderr)
+        self.assertIn(
+            "Fix: copy lib/firewall.sh and lib/cis.sh of the MEHO download to "
+            "/usr/local/lib/meho-host/.",
+            result.stderr,
+        )
 
 
 if __name__ == "__main__":

@@ -146,12 +146,12 @@ kernel_setting() {
 # have, as "<key> is <now>, but RKE2 needs <value>", and return 1. The
 # values come from the file, so they follow RKE2's file of each version.
 cis_kernel_settings_loaded() {
-    local key value current wanted
+    local key value current needed
     while read -r key value; do
-        read -r -a wanted <<<"$value"
+        read -r -a needed <<<"$value"
         current=$(kernel_setting "$key") || current="not readable"
-        if [[ $current != "${wanted[*]}" ]]; then
-            printf '%s is %s, but RKE2 needs %s\n' "$key" "$current" "${wanted[*]}"
+        if [[ $current != "${needed[*]}" ]]; then
+            printf '%s is %s, but RKE2 needs %s\n' "$key" "$current" "${needed[*]}"
             return 1
         fi
     done < <(sysctl_file_settings "$1")

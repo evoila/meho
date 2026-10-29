@@ -18,15 +18,23 @@ network, and they change nothing on the machine that runs them:
   stub accepts every file, and the systemctl stub only reloads.
 - Standard input is empty unless a test gives answers (stdin="yes\n"), and
   there is no SSH session unless a test gives one (ssh_client=...).
+- The real openssl checks the console certificate. console_certificate()
+  makes test certificates with fixed dates around NOW, with the real
+  openssl, so no test depends on the day it runs.
 
 The default answers describe a healthy machine on 2026-10-23 at 12:00 UTC:
 the node is Ready, every pod runs or has finished, both disks have most of
-their space free, and every certificate is valid for a year or longer.
+their space free, and every RKE2 certificate is valid for a year or longer.
+The MEHO firewall is loaded and enabled, RKE2's CIS profile is set up as
+install.sh sets it up, and the console certificate names meho.example.com
+and has a year left. The tests of check add the install record, which
+holds the host name (INSTALL_RECORD).
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import shutil
 import subprocess
 import tempfile
@@ -34,11 +42,143 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from harness import LINUX_SERVER, REAL_TOOLS, UBUNTU_2404, _write_script
+from harness import (
+    FIXTURES,
+    LINUX_SERVER,
+    PREROUTING_CHAIN,
+    REAL_TOOLS,
+    RKE2_CIS_SYSCTL,
+    UBUNTU_2404,
+    _write_script,
+    kernel_path,
+)
 
 MEHO_HOST = LINUX_SERVER / "meho-host"
 NOW = dt.datetime(2026, 10, 23, 12, 0, tzinfo=dt.UTC)
-HOST_REAL_TOOLS = (*REAL_TOOLS, "cp", "rm", "rmdir", "find", "tar", "gzip")
+HOST_REAL_TOOLS = (*REAL_TOOLS, "cp", "rm", "rmdir", "find", "tar", "gzip", "head", "openssl")
+HOSTNAME = "meho.example.com"
+
+# The files of RKE2's CIS profile as install.sh writes them (lib/cis.sh).
+RKE2_CONFIG = (
+    'write-kubeconfig-mode: "0600"\nprofile: cis\n'
+    'pod-security-admission-config-file: "/etc/rancher/rke2/meho-pss.yaml"\n'
+)
+CIS_FILES = {
+    "/etc/rancher/rke2/config.yaml": RKE2_CONFIG,
+    "/etc/rancher/rke2/meho-pss.yaml": (FIXTURES / "rke2-pod-security-cis.yaml").read_text(),
+    "/etc/sysctl.d/60-rke2-cis.conf": RKE2_CIS_SYSCTL,
+    "/etc/passwd": "root:x:0:0:root:/root:/bin/bash\netcd:x:998:998:etcd user:/:/sbin/nologin\n",
+    "/etc/group": "root:x:0:\netcd:x:998:\n",
+}
+INSTALL_RECORD = (
+    f'{{\n  "options": {{\n    "hostname": "{HOSTNAME}",\n    "from_disk": false\n  }}\n}}\n'
+)
+
+# openssl ca signs with the dates it is given; "openssl x509 -days" can only
+# count from the real time.
+_CA_CONFIG = """\
+[ ca ]
+default_ca = test_ca
+[ test_ca ]
+database = index.txt
+new_certs_dir = .
+default_md = sha256
+policy = any
+unique_subject = no
+rand_serial = yes
+[ any ]
+commonName = optional
+[ ca_ext ]
+basicConstraints = critical,CA:true,pathlen:0
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+"""
+
+
+def _openssl_time(days: int) -> str:
+    return (NOW + dt.timedelta(days=days)).strftime("%Y%m%d%H%M%SZ")
+
+
+def _openssl(work: Path, *args: str) -> None:
+    subprocess.run(["openssl", *args], cwd=work, check=True, capture_output=True, timeout=30)
+
+
+def _sign(work: Path, csr: str, out: str, start: int, end: int, *extra: str) -> str:
+    """Sign a request with openssl ca, valid from NOW + start to NOW + end days."""
+    (work / "index.txt").write_text("")
+    dates = ("-startdate", _openssl_time(start), "-enddate", _openssl_time(end))
+    _openssl(
+        work,
+        "ca",
+        "-batch",
+        "-notext",
+        "-config",
+        "ca.cnf",
+        "-in",
+        csr,
+        "-out",
+        out,
+        *dates,
+        *extra,
+    )
+    return (work / out).read_text()
+
+
+def _request(work: Path, name: str, subject: str) -> None:
+    key = (
+        "-newkey",
+        "ec",
+        "-pkeyopt",
+        "ec_paramgen_curve:P-256",
+        "-nodes",
+        "-keyout",
+        f"{name}.key",
+    )
+    _openssl(work, "req", "-new", *key, "-subj", subject, "-out", f"{name}.csr")
+
+
+@functools.cache
+def console_certificate(
+    host: str = HOSTNAME, *, start: int = -30, end: int = 365, ca: str = "MEHO install CA"
+) -> tuple[str, str]:
+    """(tls.crt, ca.crt) of a test certificate for the host, signed by a test
+    CA with the given name, valid from NOW + start to NOW + end days. The
+    CA is valid from 400 days before NOW to ten years after it."""
+    with tempfile.TemporaryDirectory(prefix="meho-host-cert-") as folder:
+        work = Path(folder)
+        (work / "ca.cnf").write_text(_CA_CONFIG)
+        _request(work, "ca", f"/CN={ca}")
+        ca_pem = _sign(
+            work,
+            "ca.csr",
+            "ca.crt",
+            -400,
+            3650,
+            "-selfsign",
+            "-keyfile",
+            "ca.key",
+            "-extensions",
+            "ca_ext",
+        )
+        (work / "leaf.ext").write_text(
+            "basicConstraints = critical,CA:false\nkeyUsage = critical,digitalSignature\n"
+            f"extendedKeyUsage = serverAuth\nsubjectAltName = DNS:{host}\n"
+        )
+        _request(work, "leaf", f"/CN={host}")
+        leaf_pem = _sign(
+            work,
+            "leaf.csr",
+            "leaf.crt",
+            start,
+            end,
+            "-cert",
+            "ca.crt",
+            "-keyfile",
+            "ca.key",
+            "-extfile",
+            "leaf.ext",
+        )
+    return leaf_pem, ca_pem
 
 
 def expires(days: int) -> str:
@@ -109,10 +249,20 @@ STUBS = {
         case "$*" in
           "-c -f "*) cat "$MEHO_FAKE/nft_check_out"; exit "$(cat "$MEHO_FAKE/nft_check_rc")" ;;
           "-f "*) exit 0 ;;
+          "list table inet meho") exit "$(cat "$MEHO_FAKE/nft_table_rc")" ;;
+          "list chain inet meho prerouting")
+            cat "$MEHO_FAKE/nft_chain_out"
+            exit "$(cat "$MEHO_FAKE/nft_chain_rc")" ;;
           *) exit 1 ;;
         esac
         """),
-    "systemctl": 'case "$1" in daemon-reload) exit 0 ;; *) exit 1 ;; esac',
+    "systemctl": textwrap.dedent("""\
+        case "$1" in
+          daemon-reload) exit 0 ;;
+          is-enabled) grep -qxF -- "$3" "$MEHO_FAKE/enabled_units" ;;
+          *) exit 1 ;;
+        esac
+        """),
 }
 
 RKE2_STUB = textwrap.dedent("""\
@@ -126,8 +276,10 @@ RKE2_STUB = textwrap.dedent("""\
 
 # The fake kubectl answers each call of meho-host from one file. The values
 # of the Secrets (kube_secret_values, one key=value per line) are answered
-# only to the Go template the bundle uses; any other request for Secret
-# content fails, so the bundle cannot read them in another way.
+# only to the Go template the bundle uses, and the two public certificates
+# of the console's TLS Secret only to the templates of the check that read
+# tls.crt and ca.crt; any other request for Secret content fails, so the
+# bundle cannot read them in another way.
 KUBECTL_STUB = textwrap.dedent("""\
     rc=$(cat "$MEHO_FAKE/kubectl_rc")
     [ "$rc" = 0 ] || exit "$rc"
@@ -142,6 +294,12 @@ KUBECTL_STUB = textwrap.dedent("""\
         exit "$(cat "$MEHO_FAKE/kube_logs_previous_rc")" ;;
       *" logs "*) cat "$MEHO_FAKE/kube_logs" ;;
       *"get secrets -o go-template="*) cat "$MEHO_FAKE/kube_secret_values" ;;
+      *"get secret meho-core-tls -o go-template="*tls.crt*)
+        cat "$MEHO_FAKE/console_tls_crt"
+        exit "$(cat "$MEHO_FAKE/console_tls_rc")" ;;
+      *"get secret meho-core-tls -o go-template="*ca.crt*)
+        cat "$MEHO_FAKE/console_ca_crt"
+        exit "$(cat "$MEHO_FAKE/console_tls_rc")" ;;
       *"get secret"*" -o "*)
         echo "error: the fake kubectl gives Secret content only to the Go template" >&2
         exit 1 ;;
@@ -210,6 +368,11 @@ DEFAULT_ANSWERS = {
     "journal_out": "2026-10-23T11:00:00+0000 meho rke2[1234]: fake journal line\n",
     "nft_check_rc": "0",
     "nft_check_out": "",
+    "nft_table_rc": "0",
+    "nft_chain_rc": "0",
+    "nft_chain_out": PREROUTING_CHAIN,
+    "enabled_units": "meho-firewall.service\n",
+    "console_tls_rc": "0",
 }
 
 
@@ -236,10 +399,16 @@ class FakeHost:
         _write_script(self.host_path("/usr/local/bin/rke2"), RKE2_STUB)
         for name, content in DEFAULT_ANSWERS.items():
             self.answer(name, content)
+        self.console_certificate(*console_certificate())
         (self.fake / "calls.log").write_text("")
         self.host_file("/etc/os-release", UBUNTU_2404)
         self.host_file("/etc/rancher/rke2/rke2.yaml", "fake access file\n")
         self.host_path("/var/lib/meho").mkdir(parents=True)
+        for path, content in CIS_FILES.items():
+            self.host_file(path, content)
+        for line in RKE2_CIS_SYSCTL.splitlines():
+            key, value = line.split("=", 1)
+            self.host_file(kernel_path(key), value + "\n")
 
     def close(self) -> None:
         self._tempdir.cleanup()
@@ -247,6 +416,11 @@ class FakeHost:
     def answer(self, name: str, content: str) -> None:
         """Set what one stub command answers. The names are in DEFAULT_ANSWERS."""
         (self.fake / name).write_text(content)
+
+    def console_certificate(self, chain: str, ca: str) -> None:
+        """Set tls.crt and ca.crt of the console's TLS Secret."""
+        self.answer("console_tls_crt", chain)
+        self.answer("console_ca_crt", ca)
 
     def host_path(self, path: str) -> Path:
         """The place of a machine path, such as /var/lib/meho, below the fake root."""

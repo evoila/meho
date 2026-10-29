@@ -16,8 +16,16 @@ into an item of a LOCAL library. MEHO sends no file bytes. The steps:
 An item with the same name that already has content gives ``unchanged``. An
 empty one (left by an earlier failed try) is filled again, so a retry needs no
 clean-up first. The URL must be http or https and must not hold a user name or
-password, so no secret reaches a preview, audit row or broadcast. vCenter
-itself would also take ``file`` and ``ds`` URLs; MEHO does not send them.
+password. The approval preview shows it without its query part, so the token
+of a signed URL stays out of the preview. vCenter itself would also take
+``file`` and ``ds`` URLs; MEHO does not send them.
+
+Steps 2 to 4 run after the item exists, so each saves where its resume
+continues (#4217): a step that waits for approval stores the library, item and
+session ids, the file name and its own name. Approving it continues at that
+step and opens no second session (vCenter allows one active session per item).
+A park at step 1 saves nothing: its resume runs from the start and finds no
+item yet.
 
 It calls vCenter REST on the connector session through the shared write seam
 (:func:`._write._write_sub_op`), so it needs no catalog ingest. The
@@ -30,7 +38,7 @@ import asyncio
 import posixpath
 import time
 from typing import TYPE_CHECKING, Any, Final
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 import httpx
 
@@ -59,6 +67,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     _find_content_library_ids,
     _parse_vsphere_error,
     _read_sub_op,
+    _refuse_resume_without_state,
     _unwrap_value,
     _vsphere_fault_detail,
     _write_sub_op,
@@ -68,6 +77,7 @@ from meho_backplane.operations._preview import (
     preview_failure_reason,
     register_preview_builder,
 )
+from meho_backplane.operations.composite import composite_resume_state
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -107,6 +117,16 @@ _SUB_OPS_CONTENT_LIBRARY_ITEM_UPLOAD: Final[tuple[str, ...]] = (
 #: Seconds between two reads of the update session. A test may lower it.
 _POLL_INTERVAL_SECONDS: float = 5.0
 
+#: The steps after the item exists. Each is a governed write that saves where
+#: its resume continues (#4217).
+_STEP_SESSION: Final = "session"
+_STEP_ADD_FILE: Final = "add_file"
+_STEP_COMPLETE: Final = "complete"
+_PULL_STEPS: Final[tuple[str, ...]] = (_STEP_SESSION, _STEP_ADD_FILE, _STEP_COMPLETE)
+_PULL_WRITE_OPS: Final[frozenset[str]] = frozenset(
+    {_OP_CREATE_UPDATE_SESSION, _OP_ADD_SESSION_FILE, _OP_COMPLETE_SESSION}
+)
+
 
 def _source_problem(url: Any) -> str | None:
     """Why *url* is not an http(s) URL vCenter may download from, or ``None``."""
@@ -118,6 +138,18 @@ def _source_problem(url: Any) -> str | None:
     if parts.username is not None or parts.password is not None:
         return "source_url must not hold a user name or password"
     return None
+
+
+def _shown_url(url: Any) -> Any:
+    """*url* without its query, fragment, user name and password, for a preview.
+
+    A signed download URL carries its token in the query. The full URL stays
+    in the parameters, so vCenter still downloads from it.
+    """
+    if not isinstance(url, str):
+        return url
+    parts = urlsplit(url)
+    return urlunsplit(parts._replace(netloc=parts.netloc.rpartition("@")[2], query="", fragment=""))
 
 
 def _file_name(params: dict[str, Any]) -> str:
@@ -180,11 +212,10 @@ async def _existing_item(
     return ({**model, "id": ids[0]} if model is not None else None), None
 
 
-def _item_info(model: dict[str, Any] | None) -> dict[str, Any] | None:
-    if model is None:
-        return None
+def _item_info(item_id: str, model: dict[str, Any]) -> dict[str, Any]:
+    """The ``item`` answer field. vCenter's item GET leaves ``id`` out, so it is passed in."""
     return {
-        "id": model.get("id"),
+        "id": item_id,
         "name": model.get("name"),
         "type": model.get("type"),
         "size_bytes": int_or_none(model.get("size")),
@@ -218,36 +249,66 @@ async def _start_pull(
     target: Any,
     operator: Operator,
     *,
-    item_id: str,
+    envelope: dict[str, Any],
     file_name: str,
     params: dict[str, Any],
-) -> tuple[OperationResult | None, str | None]:
-    """Open a session, add the PULL file, complete it; ``(gate, None)`` or ``(None, id)``."""
-    gate, payload = await _write_sub_op(
-        connector, target, operator, _OP_CREATE_UPDATE_SESSION, {"library_item_id": item_id}
-    )
-    if gate is not None:
-        return gate, None
-    session_id = _unwrap_value(payload)
-    if not isinstance(session_id, str) or not session_id:
-        raise RuntimeError(f"vCenter answered with no update session id ({session_id!r})")
-    endpoint: dict[str, Any] = {"uri": params["source_url"]}
-    if isinstance(params.get("ssl_certificate_thumbprint"), str):
-        endpoint["ssl_certificate_thumbprint"] = params["ssl_certificate_thumbprint"]
-    add = {
-        "updateSessionId": session_id,
-        "name": file_name,
-        "source_type": "PULL",
-        "source_endpoint": endpoint,
-    }
-    for op_id, sub_params in (
-        (_OP_ADD_SESSION_FILE, add),
-        (_OP_COMPLETE_SESSION, {"updateSessionId": session_id}),
-    ):
-        gate, _ = await _write_sub_op(connector, target, operator, op_id, sub_params)
+    step: str = _STEP_SESSION,
+) -> OperationResult | None:
+    """Open a session, add the PULL file and complete it, from *step* on.
+
+    Fills ``envelope["session_id"]``. Returns the gate of a step that waits
+    for approval or is denied, else ``None``. The item exists by now, so each
+    step saves the ids, the file name and its own name as resume state
+    (#4217): approving it continues here at that step and opens no second
+    session.
+    """
+
+    async def write(
+        op_id: str, sub_params: dict[str, Any], step: str
+    ) -> tuple[OperationResult | None, Any]:
+        state = {
+            "library_id": envelope["library_id"],
+            "item_id": envelope["item_id"],
+            "session_id": envelope["session_id"],
+            "file_name": file_name,
+            "step": step,
+        }
+        return await _write_sub_op(
+            connector,
+            target,
+            operator,
+            op_id,
+            sub_params,
+            resume_state=state,
+            after_main_effect=True,
+        )
+
+    if step == _STEP_SESSION:
+        gate, payload = await write(
+            _OP_CREATE_UPDATE_SESSION, {"library_item_id": envelope["item_id"]}, _STEP_SESSION
+        )
         if gate is not None:
-            return gate, None
-    return None, session_id
+            return gate
+        session_id = _unwrap_value(payload)
+        if not isinstance(session_id, str) or not session_id:
+            raise RuntimeError(f"vCenter answered with no update session id ({session_id!r})")
+        envelope["session_id"] = session_id
+    session_id = str(envelope["session_id"])
+    if step != _STEP_COMPLETE:
+        endpoint: dict[str, Any] = {"uri": params["source_url"]}
+        if isinstance(params.get("ssl_certificate_thumbprint"), str):
+            endpoint["ssl_certificate_thumbprint"] = params["ssl_certificate_thumbprint"]
+        add = {
+            "updateSessionId": session_id,
+            "name": file_name,
+            "source_type": "PULL",
+            "source_endpoint": endpoint,
+        }
+        gate, _ = await write(_OP_ADD_SESSION_FILE, add, _STEP_ADD_FILE)
+        if gate is not None:
+            return gate
+    gate, _ = await write(_OP_COMPLETE_SESSION, {"updateSessionId": session_id}, _STEP_COMPLETE)
+    return gate
 
 
 async def _wait_for_session(
@@ -309,7 +370,7 @@ async def _finish(
             "status": "not_verified",
             "guidance": "The download is done, but the item does not read back. Check vCenter.",
         }
-    return {**envelope, "status": "uploaded", "item": _item_info(model)}
+    return {**envelope, "status": "uploaded", "item": _item_info(envelope["item_id"], model)}
 
 
 async def _plan(
@@ -344,11 +405,29 @@ async def _plan(
                 **envelope,
                 "status": "unchanged",
                 "item_id": item["id"],
-                "item": _item_info(item),
+                "item": _item_info(item["id"], item),
                 "guidance": "The item already exists and has content; nothing was sent.",
             },
         )
     return file_name, item, None
+
+
+def _resumed_upload_state() -> dict[str, Any]:
+    """The state a waiting pull step saved, during its resume (#4217); empty otherwise.
+
+    It needs the library and item ids, the file name and one of the steps; a
+    step after the session open also needs the session id. Anything else
+    counts as missing state and is refused before any read or write.
+    """
+    saved = composite_resume_state(OP_ID_CONTENT_LIBRARY_ITEM_UPLOAD)
+    if saved is None or saved.get("step") not in _PULL_STEPS:
+        return {}
+    needed = ["library_id", "item_id", "file_name"]
+    if saved["step"] != _STEP_SESSION:
+        needed.append("session_id")
+    if not all(isinstance(saved.get(key), str) and saved[key] for key in needed):
+        return {}
+    return saved
 
 
 async def content_library_item_upload_composite(
@@ -358,7 +437,12 @@ async def content_library_item_upload_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any] | OperationResult:
-    """vCenter downloads one file into a local library item (``content_library.item.upload``)."""
+    """vCenter downloads one file into a local library item (``content_library.item.upload``).
+
+    An approved pull step continues at that step with the ids its park saved
+    (#4217); it reads nothing again and opens no second session. Such a
+    resume without saved state is refused before any call.
+    """
     envelope: dict[str, Any] = {
         "library_id": None,
         "item_id": None,
@@ -369,31 +453,77 @@ async def content_library_item_upload_composite(
         "error_type": None,
         "guidance": None,
     }
+    saved = _resumed_upload_state()
+    refusal = _refuse_resume_without_state(
+        composite_op_id=OP_ID_CONTENT_LIBRARY_ITEM_UPLOAD,
+        write_ops=_PULL_WRITE_OPS,
+        has_state=bool(saved),
+        nothing_done="no file was added",
+        remediation=(
+            "Nothing ran. Call the operation again with the same parameters (it reuses the "
+            "empty item), or delete the item named in the approval request with "
+            "content_library.item.delete."
+        ),
+    )
+    if refusal is not None:
+        return refusal
+    if saved:
+        envelope.update(
+            library_id=saved["library_id"],
+            item_id=saved["item_id"],
+            session_id=saved.get("session_id"),
+        )
+        return await _pull_and_wait(
+            connector, target, operator, params, envelope, saved["file_name"], saved["step"]
+        )
     file_name, item, answer = await _plan(connector, target, operator, params, envelope)
     if answer is not None:
         return answer
-    try:
-        item_id = item["id"] if item is not None else None
-        if item_id is None:
+    item_id = item["id"] if item is not None else None
+    if item_id is None:
+        try:
             gate, item_id = await _create_item(
                 connector, target, operator, params, envelope["library_id"]
             )
-            if gate is not None:
-                return gate
-        envelope["item_id"] = item_id
-        gate, session_id = await _start_pull(
-            connector, target, operator, item_id=str(item_id), file_name=file_name, params=params
+        except httpx.HTTPError as exc:
+            return _upload_fault(envelope, exc)
+        if gate is not None:
+            return gate
+    envelope["item_id"] = item_id
+    return await _pull_and_wait(
+        connector, target, operator, params, envelope, file_name, _STEP_SESSION
+    )
+
+
+async def _pull_and_wait(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    params: dict[str, Any],
+    envelope: dict[str, Any],
+    file_name: str,
+    step: str,
+) -> dict[str, Any] | OperationResult:
+    """Run the pull steps from *step* on, then wait for the download; the answer."""
+    try:
+        gate = await _start_pull(
+            connector,
+            target,
+            operator,
+            envelope=envelope,
+            file_name=file_name,
+            params=params,
+            step=step,
         )
     except httpx.HTTPError as exc:
         return _upload_fault(envelope, exc)
     if gate is not None:
         return gate
-    envelope["session_id"] = session_id
     session = await _wait_for_session(
         connector,
         target,
         operator,
-        str(session_id),
+        str(envelope["session_id"]),
         float(params.get("wait_seconds", DEFAULT_WAIT_SECONDS)),
     )
     return await _finish(connector, target, operator, envelope, session)
@@ -426,16 +556,25 @@ def _upload_fault(envelope: dict[str, Any], exc: httpx.HTTPError) -> dict[str, A
 
 
 async def _content_library_item_upload_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Show the approver the library, the item name, the URL, and any item of that name."""
+    """Show the approver the library, the item name, the URL, and any item of that name.
+
+    The URL is shown without its query part, user name and password, so the
+    token of a signed URL does not land in the approval row.
+    """
     if ctx.connector_instance is None:
         return None
     connector: VmwareRestConnector = ctx.connector_instance  # type: ignore[assignment]
     params = dict(ctx.params)
+    shown_url = _shown_url(params.get("source_url"))
     effect: dict[str, Any] = {
         "item_name": params.get("item_name"),
-        "source_url": params.get("source_url"),
+        "source_url": shown_url,
         "item_type": params.get("item_type"),
     }
+    if shown_url != params.get("source_url"):
+        effect["source_url_note"] = (
+            "The URL is shown without its query part, user name and password."
+        )
     problem = _source_problem(params.get("source_url"))
     if problem is not None:
         return {**effect, "summary": f"The call will be refused: {problem}."}
@@ -463,11 +602,12 @@ async def _content_library_item_upload_preview(ctx: PreviewContext) -> dict[str,
             "summary": f"The call will change nothing: {(answer or {}).get('guidance')}",
         }
     summary = (
-        f"vCenter downloads {effect['source_url']} into a new item of library {library['name']!r}."
+        f"vCenter downloads {shown_url} into a new item of library {library['name']!r}."
         if item is None
         else f"Item {params.get('item_name')!r} already exists in library {library['name']!r}."
     )
-    return {**effect, "summary": summary, "library": library, "existing_item": _item_info(item)}
+    existing = _item_info(item["id"], item) if item is not None else None
+    return {**effect, "summary": summary, "library": library, "existing_item": existing}
 
 
 register_preview_builder(OP_ID_CONTENT_LIBRARY_ITEM_UPLOAD, _content_library_item_upload_preview)

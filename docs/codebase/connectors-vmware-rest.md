@@ -533,12 +533,23 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     item id, so the caller can retry or delete the empty item with
     `content_library.item.delete`. Only `http` / `https` URLs without a user
     name or password are accepted (vCenter would also take `file` and `ds`).
+    The three steps after the item create are `after_main_effect` writes that
+    save the library, item and session ids, the file name and their own step
+    as resume state (#4217): a step that waits for approval continues at that
+    step when approved, with no new reads and no second update session
+    (vCenter allows one active session per item). A park at the item create
+    saves nothing; its resume runs from the start and finds no item yet. A
+    pull-step resume without saved state is refused before any call. vCenter's
+    item GET has no `id`, so the `item` answer field carries the known item id.
     This typed op is the governed path for the VMware rule that new VMware
     work is typed; the raw ingested recipe in
     `vmware-rest-governed-iso-path.md` stays for the long tail.
   - Both have a preview: the create shows the resolved datastore and any
     library that already has the name; the upload shows the library, the item
-    name, the URL and file name, and any item of that name.
+    name, the URL and file name, and any item of that name. The preview shows
+    the URL without its query part, user name and password (`source_url_note`
+    says so when something was cut), so the token of a signed download URL
+    stays out of the approval row; the call still downloads from the full URL.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
   lifespan startup. Iterates a single `_COMPOSITES` tuple of 78

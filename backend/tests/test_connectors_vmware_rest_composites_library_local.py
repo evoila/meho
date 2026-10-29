@@ -14,13 +14,16 @@ and the write gate (``enforce_subop_policy``) with a recorder. They check:
 * the read-back of the new library and the item;
 * the download states (done, still running, failed) and vCenter faults;
 * that a parked gate is returned as is and stops the call;
-* the approval previews;
+* that an approved pull step continues at that step and opens no second
+  session, and that a resume with no saved state is refused;
+* the approval previews, and that a signed URL's query stays out of them;
 * that every answer fits the registered response schema.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any
 from uuid import UUID
 
@@ -44,6 +47,11 @@ from meho_backplane.connectors.vmware_rest.composites._library_upload import (
     content_library_item_upload_composite,
 )
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext
+from meho_backplane.operations.composite import (
+    CompositeResumeState,
+    composite_resume_scope_var,
+    composite_resume_state_var,
+)
 
 _LIB = "11111111-2222-3333-4444-555555555555"
 _LIB2 = "11111111-2222-3333-4444-666666666666"
@@ -65,6 +73,8 @@ _GET_SESSION = f"/api/content/library/item/update-session/{_SESSION}"
 
 _LOCAL_LIB = {"id": _LIB, "name": "lab-lib", "type": "LOCAL"}
 _URL = "https://depot.example.test/iso/installer.iso"
+_SIGNED_URL = f"{_URL}?X-Amz-Signature=signedsecret&X-Amz-Expires=300"
+_UPLOAD_OP = "vmware.composite.content_library.item.upload"
 
 
 def _operator() -> Operator:
@@ -159,14 +169,22 @@ class _Seq:
 
 
 class _Gate:
-    """Stub for ``enforce_subop_policy``; parks the op ids in *park*."""
+    """Stub for ``enforce_subop_policy``; parks the op ids in *park*.
+
+    ``resume_states`` keeps what each write passed as ``resume_state`` (or
+    ``None``), in call order.
+    """
 
     def __init__(self, park: set[str] | None = None) -> None:
         self.op_ids: list[str] = []
+        self.resume_states: list[dict[str, Any] | None] = []
         self._park = park or set()
 
-    async def __call__(self, *, op_id: str, **_: Any) -> OperationResult | None:
+    async def __call__(
+        self, *, op_id: str, resume_state: dict[str, Any] | None = None, **_: Any
+    ) -> OperationResult | None:
         self.op_ids.append(op_id)
+        self.resume_states.append(resume_state)
         if op_id in self._park:
             return OperationResult(
                 status="awaiting_approval", op_id=op_id, result=None, duration_ms=1.0
@@ -184,6 +202,26 @@ def gate(monkeypatch: pytest.MonkeyPatch) -> _Gate:
 @pytest.fixture(autouse=True)
 def _fast_poll(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_library_upload, "_POLL_INTERVAL_SECONDS", 0.0)
+
+
+@contextmanager
+def _resuming(approved_op_id: str, state: dict[str, Any] | None) -> Iterator[None]:
+    """Bind what an approval resume of a pull step binds (#4217).
+
+    The gate is a stub here, so only the resume scope and the saved state
+    matter; the real seam is covered in ``test_operations_subop_policy_gate``.
+    """
+    scope_token = composite_resume_scope_var.set((approved_op_id, "deadbeef"))
+    state_token = composite_resume_state_var.set(
+        None
+        if state is None
+        else CompositeResumeState(op_id=_UPLOAD_OP, state=state, after_main_effect=True)
+    )
+    try:
+        yield
+    finally:
+        composite_resume_state_var.reset(state_token)
+        composite_resume_scope_var.reset(scope_token)
 
 
 def _valid(schema: dict[str, Any]) -> Callable[[Any], None]:
@@ -373,7 +411,7 @@ def _upload_responses(**overrides: Any) -> dict[str, Any]:
         _ADD_FILE: {"name": "installer.iso", "status": "WAITING_FOR_TRANSFER"},
         _COMPLETE: None,
         _GET_SESSION: [_Seq({"state": "ACTIVE"}), _Seq({"state": "DONE"})],
-        _GET_ITEM: {"id": _ITEM, "name": "installer", "type": "iso", "size": 42, "cached": True},
+        _GET_ITEM: {"name": "installer", "type": "iso", "size": 42, "cached": True},
         **overrides,
     }
 
@@ -393,6 +431,7 @@ async def test_upload_creates_the_item_and_pulls_the_file(gate: _Gate) -> None:
     assert out["item_id"] == _ITEM
     assert out["session_id"] == _SESSION
     assert out["session_state"] == "DONE"
+    assert out["item"]["id"] == _ITEM, "vCenter's item GET has no id; the known id is used"
     assert out["item"]["size_bytes"] == 42
     assert gate.op_ids == _UPLOAD_WRITES
     assert conn.body_of(_CREATE_ITEM) == {"library_id": _LIB, "name": "installer", "type": "iso"}
@@ -424,13 +463,15 @@ async def test_upload_answers_unchanged_for_an_item_with_content(gate: _Gate) ->
     conn = _Connector(_upload_responses(**{_FIND_ITEM: [_ITEM]}))
     out = await _upload(conn)
     assert out["status"] == "unchanged"
+    assert out["item_id"] == _ITEM
+    assert out["item"]["id"] == _ITEM
     assert out["item"]["size_bytes"] == 42
     assert gate.op_ids == []
     _check_upload(out)
 
 
 async def test_upload_fills_an_empty_item_left_by_a_failed_try(gate: _Gate) -> None:
-    empty = {"id": _ITEM, "name": "installer", "type": "iso", "size": 0}
+    empty = {"name": "installer", "type": "iso", "size": 0}
     full = {**empty, "size": 42}
     conn = _Connector(
         _upload_responses(**{_FIND_ITEM: [_ITEM], _GET_ITEM: [_Seq(empty), _Seq(full)]})
@@ -540,6 +581,109 @@ async def test_upload_returns_a_parked_gate_as_is(monkeypatch: pytest.MonkeyPatc
     assert _CREATE_ITEM not in conn.paths()
 
 
+def _saved(step: str, session_id: str | None = _SESSION) -> dict[str, Any]:
+    return {
+        "library_id": _LIB,
+        "item_id": _ITEM,
+        "session_id": session_id,
+        "file_name": "installer.iso",
+        "step": step,
+    }
+
+
+async def test_upload_saves_where_each_pull_step_continues(gate: _Gate) -> None:
+    """The item create saves nothing; the three pull steps save the ids and their step (#4217)."""
+    conn = _Connector(_upload_responses())
+    await _upload(conn)
+    assert gate.resume_states == [
+        None,
+        _saved("session", session_id=None),
+        _saved("add_file"),
+        _saved("complete"),
+    ]
+
+
+async def test_upload_parks_at_the_add_file_step_with_its_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = _Gate({_UPLOAD_WRITES[2]})
+    monkeypatch.setattr(_write, "enforce_subop_policy", gate)
+    conn = _Connector(_upload_responses())
+    out = await _upload(conn)
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert gate.resume_states[-1] == _saved("add_file")
+    assert conn.paths("POST") == [_FIND_ITEM, _CREATE_ITEM, _CREATE_SESSION]
+
+
+@pytest.mark.parametrize(
+    ("step", "approved", "writes"),
+    [
+        ("session", _UPLOAD_WRITES[1], _UPLOAD_WRITES[1:]),
+        ("add_file", _UPLOAD_WRITES[2], _UPLOAD_WRITES[2:]),
+        ("complete", _UPLOAD_WRITES[3], _UPLOAD_WRITES[3:]),
+    ],
+)
+async def test_upload_resumes_at_the_approved_pull_step(
+    gate: _Gate, step: str, approved: str, writes: list[str]
+) -> None:
+    """An approved pull step continues there: no new reads, no item, no second session (#4217)."""
+    conn = _Connector(_upload_responses())
+    with _resuming(approved, _saved(step, session_id=None if step == "session" else _SESSION)):
+        out = await _upload(conn, ssl_certificate_thumbprint="AA:BB")
+    assert out["status"] == "uploaded"
+    assert out["library_id"] == _LIB
+    assert out["item_id"] == _ITEM
+    assert out["session_id"] == _SESSION
+    assert out["item"]["id"] == _ITEM
+    assert gate.op_ids == writes
+    assert _GET_LIB not in conn.paths()
+    assert _FIND_ITEM not in conn.paths()
+    assert _CREATE_ITEM not in conn.paths()
+    if step != "session":
+        assert _CREATE_SESSION not in conn.paths()
+    if step != "complete":
+        assert conn.body_of(_ADD_FILE)["source_endpoint"] == {
+            "uri": _URL,
+            "ssl_certificate_thumbprint": "AA:BB",
+        }
+    assert conn.paths("POST")[-1] == _COMPLETE
+    _check_upload(out)
+
+
+async def test_upload_resumed_at_complete_reports_the_download_states(gate: _Gate) -> None:
+    conn = _Connector(_upload_responses(**{_GET_SESSION: {"state": "ACTIVE"}}))
+    with _resuming(_UPLOAD_WRITES[3], _saved("complete")):
+        out = await _upload(conn, wait_seconds=0)
+    assert out["status"] == "in_progress"
+    assert out["item_id"] == _ITEM
+    assert conn.paths("POST") == [_COMPLETE]
+    _check_upload(out)
+
+
+@pytest.mark.parametrize("state", [None, {"item_id": _ITEM}, _saved("add_file", session_id=None)])
+async def test_upload_refuses_a_pull_step_resume_without_state(
+    gate: _Gate, state: dict[str, Any] | None
+) -> None:
+    conn = _Connector(_upload_responses())
+    with _resuming(_UPLOAD_WRITES[2], state):
+        out = await _upload(conn)
+    assert isinstance(out, OperationResult)
+    assert out.status == "error"
+    assert "composite_resume_unsupported" in str(out.error)
+    assert conn.calls == []
+    assert gate.op_ids == []
+
+
+async def test_upload_item_create_resume_runs_from_the_start(gate: _Gate) -> None:
+    """A park at the item create saved nothing; its resume finds no item and creates it."""
+    conn = _Connector(_upload_responses())
+    with _resuming(_UPLOAD_WRITES[0], None):
+        out = await _upload(conn)
+    assert out["status"] == "uploaded"
+    assert gate.op_ids == _UPLOAD_WRITES
+
+
 async def test_upload_preview_shows_the_library_and_the_url() -> None:
     builder = _PREVIEW_BUILDERS["vmware.composite.content_library.item.upload"]
     conn = _Connector(_upload_responses())
@@ -555,7 +699,58 @@ async def test_upload_preview_shows_the_library_and_the_url() -> None:
     assert effect["library"] == {"id": _LIB, "name": "lab-lib", "type": "LOCAL"}
     assert effect["file_name"] == "installer.iso"
     assert effect["existing_item"] is None
+    assert "source_url_note" not in effect
     assert conn.paths("POST") == [_FIND_ITEM]
+
+
+async def _preview(conn: _Connector, **params: Any) -> dict[str, Any]:
+    builder = _PREVIEW_BUILDERS[_UPLOAD_OP]
+    ctx = PreviewContext(
+        descriptor=None,  # type: ignore[arg-type]
+        connector_instance=conn,  # type: ignore[arg-type]
+        operator=_operator(),
+        target=object(),
+        params={"library_id": _LIB, "item_name": "installer", **params},
+    )
+    effect = await builder(ctx)
+    assert effect is not None
+    return effect
+
+
+async def test_upload_preview_hides_the_query_of_a_signed_url(gate: _Gate) -> None:
+    """The preview shows the URL without its query; the call still downloads from the full URL."""
+    conn = _Connector(_upload_responses())
+    effect = await _preview(conn, source_url=_SIGNED_URL)
+    assert effect["source_url"] == _URL
+    assert effect["file_name"] == "installer.iso"
+    assert _URL in effect["summary"]
+    assert "signedsecret" not in str(effect)
+    assert (
+        effect["source_url_note"]
+        == "The URL is shown without its query part, user name and password."
+    )
+
+    out = await _upload(conn, source_url=_SIGNED_URL)
+    assert out["status"] == "uploaded"
+    assert conn.body_of(_ADD_FILE)["source_endpoint"] == {"uri": _SIGNED_URL}
+
+
+async def test_upload_preview_hides_a_password_in_a_refused_url() -> None:
+    conn = _Connector(_upload_responses())
+    url = "https://user:secret@depot.example.test/a.iso#frag"  # trufflehog:ignore
+    effect = await _preview(conn, source_url=url)
+    assert effect["source_url"] == "https://depot.example.test/a.iso"
+    assert "secret" not in str(effect)
+    assert "refused" in effect["summary"]
+    assert conn.calls == []
+
+
+async def test_upload_preview_shows_the_existing_item_with_its_id() -> None:
+    conn = _Connector(_upload_responses(**{_FIND_ITEM: [_ITEM]}))
+    effect = await _preview(conn, source_url=_URL)
+    assert effect["existing_item"]["id"] == _ITEM
+    assert effect["existing_item"]["size_bytes"] == 42
+    assert "already exists" in effect["summary"]
 
 
 def test_upload_schema_rejects_a_url_with_a_password() -> None:

@@ -1393,6 +1393,7 @@ got one in #4850; `k8s.secret.update` came later with its own builder
 | `sddc.host.validate` | an agent's call | host count; per host: `fqdn`, `username`, `storageType`, `networkPoolId` | the ESXi password and any other spec field |
 | `sddc.host.commission` | every call | the same as `sddc.host.validate` | the same |
 | `holodeck.router.patch` | every call | HoloRouter version, whether the call only checks (`verify_only`, a 9.1 router), the patch ids and the module file each one edits | nothing secret exists; the op takes no params |
+| `secret.handoff.import` | every call | the store target name (the other instance's Vault), the sink `{kind, ref}`, `expect_sha256`, the reason | the one-time handoff token (`connectors/secret/handoff_preview.py`) |
 | `vmware.composite.vm.guest.file.read` | an agent's call | VM, guest path, whether MEHO downloads the bytes (`fetch_content`, `max_inline_bytes`), the guest login's store path (`guest_secret_ref`) | the guest login |
 
 `k8s.secret.delete` is not a credential write (its params are only the

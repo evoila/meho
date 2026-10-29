@@ -182,6 +182,9 @@ _CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
         # flight recorder drop its bodies (the OAuth form carries the session
         # JWT as the ``assertion``; the token response carries the token).
         "vcfa.provider.api_token.create",
+        # The handoff export returns a one-time handoff token: not the value,
+        # but it can fetch the value once. Aggregate-only keeps it off the feed.
+        "secret.handoff.export",
     }
 )
 
@@ -234,6 +237,9 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # k8s.secret.create (inline maps or store refs), so the same pin
         # keeps them off the approval row and the broadcast.
         "k8s.secret.update",
+        # The handoff import carries the one-time handoff token in params.
+        # The pin keeps it off the approval row (stored encrypted) and the feed.
+        "secret.handoff.import",
         "k8s.job.create",
         # G3.13-T4 #1406 — Keycloak user-credential write ops. Both source
         # the password from Vault (it is never an inline param), so the

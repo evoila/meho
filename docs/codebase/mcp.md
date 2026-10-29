@@ -1079,6 +1079,7 @@ Five synthetic connectors follow this mould (natural key
 | Wire `connector_id` | Op | MCP front | Since |
 |---|---|---|---|
 | `secret-broker-1.x` | `secret.move` | (dispatch-only) | #1577 |
+| `secret-broker-1.x` | `secret.handoff.export` / `secret.handoff.import` | (dispatch-only; `dangerous` + `requires_approval`, a second person approves on each instance) | #5228 |
 | `topology-graph-1.x` | `topology.create_node` / `.annotate` / … | `meho_topology_create_node` / `_annotate` / … | #2537 |
 | `targets-registry-1.x` | `targets.register` | `meho_targets_register` | #2861 |
 | `targets-registry-1.x` | `targets.remove` | (dispatch-only; `dangerous` + `requires_approval`, a second person approves) | #4623 |

@@ -463,6 +463,7 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "entra-graph",
         "fleet-lcm",
         "fleet-rest",
+        "freeipa-jsonrpc",
         "gcloud-rest",
         "harbor-rest",
         "hcx-rest",

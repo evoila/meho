@@ -140,9 +140,10 @@ from meho_backplane.operations.ingest.payload import (
     ConnectorReviewProvenance,
 )
 from meho_backplane.operations.ingest.spec_provenance import load_spec_provenance
+from meho_backplane.operations.tenant_operation_settings import load_tenant_settings
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
 
     from meho_backplane.connectors.base import Connector
     from meho_backplane.db.models import EndpointDescriptor
@@ -153,8 +154,14 @@ __all__ = ["ReviewService"]
 _log = structlog.get_logger(__name__)
 
 
-def _review_op(op: EndpointDescriptor) -> ConnectorReviewOp:
-    """Project one descriptor row into its review-payload shape."""
+def _review_op(
+    op: EndpointDescriptor, tenant_settings: Mapping[str, bool] | None = None
+) -> ConnectorReviewOp:
+    """Project one descriptor row into its review-payload shape.
+
+    *tenant_settings* is the reading tenant's own ``{op_id: enabled}``
+    settings for a built-in connector (#5029); empty otherwise.
+    """
     return ConnectorReviewOp(
         op_id=op.op_id,
         summary=op.summary,
@@ -165,6 +172,7 @@ def _review_op(op: EndpointDescriptor) -> ConnectorReviewOp:
         is_enabled=op.is_enabled,
         tags=list(op.tags),
         needs_reingest=op.needs_reingest,
+        tenant_enabled=(tenant_settings or {}).get(op.op_id),
     )
 
 
@@ -194,7 +202,11 @@ def _authoring_kind_for_payload(
     )
 
 
-def _render_groups(groups: list[Any], ops: list[Any]) -> list[ConnectorReviewGroup]:
+def _render_groups(
+    groups: list[Any],
+    ops: list[Any],
+    tenant_settings: Mapping[str, bool] | None = None,
+) -> list[ConnectorReviewGroup]:
     """Pack *ops* under their group rows for the review payload.
 
     Each group also gets its review advice (#3671), built from the ops
@@ -206,7 +218,7 @@ def _render_groups(groups: list[Any], ops: list[Any]) -> list[ConnectorReviewGro
             ops_by_group[op.group_id].append(op)
     rendered: list[ConnectorReviewGroup] = []
     for group in groups:
-        group_ops = [_review_op(op) for op in ops_by_group[group.id]]
+        group_ops = [_review_op(op, tenant_settings) for op in ops_by_group[group.id]]
         rendered.append(
             ConnectorReviewGroup(
                 group_key=group.group_key,
@@ -219,6 +231,27 @@ def _render_groups(groups: list[Any], ops: list[Any]) -> list[ConnectorReviewGro
             )
         )
     return rendered
+
+
+async def _reading_tenant_settings(
+    session: AsyncSession,
+    scope: ConnectorScope,
+    reading_tenant_id: UUID | None,
+) -> dict[str, bool]:
+    """Return the reading tenant's own on/off settings for a built-in connector (#5029).
+
+    Shown next to the install default in the review payload. Empty for a
+    tenant's own connector copy or when no tenant reads.
+    """
+    if scope.tenant_id is not None or reading_tenant_id is None:
+        return {}
+    return await load_tenant_settings(
+        session,
+        tenant_id=reading_tenant_id,
+        product=scope.product,
+        version=scope.version,
+        impl_id=scope.impl_id,
+    )
 
 
 class ReviewService:
@@ -750,13 +783,17 @@ class ReviewService:
                 prefer=prefer,
                 allow_legacy_tenant_copy=True,
             )
-            return await self._render_payload(connector_id, scope, session)
+            return await self._render_payload(
+                connector_id, scope, session, reading_tenant_id=tenant_id
+            )
 
     async def _render_payload(
         self,
         connector_id: str,
         scope: ConnectorScope,
         session: AsyncSession,
+        *,
+        reading_tenant_id: UUID | None = None,
     ) -> ConnectorReviewPayload:
         """Load groups + ops for *scope* and pack them into the payload.
 
@@ -774,7 +811,8 @@ class ReviewService:
             scope,
             [group.id for group in groups],
         )
-        rendered_groups = _render_groups(groups, ops)
+        tenant_settings = await _reading_tenant_settings(session, scope, reading_tenant_id)
+        rendered_groups = _render_groups(groups, ops, tenant_settings)
         # #3870: list every op outside the rendered groups too, with its
         # enabled state and safety level, so the review shows the whole
         # op set dispatch can serve — not only the grouped part.
@@ -825,7 +863,7 @@ class ReviewService:
             groups=rendered_groups,
             total_op_count=grouped_op_count,
             ungrouped_op_count=max(all_op_count - grouped_op_count, 0),
-            ungrouped_ops=[_review_op(op) for op in ungrouped_ops],
+            ungrouped_ops=[_review_op(op, tenant_settings) for op in ungrouped_ops],
             needs_reingest_op_count=needs_reingest_op_count,
             delete_ops_below_destructive=delete_review,
             delete_ops_needing_correction_count=sum(

@@ -775,14 +775,106 @@ async def test_vm_migrate_preview_names_target_host_resolution() -> None:
     }
 
 
-async def test_vm_power_preview_names_the_hard_vs_soft_power_kind() -> None:
-    """The single-VM power echo surfaces the soft-vs-hard distinction to the approver."""
-    hard = await _write_preview._vm_power_preview(_make_preview_ctx({"vm": "vm-1", "verb": "off"}))
-    assert hard == {"vm": "vm-1", "verb": "off", "power_kind": "hard"}
-    soft = await _write_preview._vm_power_preview(
-        _make_preview_ctx({"vm": "vm-1", "verb": "guest_shutdown"})
+async def test_vm_power_preview_shows_name_power_state_and_power_kind() -> None:
+    """The power card names the VM and its power state, not only the moid (#3942)."""
+    recorder = _RecordingConnector()
+    recorder.responses["/vcenter/vm/vm-1"] = {
+        "value": {"name": "web-01", "power_state": "POWERED_ON"}
+    }
+    hard = await _write_preview._vm_power_preview(
+        _make_preview_ctx({"vm": "vm-1", "verb": "off"}, connector_instance=recorder)
     )
-    assert soft == {"vm": "vm-1", "verb": "guest_shutdown", "power_kind": "guest"}
+    assert hard == {
+        "vm": "vm-1",
+        "name": "web-01",
+        "power_state": "POWERED_ON",
+        "verb": "off",
+        "power_kind": "hard",
+    }
+    soft = await _write_preview._vm_power_preview(
+        _make_preview_ctx({"vm": "vm-1", "verb": "guest_shutdown"}, connector_instance=recorder)
+    )
+    assert soft is not None
+    assert soft["power_kind"] == "guest"
+    assert soft["name"] == "web-01"
+    # Only the VM read fired -- never the power verb.
+    assert recorder.calls == [("GET", "/vcenter/vm/vm-1", None)] * 2
+
+
+async def test_vm_power_preview_keeps_the_moid_when_the_vm_read_fails() -> None:
+    """A failed name read keeps the moid and names the gap; it never raises."""
+    recorder = _RecordingConnector()
+    recorder.failures["/vcenter/vm/vm-1"] = "vCenter refused the read"
+    preview = await _write_preview._vm_power_preview(
+        _make_preview_ctx({"vm": "vm-1", "verb": "reset"}, connector_instance=recorder)
+    )
+    assert preview == {
+        "vm": "vm-1",
+        "name": None,
+        "power_state": None,
+        "verb": "reset",
+        "power_kind": "hard",
+        "unavailable": ["the VM name and power state: the VM read failed (RuntimeError)"],
+    }
+    # The fault text never reaches the durable row.
+    assert "refused" not in str(preview)
+
+
+async def test_vm_power_preview_without_a_connector_names_the_gap() -> None:
+    """No connector session: the card still shows the moid and says the name is missing."""
+    preview = await _write_preview._vm_power_preview(
+        _make_preview_ctx({"vm": "vm-1", "verb": "on"}, connector_instance=None)
+    )
+    assert preview == {
+        "vm": "vm-1",
+        "name": None,
+        "power_state": None,
+        "verb": "on",
+        "power_kind": "hard",
+        "unavailable": ["the VM name and power state: no connector session to read the VM"],
+    }
+
+
+async def test_vm_power_park_shows_the_vm_name_and_power_state(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A person's power-off waits for approval; the row names the VM (#3942)."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses["/vcenter/vm/vm-42"] = {
+        "value": {"name": "app-42", "power_state": "POWERED_ON"}
+    }
+
+    _, row = await _park("vmware.composite.vm.power", {"vm": "vm-42", "verb": "off"})
+
+    preview = row.proposed_effect["preview"]
+    assert preview == {
+        "vm": "vm-42",
+        "name": "app-42",
+        "power_state": "POWERED_ON",
+        "verb": "off",
+        "power_kind": "hard",
+    }
+    assert all(verb == "GET" for verb, _, _ in recorder.calls)
+
+
+async def test_vm_power_park_is_still_created_when_the_vm_read_fails(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A failed name read does not block the approval request."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.failures["/vcenter/vm/vm-42"] = "vCenter unavailable"
+
+    _, row = await _park("vmware.composite.vm.power", {"vm": "vm-42", "verb": "off"})
+
+    effect = row.proposed_effect
+    assert effect["preview_populated"] is True
+    assert "preview_unavailable" not in effect
+    assert effect["preview"]["vm"] == "vm-42"
+    assert effect["preview"]["name"] is None
+    assert effect["preview"]["unavailable"] == [
+        "the VM name and power state: the VM read failed (RuntimeError)"
+    ]
+    assert "vCenter unavailable" not in str(effect)
 
 
 async def test_echo_builders_decline_on_malformed_params() -> None:

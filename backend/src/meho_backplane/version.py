@@ -37,7 +37,7 @@ from pydantic import BaseModel, ConfigDict
 
 from meho_backplane.connector_packages import ConnectorPackage, installed_connector_packages
 
-__all__ = ["VersionResponse", "deployed_version_label", "router"]
+__all__ = ["VersionResponse", "build_git_sha", "deployed_version_label", "router"]
 
 _UNKNOWN: str = "unknown"
 
@@ -59,6 +59,16 @@ class VersionResponse(BaseModel):
     build_date: str
     chart_version: str | None
     connector_packages: list[ConnectorPackage] = []
+
+
+def build_git_sha() -> str:
+    """Return the commit hash of the running build, or ``"unknown"``.
+
+    The release identity ``GET /version`` reports as ``git_sha``. The
+    operation catalog stamp (:mod:`meho_backplane.operations.catalog_release`)
+    uses the same value, so both name a release the same way.
+    """
+    return os.environ.get("GIT_SHA") or _UNKNOWN
 
 
 def deployed_version_label() -> str:
@@ -102,7 +112,7 @@ async def version() -> VersionResponse:
     empty for the plain public image.
     """
     return VersionResponse(
-        git_sha=os.environ.get("GIT_SHA") or _UNKNOWN,
+        git_sha=build_git_sha(),
         build_date=os.environ.get("BUILD_DATE") or _UNKNOWN,
         chart_version=os.environ.get("CHART_VERSION") or None,
         connector_packages=list(installed_connector_packages()),

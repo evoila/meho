@@ -37,15 +37,17 @@ single-object / list Secret read reuses this same helper.
 The flight recorder's Kubernetes transport hook (``_wire_span.py``,
 #3841) runs the same walk over every JSON request and response body
 before the body reaches the recorder, so a ``k8s.apply`` of a Secret or
-a ``k8s.cr.*`` read of one never records a value either.
+a ``k8s.cr.*`` read of one never records a value either. On a Secret
+the walk also replaces every ``metadata.annotations`` value (keys kept),
+because deploy tools can copy the whole manifest into an annotation.
 
 Note on the current CR projection: ``custom_resource_row`` otherwise
-keeps only ``metadata`` + a bounded ``.spec`` excerpt and drops every
-other top-level field, and a ``Secret`` has no ``.spec`` -- so before
-this module a CR read of a ``Secret`` returned no ``data`` at all. This
-redactor lets the projection surface the ``data`` / ``stringData`` **key
-inventory** (values redacted) instead, which is both safe and more
-useful than silently dropping it. ``k8s.secret.read_to_ref`` (#3496) is
+keeps only ``metadata`` + bounded ``.spec`` / ``.status`` excerpts and
+drops every other top-level field, and a ``Secret`` has no ``.spec`` --
+so before this module a CR read of a ``Secret`` returned no ``data`` at
+all. This redactor lets the projection surface the ``data`` /
+``stringData`` **key inventory** (values redacted) instead, which is
+both safe and more useful than silently dropping it. ``k8s.secret.read_to_ref`` (#3496) is
 unaffected: it returns only a Vault ``secret_ref`` + a SHA-256, never a
 ``data`` map, so there is nothing here for this walk to match.
 """
@@ -77,8 +79,9 @@ SECRET_KIND = "Secret"
 SECRET_LIST_KIND = "SecretList"
 
 #: The annotation ``kubectl apply`` writes with the full last manifest. On
-#: a Secret it repeats every ``data`` / ``stringData`` value, so the walk
-#: redacts it like a value.
+#: a Secret it repeats every ``data`` / ``stringData`` value. The walk
+#: redacts every annotation value on a Secret (this one included); the CR
+#: row projection also leaves this one out on every kind.
 LAST_APPLIED_ANNOTATION = "kubectl.kubernetes.io/last-applied-configuration"
 
 #: The two maps on a ``Secret`` whose values are secret material:
@@ -119,8 +122,11 @@ def redact_kubernetes_payload(value: Any) -> Any:
     when it has no ``kind`` and sits in the ``items`` of a
     :data:`SECRET_LIST_KIND` envelope (the shape ``GET .../secrets``
     returns). Each value of its ``data`` / ``stringData`` maps is replaced
-    via :func:`redact_secret_value` (key names kept), and so is its
-    :data:`LAST_APPLIED_ANNOTATION` annotation, which repeats those values.
+    via :func:`redact_secret_value` (key names kept), and so is every
+    value of its ``metadata.annotations`` (annotation keys kept). Deploy
+    tools can copy the whole manifest into an annotation (for example
+    :data:`LAST_APPLIED_ANNOTATION`), so no annotation value on a Secret
+    is shown.
     Every other value is walked so a ``Secret`` nested inside a
     ``List``-kind envelope or a ``k8s.cr.list`` ``items`` array is still
     caught. Scalars pass through unchanged. The input is never mutated --
@@ -154,11 +160,12 @@ def _walk(value: Any, *, in_secret_list: bool) -> Any:
 
 
 def _redact_secret_metadata(metadata: dict[Any, Any]) -> dict[Any, Any]:
-    """Copy a Secret's ``metadata`` with the last-applied annotation redacted."""
+    """Copy a Secret's ``metadata`` with every annotation value redacted.
+
+    Annotation keys stay, so a read still shows which annotations exist.
+    """
     out: dict[Any, Any] = _walk(metadata, in_secret_list=False)
     annotations = out.get("annotations")
-    if isinstance(annotations, dict) and LAST_APPLIED_ANNOTATION in annotations:
-        annotations[LAST_APPLIED_ANNOTATION] = redact_secret_value(
-            annotations[LAST_APPLIED_ANNOTATION]
-        )
+    if isinstance(annotations, dict):
+        out["annotations"] = {key: redact_secret_value(value) for key, value in annotations.items()}
     return out

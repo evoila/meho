@@ -1312,7 +1312,7 @@
     },
     "migrationJob": {
       "type": "object",
-      "description": "Pre-install / pre-upgrade migration Job (Helm hook) running `python -m meho_backplane.db.migrate` before the Deployment rolls forward.",
+      "description": "Pre-install / pre-upgrade migration Job (Helm hook) running `python -m meho_backplane.db.migrate` before the Deployment rolls forward. With `corePostgres.enabled: true` the Job is not rendered; the same runner runs as the backplane Deployment's `migrate` init container with `resources` from this block (#5233).",
       "additionalProperties": false,
       "required": ["backoffLimit", "ttlSecondsAfterFinished"],
       "properties": {

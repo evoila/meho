@@ -977,6 +977,17 @@ class VcfAutomationConnector(HttpConnector):
 
         return await provider_role_create(self, operator, target, params)
 
+    async def provider_role_delete(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.role.delete`` — see :mod:`._role_user`."""
+        from meho_backplane.connectors.vcf_automation._role_user import provider_role_delete
+
+        return await provider_role_delete(self, operator, target, params)
+
     async def provider_user_create(
         self,
         operator: Operator,

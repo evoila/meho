@@ -254,7 +254,8 @@ cli/
     │   │   └── memory_test.go    # parseScope/parseTTL/parseScopeSlugArg + verb-happy-path + 403/404/422 + decline + JSON envelope tests.
     │   ├── connector/         # G0.7-T5 #405 — `meho connector …` verb tree. G0.12-T7 #1265 migrated every verb onto the generated typed client (api.ClientWithResponses via api.AuthedClient + retryOn401); api.CatalogListResponse / api.ConnectorReviewPayload / api.IngestRequest / api.IngestResponse / api.EditGroupBody / api.EditOpBody are the single source of truth, no consumer-side struct duplicates.
     │   │   ├── connector.go      # NewRootCmd + newAuthedClient / retryOn401 / renderRequestError / renderHTTPStatus helpers.
-    │   │   ├── ingest.go         # `meho connector ingest` (POST /api/v1/connectors/ingest). 202-aware since G0.22-T4 #1609: polls GET /ingest/jobs/{job_id} to a terminal status by default, `--no-wait` exits 0 with the job handle; 200 stays the legacy sync render. Owns the shared pollIngestJob loop + renderIngestTerminal lifecycle switch (succeeded/failed/degraded/undocumented) that ingest_status.go reuses. `--tenant-id` (#2209) selects the write scope: omitted leaves the body's tenant_id unset (built-in/global, the #2085 omit-equals-global contract); the operator's own tenant UUID makes the ingest tenant-curated.
+    │   │   ├── ingest.go         # `meho connector ingest` (POST /api/v1/connectors/ingest). 202-aware since G0.22-T4 #1609: polls GET /ingest/jobs/{job_id} to a terminal status by default, `--no-wait` exits 0 with the job handle; 200 stays the legacy sync render. Owns the shared pollIngestJob loop + renderIngestTerminal lifecycle switch (succeeded/failed/degraded/undocumented) that ingest_status.go reuses. `--tenant-id` (#2209) selects the write scope: omitted leaves the body's tenant_id unset (built-in/global, the #2085 omit-equals-global contract); the operator's own tenant UUID makes the ingest tenant-curated. Converts a `file://` / `docs:` Swagger 2.0 spec to OpenAPI 3 before the upload (see swagger2.go); `--save-converted <file>` keeps the converted copy.
+    │   │   ├── swagger2.go       # Local Swagger 2.0 → OpenAPI 3.0 conversion for `connector ingest` (#5028), via kin-openapi `openapi2conv`. Fetches nothing; refuses a `$ref` to another file or URL by name; prints a one-line summary per converted spec to stderr.
     │   │   ├── ingest_status.go  # `meho connector ingest-status <job-id> [--wait] [--json]` (#1621) — post-`--no-wait` poll/inspect verb. Snapshot by default (running → identity+lifecycle echo, exit 0), `--wait` polls to terminal; terminal render + poll loop reuse ingest.go's renderIngestTerminal / pollIngestJob (no duplicated switch). Closes the PR #1618 loop the `--no-wait` hint now names.
     │   │   ├── list.go           # `meho connector list` (GET  /api/v1/connectors). List endpoint returns dict[str, list[dict]] (no response_model on the backend; per-row UUID serialisation), so a package-private listEntry decode lives here.
     │   │   ├── review.go         # `meho connector review <id>` (GET  /api/v1/connectors/{id}/review). `--prefer tenant|builtin|legacy` (#3799, #4889) is sent as `?prefer=` to pick a row when the id matches both a built-in and a tenant connector (`legacy` picks the tenant's old copy under a former product name); omitted, the 409 stays the default.
@@ -265,6 +266,8 @@ cli/
     │   │   ├── disable.go        # `meho connector disable <id>` (constructor only; logic in enable.go).
     │   │   ├── delete.go         # `meho connector delete <id>` (DELETE /api/v1/connectors/{id}, #4889) — removes the connector's operations and groups from the operator's own tenant; the built-in copy stays. Constructor only; logic in enable.go. The verb the list `next_step` and the `connector_legacy_tenant_copy` message name.
     │   │   ├── delete_test.go    # `delete` wiring, 204 --json envelope, 404 render.
+    │   │   ├── tenant_setting.go # `meho connector tenant-setting show|set|set-group` (#5029) — GET /{id}/tenant-settings, PUT /{id}/tenant-settings/operations/{op} and /groups/{key} with `--on|--off|--default`; turns built-in ops on or off for one tenant only. `--tenant-id` acts on another tenant (platform_admin). `review` prints the tenant setting in its `ten` column.
+    │   │   ├── tenant_setting_test.go # wire body (`enabled` true/false/null), `?tenant_id`, both values in the render.
     │   │   ├── connector_test.go # pure-function + typed-client mocked HTTP contract tests.
     │   │   └── prefer_test.go    # `--prefer` on review / enable-reads + the 409 connector_scope_ambiguous CLI error (#3799).
     │   ├── operation/         # G0.6-T13 #481 — `meho operation …` meta-tool surface.
@@ -801,6 +804,7 @@ field, so a response from an older backplane prints as it always did.
 | `Approvals: …` | `approvals` | `Approvals: a second person must approve; decisions on someone else's instruction are refused; approval key configured` |
 | `Features: …` | `features` | `Features: all configured` or `Features: not configured: agent_runtime (needs KEYCLOAK_ADMIN_CLIENT_ID)` |
 | `Sandbox mode: on …` | `sandbox_mode` | printed only when the mode is on (#4622) |
+| `Operation settings: written by release …` | `operation_catalog` | printed only when another release wrote the shared operation rows (#5019) |
 
 The DB line (`formatDB` in `internal/output/format.go`) uses the
 database revision and the revision this version expects, which the
@@ -843,6 +847,13 @@ readiness checks and the approval key state all come from one
      at login time. If refresh succeeds, retries the request once.
    * If refresh fails (no refresh_token, IdP rejected), surfaces
      `auth_expired`.
+   * A 401 whose `detail` is `missing_tenant_claim` (bare, or with
+     the explanation newer backplanes add) is checked first, by
+     `noTenantMessage` (#3872). The login worked but the token has no
+     tenant, so "run `meho login`" would be wrong. The CLI writes its
+     own text: the person is in no MEHO role group, ask the admin, and
+     the link to the guide `guides/tenant-bootstrap/`. Exit code stays
+     2 (`auth_expired`).
 4. **Check the version gap.** `printVersionSkew` reads the
    backplane's `GET /version` (3-second cap) and compares its
    `chart_version` with the CLI's build version

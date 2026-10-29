@@ -112,6 +112,7 @@ __all__ = [
     "build_mark_ssd_envelope",
     "build_query_boot_devices_envelope",
     "build_retrieve_properties_ex_envelope",
+    "build_search_datastore_envelope",
     "build_service_content_envelope",
     "parse_boot_devices",
     "parse_moref_result",
@@ -405,6 +406,52 @@ def build_datastore_refresh_envelope(datastore_moid: str, *, storage_info: bool)
     """
     method = "RefreshDatastoreStorageInfo" if storage_info else "RefreshDatastore"
     return _envelope(method, _method(method, _this("Datastore", datastore_moid)))
+
+
+#: ``HostDatastoreBrowserSearchSpec`` / ``FileQueryFlags`` child order (vim25
+#: WSDL sequence); only the fields the datastore browse sets (#3432).
+_SEARCH_DETAIL_FIELDS: Final = ("fileType", "fileSize", "modification", "fileOwner")
+
+
+def _xml_bool(value: Any) -> str:
+    return "true" if value else "false"
+
+
+def build_search_datastore_envelope(
+    browser_moid: str,
+    method: str,
+    datastore_path: str,
+    search_spec: Mapping[str, Any],
+) -> str:
+    """``HostDatastoreBrowser.SearchDatastore_Task`` / ``SearchDatastoreSubFolders_Task``.
+
+    *search_spec* is the VI-JSON ``HostDatastoreBrowserSearchSpec`` dict the
+    browse helper builds (``details`` flags, optional ``matchPattern`` list,
+    ``sortFoldersFirst``). Elements are written in the WSDL sequence order
+    (``details``, ``matchPattern``, ``sortFoldersFirst``); the ``_typeName``
+    discriminators are dropped. Both methods return a Task MoRef.
+    """
+    parts: list[str] = []
+    details = search_spec.get("details")
+    if isinstance(details, Mapping):
+        flags = "".join(
+            f"<{name}>{_xml_bool(details[name])}</{name}>"
+            for name in _SEARCH_DETAIL_FIELDS
+            if name in details
+        )
+        parts.append(f"<details>{flags}</details>")
+    for pattern in search_spec.get("matchPattern") or []:
+        parts.append(f"<matchPattern>{_xml_escape(str(pattern))}</matchPattern>")
+    if "sortFoldersFirst" in search_spec:
+        parts.append(
+            f"<sortFoldersFirst>{_xml_bool(search_spec['sortFoldersFirst'])}</sortFoldersFirst>"
+        )
+    body = (
+        _this("HostDatastoreBrowser", browser_moid)
+        + f"<datastorePath>{_xml_escape(datastore_path)}</datastorePath>"
+        + f"<searchSpec>{''.join(parts)}</searchSpec>"
+    )
+    return _envelope(method, _method(method, body))
 
 
 # --- Deserialiser core -----------------------------------------------------

@@ -129,7 +129,8 @@ from __future__ import annotations
 import hashlib
 import inspect
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
@@ -142,6 +143,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations._handler_resolve import import_handler
+from meho_backplane.operations.catalog_release import record_catalog_release
 from meho_backplane.operations.composite_invariant import (
     assert_registered_composites_have_no_ingested_dispatch,
 )
@@ -165,6 +167,7 @@ __all__ = [
     "clear_typed_op_registrars",
     "clear_typed_op_snapshot",
     "derive_handler_ref",
+    "operation_catalog_write",
     "register_composite_operation",
     "register_typed_op_registrar",
     "register_typed_operation",
@@ -350,7 +353,7 @@ async def _capture_typed_op_snapshot(session: AsyncSession, fingerprint: tuple[s
     )
 
 
-async def _replay_typed_op_snapshot(snapshot: _TypedOpSnapshot) -> None:
+async def _replay_typed_op_snapshot(session: AsyncSession, snapshot: _TypedOpSnapshot) -> None:
     """Bulk-insert the cached snapshot into the boot's DB. The amortized path.
 
     Two ``INSERT ... VALUES (...)`` statements (groups first so the
@@ -366,25 +369,22 @@ async def _replay_typed_op_snapshot(snapshot: _TypedOpSnapshot) -> None:
     natural-key-lookup short-circuit the un-amortized path already has.
     """
     _fingerprint, group_rows, descriptor_rows = snapshot
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        already_present = (
-            await session.execute(
-                select(EndpointDescriptor.id)
-                .where(
-                    EndpointDescriptor.tenant_id.is_(None),
-                    EndpointDescriptor.source_kind.in_(("typed", "composite")),
-                )
-                .limit(1)
+    already_present = (
+        await session.execute(
+            select(EndpointDescriptor.id)
+            .where(
+                EndpointDescriptor.tenant_id.is_(None),
+                EndpointDescriptor.source_kind.in_(("typed", "composite")),
             )
-        ).first()
-        if already_present is not None:
-            return
-        if group_rows:
-            await session.execute(insert(OperationGroup), group_rows)
-        if descriptor_rows:
-            await session.execute(insert(EndpointDescriptor), descriptor_rows)
-        await session.commit()
+            .limit(1)
+        )
+    ).first()
+    if already_present is not None:
+        return
+    if group_rows:
+        await session.execute(insert(OperationGroup), group_rows)
+    if descriptor_rows:
+        await session.execute(insert(EndpointDescriptor), descriptor_rows)
 
 
 async def run_typed_op_registrars(
@@ -461,34 +461,124 @@ async def run_typed_op_registrars(
     fails with ``handler_unreachable``. Rows the list does not name are
     kept even when their handler does not import here, so an older server
     sharing the database cannot delete ops a newer release owns.
+
+    All or nothing (#5019)
+    ----------------------
+
+    Every step above runs in **one** database transaction, and the
+    transaction commits only after the last step passed. The registrars
+    write through that transaction (see :func:`_bind_catalog_session`). In
+    the same transaction, :func:`~meho_backplane.operations.catalog_release.record_catalog_release`
+    stores this release as the writer of the rows. When any step fails
+    (one registrar, the retirement sweep or the invariant sweep), the
+    transaction rolls back: no operation row changes, and a pod of the
+    previous release that still serves keeps its own settings.
+
+    This function commits as soon as the last step passed. The lifespan
+    uses :func:`operation_catalog_write` instead, which holds the
+    transaction open until the rest of the start (the background loops)
+    succeeded too.
     """
-    await _run_typed_op_registrars(embedding_service=embedding_service)
-    await retire_dead_handler_rows()
-    await assert_registered_composites_have_no_ingested_dispatch()
+    async with operation_catalog_write(embedding_service=embedding_service):
+        pass
+
+
+@asynccontextmanager
+async def operation_catalog_write(
+    *,
+    embedding_service: EmbeddingService | None = None,
+) -> AsyncIterator[None]:
+    """Write the built-in operation rows; commit when the ``with`` block ends well.
+
+    On entry, every step of :func:`run_typed_op_registrars` runs in one
+    transaction: the registrars, the retirement sweep, the invariant
+    sweep and the release stamp. The transaction then stays open while
+    the ``with`` block runs, and commits only when the block ends without
+    an exception. The lifespan puts the start of its background loops in
+    the block, so a start that fails at any step, also after the rows
+    were written, changes no operation row and no release stamp (#5019).
+
+    When a step or the block fails, the session closes without a commit,
+    which rolls everything back, and the log says
+    ``operation_catalog_unchanged``.
+    """
+    try:
+        async with get_sessionmaker()() as session:
+            async with _bind_catalog_session(session):
+                await _populate_catalog(session, embedding_service=embedding_service)
+                await retire_dead_handler_rows(session=session)
+                await assert_registered_composites_have_no_ingested_dispatch(session=session)
+                await record_catalog_release(session)
+            yield
+            await session.commit()
+    except Exception as exc:
+        structlog.get_logger(__name__).error(
+            "operation_catalog_unchanged",
+            reason="start-up registration failed; no operation row was changed",
+            error_class=type(exc).__name__,
+        )
+        raise
+
+
+#: The session of the start-up registration transaction while
+#: :func:`_bind_catalog_session` is open. :func:`register_typed_operation`
+#: and :func:`register_composite_operation` write through it when the
+#: caller passes no session, so every registrar's rows land in one
+#: transaction without each registrar threading a session.
+_CATALOG_SESSION: ContextVar[AsyncSession | None] = ContextVar(
+    "meho_operation_catalog_session", default=None
+)
+
+
+@asynccontextmanager
+async def _bind_catalog_session(session: AsyncSession) -> AsyncIterator[None]:
+    """Bind ``session`` for the registration helpers while the block runs.
+
+    The binding ends with the block, before the caller commits, so a
+    task the caller starts afterwards does not inherit a session that is
+    about to close. Nothing here commits; the caller owns the session.
+    """
+    token = _CATALOG_SESSION.set(session)
+    try:
+        yield
+    finally:
+        _CATALOG_SESSION.reset(token)
 
 
 async def _run_typed_op_registrars(
     *,
     embedding_service: EmbeddingService | None = None,
 ) -> None:
+    """Write the registrars' rows in one transaction, without the sweeps. Test seam."""
+    async with get_sessionmaker()() as session:
+        async with _bind_catalog_session(session):
+            await _populate_catalog(session, embedding_service=embedding_service)
+        await session.commit()
+
+
+async def _populate_catalog(
+    session: AsyncSession,
+    *,
+    embedding_service: EmbeddingService | None = None,
+) -> None:
     """Populate descriptor rows via a real registrar pass or the amortized replay.
 
-    Split from :func:`run_typed_op_registrars` so the two-world invariant
-    sweep runs on every path regardless of which branch produced the rows.
+    Runs inside :func:`_bind_catalog_session`; nothing here commits. Split
+    from :func:`run_typed_op_registrars` so the sweeps run on every path
+    regardless of which branch produced the rows.
     """
     if get_settings().test_amortize_typed_op_registrars:
         fingerprint = _registrar_fingerprint()
         snapshot = _TYPED_OP_SNAPSHOT
         if snapshot is not None and snapshot[0] == fingerprint:
-            await _replay_typed_op_snapshot(snapshot)
+            await _replay_typed_op_snapshot(session, snapshot)
             return
         # First call this process (or the registrar set changed since
         # capture): run for real, then capture the built-in rows so later
         # boots with the same registrar set replay the snapshot.
         await _run_registrars(embedding_service=embedding_service)
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            await _capture_typed_op_snapshot(session, fingerprint)
+        await session.flush()
+        await _capture_typed_op_snapshot(session, fingerprint)
         return
 
     await _run_registrars(embedding_service=embedding_service)
@@ -1151,8 +1241,10 @@ async def register_typed_operation(
     session
         Optional caller-owned :class:`AsyncSession`. When provided
         the helper does **not** commit -- the caller controls
-        transaction boundaries. When ``None`` the helper opens its
-        own session, commits, and closes.
+        transaction boundaries. When ``None`` and the start-up
+        registration transaction is open (:func:`run_typed_op_registrars`),
+        the helper writes through that transaction and does not commit
+        (#5019). Otherwise it opens its own session, commits, and closes.
     embedding_service
         Optional caller-supplied :class:`EmbeddingService`. Test
         seam; production callers leave ``None`` so the helper
@@ -1221,6 +1313,8 @@ async def register_typed_operation(
 
     tags_list = list(tags) if tags is not None else []
 
+    if session is None:
+        session = _CATALOG_SESSION.get()
     if session is not None:
         await _register_in_session(
             session,
@@ -1421,6 +1515,8 @@ async def register_composite_operation(
 
     tags_list = list(tags) if tags is not None else []
 
+    if session is None:
+        session = _CATALOG_SESSION.get()
     if session is not None:
         await _register_in_session(
             session,

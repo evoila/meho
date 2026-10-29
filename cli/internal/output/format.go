@@ -364,7 +364,31 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 	if resp.SandboxMode != nil && *resp.SandboxMode == "on" {
 		fmt.Fprintln(stdoutW, "  Sandbox mode: on (a standing grant made in the web console may cover deletes by service principals)")
 	}
+
+	// Operation settings (#5019): one line when another release wrote the
+	// shared operation rows, nothing otherwise. Older backplanes send no
+	// field.
+	if line := formatOperationCatalog(resp.OperationCatalog); line != "" {
+		fmt.Fprintln(stdoutW, line)
+	}
 	return nil
+}
+
+// formatOperationCatalog returns the warning line for operation rows
+// written by another release, or "" when this release wrote them, no
+// release is recorded yet, or the backplane sends no field.
+func formatOperationCatalog(c *api.OperationCatalogStatus) string {
+	if c == nil || c.State != "other_release" {
+		return ""
+	}
+	writer := "unknown"
+	if c.WrittenByRelease != nil && *c.WrittenByRelease != "" {
+		writer = *c.WrittenByRelease
+	}
+	return fmt.Sprintf(
+		"  Operation settings: written by release %s, this server runs %s (see docs/acceptance/rollback.md)",
+		writer, c.ThisRelease,
+	)
 }
 
 // FormatConnectorPackages renders the connector packages an image

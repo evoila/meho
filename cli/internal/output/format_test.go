@@ -80,6 +80,45 @@ func TestRenderHumanHealth_SandboxMode(t *testing.T) {
 	}
 }
 
+// TestRenderHumanHealth_OperationCatalog: one extra line when another
+// release wrote the operation rows (#5019); nothing new when this
+// release wrote them, none is recorded, or the field is missing.
+func TestRenderHumanHealth_OperationCatalog(t *testing.T) {
+	base := func(c *api.OperationCatalogStatus) *api.HealthResponse {
+		return &api.HealthResponse{
+			Operator:         api.OperatorIdentity{Sub: "alice-sub-id"},
+			Vault:            api.VaultStatus{Reachable: true, ReadOk: true},
+			Db:               api.DbStatus{Migrated: ptrBool(true)},
+			OperationCatalog: c,
+		}
+	}
+	render := func(resp *api.HealthResponse) string {
+		var buf bytes.Buffer
+		if err := PrintHealth(&buf, resp); err != nil {
+			t.Fatalf("PrintHealth: %v", err)
+		}
+		return buf.String()
+	}
+	other := render(base(&api.OperationCatalogStatus{
+		State:            "other_release",
+		ThisRelease:      "aaa111",
+		WrittenByRelease: ptrStr("bbb222"),
+	}))
+	if !strings.Contains(other, "Operation settings: written by release bbb222, this server runs aaa111") {
+		t.Errorf("expected the operation settings line, got:\n%s", other)
+	}
+	missing := render(base(nil))
+	for _, state := range []string{"same_release", "not_recorded"} {
+		got := render(base(&api.OperationCatalogStatus{State: state, ThisRelease: "aaa111"}))
+		if got != missing {
+			t.Errorf("state %s must print like no field:\n%s\n---\n%s", state, got, missing)
+		}
+	}
+	if strings.Count(other, "\n") != strings.Count(missing, "\n")+1 {
+		t.Errorf("another release adds exactly one line:\n%s\n---\n%s", other, missing)
+	}
+}
+
 // TestRenderHumanHealth_ConnectorPackages: `meho status` lists the
 // connector packages the image carries (#5036), prints "none" for the
 // plain public image, and prints nothing when an older backplane sends

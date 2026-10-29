@@ -499,10 +499,10 @@ func TestBootstrap_FreshRealmCreatesEverything(t *testing.T) {
 		t.Errorf("MCPClientID = %q, want meho-mcp", res.MCPClientID)
 	}
 
-	// Each client has 6 mappers.
+	// Each client has 8 mappers.
 	for uuid, mappers := range fake.mappers {
-		if len(mappers) != 6 {
-			t.Errorf("client %s has %d mappers, want 6",
+		if len(mappers) != 8 {
+			t.Errorf("client %s has %d mappers, want 8",
 				uuid, len(mappers))
 		}
 		names := make(map[string]bool)
@@ -515,6 +515,8 @@ func TestBootstrap_FreshRealmCreatesEverything(t *testing.T) {
 			"tenant-id",
 			"tenant-role",
 			"approver",
+			"platform-admin",
+			"meho-tenants",
 			"groups-claim",
 		} {
 			if !names[want] {
@@ -531,9 +533,10 @@ func TestBootstrap_FreshRealmCreatesEverything(t *testing.T) {
 		}
 	}
 
-	// Five role groups, one user, and the user is in MEHO-Admins only.
-	if len(fake.groups) != 5 {
-		t.Errorf("expected 5 groups, got %d", len(fake.groups))
+	// Five role groups plus the platform group, one user, and the user
+	// is in MEHO-Admins and MEHO-Platform-Admins.
+	if len(fake.groups) != 6 {
+		t.Errorf("expected 6 groups, got %d", len(fake.groups))
 	}
 	if len(fake.users) != 1 {
 		t.Errorf("expected 1 user, got %d", len(fake.users))
@@ -545,8 +548,8 @@ func TestBootstrap_FreshRealmCreatesEverything(t *testing.T) {
 	if got := fake.passwords[userID]; got != "deploypw" {
 		t.Errorf("user password = %q, want deploypw", got)
 	}
-	if got := fake.userGroupNames(userID); !slices.Equal(got, []string{"MEHO-Admins"}) {
-		t.Errorf("user groups = %v, want [MEHO-Admins]", got)
+	if got := fake.userGroupNames(userID); !slices.Equal(got, []string{"MEHO-Admins", "MEHO-Platform-Admins"}) {
+		t.Errorf("user groups = %v, want [MEHO-Admins MEHO-Platform-Admins]", got)
 	}
 	if res.AdminGroupUUID != fake.groupByName("MEHO-Admins").ID {
 		t.Errorf("AdminGroupUUID = %q, want the MEHO-Admins UUID", res.AdminGroupUUID)
@@ -685,9 +688,9 @@ func TestBootstrap_SkipUserProvisioningKeepsGroupsOmitsUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Bootstrap with skip-user: %v", err)
 	}
-	if len(fake.groups) != 5 {
-		t.Errorf("expected the 5 role groups when the user step is "+
-			"skipped, got %d", len(fake.groups))
+	if len(fake.groups) != 6 {
+		t.Errorf("expected the 5 role groups and the platform group "+
+			"when the user step is skipped, got %d", len(fake.groups))
 	}
 	if len(fake.users) != 0 {
 		t.Errorf("expected 0 users when skipped, got %d",
@@ -812,6 +815,7 @@ func TestBootstrap_MapperShapeMatchesReferenceScript(t *testing.T) {
 		{"tenant-id", "tenant_id", "String"},
 		{"tenant-role", "tenant_role", "String"},
 		{"approver", "approver", "boolean"},
+		{"platform-admin", "platform_admin", "boolean"},
 	} {
 		m := byName[tc.mapper]
 		if m.ProtocolMapper != "oidc-usermodel-attribute-mapper" {
@@ -834,6 +838,27 @@ func TestBootstrap_MapperShapeMatchesReferenceScript(t *testing.T) {
 		}
 		if _, ok := m.Config["claim.value"]; ok {
 			t.Errorf("%s carries a fixed claim.value", tc.mapper)
+		}
+	}
+
+	// meho-tenants — collects meho_tenant from every group of the person
+	// into the meho_tenants list.
+	mt := byName["meho-tenants"]
+	if mt.ProtocolMapper != "oidc-usermodel-attribute-mapper" {
+		t.Errorf("meho-tenants mapper type = %q", mt.ProtocolMapper)
+	}
+	for k, v := range map[string]string{
+		"user.attribute":       "meho_tenant",
+		"claim.name":           "meho_tenants",
+		"jsonType.label":       "String",
+		"multivalued":          "true",
+		"aggregate.attrs":      "true",
+		"access.token.claim":   "true",
+		"userinfo.token.claim": "true",
+		"id.token.claim":       "false",
+	} {
+		if mt.Config[k] != v {
+			t.Errorf("meho-tenants config %s = %q, want %q", k, mt.Config[k], v)
 		}
 	}
 
@@ -1305,14 +1330,25 @@ func TestBootstrap_CreatesFiveRoleGroupsWithAttributes(t *testing.T) {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 	tenant := []string{opts.TenantID}
+	mt := func(role string) []string { return []string{opts.TenantID + ":main:" + role} }
 	want := map[string]map[string][]string{
-		"MEHO-Readers":      {"tenant_id": tenant, "tenant_role": {"read_only"}},
-		"MEHO-Operators":    {"tenant_id": tenant, "tenant_role": {"operator"}},
-		"MEHO-SA-Operators": {"tenant_id": tenant, "tenant_role": {"operator"}},
-		"MEHO-Admins":       {"tenant_id": tenant, "tenant_role": {"tenant_admin"}},
+		"MEHO-Readers": {
+			"tenant_id": tenant, "tenant_role": {"read_only"}, "meho_tenant": mt("Readers"),
+		},
+		"MEHO-Operators": {
+			"tenant_id": tenant, "tenant_role": {"operator"}, "meho_tenant": mt("Operators"),
+		},
+		"MEHO-SA-Operators": {
+			"tenant_id": tenant, "tenant_role": {"operator"}, "meho_tenant": mt("SA-Operators"),
+		},
+		"MEHO-Admins": {
+			"tenant_id": tenant, "tenant_role": {"tenant_admin"}, "meho_tenant": mt("Admins"),
+		},
 		"MEHO-Approvers": {
 			"tenant_id": tenant, "tenant_role": {"read_only"}, "approver": {"true"},
+			"meho_tenant": mt("Approvers"),
 		},
+		"MEHO-Platform-Admins": {"platform_admin": {"true"}},
 	}
 	for name, attrs := range want {
 		g := fake.groupByName(name)
@@ -1376,8 +1412,8 @@ func TestBootstrap_UpgradeReplacesFixedValueMappers(t *testing.T) {
 
 	for _, clientID := range []string{"meho-cli", "meho-mcp"} {
 		byName := fake.clientMappers(t, clientID)
-		if len(byName) != 6 {
-			t.Errorf("%s has %d mappers, want 6", clientID, len(byName))
+		if len(byName) != 8 {
+			t.Errorf("%s has %d mappers, want 8", clientID, len(byName))
 		}
 		for name, m := range byName {
 			if m.ProtocolMapper == "oidc-hardcoded-claim-mapper" {
@@ -1404,8 +1440,8 @@ func TestBootstrap_UpgradeReplacesFixedValueMappers(t *testing.T) {
 	if fake.groupByName("meho-admins") == nil {
 		t.Errorf("old meho-admins group was removed; old groups must stay")
 	}
-	if got := fake.userGroupNames("uuid-old-user"); !slices.Equal(got, []string{"MEHO-Admins", "meho-admins"}) {
-		t.Errorf("admin user groups = %v, want [MEHO-Admins meho-admins]", got)
+	if got := fake.userGroupNames("uuid-old-user"); !slices.Equal(got, []string{"MEHO-Admins", "MEHO-Platform-Admins", "meho-admins"}) {
+		t.Errorf("admin user groups = %v, want [MEHO-Admins MEHO-Platform-Admins meho-admins]", got)
 	}
 	if res.AdminUserCreated || !res.AdminUserJoined {
 		t.Errorf("want an existing user that joined MEHO-Admins, got %+v", res)
@@ -1469,8 +1505,8 @@ func TestBootstrap_FixesChangedGroupAttributes(t *testing.T) {
 	if n := fake.calls["PUT /groups/{uuid}"]; n != 2 {
 		t.Errorf("PUT /groups/{uuid} called %d times, want 2", n)
 	}
-	if n := fake.calls["POST /groups"]; n != 3 {
-		t.Errorf("POST /groups called %d times, want 3 (the missing groups)", n)
+	if n := fake.calls["POST /groups"]; n != 4 {
+		t.Errorf("POST /groups called %d times, want 4 (the missing groups)", n)
 	}
 	for _, name := range []string{"MEHO-Operators", "MEHO-Readers"} {
 		found := false
@@ -1494,7 +1530,7 @@ func TestBootstrap_DryRunListsRoleGroups(t *testing.T) {
 		t.Fatalf("Bootstrap dry-run: %v", err)
 	}
 	want := "MEHO-Approvers: tenant_id=" + opts.TenantID +
-		" tenant_role=read_only approver=true"
+		" tenant_role=read_only approver=true meho_tenant=" + opts.TenantID + ":main:Approvers"
 	if !strings.Contains(stdout, want) {
 		t.Errorf("dry-run stdout missing %q; got:\n%s", want, stdout)
 	}

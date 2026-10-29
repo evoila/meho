@@ -41,7 +41,7 @@ parity holds via the equivalent native partial index.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -205,10 +205,11 @@ def _insert_event(
 
 def test_upgrade_adds_columns_nullable_and_partial_unique_index(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``upgrade 0073`` adds nullable ``dedupe_key`` / ``origin`` + the dedupe index."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     columns = _table_columns(sync_url, "event_outbox")
     assert columns >= _NEW_COLUMNS, f"missing new columns: {_NEW_COLUMNS - columns}"
@@ -230,10 +231,11 @@ def test_upgrade_adds_columns_nullable_and_partial_unique_index(
 
 def test_dedupe_key_unique_per_tenant_rejects_duplicate(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A duplicate ``(tenant_id, dedupe_key)`` raises :class:`IntegrityError`."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     tenant_id = _seed_tenant(sync_url)
 
     _insert_event(sync_url, tenant_id, dedupe_key="dup-1", origin="src-A")
@@ -243,10 +245,11 @@ def test_dedupe_key_unique_per_tenant_rejects_duplicate(
 
 def test_null_dedupe_key_unconstrained_and_uniqueness_is_per_tenant(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """NULL ``dedupe_key`` rows are unconstrained; the key is unique *per tenant*."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     tenant_a = _seed_tenant(sync_url)
     tenant_b = _seed_tenant(sync_url)
 
@@ -266,10 +269,11 @@ def test_null_dedupe_key_unconstrained_and_uniqueness_is_per_tenant(
 
 def test_downgrade_drops_columns_and_index_keeping_originals(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``downgrade 0072`` removes the columns + dedupe index; 0027 indexes survive."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     command.downgrade(cfg, _DOWN_REVISION)
 
     columns = _table_columns(sync_url, "event_outbox")
@@ -282,10 +286,11 @@ def test_downgrade_drops_columns_and_index_keeping_originals(
 
 def test_downgrade_then_upgrade_round_trips(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``upgrade 0073`` → ``downgrade 0072`` → ``upgrade 0073`` restores the shape."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     tenant_id = _seed_tenant(sync_url)
     _insert_event(sync_url, tenant_id, dedupe_key="round-trip", origin="src")
 
@@ -305,10 +310,11 @@ def test_downgrade_then_upgrade_round_trips(
 
 def test_pre_upgrade_lacks_dedupe_columns(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """At revision 0072 the columns + dedupe index do not yet exist."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
 
     columns = _table_columns(sync_url, "event_outbox")
     assert not (_NEW_COLUMNS & columns), "0072 must predate the dedupe columns"

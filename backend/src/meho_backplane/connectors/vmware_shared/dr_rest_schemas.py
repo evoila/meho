@@ -4,8 +4,8 @@
 """Response schemas shared by the SRM and vSphere Replication typed reads.
 
 Both APIs return the same server summary and both ``api_file.get`` reads
-return the same answer (:mod:`meho_backplane.connectors._shared.dr_rest`,
-:mod:`meho_backplane.connectors._shared.dr_api_file`). The builders take
+return the same answer (:mod:`meho_backplane.connectors.vmware_shared.dr_rest`,
+:mod:`meho_backplane.connectors.vmware_shared.dr_api_file`). The builders take
 the product name, so each connector's text names its own product.
 """
 

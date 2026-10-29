@@ -40,7 +40,6 @@ from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors import OperationResult
-from meho_backplane.connectors._shared.license_key import mask_license_key
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError, SessionLoginError
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.connectors.vmware_rest import (
@@ -74,6 +73,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops_license import (
     license_list_impl,
 )
 from meho_backplane.connectors.vmware_rest.vim_body import unwrap_vim_value
+from meho_backplane.connectors.vmware_shared.license_key import mask_license_key
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, AuditLog, EndpointDescriptor, OperationGroup
 from meho_backplane.db.models import Target as TargetORM
@@ -971,9 +971,15 @@ async def test_flight_recorder_spans_hold_no_licence_key() -> None:
 
 
 async def test_without_the_licence_tag_the_flight_recorder_would_keep_the_key() -> None:
-    """Control: the tag is what keeps the key out, so the test above is not empty."""
+    """Control: the tag is what keeps the body out, so the test above is not empty.
+
+    Without the tag the body is recorded. The key is still masked, because
+    it sits under a secret-named field (#5031).
+    """
     spans = await _list_with_capture(("read-only", "vmware"))
-    assert _KEY_ENT in repr(spans)
+    assert all(span.attributes["body_recorded"] for span in spans)
+    assert "[REDACTED:param_name]" in repr(spans)
+    assert _KEY_ENT not in repr(spans)
 
 
 # ---------------------------------------------------------------------------

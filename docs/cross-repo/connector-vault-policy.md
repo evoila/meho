@@ -532,6 +532,9 @@ caveat). The contract a deploy must satisfy is therefore:
 | Write (`vault.kv.metadata.delete` permanent removal) | same | `read` + `delete` on `secret/metadata/…/{{identity…}}/*` (§6.1) |
 | Write (`vault.token.role.write` create or change a token role) | same | `create` + `update` on `auth/token/roles/<role>` (§6.4) |
 | Read (`vault.token.role.read` / `vault.token.role.list`) | same | `read` on `auth/token/roles/<role>`; `list` on `auth/token/roles` (§6.4) |
+| Write (`vault.auth.jwt.role.write` create or change a JWT/OIDC login role) | same | `create` + `read` + `update` on `auth/<mount>/role/<role>` (§6.5) |
+| Read (`vault.auth.jwt.role.read` / `.role.list` / `.config.read`) | same | `read` on `auth/<mount>/role/<role>` and `auth/<mount>/config`; `list` on `auth/<mount>/role` (§6.5) |
+| Write (`vault.sys.policy.delete` delete one Vault policy) | same; use a target whose `vault_role` has this rule, not `meho-mcp` | `delete` on `sys/policy/<name>` ([vault-remove-tenant.md](vault-remove-tenant.md) step 4) |
 
 A deploy that follows only the §2 read grant provisions **read-only** and
 discovers the missing write grant *after* an operator approves a parked
@@ -609,6 +612,124 @@ Notes:
   role is a separate operation with its own grant on `auth/token/create`
   (and `auth/token/create/<role>`); this section only covers the role
   settings.
+
+### 6.5 JWT/OIDC login roles (`vault.auth.jwt.*`)
+
+A login role on the JWT/OIDC login method decides who can log in to Vault
+with a token from an identity provider, which policies they get, and how
+long the Vault token lives (`token_ttl`). MEHO itself logs in this way, so
+a change to its own role (for example `auth/jwt/role/meho-mcp`) changes
+how every MEHO request reaches Vault. The four operations run under the
+same identity chain as §6.3. Put the grants into the policy of the role
+that will manage login roles, not into the shared read policy:
+
+```hcl
+# List the login role names on one mount (`vault.auth.jwt.role.list`).
+# Replace <mount> with the mount path, for example `jwt` or `oidc`.
+path "auth/<mount>/role" {
+  capabilities = ["list"]
+}
+
+# Create or change a login role (`vault.auth.jwt.role.write`) and read it
+# (`vault.auth.jwt.role.read`). End the path with `*` to cover every role
+# on the mount.
+path "auth/<mount>/role/<role>" {
+  capabilities = ["create", "update", "read"]
+}
+
+# Read the mount config (`vault.auth.jwt.config.read`). MEHO never returns
+# oidc_client_secret or provider_config from it.
+path "auth/<mount>/config" {
+  capabilities = ["read"]
+}
+```
+
+Notes:
+
+- **`create`, `read` and `update` are all required** for
+  `vault.auth.jwt.role.write`. `create` and `update` for the same reason as
+  §6.4; `read` because the write reads the current role first (see the
+  next note). Before MEHO asks for approval it checks all three with the
+  §6.2 probe on `auth/<mount>/role/<role>`; when one is missing the call is
+  refused with `error_code: "write_capability_denied"` and no approval
+  request is written.
+- **Fields not given keep their value.** Vault sets a missing `role_type`
+  back to `oidc` and a missing `bound_claims_type` back to `string`, so
+  MEHO reads the role and sends those two again. Every other field, for
+  example `bound_audiences`, `user_claim` and the policies, stays as it
+  is.
+- **Existing tokens keep their old lifetime.** Only new logins get the new
+  settings. A check made with a token from before the change still shows
+  the old lease.
+
+### 6.6 Staging a Kubernetes Secret (`k8s.secret.read_to_ref`)
+
+`k8s.secret.read_to_ref` reads one value from a Kubernetes Secret and
+writes it to Vault. It is the way to register a guest cluster from its
+kubeconfig without the kubeconfig reaching the agent. The write goes
+through the same handler as `vault.kv.put`, so it needs the same
+`create` + `update` grant. What is different is **where** it writes.
+
+**The path is fixed.** The op always writes to
+
+```text
+secret/data/tenants/<tenant_id>/<register_as>
+```
+
+`<tenant_id>` is the caller's tenant. `<register_as>` is the target name
+the caller passes. You cannot choose another path, for two reasons:
+
+- `meho targets create --name <register_as>` without a `secret_ref`
+  reads this same path. That is how the staged kubeconfig reaches the new
+  target.
+- The tenant-scope guard (on by default) refuses a Vault write outside
+  `secret/tenants/<tenant_id>/`. A path such as `secret/meho/...` would be
+  refused by MEHO before it reaches Vault.
+
+**Which role writes.** The op writes with no Vault target. So step 1 of
+the §6.3 chain (a target's `vault_role`) never applies. The write uses
+the per-tenant role from `VAULT_OIDC_ROLE_BY_TENANT`, or else the global
+`VAULT_OIDC_ROLE` (usually `meho-mcp`). Running the op on another vault
+target does not change the role.
+
+**The grant it needs.** The policies of that role, or the identity-group
+policies of the caller, must give `create` + `update` on the tenant
+subtree:
+
+```hcl
+path "secret/data/tenants/{{identity.entity.metadata.tenant_id}}/*" {
+  capabilities = ["create", "read", "update"]
+}
+```
+
+The per-tenant policies in
+[`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md)
+already handle this:
+
+- `meho-tenant-admin` grants it. A `tenant_admin` can run the op.
+- `meho-tenant-operator` does **not** grant it. That policy can write
+  only under `tenants/<tenant_id>/rotation/*`. An `operator` gets
+  `write_capability_denied` at park time.
+- `meho-tenant-read-only` does not grant it.
+
+Do not add this grant to the shared `meho-mcp` policy for everyone. Give
+it through the per-tenant policy of the people who register clusters.
+
+**The tenant metadata must be set.** The templated path above only works
+when the caller's Vault entity carries the `tenant_id` metadata
+([`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md)
+§3). Without it, the grant does not apply and Vault denies the write.
+
+**Both people need the grant.** The op needs approval. MEHO checks the
+grant for the person who calls the op, at park time. After approval, the
+write runs with the token of the person who approves (see the §6.2 note
+on the reviewer token). So the approver needs the same grant. Check both
+with §6.2, using the path above:
+
+```bash
+vault token capabilities "secret/data/tenants/<tenant-uuid>/<register_as>"
+# Expect: create read update
+```
 
 ## Scope note — `shared_service_account` only; `per_user`/`impersonation` deferred
 

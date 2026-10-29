@@ -51,6 +51,7 @@ _SAFE_OPERATIONS_THAT_CHANGE_THINGS: Final[frozenset[str]] = frozenset(
         "vmware.composite.datastore.refresh",
         "rke2.etcd-snapshot.save",
         "vcfa.tenant.cloud_account.enumerate_images",
+        "hcx.service_mesh.diagnose",
     }
 )
 

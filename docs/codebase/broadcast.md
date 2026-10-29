@@ -233,7 +233,8 @@ CSP does not allow.
     `classify_op` has nothing better than `other`. The few `safe`
     operations that make the target do work
     (`vmware.composite.datastore.refresh`, `rke2.etcd-snapshot.save`,
-    `vcfa.tenant.cloud_account.enumerate_images`) are pinned `write` in
+    `vcfa.tenant.cloud_account.enumerate_images`,
+    `hcx.service_mesh.diagnose`) are pinned `write` in
     `_WRITE_OPS`.
   - The credential and audit-query classes always win, as above.
   - Ingested operations keep the class from the HTTP method in their op

@@ -564,12 +564,14 @@ _WRITE_OPS: Final[frozenset[str]] = frozenset(
         "topology.delete_node",
         # Hand-written ``safe`` operations that are not plain reads: each
         # makes the target do work (rescan a datastore, save an etcd
-        # snapshot, reload a template list). Without a pin they would get
-        # ``read`` from :func:`resolve_operation_op_class`, like every other
-        # ``safe`` hand-written operation.
+        # snapshot, reload a template list, start an HCX diagnostics run).
+        # Without a pin they would get ``read`` from
+        # :func:`resolve_operation_op_class`, like every other ``safe``
+        # hand-written operation.
         "vmware.composite.datastore.refresh",
         "rke2.etcd-snapshot.save",
         "vcfa.tenant.cloud_account.enumerate_images",
+        "hcx.service_mesh.diagnose",
     }
 )
 

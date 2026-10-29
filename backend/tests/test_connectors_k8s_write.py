@@ -1259,3 +1259,73 @@ def _awaitable(value: Any) -> Any:
             return _coro().__await__()
 
     return _Awaitable()
+
+
+# ---------------------------------------------------------------------------
+# k8s.secret.create — labels and annotations (#3680)
+# ---------------------------------------------------------------------------
+
+
+def test_secret_create_schema_accepts_labels_and_annotations_only() -> None:
+    """labels / annotations are string maps; other unknown keys stay rejected."""
+    from jsonschema import Draft202012Validator
+
+    op = next(o for o in WRITE_DANGEROUS_OPS if o.op_id == "k8s.secret.create")
+    validator = Draft202012Validator(op.parameter_schema)
+    base = {"name": "repo-creds", "namespace": "argocd", "string_data": {"url": "x"}}
+
+    assert not list(
+        validator.iter_errors(
+            {
+                **base,
+                "labels": {"argocd.argoproj.io/secret-type": "repository"},
+                "annotations": {"owner": "platform"},
+            }
+        )
+    )
+    assert list(validator.iter_errors({**base, "labels": {"a": 1}}))
+    assert list(validator.iter_errors({**base, "annotations": {"a": None}}))
+    assert list(validator.iter_errors({**base, "finalizers": ["x"]}))
+
+
+@pytest.mark.asyncio
+async def test_secret_create_sets_labels_and_annotations_with_ref_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One call creates a label-selected Secret whose value comes from a ref."""
+    install_fake_client(monkeypatch, secret={"sshPrivateKey": _SECRET_REF_SENTINEL})
+    conn = _make_connector()
+    params = {
+        "name": "repo-creds",
+        "namespace": "argocd",
+        "labels": {"argocd.argoproj.io/secret-type": "repository"},
+        "annotations": {"managed-by": "meho"},
+        "string_data": {"url": "ssh://git.example.invalid/charts.git"},
+        "string_data_secret_ref": {"sshPrivateKey": "argocd/repo"},
+    }
+    with _patch_kubeconfig(), _core_v1_patch() as core_cls:
+        core_cls.return_value.create_namespaced_secret = AsyncMock()
+        result = await conn.k8s_secret_create(
+            operator=_make_operator(), target=_TARGET, params=params
+        )
+    body = core_cls.return_value.create_namespaced_secret.call_args.kwargs["body"]
+    assert body.metadata.labels == {"argocd.argoproj.io/secret-type": "repository"}
+    assert body.metadata.annotations == {"managed-by": "meho"}
+    assert body.string_data["sshPrivateKey"] == _SECRET_REF_SENTINEL
+    assert result["data_keys"] == ["sshPrivateKey", "url"]
+    assert _SECRET_REF_SENTINEL not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_secret_create_without_labels_leaves_metadata_maps_unset() -> None:
+    conn = _make_connector()
+    with _patch_kubeconfig(), _core_v1_patch() as core_cls:
+        core_cls.return_value.create_namespaced_secret = AsyncMock()
+        await conn.k8s_secret_create(
+            operator=_make_operator(),
+            target=_TARGET,
+            params={"name": "s", "namespace": "argocd", "string_data": {"k": "v"}},
+        )
+    body = core_cls.return_value.create_namespaced_secret.call_args.kwargs["body"]
+    assert body.metadata.labels is None
+    assert body.metadata.annotations is None

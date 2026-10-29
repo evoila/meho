@@ -14,8 +14,9 @@ and the network list) and, for the distributed port groups, one vim read of
   ``type`` parameter offers;
 * against the pinned VI/JSON files (9.0 and, when on the shelf, 8.0 U1 to
   U3): ``RetrievePropertiesEx`` and the portgroup ``config`` property are
-  served; in the 9.0 file the config has ``distributedVirtualSwitch`` and
-  ``defaultPortConfig``, and the port setting has ``vlan``.
+  served; in the 9.0 file the config has ``distributedVirtualSwitch``,
+  ``defaultPortConfig`` and ``backingType``, the backing type enum is
+  ``standard`` / ``nsx``, and the port setting has ``vlan``.
 
 The shelf-backed tests skip when the spec shelf is not there; the pin test
 always runs. Follows ``docs/decisions/spec-reconcile-guards-standard.md``.
@@ -28,7 +29,12 @@ from typing import Any
 import pytest
 import yaml
 
+from meho_backplane.connectors.vmware_rest.composites._read import (
+    _DVPG_DEFAULT_BACKING_TYPE,
+    _PROP_DVPG_BACKING_TYPE,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_network_list import (
+    _NSX_BACKING,
     DATACENTER_LIST_PATH,
     NETWORK_FILTER_PARAMS,
     NETWORK_LIST_PATH,
@@ -53,6 +59,8 @@ _VIM_PATHS = (
 
 def test_network_list_paths_are_pinned() -> None:
     """Pin the REST calls and filters of the operation (sandbox-safe, always runs)."""
+    assert _PROP_DVPG_BACKING_TYPE == "config.backingType"
+    assert (_DVPG_DEFAULT_BACKING_TYPE, _NSX_BACKING) == ("standard", "nsx")
     assert (DATACENTER_LIST_PATH, NETWORK_LIST_PATH) == ("/vcenter/datacenter", "/vcenter/network")
     assert set(NETWORK_FILTER_PARAMS.values()) == {"types", "folders"}
     assert NETWORK_TYPES == ("STANDARD_PORTGROUP", "DISTRIBUTED_PORTGROUP", "OPAQUE_NETWORK")
@@ -138,6 +146,25 @@ def _served(lines: list[str]) -> set[str]:
     return found
 
 
+def _enum_values(lines: list[str], schema: str) -> set[str]:
+    """The values of one enum component schema (the ``- 'x'`` lines under ``enum:``)."""
+    values: set[str] = set()
+    inside = in_enum = False
+    for line in lines:
+        if line == f"    {schema}:":
+            inside = True
+            continue
+        if not inside:
+            continue
+        if line.startswith("    ") and not line.startswith("     "):
+            break
+        if line.startswith("      ") and not line.startswith("       "):
+            in_enum = line.strip() == "enum:"
+        elif in_enum and line.startswith("        - "):
+            values.add(line.removeprefix("        - ").strip().strip("'\""))
+    return values
+
+
 def _schema_properties(lines: list[str], schema: str) -> set[str]:
     """The property names of one component schema (4-space key, 8-space properties)."""
     names: set[str] = set()
@@ -166,7 +193,11 @@ def test_vim_read_is_served_by_the_pinned_vi_json(shelf_dir: str, file_name: str
 
 def test_portgroup_config_has_the_switch_and_vlan_fields() -> None:
     lines = _vi_json_lines("vcenter-9.0", "vi-json.yaml")
-    assert {"distributedVirtualSwitch", "defaultPortConfig"} <= _schema_properties(
+    assert {"distributedVirtualSwitch", "defaultPortConfig", "backingType"} <= _schema_properties(
         lines, "DVPortgroupConfigInfo"
     )
+    assert _enum_values(lines, "DistributedVirtualPortgroupBackingType_enum") == {
+        _DVPG_DEFAULT_BACKING_TYPE,
+        _NSX_BACKING,
+    }
     assert "vlan" in _schema_properties(lines, "VMwareDVSPortSetting")

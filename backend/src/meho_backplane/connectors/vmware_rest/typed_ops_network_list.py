@@ -4,7 +4,8 @@
 """``vmware.network.list`` typed op -- every network of one vCenter.
 
 Lists the networks a VM can use: standard port groups, distributed port
-groups and networks managed outside vSphere (NSX segments). It reads the
+groups (an NSX segment on a distributed switch is one of them) and opaque
+networks (managed outside vSphere, the older host-level NSX switch). It reads the
 vSphere Automation REST API on the connector's own session, so it works on
 a fresh install with no catalog ingest:
 
@@ -13,13 +14,16 @@ a fresh install with no catalog ingest:
    with the optional ``types`` and ``folders`` filters. So every row knows
    its datacenter. The optional ``name`` pattern is applied here, in MEHO.
    A failed list fails the operation.
-3. For the distributed port groups only, the parent switch and the default
-   VLAN come from the vim properties ``config.distributedVirtualSwitch`` and
-   ``config.defaultPortConfig`` of ``DistributedVirtualPortgroup``. This is
-   the same reader as ``vmware.composite.network.portgroup.audit``
-   (:func:`~meho_backplane.connectors.vmware_rest.composites._read.read_portgroup_switch_and_vlan`).
-   A failed vim read leaves the switch and VLAN ``null``; ``read_note`` says
-   why.
+3. For the distributed port groups only, the parent switch, the default
+   VLAN and the backing type come from the vim properties
+   ``config.distributedVirtualSwitch``, ``config.defaultPortConfig`` and
+   ``config.backingType`` of ``DistributedVirtualPortgroup``
+   (:func:`~meho_backplane.connectors.vmware_rest.composites._read.read_portgroup_switch_vlan_and_backing`,
+   the switch and VLAN code of ``vmware.composite.network.portgroup.audit``).
+   Since vSphere 7.0 an NSX segment is a distributed port group with backing
+   type ``nsx``, so the REST list types it ``DISTRIBUTED_PORTGROUP``; the row
+   field ``nsx_segment`` shows it. A failed vim read leaves the switch, VLAN
+   and ``nsx_segment`` ``null``; ``read_note`` says why.
 
 The rows are flat, so a long list rides a result handle like any other list.
 """
@@ -57,6 +61,8 @@ NETWORK_LIST_PATH = "/vcenter/network"
 #: The values of the vendor enum ``Network.Type``.
 NETWORK_TYPES: tuple[str, ...] = ("STANDARD_PORTGROUP", "DISTRIBUTED_PORTGROUP", "OPAQUE_NETWORK")
 _DISTRIBUTED_PORTGROUP = "DISTRIBUTED_PORTGROUP"
+#: ``config.backingType`` of a distributed port group made by NSX Manager.
+_NSX_BACKING = "nsx"
 
 #: Operation parameter -> the FilterSpec field of ``GET /vcenter/network``.
 #: Sent in the legacy ``filter.`` form; ``adapt_op_query`` drops the prefix on ``/api``.
@@ -67,9 +73,9 @@ NETWORK_LIST_GROUP_KEY = "vmware-networks"
 
 NETWORK_LIST_WHEN_TO_USE = (
     "Use to see the networks of a vCenter that a VM can use: standard port groups, "
-    "distributed port groups and NSX segments, with their ids, datacenter and, for a "
-    "distributed port group, its switch and VLAN. Start here when you need a network "
-    "id for another call. Read-only."
+    "distributed port groups and opaque networks, with their ids, datacenter and, for a "
+    "distributed port group, its switch, VLAN and whether it is an NSX segment. Start "
+    "here when you need a network id for another call. Read-only."
 )
 
 
@@ -138,23 +144,28 @@ def _vlan_fields(vlan: dict[str, Any] | None) -> dict[str, Any]:
     return {"vlan_mode": "access", "vlan_id": vlan["vlan_id"], "vlan_trunk_ranges": None}
 
 
-async def _switch_and_vlan(
+_PortgroupDetails = tuple[str | None, str | None, dict[str, Any] | None, str | None]
+
+
+async def _portgroup_details(
     connector: VmwareRestConnector,
     operator: Operator,
     target: VsphereTargetLike,
     portgroup_ids: list[str],
-) -> tuple[dict[str, tuple[str | None, str | None, dict[str, Any] | None]], str | None]:
-    """Switch and VLAN per distributed port group. Returns ``(by id, note)``."""
+) -> tuple[dict[str, _PortgroupDetails], str | None]:
+    """Switch, VLAN and backing type per distributed port group. Returns ``(by id, note)``."""
     from meho_backplane.connectors.vmware_rest.composites._read import (
-        read_portgroup_switch_and_vlan,
+        read_portgroup_switch_vlan_and_backing,
     )
 
     if not portgroup_ids:
         return {}, None
     try:
-        found = await read_portgroup_switch_and_vlan(connector, target, operator, portgroup_ids)
+        found = await read_portgroup_switch_vlan_and_backing(
+            connector, target, operator, portgroup_ids
+        )
     except (httpx.HTTPError, RuntimeError) as exc:
-        return {}, f"switch and VLAN not read: {type(exc).__name__}: {exc}"
+        return {}, f"switch, VLAN and backing not read: {type(exc).__name__}: {exc}"
     return found, None
 
 
@@ -194,12 +205,12 @@ async def network_list_impl(
         for net_id, (entry, _, _) in listed.items()
         if entry.get("type") == _DISTRIBUTED_PORTGROUP
     ]
-    switch_vlan, note = await _switch_and_vlan(connector, operator, target, portgroup_ids)
+    details, note = await _portgroup_details(connector, operator, target, portgroup_ids)
 
     rows: list[dict[str, Any]] = []
     for net_id, (entry, dc_id, dc_name) in listed.items():
         is_portgroup = net_id in portgroup_ids
-        switch_id, switch_name, vlan = switch_vlan.get(net_id, (None, None, None))
+        switch_id, switch_name, vlan, backing = details.get(net_id, (None, None, None, None))
         name = entry.get("name")
         net_type = entry.get("type")
         rows.append(
@@ -212,6 +223,7 @@ async def network_list_impl(
                 "switch_id": switch_id,
                 "switch_name": switch_name,
                 **_vlan_fields(vlan),
+                "nsx_segment": None if backing is None else backing == _NSX_BACKING,
                 "read_note": note if is_portgroup else None,
             }
         )
@@ -239,8 +251,9 @@ _NETWORK_ROW_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": (
                 "STANDARD_PORTGROUP (on the hosts), DISTRIBUTED_PORTGROUP (on a "
-                "distributed switch) or OPAQUE_NETWORK (managed outside vSphere, "
-                "for example an NSX segment)."
+                "distributed switch; an NSX segment is one, see nsx_segment) or "
+                "OPAQUE_NETWORK (managed outside vSphere, for example on the older "
+                "host-level NSX switch)."
             ),
         },
         "datacenter": {"type": "string", "description": "Moid of the datacenter of the network."},
@@ -269,9 +282,19 @@ _NETWORK_ROW_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "The VLAN ranges in trunk mode, for example '100-200,300'.",
         },
+        "nsx_segment": {
+            "type": ["boolean", "null"],
+            "description": (
+                "Only for a distributed port group: true when NSX made it (an NSX "
+                "segment, config.backingType 'nsx'), false when vCenter made it. Null "
+                "for other types or when the read failed."
+            ),
+        },
         "read_note": {
             "type": ["string", "null"],
-            "description": "Why the switch and VLAN of a distributed port group are null.",
+            "description": (
+                "Why the switch, VLAN and nsx_segment of a distributed port group are null."
+            ),
         },
     },
     "required": [
@@ -285,6 +308,7 @@ _NETWORK_ROW_SCHEMA: dict[str, Any] = {
         "vlan_mode",
         "vlan_id",
         "vlan_trunk_ranges",
+        "nsx_segment",
         "read_note",
     ],
 }
@@ -292,12 +316,12 @@ _NETWORK_ROW_SCHEMA: dict[str, Any] = {
 VMWARE_NETWORK_LIST_OP = VmwareTypedOp(
     op_id="vmware.network.list",
     handler_attr="network_list",
-    summary="List the networks of a vCenter: standard and distributed port groups, NSX segments.",
+    summary="List the networks of a vCenter: port groups, NSX segments and opaque networks.",
     description=(
         "Reads GET /vcenter/network per datacenter. Returns one row per network: id (moid), "
-        "name, type, datacenter and, for a distributed port group, its switch and default "
-        "VLAN. Filters: type, datacenter, folder, name pattern. vCenter only. Needs no "
-        "catalog ingest. Read-only."
+        "name, type, datacenter and, for a distributed port group, its switch, default "
+        "VLAN and nsx_segment. Filters: type, datacenter, folder, name pattern. vCenter "
+        "only. Needs no catalog ingest. Read-only."
     ),
     parameter_schema={
         "type": "object",
@@ -307,7 +331,8 @@ VMWARE_NETWORK_LIST_OP = VmwareTypedOp(
                 "enum": list(NETWORK_TYPES),
                 "description": (
                     "Optional. Show only one type: STANDARD_PORTGROUP, "
-                    "DISTRIBUTED_PORTGROUP or OPAQUE_NETWORK (for example an NSX segment)."
+                    "DISTRIBUTED_PORTGROUP (this includes NSX segments on a distributed "
+                    "switch) or OPAQUE_NETWORK (the older host-level NSX switch)."
                 ),
             },
             "datacenter": {
@@ -355,20 +380,23 @@ VMWARE_NETWORK_LIST_OP = VmwareTypedOp(
     llm_instructions={
         "when_to_call": (
             "Call to see which networks a vCenter has, to get a network id for another "
-            "call (for example to connect a VM NIC), or to check the switch and VLAN of "
-            "a distributed port group."
+            "call (for example to connect a VM NIC), to check the switch and VLAN of "
+            "a distributed port group, or to find the NSX segments."
         ),
         "parameter_hints": {
-            "type": "Omit it for every type, or pass one value of the enum.",
+            "type": (
+                "Omit it for every type, or pass one value of the enum. For NSX segments "
+                "pass DISTRIBUTED_PORTGROUP and keep the rows with nsx_segment true."
+            ),
             "datacenter": "A datacenter moid such as 'datacenter-3'; omit for every one.",
             "folder": "A network folder moid such as 'group-n5'; omit for every folder.",
             "name": "Omit it for every network, or pass a pattern such as 'prod*'.",
         },
         "output_shape": (
             "{networks: [{id, name, type, datacenter, datacenter_name, switch_id, "
-            "switch_name, vlan_mode, vlan_id, vlan_trunk_ranges, read_note}]}. The switch "
-            "and VLAN fields are set only for a distributed port group; read_note says "
-            "why they are null when the read failed."
+            "switch_name, vlan_mode, vlan_id, vlan_trunk_ranges, nsx_segment, read_note}]}. "
+            "The switch, VLAN and nsx_segment fields are set only for a distributed port "
+            "group; read_note says why they are null when the read failed."
         ),
         "next_step": (
             "Use id where another call needs a network moid. For the VMs on each "

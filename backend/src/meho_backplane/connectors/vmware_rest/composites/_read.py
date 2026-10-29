@@ -159,7 +159,7 @@ __all__ = [
     "event_tail_composite",
     "network_portgroup_audit_composite",
     "performance_summary_composite",
-    "read_portgroup_switch_and_vlan",
+    "read_portgroup_switch_vlan_and_backing",
 ]
 
 
@@ -267,6 +267,11 @@ _PORTGROUP_AUDIT_PATHS: tuple[str, ...] = (
     _PROP_DVPG_DEFAULT_PORT_CONFIG,
     _PROP_NETWORK_VM,
 )
+#: The backing type of a distributed portgroup (read by ``vmware.network.list``
+#: only, not by the audit): ``standard`` (made by vCenter) or ``nsx`` (an NSX
+#: segment, made by NSX Manager). Since vSphere 7.0; unset means ``standard``.
+_PROP_DVPG_BACKING_TYPE = "config.backingType"
+_DVPG_DEFAULT_BACKING_TYPE = "standard"
 
 # Per-composite sub-op-id tuples. Each tuple lists the raw-REST /
 # vi-json sub-ops the composite issues directly on the connector
@@ -1377,16 +1382,19 @@ def _portgroup_switch_and_vlan(
     return dvs_moid, dvs_name, _vlan_identity_view(_observed_vlan_identity(raw_vlan))
 
 
-async def read_portgroup_switch_and_vlan(
+async def read_portgroup_switch_vlan_and_backing(
     connector: VmwareRestConnector,
     target: Any,
     operator: Operator,
     portgroup_moids: list[str],
-) -> dict[str, tuple[str | None, str | None, dict[str, Any] | None]]:
-    """Read the parent switch and default VLAN of distributed portgroups.
+) -> dict[str, tuple[str | None, str | None, dict[str, Any] | None, str | None]]:
+    """Read the parent switch, default VLAN and backing type of distributed portgroups.
 
-    Returns ``{portgroup moid: (switch moid, switch name, VLAN view)}`` for
-    every moid passed. The same vim reads as the portgroup audit: one
+    Returns ``{portgroup moid: (switch moid, switch name, VLAN view, backing
+    type)}`` for every moid passed. The backing type is ``standard`` or
+    ``nsx``; an unset value is the vendor default ``standard``, and a
+    portgroup the read did not return gets ``None``. The same vim reads as
+    the portgroup audit (plus ``config.backingType``): one
     ``RetrievePropertiesEx`` over the portgroups, then one per switch type
     for the switch names. No call is made for an empty list. A failed read
     raises (:exc:`httpx.HTTPError` or :exc:`RuntimeError`).
@@ -1397,13 +1405,17 @@ async def read_portgroup_switch_and_vlan(
         operator,
         _DVPG_MO_TYPE,
         portgroup_moids,
-        [_PROP_DVPG_DVS, _PROP_DVPG_DEFAULT_PORT_CONFIG],
+        [_PROP_DVPG_DVS, _PROP_DVPG_DEFAULT_PORT_CONFIG, _PROP_DVPG_BACKING_TYPE],
     )
     dvs_names = await _read_dvs_names(connector, target, operator, _dvs_refs(pg_props))
-    return {
-        moid: _portgroup_switch_and_vlan(pg_props.get(moid, {}), dvs_names)
-        for moid in portgroup_moids
-    }
+    found: dict[str, tuple[str | None, str | None, dict[str, Any] | None, str | None]] = {}
+    for moid in portgroup_moids:
+        props = pg_props.get(moid, {})
+        backing = props.get(_PROP_DVPG_BACKING_TYPE)
+        if not isinstance(backing, str):
+            backing = _DVPG_DEFAULT_BACKING_TYPE if props else None
+        found[moid] = (*_portgroup_switch_and_vlan(props, dvs_names), backing)
+    return found
 
 
 def _portgroup_vm_moids(props: dict[str, Any]) -> list[str]:

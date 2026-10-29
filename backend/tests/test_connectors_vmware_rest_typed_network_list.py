@@ -5,7 +5,8 @@
 
 * :func:`network_list_impl` against a recording fake connector with saved
   answers: one row per network of every type with its datacenter, the switch
-  and VLAN of the distributed port groups (access and trunk), the filters on
+  and VLAN of the distributed port groups (access and trunk), an NSX segment
+  (a distributed port group with backing type ``nsx``), the filters on
   the ``/api`` and the legacy ``/rest`` mount, the name pattern, a failed vim
   read and a failed list;
 * the real connector over mocked HTTP: the calls land on ``/api`` with the
@@ -56,6 +57,8 @@ _NETWORKS: dict[str, list[dict[str, Any]]] = {
     "datacenter-50": [
         {"network": "network-o-7", "name": "seg-app", "type": "OPAQUE_NETWORK"},
         {"network": "dvportgroup-60", "name": "lab", "type": "DISTRIBUTED_PORTGROUP"},
+        # An NSX segment on a distributed switch (vSphere 7.0 and later).
+        {"network": "dvportgroup-70", "name": "seg-web", "type": "DISTRIBUTED_PORTGROUP"},
     ],
 }
 #: The networks in folder ``group-n5`` (only some of datacenter-3).
@@ -84,6 +87,7 @@ _VIM: dict[str, dict[str, dict[str, Any]]] = {
         "dvportgroup-20": {
             "config.distributedVirtualSwitch": vim_moref(_VDS, "dvs-1"),
             "config.defaultPortConfig": _vlan_access(110),
+            "config.backingType": "standard",
         },
         "dvportgroup-21": {
             "config.distributedVirtualSwitch": vim_moref(_VDS, "dvs-1"),
@@ -96,6 +100,12 @@ _VIM: dict[str, dict[str, dict[str, Any]]] = {
                 "_typeName": "VMwareDVSPortSetting",
                 "vlan": {"_typeName": "VmwareDistributedVirtualSwitchPvlanSpec", "pvlanId": 5},
             },
+        },
+        # Made by NSX Manager: backing type nsx, VLAN 0 on the switch.
+        "dvportgroup-70": {
+            "config.distributedVirtualSwitch": vim_moref(_VDS, "dvs-2"),
+            "config.defaultPortConfig": _vlan_access(0),
+            "config.backingType": "nsx",
         },
     },
     _VDS: {"dvs-1": {"name": "dvs-prod"}, "dvs-2": {"name": "dvs-lab"}},
@@ -148,6 +158,7 @@ class _FakeConnector:
         self._envelope = envelope
         self.get_calls: list[tuple[str, dict[str, Any] | None]] = []
         self.vim_reads: list[tuple[str, list[str]]] = []
+        self.vim_paths: list[list[str]] = []
 
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         del target, operator
@@ -202,6 +213,7 @@ class _FakeConnector:
         path_set = spec["propSet"][0]["pathSet"]
         moids = [o["obj"]["value"] for o in spec["objectSet"]]
         self.vim_reads.append((mo_type, moids))
+        self.vim_paths.append(path_set)
         if self._fail_vim:
             raise _http_error(path)
         objects = [
@@ -233,6 +245,7 @@ async def test_lists_every_network_of_every_type_with_its_datacenter() -> None:
         "dvportgroup-21",
         "network-o-7",
         "dvportgroup-60",
+        "dvportgroup-70",
     ]
     assert rows["network-12"] == {
         "id": "network-12",
@@ -245,6 +258,7 @@ async def test_lists_every_network_of_every_type_with_its_datacenter() -> None:
         "vlan_mode": None,
         "vlan_id": None,
         "vlan_trunk_ranges": None,
+        "nsx_segment": None,
         "read_note": None,
     }
     assert rows["dvportgroup-20"] == {
@@ -258,6 +272,7 @@ async def test_lists_every_network_of_every_type_with_its_datacenter() -> None:
         "vlan_mode": "access",
         "vlan_id": 110,
         "vlan_trunk_ranges": None,
+        "nsx_segment": False,
         "read_note": None,
     }
     trunk = rows["dvportgroup-21"]
@@ -266,8 +281,8 @@ async def test_lists_every_network_of_every_type_with_its_datacenter() -> None:
         None,
         "100-200,300",
     )
-    nsx = rows["network-o-7"]
-    assert (nsx["type"], nsx["datacenter"], nsx["datacenter_name"]) == (
+    opaque = rows["network-o-7"]
+    assert (opaque["type"], opaque["datacenter"], opaque["datacenter_name"]) == (
         "OPAQUE_NETWORK",
         "datacenter-50",
         "dc-b",
@@ -278,6 +293,41 @@ async def test_lists_every_network_of_every_type_with_its_datacenter() -> None:
         None,
         None,
     )
+    # No backingType in the answer: the vendor default is standard.
+    assert trunk["nsx_segment"] is False
+    assert pvlan["nsx_segment"] is False
+
+
+async def test_an_nsx_segment_is_a_distributed_portgroup_with_nsx_segment_true() -> None:
+    conn = _FakeConnector()
+    out = await network_list_impl(
+        conn, _operator(), _Target(), {"type": "DISTRIBUTED_PORTGROUP", "name": "seg-*"}
+    )
+    Draft202012Validator(VMWARE_NETWORK_LIST_OP.response_schema).validate(out)
+    (segment,) = out["networks"]
+    assert segment == {
+        "id": "dvportgroup-70",
+        "name": "seg-web",
+        "type": "DISTRIBUTED_PORTGROUP",
+        "datacenter": "datacenter-50",
+        "datacenter_name": "dc-b",
+        "switch_id": "dvs-2",
+        "switch_name": "dvs-lab",
+        "vlan_mode": "access",
+        "vlan_id": 0,
+        "vlan_trunk_ranges": None,
+        "nsx_segment": True,
+        "read_note": None,
+    }
+    (pg_read, _) = conn.vim_reads
+    assert pg_read == (_DVPG, ["dvportgroup-70"])
+    assert "config.backingType" in conn.vim_paths[0]
+
+
+def test_the_portgroup_audit_does_not_read_the_backing_type() -> None:
+    from meho_backplane.connectors.vmware_rest.composites._read import _PORTGROUP_AUDIT_PATHS
+
+    assert "config.backingType" not in _PORTGROUP_AUDIT_PATHS
 
 
 async def test_one_network_call_per_datacenter_and_vim_reads_only_portgroups() -> None:
@@ -288,7 +338,10 @@ async def test_one_network_call_per_datacenter_and_vim_reads_only_portgroups() -
         ("/api/vcenter/network", {"datacenters": ["datacenter-3"]}),
         ("/api/vcenter/network", {"datacenters": ["datacenter-50"]}),
     ]
-    assert conn.vim_reads[0] == (_DVPG, ["dvportgroup-20", "dvportgroup-21", "dvportgroup-60"])
+    assert conn.vim_reads[0] == (
+        _DVPG,
+        ["dvportgroup-20", "dvportgroup-21", "dvportgroup-60", "dvportgroup-70"],
+    )
     assert conn.vim_reads[1] == (_VDS, ["dvs-1", "dvs-2"])
 
 
@@ -364,10 +417,10 @@ async def test_a_failed_vim_read_keeps_the_rows_with_a_note() -> None:
     out = await network_list_impl(conn, _operator(), _Target(), {})
     Draft202012Validator(VMWARE_NETWORK_LIST_OP.response_schema).validate(out)
     rows = _by_id(out)
-    assert len(rows) == 5
+    assert len(rows) == 6
     pg = rows["dvportgroup-20"]
-    assert (pg["switch_id"], pg["vlan_mode"]) == (None, None)
-    assert "switch and VLAN not read" in pg["read_note"]
+    assert (pg["switch_id"], pg["vlan_mode"], pg["nsx_segment"]) == (None, None, None)
+    assert "switch, VLAN and backing not read" in pg["read_note"]
     assert "HTTPStatusError" in pg["read_note"]
     # Only distributed port groups have a switch and VLAN, so only they get a note.
     assert rows["network-12"]["read_note"] is None

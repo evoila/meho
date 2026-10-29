@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0120_add_endpoint_descriptor_owner_package`` (#5037).
+"""Tests for Alembic migration ``0122_add_endpoint_descriptor_owner_package`` (#5037).
 
 * The upgrade adds exactly one column, ``endpoint_descriptor.owner_package``,
   and it is nullable. No other table or column changes.
@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -24,8 +24,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0120"
-_DOWN_REVISION = "0119"
+_REVISION = "0122"
+_DOWN_REVISION = "0121"
 
 _OLD_ROW_INSERT = (
     "INSERT INTO endpoint_descriptor (id, product, version, impl_id, op_id, source_kind, "
@@ -39,7 +39,7 @@ _OLD_ROW_INSERT = (
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0120.db"
+    db_path = tmp_path / "migration_0122.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
@@ -69,9 +69,12 @@ def _schema(sync_url: str) -> dict[str, dict[str, bool]]:
         eng.dispose()
 
 
-def test_upgrade_adds_only_one_nullable_column(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_only_one_nullable_column(
+    alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     before = _schema(sync_url)
     eng = sa_create_engine(sync_url)
     try:
@@ -100,8 +103,11 @@ def test_upgrade_adds_only_one_nullable_column(alembic_cfg: tuple[Config, str]) 
     assert owners == [(None,)]
 
 
-def test_downgrade_drops_the_column(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_drops_the_column(
+    alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     command.downgrade(cfg, _DOWN_REVISION)
     assert "owner_package" not in _schema(sync_url)["endpoint_descriptor"]

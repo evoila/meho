@@ -111,7 +111,10 @@ Detail payloads land in ``extras``. Codes:
   connector-resolution time (G0.20-T6 #1142 follow-up, #1506) before the
   handler proceeds unbound and trips ``dispatch_typed``'s self-guard
   :exc:`RuntimeError`. A module-level handler (no ``self``) needs no
-  target and dispatches unchanged.
+  target and dispatches unchanged. Since #4139 every op that needs a
+  target (:func:`descriptor_requires_target`, which includes every
+  ``ingested`` op) is checked right after the descriptor lookup, before
+  the policy gate, so it never surfaces as ``no_connector``.
 * ``handler_unreachable`` -- ``importlib`` couldn't resolve
   ``handler_ref``, or the resolved symbol is not callable.
 * ``denied`` -- the policy gate issued an outright ``deny`` verdict.
@@ -2345,6 +2348,25 @@ def _result_digest_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, 
     return None
 
 
+def _result_document_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, Any] | None:
+    """Extract ``result_document`` from a descriptor's ``llm_instructions``.
+
+    An op whose whole result other operations load by its handle (the
+    migration inventory reads) attaches ``{"always": true}`` under
+    ``llm_instructions.result_document``; the reducer then keeps the payload
+    as a document record whatever its size. A plain dict is returned, as for
+    the other hints; the reducer validates it. ``None`` when the op did not
+    register the hint.
+    """
+    instructions = descriptor.llm_instructions
+    if not isinstance(instructions, dict):
+        return None
+    raw = instructions.get("result_document")
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
 async def _unavailable_delivery_result(
     *,
     op_id: str,
@@ -2554,6 +2576,9 @@ def _build_reducer_context(
     result_digest = _result_digest_from_descriptor(descriptor)
     if result_digest is not None:
         reducer_context["result_digest"] = result_digest
+    result_document = _result_document_from_descriptor(descriptor)
+    if result_document is not None:
+        reducer_context["result_document"] = result_document
     return reducer_context
 
 
@@ -3237,6 +3262,11 @@ async def dispatch(
             triple=(product, version, impl_id),
             started=started,
         )
+    # #4139: an op that needs a target (every ingested op, or a typed op
+    # bound to a connector) and got none fails here with one clear line,
+    # before the catalog guard, the policy gate or a wait for approval.
+    if target is None and descriptor_requires_target(descriptor):
+        return result_target_required(op_id, _elapsed_ms(started))
 
     # --- Step 3: catalog target guard + parameter_schema validation -------
     # A connector may opt an ingested catalog into a target-compatibility

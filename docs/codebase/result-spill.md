@@ -30,10 +30,23 @@ threshold (>50 rows or >4 KB by default), the caller gets back:
   retrievable from the handle instead of naming a read that fails.
   Credential-class ops do not get this default copy;
   they keep only the scalars their `result_scalars` hint lists (#3084).
-  Lists and objects are never copied by default (objects need the
-  bounded `result_objects` hint). An object that hint names is stored
-  whole next to the omitted scalars, so a `path` read returns what the
-  bounded inline projection left out; and
+  An object the `result_objects` hint names is stored whole next to the
+  omitted scalars, so a `path` read returns what the bounded inline
+  projection left out. Every other top-level object or list next to the
+  rows (a part, #5139) is stored whole there too, with no hint. Whole
+  parts ride inline while the summary stays under 4,096 bytes; the rest
+  are named in `parts_not_inline`, and `parts_note` names the `path`
+  read, or says the parts cannot be read when the store dropped them to
+  keep the rows. The 4,096 bytes are one budget for the whole summary:
+  the reducer's own keys, the scalars (hinted or not), the `result_objects`
+  projection, the digest, the parts, the names and the notes. When the
+  names and the note leave no room, the largest values move out of the
+  summary and are stored with the rows, and the parts are placed again in
+  the room they left. A scalar is counted under `omitted_scalar_count`
+  like the other omitted scalars; an object or list (a digest list, the
+  projection of a hinted object) is named in `parts_not_inline`, and the
+  `path` read returns it whole. Credential-class ops get no default parts;
+  and
 - a `ResultHandle` on `OperationResult.handle` carrying `summary_md`,
   `schema_`, `total_rows`, `sample_rows`, and the self-documenting
   `fetch_more` envelope. `schema_` comes from the result field catalog
@@ -318,6 +331,14 @@ the reducer keeps it **whole** as a document record under a handle:
   is not stored either (`reason=admission_limit_exceeded`).
 - Credential-class ops and reduces without an `op_id` pass through
   unchanged, as before.
+- An op may declare `llm_instructions.result_document: {"always": true}`
+  (the dispatcher forwards it as `context["result_document"]`). Then the
+  reducer skips collection detection and keeps the payload as a document
+  record whatever its size, so a small result gets a handle too. The
+  migration inventory reads use it: other operations load the inventory
+  by its handle. When the store did not keep a small payload, it passes
+  through inline as without the hint. A malformed hint is logged and
+  ignored.
 - A multi-step operation's failure envelope (an `issues[]` entry with
   `severity: "error"`, #3809) takes the same reducer path as a success
   payload (#4223). An oversized refusal — `folder.create`'s
@@ -334,11 +355,11 @@ array value). The pointer rules follow RFC 6901: `""` is the whole
 document, each `/` starts one step, and in a step `~1` means `/` and `~0`
 means `~` (in that order, so `/a~1b~0c` reads the key `a/b~c`). An array
 index has no leading zero, and `-` never resolves. On a rows handle, the
-document is only the top-level scalar fields left out of the inline
-summary that the store kept with the rows (see Overview). Lists and
-objects beside the rows are not part of it, and when the store dropped
-the omitted scalars to make room for the rows, there is no document at
-all. `path` cannot be combined with any relational field (a
+document holds the top-level fields the store kept with the rows (see
+Overview): the scalars left out of the inline summary, the objects a
+`result_objects` hint names, and every object or list beside the rows
+(#5139). When the store dropped them to make room for the rows, there is
+no document at all. `path` cannot be combined with any relational field (a
 `ValidationError` at spec construction). An array value pages with the
 call's `offset` / `limit` (items that are not objects come back as
 `{"value": item}`). A text value comes back in parts (#4994, see
@@ -485,6 +506,32 @@ handler builds the reducer context itself (the caller's `tenant_id` and
 page spills and reads back through `result_query` like a dispatched
 result. The spill is keyed to the caller even for a cross-tenant
 `platform_admin` listing. See [`targets.md`](targets.md).
+
+### `meho_connector_list` (#4121)
+
+`meho_connector_list` works the same way. Its handler in
+`mcp/tools/connector_admin.py` has two steps:
+
+- `list_connector_rows` reads the connectors and builds the rows. By
+  default each row is short: `connector_id`, `product`, `version`,
+  `status`, `dispatchable`, `scope`. `detail="full"` gives every
+  `ConnectorListItem` field. `product` keeps one product only; empty
+  text means no filter.
+- `reduce_connector_list` runs the rows through `JsonFluxReducer` with
+  `op_id="meho_connector_list"`, the caller's `tenant_id` and
+  `operator_sub`, and a `pagination_hint` that says to narrow with
+  `product`. Over 50 rows or 4 KB, the answer is the summary plus a
+  `handle`.
+
+The short `status` uses the words of the `status` filter (`staged`,
+`enabled`, `disabled`), plus `registered` for a connector with no
+operations yet and `mixed` for one whose groups are partly enabled and
+partly disabled.
+
+A hosted agent run uses the two steps apart: the toolset first drops the
+connectors outside the agent's allow-list, then reduces. So a handle
+never holds a connector the agent may not see. See
+[`agent-runtime.md`](agent-runtime.md).
 
 ## Diagnosis: the RDC cycle-8 `k8s.logs tail=300` finding (#1629)
 

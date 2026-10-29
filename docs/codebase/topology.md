@@ -799,7 +799,8 @@ front maps the exception to `404 node_untracked`; the MCP front
 returns the typed `{kind, status: "node_untracked", name,
 nodes: []}` envelope, which also carries `direction`,
 `relation_class` and `evidence` like every other closure answer
-(#3760). The CLI's `formatNotFound` renders the
+(#3760), and a `detail` text (#4112) that says the answer is not
+"safe to delete" and how to add the missing data. The CLI's `formatNotFound` renders the
 operator-actionable "register / refresh the target or annotate
 the relationship" prompt. `find_path` keeps its G9.1 silent-on-miss
 contract by default — `None` is the recoverable "no route" answer.
@@ -1732,7 +1733,13 @@ Load-bearing details:
   on each, and merges the results. One connector raising is recorded
   in `skipped` with the exception summary and does not abort the
   sweep. `seed_target` (optional) is resolved tenant-scoped before
-  being forwarded. The verb never creates `targets` rows
+  being forwarded. The caller is forwarded too
+  (`list_candidates(seed, operator=operator)`), so a connector that must
+  read the seed's secret reads it under the caller's identity, like the
+  probe. A candidate may carry `secret_ref` and `extras` (the Azure
+  connector sets both), and `meho targets discover <product>
+  --import-yaml` prints the candidates as a file for `meho targets
+  import`. The verb never creates `targets` rows
   (auto-registration is v0.2.next per #363).
 - **Tenant scoping.** No route accepts a `tenant_id` from the path,
   query string, or body. The query verbs filter on

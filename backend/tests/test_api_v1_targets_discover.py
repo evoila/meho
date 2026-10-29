@@ -167,25 +167,35 @@ class _BaseFakeConnector(Connector):
 
 
 class _CandidatesConnector(_BaseFakeConnector):
-    async def list_candidates(self, seed_target: Any | None = None) -> list[CandidateHint]:
+    async def list_candidates(
+        self, seed_target: Any | None = None, operator: Any | None = None
+    ) -> list[CandidateHint]:
         return [
             CandidateHint(
                 name="esxi-7",
                 host="10.0.0.7",
                 port=443,
-                evidence={"source": "vcenter", "seed": getattr(seed_target, "name", None)},
+                evidence={
+                    "source": "vcenter",
+                    "seed": getattr(seed_target, "name", None),
+                    "caller": getattr(operator, "sub", None),
+                },
                 confidence="high",
             )
         ]
 
 
 class _EmptyConnector(_BaseFakeConnector):
-    async def list_candidates(self, seed_target: Any | None = None) -> list[CandidateHint]:
+    async def list_candidates(
+        self, seed_target: Any | None = None, operator: Any | None = None
+    ) -> list[CandidateHint]:
         return []
 
 
 class _RaisingConnector(_BaseFakeConnector):
-    async def list_candidates(self, seed_target: Any | None = None) -> list[CandidateHint]:
+    async def list_candidates(
+        self, seed_target: Any | None = None, operator: Any | None = None
+    ) -> list[CandidateHint]:
         raise RuntimeError("connector exploded")
 
 
@@ -343,6 +353,9 @@ def test_discover_with_seed_target_resolves_and_forwards(client: TestClient) -> 
     # _CandidatesConnector echoes the seed name into evidence; proves
     # the resolved target (not the raw string) reached the hook.
     assert body["discovered"][0]["evidence"]["seed"] == "seed-vc"
+    # The caller reaches the hook too, so a connector can read the seed's
+    # secret as the caller.
+    assert body["discovered"][0]["evidence"]["caller"] == "op-1"
 
 
 def test_discover_unknown_seed_target_returns_404(client: TestClient) -> None:

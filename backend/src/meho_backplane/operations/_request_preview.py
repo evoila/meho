@@ -76,7 +76,10 @@ from meho_backplane.operations._catalog_guard import (
     CatalogRefusal,
     choose_catalog_for_target,
 )
-from meho_backplane.operations._errors import result_unqualified_target_version
+from meho_backplane.operations._errors import (
+    result_target_required,
+    result_unqualified_target_version,
+)
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.operations._lookup import (
     lookup_descriptor,
@@ -252,6 +255,9 @@ async def _resolve_descriptor(
     Returns the ``unknown_connector`` / ``unknown_op`` envelope when the
     natural key resolves no descriptor; :func:`~._op_miss.op_miss_result`
     picks the code and names other connectors that have the op (#4031).
+    Returns the ``target_required`` envelope when the op needs a target
+    and got none (#4139); like ``dispatch``, this comes before the
+    catalog choice.
     """
     product, version, impl_id = parse_connector_id(connector_id)
 
@@ -277,6 +283,23 @@ async def _resolve_descriptor(
             "connector_id": connector_id,
             "error": miss.error,
             "extras": dict(miss.extras),
+        }
+
+    # Imported lazily: the dispatcher imports this module at load time.
+    from meho_backplane.operations.dispatcher import descriptor_requires_target
+
+    if target is None and descriptor_requires_target(descriptor):
+        # #4139: same answer and same order as ``dispatch`` -- before the
+        # catalog choice, so a guarded catalog never answers
+        # ``unqualified_target_version`` for a missing target.
+        missing = result_target_required(op_id, 0.0)
+        return {
+            "status": "error",
+            "op_id": op_id,
+            "connector_id": connector_id,
+            "source_kind": descriptor.source_kind,
+            "error": missing.error,
+            "extras": dict(missing.extras),
         }
 
     # --- Catalog choice (mirrors dispatch Step 3, no audit row) ------------
@@ -596,11 +619,12 @@ async def preview_dispatch(
 
     Returns a JSON-shaped envelope: ``status`` ``"ok"`` (request/synthetic
     preview resolved), ``"error"`` (structured ``unknown_op`` /
-    ``unqualified_target_version`` / ``invalid_params`` / ``no_connector`` /
-    ``ambiguous_connector`` / ``dispatch_error``), or ``"unavailable"`` (a
-    non-governed typed/composite op). ``op_id`` / ``connector_id`` /
-    ``source_kind`` echo for correlation. Every envelope whose op resolved
-    (every status except ``unknown_op`` / ``unknown_connector`` /
+    ``target_required`` / ``unqualified_target_version`` / ``invalid_params`` /
+    ``no_connector`` / ``ambiguous_connector`` / ``dispatch_error``), or
+    ``"unavailable"`` (a non-governed typed/composite op). ``op_id`` /
+    ``connector_id`` / ``source_kind`` echo for correlation. Every envelope
+    whose op resolved (every status except ``unknown_op`` /
+    ``unknown_connector`` / ``target_required`` /
     ``unqualified_target_version``) carries ``safety_level``,
     ``requires_approval``, ``policy_verdict`` and ``policy_reason`` (#4923).
     On ``ok``: ``method``, ``resolved_path``, ``query``, ``redacted_body``,
@@ -617,7 +641,7 @@ async def preview_dispatch(
         target=target,
     )
     if isinstance(resolved, dict):
-        return resolved  # unknown_op / unknown_connector / unqualified_target_version
+        return resolved  # the op or the target did not resolve (see _resolve_descriptor)
     descriptor, connector_id = resolved
     envelope = await _preview_resolved_op(
         operator=operator,

@@ -1230,6 +1230,149 @@ async def test_no_connector_error_names_target_product_not_connector_id(
 
 
 # ---------------------------------------------------------------------------
+# #4139: an op that needs a target and got none says so in one clear line
+# ---------------------------------------------------------------------------
+
+_TARGET_REQUIRED_TEXT = (
+    "target_required: this operation needs a target; call list_targets and pass a target name"
+)
+
+
+async def _add_ghost_ingested_op(
+    session: AsyncSession,
+    embedding: Any,
+    *,
+    op_id: str = "GET:/api/test",
+    safety_level: str = "safe",
+    requires_approval: bool = False,
+) -> None:
+    """Insert one ``ghost-1.0`` ingested descriptor (no connector registered)."""
+    session.add(
+        EndpointDescriptor(
+            id=uuid.uuid4(),
+            tenant_id=None,
+            product="ghost",
+            version="1.0",
+            impl_id="ghost",
+            op_id=op_id,
+            source_kind="ingested",
+            method="GET",
+            path="/api/test",
+            handler_ref=None,
+            summary="Ghost",
+            description="Ghost endpoint.",
+            tags=[],
+            parameter_schema={},
+            response_schema=None,
+            llm_instructions=None,
+            safety_level=safety_level,
+            requires_approval=requires_approval,
+            is_enabled=True,
+            embedding=embedding,
+            custom_description=None,
+            custom_notes=None,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+    )
+    await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_and_preview_ingested_op_without_target_return_target_required(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """An ingested op with ``target=None`` is a missing target, not a connector miss."""
+    await _add_ghost_ingested_op(session, stub_embedding_service.encode_one.return_value)
+    operator = _make_operator()
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="ghost-1.0",
+        op_id="GET:/api/test",
+        target=None,
+        params={},
+    )
+    assert result.status == "error"
+    assert result.error == _TARGET_REQUIRED_TEXT
+    assert result.extras["error_code"] == "target_required"
+    assert result.extras["op_id"] == "GET:/api/test"
+
+    preview = await preview_dispatch(
+        operator=operator,
+        connector_id="ghost-1.0",
+        op_id="GET:/api/test",
+        target=None,
+        params={},
+    )
+    assert preview["status"] == "error"
+    assert preview["error"] == _TARGET_REQUIRED_TEXT
+    assert preview["extras"]["error_code"] == "target_required"
+    assert preview["extras"]["op_id"] == "GET:/api/test"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_missing_target_is_checked_before_the_policy_gate(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """A destructive op without a target fails at once: no approval wait, no audit row."""
+    await _add_ghost_ingested_op(
+        session,
+        stub_embedding_service.encode_one.return_value,
+        op_id="DELETE:/api/test",
+        safety_level="destructive",
+        requires_approval=True,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.AGENT),
+        connector_id="ghost-1.0",
+        op_id="DELETE:/api/test",
+        target=None,
+        params={},
+    )
+    assert result.status == "error"
+    assert result.extras["error_code"] == "target_required"
+    rows = await session.scalar(
+        select(func.count()).select_from(AuditLog).where(AuditLog.path == "DELETE:/api/test")
+    )
+    assert rows == 0
+
+
+@pytest.mark.asyncio
+async def test_dispatch_and_preview_target_without_product_keep_no_connector(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """A real target that has no product still gets today's ``no_connector`` answer."""
+    await _add_ghost_ingested_op(session, stub_embedding_service.encode_one.return_value)
+    operator = _make_operator()
+    target = _FakeTarget(product="")
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="ghost-1.0",
+        op_id="GET:/api/test",
+        target=target,
+        params={},
+    )
+    assert result.extras["error_code"] == "no_connector"
+    assert "target has no product slug" in result.extras["exception_message"]
+
+    preview = await preview_dispatch(
+        operator=operator,
+        connector_id="ghost-1.0",
+        op_id="GET:/api/test",
+        target=target,
+        params={},
+    )
+    assert preview["extras"]["error_code"] == "no_connector"
+    assert "target has no product slug" in preview["error"]
+
+
+# ---------------------------------------------------------------------------
 # G0.14-T1 (#1142): typed/composite resolver miss must surface
 # no_connector (matching the ingested branch), and the resolver's
 # AmbiguousConnectorResolution must surface ambiguous_connector on

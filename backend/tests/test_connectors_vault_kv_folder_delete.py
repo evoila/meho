@@ -560,6 +560,52 @@ async def test_out_of_tenant_folder_is_denied_before_any_vault_call(
     assert tree.delete_calls == []
 
 
+async def test_unapproved_out_of_tenant_folder_is_refused_without_a_vault_call(
+    monkeypatch: pytest.MonkeyPatch, _registered_ops: None
+) -> None:
+    """The check before approval runs the tenant check first, so it never walks the folder."""
+    fake, tree = _lab_tree(monkeypatch)
+    other = UUID("00000000-0000-0000-0000-00000000beef")
+    tree.add(f"secret/tenants/{other}/lab-old/stray/token")
+
+    result = await _run({"path": f"tenants/{other}/lab-old", "keys": ["admin"]}, approved=False)
+
+    assert result.status == "denied"
+    assert result.extras["error_code"] == "write_capability_denied"
+    assert str(result.extras["reason"]).startswith("VaultTenantScopeError")
+    assert "stray" not in json.dumps(result.model_dump(mode="json"))
+    assert await _pending_count() == 0
+    assert fake.auth.jwt.login_calls == []
+    assert tree.list_calls == []
+    assert fake.sys.get_capabilities_calls == []
+    assert tree.delete_calls == []
+
+
+async def test_preflight_refuses_an_out_of_tenant_folder_before_any_vault_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake, tree = _lab_tree(monkeypatch)
+    other = UUID("00000000-0000-0000-0000-00000000beef")
+    ctx = PreviewContext(
+        descriptor=MagicMock(op_id=_OP_ID),
+        connector_instance=None,
+        operator=_operator(),
+        target=None,
+        params={"path": f"tenants/{other}/lab-old", "keys": ["admin"]},
+        connector_id=_CONNECTOR_ID,
+    )
+
+    result = await folder_module._folder_delete_preflight(ctx)
+
+    assert result is not None
+    assert result["will_be_denied"] is True
+    assert result["path"] == f"secret/tenants/{other}/lab-old"
+    assert result["reason"].startswith("VaultTenantScopeError")
+    assert fake.auth.jwt.login_calls == []
+    assert tree.list_calls == []
+    assert fake.sys.get_capabilities_calls == []
+
+
 # ===========================================================================
 # Guards
 # ===========================================================================
@@ -635,6 +681,31 @@ async def test_folder_with_bad_parts_is_refused_before_any_vault_call(
     assert result.status == "error"
     assert result.extras.get("exception_class") == "VaultFolderKeyError"
     assert fake.auth.jwt.login_calls == []
+    assert tree.delete_calls == []
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"path": f"{_FOLDER}/../other", "keys": ["admin"]},
+        {"path": _FOLDER, "keys": ["../other/admin"]},
+        {"path": f"secret/{_FOLDER}", "keys": ["admin"]},
+    ],
+    ids=["dot-dot-folder", "dot-dot-key", "mount-in-path"],
+)
+async def test_unapproved_bad_folder_or_key_is_refused_without_a_vault_call(
+    monkeypatch: pytest.MonkeyPatch, params: dict[str, Any], _registered_ops: None
+) -> None:
+    """The check before approval runs the folder and key checks before it opens Vault."""
+    fake, tree = _lab_tree(monkeypatch)
+
+    result = await _run(params, approved=False)
+
+    assert result.status == "denied"
+    assert result.extras["error_code"] == "write_capability_denied"
+    assert await _pending_count() == 0
+    assert fake.auth.jwt.login_calls == []
+    assert tree.list_calls == []
     assert tree.delete_calls == []
 
 

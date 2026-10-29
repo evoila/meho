@@ -37,15 +37,19 @@ Guards
   before the call waits for approval. When the call runs, a folder that now
   holds more secrets than the limit is refused and nothing is deleted.
 * A permission check runs before the call waits for approval
-  (:func:`_folder_delete_preflight`). It walks the folder first, the same
-  walk the delete does, to find every sub-folder the delete will list,
-  also one no listed key is in. The identity needs ``list`` on the
-  metadata path of the folder and of every one of these sub-folders, and,
-  for every listed key, ``read`` on its metadata path and ``update`` on
-  its delete path. Vault rights can differ per key and per sub-folder, so
-  every path is checked, in one ``sys/capabilities-self`` call. When Vault
-  would refuse one of them, MEHO refuses the call and asks no one to
-  approve it.
+  (:func:`_folder_delete_preflight`). It first runs the same folder, key
+  and tenant checks the delete runs (:func:`_folder_and_keys` and
+  :func:`enforce_tenant_scope`), before it talks to Vault. A folder
+  outside the caller's tenant is refused here, without a Vault call, so
+  the walk can never show the caller a folder name of another tenant.
+  Then it walks the folder, the same walk the delete does, to find every
+  sub-folder the delete will list, also one no listed key is in. The
+  identity needs ``list`` on the metadata path of the folder and of every
+  one of these sub-folders, and, for every listed key, ``read`` on its
+  metadata path and ``update`` on its delete path. Vault rights can differ
+  per key and per sub-folder, so every path is checked, in one
+  ``sys/capabilities-self`` call. When a check fails or Vault would refuse
+  one of the paths, MEHO refuses the call and asks no one to approve it.
 
 The result and the approval card carry key paths only, never a secret value.
 """
@@ -69,11 +73,15 @@ from meho_backplane.connectors.vault.kv_tree import (
 from meho_backplane.connectors.vault.ops import (
     _DEFAULT_KV_MOUNT,
     _MOUNT_PROPERTY,
+    VaultPathShapeError,
     _extract_mount_and_path,
     vault_capabilities_preflight,
 )
 from meho_backplane.connectors.vault.target_auth import vault_client_for_target
-from meho_backplane.connectors.vault.tenant_scope import enforce_tenant_scope
+from meho_backplane.connectors.vault.tenant_scope import (
+    VaultTenantScopeError,
+    enforce_tenant_scope,
+)
 from meho_backplane.operations._preview import (
     PreviewContext,
     register_permission_preflight,
@@ -424,24 +432,57 @@ def _folder_delete_checks(
     return checks
 
 
-async def _folder_delete_preflight(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Check, before the call waits for approval, that Vault will allow the whole delete.
+def _refused_before_vault(ctx: PreviewContext, exc: Exception) -> dict[str, Any]:
+    """The check result for a call MEHO refuses itself, before any Vault call.
 
-    Walks the folder (:func:`list_kv_folders`) to find every sub-folder the
-    delete will list, builds the paths with :func:`_folder_delete_checks`
-    and probes them all in one ``sys/capabilities-self`` call. A sub-folder
-    the walk could not list is probed too, so the refusal names it. Returns
-    the first check that fails, else the last check with the number of
-    paths checked. Returns ``None`` when the walk or the probe itself fails
-    (fail-soft, like the other KV writes; the run then refuses the call
-    before it deletes anything).
+    Shaped like a ``sys/capabilities-self`` result with ``will_be_denied``
+    set, so the dispatcher refuses the park the same way it refuses a
+    missing Vault right, and no one is asked to approve the call. The
+    ``reason`` names the error, so the caller sees it was not a Vault
+    right that was missing.
     """
     mount = str(ctx.params.get("mount", _DEFAULT_KV_MOUNT)).strip()
     folder = str(ctx.params.get("path", "")).strip().strip("/")
+    return {
+        "check": "vault.kv.folder.delete.params",
+        "path": f"{mount}/{folder}",
+        "required": [],
+        "granted": [],
+        "will_be_denied": True,
+        "reason": f"{type(exc).__name__}: {exc}",
+        "principal_sub": ctx.operator.sub,
+    }
+
+
+async def _folder_delete_preflight(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Check, before the call waits for approval, that the whole delete is allowed.
+
+    First runs the checks the delete itself runs before it talks to Vault:
+    the folder and key checks (:func:`_folder_and_keys`) and the tenant
+    check (:func:`enforce_tenant_scope`). When one of them refuses the
+    call, the result says so (:func:`_refused_before_vault`) and no Vault
+    call is made: the folder walk below must never list a folder the
+    caller may not touch, because a refused sub-folder would show its name
+    in the result.
+
+    Then walks the folder (:func:`list_kv_folders`) to find every
+    sub-folder the delete will list, builds the paths with
+    :func:`_folder_delete_checks` and probes them all in one
+    ``sys/capabilities-self`` call. A sub-folder the walk could not list is
+    probed too, so the refusal names it. Returns the first check that
+    fails, else the last check with the number of paths checked. Returns
+    ``None`` when the params do not hold a folder and keys, or when the
+    walk or the probe itself fails (fail-soft, like the other KV writes;
+    the run then refuses the call before it deletes anything).
+    """
     raw_keys = ctx.params.get("keys")
-    if not isinstance(raw_keys, list) or not raw_keys or not folder:
+    if not isinstance(raw_keys, list) or not raw_keys or "path" not in ctx.params:
         return None
-    keys = sorted({str(key) for key in raw_keys})
+    try:
+        mount, folder, keys = _folder_and_keys(ctx.params)
+        enforce_tenant_scope(ctx.operator, mount=mount, path=folder, read_only=False)
+    except (VaultFolderKeyError, VaultPathShapeError, VaultTenantScopeError) as exc:
+        return _refused_before_vault(ctx, exc)
     async with vault_client_for_target(ctx.operator, ctx.target) as client:
         sub_folders = await list_kv_folders(
             client, mount=mount, path=folder, max_keys=folder_max_keys()

@@ -539,7 +539,7 @@ async def test_supervisor_libraries_on_vcenter_9(
     connector: VmwareRestConnector, vc: respx.MockRouter
 ) -> None:
     vc.get("/api/vcenter/namespace-management/lifecycle/content/libraries").respond(
-        200, json={"libraries": [{"library": _SUB_LIB, "status": "READY"}]}
+        200, json={"libraries": [{"library": {"id": _SUB_LIB}, "status": "READY"}]}
     )
     out = await connector.supervisor_content_library_list(
         _operator(), _StubTarget(fingerprint={"version": "9.0.0"}), {}

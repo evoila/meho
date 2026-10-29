@@ -575,7 +575,19 @@ async def supervisor_content_library_list_impl(
         )
     )
     rows = [
-        {"library_id": entry.get("library"), "status": entry.get("status")}
+        {"library_id": _supervisor_library_id(entry.get("library")), "status": entry.get("status")}
         for entry in _rows(answer.get("libraries"))
     ]
     return {"library_count": len(rows), "libraries": rows}
+
+
+def _supervisor_library_id(value: Any) -> str | None:
+    """Read the library id from a Supervisor library row.
+
+    vCenter 9.0 sends ``{"library": {"id": "<uuid>"}, "status": ...}``. Keep a
+    plain string as is, in case a build sends the id directly.
+    """
+    if isinstance(value, Mapping):
+        library_id = value.get("id")
+        return library_id if isinstance(library_id, str) else None
+    return value if isinstance(value, str) else None

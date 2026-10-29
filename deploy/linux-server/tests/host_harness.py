@@ -277,9 +277,9 @@ RKE2_STUB = textwrap.dedent("""\
 # The fake kubectl answers each call of meho-host from one file. The values
 # of the Secrets (kube_secret_values, one key=value per line) are answered
 # only to the Go template the bundle uses, and the two public certificates
-# of the console's TLS Secret only to the templates of the check that read
-# tls.crt and ca.crt; any other request for Secret content fails, so the
-# bundle cannot read them in another way.
+# of the console's TLS Secret only to the template of the check, which
+# prints tls.crt, the line "#ca.crt" and ca.crt; any other request for
+# Secret content fails, so the bundle cannot read them in another way.
 KUBECTL_STUB = textwrap.dedent("""\
     rc=$(cat "$MEHO_FAKE/kubectl_rc")
     [ "$rc" = 0 ] || exit "$rc"
@@ -294,10 +294,9 @@ KUBECTL_STUB = textwrap.dedent("""\
         exit "$(cat "$MEHO_FAKE/kube_logs_previous_rc")" ;;
       *" logs "*) cat "$MEHO_FAKE/kube_logs" ;;
       *"get secrets -o go-template="*) cat "$MEHO_FAKE/kube_secret_values" ;;
-      *"get secret meho-core-tls -o go-template="*tls.crt*)
+      *"get secret meho-core-tls -o go-template="*)
         cat "$MEHO_FAKE/console_tls_crt"
-        exit "$(cat "$MEHO_FAKE/console_tls_rc")" ;;
-      *"get secret meho-core-tls -o go-template="*ca.crt*)
+        printf '\\n#ca.crt\\n'
         cat "$MEHO_FAKE/console_ca_crt"
         exit "$(cat "$MEHO_FAKE/console_tls_rc")" ;;
       *"get secret"*" -o "*)

@@ -129,8 +129,11 @@ readonly CERT_ROW_RE="^([^[:space:]]+)[[:space:]]+.*[[:space:]](${CERT_EXPIRES_R
 # clients trust). It never reads tls.key.
 readonly CONSOLE_TLS_SECRET=meho-core-tls
 readonly CONSOLE_CERT_MIN_DAYS=30
-readonly TLS_CHAIN_TEMPLATE='{{with index .data "tls.crt"}}{{base64decode .}}{{end}}'
-readonly TLS_CA_TEMPLATE='{{with index .data "ca.crt"}}{{base64decode .}}{{end}}'
+# One kubectl call prints both keys, decoded, with the marker line between
+# them: each call may wait 10 seconds, and meho doctor gives the whole check
+# 60 seconds (#4740).
+readonly TLS_CA_MARKER='#ca.crt'
+readonly TLS_CERTS_TEMPLATE='{{with index .data "tls.crt"}}{{base64decode .}}{{end}}{{"\n#ca.crt\n"}}{{with index .data "ca.crt"}}{{base64decode .}}{{end}}'
 # The openssl verify error codes of the time checks (X509_V_ERR_CERT_NOT_YET_VALID
 # and X509_V_ERR_CERT_HAS_EXPIRED). certificate_state reports the time of the
 # server certificate itself, in its own words.
@@ -522,7 +525,7 @@ certificate_state() {
 # check_console_certificate: the certificate that the console, the API and
 # the login show to the browser and to the meho CLI.
 check_console_certificate() {
-    local host chain ca state hint
+    local host certs chain ca state hint
     hint="the console needs a certificate for the host name of this install, valid for more than $CONSOLE_CERT_MIN_DAYS days. $SUPPORT_HINT"
     if ! command -v openssl >/dev/null 2>&1; then
         result console-certificate fail "openssl not found, so the certificate cannot be checked." \
@@ -535,12 +538,17 @@ check_console_certificate() {
             "$SUPPORT_HINT"
         return 0
     fi
-    if ! chain=$(rke2_kubectl -n "$MEHO_NAMESPACE" get secret "$CONSOLE_TLS_SECRET" \
-        -o go-template="$TLS_CHAIN_TEMPLATE" 2>/dev/null) || [[ -z $chain ]] ||
-        ! ca=$(rke2_kubectl -n "$MEHO_NAMESPACE" get secret "$CONSOLE_TLS_SECRET" \
-            -o go-template="$TLS_CA_TEMPLATE" 2>/dev/null); then
+    if ! certs=$(rke2_kubectl -n "$MEHO_NAMESPACE" get secret "$CONSOLE_TLS_SECRET" \
+        -o go-template="$TLS_CERTS_TEMPLATE" 2>/dev/null) || [[ $certs != *$'\n'"$TLS_CA_MARKER"* ]]; then
         result console-certificate fail "the Secret $CONSOLE_TLS_SECRET with the certificate cannot be read." \
             "check the node and pods lines first. Then $SUPPORT_HINT"
+        return 0
+    fi
+    chain=${certs%%$'\n'"$TLS_CA_MARKER"*}
+    ca=${certs#*$'\n'"$TLS_CA_MARKER"}
+    ca=${ca#$'\n'}
+    if [[ -z ${chain//[[:space:]]/} ]]; then
+        result console-certificate fail "the Secret $CONSOLE_TLS_SECRET has no tls.crt." "$hint"
         return 0
     fi
     state=$(certificate_state "$host" "$chain" "$ca" "$(date -u +%s)")

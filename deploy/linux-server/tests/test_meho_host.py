@@ -613,6 +613,21 @@ class ConsoleCertificateLineTests(CheckTestCase):
                     f"[FAIL] console-certificate: {problems}. {CERTIFICATE_FIX}\n", result.stdout
                 )
 
+    def test_one_kubectl_call_reads_both_certificates(self) -> None:
+        self.host.run("check")
+
+        calls = [line for line in self.host.calls().splitlines() if "meho-core-tls" in line]
+        self.assertEqual(1, len(calls), calls)
+        self.assertIn('{{"\\n#ca.crt\\n"}}{{with index .data "ca.crt"}}', calls[0])
+
+    def test_a_secret_without_tls_crt_is_red(self) -> None:
+        self.host.console_certificate("", console_certificate()[1])
+
+        self.assertEqual(
+            f"[FAIL] console-certificate: the Secret meho-core-tls has no tls.crt. {CERTIFICATE_FIX}",
+            self.line("console-certificate"),
+        )
+
     def test_a_secret_that_cannot_be_read_is_red(self) -> None:
         self.host.answer("console_tls_rc", "1")
 

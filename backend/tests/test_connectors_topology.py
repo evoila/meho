@@ -126,7 +126,9 @@ class _OverridingConnector(Connector):
             discovered_at=_NOW,
         )
 
-    async def list_candidates(self, seed_target: Any | None = None) -> list[CandidateHint]:
+    async def list_candidates(
+        self, seed_target: Any | None = None, operator: Any | None = None
+    ) -> list[CandidateHint]:
         return [
             CandidateHint(
                 name="cluster-2",

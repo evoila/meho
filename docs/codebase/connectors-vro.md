@@ -63,7 +63,9 @@ raise `NotImplementedError`.
 ## Key types
 
 - `VroConnector` (`connector.py`) -- the connector class. Caches one
-  `Authorization` value per target and tenant (`target_cache_key`).
+  `Authorization` value per credential, login mode, org and login domain
+  (`_login_cache_key`, built on `credential_cache_key`: tenant, secret and
+  login host).
 - `VroTargetLike`, `VroCredentialsLoader`, `login_mode`, `vcfa_org`
   (`session.py`) -- the target shape, the credential loader type, the
   login mode check and the VCF Automation org of the login user.
@@ -82,7 +84,7 @@ The login mode comes from the target's `extras["login"]`:
 
 - `vcfa-session`: the VCF 9 login. A VCF 9 Orchestrator signs people in
   through VCF Automation. The connector uses the shared VCF Automation
-  session login (`connectors/_shared/vcfa_session.py`, see
+  session login (`connectors/vmware_shared/vcfa_session.py`, see
   `connectors-vcf-auth-shared.md`): `POST /cloudapi/1.0.0/sessions` with
   HTTP Basic `<user>@<extras.org>` (for the provider org `System`:
   `/cloudapi/1.0.0/sessions/provider`). The token comes back in the
@@ -106,14 +108,19 @@ The login mode comes from the target's `extras["login"]`:
   names the allowed values.
 
 The `Authorization` value (for `vcfa-session` also the time the token
-ends) is cached per target and tenant. Only a caller
+ends) is cached per credential, login mode, org and login domain
+(`_login_cache_key`, built on `credential_cache_key`: tenant, secret and
+login host). The login domain is `extras["domain"]`, which the
+`automation` login sends. Two targets with the same secret, login host,
+mode, org and domain share one login. Only a caller
 with an operator JWT, other than the synthesised system operator, reads or
 fills the cache. Any other caller (a probe, a background job) runs the
 credential loader, which checks it: the Vault loader fails closed without
 a valid JWT. Its login is not kept, so a login a real operator primed is
 never served to a system caller. A `401` reaches the dispatcher, which
-calls `invalidate_session(target)` (drops only this target's value) and
-runs the call once more; the connector logs in again.
+calls `invalidate_session(target, rejected=...)` and runs the call once
+more. The cached value is dropped only when the failed request sent it,
+so a late `401` never drops a newer login another call just made.
 
 Every call sends `Accept: application/json`. The API answers XML when no
 `Accept` header is sent.
@@ -192,7 +199,7 @@ MEHO stores a long list behind a result handle; the agent reads it with
 - `connectors/_shared/vault_creds.py`: the operator-context credential read.
 - `connectors/_shared/vcf_auth.py`: `basic_auth_header`,
   `is_acceptable_auth_model`.
-- `connectors/_shared/vcfa_session.py`: the shared VCF Automation session
+- `connectors/vmware_shared/vcfa_session.py`: the shared VCF Automation session
   login (`vcfa-session`).
 - `connectors/vra8/_auth.py`: `vra8_login`, the Aria Automation login.
 - `operations/typed_register.py`: the typed-op registrar.

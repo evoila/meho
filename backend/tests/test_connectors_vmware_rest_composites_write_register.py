@@ -170,6 +170,8 @@ _READ_OP_IDS: tuple[str, ...] = (
     "vmware.composite.datastore.usage",
     # Datastore cache refresh read (#3789).
     "vmware.composite.datastore.refresh",
+    # Datastore file list read (#3432).
+    "vmware.composite.datastore.file.list",
     "vmware.composite.network.portgroup.audit",
     # VM CPU / memory limit + reservation read (#3880).
     "vmware.composite.vm.resource_allocation.show",
@@ -187,6 +189,8 @@ _READ_OP_IDS: tuple[str, ...] = (
     # Content-library SUBSCRIBED reads (#3495).
     "vmware.composite.content_library.subscribed.status",
     "vmware.composite.content_library.subscribed.items.list",
+    # Migration inventory read of one vCenter.
+    "vmware.migration.inventory",
 )
 
 # 2 caution + approval writes (#3495) -- the SUBSCRIBED content-library

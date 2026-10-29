@@ -4,6 +4,7 @@
 package audit
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -137,7 +138,7 @@ func TestRunTraceListSendsHasTraceAndFlags(t *testing.T) {
 	if !strings.HasPrefix(lines[0], "AUDIT ID") {
 		t.Errorf("header does not start with AUDIT ID: %q", lines[0])
 	}
-	for _, col := range []string{"TIME", "TARGET", "OP_ID", "STATUS"} {
+	for _, col := range []string{"TIME", "TENANT", "TARGET", "OP_ID", "STATUS"} {
 		if !strings.Contains(lines[0], col) {
 			t.Errorf("header missing %s: %q", col, lines[0])
 		}
@@ -158,6 +159,48 @@ func TestRunTraceListSendsHasTraceAndFlags(t *testing.T) {
 	}
 	if !strings.Contains(lines[3], "NEXT: --cursor=opaque-cursor-2") {
 		t.Errorf("missing NEXT line: %q", lines[3])
+	}
+}
+
+// TestPrintTraceListTableShowsTenant pins the TENANT column (#5238):
+// the tenant name when the backend sends one, else the tenant id,
+// else "-".
+func TestPrintTraceListTableShowsTenant(t *testing.T) {
+	name := "team-a"
+	row := func(id string, tname *string, tid string) api.AuditEntry {
+		e := api.AuditEntry{
+			Id:           mustUUID(t, id),
+			Ts:           mustTS(t, "2026-10-20T10:00:00Z"),
+			PrincipalSub: "op-1",
+			OpId:         "vmware.vm.list",
+			OpClass:      "read",
+			ResultStatus: "ok",
+			TenantName:   tname,
+		}
+		if tid != "" {
+			e.TenantId = mustUUIDPtr(t, tid)
+		}
+		return e
+	}
+	var buf bytes.Buffer
+	printTraceListTable(&buf, &api.AuditQueryResult{Rows: []api.AuditEntry{
+		row("00000000-0000-0000-0000-000000000001", &name, "22222222-2222-2222-2222-222222222222"),
+		row("00000000-0000-0000-0000-000000000002", nil, "22222222-2222-2222-2222-222222222222"),
+		row("00000000-0000-0000-0000-000000000003", nil, ""),
+	}})
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("want header + 3 rows; got %d lines:\n%s", len(lines), buf.String())
+	}
+	// "AUDIT ID" is two words, so the tenant column is the fourth field.
+	if got := strings.Fields(lines[0])[3]; got != "TENANT" {
+		t.Errorf("tenant header column %q; want TENANT", got)
+	}
+	// A UUID is 36 runes, so the 18-wide column cuts the id fallback.
+	for i, want := range []string{"team-a", "22222222-2222-222…", "-"} {
+		if got := strings.Fields(lines[i+1])[2]; got != want {
+			t.Errorf("row %d: tenant column %q; want %q", i, got, want)
+		}
 	}
 }
 

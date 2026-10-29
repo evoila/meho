@@ -6,7 +6,7 @@
 Broadcom does not publish the 8.8 and 9.0 API files of Site Recovery
 Manager and vSphere Replication as downloads; a running appliance serves
 them. This read fetches one file named in the connector's
-:attr:`~meho_backplane.connectors._shared.dr_rest.DrRestConnector.api_files`
+:attr:`~meho_backplane.connectors.vmware_shared.dr_rest.DrRestConnector.api_files`
 and returns its path, HTTP status, content type, size, SHA-256 and the
 server version and build, with the text in parts behind a result handle.
 Joining the parts in order gives the checked copy of the file, so the
@@ -52,7 +52,7 @@ from meho_backplane.connectors._shared.api_file_secrets import scrub_query_strin
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
-    from meho_backplane.connectors._shared.dr_rest import DrRestConnector, DrTargetLike
+    from meho_backplane.connectors.vmware_shared.dr_rest import DrRestConnector, DrTargetLike
 
 __all__ = ["ApiFileNameError", "dr_api_file_get"]
 

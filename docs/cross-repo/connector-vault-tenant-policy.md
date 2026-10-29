@@ -91,7 +91,7 @@ Notes:
   policies, only `meho-tenant-admin` grants `create` + `update` there.
   The person who calls the op and the person who approves it both need
   the grant
-  ([`connector-vault-policy.md`](./connector-vault-policy.md) §6.5).
+  ([`connector-vault-policy.md`](./connector-vault-policy.md) §6.6).
 
 ## 2. The three policy bodies
 

@@ -163,6 +163,20 @@ two tool descriptions therefore cross-reference the `kb` REST/CLI surface
 and note that entry deletion is REST/CLI-only (`DELETE /api/v1/kb/{slug}`
 or `meho kb delete` — there is no MCP delete tool).
 
+### No issue numbers or planning codes in model text
+
+A model reads every tool description, every schema field description and
+every operation-group text. It cannot open an issue link, and a code like
+`G0.18-T5` means nothing to it. So these texts hold no issue numbers
+(`#1234`), planning codes (`G11.2-T6`) or design-doc section marks
+(`§6`). Say the meaning in plain words instead. A change-ticket example
+such as `gh:org/repo#7` is fine: the `#` follows a word.
+`tests/test_model_text_no_internal_refs.py` checks every tool's
+`to_wire()` text and every group registered at start-up. It uses the
+same pattern (`_INTERNAL_REF`) that
+`backend/scripts/generate_reference_docs.py` uses to strip these codes
+from the public reference page.
+
 ### Proactive-trigger wording on the coordination levers (#3132)
 
 The three coordination levers — knowledge (`search_knowledge` /
@@ -188,6 +202,47 @@ is a behavioural regression, and the substring guards in
 `tests/test_mcp_tools_knowledge.py` / `test_mcp_tools_memory.py` pin
 the load-bearing pieces. The maturity prefix (#2675) and the kb
 REST/CLI cross-references (#2486) are unchanged by this wording pass.
+
+### Tool text size limit on the default list (#4112)
+
+Every session gets the default tool list before the user's question. The
+tool text (name, description and input schema) uses up the model's
+context window. A small open model often has a 32,768-token window, so
+this text must stay short.
+
+`tests/test_mcp_tool_text_budget.py` sets two limits. It measures a tool
+as its name plus description plus input schema as compact JSON, taken
+from `ToolDefinition.to_wire()`. Output schemas are not counted.
+
+- One tool: at most 6,000 characters.
+- The whole default list (26 tools, docs add-on on): at most 70,000
+  characters, about 17,500 tokens.
+
+When #4112 set the limits, the default list went from 96,804 to 66,092
+characters. The largest tool, `query_topology`, went from 16,302 to
+5,537.
+
+What a description keeps:
+
+- what the tool is for, and when to call it (the proactive-trigger
+  sentences above stay);
+- its arguments, and which are required for which option, because the
+  wire schema drops top-level `allOf` / `anyOf`;
+- the one or two rules that stop wrong calls.
+
+What moved out:
+
+- Return shapes. Tools with an output schema already describe them there.
+- Help that matters only after a certain answer. Example: the
+  `query_topology` closure answer with `status: "node_untracked"` now
+  carries a `detail` text that says the answer is not "safe to delete"
+  and how to add the missing data. The description keeps only the
+  short rule.
+- Background and history (issue numbers, internal table names, server
+  internals). These stay in this file and in the code comments.
+
+If the test fails, shorten the text first. Raise a limit only with a
+reason in the pull request.
 
 ### Runbook family canonicalisation (#1612)
 
@@ -525,6 +580,41 @@ each connector: a connector of another tenant is never named, and a
 built-in op hidden by the tenant's own connector row is not named
 either. The extra lookups run only on this error path
 (`operations/_op_miss.py`). Tests: `tests/test_operations_op_miss.py`.
+
+### Close ids for an unknown connector (#4136)
+
+Every unknown-connector error names up to 5 close connector ids, so a
+model that guessed a near-miss id (`vmware-rest`, `linux-ssh-1.0`) can
+fix its call at once. It does not have to read the whole
+`meho_connector_list` first.
+
+- **Which ids.** `close_connector_ids` in `operations/_lookup.py`. An id
+  is close when it starts with the given text, or has a close spelling
+  (`difflib`, ratio 0.6 or more). Case is ignored. The closest come first.
+- **Who sees what.** Only built-in connectors and the caller's own
+  tenant, the same rule as `connector_exists`. A connector of another
+  tenant is never named. A built-in connector class with no operation
+  rows yet is named too: a hand-coded class, or the profiled class that
+  startup stamps for a catalog row shipped with a profile (for example
+  `mehoauto-rest-0.1.0` before its first ingest). The class that ingest
+  registers (an auto-shim, or a profiled class for a row the catalog
+  ships no profile for) is not read from the registry: a tenant-scoped
+  ingest registers one as well, so that connector counts only through
+  its rows, which the tenant rule filters.
+- **Where.** The message says "Did you mean: vmware-rest-9.0,
+  vmware-rest-8.0?". With no close id it says "Call `meho_connector_list`
+  to see the ids." The ids are also in `data.did_you_mean` (the `-32602`
+  of `list_operation_groups`, `search_operations` and `list_targets`) and
+  in `extras.did_you_mean` (the `unknown_connector` result of
+  `call_operation` and `preview_operation`).
+- **`list_targets`.** When the `connector_id` filter finds no target and
+  no connector the caller can see has that product
+  (`connector_product_known`, same visibility rule as above), the answer
+  is the same unknown-connector `-32602`, not an empty list. A known
+  product with no targets still returns an empty list.
+
+The lookups run only on the error path. Tests:
+`tests/test_unknown_connector_did_you_mean.py`.
 
 ### `search_operations` exact-op mode, and slim hits (#3668)
 
@@ -991,8 +1081,9 @@ Five synthetic connectors follow this mould (natural key
 | `secret-broker-1.x` | `secret.move` | (dispatch-only) | #1577 |
 | `topology-graph-1.x` | `topology.create_node` / `.annotate` / … | `meho_topology_create_node` / `_annotate` / … | #2537 |
 | `targets-registry-1.x` | `targets.register` | `meho_targets_register` | #2861 |
+| `targets-registry-1.x` | `targets.remove` | (dispatch-only; `dangerous` + `requires_approval`, a second person approves) | #4623 |
 | `audit-integrity-1.x` | `audit.loose_rows` | (dispatch-only; a `safe` read a Sensor pins) | #4670 |
-| `migration-assess-1.x` | `migration.inventory.csv` | (dispatch-only; a `safe` read of stored inventories) | #5099 |
+| `migration-assess-1.x` | `migration.inventory.csv` | (dispatch-only; a `safe` read of stored or inline inventories) | #5099 |
 
 `meho_targets_register` (#2861,
 `mcp/tools/targets_register.py` + `connectors/targets/`) closes the last
@@ -1012,6 +1103,18 @@ host, tenant_id}` payload and the `awaiting_approval` envelope conform
 model's `ValidationError` to `ValueError` at its boundary so the
 dispatcher's `connector_error` maps them to `-32602` with a clean
 message.
+
+`targets.remove` (#4623) is the opposite write and does not follow the
+`caution` dial above. Like `DELETE /api/v1/targets/{name}`, it needs the
+`tenant_admin` role; after approval, the approver's role counts. It is
+`dangerous` with `requires_approval=True`, and
+its name ends in `.remove`, so the rules for deletes apply: a person's call
+waits until a second person approves it, an agent login is refused, a
+service principal waits for a person and cannot get a standing grant for
+it, and only in sandbox mode can a delete grant made in the web console let
+a service principal run it at once. It is reached through
+`call_operation` only; there is no `meho_*` tool for it. See
+[`targets.md`](targets.md#removing-a-target-targetsremove).
 
 ## Audit URI redaction for query-bearing resources
 
@@ -1107,6 +1210,26 @@ The transport cap is deliberately sized with headroom above the
 largest legitimate tool payload (64 KiB body + envelope + JSON
 escaping) so the schema-level caps, not the transport, are the
 operative limit for well-formed calls.
+
+## Extra arguments on read tools with no arguments (#4137)
+
+Small models often send arguments to a tool that takes none, for
+example `meho_status` with `{"input": {}}` or `{"": ""}`. The schema
+(`properties: {}`, `additionalProperties: false`) used to refuse each
+call with `-32602`, and the model had to try again.
+
+`handle_tools_call` (`mcp/handlers.py`) now replaces the arguments with
+`{}` just before the `inputSchema` check when both are true:
+
+* the tool is a read tool (`op_class == "read"`), and
+* its `inputSchema` has no `properties`.
+
+Today this covers `meho_status`, `meho_automation_list`, and
+`meho_agents_list`. Tools that take arguments, and every write tool,
+still refuse an unknown argument with `-32602`: a wrong argument name
+there can mean a wrong answer. The tool schemas, the REST API, and the
+CLI are not changed. The audit row's `params_hash` is still computed
+over the arguments the client sent.
 
 ## Dependencies
 

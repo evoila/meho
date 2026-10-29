@@ -295,13 +295,18 @@ class NsxConnector(HttpConnector):
     # the service-account credentials are re-read from Vault via
     # ``_session_loader`` on every establish, so a restage already converges on
     # the next cold-session dispatch with no credential cache to evict.
-    async def invalidate_session(self, target: NsxTargetLike) -> None:
+    async def invalidate_session(
+        self, target: NsxTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Public duck-typed session-eviction hook for the dispatch path.
 
         The seam the generic dispatch path calls on an auth-class status
         (NSX's 401) before re-dispatching once (G0.29-T2 #2067) -- the path
         the typed read ops (#2302) traverse. Delegates to
         :meth:`_invalidate_session`, mirroring the vmware-rest / vcf-logs seam.
+
+        The session is per target, so *rejected* (the request that got the
+        ``401``) is not needed and not read.
         """
         await self._invalidate_session(target)
 

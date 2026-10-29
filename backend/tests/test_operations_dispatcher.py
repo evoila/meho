@@ -1230,6 +1230,149 @@ async def test_no_connector_error_names_target_product_not_connector_id(
 
 
 # ---------------------------------------------------------------------------
+# #4139: an op that needs a target and got none says so in one clear line
+# ---------------------------------------------------------------------------
+
+_TARGET_REQUIRED_TEXT = (
+    "target_required: this operation needs a target; call list_targets and pass a target name"
+)
+
+
+async def _add_ghost_ingested_op(
+    session: AsyncSession,
+    embedding: Any,
+    *,
+    op_id: str = "GET:/api/test",
+    safety_level: str = "safe",
+    requires_approval: bool = False,
+) -> None:
+    """Insert one ``ghost-1.0`` ingested descriptor (no connector registered)."""
+    session.add(
+        EndpointDescriptor(
+            id=uuid.uuid4(),
+            tenant_id=None,
+            product="ghost",
+            version="1.0",
+            impl_id="ghost",
+            op_id=op_id,
+            source_kind="ingested",
+            method="GET",
+            path="/api/test",
+            handler_ref=None,
+            summary="Ghost",
+            description="Ghost endpoint.",
+            tags=[],
+            parameter_schema={},
+            response_schema=None,
+            llm_instructions=None,
+            safety_level=safety_level,
+            requires_approval=requires_approval,
+            is_enabled=True,
+            embedding=embedding,
+            custom_description=None,
+            custom_notes=None,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+    )
+    await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_and_preview_ingested_op_without_target_return_target_required(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """An ingested op with ``target=None`` is a missing target, not a connector miss."""
+    await _add_ghost_ingested_op(session, stub_embedding_service.encode_one.return_value)
+    operator = _make_operator()
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="ghost-1.0",
+        op_id="GET:/api/test",
+        target=None,
+        params={},
+    )
+    assert result.status == "error"
+    assert result.error == _TARGET_REQUIRED_TEXT
+    assert result.extras["error_code"] == "target_required"
+    assert result.extras["op_id"] == "GET:/api/test"
+
+    preview = await preview_dispatch(
+        operator=operator,
+        connector_id="ghost-1.0",
+        op_id="GET:/api/test",
+        target=None,
+        params={},
+    )
+    assert preview["status"] == "error"
+    assert preview["error"] == _TARGET_REQUIRED_TEXT
+    assert preview["extras"]["error_code"] == "target_required"
+    assert preview["extras"]["op_id"] == "GET:/api/test"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_missing_target_is_checked_before_the_policy_gate(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """A destructive op without a target fails at once: no approval wait, no audit row."""
+    await _add_ghost_ingested_op(
+        session,
+        stub_embedding_service.encode_one.return_value,
+        op_id="DELETE:/api/test",
+        safety_level="destructive",
+        requires_approval=True,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.AGENT),
+        connector_id="ghost-1.0",
+        op_id="DELETE:/api/test",
+        target=None,
+        params={},
+    )
+    assert result.status == "error"
+    assert result.extras["error_code"] == "target_required"
+    rows = await session.scalar(
+        select(func.count()).select_from(AuditLog).where(AuditLog.path == "DELETE:/api/test")
+    )
+    assert rows == 0
+
+
+@pytest.mark.asyncio
+async def test_dispatch_and_preview_target_without_product_keep_no_connector(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """A real target that has no product still gets today's ``no_connector`` answer."""
+    await _add_ghost_ingested_op(session, stub_embedding_service.encode_one.return_value)
+    operator = _make_operator()
+    target = _FakeTarget(product="")
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="ghost-1.0",
+        op_id="GET:/api/test",
+        target=target,
+        params={},
+    )
+    assert result.extras["error_code"] == "no_connector"
+    assert "target has no product slug" in result.extras["exception_message"]
+
+    preview = await preview_dispatch(
+        operator=operator,
+        connector_id="ghost-1.0",
+        op_id="GET:/api/test",
+        target=target,
+        params={},
+    )
+    assert preview["extras"]["error_code"] == "no_connector"
+    assert "target has no product slug" in preview["error"]
+
+
+# ---------------------------------------------------------------------------
 # G0.14-T1 (#1142): typed/composite resolver miss must surface
 # no_connector (matching the ingested branch), and the resolver's
 # AmbiguousConnectorResolution must surface ambiguous_connector on
@@ -2410,6 +2553,74 @@ async def test_vmware_sibling_fallback_destructive_preview_hash_binds_the_siblin
         approvals = (await fresh.execute(select(ApprovalRequest))).scalars().all()
     assert [a.connector_id for a in approvals] == ["vmware-rest-8.0"]
     assert [a.preview_hash for a in approvals] == [preview["preview_hash"]]
+
+
+@pytest.mark.asyncio
+async def test_vmware_preview_reports_the_same_target_refusal_as_the_call(
+    session: AsyncSession,
+) -> None:
+    """With no sibling to run on, the preview is refused like the call (#4984).
+
+    The preview answers ``unqualified_target_version`` with the same reason,
+    target product and target version as the call, gives no preview hash and
+    writes no audit row. Only the call writes one.
+    """
+    _register_vmware_sibling_catalogs()
+    # A write that waits for a second person's approval, like the case in #4984.
+    await _add_vmware_guard_descriptor(session, version="9.0")
+    target = _FakeTarget(product="vmware", version="8.0.3")
+
+    preview = await preview_dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=target,
+        params={},
+    )
+
+    assert preview["status"] == "error", preview
+    assert preview["connector_id"] == "vmware-rest-9.0"
+    assert "preview_hash" not in preview
+    assert "policy_verdict" not in preview
+    assert await _audit_rows_for_guard_op() == []
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=target,
+        params={},
+    )
+
+    assert result.extras["error_code"] == "unqualified_target_version"
+    assert preview["error"] == result.error
+    assert preview["extras"] == result.extras
+    assert _RecordingVmwareTransport.sent == []
+    assert len(await _audit_rows_for_guard_op()) == 1
+
+
+@pytest.mark.asyncio
+async def test_vmware_preview_on_sibling_catalog_is_ok_and_writes_no_audit_row(
+    session: AsyncSession,
+) -> None:
+    """When a sibling serves the target, the preview is ok on the sibling (#3600)."""
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="8.0")
+
+    preview = await preview_dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="8.0.3"),
+        params={},
+    )
+
+    assert preview["status"] == "ok", preview
+    assert preview["connector_id"] == "vmware-rest-8.0"
+    assert preview["preview_hash"]
+    assert _RecordingVmwareTransport.sent == []
+    assert await _audit_rows_for_guard_op() == []
 
 
 class _VmwareTasksList80Connector(VmwareRest80Connector):

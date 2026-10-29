@@ -88,9 +88,109 @@ AKS_API_VERSION: Final[str] = "2026-08-01"
 
 # ---- arc (Task #5084) ----
 
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.HybridCompute/machines``:
+#: the Azure Arc machines of one subscription (Machines - List By Subscription).
+ARC_MACHINES_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.HybridCompute/machines"
+)
+
+#: ``GET .../resourceGroups/{resourceGroupName}/providers/Microsoft.HybridCompute/
+#: machines/{machineName}``: one Azure Arc machine (Machines - Get).
+ARC_MACHINE_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    + "/providers/Microsoft.HybridCompute/machines/{name}"
+)
+
+#: ``POST .../Microsoft.HybridCompute/machines/{name}/assessPatches``: check one
+#: Arc machine for missing updates (Machines - Assess Patches). Long-running.
+ARC_ASSESS_PATCHES_PATH: Final[str] = ARC_MACHINE_PATH + "/assessPatches"
+
+#: The API version of the Azure Arc calls (Microsoft.HybridCompute).
+ARC_API_VERSION: Final[str] = "2026-09-01"
+
+#: ``POST .../Microsoft.Compute/virtualMachines/{vmName}/assessPatches``: check
+#: one Azure VM for missing updates (Virtual Machines - Assess Patches).
+#: Long-running.
+VM_ASSESS_PATCHES_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    + "/providers/Microsoft.Compute/virtualMachines/{name}/assessPatches"
+)
+
+#: The API version of the VM patch assessment (Microsoft.Compute).
+VM_ASSESS_API_VERSION: Final[str] = "2026-04-01"
+
 # ---- automation (Task #5092) ----
+#
+# Azure Automation (Microsoft.Automation). MEHO reads only these lists: the
+# Automation accounts, and per account its runbooks, jobs, schedules and job
+# schedules (the links between a schedule and its runbooks). Paths that
+# return runbook code, job output or streams, credentials or variables are
+# never added here, because they can hold secrets; a test fails when one is.
+
+#: The API version of the Azure Automation reads (Microsoft.Automation).
+AUTOMATION_API_VERSION: Final[str] = "2024-10-23"
+
+_AUTOMATION_ACCOUNT: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.Automation/automationAccounts/{account}"
+)
+
+#: ``GET``: every Automation account of the subscription (AutomationAccount_List).
+AUTOMATION_ACCOUNTS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Automation/automationAccounts"
+)
+
+#: ``GET``: the runbooks of one account (Runbook_ListByAutomationAccount).
+AUTOMATION_RUNBOOKS_PATH: Final[str] = f"{_AUTOMATION_ACCOUNT}/runbooks"
+
+#: ``GET``: the jobs of one account, narrowed with ``$filter``
+#: (Job_ListByAutomationAccount).
+AUTOMATION_JOBS_PATH: Final[str] = f"{_AUTOMATION_ACCOUNT}/jobs"
+
+#: ``GET``: the schedules of one account (Schedule_ListByAutomationAccount).
+AUTOMATION_SCHEDULES_PATH: Final[str] = f"{_AUTOMATION_ACCOUNT}/schedules"
+
+#: ``GET``: the job schedules of one account, which link a schedule to a
+#: runbook (JobSchedule_ListByAutomationAccount).
+AUTOMATION_JOB_SCHEDULES_PATH: Final[str] = f"{_AUTOMATION_ACCOUNT}/jobSchedules"
 
 # ---- avs (Task #5091) ----
+#
+# Azure VMware Solution: private clouds, their clusters and hosts, and the host
+# quota in a region. Reads only. MEHO never calls the actions that return the
+# vCenter and NSX passwords (listAdminCredentials) or license keys.
+
+#: The API version of the Azure VMware Solution reads (Microsoft.AVS).
+AVS_API_VERSION: Final[str] = "2026-03-01"
+
+#: ``GET .../providers/Microsoft.AVS/privateClouds``: every Azure VMware
+#: Solution private cloud of the subscription (Private Clouds - List In
+#: Subscription).
+AVS_PRIVATE_CLOUDS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.AVS/privateClouds"
+)
+
+#: ``GET .../privateClouds/{privateCloudName}/clusters``: the clusters of one
+#: private cloud, without the management cluster (Clusters - List).
+AVS_CLUSTERS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.AVS/privateClouds/{private_cloud}/clusters"
+)
+
+#: ``GET .../clusters/{clusterName}/hosts``: the hosts of one cluster of a
+#: private cloud (Hosts - List).
+AVS_HOSTS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.AVS/privateClouds/{private_cloud}/clusters/{cluster}/hosts"
+)
+
+#: ``POST .../providers/Microsoft.AVS/locations/{location}/checkQuotaAvailability``:
+#: the host quota of the subscription in one region (Locations - Check Quota
+#: Availability). A read, even though it is a POST.
+AVS_QUOTA_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.AVS/locations/{location}"
+    "/checkQuotaAvailability"
+)
 
 # ---- compute (Task #5083) ----
 #
@@ -246,6 +346,64 @@ LOCKS_PATH: Final[str] = "/subscriptions/{subscription_id}/providers/Microsoft.A
 LOCKS_API_VERSION: Final[str] = "2020-05-01"
 
 # ---- migrate (Task #5093) ----
+#
+# Azure Migrate has two providers. Microsoft.Migrate holds the assessment
+# projects, their machines, groups, assessments and assessed machines.
+# Microsoft.OffAzure holds the discovery sites: the places where the Azure
+# Migrate appliance (VMware, Hyper-V, physical servers) or a CSV import put the
+# machines it found. Each provider has its own API version.
+
+#: The API version of the assessment project reads (Microsoft.Migrate).
+MIGRATE_API_VERSION: Final[str] = "2024-01-15"
+
+#: The API version of the discovery site reads (Microsoft.OffAzure).
+OFFAZURE_API_VERSION: Final[str] = "2023-06-06"
+
+_MIGRATE_PROJECT: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.Migrate/assessmentProjects/{project}"
+)
+
+_OFFAZURE: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OffAzure"
+)
+
+#: ``GET``: every assessment project of the subscription
+#: (AssessmentProjectsOperations_ListBySubscription).
+MIGRATE_PROJECTS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Migrate/assessmentProjects"
+)
+
+#: ``GET``: the machines one assessment project knows (MachinesOperations_ListByAssessmentProject).
+MIGRATE_MACHINES_PATH: Final[str] = f"{_MIGRATE_PROJECT}/machines"
+
+#: ``GET``: the groups of one assessment project (GroupsOperations_ListByAssessmentProject).
+MIGRATE_GROUPS_PATH: Final[str] = f"{_MIGRATE_PROJECT}/groups"
+
+#: ``GET``: the assessments of one group (AssessmentsOperations_ListByGroup).
+MIGRATE_ASSESSMENTS_PATH: Final[str] = f"{_MIGRATE_PROJECT}/groups/{{group}}/assessments"
+
+#: ``GET``: one assessment (AssessmentsOperations_Get).
+MIGRATE_ASSESSMENT_PATH: Final[str] = f"{MIGRATE_ASSESSMENTS_PATH}/{{assessment}}"
+
+#: ``GET``: the assessed machines of one assessment
+#: (AssessedMachinesOperations_ListByAssessment).
+MIGRATE_ASSESSED_MACHINES_PATH: Final[str] = f"{MIGRATE_ASSESSMENT_PATH}/assessedMachines"
+
+#: ``GET``: the VMware sites of a resource group (appliance discovery).
+OFFAZURE_VMWARE_SITES_PATH: Final[str] = f"{_OFFAZURE}/vmwareSites"
+
+#: ``GET``: the Hyper-V sites of a resource group (appliance discovery).
+OFFAZURE_HYPERV_SITES_PATH: Final[str] = f"{_OFFAZURE}/hypervSites"
+
+#: ``GET``: the physical server sites of a resource group (appliance discovery).
+OFFAZURE_SERVER_SITES_PATH: Final[str] = f"{_OFFAZURE}/serverSites"
+
+#: ``GET``: the import sites of a resource group (machines from a CSV import).
+OFFAZURE_IMPORT_SITES_PATH: Final[str] = f"{_OFFAZURE}/importSites"
+
+#: ``GET``: the master sites of a resource group (a master site links the other sites).
+OFFAZURE_MASTER_SITES_PATH: Final[str] = f"{_OFFAZURE}/masterSites"
 
 # ---- monitor (Task #5090) ----
 
@@ -352,6 +510,44 @@ ACTIVITY_LOG_PATH: Final[str] = (
 ACTIVITY_LOG_API_VERSION: Final[str] = "2015-04-01"
 
 # ---- storage (Task #5086) ----
+#
+# Two hosts. The account and container lists go to Resource Manager, like
+# every path above. The blob paths (``BLOB_LIST_PATH`` and ``BLOB_PATH``) are
+# data-plane paths: they go to the storage account's own blob host,
+# ``https://<account>.blob.core.windows.net``, which takes a token for Azure
+# Storage and answers in XML. A data-plane path takes the Blob service
+# version in the ``x-ms-version`` header, not as ``api-version``.
+
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.Storage/storageAccounts``:
+#: the storage accounts of one subscription (Storage Accounts - List).
+STORAGE_ACCOUNTS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Storage/storageAccounts"
+)
+
+#: ``GET .../storageAccounts/{accountName}/blobServices/default/containers``:
+#: the containers of one storage account, read on Resource Manager (Blob
+#: Containers - List). The Reader role is enough.
+BLOB_CONTAINERS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/"
+    "Microsoft.Storage/storageAccounts/{account}/blobServices/default/containers"
+)
+
+#: The API version of the storage reads on Resource Manager (Microsoft.Storage).
+STORAGE_API_VERSION: Final[str] = "2026-09-01"
+
+#: ``GET /{containerName}?restype=container&comp=list`` on the account's blob
+#: host: the files (blobs) of one container (List Blobs). The query part is
+#: fixed; MEHO sends it with the other query values.
+BLOB_LIST_PATH: Final[str] = "/{container}?restype=container&comp=list"
+
+#: ``/{containerName}/{blob}`` on the account's blob host: ``HEAD`` reads one
+#: file's properties (Get Blob Properties), ``GET`` its bytes (Get Blob).
+BLOB_PATH: Final[str] = "/{container}/{blob}"
+
+#: The Blob service version of the data-plane calls, sent as ``x-ms-version``.
+#: The pinned spec files also have 2026-12-06, a date after this code was
+#: written; the lab proof checks which version the lab account accepts.
+BLOB_API_VERSION: Final[str] = "2026-10-06"
 
 
 def subscription_path(subscription_id: str) -> str:

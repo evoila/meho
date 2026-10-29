@@ -228,6 +228,30 @@ async def test_vcfa_session_logs_in_again_after_a_401(connector: VroConnector) -
 
 
 @pytest.mark.asyncio
+async def test_targets_share_a_login_only_when_the_org_is_the_same(
+    connector: VroConnector,
+) -> None:
+    """One secret and one host: the same org shares one login, another org logs in alone."""
+    token_a = make_token({"exp": time.time() + 3600, "n": 1})
+    token_b = make_token({"exp": time.time() + 3600, "n": 2})
+    first, second = _Target(org="org-a"), _Target(org="org-a")
+    other = _Target(org="org-b")
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        login = mock.post(_ORG_LOGIN)
+        login.side_effect = [_session_answer(token_a), _session_answer(token_b)]
+        about = mock.get(_ABOUT).respond(200, json=_ABOUT_PAYLOAD)
+        for target in (first, second, other):
+            assert (await _dispatch("vro.about", target=target)).status == "ok"
+
+    assert login.call_count == 2
+    assert [call.request.headers["authorization"] for call in about.calls] == [
+        f"Bearer {token_a}",
+        f"Bearer {token_a}",
+        f"Bearer {token_b}",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_wrong_password_gives_connector_auth_failed_with_the_fix(
     connector: VroConnector,
 ) -> None:

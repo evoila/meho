@@ -28,11 +28,15 @@ dispatcher binds it only to a connector of that class. So ``srm.about``
 cannot run on a ``vr`` target, and ``vr.about`` cannot run on an ``srm``
 target: the dispatcher stops before any HTTP request.
 
-Sessions are cached per target and tenant (``target_cache_key``), so two
-targets on one address (a 9.1 appliance registered once as ``srm`` and
-once as ``vr``) never share a session. On ``401`` from a later call the
-dispatcher calls :meth:`DrRestConnector.invalidate_session`, which drops
-only this target's session, and dispatches once more.
+Sessions are cached per credential (``credential_cache_key``: tenant,
+secret and login host), so two targets of one product that share a
+credential share one session. Each product has its own connector and its
+own cache, so a 9.1 appliance registered once as ``srm`` and once as ``vr``
+still keeps two sessions. On ``401`` from a later call the dispatcher calls
+:meth:`DrRestConnector.invalidate_session` with the rejected request. It
+drops the shared session only when the rejected request sent it, so a late
+``401`` never drops a session another call has just logged in for. Then the
+dispatcher runs the call once more.
 """
 
 from __future__ import annotations
@@ -47,7 +51,8 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key
+from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
 from meho_backplane.connectors._shared.vcf_auth import (
@@ -103,10 +108,10 @@ class DrTargetLike(Protocol):
     """Minimum target shape :class:`DrRestConnector` reads.
 
     The concrete ``Target`` model satisfies this Protocol unchanged.
-    ``id`` / ``tenant_id`` form the tenant-unique session cache key, so two
-    targets that share one address never share a session. ``secret_ref``
-    is the Vault path the loader resolves; ``port`` is optional (the
-    appliance listens on 443).
+    ``tenant_id``, ``secret_ref``, ``host`` and ``port`` form the session
+    cache key (``credential_cache_key``). ``secret_ref`` is the Vault path
+    the loader resolves; ``port`` is optional (the appliance listens on
+    443).
     """
 
     id: object
@@ -200,7 +205,7 @@ class DrRestConnector(HttpConnector):
 
     def __init__(self, *, session_loader: DrSessionLoader | None = None) -> None:
         super().__init__()
-        self._session_ids: dict[tuple[str, str], str] = {}
+        self._session_ids: dict[tuple[str, ...], str] = {}
         self._session_lock = asyncio.Lock()
         self._session_loader: DrSessionLoader = (
             session_loader if session_loader is not None else load_basic_credentials
@@ -229,7 +234,7 @@ class DrRestConnector(HttpConnector):
 
     async def _session_id(self, target: DrTargetLike, operator: Operator) -> str:
         """Return the cached session id for *target*, logging in on first use."""
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target)
         async with self._session_lock:
             cached = self._session_ids.get(cache_key)
             if cached is not None:
@@ -287,22 +292,31 @@ class DrRestConnector(HttpConnector):
             )
         return session_id
 
-    async def invalidate_session(self, target: DrTargetLike) -> None:
-        """Drop the cached session for *target* only (the dispatcher's 401 hook).
+    async def invalidate_session(
+        self, target: DrTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
+        """Drop the cached session of *target*'s credential (the dispatcher's 401 hook).
 
-        The next :meth:`auth_headers` call logs in again. Credentials are
-        not cached: every login reads them through the loader.
+        With *rejected*, the session is dropped only when that request sent
+        it; a newer session stays. The next :meth:`auth_headers` call logs
+        in again when the session was dropped. Credentials are not cached:
+        every login reads them through the loader.
         """
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target)
         async with self._session_lock:
-            self._session_ids.pop(cache_key, None)
+            drop_rejected_token(
+                self._session_ids,
+                cache_key,
+                rejected,
+                lambda session_id: {SESSION_HEADER: session_id},
+            )
 
     async def server_version(self, target: DrTargetLike, operator: Operator) -> DrServerVersion:
         """Read the server version and build. Never raises: a failure is named in ``error``.
 
         One ``GET`` of :attr:`info_path` with no retry, so a failed version
         read never costs the caller its own answer for long. A ``401``
-        drops this target's cached session, so the next call logs in again.
+        drops the cached session, so the next call logs in again.
         """
         try:
             headers = await self.auth_headers(target, operator)
@@ -323,7 +337,7 @@ class DrRestConnector(HttpConnector):
             span, method="GET", request_headers=headers, response=resp
         )
         if resp.status_code == httpx.codes.UNAUTHORIZED:
-            await self.invalidate_session(target)
+            await self.invalidate_session(target, rejected=resp.request)
         try:
             resp.raise_for_status()
             payload = resp.json()

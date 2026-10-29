@@ -1847,25 +1847,27 @@ async def test_canary_llm_call_count_matches_documented_contract(
 
     Single-spec mode: ``1 + ceil(vcenter_ops / batch_size)`` =
     ``1 + 26 = 27`` calls (1 Pass-1, 26 Pass-2 batches over ~1,275 ops
-    at ``batch_size=50``).
+    at ``batch_size=50``), plus one "extend" Pass-1 for the ops the
+    stub left unassigned (#4972). The stub's static taxonomy only
+    repeats existing keys, so every extend proposal is dropped, no
+    extra Pass-2 batch runs, and the extend rounds stop after one.
 
-    Two-spec mode: the vcenter ingest issues Pass-1 (exactly once)
-    plus ~26 Pass-2 batches; the vi-json ingest sees existing groups
-    so it takes the partial-regrouping path: ~44 Pass-2 batches
-    (~2,195 ops at ``batch_size=50``), then one "extend" Pass-1 for the
-    ops the stub left unassigned (#3713). The stub's static taxonomy
-    only repeats existing keys, so every proposal is dropped and no
-    extra Pass-2 batch runs. Aggregate ``2 + ~26 + ~44 = ~72`` calls.
+    Two-spec mode: the vcenter ingest issues the same calls; the
+    vi-json ingest sees existing groups so it takes the
+    partial-regrouping path: ~44 Pass-2 batches (~2,195 ops at
+    ``batch_size=50``), then one "extend" Pass-1 for its leftover ops
+    (#3713). Aggregate ``3 + ~26 + ~44 = ~73`` calls.
 
     Bounds are wide enough to survive vendor spec churn.
     """
     stub_client = ingested_canary.stub_client
     call_count = len(stub_client.calls)
-    # The first ingest's grouping phase runs one full Pass-1. In
-    # two-spec mode the vi-json ingest takes the partial-regrouping
-    # branch and adds one "extend" Pass-1 for its leftover ops (#3713).
+    # The first ingest's grouping phase runs one full Pass-1, then one
+    # "extend" Pass-1 for its leftover ops (#4972). In two-spec mode the
+    # vi-json ingest takes the partial-regrouping branch and adds one
+    # more "extend" Pass-1 for its leftover ops (#3713).
     propose_calls = [c for c in stub_client.calls if c["phase"] == "propose"]
-    expected_propose = 2 if ingested_canary.two_spec_mode else 1
+    expected_propose = 3 if ingested_canary.two_spec_mode else 2
     assert len(propose_calls) == expected_propose, (
         f"expected exactly {expected_propose} Pass-1 call(s); got {len(propose_calls)}"
     )

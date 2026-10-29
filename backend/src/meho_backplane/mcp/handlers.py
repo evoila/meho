@@ -491,6 +491,13 @@ async def handle_tools_call(
                     },
                 )
 
+        # A read tool that takes no arguments ignores any it is sent
+        # (#4137): small models often add junk keys, and a refused call
+        # only costs a retry. Tools with arguments and write tools keep
+        # the strict check. ``params_hash`` above still covers what was sent.
+        if defn.op_class == "read" and not defn.inputSchema.get("properties"):
+            arguments = {}
+
         # Read tools treat an empty optional text argument as "not given"
         # (#4110): small models fill unused filters with "", and a filter
         # on "" silently matches nothing. Required fields keep the check.

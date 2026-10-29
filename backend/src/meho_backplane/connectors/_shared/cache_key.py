@@ -104,6 +104,18 @@ def target_cache_key(target: TenantScopedTargetLike) -> tuple[str, str]:
     return (str(target.tenant_id), str(target.id))
 
 
+def _login_host(raw: object) -> str:
+    """Return *raw* host with the host name case-folded and any path kept as is.
+
+    A target ``host`` may carry a service path (``appliance/Fleet-LCM``). The
+    HTTP adapter puts that path in the base URL unchanged, so two targets
+    whose paths differ only in case reach different login paths. Host names
+    are case-insensitive, paths are not.
+    """
+    name, slash, path = str(raw or "").strip().partition("/")
+    return name.lower() + slash + path
+
+
 def credential_cache_key(
     target: TenantScopedTargetLike, *login_inputs: Any, secret_ref: str | None = None
 ) -> tuple[str, ...]:
@@ -119,7 +131,10 @@ def credential_cache_key(
       HTTP adapter builds it: the scheme comes from :func:`effective_scheme`
       and an unset port is the scheme's default port. So a target with no
       port and a target with the explicit default port share one key, and an
-      HTTP target never shares a key (or a token) with an HTTPS target.
+      HTTP target never shares a key (or a token) with an HTTPS target. Only
+      the host name is case-folded; a service path carried on ``host`` keeps
+      its case, because the adapter sends it as is and paths are
+      case-sensitive.
     * ``fqdn`` is part of the address because some connectors send it as the
       ``Host`` header, and the appliance picks the organisation from it.
     * *login_inputs* are the other target values the connector's login reads
@@ -137,7 +152,7 @@ def credential_cache_key(
     if not secret_ref:
         return target_cache_key(target)
     scheme = effective_scheme(target)
-    host = str(getattr(target, "host", None) or "").strip().lower()
+    host = _login_host(getattr(target, "host", None))
     port = getattr(target, "port", None) or DEFAULT_PORTS[scheme]
     fqdn = str(getattr(target, "fqdn", None) or "").strip().lower()
     return (

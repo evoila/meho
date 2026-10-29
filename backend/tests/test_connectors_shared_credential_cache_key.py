@@ -56,6 +56,16 @@ def test_host_case_and_spaces_do_not_split_the_key() -> None:
     assert credential_cache_key(first) == credential_cache_key(second)
 
 
+def test_a_service_path_on_the_host_keeps_its_case() -> None:
+    """The adapter sends the path as is, so paths that differ in case are different logins."""
+    upper = _target(host="Appliance.Test.Invalid/Org-A")
+    lower_name = _target(host="appliance.test.invalid/Org-A")
+    lower_path = _target(host="appliance.test.invalid/org-a")
+    assert credential_cache_key(upper) == credential_cache_key(lower_name)
+    assert credential_cache_key(upper) != credential_cache_key(lower_path)
+    assert credential_cache_key(upper)[3] == "appliance.test.invalid/Org-A"
+
+
 def test_a_different_credential_gives_a_different_key() -> None:
     base = _target()
     for other in (

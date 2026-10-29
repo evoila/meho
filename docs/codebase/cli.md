@@ -2506,7 +2506,9 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      its groups already carry, else a new one that the summary prints.
      The UUID is stored in its standard form (lowercase, with dashes)
      whatever form the flag used, so the `meho_tenant` value keeps its
-     three colon-separated parts.
+     three colon-separated parts. The first tenant's `meho_tenant` uses
+     the standard form of `--tenant-id` in the same way, while its
+     `tenant_id` attribute keeps the flag's text as given.
      Names are checked before any Keycloak call: lowercase letters,
      digits and dashes, not `sa` / `platform` / `ci`, and not the first
      tenant's name or id. Each group spec names the keys the command owns

@@ -263,12 +263,14 @@ var attributeDisplayOrder = append(slices.Clone(roleGroupAttributeKeys), "platfo
 
 // desiredAttributes returns the attributes the command owns on g.
 // `approver` is set only on MEHO-Approvers; on the other groups it must
-// be absent.
+// be absent. `tenant_id` keeps the text of --tenant-id as given, since
+// the `tenant_id` claim must stay as it was; `meho_tenant` takes the
+// UUID's standard form, so its three colon-separated parts hold.
 func (g roleGroup) desiredAttributes(tenantID, tenantName string) map[string][]string {
 	attrs := map[string][]string{
 		"tenant_id":   {tenantID},
 		"tenant_role": {g.TenantRole},
-		"meho_tenant": {mehoTenantValue(tenantID, tenantName, g.Role)},
+		"meho_tenant": {mehoTenantValue(standardUUID(tenantID), tenantName, g.Role)},
 	}
 	if g.Approver {
 		attrs["approver"] = []string{"true"}

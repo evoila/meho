@@ -138,6 +138,32 @@ func TestBootstrap_AddTenantIDInUrnFormIsStoredInStandardForm(t *testing.T) {
 	}
 }
 
+// --tenant-id in the urn:uuid form (or in upper case) keeps that text in
+// tenant_id, as the tenant_id claim must stay as it was, but meho_tenant
+// takes the standard UUID form, so its three parts hold.
+func TestBootstrap_FirstTenantIDInUrnFormGivesStandardMehoTenant(t *testing.T) {
+	fake := newFakeKeycloak()
+	opts := fullOpts()
+	std := strings.ToLower(opts.TenantID)
+	opts.TenantID = "urn:uuid:" + strings.ToUpper(std)
+	if _, _, err := runBootstrapOnce(t, fake, opts); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	for _, g := range roleGroups {
+		got := fake.groupByName(g.Name)
+		if got == nil {
+			t.Errorf("group %s not created", g.Name)
+			continue
+		}
+		if !slices.Equal(got.Attributes["tenant_id"], []string{opts.TenantID}) {
+			t.Errorf("%s tenant_id = %v, want %q", g.Name, got.Attributes["tenant_id"], opts.TenantID)
+		}
+		if !slices.Equal(got.Attributes["meho_tenant"], []string{std + ":main:" + g.Role}) {
+			t.Errorf("%s meho_tenant = %v, want %q", g.Name, got.Attributes["meho_tenant"], std+":main:"+g.Role)
+		}
+	}
+}
+
 // A realm made by the older command (groups with tenant_id and
 // tenant_role only, no platform group) gets meho_tenant on the five
 // groups and the platform group. The values it had stay; other

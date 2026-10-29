@@ -99,6 +99,8 @@ preview_dispatch(operator, connector_id, op_id, target, params)
         ├─ parse_connector_id → (product, version, impl_id)
         ├─ lookup_descriptor → None ? → status=error error_code=unknown_op
         │       (or unknown_connector; op_miss_result, #4031)
+        ├─ target is None and descriptor_requires_target ? → status=error
+        │       error_code=target_required (same answer and order as /call, #4139)
         ├─ not previewable (see _is_previewable: ingested, OR destructive,
         │       OR requires_approval AND not credential-class) ?
         │       → status=unavailable (not_ingested)     ◄── governed tiers pass (#3198/#3312)
@@ -155,7 +157,7 @@ its own. Both surfaces stay `OPERATOR`-gated at the route / tool layer.
 | `status` | meaning | extra fields |
 |---|---|---|
 | `ok` | request (or synthetic preview) resolved | `method`, `resolved_path`, `query` (object/null), `redacted_body` (object/null), `source_kind`, `preview_hash` (#3197 — SHA-256 over the resolved-request projection; the caller presents it on a `destructive`-tier `call_operation` and the dispatcher recomputes + matches it before parking the approval), and — on a governed-tier synthetic preview whose builder populated — `proposed_effect` (#3312, the reused park-time effect block; unhashed, so it never perturbs the `preview_hash` binding). Every synthetic preview also carries `plan_shown` (#4028): `true` with `proposed_effect`, or `false` with a plain `plan_note` when the builder needs the target and declined (both unhashed). Plus the four governance fields below |
-| `error` | structured failure | `error` (`"<code>: …"`), `extras.error_code` (`unknown_op` / `unknown_connector` / `invalid_params` / `invalid_op_schema` / `no_connector` / `ambiguous_connector` / `dispatch_error`) + per-code detail (`invalid_op_schema` carries `extras.missing_ref`, #3095; `unknown_op` carries `extras.connectors_with_op`, #4031). Every code except `unknown_op` / `unknown_connector` also carries the four governance fields below |
+| `error` | structured failure | `error` (`"<code>: …"`), `extras.error_code` (`unknown_op` / `unknown_connector` / `target_required` / `invalid_params` / `invalid_op_schema` / `no_connector` / `ambiguous_connector` / `dispatch_error`) + per-code detail (`invalid_op_schema` carries `extras.missing_ref`, #3095; `unknown_op` carries `extras.connectors_with_op`, #4031). Every code except `unknown_op` / `unknown_connector` also carries the four governance fields below |
 | `unavailable` | not an HTTP-ingested op **and** not previewable in a governed tier (destructive, or non-credential-class requires_approval — a credential-class op like `vault.kv.put` stays here so its secret params never surface) | `source_kind`, `extras.error_code=preview_unavailable`, `extras.reason=not_ingested`, plus the four governance fields below |
 
 **Governance fields (#3973 / #4923).** Every envelope whose op resolved

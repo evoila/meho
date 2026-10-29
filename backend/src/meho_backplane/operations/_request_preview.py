@@ -76,6 +76,7 @@ from meho_backplane.operations._catalog_guard import (
     CatalogSelection,
     choose_catalog_for_target,
 )
+from meho_backplane.operations._errors import result_target_required
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.operations._lookup import (
     lookup_descriptor,
@@ -578,9 +579,10 @@ async def preview_dispatch(
 
     Returns a JSON-shaped envelope: ``status`` ``"ok"`` (request/synthetic
     preview resolved), ``"error"`` (structured ``unknown_op`` /
-    ``invalid_params`` / ``no_connector`` / ``ambiguous_connector`` /
-    ``dispatch_error``), or ``"unavailable"`` (a non-governed typed/composite
-    op). ``op_id`` / ``connector_id`` / ``source_kind`` echo for correlation.
+    ``target_required`` / ``invalid_params`` / ``no_connector`` /
+    ``ambiguous_connector`` / ``dispatch_error``), or ``"unavailable"`` (a
+    non-governed typed/composite op). ``op_id`` / ``connector_id`` /
+    ``source_kind`` echo for correlation.
     Every envelope whose op resolved (every status except ``unknown_op`` /
     ``unknown_connector``) carries ``safety_level``, ``requires_approval``,
     ``policy_verdict`` and ``policy_reason`` (#4923).
@@ -627,6 +629,20 @@ async def _preview_resolved_op(
     params: dict[str, Any],
 ) -> dict[str, Any]:
     """The preview envelope for a resolved descriptor, before the governance fields."""
+    # Imported lazily: the dispatcher imports this module at load time.
+    from meho_backplane.operations.dispatcher import descriptor_requires_target
+
+    if target is None and descriptor_requires_target(descriptor):
+        # #4139: same answer and same order as ``dispatch``.
+        missing = result_target_required(op_id, 0.0)
+        return {
+            "status": "error",
+            "op_id": op_id,
+            "connector_id": connector_id,
+            "source_kind": descriptor.source_kind,
+            "error": missing.error,
+            "extras": dict(missing.extras),
+        }
     fault = _gate_and_validate(
         descriptor=descriptor, connector_id=connector_id, op_id=op_id, params=params
     )

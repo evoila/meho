@@ -347,18 +347,25 @@ def result_target_required(op_id: str, duration_ms: float) -> OperationResult:
     :exc:`RuntimeError` in
     :func:`~meho_backplane.operations._branches.dispatch_typed` (which
     stayed a loud internal signal for genuine instance-cache faults).
+    ``dispatch`` and ``preview_dispatch`` also return it up front for
+    any op that needs a target (``descriptor_requires_target``, which
+    covers every ``ingested`` op) when none was given (#4139).
 
-    Invalid-params-style shape — ``status="error"``,
-    ``error="target_required: <op> requires a target"``, ``error_code``
-    in ``extras`` — so callers that already branch on
-    ``result.extras["error_code"]`` for ``invalid_params`` extend the
-    same pattern. The op id rides in ``extras`` so an agent can name the
-    op it must re-call with a target.
+    Invalid-params-style shape — ``status="error"``, ``error`` naming
+    the missing target, ``error_code`` in ``extras`` — so
+    callers that already branch on ``result.extras["error_code"]`` for
+    ``invalid_params`` extend the same pattern. The message names
+    ``list_targets`` so a model knows where a target name comes from
+    (#4139). The op id rides in ``extras`` so an agent can name the op it
+    must re-call with a target.
     """
     return OperationResult(
         status="error",
         op_id=op_id,
-        error=f"target_required: {op_id!r} requires a target; none was supplied",
+        error=(
+            "target_required: this operation needs a target; "
+            "call list_targets and pass a target name"
+        ),
         duration_ms=duration_ms,
         extras={"error_code": "target_required", "op_id": op_id},
     )

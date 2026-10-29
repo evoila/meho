@@ -26,9 +26,10 @@ or vmware, only about the generic fact "``endpoint_descriptor`` row X is
   A composite that dispatches every sub-op directly on the connector's own
   session has no descriptor-routed surface to declare and registers
   nothing -- that is the compliant shape the Goal migrated the shipped
-  composites to, which is why the production registry is empty. The seam
-  exists so a *future* code-shipped op that reintroduces ``dispatch_child``
-  routing is covered without touching this module.
+  composites to. A composite that runs another connector's operations as
+  child calls declares them here (``vmware.migration.inventory`` declares
+  its two VCF Operations reads), so the sweep covers it without touching
+  this module.
 * :func:`assert_no_ingested_dispatch_dependency` -- the per-op primitive.
   Given a code-shipped op's declared ``sub_op_ids`` and its
   ``connector_id``, it resolves each raw sub-op against the descriptor

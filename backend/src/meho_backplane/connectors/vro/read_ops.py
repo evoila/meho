@@ -73,6 +73,17 @@ _DECLARED_PARAM: dict[str, Any] = {
         "description": string_schema("Parameter description."),
     },
 }
+_INPUT_PARAM: dict[str, Any] = {
+    "type": "object",
+    "description": "One declared input. Default values are not returned.",
+    "properties": {
+        **_DECLARED_PARAM["properties"],
+        "secret": {
+            "type": "boolean",
+            "description": "True when the input is a SecureString (a secret value).",
+        },
+    },
+}
 _RUN_PARAM: dict[str, Any] = {
     "type": "object",
     "description": "One input or output of the run.",
@@ -249,15 +260,15 @@ _WORKFLOW_LIST = VroTypedOp(
         ),
         "output_shape": (
             "{items: [{id, name, categoryName, categoryId, version, description, href, "
-            "...}], total, start_index, count}. Rows hold the fields the server sends; a "
-            "long list is behind a result handle."
+            "...}], total, start_index, count, more_rows}. Rows hold the fields the server "
+            "sends; a long list is behind a result handle."
         ),
         "next_step": (
             "Call vro.workflow.get with the id to see its inputs, or vro.execution.list "
-            "with the id to see its runs. If total is larger than count, call again with "
+            "with the id to see its runs. If more_rows is true, call again with "
             "start_index set to start_index + count."
         ),
-        "result_scalars": {"keys": ["total", "start_index", "count"]},
+        "result_scalars": {"keys": ["total", "start_index", "count", "more_rows"]},
     },
 )
 
@@ -267,8 +278,9 @@ _WORKFLOW_GET = VroTypedOp(
     summary="Read one Orchestrator workflow with its inputs and outputs.",
     description=(
         "Reads GET /vco/api/workflows/{workflowId} and its /content: name, version, "
-        "description, category and the declared inputs and outputs (name, type, "
-        "description). Default values are not returned."
+        "description, category, the declared inputs and outputs (name, type, "
+        "description; inputs also secret) and content_sha256, a checksum of the workflow "
+        "content. Default values are not returned."
     ),
     parameter_schema={
         "type": "object",
@@ -286,10 +298,17 @@ _WORKFLOW_GET = VroTypedOp(
             "version": string_schema("Workflow version."),
             "description": string_schema("Workflow description."),
             "category_id": string_schema("Id of the workflow's category."),
+            "content_sha256": {
+                "type": "string",
+                "description": (
+                    "SHA-256 (hex) of the workflow content in a fixed form. The same "
+                    "content always gives the same value; a changed workflow gives a new one."
+                ),
+            },
             "inputs": {
                 "type": "array",
                 "description": "The declared inputs.",
-                "items": _DECLARED_PARAM,
+                "items": _INPUT_PARAM,
             },
             "outputs": {
                 "type": "array",
@@ -308,8 +327,9 @@ _WORKFLOW_GET = VroTypedOp(
             "with their types."
         ),
         "output_shape": (
-            "{id, name, display_name, version, description, category_id, "
-            "inputs: [{name, type, description}], outputs: [{name, type, description}]}."
+            "{id, name, display_name, version, description, category_id, content_sha256, "
+            "inputs: [{name, type, description, secret}], "
+            "outputs: [{name, type, description}]}. secret is true for a SecureString input."
         ),
         "next_step": "Call vro.execution.list with the same workflow_id to see its runs.",
     },
@@ -361,14 +381,15 @@ _EXECUTION_LIST = VroTypedOp(
         ),
         "output_shape": (
             "{items: [{id, name, state, startDate, endDate, startedBy, href, ...}], total, "
-            "start_index, count}. Rows hold the fields the server sends; a long list is "
+            "start_index, count, more_rows}. Rows hold the fields the server sends; a long list is "
             "behind a result handle; filter it with result_query, for example on state."
         ),
         "next_step": (
             "Call vro.execution.get with the run id for its inputs, outputs and error, "
-            "and vro.execution.logs for its log lines."
+            "and vro.execution.logs for its log lines. If more_rows is true, call again "
+            "with start_index set to start_index + count."
         ),
-        "result_scalars": {"keys": ["total", "start_index", "count"]},
+        "result_scalars": {"keys": ["total", "start_index", "count", "more_rows"]},
     },
 )
 
@@ -379,7 +400,8 @@ _EXECUTION_GET = VroTypedOp(
     description=(
         "Reads GET /vco/api/workflows/{workflowId}/executions/{executionId}: state, start "
         "and end date, user, the error text of a failed run, and the inputs and outputs. "
-        "Secret values come back replaced."
+        "outcome is a plain result next to the vendor state. Secret values come back "
+        "replaced."
     ),
     parameter_schema={
         "type": "object",
@@ -397,6 +419,25 @@ _EXECUTION_GET = VroTypedOp(
                 "Run state: running, completed, failed, canceled, waiting, "
                 "waiting-signal, suspended or initializing."
             ),
+            "outcome": {
+                "type": "string",
+                "enum": [
+                    "completed",
+                    "failed",
+                    "canceled",
+                    "running",
+                    "waiting",
+                    "unknown",
+                    "not_reachable",
+                ],
+                "description": (
+                    "Plain outcome of the run: completed, failed, canceled, running "
+                    "(also initializing), waiting (also waiting-signal and suspended), "
+                    "unknown for a state MEHO does not know, or not_reachable when the "
+                    "server did not answer."
+                ),
+            },
+            "checked_at": string_schema("When MEHO read the run (ISO 8601, UTC)."),
             "business_state": string_schema("Business state the workflow last set."),
             "start_date": string_schema("When the run started."),
             "end_date": string_schema("When the run ended."),
@@ -417,13 +458,16 @@ _EXECUTION_GET = VroTypedOp(
             "current step, inputs and outputs."
         ),
         "output_shape": (
-            "{id, name, state, business_state, start_date, end_date, started_by, error, "
-            "current_item, inputs: [{name, type, value}], outputs: [{name, type, value}]}. "
-            "A SecureString, encrypted or secret-named value is ***REDACTED***."
+            "{id, name, state, outcome, checked_at, business_state, start_date, end_date, "
+            "started_by, error, current_item, inputs: [{name, type, value}], "
+            "outputs: [{name, type, value}]}. A SecureString, encrypted or secret-named "
+            "value is ***REDACTED***."
         ),
         "next_step": (
-            "If state is failed, report error and current_item, then call "
-            "vro.execution.logs for the log lines of the run."
+            "If outcome is failed, report error and current_item, then call "
+            "vro.execution.logs for the log lines of the run. If outcome is running or "
+            "waiting, read the run again later. If outcome is not_reachable, check the "
+            "server with vro.health."
         ),
     },
 )
@@ -482,6 +526,10 @@ _EXECUTION_LOGS = VroTypedOp(
                 "type": "boolean",
                 "description": "True when the server sent more lines than max_lines.",
             },
+            "more_rows": {
+                "type": "boolean",
+                "description": "Same as more_lines; every list read has more_rows.",
+            },
         },
     },
     group_key=GROUP_EXECUTIONS,
@@ -495,14 +543,14 @@ _EXECUTION_LOGS = VroTypedOp(
         ),
         "output_shape": (
             "{items: [{time_stamp, severity, user, origin, short_description, "
-            "long_description, cut}], lines, more_lines}. A long log is behind a result "
+            "long_description, cut}], lines, more_lines, more_rows}. A long log is behind a result "
             "handle; filter it with result_query, for example on severity."
         ),
         "next_step": (
             "Report the error lines. If more_lines is true, call again with a larger "
             "max_lines (at most 2000)."
         ),
-        "result_scalars": {"keys": ["lines", "more_lines"]},
+        "result_scalars": {"keys": ["lines", "more_lines", "more_rows"]},
     },
 )
 

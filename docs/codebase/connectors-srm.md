@@ -26,8 +26,8 @@ Package: `backend/src/meho_backplane/connectors/srm/`.
 The login, the session cache, the version read and both reads are shared
 with the vSphere Replication connector (`docs/codebase/connectors-vr.md`).
 Both APIs are served by the same REST API gateway, so the shared part
-lives in `connectors/_shared/dr_rest.py` (the base class
-`DrRestConnector`) and `connectors/_shared/dr_api_file.py` (the read).
+lives in `connectors/vmware_shared/dr_rest.py` (the base class
+`DrRestConnector`) and `connectors/vmware_shared/dr_api_file.py` (the read).
 `SrmConnector` sets the SRM paths.
 
 | Operation | What it does | Vendor call | Risk | Versions |
@@ -68,15 +68,16 @@ other modes raise `NotImplementedError`.
 ## Key types
 
 - `SrmConnector` (`connector.py`) -- the connector class, a subclass of
-  `DrRestConnector` (`connectors/_shared/dr_rest.py`). It sets the SRM
+  `DrRestConnector` (`connectors/vmware_shared/dr_rest.py`). It sets the SRM
   paths (`api_base`, `session_path`, `info_path`, `api_files`) and
   defines the entry methods `about` and `api_file_get`, which call the
   shared code. The entry methods live on this class, not on the base, so
   the stored handler of `srm.about` names `SrmConnector`. MEHO binds it
   only to an `SrmConnector`, so an `srm.*` operation cannot run on a `vr`
   target (the call ends with a `connector_error` before any HTTP
-  request). The base caches one session id per target and tenant
-  (`target_cache_key`).
+  request). The base caches one session id per credential
+  (`credential_cache_key`: tenant, secret and login host), so two SRM
+  targets that share one credential share one session.
 - `SrmTargetLike` (`session.py`) -- the minimum target shape: `id`,
   `tenant_id`, `name`, `host`, `port`, `secret_ref`, `auth_model`.
 - `SrmSessionLoader` (`session.py`) -- an async callable
@@ -84,14 +85,14 @@ other modes raise `NotImplementedError`.
   `load_session_credentials_from_vault`, reads the target's `secret_ref`
   from Vault under the operator's identity. Tests inject a static loader.
 - `DrServerVersion`, `parse_server_version`, `summarise_server_info`
-  (`connectors/_shared/dr_rest.py`) -- the version read and the
+  (`connectors/vmware_shared/dr_rest.py`) -- the version read and the
   `srm.about` answer.
 - `SrmTypedOp`, `SRM_TYPED_OPS`, `register_srm_typed_operations`
   (`typed_ops.py`) -- the op metadata and the registrar. The response
   schemas and the shared `llm_instructions` texts come from
-  `connectors/_shared/dr_rest_schemas.py`.
+  `connectors/vmware_shared/dr_rest_schemas.py`.
 - `API_FILES` (`api_file.py`) -- the two files the read can fetch.
-- `dr_api_file_get` (`connectors/_shared/dr_api_file.py`) -- the read's
+- `dr_api_file_get` (`connectors/vmware_shared/dr_api_file.py`) -- the read's
   body, shared with `vr.api_file.get`.
 - `connectors/_shared/api_file_read.py` -- the vendor-neutral steps of an
   API file read (bounded fetch, text check, parts, size check, one

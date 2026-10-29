@@ -83,6 +83,7 @@ class _StubTarget:
     port: int | None
     secret_ref: str
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
+    fqdn: str | None = None
     id: UUID = field(default_factory=uuid4)
     tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
@@ -287,6 +288,63 @@ async def test_login_goes_to_vcf_ops_url_when_set() -> None:
 
     assert headers == {"Authorization": f"Bearer {_JWT}"}
     assert fleet.calls.call_count == 0
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_targets_with_one_secret_and_vcf_ops_url_share_one_login_and_renewal() -> None:
+    """Two targets on different hosts log in once at the shared ``vcf_ops_url``.
+
+    The token is keyed by the login address from the secret, not by the
+    target's own name, host or ``fqdn`` (the login does not send the
+    ``fqdn``). A renewal on one target gives both the new token, and a
+    ``401`` on the other target with the old token keeps the new one.
+    """
+    shared_secret = "fleet-lcm/shared"
+    first = _StubTarget(
+        name="fleet-lcm-a",
+        host="fleet-lcm-a.test.invalid",
+        port=443,
+        secret_ref=shared_secret,
+        fqdn="fleet-a.example.test",
+    )
+    second = _StubTarget(
+        name="fleet-lcm-b",
+        host="fleet-lcm-b.test.invalid/fleet-lcm",
+        port=None,
+        secret_ref=shared_secret,
+        fqdn="fleet-b.example.test",
+    )
+
+    async def _ops_url_loader(_target: FleetLcmTargetLike, _operator: Operator) -> dict[str, str]:
+        return {
+            "username": "admin",
+            "password": _PASSWORD,
+            "vcf_ops_url": "https://vcf-ops.test.invalid",
+        }
+
+    connector = FleetLcmConnector(credentials_loader=_ops_url_loader)
+    async with respx.mock(base_url="https://vcf-ops.test.invalid") as ops_mock:
+        acquire, exchange = _mock_login(ops_mock)
+        exchange.side_effect = [
+            httpx.Response(200, json={"jwtToken": "jwt-1"}),
+            httpx.Response(200, json={"jwtToken": "jwt-2"}),
+        ]
+        operator = _make_operator()
+        h_a = await connector.auth_headers(first, operator=operator)
+        h_b = await connector.auth_headers(second, operator=operator)
+        assert h_a == h_b == {"Authorization": "Bearer jwt-1"}
+
+        rejected_a = httpx.Request("GET", "https://fleet-lcm-a.test.invalid/v1/health", headers=h_a)
+        await connector.invalidate_session(first, rejected=rejected_a)
+        h_a2 = await connector.auth_headers(first, operator=operator)
+        # A late 401 on the other target still carries the old token: the new one stays.
+        rejected_b = httpx.Request("GET", "https://fleet-lcm-b.test.invalid/v1/health", headers=h_b)
+        await connector.invalidate_session(second, rejected=rejected_b)
+        h_b2 = await connector.auth_headers(second, operator=operator)
+
+    assert h_a2 == h_b2 == {"Authorization": "Bearer jwt-2"}
+    assert acquire.call_count == 2 and exchange.call_count == 2
     await connector.aclose()
 
 

@@ -31,7 +31,7 @@ Follows the synchronous pattern of
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -121,19 +121,21 @@ def _table_indexes(sync_url: str, table: str) -> set[str]:
 
 def test_upgrade_creates_identity_budget_table(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``upgrade head`` creates the ``identity_budget`` table."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     assert "identity_budget" in _table_names(sync_url)
 
 
 def test_upgrade_creates_expected_columns(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``identity_budget`` has every documented column after upgrade."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     cols = _table_columns(sync_url, "identity_budget")
     expected = {
         "id",
@@ -156,20 +158,22 @@ def test_upgrade_creates_expected_columns(
 
 def test_upgrade_creates_named_index(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """The documented index exists after upgrade."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     idx = _table_indexes(sync_url, "identity_budget")
     assert "identity_budget_tenant_principal_idx" in idx
 
 
 def test_limits_columns_are_nullable(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Optional-limit columns permit NULL (NULL = no cap)."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     for col in ("token_limit", "cost_limit", "request_limit"):
         assert _column_is_nullable(sync_url, "identity_budget", col), (
             f"{col} must be nullable (NULL means no cap)"
@@ -178,10 +182,11 @@ def test_limits_columns_are_nullable(
 
 def test_consumption_columns_are_not_nullable(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Consumption columns reject NULL (default 0)."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     for col in ("tokens_consumed", "cost_consumed", "requests_consumed"):
         assert not _column_is_nullable(sync_url, "identity_budget", col), (
             f"{col} must be NOT NULL with default 0"
@@ -190,10 +195,11 @@ def test_consumption_columns_are_not_nullable(
 
 def test_keying_columns_are_not_nullable(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """tenant_id / principal_sub / window_kind / window_start / window_end are NOT NULL."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     for col in (
         "tenant_id",
         "principal_sub",
@@ -208,10 +214,11 @@ def test_keying_columns_are_not_nullable(
 
 def test_window_kind_check_constraint_rejects_unknown(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """The window_kind CHECK refuses values outside the closed enum."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     # Bootstrap a tenant row so the FK insert can succeed.
     sync_eng = sa_create_engine(sync_url)
@@ -253,10 +260,11 @@ def test_window_kind_check_constraint_rejects_unknown(
 
 def test_unique_constraint_rejects_duplicate_bucket(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A duplicate (tenant, principal, kind, start) row is refused."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     sync_eng = sa_create_engine(sync_url)
     try:
@@ -312,6 +320,7 @@ def test_unique_constraint_rejects_duplicate_bucket(
 
 def test_pre_existing_tables_undisturbed(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """The migration touches no other table.
 
@@ -319,7 +328,7 @@ def test_pre_existing_tables_undisturbed(
     column changes on ``audit_log`` / ``agent_run`` / ``agent_permission``.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     # Spot-check three pre-existing tables.
     for table in ("audit_log", "agent_run", "agent_permission"):
         assert table in _table_names(sync_url), (
@@ -329,10 +338,11 @@ def test_pre_existing_tables_undisturbed(
 
 def test_reversibility_round_trip(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """downgrade to 0030 drops the table; upgrade recreates it."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     assert "identity_budget" in _table_names(sync_url)
 
     command.downgrade(cfg, "0030")

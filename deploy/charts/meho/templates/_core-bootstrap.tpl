@@ -15,6 +15,7 @@ mounted into the Job.
   "first_login_secret" (printf "%s-core-first-login" $rel)
   "admin_username" .Values.coreKeycloak.firstLogin.adminUsername
   "approver_username" .Values.coreKeycloak.firstLogin.approverUsername
+  "tenants" (default (list) .Values.coreKeycloak.tenants)
   "ci" (dict "enabled" $ci.enabled "tenant_id" $ci.tenantId "secret_name" (printf "%s-core-ci-login" $rel))
   | toJson -}}
 {{- end }}

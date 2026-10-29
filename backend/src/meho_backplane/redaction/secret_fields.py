@@ -18,9 +18,18 @@ broadcast scrub and the approval echo already use.
   secret name gets :data:`SECRET_FIELD_MARKER` in place of its value (a whole
   sub-tree, too). Each string goes through :func:`scrub_secret_fields_in_text`.
 * :func:`scrub_secret_fields_in_text` finds quoted name-value pairs in text
-  (JSON ``"name": "value"``, Python ``'name': 'value'`` and escaped JSON
-  ``\\"name\\": \\"value\\"``) and replaces the value when the name is a
-  secret name.
+  and replaces the value when the name is a secret name. The name and the
+  value may each use ``"`` or ``'`` (JSON ``"name": "value"``, Python
+  ``'name': 'value'`` and Python's ``'name': "it's"``), and the pair may be
+  escaped JSON inside a JSON string (``\\"name\\": \\"value\\"``).
+  :func:`iter_quoted_secret_fields` lists those pairs; the capture check
+  (``tests/test_capture_secret_scan.py``) uses it too.
+
+The value is read by a small scanner, not by a pattern: it walks the text
+from the opening quote to the closing quote and steps over each escape, so
+a quote inside the value does not end it, and a value has no length limit.
+A value with no closing quote (a diagnostic cut by a length cap) is
+replaced up to the end of the text.
 
 Numbers, booleans and ``null`` under a secret name stay (``bind_secret_id:
 true`` is a flag, not a secret). A value that an earlier step already
@@ -37,26 +46,30 @@ there a field like ``password`` is removed only for a credential read
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
-from typing import Any, Final
+from collections.abc import Iterator, Mapping, Sequence
+from typing import Any, Final, NamedTuple
 
-__all__ = ["SECRET_FIELD_MARKER", "scrub_secret_fields", "scrub_secret_fields_in_text"]
+__all__ = [
+    "SECRET_FIELD_MARKER",
+    "QuotedSecretField",
+    "iter_quoted_secret_fields",
+    "scrub_secret_fields",
+    "scrub_secret_fields_in_text",
+]
 
 #: The text put in place of a secret-named value. The same text as the
 #: broadcast scrub, so a reader sees one word for "a field with a secret name".
 SECRET_FIELD_MARKER: Final[str] = "[REDACTED:param_name]"
 
-_NAME: Final[str] = r"(?P<name>[A-Za-z0-9_.\-]{1,128})"
-_MAX: Final[str] = "4096"
+_NAME: Final[str] = r"[A-Za-z0-9_.\-]{1,128}"
 
-#: Quoted name-value pairs. Each pattern names the value ``value``.
-_QUOTED_PAIRS: Final[tuple[re.Pattern[str], ...]] = (
-    # Escaped JSON inside a JSON string: \"name\": \"value\"
-    re.compile(r'\\"' + _NAME + r'\\"\s*:\s*\\"(?P<value>(?:(?!\\").){1,' + _MAX + r'})\\"'),
-    # JSON: "name": "value" (a value may hold \" and other escapes)
-    re.compile(r'"' + _NAME + r'"\s*:\s*"(?P<value>(?:[^"\\]|\\.){1,' + _MAX + r'})"'),
-    # Python repr: 'name': 'value'
-    re.compile(r"'" + _NAME + r"'\s*:\s*'(?P<value>(?:[^'\\]|\\.){1," + _MAX + r"})'"),
+#: The start of a quoted name-value pair, up to and including the opening
+#: quote of the value: escaped JSON (``\"name\": \"``), or a name and a
+#: value each in ``"`` or ``'``. The value itself is read by a scanner
+#: (:func:`_plain_value_end`, :func:`_escaped_value_end`).
+_PAIR_START: Final[re.Pattern[str]] = re.compile(
+    r"\\\"(?P<escaped_name>" + _NAME + r")\\\"\s*:\s*\\\""
+    r"|(?P<name_quote>[\"'])(?P<name>" + _NAME + r")(?P=name_quote)\s*:\s*(?P<value_quote>[\"'])"
 )
 
 #: A value some earlier step already masked: ``[REDACTED:...]``, the trace
@@ -86,21 +99,87 @@ def _is_secret_name(name: str) -> bool:
     return is_secret_param_name(name)
 
 
-def _replace_value(match: re.Match[str]) -> str:
-    value = match.group("value")
-    if not _is_secret_name(match.group("name")) or _is_placeholder(value):
-        return match.group(0)
-    start, end = match.span("value")
-    offset = match.start()
-    whole = match.group(0)
-    return whole[: start - offset] + SECRET_FIELD_MARKER + whole[end - offset :]
+class QuotedSecretField(NamedTuple):
+    """A quoted pair with a secret name: ``text[start:end]`` is the value."""
+
+    name: str
+    value: str
+    start: int
+    end: int
+
+
+def _plain_value_end(text: str, start: int, quote: str) -> int:
+    """The index of the closing *quote*, stepping over ``\\x`` escapes; -1 when none."""
+    index = start
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+        elif char == quote:
+            return index
+        else:
+            index += 1
+    return -1
+
+
+def _escaped_value_end(text: str, start: int) -> int:
+    """The index of the closing ``\\"`` of an escaped JSON value; -1 when none.
+
+    Inside a JSON string, the inner JSON's own escapes are escaped once more:
+    an inner ``\\"`` (a quote in the value) is ``\\\\\\"``, an inner ``\\\\`` is
+    ``\\\\\\\\``, an inner ``\\n`` is ``\\\\n``. Each is stepped over as one unit.
+    """
+    index = start
+    while index < len(text):
+        if text[index] != "\\":
+            index += 1
+            continue
+        following = text[index + 1 : index + 2]
+        if following == '"':
+            return index
+        index += 2
+        if following == "\\" and text[index : index + 2] in ("\\\\", '\\"'):
+            index += 2
+    return -1
+
+
+def iter_quoted_secret_fields(text: str) -> Iterator[QuotedSecretField]:
+    """Yield each quoted pair in *text* whose name is a secret name, in order.
+
+    A pair inside the value of an earlier secret-named pair is not yielded
+    again. A value with no closing quote runs to the end of *text*.
+    """
+    cursor = 0
+    for match in _PAIR_START.finditer(text):
+        if match.start() < cursor:
+            continue
+        escaped_name = match.group("escaped_name")
+        name = escaped_name if escaped_name is not None else match.group("name")
+        if not _is_secret_name(name):
+            continue
+        start = match.end()
+        if escaped_name is not None:
+            end = _escaped_value_end(text, start)
+        else:
+            end = _plain_value_end(text, start, match.group("value_quote"))
+        if end == -1:
+            end = len(text)
+        yield QuotedSecretField(name, text[start:end], start, end)
+        cursor = end
 
 
 def scrub_secret_fields_in_text(text: str) -> str:
     """Return *text* with the value of each quoted secret-named pair replaced."""
-    for pattern in _QUOTED_PAIRS:
-        text = pattern.sub(_replace_value, text)
-    return text
+    parts: list[str] = []
+    cursor = 0
+    for field in iter_quoted_secret_fields(text):
+        if field.value == "" or _is_placeholder(field.value):
+            continue
+        parts.append(text[cursor : field.start])
+        parts.append(SECRET_FIELD_MARKER)
+        cursor = field.end
+    parts.append(text[cursor:])
+    return "".join(parts)
 
 
 def scrub_secret_fields(node: Any) -> Any:

@@ -17,9 +17,12 @@ real system, so it can carry a real token or password by mistake.
   library (``Authorization:`` header, ``Bearer`` token, JWT, labelled
   ``password=`` / ``token:`` pairs, BIND key secret), a private key block, an
   AWS access key id, and GitHub and Slack tokens;
-* a field with a secret name and a value, as JSON or Python (``"password":
-  "..."``), as YAML (``password: ...``) or as XML (``<password>...</password>``).
-  The name rule is the shared ``is_secret_param_name``.
+* a field with a secret name and a value, as a quoted pair (JSON
+  ``"password": "..."``, Python ``'password': "..."`` with either quote,
+  escaped JSON ``\\"password\\": \\"...\\"``; found by the shared
+  ``iter_quoted_secret_fields``), as YAML (``password: ...``) or as XML
+  (``<password>...</password>``). The name rule is the shared
+  ``is_secret_param_name``.
 
 A value that is clearly not a secret is skipped: a ``<placeholder>``, a value
 some step already masked (``[REDACTED:...]``, ``***``), a template reference
@@ -48,6 +51,7 @@ import pytest
 
 from meho_backplane.broadcast.events import is_secret_param_name
 from meho_backplane.redaction.patterns import NAMED_PATTERNS
+from meho_backplane.redaction.secret_fields import iter_quoted_secret_fields
 
 #: The start of every value ``test_redaction_planted_secrets.py`` plants.
 PLANTED_MARKER: Final = "planted-secret-"
@@ -73,8 +77,6 @@ _OTHER_SHAPES: Final[dict[str, re.Pattern[str]]] = {
 
 _NAME = r"(?P<name>[A-Za-z0-9_.\-]{1,128})"
 _FIELD_PATTERNS: Final[dict[str, re.Pattern[str]]] = {
-    "json_field": re.compile(r'"' + _NAME + r'"\s*:\s*"(?P<value>(?:[^"\\]|\\.){1,4096})"'),
-    "python_field": re.compile(r"'" + _NAME + r"'\s*:\s*'(?P<value>(?:[^'\\]|\\.){1,4096})'"),
     "yaml_field": re.compile(
         r"(?m)^[ \t-]*" + _NAME + r"[ \t]*:[ \t]+(?P<value>[^\s#][^\n]*?)[ \t]*$"
     ),
@@ -135,6 +137,9 @@ def scan_text(text: str, *, path: str = "<text>") -> list[Finding]:
     for name, pattern in _OTHER_SHAPES.items():
         for match in pattern.finditer(text):
             findings.append(Finding(path, _line_of(text, match.start()), name))
+    for field in iter_quoted_secret_fields(text):
+        if _is_secret_value(field.value):
+            findings.append(Finding(path, _line_of(text, field.start), "quoted_field"))
     for name, pattern in _FIELD_PATTERNS.items():
         for match in pattern.finditer(text):
             if is_secret_param_name(match.group("name")) and _is_secret_value(match.group("value")):
@@ -197,9 +202,12 @@ _FAKE_AWS_KEY_ID = "AK" + "IA" + "MADEUPMADEUP1234"
         ("answer.json", '{"note": "planted-secret-token-made-up"}', "planted_marker"),
         ("answer.json", '{"session": "' + _FAKE_JWT + '"}', "jwt"),
         ("answer.txt", "Authorization: Bearer made-up-token-value-123", "authorization_header"),
-        ("answer.json", '{"user": "u", "password": "made-up-pass-123"}', "json_field"),
-        ("answer.json", '{"encryptedPassword": "made-up-encrypted-1"}', "json_field"),
-        ("answer.py.txt", "{'clientSecret': 'made-up-client-secret'}", "python_field"),
+        ("answer.json", '{"user": "u", "password": "made-up-pass-123"}', "quoted_field"),
+        ("answer.json", '{"encryptedPassword": "made-up-encrypted-1"}', "quoted_field"),
+        ("answer.py.txt", "{'clientSecret': 'made-up-client-secret'}", "quoted_field"),
+        ("answer.py.txt", "{'note': \"it's\", 'password': \"made-up-it's-pass\"}", "quoted_field"),
+        ("answer.json", '{"body": "{\\"password\\": \\"made-up-pass-123\\"}"}', "quoted_field"),
+        ("answer.json", '{"password": "' + "x" * 5000 + '"}', "quoted_field"),
         ("answer.yaml", "account:\n  sessionToken: made-up-session-token\n", "yaml_field"),
         ("answer.xml", "<login><password>made-up-pass-123</password></login>", "xml_field"),
         ("key.pem", _FAKE_KEY_BLOCK, "private_key_block"),

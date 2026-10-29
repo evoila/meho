@@ -35050,7 +35050,7 @@
             "maxLength": 256,
             "minLength": 1,
             "title": "Connector Id",
-            "description": "Exact '<impl_id>-<version>' connector id, e.g. 'k8s-1.x'."
+            "description": "Exact '<impl_id>-<version>' connector id, e.g. 'gh-rest-3'."
           },
           "target_id": {
             "type": "string",
@@ -36157,7 +36157,7 @@
           "host"
         ],
         "title": "TargetCreate",
-        "description": "POST /api/v1/targets body.\n\n``name`` and ``product`` are immutable after creation; to rename a\ntarget, delete + re-create. ``auth_model`` defaults to\n``shared_service_account`` matching the DB column default.\n\n``fingerprint`` is **not** accepted \u2014 it is server-managed and only\nwritten by the probe handler from the connector's response. Sending\n``fingerprint`` in the create body raises 422 via ``extra='forbid'``\nso clients cannot seed the G0.6 resolver's tie-break input with\nfabricated values. ``preferred_impl_id`` is accepted as an optional\noperator override.\n\n``version`` is accepted as an optional operator-asserted product\nversion (G0.15-T6 #1215). Operators who know the version up-front\n(e.g. ``\"2.x\"`` for a Harbor target the consumer just\ndeployed) can pass it at create time so the very first probe\ndispatches against the versioned connector without round-tripping\nthrough PATCH. Fresh targets still default to ``None`` and resolve\nvia the sibling wildcard registration applied to every typed\nconnector in the same PR (K8s pattern fanned out)."
+        "description": "POST /api/v1/targets body.\n\n``name`` and ``product`` are immutable after creation; to rename a\ntarget, delete + re-create. ``auth_model`` defaults to\n``shared_service_account`` matching the DB column default.\n\n``fingerprint`` is **not** accepted \u2014 it is server-managed and only\nwritten by the probe handler from the connector's response. Sending\n``fingerprint`` in the create body raises 422 via ``extra='forbid'``\nso clients cannot seed the G0.6 resolver's tie-break input with\nfabricated values. ``preferred_impl_id`` is accepted as an optional\noperator override.\n\n``version`` is accepted as an optional operator-asserted product\nversion (G0.15-T6 #1215). Operators who know the version up-front\n(e.g. ``\"2.11.0\"`` for a Harbor target the consumer just\ndeployed) can pass it at create time so the very first probe\ndispatches against the versioned connector without round-tripping\nthrough PATCH. Fresh targets still default to ``None`` and resolve\nvia the sibling wildcard registration applied to every typed\nconnector in the same PR (K8s pattern fanned out)."
       },
       "TargetListResponse": {
         "properties": {

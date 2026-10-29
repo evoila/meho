@@ -319,7 +319,7 @@ class TargetCreate(BaseModel):
 
     ``version`` is accepted as an optional operator-asserted product
     version (G0.15-T6 #1215). Operators who know the version up-front
-    (e.g. ``"2.x"`` for a Harbor target the consumer just
+    (e.g. ``"2.11.0"`` for a Harbor target the consumer just
     deployed) can pass it at create time so the very first probe
     dispatches against the versioned connector without round-tripping
     through PATCH. Fresh targets still default to ``None`` and resolve

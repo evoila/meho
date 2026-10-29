@@ -72,7 +72,7 @@ class ServiceGrantCreate(BaseModel):
     connector_id: str = Field(
         min_length=1,
         max_length=256,
-        description="Exact '<impl_id>-<version>' connector id, e.g. 'k8s-1.x'.",
+        description="Exact '<impl_id>-<version>' connector id, e.g. 'gh-rest-3'.",
     )
     target_id: UUID | None = Field(
         default=None,

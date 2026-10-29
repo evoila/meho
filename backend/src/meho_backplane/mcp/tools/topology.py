@@ -1630,8 +1630,8 @@ async def _reject_unknown_connector(tenant_id: uuid.UUID, connector_id: str) -> 
     """Raise the unknown-connector ``-32602`` when no visible connector has the id's product.
 
     Runs only when the ``connector_id`` filter found no target (#4136).
-    Without it, a wrong id such as ``vmware-rest`` (product
-    ``vmware-rest``, which no target has) came back as an empty list with
+    Without it, a wrong id such as ``harbor-rest`` (product
+    ``harbor-rest``, which no target has) came back as an empty list with
     no warning. A known product with no targets still returns the empty
     list. The error is the one ``search_operations`` raises, with the
     close ids the caller can see.

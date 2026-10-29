@@ -452,7 +452,7 @@ async def close_connector_ids(*, tenant_id: UUID, connector_id: str) -> list[str
     """Return up to 5 caller-visible connector ids close to *connector_id* (#4136).
 
     Runs only on the unknown-connector error path. A close id is one that
-    starts with the given text (``vmware-rest`` -> ``vmware-rest-9.0``) or
+    starts with the given text (``harbor-rest`` -> ``harbor-rest-2.x``) or
     has a close spelling (``linux-ssh-1.0`` -> ``linux-ssh-1.x``). The
     match ignores case. Closest ids come first.
 

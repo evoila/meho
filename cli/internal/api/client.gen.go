@@ -9034,7 +9034,7 @@ type SensorStatus string
 // floor of what runs unattended, not a bypass of a modeled destructive
 // gate).
 type ServiceGrantCreate struct {
-	// ConnectorId Exact '<impl_id>-<version>' connector id, e.g. 'k8s-1.x'.
+	// ConnectorId Exact '<impl_id>-<version>' connector id, e.g. 'gh-rest-3'.
 	ConnectorId string `json:"connector_id"`
 
 	// ExpiresAt Optional UTC expiry; null = standing (permanent) grant; must be future.
@@ -9515,7 +9515,7 @@ type Target struct {
 //
 // “version“ is accepted as an optional operator-asserted product
 // version (G0.15-T6 #1215). Operators who know the version up-front
-// (e.g. “"2.x"“ for a Harbor target the consumer just
+// (e.g. “"2.11.0"“ for a Harbor target the consumer just
 // deployed) can pass it at create time so the very first probe
 // dispatches against the versioned connector without round-tripping
 // through PATCH. Fresh targets still default to “None“ and resolve

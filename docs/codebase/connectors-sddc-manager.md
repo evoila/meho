@@ -178,6 +178,8 @@ dispatcher's #2067 recovery arm, which calls the connector's public
 | `sddc.credential.list` | `sddc-credentials` | `GET /v1/credentials` |
 | `sddc.task.list` | `sddc-tasks-typed` | `GET /v1/tasks` |
 | `sddc.task.get` | `sddc-tasks-typed` | `GET /v1/tasks/{id}` |
+| `sddc.domain.validation.get` | `sddc-tasks-typed` | `GET /v1/domains/validations/{id}` |
+| `sddc.host.validation.get` | `sddc-tasks-typed` | `GET /v1/hosts/validations/{id}` |
 | `sddc.system.info` | `sddc-platform` | `GET /v1/system` |
 | `sddc.vcf_service.list` | `sddc-platform` | `GET /v1/vcf-services` |
 | `sddc.manager.list` | `sddc-platform` | `GET /v1/sddc-managers` |
@@ -210,7 +212,7 @@ not dispatchable without operator approval), the op-id is on
 `credential_read` and audit/broadcast rows collapse to aggregate-only), and the
 handler scrubs every secret-keyed value at the connector boundary
 (`_redact_secrets`). Three layers; no secret ever rides the result. `safety_level`
-is `caution`; the other 13 reads are `safe` / no-approval. The ingested twins
+is `caution`; the other 16 reads are `safe` / no-approval. The ingested twins
 (`GET:/v1/credentials` and the other SDDC Manager reads whose answer holds
 credentials) get the same guards through the catalog row's `safety_overlay`
 and the same `_CREDENTIAL_READ_OPS` entry (#4617); see
@@ -229,7 +231,7 @@ token of the flight recorder, so the trace stores no body of the vendor call:
 the flight recorder records the raw answer before the handler masks it. Tests:
 [`backend/tests/test_connectors_sddc_manager_license.py`](../../backend/tests/test_connectors_sddc_manager_license.py).
 
-**Operation contracts.** The 20 typed ops meet the VMware operation-contract
+**Operation contracts.** The 22 typed ops meet the VMware operation-contract
 check (`backend/tests/test_operation_contracts.py`), with one exception (last item):
 
 - Each `response_schema` names the main fields of the vendor answer
@@ -333,6 +335,15 @@ return a `Task` in seconds while the build runs for hours on the appliance);
 poll `sddc.task.get` with the returned task id and `sddc.domain.status` once
 the domain object exists, to a terminal state.
 
+**Reading a check result (#3518).** `host.validate` and `domain.validate`
+return a `Validation` that is often still `IN_PROGRESS`. Read it again by its
+id with `sddc.host.validation.get` (`GET /v1/hosts/validations/{id}`) or
+`sddc.domain.validation.get` (`GET /v1/domains/validations/{id}`). Both are
+`safe` reads with no approval. Wait until `executionStatus` is `COMPLETED`,
+then `resultStatus` (`SUCCEEDED` / `WARNING` / `FAILED`) is the result. You do
+not need `sddc.task.get` for a check. The `id` path value must be letters,
+digits, `-` or `_` only; the handler also percent-encodes it.
+
 **NFS-principal shape.** For an NFS-principal domain
 the `DomainCreationSpec` uses
 `computeSpec.clusterSpecs[].datastoreSpec.nfsDatastoreSpecs[].nasVolume`
@@ -353,7 +364,11 @@ build's `Task.subTasks[]` runs to hundreds of rows). `task.get` /
 the collection to reduce (the `Task` carries three list fields — `subTasks` /
 `errors` / `resources` — so without the hint the reducer's multi-list
 detail-object exemption would pass the whole document through unreduced); the
-validation ops keep the `id` / `executionStatus` / `resultStatus` poll keys.
+validation ops and the two validation reads keep the `id` / `description` /
+`executionStatus` / `resultStatus` poll keys. A completed `Validation` with
+long check texts often passes the 4 KB limit, so `validationChecks[]` goes to a
+result handle; the result stays in the answer, and `result_query` on the
+handle finds the failed checks.
 
 **Spec-reconcile lane (#3497).** The hand-coded write `METHOD:/path` set
 (`typed_writes.TYPED_WRITE_DECLARED_OP_IDS`) is asserted against the pinned
@@ -362,7 +377,9 @@ validation ops keep the `id` / `executionStatus` / `resultStatus` poll keys.
 A 9.1 target resolves to this same `sddc-rest-9.0` connector (range
 `>=9.0,<10.0`; no path was removed 9.0 → 9.1), so the reads stay guarded against
 `sddc-manager-9.0` (the #2982 lane) and the new writes against `sddc-manager-9.1`
-(the estate version). Provenance + CI wiring:
+(the estate version). The two validation reads (#3518) are in both lanes: as
+typed-read path constants in the 9.0 lane, and next to the writes they poll in
+the 9.1 lane. Provenance + CI wiring:
 [`docs/decisions/vendor-spec-ci-provisioning.md`](../decisions/vendor-spec-ci-provisioning.md)
 (the sddc-manager-9.1 extension).
 
@@ -446,7 +463,8 @@ host-commissioning IP-capacity pre-flight; `--json` emits the full envelope.
   (spec ingestion + read ops); [G3.5-T6 #618](https://github.com/evoila/meho/issues/618)
   (CLI verbs + E2E + this doc update).
   [#3497](https://github.com/evoila/meho/issues/3497) (curated
-  workload-domain write surface + `sddc-manager-9.1` reconcile lane).
+  workload-domain write surface + `sddc-manager-9.1` reconcile lane);
+  [#3518](https://github.com/evoila/meho/issues/3518) (validation-result reads).
 - Parent Initiative: [G3.5 #368](https://github.com/evoila/meho/issues/368).
 - Parent Goal: [G3 #214](https://github.com/evoila/meho/issues/214).
 - Operator onboarding: [`docs/cross-repo/sddc-manager-onboarding.md`](../cross-repo/sddc-manager-onboarding.md) — wrapper-flip recipe.

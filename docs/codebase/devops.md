@@ -203,6 +203,13 @@ and every pod uses `meho.core.imagePullSecrets` (both in
 `backend/tests/test_chart_image_registry.py` fails. The recipe is in
 [`../deploying.md`](../deploying.md#install-with-no-internet).
 
+`deploy/charts/meho/images.txt` is the list the customer copies: every
+image of the chart except MEHO's own, one per line, as `<image@digest>
+<path in your registry>:<tag>`. Every image must be pinned by digest. The
+same test fails when the list and a render with every part on differ, and
+prints the lines the chart now wants. A new image, or a new digest, means
+a new line in `images.txt`.
+
 ### Probes
 
 The Deployment renders `startupProbe`, `livenessProbe`, and

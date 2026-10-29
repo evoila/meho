@@ -470,11 +470,15 @@ needed its own `vault.kv.delete` call and its own approval.
   is refused before the call waits for approval. The same limit stops the
   recursive list and the walk when the call runs
   (`VaultFolderTooLargeError`; nothing is deleted then).
-- Permission check before approval (`_folder_delete_preflight`): `list` on
-  `<mount>/metadata/<folder>` and on every sub-folder a listed key is in,
-  and for every listed key `read` on its metadata path and `update` on its
-  delete path. Vault rights can differ per key and per sub-folder, so all
-  paths are probed, in one `sys/capabilities-self` call
+- Permission check before approval (`_folder_delete_preflight`): it first
+  walks the folder (`kv_tree.list_kv_folders`, the same walk the delete
+  does) to find every sub-folder the delete will list, also one no listed
+  key is in. A sub-folder Vault refuses to list is kept and not entered.
+  Then it needs `list` on `<mount>/metadata/<folder>` and on every one of
+  these sub-folders (plus every sub-folder a listed key is in), and for
+  every listed key `read` on its metadata path and `update` on its delete
+  path. Vault rights can differ per key and per sub-folder, so all paths
+  are probed, in one `sys/capabilities-self` call
   (`vault_capabilities_preflight`). When one is missing the call is refused
   with `write_capability_denied` naming that path, and no approval is
   requested.

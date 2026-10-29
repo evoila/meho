@@ -16,8 +16,9 @@ approval. These tests prove:
   than the limit are refused before the call waits for approval.
 * **The approval card** lists every key path and the count, never a value.
 * **The permission check** runs before the call waits for approval, covers
-  every listed key and every sub-folder in one Vault call, and a call Vault
-  would refuse on any of them is not parked.
+  every listed key and every sub-folder the delete will list (also one no
+  listed key is in) in one Vault call, and a call Vault would refuse on any
+  of them is not parked.
 * **The full flow**: preview, wait for approval, a second person approves,
   only the listed keys are deleted, a key added after the approval is left
   alone.
@@ -45,6 +46,11 @@ from meho_backplane.connectors.registry import clear_registry, register_connecto
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.connectors.vault import VaultConnector
 from meho_backplane.connectors.vault import ops_kv_folder as folder_module
+from meho_backplane.connectors.vault.kv_tree import (
+    VaultFolderTooLargeError,
+    list_kv_folders,
+    list_kv_tree,
+)
 from meho_backplane.connectors.vault.ops import register_vault_typed_operations
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
@@ -86,6 +92,7 @@ class _Tree:
     def __init__(self) -> None:
         self.secrets: dict[str, dict[str, dict[str, Any]]] = {}
         self.list_calls: list[str] = []
+        self.list_exc_for: dict[str, Exception] = {}
         self.delete_calls: list[dict[str, Any]] = []
         self.delete_exc_for: dict[str, Exception] = {}
 
@@ -113,6 +120,8 @@ class _Tree:
 
     def list_secrets(self, path: str, mount_point: str = "secret", **_: Any) -> dict[str, Any]:
         self.list_calls.append(f"{mount_point}/{path}")
+        if f"{mount_point}/{path}" in self.list_exc_for:
+            raise self.list_exc_for[f"{mount_point}/{path}"]
         prefix = f"{mount_point}/{path}".rstrip("/") + "/"
         names: set[str] = set()
         for full in self.secrets:
@@ -276,6 +285,37 @@ async def test_plain_list_is_unchanged(
 
     assert result.status == "ok", result.error
     assert result.result == {"keys": ["admin", "run1/", "run2/"]}
+
+
+async def test_folder_walk_returns_every_sub_folder(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake, _tree = _lab_tree(monkeypatch)
+
+    folders = await list_kv_folders(fake, mount="secret", path=_FOLDER, max_keys=10)
+
+    assert folders == _SUB_FOLDERS
+
+
+async def test_folder_walk_keeps_a_sub_folder_it_may_not_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused sub-folder is returned and not entered; the secret walk raises instead."""
+    fake, tree = _lab_tree(monkeypatch)
+    tree.list_exc_for[f"secret/{_FOLDER}/run2"] = hvac.exceptions.Forbidden("denied")
+
+    folders = await list_kv_folders(fake, mount="secret", path=_FOLDER, max_keys=10)
+
+    assert folders == ["run1", "run2"]
+    with pytest.raises(hvac.exceptions.Forbidden):
+        await list_kv_tree(fake, mount="secret", path=_FOLDER, max_keys=10)
+
+
+async def test_folder_walk_refuses_a_folder_over_the_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake, _tree = _lab_tree(monkeypatch)
+
+    with pytest.raises(VaultFolderTooLargeError):
+        await list_kv_folders(fake, mount="secret", path=_FOLDER, max_keys=2)
 
 
 async def test_recursive_list_refuses_a_folder_over_the_limit(
@@ -690,7 +730,7 @@ def _caps(granted_update: list[str]) -> dict[str, list[str]]:
 
 
 def test_checks_cover_every_key_and_every_sub_folder() -> None:
-    checks = folder_module._folder_delete_checks("secret", _FOLDER, _ALL_KEYS)
+    checks = folder_module._folder_delete_checks("secret", _FOLDER, _ALL_KEYS, ["run1", "run2"])
 
     assert checks == [
         (f"secret/metadata/{_FOLDER}", frozenset({"list"})),
@@ -779,6 +819,77 @@ async def test_missing_list_right_on_a_sub_folder_is_reported(
     assert result.extras["required"] == ["list"]
     assert await _pending_count() == 0
     assert tree.delete_calls == []
+
+
+async def test_unlisted_sub_folder_without_list_right_is_reported(
+    monkeypatch: pytest.MonkeyPatch, _registered_ops: None
+) -> None:
+    """A sub-folder no listed key is in still gets listed by the delete, so it is checked."""
+    fake, tree = _lab_tree(monkeypatch)
+    tree.add(f"secret/{_FOLDER}/stray/token")
+    denied = f"secret/metadata/{_FOLDER}/stray"
+    fake.sys.capabilities_by_path = {**_caps(["update"]), denied: []}
+
+    result = await _run({"path": _FOLDER, "keys": _ALL_KEYS}, approved=False)
+
+    assert result.status == "denied"
+    assert result.extras["error_code"] == "write_capability_denied"
+    assert result.extras["path"] == denied
+    assert result.extras["required"] == ["list"]
+    assert await _pending_count() == 0
+    assert tree.delete_calls == []
+
+
+async def test_unlisted_sub_folder_vault_refuses_to_list_is_reported(
+    monkeypatch: pytest.MonkeyPatch, _registered_ops: None
+) -> None:
+    """Vault refuses the list of an unlisted sub-folder during the walk: the check names it."""
+    fake, tree = _lab_tree(monkeypatch)
+    tree.add(f"secret/{_FOLDER}/stray/token")
+    denied = f"secret/metadata/{_FOLDER}/stray"
+    tree.list_exc_for[f"secret/{_FOLDER}/stray"] = hvac.exceptions.Forbidden("denied")
+    fake.sys.capabilities_by_path = {**_caps(["update"]), denied: []}
+
+    result = await _run({"path": _FOLDER, "keys": _ALL_KEYS}, approved=False)
+
+    assert result.status == "denied"
+    assert result.extras["path"] == denied
+    assert result.extras["required"] == ["list"]
+    assert await _pending_count() == 0
+    assert tree.delete_calls == []
+
+
+async def test_preflight_walks_the_folder_and_probes_every_path_in_one_vault_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The check lists the folder tree once and probes every folder and key in one call."""
+    fake, tree = _lab_tree(monkeypatch)
+    tree.add(f"secret/{_FOLDER}/stray/token")
+    stray = f"secret/metadata/{_FOLDER}/stray"
+    fake.sys.capabilities_by_path = {**_caps(["update"]), stray: ["list"]}
+    ctx = PreviewContext(
+        descriptor=MagicMock(op_id=_OP_ID),
+        connector_instance=None,
+        operator=_operator(),
+        target=None,
+        params={"path": _FOLDER, "keys": _ALL_KEYS},
+        connector_id=_CONNECTOR_ID,
+    )
+
+    result = await folder_module._folder_delete_preflight(ctx)
+
+    assert result is not None
+    assert result["will_be_denied"] is False
+    assert result["checked_paths"] == 11
+    assert tree.list_calls == [
+        f"secret/{_FOLDER}",
+        f"secret/{_FOLDER}/stray",
+        f"secret/{_FOLDER}/run2",
+        f"secret/{_FOLDER}/run2/deep",
+        f"secret/{_FOLDER}/run1",
+    ]
+    assert len(fake.sys.get_capabilities_calls) == 1
+    assert set(fake.sys.get_capabilities_calls[0]["paths"]) == {*_caps(["update"]), stray}
 
 
 async def test_preflight_probes_every_path_in_one_vault_call(

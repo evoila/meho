@@ -37,12 +37,14 @@ Guards
   before the call waits for approval. When the call runs, a folder that now
   holds more secrets than the limit is refused and nothing is deleted.
 * A permission check runs before the call waits for approval
-  (:func:`_folder_delete_preflight`): the identity needs ``list`` on the
-  metadata path of the folder and of every sub-folder a listed key is in,
-  and, for every listed key, ``read`` on its metadata path and ``update``
-  on its delete path. Vault rights can differ per key and per sub-folder,
-  so every path is checked, in one ``sys/capabilities-self`` call. When
-  Vault would refuse one of them, MEHO refuses the call and asks no one to
+  (:func:`_folder_delete_preflight`). It walks the folder first, the same
+  walk the delete does, to find every sub-folder the delete will list,
+  also one no listed key is in. The identity needs ``list`` on the
+  metadata path of the folder and of every one of these sub-folders, and,
+  for every listed key, ``read`` on its metadata path and ``update`` on
+  its delete path. Vault rights can differ per key and per sub-folder, so
+  every path is checked, in one ``sys/capabilities-self`` call. When Vault
+  would refuse one of them, MEHO refuses the call and asks no one to
   approve it.
 
 The result and the approval card carry key paths only, never a secret value.
@@ -51,6 +53,7 @@ The result and the approval card carry key paths only, never a secret value.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -60,6 +63,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vault.kv_tree import (
     DEFAULT_FOLDER_MAX_KEYS,
     folder_max_keys,
+    list_kv_folders,
     list_kv_tree,
 )
 from meho_backplane.connectors.vault.ops import (
@@ -219,8 +223,9 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
         "shows every key path and the count. The Vault role needs 'list' and "
         "'read' on <mount>/metadata/<folder>/... and 'update' on "
         "<mount>/delete/<folder>/...; MEHO checks this for every listed key and "
-        "sub-folder before it asks for approval and refuses with error_code "
-        "'write_capability_denied' when a right is missing on one of them."
+        "every sub-folder of the folder before it asks for approval and refuses "
+        "with error_code 'write_capability_denied' when a right is missing on "
+        "one of them."
     ),
     "parameter_hints": {
         "mount": "Optional. KV v2 mount point; defaults to 'secret'.",
@@ -396,15 +401,16 @@ async def _folder_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
 
 
 def _folder_delete_checks(
-    mount: str, folder: str, keys: list[str]
+    mount: str, folder: str, keys: list[str], sub_folders: Sequence[str] = ()
 ) -> list[tuple[str, frozenset[str]]]:
     """The ``(path, rights)`` pairs the delete needs, as ``sys/capabilities-self`` names them.
 
-    ``list`` on the folder's metadata path and on every sub-folder a listed
-    key is in (the paths the walk lists), then ``read`` on each key's
-    metadata path and ``update`` on each key's delete path.
+    ``list`` on the folder's metadata path, on every sub-folder in
+    *sub_folders* (the ones the walk found) and on every sub-folder a
+    listed key is in, then ``read`` on each key's metadata path and
+    ``update`` on each key's delete path.
     """
-    folders: set[str] = {folder}
+    folders: set[str] = {folder, *(f"{folder}/{sub}" for sub in sub_folders)}
     for key in keys:
         parts = key.split("/")
         for depth in range(1, len(parts)):
@@ -421,19 +427,30 @@ def _folder_delete_checks(
 async def _folder_delete_preflight(ctx: PreviewContext) -> dict[str, Any] | None:
     """Check, before the call waits for approval, that Vault will allow the whole delete.
 
-    Builds the paths with :func:`_folder_delete_checks` and probes them all in
-    one ``sys/capabilities-self`` call. Returns the first check that fails,
-    else the last check with the number of paths checked. Returns ``None``
-    when the probe itself fails (fail-soft, like the other KV writes).
+    Walks the folder (:func:`list_kv_folders`) to find every sub-folder the
+    delete will list, builds the paths with :func:`_folder_delete_checks`
+    and probes them all in one ``sys/capabilities-self`` call. A sub-folder
+    the walk could not list is probed too, so the refusal names it. Returns
+    the first check that fails, else the last check with the number of
+    paths checked. Returns ``None`` when the walk or the probe itself fails
+    (fail-soft, like the other KV writes; the run then refuses the call
+    before it deletes anything).
     """
     mount = str(ctx.params.get("mount", _DEFAULT_KV_MOUNT)).strip()
     folder = str(ctx.params.get("path", "")).strip().strip("/")
     raw_keys = ctx.params.get("keys")
-    if not isinstance(raw_keys, list) or not raw_keys:
+    if not isinstance(raw_keys, list) or not raw_keys or not folder:
         return None
     keys = sorted({str(key) for key in raw_keys})
+    async with vault_client_for_target(ctx.operator, ctx.target) as client:
+        sub_folders = await list_kv_folders(
+            client, mount=mount, path=folder, max_keys=folder_max_keys()
+        )
     return await vault_capabilities_preflight(
-        ctx.operator, FOLDER_DELETE_OP_ID, _folder_delete_checks(mount, folder, keys), ctx.target
+        ctx.operator,
+        FOLDER_DELETE_OP_ID,
+        _folder_delete_checks(mount, folder, keys, sub_folders),
+        ctx.target,
     )
 
 

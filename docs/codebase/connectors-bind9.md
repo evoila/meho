@@ -199,7 +199,7 @@ reason.
 | `bind9.record.add` | `Bind9Connector.bind9_record_add` | `caution` | Atomic A/AAAA record write with snapshot rollback; resolves owning zone via longest-suffix match when `zone` omitted; optional `view` disambiguates split-horizon zones (#2897); verify predicate = `dig` returns the new IP, or `rndc zonestatus` serial-match when a `view` is given |
 | `bind9.record.remove` | `Bind9Connector.bind9_record_remove` | `destructive` | Governed whole-name clear (#3247): atomic remove of **every** A + AAAA at the given FQDN with snapshot rollback; same `view` disambiguation as `record.add`; verify predicate = `dig` no longer resolves the FQDN, or `rndc zonestatus` serial-match when a `view` is given. Promoted from `caution` by the #3247 operator ruling — as the broadest DNS removal it rides the same governed gate as `record.delete`: mandatory human approval + preview-hash binding + whole-name blast-radius (the name + every A/AAAA value that dies) |
 | `bind9.record.delete` | `Bind9Connector.bind9_record_delete` | `destructive` | Governed-delete tier (#3231): deletes exactly ONE record scoped by `(zone, name, type, rdata?)` — never zone-wide, never a whole-rrset sweep. Mandatory human approval + preview-hash binding + blast-radius (the exact record + its siblings). Fail-closed structured refusals `not_found` / `ambiguous` (candidates named) / `unmanaged_zone`; verify predicate confirms the single deleted value is gone (view → `rndc zonestatus`) |
-| `bind9.config.show` | `Bind9Connector.bind9_config_show` | `caution` | Read named.conf or an included fragment under the bind config root; path-safety filter refuses traversal with no content leaked. Waits for approval and is on `_CREDENTIAL_READ_OPS`, because a config file can hold TSIG / rndc key secrets; the value of every `secret "..."` line comes back as `[REDACTED:bind_key_secret]` (#4617) |
+| `bind9.config.show` | `Bind9Connector.bind9_config_show` | `safe` | Read one config file under the bind config root: `named.conf`, `named.conf.*` or `*.conf`. Runs at once, without approval (#5132), so a session can read a file before `bind9.config.apply_file` changes it. Key files (`rndc.key`, `*.key`, `*.private`), zone files (use `bind9.zone.read`) and paths outside the root are refused with `ConfigPathRejectedError` and no content. Stays on `_CREDENTIAL_READ_OPS` (summary-only broadcast, no body in the flight recorder), because a config file can hold TSIG / rndc key secrets; the value of every `secret "..."` line comes back as `[REDACTED:bind_key_secret]` (#4617) |
 | `bind9.config.apply_file` | `Bind9Connector.bind9_config_apply_file` | `dangerous` | Atomic single-fragment write via T3's primitive; validate = `named-checkconf -p`; verify = config still parses after live reload |
 | `bind9.config.apply_views` | `Bind9Connector.bind9_config_apply_views` | `dangerous` | Atomic multi-file tree write (tar mode of T3's primitive); validate = `named-checkconf -p`; verify = caller-supplied `dig` or fallback parse check |
 | `bind9.config.backup` | `Bind9Connector.bind9_config_backup` | `caution` | `tar -czf` of `/etc/bind/` under `/var/backups/meho-bind9/`; returns backup ID + listing of existing backups |
@@ -502,12 +502,27 @@ hand-coded paths only achieved by convention:
   the SSH command line, but a NUL/newline would survive quoting in
   some shells and is easier to refuse at the API boundary.
 
-The check is lexical, not realpath -- a `realpath` resolution would
-double the wire cost (a second SSH round-trip), and the threat model
-is operator-typed paths in agent prompts (not a hostile operator
-placing a symlink inside `/etc/bind/`). The lexical check rejects
-`../` ladders and absolute paths outside the root, which is the
-right granularity.
+`ensure_path_under_root` itself is lexical. `bind9.config.show` runs
+without approval since #5132, so the read has two more checks:
+
+* **File-name rule** (`ensure_config_file_name`). The read takes only
+  config files: `named.conf`, names that start with `named.conf.`,
+  and names that end in `.conf` (for example view files). It refuses
+  every other file with the same `ConfigPathRejectedError` and no
+  content: `rndc.key`, any `*.key` or `*.private` file (also when the
+  rest of the name matches), `bind.keys`, and zone files. Zone files
+  have their own read, `bind9.zone.read`.
+* **Real path.** The rule runs on the normalised path, so a `..` or
+  `.` segment cannot hide the file name. Then the handler runs
+  `realpath -- <root> <path>` on the nameserver and runs both checks
+  again on the real path, before `cat`. A symlink inside the root
+  that points to a key file, or to a file outside the root, is
+  refused; the file is never read. If `realpath` fails, the read is
+  refused too.
+
+`bind9.config.apply_file` and `bind9.config.apply_views` still use
+only the lexical check: they wait for approval, and they write files
+instead of reading them.
 
 ## Registration
 

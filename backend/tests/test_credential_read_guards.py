@@ -11,10 +11,11 @@ Two guards, one shared list:
   dispatcher replaces every secret-named field in the answer with
   ``[REDACTED:param_name]`` before the caller sees it.
 
-``bind9.config.show`` gets the same two guards in its op definition. Its
-answer is one text field, so the ``bind_key_secret`` text rule replaces
-the value of every ``secret "..."`` line (TSIG and rndc keys) and the
-rest of the file stays readable.
+``bind9.config.show`` is on the same list. Its answer is one text field,
+so the ``bind_key_secret`` text rule replaces the value of every
+``secret "..."`` line (TSIG and rndc keys) and the rest of the file stays
+readable. Since #5132 it reads only config files (no key files), so it
+runs without approval.
 """
 
 from __future__ import annotations
@@ -275,10 +276,11 @@ async def test_sddc_ingested_credential_read_response_is_scrubbed(
 # ---------------------------------------------------------------------------
 
 
-def test_bind9_config_show_is_caution_with_approval() -> None:
+def test_bind9_config_show_is_safe_without_approval() -> None:
+    """#5132: the read refuses key files and hides key secrets, so it runs at once."""
     op = next(o for o in BIND9_OPS if o.op_id == "bind9.config.show")
-    assert op.safety_level == "caution"
-    assert op.requires_approval is True
+    assert op.safety_level == "safe"
+    assert op.requires_approval is False
 
 
 def test_bind9_config_show_classifies_credential_read() -> None:
@@ -369,5 +371,24 @@ async def test_bind9_config_show_key_secret_is_redacted(
     assert result.status == "ok", result.error
     assert isinstance(result.result, dict)
     assert result.result["file"] == "/etc/bind/named.conf"
+    assert result.result["content"] == _NAMED_CONF_REDACTED
+    assert _FAKE_TSIG_VALUE not in result.model_dump_json()
+
+
+async def test_bind9_config_show_key_secret_stays_redacted_with_reveal_secret(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """``reveal_secret`` does not bring a key secret back: the text rule still runs."""
+    await _register_bind9_config_show(stub_embedding_service)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="bind9-ssh-9.x",
+        op_id="bind9.config.show",
+        target=None,
+        params={"path": "named.conf", "reveal_secret": True},
+    )
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
     assert result.result["content"] == _NAMED_CONF_REDACTED
     assert _FAKE_TSIG_VALUE not in result.model_dump_json()

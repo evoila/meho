@@ -24,6 +24,9 @@
                                version, impl_id, tenant_id} from the
                                ambiguous-scope envelope (empty for the
                                non-ambiguous cases).
+    * ``users``             -- list[dict]: optional (#5027); each {kind,
+                               id, name, op_id} from the
+                               ``connector_in_use`` 409 (empty otherwise).
     * ``available_entries`` -- list[str]: optional (T2); the catalog
                                ``"<product>/<version>"`` refs the
                                ``catalog_entry_not_found`` 422 carries.
@@ -43,6 +46,16 @@
             {% else %}
               tenant_id={{ candidate.tenant_id }}
             {% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+    {% if users is defined and users %}
+      <ul class="mt-2 list-disc pl-4 text-xs" data-connector-users>
+        {% for user in users %}
+          <li class="font-mono [overflow-wrap:anywhere]">
+            {{ user.kind }}: {{ user.name or user.id }}
+            {% if user.op_id %}&mdash; operation {{ user.op_id }}{% endif %}
           </li>
         {% endfor %}
       </ul>

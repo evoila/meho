@@ -428,7 +428,7 @@ VM_INFO_WHEN_TO_USE = (
     "Use to triage a single VM's live state: power state (raw vim enum), "
     "guest IP, VMware Tools status + running status, guest heartbeat "
     "colour, and per-datastore storage usage -- addressed by moid or "
-    "name. The #1 hung-appliance read: a VM that is 'poweredOn' but has "
+    "name. The main hung-appliance read: a VM that is 'poweredOn' but has "
     "no guest_ip and a red/gray heartbeat is stuck. Reads the "
     "VirtualMachine managed object's runtime.powerState, guest.*, "
     "guestHeartbeatStatus, and storage.perDatastoreUsage via "

@@ -202,6 +202,8 @@ def _seed_request(
     expires_at: datetime | None = None,
     resumed_at: datetime | None = None,
     resume_result: dict[str, object] | None = None,
+    withdrawn_at: datetime | None = None,
+    withdraw_reason: str | None = None,
 ) -> uuid.UUID:
     """Insert one ``approval_request`` row; return its id."""
     rid = request_id or uuid.uuid4()
@@ -238,6 +240,8 @@ def _seed_request(
                     expires_at=stored_expires_at,
                     resumed_at=resumed_at,
                     resume_result=resume_result,
+                    withdrawn_at=withdrawn_at,
+                    withdraw_reason=withdraw_reason,
                 ),
             )
         return rid
@@ -1771,6 +1775,57 @@ def test_detail_modal_expired_row_shows_expiry_timestamp() -> None:
     # Read-only: no decision forms on a closed request.
     assert f'hx-post="/ui/approvals/{rid}/approve"' not in body
     assert f'hx-post="/ui/approvals/{rid}/reject"' not in body
+
+
+def _seed_withdrawn(op_id: str = "withdrawn.op") -> uuid.UUID:
+    return _seed_request(
+        tenant_id=_TENANT_A,
+        op_id=op_id,
+        status_value=ApprovalRequestStatus.WITHDRAWN.value,
+        withdrawn_at=datetime(2026, 6, 18, 7, 15, tzinfo=UTC),
+        withdraw_reason="plan changed",
+    )
+
+
+def test_detail_modal_withdrawn_row_names_the_sender_and_has_no_decisions() -> None:
+    """A withdrawn request (#4987) shows who took it back, when and why; no buttons."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_withdrawn()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub="op-99")
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Withdrawn by the sender" in body
+    assert 'datetime="2026-06-18T07:15:00' in body
+    assert "plan changed" in body
+    assert f'hx-post="/ui/approvals/{rid}/approve"' not in body
+    assert f'hx-post="/ui/approvals/{rid}/reject"' not in body
+
+
+def test_history_withdrawn_tab_lists_withdrawn_rows() -> None:
+    """The Withdrawn tab (#4987) lists only withdrawn rows, with time and reason."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_request(tenant_id=_TENANT_A, op_id="pending.op")
+    _seed_withdrawn()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?tab=withdrawn", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "withdrawn.op" in body
+    assert "pending.op" not in body
+    assert "withdrawn by the sender" in body
+    assert "plan changed" in body
+    assert 'datetime="2026-06-18T07:15:00' in body
 
 
 def test_detail_modal_pending_row_still_offers_decisions() -> None:

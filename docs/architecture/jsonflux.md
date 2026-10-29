@@ -467,8 +467,8 @@ TTL:   the handle's ttl_seconds (server-enforced)
 ```
 
 `record_kind` is `rows` or `document` (#3633). On a rows record,
-`document` holds the top-level fields left out of the inline summary, or
-is null. One record is also capped at `RESULT_HANDLE_MAX_RECORD_BYTES`
+`document` holds the top-level fields kept with the rows, or is null.
+One record is also capped at `RESULT_HANDLE_MAX_RECORD_BYTES`
 (default 16 MiB): the store keeps the longest run of rows from the start
 that fits, never a gap, and sets `storage_coverage` to `complete` or
 `partial`.
@@ -584,11 +584,11 @@ under RFC 6901 rules: `""` is the whole document, `~1` means `/` and
 resolves. A `path` read never touches SQL, so it cannot be combined with
 `filter`, `select`, or the other query fields. An array value pages with
 `offset` / `limit`; any other value comes back whole. A rows handle also
-answers `path` reads, but only for the top-level **scalar** fields its
-summary left out and the store kept with the rows. Lists and objects
-beside the rows are not kept, and the store drops the omitted scalars
-when they leave no room for the rows; the drill-in rationale says which
-case applies. The full rules are in
+answers `path` reads for the top-level fields the store kept with the
+rows: the scalars its summary left out, the objects a `result_objects`
+hint names, and every object or list beside the rows (#5139). The store
+drops these fields only when they leave no room for the first row; the
+drill-in rationale says which case applies. The full rules are in
 [`docs/codebase/result-spill.md`](../codebase/result-spill.md#document-records-and-path-reads-3633).
 
 ### Completed-operation receipt (`audit_id`, #3636)
@@ -708,7 +708,10 @@ that read when the count is above zero and the store kept the value. A
 value that leaves no room for the rows under the per-record cap is
 dropped, the rows are still stored, and the rationale says the value is
 not retrievable. With a hint, the listed keys are kept on top of
-the default copy, outside that budget. Credential-class ops
+the default copy, outside that budget, but inside the 4,096-byte limit
+of the whole inline summary (#5139, next sections): a hinted value that
+would push the summary over moves out like any other, is counted under
+`omitted_scalar_count`, and is stored with the rows. Credential-class ops
 (`credential_read` / `credential_mint` / `credential_write`) get no
 default copy: for them the hint is still the only path, so a secret-shaped
 scalar is never copied by accident. The registry sweep in
@@ -746,9 +749,38 @@ identity value within that bound stays verbatim; an exceptional value is
 returned as its bounded prefix and named in `result_object_truncations`, so a
 caller knows to retrieve the complete value from the handle spill when that
 object is an alias of the spilled collection (as the TLS leaf is). This is an
-additive generic facility: a descriptor without `result_objects` retains the
-existing bookkeeping-only reduced summary, and the full collection remains
+additive generic facility: the hint only chooses which inline fields of the
+named objects ride in the summary, and the full collection remains
 retrievable through `result_query`.
+
+### Parts next to the rows are kept by default (#5139)
+
+An answer often carries objects and lists next to its rows: `assumptions`,
+`inputs`, `totals`, `unknowns`, a task's `errors`. Without them the rows can be
+read wrongly. So, with no hint, the reducer stores every top-level object or
+list next to the rows (a "part") whole with the rows. `result_query` with
+`query={"path": "/<part>"}` returns it, and a list part pages with `offset` /
+`limit`. Whole parts are also copied into the inline summary, in answer order,
+while the summary stays under 4,096 bytes. A part is never cut. The parts left
+out are named in `parts_not_inline` (with `parts_not_inline_count` when the
+names list itself is cut), and `parts_note` names the `path` read. When the
+store must drop the parts to keep the rows (its per-record size cap), the note
+says they cannot be read. The 4,096 bytes are one budget for the whole summary:
+the reducer's own keys, the scalars (hinted or not), the `result_objects`
+projection, the digest, the parts, the names and the notes. The fit runs before
+the spill (`_plan_inline` → `_fit_inline`): the notes get room for their longer
+text, and when the names and the note still leave no room, the largest value
+moves out, is stored with the rows, and the parts are placed again in the room
+it left. A scalar that moves out is counted under `omitted_scalar_count`. An
+object or list that moves out (a digest list such as `failed`, or the projection
+of a `result_objects` object) is named in `parts_not_inline`, and the `path`
+read returns it whole; a moved projection also drops its
+`result_object_truncations` entry, since nothing of it is cut any more. Only the
+reducer's own keys never move. Credential-class ops keep the old rule: no part is
+copied or stored without their own hint. The registry sweep in
+`tests/test_operations_jsonflux_conformance.py` reduces a large sample for every
+typed and multi-step op whose declared answer has rows plus parts and fails
+when a part is lost.
 
 For typed descriptors with an explicit response schema, a top-level array plus
 one recognised Boolean outcome field (`handshake`, `reachable`, `success`, `ok`,

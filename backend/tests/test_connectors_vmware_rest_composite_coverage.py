@@ -62,6 +62,8 @@ _CLASSIFIER_OTHER = frozenset(
         # vlan.set ends in ``.set`` (not a write suffix) -> the classifier's
         # generic ``other`` branch, like security.set.
         "vmware.composite.network.portgroup.vlan.set",
+        # The DRS group member change ends in ``.set`` too -> ``other``.
+        "vmware.composite.cluster.drs_group.members.set",
         "vmware.composite.vm.resize",
         "vmware.composite.vm.nic.repoint",
         "vmware.composite.vm.device.cdrom",

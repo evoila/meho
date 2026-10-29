@@ -61,10 +61,14 @@ OK_LINES = [
     "[ok]   pods: all 7 pods in meho, kube-system, local-path-storage run",
     "[ok]   disk: /var/lib/rancher has 150 GB free (75%); /var/lib/meho has 150 GB free (75%)",
     "[ok]   certificates: all 2 RKE2 certificates are valid for at least 30 days",
-    "[ok]   firewall: on: the table inet meho is loaded, its chain prerouting drops what it "
-    "does not allow, and meho-firewall.service loads it at every start",
-    "[ok]   cis-profile: on: RKE2's settings set profile: cis, and the machine has the etcd "
-    "user and the kernel settings the profile needs",
+    (
+        "[ok]   firewall: on: the table inet meho is loaded, its chain prerouting drops what it "
+        "does not allow, and meho-firewall.service loads it at every start"
+    ),
+    (
+        "[ok]   cis-profile: on: RKE2's settings set profile: cis, and the machine has the etcd "
+        "user and the kernel settings the profile needs"
+    ),
     "[ok]   console-certificate: valid for meho.example.com until 2027-10-23 (365 days left)",
 ]
 CHECK_NAMES = [

@@ -30,9 +30,14 @@ How a call runs:
 4. **Finish an interrupted run.** With ``-ResetHoloRouter`` the router
    reboots at the end of the cmdlet and kills the script before the last two
    steps. The progress file then still says ``running`` while the ``tmux``
-   session is gone. ``holodeck.instance.status`` reports that, and a second
-   ``holodeck.instance.remove`` call with the same id runs only the two
-   missing steps (no cmdlet) and finishes the progress file.
+   session is gone. Its ``deleted`` field says whether the cmdlet finished:
+   ``true`` when it returned, ``false`` when it failed, ``null`` when the
+   script died before it could say. ``holodeck.instance.status`` reports
+   that, and a second ``holodeck.instance.remove`` call with the same id
+   finishes the run (see :func:`resumable`): it runs only the two missing
+   steps, without the cmdlet. When the instance is still listed and the
+   delete is not confirmed, or the record is older than the listed deploy,
+   the call deletes the instance again instead.
 
 No password or token is a parameter, and none is returned. The script reads
 the vCenter login from the loaded config on the appliance, by variable name
@@ -55,7 +60,12 @@ from typing import TYPE_CHECKING, Any
 from meho_backplane.connectors._shared.pwsh import PwshRunError, ps_single_quote, pwsh_run
 from meho_backplane.connectors.holodeck._response_schemas import HOLODECK_RESPONSE_SCHEMAS
 from meho_backplane.connectors.holodeck.ops import SSH_TRANSPORT_NOTE, HolodeckOp
-from meho_backplane.connectors.holodeck.ops_deploy import _pwsh_encoded, target_hr_version
+from meho_backplane.connectors.holodeck.ops_deploy import (
+    _pwsh_encoded,
+    _remove_age,
+    map_instance_status_envelope,
+    target_hr_version,
+)
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 if TYPE_CHECKING:
@@ -73,6 +83,7 @@ __all__ = [
     "known_vms",
     "read_remove_record",
     "remove_record_path",
+    "resumable",
 ]
 
 _OP_ID = "holodeck.instance.remove"
@@ -289,7 +300,7 @@ def interrupted(record: dict[str, Any] | None) -> bool:
 
     That happens when the HoloRouter reboots (``reset_router``) before the
     script lists the leftover VMs and moves the files. A record that holds the
-    cmdlet's error is not resumed: the cmdlet failed, there is nothing to
+    cmdlet's error is not interrupted: the cmdlet failed, there is nothing to
     finish.
     """
     return (
@@ -298,6 +309,26 @@ def interrupted(record: dict[str, Any] | None) -> bool:
         and record.get("tmux_alive") is False
         and not record.get("error")
     )
+
+
+def resumable(check: dict[str, Any], record: dict[str, Any] | None) -> bool:
+    """True when a remove call should finish the interrupted run in *record*.
+
+    A resume skips ``Remove-HoloDeckInstance`` and runs only the last two
+    steps. That is right when the instance is no longer listed (there is
+    nothing left to delete; the leftover VM list shows what is left), or when
+    it is still listed, the record says the cmdlet finished (``deleted``
+    true) and the record is newer than the listed deploy. When the instance
+    is listed and the delete is not confirmed, or the record belongs to an
+    older deploy with the same id, or MEHO cannot compare the two times, the
+    call deletes the instance again instead.
+    """
+    if record is None or not interrupted(record):
+        return False
+    if _found(check) and record.get("deleted") is not True:
+        return False
+    deploy = map_instance_status_envelope(check.get("instance"))
+    return _remove_age(deploy, record) == "current"
 
 
 # ---------------------------------------------------------------------------
@@ -315,26 +346,30 @@ def _remove_script(
 ) -> str:
     """Compose the PowerShell that runs in ``tmux``. Every value is quoted.
 
-    Order: write the progress file, load the config, run the cmdlet, write the
-    file again (so the cmdlet's error survives a reboot), list the VMs left in
-    vCenter, move the instance's files (only when the cmdlet did not fail),
-    write the file a last time. ``Get-VM`` stops on error, so a failed read
+    Order: write the progress file (``deleted`` null), load the config, run
+    the cmdlet, write the file again with ``deleted`` true or, with the
+    error, false (so the cmdlet's outcome survives a reboot), list the VMs
+    left in vCenter, move the instance's files (only when the cmdlet did not
+    fail), write the file a last time. ``Get-VM`` stops on error, so a failed read
     keeps ``leftover_vms`` null and sets ``leftover_error``; an empty search
     gives ``[]``. ``Move-Item`` stops on error too: a file that did not move
     goes to ``move_errors``, and only moved files go to ``moved_files``.
 
     With *resume_of* (the progress file of an interrupted run) the script
     finishes that run instead: it skips the cmdlet and keeps the old start
-    time and ``reset_router`` value.
+    time, ``reset_router`` and ``deleted`` values.
     """
     resuming = resume_of is not None
     now = "(Get-Date).ToUniversalTime().ToString('o')"
     started = now
+    deleted = "$null"
     if resume_of is not None:
         reset_router = bool(resume_of.get("reset_router"))
         old_start = resume_of.get("started_at")
         if isinstance(old_start, str) and old_start:
             started = ps_single_quote(old_start)
+        if resume_of.get("deleted") is True:
+            deleted = "$true"
     reset_value = "$true" if reset_router else "$false"
     resumed_value = "$true" if resuming else "$false"
     load = f"$null = Import-HoloDeckConfig -ConfigID {ps_single_quote(config_id)}; "
@@ -345,7 +380,8 @@ def _remove_script(
         reset_flag = " -ResetHoloRouter" if reset_router else ""
         cmdlet = (
             f"try {{ {load}Remove-HoloDeckInstance -InstanceID $id{reset_flag} "
-            "-ErrorAction Stop } catch { $r.error = $_.Exception.Message }; Save-Record; "
+            "-ErrorAction Stop; $r.deleted = $true } "
+            "catch { $r.error = $_.Exception.Message; $r.deleted = $false }; Save-Record; "
         )
         leftover_load = ""
     file_list = ", ".join(ps_single_quote(path) for path in files)
@@ -371,7 +407,7 @@ def _remove_script(
         "$r = [ordered]@{ instance_id = $id; state = 'running'; "
         f"started_at = {started}; finished_at = $null; "
         f"reset_router = {reset_value}; resumed = {resumed_value}; error = $null; "
-        "leftover_vms = $null; leftover_error = $null; moved_to = $null; "
+        f"deleted = {deleted}; leftover_vms = $null; leftover_error = $null; moved_to = $null; "
         "moved_files = @(); move_errors = @() }; "
         "function Save-Record { $r | ConvertTo-Json -Depth 4 -Compress "
         "| Set-Content -LiteralPath $rec }; "
@@ -443,8 +479,8 @@ async def holodeck_instance_remove(
     Op-id: ``holodeck.instance.remove``. Runs only after a person approved
     the call. Returns ``status`` ``started``, ``unchanged`` (no such instance)
     or ``refused`` (with ``reason``). A second call for an instance whose
-    remove was interrupted finishes it (``resumed`` true). See the module
-    docstring for the steps.
+    remove was interrupted finishes it (``resumed`` true) when
+    :func:`resumable` says so. See the module docstring for the steps.
     """
     instance_id = str(params.get("instance_id", ""))
     if not _INSTANCE_ID_RE.fullmatch(instance_id):
@@ -460,16 +496,17 @@ async def holodeck_instance_remove(
     if blocker:
         return _answer("refused", instance_id, blocker)
     found = _found(check)
-    record = None if found else await read_remove_record(self, target, instance_id, operator)
-    resume = interrupted(record)
+    record = await read_remove_record(self, target, instance_id, operator)
+    resume = resumable(check, record)
     if not found and not resume:
         return _answer(
             "unchanged",
             instance_id,
             "Get-HoloDeckInstance does not list this instance; nothing was deleted",
         )
-    vms = known_vms(check, instance_id) if found else []
-    if found and not vms:
+    delete = found and not resume
+    vms = known_vms(check, instance_id) if delete else []
+    if delete and not vms:
         return _answer("refused", instance_id, _NO_VMS_REASON)
     config_id, reason = _pick_config_id(params, check)
     if config_id is None:
@@ -553,11 +590,12 @@ async def read_remove_record(
 async def _instance_remove_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """List what the approved call deletes: the VMs, the router reset, the files.
 
-    Read-only: it runs the same check script as the handler. When the toolkit
-    cannot run the remove, the check fails, or the instance is listed but no
-    VM can be named, it raises, so the call does not wait for approval and
-    the caller reads why. A call that only finishes an interrupted remove
-    lists the files to move and says that no VM is deleted.
+    Read-only: it runs the same check script and takes the same resume
+    decision (:func:`resumable`) as the handler. When the toolkit cannot run
+    the remove, the check fails, or the instance is to be deleted but no VM
+    can be named, it raises, so the call does not wait for approval and the
+    caller reads why. A call that only finishes an interrupted remove lists
+    the files to move and says that no VM is deleted.
     """
     from meho_backplane.connectors.holodeck.connector import HolodeckConnector
 
@@ -576,13 +614,12 @@ async def _instance_remove_preview(ctx: PreviewContext) -> dict[str, Any] | None
         raise ValueError(blocker)
 
     found = _found(check)
-    record = None
-    if not found:
-        record = await read_remove_record(connector, ctx.target, instance_id, ctx.operator)
-    resume = interrupted(record)
+    record = await read_remove_record(connector, ctx.target, instance_id, ctx.operator)
+    resume = resumable(check, record)
+    delete = found and not resume
     children: list[dict[str, Any]] = []
     files: list[str] = []
-    if found:
+    if delete:
         vms = known_vms(check, instance_id)
         if not vms:
             raise ValueError(_NO_VMS_REASON)
@@ -598,7 +635,7 @@ async def _instance_remove_preview(ctx: PreviewContext) -> dict[str, Any] | None
     if (found or resume) and move_state_files:
         files = [str(f) for f in _as_list(check.get("files")) if f]
         children.extend({"kind": "file_move", "path": path} for path in files)
-    if found:
+    if delete:
         note = "The instance's nested VMs are deleted and cannot be restored."
     elif resume:
         note = (
@@ -618,7 +655,7 @@ async def _instance_remove_preview(ctx: PreviewContext) -> dict[str, Any] | None
             "children": children,
             "irreversibility": "permanent",
         },
-        "reset_router": reset_router and found,
+        "reset_router": reset_router and delete,
         "files_to_move": files,
         "note": note,
     }
@@ -718,7 +755,9 @@ REMOVE_OPS: tuple[HolodeckOp, ...] = (
                 "is refused. With reset_router true the router reboots, and the steps "
                 "after the delete (leftover VMs, file move) may not finish; "
                 "holodeck.instance.status then says so, and a second call with the "
-                "same instance_id finishes them."
+                "same instance_id finishes them. When that status cannot confirm "
+                "the delete and the instance is still listed, the second call "
+                "deletes it again."
             ),
             "parameter_hints": {
                 "instance_id": "The id used at deploy time; every nested VM name starts with it.",

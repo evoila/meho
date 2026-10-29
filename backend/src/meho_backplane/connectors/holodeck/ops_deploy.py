@@ -480,6 +480,7 @@ def _removal_history(record: dict[str, Any]) -> dict[str, Any]:
         "finished_at": record.get("finished_at"),
         "reset_router": bool(record.get("reset_router")),
         "resumed": bool(record.get("resumed")),
+        "deleted": record.get("deleted") if isinstance(record.get("deleted"), bool) else None,
         "error": record.get("error"),
         "leftover_error": record.get("leftover_error"),
         "moved_to": record.get("moved_to"),
@@ -503,6 +504,39 @@ def _removed_notes(removal: dict[str, Any], leftover: list[str] | None) -> list[
             "the instance was removed, but some VMs are left; delete them with "
             "vmware.composite.vm.destroy"
         )
+    return notes + _step_notes(removal)
+
+
+def _unconfirmed_notes(removal: dict[str, Any], leftover: list[str] | None) -> list[str]:
+    """Notes for a remove that ended without the cmdlet saying that it finished.
+
+    The script writes ``deleted`` only after ``Remove-HoloDeckInstance``
+    returns. A record without it ended before or inside the cmdlet, so MEHO
+    cannot tell whether the VMs are gone and never reports ``removed``.
+    """
+    if removal["state"] == "interrupted":
+        notes = [
+            "the remove ended before Remove-HoloDeckInstance reported that it finished "
+            "(its tmux session is gone), so MEHO cannot tell whether the VMs were "
+            "deleted; call holodeck.instance.remove again with this instance_id: it "
+            "deletes the instance again when Get-HoloDeckInstance still lists it, or "
+            "finishes the last steps when it does not"
+        ]
+    else:
+        notes = [
+            "the remove finished its last steps, but Remove-HoloDeckInstance never "
+            "reported that it finished (the first run was interrupted), so MEHO cannot "
+            "confirm that the VMs were deleted; leftover_vms shows the VMs whose name "
+            "starts with the instance id"
+        ]
+    if leftover:
+        notes.append("some VMs are left; delete them with vmware.composite.vm.destroy")
+    return notes + _step_notes(removal)
+
+
+def _step_notes(removal: dict[str, Any]) -> list[str]:
+    """Notes for the last two steps: a failed VM read and files that did not move."""
+    notes: list[str] = []
     if removal["leftover_error"]:
         notes.append(
             f"MEHO could not list the VMs that are left: {removal['leftover_error']}; "
@@ -521,10 +555,13 @@ def merge_remove_record(envelope: dict[str, Any], record: dict[str, Any]) -> Non
 
     ``leftover_vms`` lists the VMs whose name still starts with the instance
     id (``[]`` when the search found none, ``None`` when the remove could not
-    check). A remove that finished without an error sets ``status`` to
-    ``removed``. So does an ``interrupted`` remove whose cmdlet did not fail:
-    the VMs are gone, and a note says how to finish the last steps. An old
-    record must never hide a newer deploy with the same id (see
+    check). A remove that finished without an error, and whose record says
+    the cmdlet finished (``deleted`` true), sets ``status`` to ``removed``.
+    So does an ``interrupted`` remove whose cmdlet finished: the VMs are
+    gone, and a note says how to finish the last steps. A remove that ended
+    before the cmdlet could say (``deleted`` null) never sets ``removed``: a
+    note keeps that doubt (see :func:`_unconfirmed_notes`). An old record
+    must never hide a newer deploy with the same id (see
     :func:`_remove_age`). A record older than the listed deploy is kept only
     as history in ``removal``. When MEHO cannot tell, or the read failed,
     ``status`` (and any ``error``) stays as ``Get-HoloDeckInstance`` reports it
@@ -544,8 +581,11 @@ def merge_remove_record(envelope: dict[str, Any], record: dict[str, Any]) -> Non
     leftover = record.get("leftover_vms")
     envelope["leftover_vms"] = _str_list(leftover) if leftover is not None else None
     state = removal["state"]
-    finished = state == "done" or (state == "interrupted" and not removal["error"])
-    if finished and age == "unsure" and envelope.get("error"):
+    ended = state == "done" or (state == "interrupted" and not removal["error"])
+    finished = ended and removal["deleted"] is True
+    if ended and not finished:
+        notes.extend(_unconfirmed_notes(removal, envelope["leftover_vms"]))
+    elif finished and age == "unsure" and envelope.get("error"):
         notes.append(
             "a remove finished, but MEHO could not read Get-HoloDeckInstance, so it "
             "cannot tell if a newer deploy uses this id; status stays unknown"

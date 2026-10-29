@@ -368,6 +368,12 @@ _INSTANCE_STATUS = _envelope(
                 "finished_at": _f(["string", "null"], "When the remove ended (UTC)."),
                 "reset_router": _f("boolean", "True when the HoloRouter was reset."),
                 "resumed": _f("boolean", "True when a second call finished an interrupted remove."),
+                "deleted": _f(
+                    ["boolean", "null"],
+                    "True when Remove-HoloDeckInstance finished, false when it failed, "
+                    "null when the script ended before it could say. status is removed "
+                    "only when this is true.",
+                ),
                 "error": _f(["string", "null"], "Error text of Remove-HoloDeckInstance."),
                 "leftover_error": _f(["string", "null"], "Why MEHO could not list VMs."),
                 "moved_to": _f(["string", "null"], "Folder the state files moved to."),

@@ -566,11 +566,14 @@ How a call runs:
 4. **Progress file.** The script writes
    `/holodeck-runtime/logs/<id>-remove.json` at the start, right after the
    cmdlet (so its outcome survives a reboot) and at the end (`state`
-   running / done / failed, `error`, `leftover_vms`, `leftover_error`,
-   `moved_to`, `moved_files`, `move_errors`, `resumed`).
+   running / done / failed, `deleted`, `error`, `leftover_vms`,
+   `leftover_error`, `moved_to`, `moved_files`, `move_errors`, `resumed`).
+   `deleted` says whether `Remove-HoloDeckInstance` finished: `null` until
+   it returns, then `true`, or `false` with the `error`.
    `holodeck.instance.status` with `instance_id` reads it, and in the same
    command lists the `tmux` sessions: it adds `removal` and `leftover_vms`,
-   and sets `status` to `removed` when the delete finished without an error.
+   and sets `status` to `removed` only when the delete finished without an
+   error and `deleted` is `true`.
    A note names leftover VMs, a failed VM read and files that did not move.
    The caller deletes each leftover VM
    with `vmware.composite.vm.destroy`. The file stays after the remove, and a
@@ -588,24 +591,40 @@ How a call runs:
    end of the cmdlet and kills the script before the last two steps
    (leftover VMs, file move). The progress file then still says `running`
    while the `tmux` session `holodeck-remove-<id>` is gone. The status op
-   reports `removal.state` `interrupted`; when the cmdlet wrote no error and
-   `Get-HoloDeckInstance` no longer lists the instance, `status` is
-   `removed` and a note says how to finish. A second
-   `holodeck.instance.remove` call with the same `instance_id` then runs
-   only the two missing steps, without the cmdlet, keeps the old start time
-   in the progress file and answers `started` with `resumed: true`. A
-   record whose `tmux` session still runs, or that holds the cmdlet's error,
-   is not resumed: the call is `unchanged`.
+   reports `removal.state` `interrupted`. When `deleted` is `true` and
+   `Get-HoloDeckInstance` no longer lists the instance (or the record is
+   newer than the listed deploy), `status` is `removed` and a note says how
+   to finish. When `deleted` is `null` (the script died before or inside
+   the cmdlet), `status` is never `removed`: a note says that MEHO cannot
+   tell whether the VMs were deleted. The second `holodeck.instance.remove`
+   call with the same `instance_id` reads the record before it decides
+   (`resumable` in `ops_remove.py`), also when the instance is still listed:
+   - The instance is not listed: the call finishes the run. It runs only
+     the two missing steps, without the cmdlet, keeps the old start time
+     and `deleted` value in the progress file, and answers `started` with
+     `resumed: true`. A run that was never confirmed ends with `deleted`
+     `null`, so the status keeps that doubt and shows `leftover_vms`.
+   - The instance is still listed, `deleted` is `true`, and the record is
+     newer than the listed deploy (the state file still lists the instance
+     until it moves): the call finishes the run the same way. No cmdlet, no
+     second router reset.
+   - The instance is still listed and the delete is not confirmed, or the
+     record is older than the listed deploy, or MEHO cannot compare the two
+     times: the call deletes the instance again, as a new run.
+   - A record whose `tmux` session still runs, or that holds the cmdlet's
+     error, is not resumed: an unlisted instance is `unchanged`, a listed
+     one is deleted.
 
 **Approval preview.** The preview builder (registered in `ops_remove.py`)
-runs the same read-only check. Its `blast_radius` names the instance
-(`object`, with `found` and `resume`), lists each VM and where it runs, the
-router reset and each file that moves (`children`), and says `permanent`.
-An old toolkit, a failed check, or a listed instance without a VM name
-makes the builder raise, so the call does not wait for approval and the
-caller reads why. An unknown instance waits with an empty list: the call
-will change nothing. A call that finishes an interrupted remove lists only
-the files that move, and its note says that no VM is deleted.
+runs the same read-only check and takes the same resume decision as the
+handler. Its `blast_radius` names the instance (`object`, with `found` and
+`resume`), lists each VM and where it runs, the router reset and each file
+that moves (`children`), and says `permanent`. An old toolkit, a failed
+check, or an instance that is to be deleted but has no VM name makes the
+builder raise, so the call does not wait for approval and the caller reads
+why. An unknown instance waits with an empty list: the call will change
+nothing. A call that finishes an interrupted remove lists only the files
+that move, and its note says that no VM is deleted.
 
 **No secrets.** No parameter is a password. The script reads the vCenter
 login from the loaded config on the appliance, by variable name only. The

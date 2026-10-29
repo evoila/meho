@@ -129,7 +129,11 @@ def _record_stdout(record: dict[str, Any], *, tmux_alive: bool | None) -> str:
 
 
 def _interrupted_record(**overrides: Any) -> dict[str, Any]:
-    """A progress file of a remove whose script was killed by the router reboot."""
+    """A progress file of a remove whose script was killed by the router reboot.
+
+    The cmdlet had finished (``deleted`` true). Pass ``deleted=None`` for a
+    script that died before or inside the cmdlet.
+    """
     record: dict[str, Any] = {
         "instance_id": "lab01",
         "state": "running",
@@ -138,6 +142,7 @@ def _interrupted_record(**overrides: Any) -> dict[str, Any]:
         "reset_router": True,
         "resumed": False,
         "error": None,
+        "deleted": True,
         "leftover_vms": None,
         "leftover_error": None,
         "moved_to": None,
@@ -312,7 +317,8 @@ async def test_remove_refuses_a_listed_instance_without_vm_names() -> None:
     assert "state file" in result["reason"]
     assert "Nothing was deleted" in result["reason"]
     assert _SECRET not in json.dumps(result)
-    mock_cmd.assert_not_called()
+    # Only the progress file is read; nothing starts.
+    assert _launches(mock_cmd) == []
 
 
 @pytest.mark.asyncio
@@ -371,6 +377,88 @@ async def test_remove_resumes_an_interrupted_run() -> None:
     assert "Move-Item -LiteralPath $p" in script
     assert "started_at = '2026-01-01T10:00:00.1234567Z';" in script
     assert "reset_router = $true; resumed = $true;" in script
+    assert "deleted = $true;" in script
+
+
+def _listed(start_time: str | None) -> dict[str, Any]:
+    """A listed instance, deployed at *start_time* (the record started at 10:00)."""
+    instance = _instance()
+    if start_time is not None:
+        instance["StartTime"] = start_time
+    return instance
+
+
+@pytest.mark.asyncio
+async def test_remove_resumes_when_the_old_instance_is_still_listed() -> None:
+    # The cmdlet finished, but the state file still lists the instance until it moves.
+    result, mock_cmd = await _remove(
+        {"instance_id": "lab01", "reset_router": True},
+        _check(instance=_listed("2026-01-01T09:00:00Z")),
+        record=_interrupted_record(),
+        tmux_alive=False,
+    )
+    assert result["status"] == "started"
+    assert result["resumed"] is True
+    assert result["reset_router"] is False
+    assert result["vms"] == []
+    (launch,) = _launches(mock_cmd)
+    script = _decoded_script(launch)
+    assert "Remove-HoloDeckInstance" not in script
+    assert "-ResetHoloRouter" not in script
+    assert "Move-Item -LiteralPath $p" in script
+    assert "deleted = $true;" in script
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("record", "start_time"),
+    [
+        # The script died before or inside the cmdlet: the delete is not confirmed.
+        (_interrupted_record(deleted=None), "2026-01-01T09:00:00Z"),
+        # The record belongs to an older deploy with the same id.
+        (_interrupted_record(), "2026-01-02T08:00:00Z"),
+        # MEHO cannot compare the two times.
+        (_interrupted_record(), None),
+    ],
+    ids=["delete-not-confirmed", "older-record", "no-deploy-time"],
+)
+async def test_remove_deletes_a_listed_instance_again_when_the_run_cannot_be_resumed(
+    record: dict[str, Any], start_time: str | None
+) -> None:
+    result, mock_cmd = await _remove(
+        {"instance_id": "lab01", "reset_router": True},
+        _check(instance=_listed(start_time)),
+        record=record,
+        tmux_alive=False,
+    )
+    assert result["status"] == "started"
+    assert result["resumed"] is False
+    assert result["reset_router"] is True
+    assert result["vms"] == ["lab01-esx-01a", "lab01-esx-02a", "lab01-vcfinstaller-a"]
+    (launch,) = _launches(mock_cmd)
+    script = _decoded_script(launch)
+    assert "Remove-HoloDeckInstance -InstanceID $id -ResetHoloRouter -ErrorAction Stop" in script
+    assert "resumed = $false;" in script
+    assert "deleted = $null;" in script
+
+
+@pytest.mark.asyncio
+async def test_remove_finishes_an_unconfirmed_run_when_the_instance_is_gone() -> None:
+    # Nothing is left to delete; the leftover VM list shows what is left, and
+    # the record keeps that the delete was never confirmed.
+    result, mock_cmd = await _remove(
+        {"instance_id": "lab01"},
+        _check(instance=None),
+        record=_interrupted_record(deleted=None),
+        tmux_alive=False,
+    )
+    assert result["status"] == "started"
+    assert result["resumed"] is True
+    (launch,) = _launches(mock_cmd)
+    script = _decoded_script(launch)
+    assert "Remove-HoloDeckInstance" not in script
+    assert "deleted = $null;" in script
+    assert "Get-VM -Name ($id + '-*') -ErrorAction Stop" in script
 
 
 @pytest.mark.asyncio
@@ -397,10 +485,13 @@ async def test_remove_unknown_instance_with_a_record_that_is_not_interrupted_is_
 async def test_remove_script_saves_the_record_right_after_the_cmdlet() -> None:
     _, mock_cmd = await _remove({"instance_id": "lab01", "reset_router": True}, _check())
     script = _decoded_script(mock_cmd.call_args.args[1])
-    # The cmdlet's outcome is on disk before the router reboot can kill the script.
+    # The cmdlet's outcome is on disk before the router reboot can kill the script:
+    # deleted is null until the cmdlet returns, then true, or false with the error.
+    assert "error = $null; deleted = $null; leftover_vms = $null;" in script
     assert (
-        "Remove-HoloDeckInstance -InstanceID $id -ResetHoloRouter -ErrorAction Stop } "
-        "catch { $r.error = $_.Exception.Message }; Save-Record; "
+        "Remove-HoloDeckInstance -InstanceID $id -ResetHoloRouter -ErrorAction Stop; "
+        "$r.deleted = $true } "
+        "catch { $r.error = $_.Exception.Message; $r.deleted = $false }; Save-Record; "
     ) in script
     assert "resumed = $false;" in script
 
@@ -610,11 +701,58 @@ async def test_status_interrupted_remove_is_removed_with_a_resume_note() -> None
     assert result["status"] == "removed"
     assert result["leftover_vms"] is None
     assert result["removal"]["state"] == "interrupted"
+    assert result["removal"]["deleted"] is True
     assert result["removal"]["reset_router"] is True
     assert "error" not in result
     (note,) = result["notes"]
     assert "tmux session is gone" in note
     assert "call holodeck.instance.remove again" in note
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("listed", "expected"),
+    [
+        # Killed before the cmdlet: the instance is still listed.
+        (
+            {"InstanceID": "lab01", "Status": "Completed", "StartTime": "2026-01-01T09:00:00Z"},
+            "completed",
+        ),
+        # Killed inside the cmdlet: the instance may be gone, or half gone.
+        (None, "unknown"),
+    ],
+    ids=["before-the-cmdlet", "inside-the-cmdlet"],
+)
+async def test_status_interrupted_before_the_delete_finished_is_not_removed(
+    listed: dict[str, Any] | None, expected: str
+) -> None:
+    result = await _status(_interrupted_record(deleted=None), listed, tmux_alive=False)
+    assert result["status"] == expected
+    assert result["removal"]["state"] == "interrupted"
+    assert result["removal"]["deleted"] is None
+    assert result["leftover_vms"] is None
+    (note,) = result["notes"]
+    assert "cannot tell whether the VMs were deleted" in note
+    assert "call holodeck.instance.remove again" in note
+
+
+@pytest.mark.asyncio
+async def test_status_resumed_run_without_a_confirmed_delete_is_not_removed() -> None:
+    record = _interrupted_record(
+        state="done",
+        resumed=True,
+        deleted=None,
+        finished_at="2026-01-01T10:40:00Z",
+        leftover_vms=["lab01-esx-01a"],
+        moved_to="/holodeck-runtime/removed/lab01-20260101-104000",
+        moved_files=["/holodeck-runtime/state/lab01-state.json"],
+    )
+    result = await _status(record, None, tmux_alive=False)
+    assert result["status"] == "unknown"
+    assert result["removal"]["deleted"] is None
+    assert result["leftover_vms"] == ["lab01-esx-01a"]
+    assert any("cannot confirm that the VMs were deleted" in note for note in result["notes"])
+    assert any("vmware.composite.vm.destroy" in note for note in result["notes"])
 
 
 @pytest.mark.asyncio
@@ -697,6 +835,7 @@ async def test_status_reports_removed_and_leftover_vms() -> None:
         "finished_at": "2026-01-01T10:20:00Z",
         "reset_router": False,
         "error": None,
+        "deleted": True,
         "leftover_vms": ["lab01-vcfinstaller-a"],
         "leftover_error": None,
         "moved_to": "/holodeck-runtime/removed/lab01-20260101-102000",
@@ -752,6 +891,7 @@ _OLD_REMOVE = {
     "started_at": "2026-01-01T10:00:00.1234567Z",
     "finished_at": "2026-01-01T10:20:00.1234567Z",
     "error": None,
+    "deleted": True,
     "leftover_vms": ["lab01-vcfinstaller-a"],
 }
 
@@ -915,6 +1055,40 @@ async def test_preview_of_a_resume_lists_only_the_files() -> None:
     assert [child["kind"] for child in radius["children"]] == ["file_move", "file_move"]
     assert effect["reset_router"] is False
     assert "deletes no VM" in effect["note"]
+
+
+@pytest.mark.asyncio
+async def test_preview_of_a_resume_with_the_instance_still_listed() -> None:
+    effect = await _preview(
+        {"instance_id": "lab01", "reset_router": True},
+        _check(instance=_listed("2026-01-01T09:00:00Z")),
+        record=_interrupted_record(),
+        tmux_alive=False,
+    )
+    assert effect is not None
+    radius = effect["blast_radius"]
+    assert radius["object"]["found"] is True
+    assert radius["object"]["resume"] is True
+    assert [child["kind"] for child in radius["children"]] == ["file_move", "file_move"]
+    assert effect["reset_router"] is False
+    assert "deletes no VM" in effect["note"]
+
+
+@pytest.mark.asyncio
+async def test_preview_deletes_again_when_the_delete_is_not_confirmed() -> None:
+    effect = await _preview(
+        {"instance_id": "lab01", "reset_router": True},
+        _check(instance=_listed("2026-01-01T09:00:00Z")),
+        record=_interrupted_record(deleted=None),
+        tmux_alive=False,
+    )
+    assert effect is not None
+    radius = effect["blast_radius"]
+    assert radius["object"]["resume"] is False
+    kinds = [child["kind"] for child in radius["children"]]
+    assert kinds.count("vm") == 3
+    assert "router_reset" in kinds
+    assert effect["reset_router"] is True
 
 
 @pytest.mark.asyncio

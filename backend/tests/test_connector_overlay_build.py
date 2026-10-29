@@ -19,11 +19,12 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import ModuleType
 
 import pytest
@@ -121,6 +122,30 @@ def test_extra_wheel_with_sitecustomize_is_refused(tmp_path: Path) -> None:
         oc.read_wheel(path, connector=False)
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "sitecustomize/__init__.py",
+        "sitecustomize/helper.py",
+        "usercustomize.pyc",
+        "sitecustomize.cpython-312-x86_64-linux-gnu.so",
+        "usercustomize.abi3.so",
+    ],
+)
+def test_extra_wheel_with_another_form_of_sitecustomize_is_refused(
+    tmp_path: Path, entry: str
+) -> None:
+    path = make_wheel(tmp_path, "helper-lib", "1.0", {entry: "x = 1\n"})
+    with pytest.raises(oc.BuildError, match="start-up hook"):
+        oc.read_wheel(path, connector=False)
+
+
+def test_extra_wheel_with_a_name_that_only_looks_like_a_hook_is_read(tmp_path: Path) -> None:
+    files = {"sitecustomize_tools/__init__.py": "", "helper_lib/sitecustomize.py": "x = 1\n"}
+    path = make_wheel(tmp_path, "helper-lib", "1.0", files)
+    assert oc.read_wheel(path, connector=False).name == "helper-lib"
+
+
 def test_extra_wheel_with_pth_in_data_folder_is_refused(tmp_path: Path) -> None:
     path = make_wheel(
         tmp_path, "helper-lib", "1.0", {"helper_lib-1.0.data/purelib/zz.pth": "import os\n"}
@@ -175,6 +200,80 @@ def test_two_connector_wheels_with_the_same_folder_are_refused(tmp_path: Path) -
 
 
 # ---------------------------------------------------------------------------
+# Checks after install, on recorded file lists
+# ---------------------------------------------------------------------------
+
+_SITE = "lib/python3.12/site-packages"
+_BASE_FILES = (
+    "meho_backplane/__init__.py",
+    "meho_backplane/connectors/__init__.py",
+    "meho_backplane/connectors/registry.py",
+    "meho_backplane/connectors/builtin_one/__init__.py",
+    "fakelib/__init__.py",
+    "flatlib.py",
+    "fastmod.cpython-312-x86_64-linux-gnu.so",
+)
+
+
+def _state(*files: str) -> dict[str, list[int]]:
+    return {f"{_SITE}/{name}": [1, 1, i] for i, name in enumerate(files)}
+
+
+def _check_added(*files: str, folders: set[str] | None = None) -> list[str]:
+    before = _state(*_BASE_FILES)
+    after = {**before, **_state(*files)}
+    new: list[str] = oc.check_files(before, after, PurePosixPath(_SITE), folders or set())
+    return new
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "sitecustomize/__init__.py",
+        "sitecustomize/helper.py",
+        "usercustomize.pyc",
+        "sitecustomize.cpython-312-x86_64-linux-gnu.so",
+        "zz.pth",
+    ],
+)
+def test_installed_startup_hook_is_refused(entry: str) -> None:
+    with pytest.raises(oc.BuildError, match=rf"{re.escape(entry)} \(is a start-up hook\)"):
+        _check_added(entry)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "flatlib/__init__.py",
+        "fakelib.py",
+        "fakelib.pyc",
+        "fakelib.cpython-312-x86_64-linux-gnu.so",
+        "fastmod/__init__.py",
+        "fastmod.py",
+    ],
+)
+def test_installed_module_with_the_name_of_a_base_module_is_refused(entry: str) -> None:
+    with pytest.raises(oc.BuildError, match=rf"{re.escape(entry)} \(takes the place of a module"):
+        _check_added(entry)
+
+
+def test_installed_connector_folder_with_the_name_of_a_base_module_is_refused() -> None:
+    with pytest.raises(oc.BuildError, match=r"\['registry'\] already exist"):
+        _check_added("meho_backplane/connectors/registry/__init__.py", folders={"registry"})
+
+
+def test_installed_new_modules_are_allowed() -> None:
+    new = _check_added(
+        "helper_lib/__init__.py",
+        "flatlib_extra.py",
+        "fakelib_tools/__init__.py",
+        "meho_backplane/connectors/example_widget/__init__.py",
+        folders={"example_widget"},
+    )
+    assert len(new) == 4
+
+
+# ---------------------------------------------------------------------------
 # Checks after install, with a real install by uv
 # ---------------------------------------------------------------------------
 
@@ -219,11 +318,13 @@ def base_venv(tmp_path: Path) -> Path:
                 {
                     "meho_backplane/__init__.py": "",
                     "meho_backplane/connectors/__init__.py": "",
+                    "meho_backplane/connectors/registry.py": "",
                     "meho_backplane/connectors/builtin_one/__init__.py": "",
                 },
                 requires=("fakelib==1.0",),
             ),
             make_wheel(base, "fakelib", "1.0", {"fakelib/__init__.py": "V = 1\n"}),
+            make_wheel(base, "flat-lib", "1.0", {"flatlib.py": "F = 1\n"}),
         ],
     )
     return venv
@@ -328,6 +429,30 @@ def test_connector_folder_that_is_built_in_is_refused(base_venv: Path, tmp_path:
         },
     )
     with pytest.raises(oc.BuildError, match=r"\['builtin_one'\] already exist"):
+        _build(base_venv, connectors, deps, out)
+
+
+@needs_uv
+def test_connector_folder_named_like_a_base_module_is_refused(
+    base_venv: Path, tmp_path: Path
+) -> None:
+    connectors, deps, out = tmp_path / "connectors", tmp_path / "deps", tmp_path / "out"
+    make_wheel(connectors, "example-connectors", "1.0", _connector_files("registry"))
+    with pytest.raises(oc.BuildError, match=r"\['registry'\] already exist"):
+        _build(base_venv, connectors, deps, out)
+    assert not (out / "app" / "connector-packages.json").exists()
+
+
+@needs_uv
+def test_extra_wheel_package_named_like_a_base_module_is_refused(
+    base_venv: Path, tmp_path: Path
+) -> None:
+    connectors, deps, out = tmp_path / "connectors", tmp_path / "deps", tmp_path / "out"
+    make_wheel(
+        connectors, "example-connectors", "1.0", _connector_files(), requires=("sneaky-lib",)
+    )
+    make_wheel(deps, "sneaky-lib", "1.0", {"flatlib/__init__.py": "F = 666\n"})
+    with pytest.raises(oc.BuildError, match=r"flatlib/__init__\.py \(takes the place of a module"):
         _build(base_venv, connectors, deps, out)
 
 

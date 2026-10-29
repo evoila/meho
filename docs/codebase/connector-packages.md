@@ -116,8 +116,10 @@ environment cannot run code in the checks.
 1. **Before install**, for every wheel file:
    - each file in the wheel must be in its `RECORD` with the right sha256,
      and the reverse. A changed wheel is refused.
-   - no start-up hook: no `.pth` file, no `sitecustomize.py` or
-     `usercustomize.py`. Python would run these before MEHO starts.
+   - no start-up hook: no `.pth` file, and no module or package named
+     `sitecustomize` or `usercustomize` in any form Python can import
+     (a `.py` file, a compiled `.pyc` file, an extension module such as
+     `.so`, or a folder). Python would run these before MEHO starts.
    - a connector wheel has files only in `meho_backplane/connectors/<folder>/`.
      Any other file, for example in MEHO's core files, is refused.
    - an extra wheel has no files in `meho_backplane/`, and no files for the
@@ -136,6 +138,12 @@ environment cannot run code in the checks.
    - every new file is in a new folder: a new top-level package, a listed
      connector folder that the public image does not have, or a new file in
      `bin/`. A new file in a folder of the public image is refused.
+   - no new module or package has the name of one the public image already
+     has. Python imports a package folder before a module file of the same
+     name, so a connector folder `registry/` would take the place of MEHO's
+     `connectors/registry.py`, and an extra wheel's folder `foo/` would take
+     the place of a base library's `foo.py`. Both are refused. The same
+     check applies to start-up hooks after install.
    - each connector package is installed, with its folders.
 5. **Output**: the new files are copied to an output folder, and the
    allowlist file `/app/connector-packages.json` is written there. For each

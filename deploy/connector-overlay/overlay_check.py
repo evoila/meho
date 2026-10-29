@@ -9,15 +9,19 @@ three steps in a throwaway build stage:
 
 1. ``check-wheels``: read every wheel file before anything is installed.
    Refuse a wheel whose file list does not match its own ``RECORD``, a
-   wheel with a start-up hook (a ``.pth`` file, ``sitecustomize.py`` or
-   ``usercustomize.py``), a connector wheel with files outside its own
-   connector folders, and an extra wheel with files in MEHO's own package.
+   wheel with a start-up hook (a ``.pth`` file, or any importable form of
+   ``sitecustomize`` or ``usercustomize``: a module file, a compiled file,
+   an extension module or a package folder), a connector wheel with files
+   outside its own connector folders, and an extra wheel with files in
+   MEHO's own package.
 2. ``snapshot``: record every file and every installed package version of
    the base image's environment. The base image installs exactly the
    versions of its lock file, so this is the lock to check against.
 3. ``finish``: after ``uv pip install``, compare the environment with the
    snapshot. Refuse any library whose version changed, any base file that
-   changed or went away, and any new file that is not in a new folder.
+   changed or went away, any new file that is not in a new folder, and any
+   new module or package whose name an existing one already has (Python
+   would import the new one instead).
    Then copy only the new files to an output folder and write the
    allowlist file (``/app/connector-packages.json``) that MEHO checks at
    start.
@@ -47,7 +51,9 @@ from pathlib import Path, PurePosixPath
 
 CONNECTORS_PREFIX = ("meho_backplane", "connectors")
 ALLOWLIST_PATH = PurePosixPath("/app/connector-packages.json")
-STARTUP_HOOK_FILES = frozenset({"sitecustomize.py", "usercustomize.py"})
+STARTUP_HOOK_MODULES = frozenset({"sitecustomize", "usercustomize"})
+# The file endings Python imports a module from: source, compiled, and extension modules.
+_MODULE_SUFFIXES = (".py", ".pyc", ".pyw", ".pyd", ".so")
 _FOLDER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RECORD_SIGNATURES = frozenset({"RECORD.jws", "RECORD.p7s"})
 _MAX_NAMED = 10
@@ -107,6 +113,26 @@ def _check_record(zf: zipfile.ZipFile, dist_info: str, files: list[str], where: 
         raise BuildError(f"{where}: its RECORD names files it does not hold: {sorted(hashes)}.")
 
 
+def _module_name(entry: str, *, is_dir: bool) -> str | None:
+    """The name Python imports ``entry`` as, or ``None`` when it is not importable.
+
+    ``entry`` is one name directly in a folder on the import path. A folder is a
+    package (with or without ``__init__.py``); a file is a module when it has a
+    module ending. ``foo.cpython-312-x86_64-linux-gnu.so`` is the module ``foo``.
+    """
+    if not is_dir and not entry.endswith(_MODULE_SUFFIXES):
+        return None
+    name = entry if is_dir else entry.partition(".")[0]
+    return name if _FOLDER_RE.match(name) else None
+
+
+def _is_startup_hook(path: PurePosixPath) -> bool:
+    """Whether Python would run ``path`` (relative to site-packages) at start."""
+    if path.suffix == ".pth":
+        return True
+    return _module_name(path.parts[0], is_dir=len(path.parts) > 1) in STARTUP_HOOK_MODULES
+
+
 def _install_path(name: str, data_dir: str, where: str) -> PurePosixPath:
     """The path a wheel entry lands at, relative to site-packages."""
     path = PurePosixPath(name)
@@ -117,7 +143,7 @@ def _install_path(name: str, data_dir: str, where: str) -> PurePosixPath:
                 "(scripts, data or headers). Overlay wheels may not do that."
             )
         path = PurePosixPath(*path.parts[2:])
-    if path.suffix == ".pth" or (len(path.parts) == 1 and path.name in STARTUP_HOOK_FILES):
+    if _is_startup_hook(path):
         raise BuildError(
             f"{where}: the file {name} is a start-up hook: Python would run it before MEHO "
             "starts. Overlay wheels may not add one."
@@ -258,8 +284,41 @@ def check_versions(before: dict[str, list[str]], after: dict[str, list[str]]) ->
         )
 
 
+def _top_modules(entries: list[tuple[str, ...]]) -> set[str]:
+    """The names Python can import from a folder, given the paths of its files."""
+    return {
+        name
+        for parts in entries
+        if parts and (name := _module_name(parts[0], is_dir=len(parts) > 1))
+    }
+
+
+@dataclass(frozen=True)
+class BaseLayout:
+    """What the base image has directly in site-packages and in ``connectors/``."""
+
+    tops: set[str]
+    modules: set[str]
+    connector_modules: set[str]
+
+    @classmethod
+    def from_files(cls, before: dict[str, list[int]], site: PurePosixPath) -> BaseLayout:
+        size = len(site.parts)
+        inner = [
+            PurePosixPath(p).parts[size:]
+            for p in before
+            if PurePosixPath(p).parts[:size] == site.parts
+        ]
+        in_connectors = [p[2:] for p in inner if len(p) > 2 and p[:2] == CONNECTORS_PREFIX]
+        return cls(
+            tops={parts[0] for parts in inner if parts},
+            modules=_top_modules(inner),
+            connector_modules=_top_modules(in_connectors),
+        )
+
+
 def _refusal(
-    rel: PurePosixPath, site: PurePosixPath, folders: set[str], base_tops: set[str]
+    rel: PurePosixPath, site: PurePosixPath, folders: set[str], base: BaseLayout
 ) -> str | None:
     """Why a new file is refused, or ``None`` when it is allowed."""
     if rel.parts[0] == "bin" and len(rel.parts) == 2:
@@ -267,15 +326,17 @@ def _refusal(
     if rel.parts[: len(site.parts)] != site.parts or len(rel.parts) == len(site.parts):
         return "is outside site-packages and bin"
     inner = PurePosixPath(*rel.parts[len(site.parts) :])
-    if inner.suffix == ".pth" or (len(inner.parts) == 1 and inner.name in STARTUP_HOOK_FILES):
+    if _is_startup_hook(inner):
         return "is a start-up hook"
     if inner.parts[0] == CONNECTORS_PREFIX[0]:
         parts = inner.parts
         if len(parts) >= 4 and parts[:2] == CONNECTORS_PREFIX and parts[2] in folders:
             return None
         return "is in MEHO's own files, outside a listed connector folder"
-    if inner.parts[0] in base_tops:
+    if inner.parts[0] in base.tops:
         return "is a new file in a folder of the base image (overlap)"
+    if _module_name(inner.parts[0], is_dir=len(inner.parts) > 1) in base.modules:
+        return "takes the place of a module of the base image (overlap)"
     return None
 
 
@@ -285,31 +346,25 @@ def check_files(
     site: PurePosixPath,
     folders: set[str],
 ) -> list[str]:
-    """Base files must stay as they were; new files must sit in new folders. Returns new files."""
+    """Base files must stay as they were; new files must sit in new folders, and no new
+    module or package may have the name of one the base image has. Returns the new files."""
     changed = sorted(p for p, st in before.items() if after.get(p) != st)
     if changed:
         raise BuildError(
             "the install changed or removed files of the base image (overlap with MEHO or with "
             f"another package): {_named(changed)}."
         )
-    size = len(site.parts)
-    inner_parts = [
-        PurePosixPath(p).parts[size:] for p in before if PurePosixPath(p).parts[:size] == site.parts
-    ]
-    base_tops = {parts[0] for parts in inner_parts if parts}
-    base_folders = {
-        parts[2] for parts in inner_parts if len(parts) >= 4 and parts[:2] == CONNECTORS_PREFIX
-    }
-    if folders & base_folders:
+    base = BaseLayout.from_files(before, site)
+    if folders & base.connector_modules:
         raise BuildError(
-            f"the connector folders {sorted(folders & base_folders)} already exist "
-            "in the base image."
+            f"the connector folders {sorted(folders & base.connector_modules)} already exist "
+            "in the base image as a folder or a module file under connectors/."
         )
     new = sorted(set(after) - set(before))
     refused = [
         f"{path} ({reason})"
         for path in new
-        if (reason := _refusal(PurePosixPath(path), site, folders, base_tops))
+        if (reason := _refusal(PurePosixPath(path), site, folders, base))
     ]
     if refused:
         raise BuildError(f"the install added files that are not allowed: {_named(refused)}.")

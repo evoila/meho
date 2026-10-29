@@ -24,6 +24,11 @@ Two related concerns the dispatcher needs but that don't belong in
 * :func:`forget_target_in_connectors` -- drop the logins and credentials
   that every cached connector instance keeps for one target, so a changed
   target is used fresh on the next dispatch (#3879).
+* :func:`forget_target_if_changed` -- the same drop, run by every process
+  that executes an operation (a backplane server, a satellite runner) when
+  the target row it reads was changed since this process last saw it. The
+  process that served the change drops at once; every other process drops
+  on its next call (#3879).
 """
 
 from __future__ import annotations
@@ -35,9 +40,11 @@ from typing import Any
 
 import structlog
 
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.base import Connector
 
 __all__ = [
+    "forget_target_if_changed",
     "forget_target_in_connectors",
     "get_or_create_connector_instance",
     "import_handler",
@@ -60,6 +67,10 @@ _HANDLER_CACHE: dict[str, Callable[..., Awaitable[Any]]] = {}
 # ``type[Connector]`` -> singleton instance cache.
 _CONNECTOR_INSTANCE_CACHE: dict[type[Connector], Connector] = {}
 
+# ``target_cache_key`` -> the ``updated_at`` this process last saw for the
+# target. Per process, like the connector caches it guards (#3879).
+_SEEN_TARGET_VERSIONS: dict[tuple[str, str], Any] = {}
+
 
 def reset_handler_cache() -> None:
     """Empty the handler-ref cache. Test-only."""
@@ -67,8 +78,9 @@ def reset_handler_cache() -> None:
 
 
 def reset_connector_instance_cache() -> None:
-    """Empty the connector-instance cache. Test-only."""
+    """Empty the connector-instance cache and the seen target versions. Test-only."""
     _CONNECTOR_INSTANCE_CACHE.clear()
+    _SEEN_TARGET_VERSIONS.clear()
 
 
 def import_handler(handler_ref: str) -> Callable[..., Awaitable[Any]]:
@@ -168,7 +180,11 @@ async def forget_target_in_connectors(target: Any) -> None:
     change may have moved the target to another connector. A failing hook is
     logged and skipped: the target change must still go through, and one
     connector must not stop the others from forgetting the target.
+
+    The target's ``updated_at`` is recorded as seen, so the next dispatch in
+    this process does not drop the same change a second time.
     """
+    _record_seen_version(target)
     for instance in list(_CONNECTOR_INSTANCE_CACHE.values()):
         for hook_name in _TARGET_FORGET_HOOKS:
             hook = getattr(instance, hook_name, None)
@@ -184,6 +200,48 @@ async def forget_target_in_connectors(target: Any) -> None:
                     target_id=str(getattr(target, "id", "?")),
                     error=f"{type(exc).__name__}: {exc}",
                 )
+
+
+def _record_seen_version(target: Any) -> tuple[bool, Any]:
+    """Store *target*'s ``updated_at``; return ``(seen_before, previous_value)``."""
+    updated_at = getattr(target, "updated_at", None)
+    key = target_cache_key(target)
+    seen_before = key in _SEEN_TARGET_VERSIONS
+    previous = _SEEN_TARGET_VERSIONS.get(key)
+    _SEEN_TARGET_VERSIONS[key] = updated_at
+    return seen_before, previous
+
+
+async def forget_target_if_changed(target: Any) -> bool:
+    """Drop the kept logins for *target* when its row changed since this process last saw it.
+
+    #3879. The target update route drops kept logins only in the process
+    that serves the PATCH. Every other backplane server, and every satellite
+    runner, keeps its own connector caches. So every execution path calls
+    this with the target it just read, before a connector reuses a login:
+    the dispatcher does, and so does the runner executor. A change shows as
+    a new ``updated_at`` on the row (the update route always refreshes it,
+    also when the same ``secret_ref`` is sent again). When the value differs
+    from the one this process saw last, the kept logins are dropped and the
+    next login uses the new values.
+
+    The first sighting only records the value: nothing was kept for the
+    target by a dispatch yet. A target object with no ``updated_at`` (a test
+    double) is never treated as changed. Returns ``True`` when a drop ran.
+    """
+    updated_at = getattr(target, "updated_at", None)
+    if updated_at is None:
+        return False
+    seen_before, previous = _record_seen_version(target)
+    if not seen_before or previous == updated_at:
+        return False
+    _log.info(
+        "target_changed_since_last_seen",
+        target_id=str(getattr(target, "id", "?")),
+        target=getattr(target, "name", None),
+    )
+    await forget_target_in_connectors(target)
+    return True
 
 
 def is_unbound_method(handler: Any, connector_cls: type[Connector]) -> bool:

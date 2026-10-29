@@ -48,6 +48,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.wrapped_creds import screen_remote_write_credential
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.operations._handler_resolve import (
+    forget_target_if_changed,
     get_or_create_connector_instance,
     import_handler,
     is_unbound_method,
@@ -379,6 +380,11 @@ async def execute_work_item(
             payload=None,
             error=f"handler_ref {item.handler_ref!r} resolved outside {_CONNECTOR_MODULE_PREFIX}*",
         )
+
+    # #3879: the central update route cannot reach this process. Drop the
+    # login kept for the target when its row changed since the runner saw it.
+    if item.target_descriptor is not None:
+        await forget_target_if_changed(item.target_descriptor)
 
     return await _invoke_recording_effect(
         _maybe_bind_method(handler, item),

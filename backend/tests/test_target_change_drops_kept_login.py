@@ -9,6 +9,9 @@ dispatch used the old credential until the login expired. These tests pin:
 
 * the new ``invalidate_credentials`` hooks on the GitHub, Keycloak, VCF
   Automation and SSH connectors drop only the changed target's entry;
+* the Proxmox hook drops the login ticket too, so the next call logs in
+  with the new username and password;
+* an SSH login that finishes after the drop is not kept;
 * :func:`forget_target_in_connectors` asks every cached connector, and one
   failing hook does not stop the others;
 * ``PATCH /api/v1/targets/{name}`` runs the drop when a connection field is
@@ -26,8 +29,9 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
@@ -38,10 +42,15 @@ from meho_backplane.api.v1.targets import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
-from meho_backplane.connectors.adapters.ssh import SshConnector
+from meho_backplane.connectors.adapters.ssh import SshConnector, SshTargetChangedError
 from meho_backplane.connectors.github import GitHubPATCredentials, GitHubRestConnector
 from meho_backplane.connectors.keycloak.connector import KeycloakConnector, _CachedToken
-from meho_backplane.connectors.vcf_automation.connector import VcfAutomationConnector
+from meho_backplane.connectors.proxmox.connector import ProxmoxConnector
+from meho_backplane.connectors.proxmox.session import ProxmoxCredentials
+from meho_backplane.connectors.vcf_automation.connector import (
+    VcfAutomationConnector,
+    _plane_cache_key,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations._handler_resolve import (
@@ -157,17 +166,48 @@ async def test_keycloak_invalidate_credentials_drops_only_that_target() -> None:
 
 @pytest.mark.asyncio
 async def test_vcf_automation_invalidate_credentials_drops_both_planes() -> None:
-    changed, other = _Target(), _Target(name="other")
+    changed, other = _Target(), _Target(name="other", secret_ref=_NARROW_REF)
     conn = VcfAutomationConnector()
-    conn._provider_tokens[target_cache_key(changed)] = "provider-old"
-    conn._tenant_tokens[target_cache_key(changed)] = "tenant-old"
-    conn._tenant_tokens[target_cache_key(other)] = "tenant-other"
+    conn._provider_tokens[_plane_cache_key(changed, "provider")] = "provider-old"
+    conn._tenant_tokens[_plane_cache_key(changed, "tenant")] = "tenant-old"
+    conn._tenant_tokens[_plane_cache_key(other, "tenant")] = "tenant-other"
 
     await conn.invalidate_credentials(changed)
 
-    assert target_cache_key(changed) not in conn._provider_tokens
-    assert target_cache_key(changed) not in conn._tenant_tokens
-    assert target_cache_key(other) in conn._tenant_tokens
+    assert _plane_cache_key(changed, "provider") not in conn._provider_tokens
+    assert _plane_cache_key(changed, "tenant") not in conn._tenant_tokens
+    assert _plane_cache_key(other, "tenant") in conn._tenant_tokens
+
+
+@pytest.mark.asyncio
+async def test_proxmox_hook_drops_the_ticket_so_the_next_call_logs_in_again() -> None:
+    """A narrower username/password credential is used on the next call, not the old ticket."""
+    users = iter([("wide@pam", "wide-pw"), ("narrow@pve", "narrow-pw")])
+
+    async def _loader(target: Any, operator: Operator) -> ProxmoxCredentials:
+        username, password = next(users)
+        return ProxmoxCredentials(mode="ticket", username=username, password=password)
+
+    conn = ProxmoxConnector(credentials_loader=_loader)
+    target = _Target(host="pve.test.invalid", port=8006)
+    tickets = iter(["ticket-wide", "ticket-narrow"])
+    with respx.mock(base_url="https://pve.test.invalid:8006") as mock:
+        login = mock.post("/api2/json/access/ticket").mock(
+            side_effect=lambda request: httpx.Response(
+                200, json={"data": {"ticket": next(tickets), "CSRFPreventionToken": "csrf"}}
+            )
+        )
+        try:
+            first = await conn.auth_headers(target, _operator())
+            await conn.invalidate_credentials(target)
+            second = await conn.auth_headers(target, _operator())
+        finally:
+            await conn.aclose()
+
+    assert first == {"Cookie": "PVEAuthCookie=ticket-wide"}
+    assert second == {"Cookie": "PVEAuthCookie=ticket-narrow"}
+    assert login.call_count == 2
+    assert b"username=narrow%40pve" in login.calls.last.request.content
 
 
 class _FakeSshConnection:
@@ -204,6 +244,41 @@ async def test_ssh_invalidate_credentials_closes_and_drops_the_pooled_connection
     assert target_cache_key(changed) not in conn._connections
     assert not kept.closed
     assert target_cache_key(other) in conn._connections
+
+
+@pytest.mark.asyncio
+async def test_ssh_login_that_finishes_after_the_drop_is_not_kept() -> None:
+    """The change commits while the handshake runs: the old login is closed, not pooled."""
+    target = _Target(host="srv.test.invalid", port=22)
+    conn = _Ssh()
+    stale, fresh = _FakeSshConnection(), _FakeSshConnection()
+    handshake_started, change_committed = asyncio.Event(), asyncio.Event()
+
+    async def _slow_connect(*_args: Any, **_kwargs: Any) -> _FakeSshConnection:
+        handshake_started.set()
+        await change_committed.wait()
+        return stale
+
+    async def _auth(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"username": "u", "known_hosts": None, "password": "p"}
+
+    with patch.object(conn, "_auth_config", _auth), patch("asyncssh.connect", _slow_connect):
+        login = asyncio.create_task(conn._connect(target))  # type: ignore[arg-type]
+        await handshake_started.wait()
+        await conn.invalidate_credentials(target)  # type: ignore[arg-type]
+        change_committed.set()
+        with pytest.raises(SshTargetChangedError):
+            await login
+
+    assert stale.closed
+    assert conn._connections == {}
+
+    async def _fast_connect(*_args: Any, **_kwargs: Any) -> _FakeSshConnection:
+        return fresh
+
+    with patch.object(conn, "_auth_config", _auth), patch("asyncssh.connect", _fast_connect):
+        assert await conn._connect(target) is fresh  # type: ignore[arg-type]
+    assert conn._connections[target_cache_key(target)][0] is fresh
 
 
 # ---------------------------------------------------------------------------

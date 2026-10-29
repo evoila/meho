@@ -62,9 +62,17 @@ read it again.
 
 Limits:
 
-- The kept logins live in each backplane process. The drop runs only
-  in the process that served the PATCH. Other replicas, and satellite
-  runners, keep their logins until they expire.
+- The kept logins live in each backplane process. The drop above runs
+  only in the process that served the PATCH. Every other process (a
+  second backplane server, a satellite runner) notices the change on
+  its next call: the dispatcher and the runner executor call
+  `forget_target_if_changed` with the target they just read. It keeps,
+  per process, the `updated_at` it saw last for each target. The update
+  route always refreshes `updated_at`, also when the same `secret_ref`
+  is sent again. A new value drops the kept logins once, then the next
+  login uses the new values. The runner gets `updated_at` in its target
+  descriptor from the gateway. Paths that call a connector without the
+  dispatcher (topology refresh, scope repair) do not run this check.
 - The handler does not commit on its own: the request's session
   commits after the response is sent, and the UI import calls it for
   many targets in one transaction. So the drop runs twice: once in the
@@ -73,7 +81,12 @@ Limits:
   (`_drop_again_after_commit`). The second drop catches a login kept by
   a dispatch that read the old row before the commit. A login that
   started before the change and finishes after the second drop can
-  still be kept.
+  still be kept, except for SSH: `SshConnector` counts drops per
+  target, and a login that finishes after a drop is closed and raises
+  `SshTargetChangedError` instead of landing in the pool.
+- The Proxmox hook drops both the credential and the login ticket
+  minted from it; dropping only the credential would still send the
+  old ticket.
 - A connector with no hook keeps its login until it expires. The
   pooled HTTP client is not affected: its key already includes the
   host, port, scheme and TLS settings.

@@ -217,6 +217,20 @@ def _record_ssh_span(
         logger.warning("flight_recorder_ssh_span_failed", exc_info=True)
 
 
+class SshTargetChangedError(RuntimeError):
+    """The target changed while MEHO was logging in to it (#3879).
+
+    The login was started with the target's old host or secret. Its result
+    is not kept, so the next call logs in with the new values.
+    """
+
+    def __init__(self, target_name: str) -> None:
+        super().__init__(
+            f"target {target_name!r} changed while MEHO was logging in to it; "
+            "the login was dropped. Retry the call."
+        )
+
+
 class ConnectorUnreachableError(RuntimeError):
     """An ``about``-style op ran against an unreachable target.
 
@@ -254,6 +268,12 @@ class SshConnector(Connector):
         # Per-target connect locks — SSH handshakes for distinct targets run
         # in parallel. Keyed on the same tenant-unique tuple as the pool.
         self._connect_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        # Per-target drop counter (#3879). ``invalidate_credentials`` raises
+        # it; ``_connect`` reads it before the handshake and keeps the new
+        # connection only when it is unchanged after. So a login that was
+        # started with the old target values, and finishes after the drop,
+        # never lands in the pool.
+        self._pool_generations: dict[tuple[str, str], int] = {}
 
     async def _resolve_secret(self, target: Target, operator: Operator | None) -> dict[str, Any]:
         """Resolve ``target.secret_ref`` (a Vault KV-v2 path string) to the secret dict.
@@ -355,6 +375,7 @@ class SshConnector(Connector):
                     await conn.wait_closed()
                 del self._connections[cache_key]
 
+            generation = self._pool_generations.get(cache_key, 0)
             auth_kwargs = await self._auth_config(target, operator)
             # ``known_hosts`` is fail-closed: the base ``_auth_config`` (and
             # every subclass override) resolves it via
@@ -371,6 +392,14 @@ class SshConnector(Connector):
                 password=auth_kwargs.get("password"),
                 known_hosts=auth_kwargs["known_hosts"],
             )
+            if self._pool_generations.get(cache_key, 0) != generation:
+                # The target was changed while this login ran: the secret
+                # read above, and maybe the host, are the old ones. Keeping
+                # the connection would serve later calls with the old login.
+                conn.close()
+                await conn.wait_closed()
+                logger.info("ssh_login_dropped_target_changed", target=target.name)
+                raise SshTargetChangedError(target.name)
             self._connections[cache_key] = (conn, time.monotonic())
             logger.info("ssh_connected", target=target.name, host=target.host)
             return conn
@@ -438,10 +467,14 @@ class SshConnector(Connector):
 
         A pooled connection was opened with the old host and secret. Dropping
         it makes the next command open a new one with the current values.
-        Called after a failed login and after a target change.
+        Called after a failed login and after a target change. A login that
+        is still running is not waited for: the drop counter tells
+        :meth:`_connect` to discard its result instead.
         """
+        cache_key = target_cache_key(target)
         async with self._pool_lock:
-            entry = self._connections.pop(target_cache_key(target), None)
+            entry = self._connections.pop(cache_key, None)
+            self._pool_generations[cache_key] = self._pool_generations.get(cache_key, 0) + 1
         if entry is not None and not entry[0].is_closed():
             entry[0].close()
             await entry[0].wait_closed()
@@ -452,6 +485,7 @@ class SshConnector(Connector):
             to_close = list(self._connections.values())
             self._connections.clear()
             self._connect_locks.clear()
+            self._pool_generations.clear()
         for conn, _ in to_close:
             if not conn.is_closed():
                 conn.close()

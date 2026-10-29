@@ -208,9 +208,9 @@ Any change to how MEHO reaches or logs in to a target (for example
 `--host`, `--secret-ref`, or `--extra`) does the same: the next call
 logs in with the new values.
 
-This works only on the MEHO server that gets the update. If you run
-more than one backplane server, or use satellite runners, the others
-keep their login until it expires.
+The MEHO server that gets the update drops its login at once. Any
+other backplane server, and any satellite runner, drops its login on
+its next call to that target.
 
 ## Import and verify
 

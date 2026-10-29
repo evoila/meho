@@ -156,6 +156,11 @@ class ResolvedTargetDescriptor(BaseModel):
     tls_ca_pin: str | None = None
     tls_server_name: str | None = None
     extras: dict[str, Any] = Field(default_factory=dict)
+    # When the target row last changed (#3879). The runner compares it with
+    # the value it saw last and drops the login it keeps for the target when
+    # the row changed. ``None`` from an older gateway: never treated as a
+    # change.
+    updated_at: datetime | None = None
 
 
 class RunnerPrincipal(BaseModel):

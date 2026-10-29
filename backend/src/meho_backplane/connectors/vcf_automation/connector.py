@@ -444,12 +444,13 @@ class VcfAutomationConnector(HttpConnector):
             return token
 
     async def _invalidate_plane(
-        self, target: VcfAutomationTargetLike, plane: Plane, rejected: httpx.Request
+        self, target: VcfAutomationTargetLike, plane: Plane, rejected: httpx.Request | None
     ) -> None:
         """Drop the cached token for *plane* on *target* under the plane's lock.
 
         The token is dropped only when *rejected* sent it; a newer token
-        another call just logged in for stays (#5033).
+        another call just logged in for stays (#5033). ``None`` drops it
+        without that check: the target changed (#3879).
         """
         lock = self._provider_lock if plane == "provider" else self._tenant_lock
         cache = self._provider_tokens if plane == "provider" else self._tenant_tokens
@@ -1282,8 +1283,8 @@ class VcfAutomationConnector(HttpConnector):
         The next call on either plane reads the secret again and logs in with
         it. Called after a failed login and after a target change.
         """
-        await self._invalidate_plane(target, "provider")
-        await self._invalidate_plane(target, "tenant")
+        await self._invalidate_plane(target, "provider", None)
+        await self._invalidate_plane(target, "tenant", None)
 
     async def aclose(self) -> None:
         """Clear both plane token caches and tear down the httpx pool.

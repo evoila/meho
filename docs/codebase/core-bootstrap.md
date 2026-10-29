@@ -20,6 +20,8 @@ today, the realm stage, finishes the Keycloak realm `meho`:
 - On the first run it logs in with Keycloak's temporary first-start account,
   checks that `meho-admin` can log in, and then removes the first-start
   account. Every later run logs in as `meho-admin`.
+- It makes the five role groups of every extra tenant in
+  `coreKeycloak.tenants` (see [Several tenants](#several-tenants)).
 - When `coreKeycloak.ci.enabled` is on, it also makes a login for automated
   install proofs.
 
@@ -69,6 +71,34 @@ puts the `platform-admin` User Attribute mapper on the three clients people
 log in with (`meho-cli`, `meho-mcp`, `meho-web`), the same way as the
 `approver` mapper. The backplane reads the boolean claim `platform_admin`.
 
+## Several tenants
+
+Design: `docs/decisions/2026-10-28-several-tenants-per-person.md`.
+
+- The five role groups carry `meho_tenant` =
+  `<tenant-uuid>:<tenant>:<Role>`, from the placeholders
+  `${MEHO_REALM_TENANT_ID}` and `${MEHO_REALM_TENANT_NAME}`. The name comes
+  from `coreKeycloak.tenantName` (default `main`).
+- The `meho-tenants` mapper on `meho-cli`, `meho-mcp` and `meho-web` lists
+  the `meho_tenant` values of all the person's groups in the claim
+  `meho_tenants` (Multivalued and Aggregate on).
+- `coreKeycloak.tenants` is a list of `{name, id}`. For each entry the Job
+  makes `MEHO-<name>-Readers`, `-Operators`, `-SA-Operators`, `-Admins` and
+  `-Approvers`. They carry only `meho_tenant`, never `tenant_id` or
+  `tenant_role`. When such a group exists already, the Job removes
+  `tenant_id`, `tenant_role` and `approver` from it
+  (`OLD_ACCESS_ATTRIBUTES`) and keeps every other attribute. The plan
+  field is `Plan.tenants` (`TenantPlan`). A name
+  must be lowercase letters, digits and dashes, and not `sa`, `platform`
+  or `ci` (those would clash with shipped groups). Names and ids must
+  differ from each other and from the first tenant; the Job stops before
+  any call otherwise.
+- No person is put into these groups by the Job. Doing it through MEHO's
+  Keycloak operations still needs a second person's approval.
+- A site with one tenant: the upgrade adds `meho_tenant` to the five groups
+  and the mapper to the three clients. The token then lists one tenant, and
+  every other claim is the same.
+
 ## The CI login (off by default)
 
 `coreKeycloak.ci.enabled: true` with `coreKeycloak.ci.tenantId: <uuid>` makes:
@@ -90,8 +120,9 @@ Turn it on only on a test install: it is a login with fixed admin claims.
   `core_bootstrap_failed: <sentence>`, `2` for a wrong command line.
 - `backend/src/meho_backplane/core/keycloak.py` — the realm stage:
   - `Plan` — read from `MEHO_CORE_KEYCLOAK_PLAN`, rendered by the chart:
-    the Keycloak Service URL, the realm file path, the Secret names and the
-    user names. Never a value.
+    the Keycloak Service URL, the realm file path, the Secret names, the
+    user names and the extra tenants (`TenantPlan`). Never a value.
+  - `tenant_groups(tenant)` — the five groups of an extra tenant.
   - `load_realm_file(path, environ)` — reads the realm file and fills its
     `${...}` placeholders from the Job's environment (the same variables
     the Keycloak pod gets).
@@ -126,11 +157,13 @@ Steps of the realm stage, in order:
    realm `master`, from `<release>-core-keycloak-bootstrap`), else as
    `meho-admin` (`client_credentials` in realm `meho`, secret from
    `<release>-core-keycloak-admin`). Neither works: the Job stops.
-3. **Client scopes, groups, clients** from the realm file: each is created
-   when missing (by name). An existing client gets the mappers and the
-   scope assignments it lacks, and its secret is set when the file names
-   one. Nothing is deleted, and an existing group, mapper or scope is not
-   changed.
+3. **Client scopes, groups, clients** from the realm file, then the groups
+   of the extra tenants: each is created when missing (by name). An
+   existing group gets the attributes the file (or the tenant) names, when
+   a value differs; its other attributes stay (output: `kept (attributes
+   set)`). An existing client gets the mappers and the scope assignments
+   it lacks, and its secret is set when the file names one. Nothing is
+   deleted, and an existing mapper or scope is not changed.
 4. **CI login**, when on.
 5. **First login.** Read `<release>-core-first-login`; make it when missing
    (create only; "already exists" means another run won). Make each person

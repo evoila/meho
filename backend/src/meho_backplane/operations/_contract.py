@@ -42,7 +42,7 @@ from sqlalchemy import select
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
-from meho_backplane.operations._lookup import visible_scope_clause
+from meho_backplane.operations._lookup import enabled_for_tenant_clause, visible_scope_clause
 from meho_backplane.operations.dispatcher import descriptor_requires_target
 from meho_backplane.operations.op_policy import apply_effective_policy
 
@@ -246,7 +246,7 @@ async def _find_descriptor(
                     EndpointDescriptor.version == version,
                     EndpointDescriptor.impl_id == impl_id,
                     EndpointDescriptor.op_id == op_id,
-                    EndpointDescriptor.is_enabled.is_(True),
+                    enabled_for_tenant_clause(tenant_id=tenant_id),
                 )
             )
         ).first()

@@ -1999,6 +1999,53 @@ class OperationPolicyOverride(Base):
     )
 
 
+class TenantOperationSetting(Base):
+    """One tenant's own on/off choice for one built-in operation (#5029).
+
+    A built-in :class:`EndpointDescriptor` row (``tenant_id IS NULL``) is
+    shared by every tenant, so its ``is_enabled`` flag is the install
+    default. A row here lets one tenant turn that operation on or off for
+    itself only. No row means the tenant uses the install default.
+
+    The row is keyed on the operation's natural key
+    ``(product, version, impl_id, op_id)``, not on the descriptor ``id``.
+    Start-up registration and spec ingest only write ``endpoint_descriptor``
+    rows, so a restart or an update never changes this table.
+
+    Only built-in operations get a row. A connector the tenant imported for
+    itself has its own descriptor rows, and their ``is_enabled`` flag is
+    the switch. Dispatch, ``search_operations``, ``list_operation_groups``
+    and the console read the effective value through
+    :func:`meho_backplane.operations._lookup.enabled_for_tenant_clause`.
+
+    ``tenant_id`` is a soft reference, no FK, the same discipline as
+    :attr:`EndpointDescriptor.tenant_id`.
+    """
+
+    __tablename__ = "tenant_operation_setting"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    product: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    impl_id: Mapped[str] = mapped_column(Text, nullable=False)
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(sa.Boolean(), nullable=False)
+    set_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "tenant_id",
+            "product",
+            "version",
+            "impl_id",
+            "op_id",
+            name="uq_tenant_operation_setting_op",
+        ),
+    )
+
+
 class SpecProvenance(Base):
     """One row per accepted spec ingest — durable, non-spoofable provenance.
 

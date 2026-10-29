@@ -90,6 +90,10 @@ from meho_backplane.db.models import (
 from meho_backplane.db.models import (
     Target as TargetORM,
 )
+from meho_backplane.operations._lookup import (
+    enabled_for_tenant_clause,
+    group_visible_for_tenant_clause,
+)
 from meho_backplane.operations.op_policy import OpKey, effective_policy_map
 from meho_backplane.targets.resolver import resolve_target
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
@@ -236,12 +240,16 @@ async def _load_ops_matrix(
     * Tenant scoping: tenant rows (``tenant_id == operator.tenant_id``)
       and built-in / global rows (``tenant_id IS NULL``) are both
       visible.
-    * Only ``review_status='enabled'`` groups are included -- staged /
-      disabled groups stay hidden from the operator the same way they
-      stay hidden from the agent.
-    * Within each group, only ``is_enabled=True`` descriptors are
-      surfaced -- a descriptor whose ingestion review left it disabled
-      should not appear in the operations matrix.
+    * Groups are shown by the same rule the agent surface uses
+      (:func:`~meho_backplane.operations._lookup.group_visible_for_tenant_clause`):
+      a group that is enabled install-wide, or a group with at least one
+      operation that is on for this tenant (#5029). A staged / disabled
+      group with no such operation stays hidden from the operator the
+      same way it stays hidden from the agent.
+    * Within each group, only descriptors that are on for this tenant
+      are surfaced (the tenant's own setting first, then the install
+      default, #5029) -- a descriptor whose ingestion review left it
+      disabled should not appear in the operations matrix.
 
     Returns groups sorted by ``group_key``; operations within a group
     sorted by ``op_id``. Both orders are stable across page renders
@@ -254,7 +262,7 @@ async def _load_ops_matrix(
             OperationGroup.product == product,
             OperationGroup.version == version,
             OperationGroup.impl_id == impl_id,
-            OperationGroup.review_status == "enabled",
+            group_visible_for_tenant_clause(tenant_id=tenant_id),
             (OperationGroup.tenant_id.is_(None)) | (OperationGroup.tenant_id == tenant_id),
         )
         .order_by(OperationGroup.group_key)
@@ -268,7 +276,7 @@ async def _load_ops_matrix(
         select(EndpointDescriptor)
         .where(
             EndpointDescriptor.group_id.in_(group_ids),
-            EndpointDescriptor.is_enabled.is_(True),
+            enabled_for_tenant_clause(tenant_id=tenant_id),
             (EndpointDescriptor.tenant_id.is_(None)) | (EndpointDescriptor.tenant_id == tenant_id),
         )
         .order_by(EndpointDescriptor.group_id, EndpointDescriptor.op_id)

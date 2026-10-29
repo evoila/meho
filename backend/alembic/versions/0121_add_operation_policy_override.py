@@ -3,8 +3,8 @@
 
 """Add the operation policy override table (#4711).
 
-Revision ID: 0120
-Revises: 0119
+Revision ID: 0121
+Revises: 0120
 Create Date: 2026-10-28
 
 One additive table, ``operation_policy_override``: an operator's stricter
@@ -27,8 +27,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0120"
-down_revision: str | None = "0119"
+revision: str = "0121"
+down_revision: str | None = "0120"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -174,6 +174,7 @@ def test_keycloak_settings() -> None:
         "KC_CACHE": "local",
         "MEHO_REALM_PUBLIC_URL": "https://meho.test",
         "MEHO_REALM_TENANT_ID": _TENANT,
+        "MEHO_REALM_TENANT_NAME": "main",
     }
     assert {k: env[k]["value"] for k in expected} == expected
 
@@ -360,6 +361,17 @@ def test_long_release_name_keeps_statefulset_and_ingress_in_step() -> None:
         (["--set", "coreKeycloak.firstTenantId="], ("coreKeycloak.firstTenantId is empty",)),
         (["--set", "coreKeycloak.firstTenantId=not-a-uuid"], ("firstTenantId",)),
         (["--set", "coreKeycloak.unknownKey=1"], ("unknownKey",)),
+        (["--set", "coreKeycloak.tenantName=Main"], ("tenantName",)),
+        (["--set", "coreKeycloak.tenants[0].name=lab-b"], ("id",)),
+        (
+            [
+                "--set",
+                "coreKeycloak.tenants[0].name=lab:b",
+                "--set",
+                f"coreKeycloak.tenants[0].id={_TENANT}",
+            ],
+            ("name",),
+        ),
     ],
     ids=[
         "needs-postgres",
@@ -368,6 +380,9 @@ def test_long_release_name_keeps_statefulset_and_ingress_in_step() -> None:
         "no-tenant-id",
         "bad-tenant-id",
         "unknown-key",
+        "bad-tenant-name",
+        "extra-tenant-needs-id",
+        "bad-extra-tenant-name",
     ],
 )
 def test_bad_values_fail_at_render(extra: list[str], messages: tuple[str, ...]) -> None:

@@ -50,7 +50,7 @@ import asyncio
 import uuid
 import warnings
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -64,7 +64,12 @@ from sqlalchemy import select
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
-from meho_backplane.db.models import EndpointDescriptor, OperationGroup, Tenant
+from meho_backplane.db.models import (
+    EndpointDescriptor,
+    OperationGroup,
+    Tenant,
+    TenantOperationSetting,
+)
 from meho_backplane.operations.ingest import ensure_connector_class_registered
 from meho_backplane.operations.op_policy import OpKey, effective_policy_map
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
@@ -447,6 +452,46 @@ def test_group_body_renders_ops() -> None:
         pass
     assert bad.status_code == 404, bad.text
     assert "Traceback" not in bad.text
+
+
+def test_group_body_shows_install_default_and_tenant_setting() -> None:
+    """A built-in op the tenant turned off shows both values (#5029)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(tenant_id=None, enabled=True)
+
+    async def _turn_off_for_tenant() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            session.add(
+                TenantOperationSetting(
+                    tenant_id=_TENANT_A,
+                    product=_PRODUCT,
+                    version=_VERSION,
+                    impl_id=_IMPL_ID,
+                    op_id=_OP_ID,
+                    enabled=False,
+                    set_by_sub=_OP_ADMIN,
+                    set_at=datetime.now(UTC),
+                )
+            )
+
+    asyncio.run(_turn_off_for_tenant())
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.get(
+            f"/ui/connectors/registry/{_CONNECTOR_ID}/review/groups/resources",
+            headers={"HX-Request": "true"},
+        )
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    assert 'data-op-tenant-setting="off"' in response.text
+    assert "Install default: on." in response.text
+    assert "This tenant: off." in response.text
 
 
 # ---------------------------------------------------------------------------

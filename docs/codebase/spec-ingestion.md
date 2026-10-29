@@ -1100,7 +1100,7 @@ upgrade and a new ingest of the API description.
   or from the API description plus its safety floors (ingested
   operations). Typed registration at every start and every re-ingest
   write only these columns.
-* `operation_policy_override` (migration `0120`, model
+* `operation_policy_override` (migration `0121`, model
   `OperationPolicyOverride`) holds the operator's choice, one row per
   scope and operation name `(product, version, impl_id, op_id)`.
   `tenant_id` is the scope: a tenant UUID (that tenant only) or `NULL`
@@ -1252,6 +1252,66 @@ reason, author and time of an approval exception.
 was lost at the next start (typed) or re-ingest (ingested). Existing
 stricter edits on rows stay until then; re-apply them once with
 `edit-op` to make them stick.
+### Each tenant turns built-in operations on or off (#5029)
+
+A built-in operation row (`endpoint_descriptor.tenant_id IS NULL`) is
+shared by every tenant. Its `is_enabled` flag is the **install
+default**. A tenant can now turn a built-in operation on or off for
+itself only. Other tenants keep the install default.
+
+- **Where it is stored.** The table `tenant_operation_setting`
+  (migration `0120`, model `TenantOperationSetting`): one row per
+  `(tenant_id, product, version, impl_id, op_id)` with `enabled`
+  true or false. No row means "use the install default". The row is
+  keyed on the operation's natural key, not on the descriptor id. A
+  start (typed registration) and an update (spec ingest, or rows
+  written again) only write `endpoint_descriptor`, so they never
+  change a tenant setting.
+- **How it is read.** `enabled_for_tenant_clause` in
+  `operations/_lookup.py` is the one "is this op on for this tenant"
+  predicate. For a built-in row it takes the tenant setting first,
+  then `is_enabled`. A tenant's own row uses its own `is_enabled`.
+  `lookup_descriptor` (dispatch, preview), `count_known_ops`,
+  `find_connectors_with_op`, `search_operations` (the PostgreSQL SQL in
+  `_search.py` carries the same rule as `_ENABLED_FOR_TENANT_SQL`,
+  checked at import), `list_operation_groups` and its op counts, the
+  operation contract, runbook verify steps and the console operations
+  pages all use it.
+- **Groups.** `group_visible_for_tenant_clause` decides which groups
+  `list_operation_groups` and a group-scoped `search_operations` show.
+  A group shows when it is fully enabled or holds an op that is on for
+  the tenant. A fully enabled group is hidden when the tenant turned ops
+  in it off and none of its ops is still on for the tenant. A group
+  setting is the same per-op setting written for each op in the group,
+  the way the install-default group enable cascades onto each op.
+- **Who may change it.** REST
+  (`api/v1/connector_tenant_settings.py`):
+  `PUT /api/v1/connectors/{id}/tenant-settings/operations/{op_id}` and
+  `PUT /api/v1/connectors/{id}/tenant-settings/groups/{group_key}` with
+  body `{"enabled": true | false | null}` (`null` = back to the install
+  default). Role `tenant_admin` for the caller's own tenant. The
+  optional `?tenant_id=` names another tenant and needs
+  `platform_admin` (403 `cross_tenant_requires_platform_admin`). The
+  install default stays the `edit-op` / `enable` / `disable` paths,
+  which need `platform_admin` for a built-in row (#3616).
+- **Audit.** Every change writes one audit row with path
+  `meho_connector_tenant_setting` in the same transaction. The payload
+  names the connector, the target tenant, the op or group, and the new
+  value. A write that changes nothing writes no row.
+- **Showing both values.** `GET /api/v1/connectors/{id}/tenant-settings`
+  lists the ops the tenant has a setting for, each with
+  `default_enabled`, `tenant_enabled` and the `enabled` value that
+  applies. The review payload (`GET /{id}/review`) carries
+  `tenant_enabled` on every op of a built-in connector. The CLI has
+  `meho connector tenant-setting show | set | set-group`, and
+  `meho connector review` prints a `ten` column next to `en`. The
+  console review drawer shows "Install default: on. This tenant: off."
+  on an op the tenant set.
+- **Tenant copies.** A connector the tenant imported for itself keeps
+  its own rows (#3870); a tenant setting would have no effect there, so
+  the write is refused with 409 `tenant_owns_connector`.
+- **Scope.** Only on and off. Risk levels and approval flags are not
+  per tenant.
 
 ### Operator-selectable auth scheme on a non-catalog ingest (#2289)
 

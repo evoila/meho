@@ -407,6 +407,15 @@ func uuidDeref(u *openapi_types.UUID) string {
 	return u.String()
 }
 
+// tenantLabel names the tenant of an audit row: the tenant name when
+// the backend sent one, else the tenant id, else "-" (#5238).
+func tenantLabel(name *string, id *openapi_types.UUID) string {
+	if n := strDeref(name); n != "" {
+		return n
+	}
+	return strOrDash(uuidDeref(id))
+}
+
 // formatTS renders an `api.AuditEntry.Ts` (`time.Time`) as the
 // RFC3339-with-nanos string the pre-migration `Entry.TS` string
 // field carried verbatim. The backend emits the column as an

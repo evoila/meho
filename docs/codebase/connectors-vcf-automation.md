@@ -192,7 +192,12 @@ lookups in `_lookups.py`, paths in `_paths.py`, and park-time previews in
   `needs-approval` is satisfied only by this op's own approval park (the
   approved re-dispatch), so a service principal whose standing grant covers
   this op but not the Vault write is refused rather than writing under the
-  target's role. The target should carry its own `extras.vault_role` — one
+  target's role. When a reviewer approves the request, the call runs as
+  the reviewer, but the **requester's** policy for that write is checked
+  too, so an agent denied `vault.kv.patch` on that target is refused before
+  the mint. The park card shows it as `requester_denied` /
+  `requester_reason` in `permission_preflight` (#3898; see
+  [approvals.md](approvals.md) "The requester's policy on a second target"). The target should carry its own `extras.vault_role` — one
   without falls back to the caller's role, the #3895 failure. The park card
   carries the Vault write ops'
   `sys/capabilities-self` `permission_preflight` (`will_be_denied`, plus

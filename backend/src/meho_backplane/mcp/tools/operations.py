@@ -57,7 +57,12 @@ from __future__ import annotations
 from typing import Any
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools._call_operation_async import poll_call, submit_async_call
 from meho_backplane.operations.meta_tools import (
@@ -184,6 +189,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="list_operation_groups",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "List enabled operation groups for a connector. Each group "
@@ -427,6 +433,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="search_operations",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Hybrid BM25 + cosine retrieval over a connector's enabled "
@@ -747,6 +754,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="preview_operation",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Preview an operation WITHOUT running it. Resolves the same "

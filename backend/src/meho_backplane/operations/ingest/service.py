@@ -148,10 +148,11 @@ from meho_backplane.operations.op_policy import (
     effective_policy_map,
     remove_override,
 )
+from meho_backplane.operations.tenant_operation_settings import load_tenant_settings
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
 
     from meho_backplane.connectors.base import Connector
     from meho_backplane.db.models import EndpointDescriptor
@@ -168,13 +169,17 @@ def _scope_name(tenant_id: UUID | None) -> Literal["tenant", "install"]:
 
 
 def _review_op(
-    op: EndpointDescriptor, policies: dict[OpKey, EffectivePolicy] | None = None
+    op: EndpointDescriptor,
+    policies: dict[OpKey, EffectivePolicy] | None = None,
+    tenant_settings: Mapping[str, bool] | None = None,
 ) -> ConnectorReviewOp:
     """Project one descriptor row into its review-payload shape.
 
     ``safety_level`` / ``requires_approval`` are the effective values from
     *policies* (the operator's overrides applied, #4711); the
     ``classified_*`` fields keep the value in code or in the API description.
+    *tenant_settings* is the reading tenant's own ``{op_id: enabled}``
+    settings for a built-in connector (#5029); empty otherwise.
     """
     policy = (policies or {}).get(OpKey.of(op))
     return ConnectorReviewOp(
@@ -189,6 +194,7 @@ def _review_op(
         is_enabled=op.is_enabled,
         tags=list(op.tags),
         needs_reingest=op.needs_reingest,
+        tenant_enabled=(tenant_settings or {}).get(op.op_id),
     )
 
 
@@ -219,7 +225,10 @@ def _authoring_kind_for_payload(
 
 
 def _render_groups(
-    groups: list[Any], ops: list[Any], policies: dict[OpKey, EffectivePolicy]
+    groups: list[Any],
+    ops: list[Any],
+    policies: dict[OpKey, EffectivePolicy],
+    tenant_settings: Mapping[str, bool] | None = None,
 ) -> list[ConnectorReviewGroup]:
     """Pack *ops* under their group rows for the review payload.
 
@@ -232,7 +241,7 @@ def _render_groups(
             ops_by_group[op.group_id].append(op)
     rendered: list[ConnectorReviewGroup] = []
     for group in groups:
-        group_ops = [_review_op(op, policies) for op in ops_by_group[group.id]]
+        group_ops = [_review_op(op, policies, tenant_settings) for op in ops_by_group[group.id]]
         rendered.append(
             ConnectorReviewGroup(
                 group_key=group.group_key,
@@ -245,6 +254,27 @@ def _render_groups(
             )
         )
     return rendered
+
+
+async def _reading_tenant_settings(
+    session: AsyncSession,
+    scope: ConnectorScope,
+    reading_tenant_id: UUID | None,
+) -> dict[str, bool]:
+    """Return the reading tenant's own on/off settings for a built-in connector (#5029).
+
+    Shown next to the install default in the review payload. Empty for a
+    tenant's own connector copy or when no tenant reads.
+    """
+    if scope.tenant_id is not None or reading_tenant_id is None:
+        return {}
+    return await load_tenant_settings(
+        session,
+        tenant_id=reading_tenant_id,
+        product=scope.product,
+        version=scope.version,
+        impl_id=scope.impl_id,
+    )
 
 
 class ReviewService:
@@ -783,13 +813,17 @@ class ReviewService:
                 prefer=prefer,
                 allow_legacy_tenant_copy=True,
             )
-            return await self._render_payload(connector_id, scope, session)
+            return await self._render_payload(
+                connector_id, scope, session, reading_tenant_id=tenant_id
+            )
 
     async def _render_payload(
         self,
         connector_id: str,
         scope: ConnectorScope,
         session: AsyncSession,
+        *,
+        reading_tenant_id: UUID | None = None,
     ) -> ConnectorReviewPayload:
         """Load groups + ops for *scope* and pack them into the payload.
 
@@ -807,6 +841,7 @@ class ReviewService:
             scope,
             [group.id for group in groups],
         )
+        tenant_settings = await _reading_tenant_settings(session, scope, reading_tenant_id)
         # #3870: list every op outside the rendered groups too, with its
         # enabled state and safety level, so the review shows the whole
         # op set dispatch can serve — not only the grouped part.
@@ -820,7 +855,7 @@ class ReviewService:
         policies = await effective_policy_map(
             session, tenant_id=self._operator.tenant_id, rows=[*ops, *ungrouped_ops]
         )
-        rendered_groups = _render_groups(groups, ops, policies)
+        rendered_groups = _render_groups(groups, ops, policies, tenant_settings)
         has_code_shipped_op = any(op.source_kind in ("typed", "composite") for op in ops)
         kind, dispatchable = _authoring_kind_for_payload(
             scope, rendered_groups, has_code_shipped_op=has_code_shipped_op
@@ -863,7 +898,7 @@ class ReviewService:
             groups=rendered_groups,
             total_op_count=grouped_op_count,
             ungrouped_op_count=max(all_op_count - grouped_op_count, 0),
-            ungrouped_ops=[_review_op(op, policies) for op in ungrouped_ops],
+            ungrouped_ops=[_review_op(op, policies, tenant_settings) for op in ungrouped_ops],
             needs_reingest_op_count=needs_reingest_op_count,
             delete_ops_below_destructive=delete_review,
             delete_ops_needing_correction_count=sum(

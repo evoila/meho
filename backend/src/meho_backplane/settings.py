@@ -1191,6 +1191,13 @@ class Settings(BaseModel):
         and one dot-separated part of that host must be exactly
         ``sandbox``. Otherwise MEHO refuses to start. Ignored when the
         mode is off.
+    sandbox_delete_grants_from_api:
+        With sandbox mode on, lets a tenant admin who is a person create a
+        delete grant through REST and the CLI too, not only in the web
+        console (#5251). From ``MEHO_SANDBOX_DELETE_GRANTS_FROM_API``.
+        Default ``False``: a delete grant is made only in the console.
+        Outside sandbox mode it changes nothing. Read at boot only; no
+        request field can change it.
     openai_api_key:
         Bearer token the OpenAI-compatible backend builder
         (G11.5-T3 #1077) authenticates with. Empty (the default) is
@@ -1664,6 +1671,9 @@ class Settings(BaseModel):
     # on an instance for disposable test systems. Both read at boot only.
     sandbox_mode: bool = False
     sandbox_mode_confirm: str = ""
+    # #5251 -- with sandbox mode on, REST and the CLI may create delete
+    # grants too. Read at boot only.
+    sandbox_delete_grants_from_api: bool = False
     # #2322 (G0.31 #2364) -- approval-TTL lifecycle. Every parked approval
     # is stamped ``expires_at = created_at + APPROVAL_DEFAULT_TTL_SECONDS``
     # (default 14 days); an explicit caller override is honoured but capped
@@ -2824,6 +2834,9 @@ def get_settings() -> Settings:
             os.environ.get("MEHO_SANDBOX_MODE", "false"),
         ),
         sandbox_mode_confirm=os.environ.get("MEHO_SANDBOX_MODE_CONFIRM", "").strip(),
+        sandbox_delete_grants_from_api=parse_bool_env(
+            os.environ.get("MEHO_SANDBOX_DELETE_GRANTS_FROM_API", "false"),
+        ),
         # #2322 — approval-TTL default + sweeper knobs.
         approval_default_ttl_seconds=int(
             os.environ.get("APPROVAL_DEFAULT_TTL_SECONDS", str(14 * 24 * 3600)),

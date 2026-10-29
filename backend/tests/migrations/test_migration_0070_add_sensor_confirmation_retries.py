@@ -24,7 +24,7 @@ DDL through ``batch_alter_table``, so PG parity holds.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -121,10 +121,12 @@ def _insert_pre_0070_sensor(sync_url: str) -> None:
         sync_eng.dispose()
 
 
-def test_upgrade_adds_confirmation_columns(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_confirmation_columns(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0070`` lands all four columns with the right nullability."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     columns = _columns(sync_url)
     for column in _CONFIRMATION_COLUMNS:
@@ -138,7 +140,9 @@ def test_upgrade_adds_confirmation_columns(alembic_cfg: tuple[Config, str]) -> N
     assert not _column_is_nullable(sync_url, "pending_count")
 
 
-def test_existing_row_backfills_confirmation_off(alembic_cfg: tuple[Config, str]) -> None:
+def test_existing_row_backfills_confirmation_off(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """A row inserted at ``0069`` backfills retry_times=0 (confirmation off).
 
     The behaviour-preserving property: no pre-#2799 sensor starts holding
@@ -146,7 +150,7 @@ def test_existing_row_backfills_confirmation_off(alembic_cfg: tuple[Config, str]
     off switch.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     _insert_pre_0070_sensor(sync_url)
 
     command.upgrade(cfg, _REVISION)
@@ -169,10 +173,12 @@ def test_existing_row_backfills_confirmation_off(alembic_cfg: tuple[Config, str]
     assert row[3] == 0
 
 
-def test_pending_state_check_rejects_skip(alembic_cfg: tuple[Config, str]) -> None:
+def test_pending_state_check_rejects_skip(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """The CHECK admits ``CheckState`` minus ``skip`` -- not ``skip`` itself."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     sync_eng = sa_create_engine(sync_url)
     try:
@@ -194,14 +200,16 @@ def test_pending_state_check_rejects_skip(alembic_cfg: tuple[Config, str]) -> No
         sync_eng.dispose()
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade "0069"`` drops the columns; ``upgrade "0070"`` restores them.
 
     Pinned to this migration's own revision on both legs (never ``head``) so a
     future head migration cannot break the round-trip.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert set(_CONFIRMATION_COLUMNS) <= _columns(sync_url)
 
     command.downgrade(cfg, _DOWN_REVISION)

@@ -108,6 +108,11 @@ class ConnectorReviewOp(BaseModel):
     # payloads built without a descriptor row.
     classified_safety_level: str | None = None
     classified_requires_approval: bool | None = None
+    # #5029: the reading tenant's own on/off setting for a built-in op.
+    # ``None`` means the tenant uses the install default (``is_enabled``),
+    # or the payload is not for a built-in connector. The effective value
+    # is this field when set, else ``is_enabled``.
+    tenant_enabled: bool | None = None
 
 
 class ConnectorReviewDeleteOp(BaseModel):

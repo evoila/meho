@@ -183,6 +183,9 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     # destructive and needs a preview hash).
     "k8s.secret.update",
     "k8s.secret.delete",
+    # Check a Secret key against its Vault copy (safe; answers only
+    # same or different).
+    "k8s.secret.compare_to_ref",
 )
 
 

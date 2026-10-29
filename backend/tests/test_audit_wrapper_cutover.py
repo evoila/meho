@@ -39,7 +39,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import structlog
-from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Response
 from fastapi.routing import iter_route_contexts
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -536,6 +536,13 @@ async def _system_recorded(operator: Operator = Depends(verify_jwt_and_bind)) ->
         payload={},
     )
     return {"recorded": "by-system"}
+
+
+@_probe.post("/recorded", status_code=204, response_class=Response)
+async def _recorded(operator: Operator = Depends(verify_jwt_and_bind)) -> Response:
+    """A MEHO change that writes its own record in the caller's name, answering 204."""
+    await _store(_classified_row(operator_sub=operator.sub, path="probe.recorded"), commit=True)
+    return Response(status_code=204)
 
 
 class _Caller:
@@ -1369,3 +1376,40 @@ async def test_mcp_failed_write_keeps_one_execution_row(
     row_class = "operation_execution" if retired else "legacy_request"
     assert _shape(rows) == [(row_class, "MCP", "/mcp/tools/call/meho_agent_principals_revoke")]
     assert rows[0].status_code == 502
+
+
+# ===========================================================================
+# Audit receipt header (#4976)
+# ===========================================================================
+
+
+def _receipt(response: Any) -> uuid.UUID | None:
+    raw = response.headers.get("meho-audit-id")
+    return None if raw is None else uuid.UUID(raw)
+
+
+async def test_rest_response_names_its_audit_record(retired: bool) -> None:
+    """``Meho-Audit-Id`` names the row ``meho audit query --audit-id`` returns.
+
+    A change with its own record names that record, with or without the
+    cutover (the legacy wrapper row is not the receipt). A change with no
+    record of its own names the wrapper row. A routine read names its
+    legacy row, or nothing after the cutover.
+    """
+    client, caller = _rest_client()
+    recorded = client.post("/api/v1/cutover-probe/recorded")
+    created = client.post("/api/v1/cutover-probe/things")
+    read = client.get(f"/api/v1/operations/groups?connector_id={_CONNECTOR}")
+    assert (recorded.status_code, created.status_code) == (204, 201)
+
+    rows = {row.id: row for row in await _audit_rows()}
+    recorded_row = rows[_receipt(recorded)]
+    assert recorded_row.path == "probe.recorded"
+    assert recorded_row.event_class == "operation_execution"
+    created_row = rows[_receipt(created)]
+    assert (created_row.method, created_row.path) == ("POST", "/api/v1/cutover-probe/things")
+    assert created_row.operator_sub == caller.sub
+    if retired:
+        assert _receipt(read) is None
+    else:
+        assert rows[_receipt(read)].path == "/api/v1/operations/groups"

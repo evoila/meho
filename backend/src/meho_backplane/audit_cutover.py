@@ -82,10 +82,11 @@ filled; with the setting off nothing is filled either.
 
 from __future__ import annotations
 
+import uuid
 from contextvars import ContextVar, Token
 from typing import Any, Final
 
-from sqlalchemy import event
+from sqlalchemy import event, inspect
 from sqlalchemy.orm import Session
 
 from meho_backplane.auth.delegation import resolve_actor_sub
@@ -102,6 +103,7 @@ __all__ = [
     "DISPATCH_ROUTES",
     "MCP_ROUTINE_OP_CLASSES",
     "ROUTINE_POST_ROUTES",
+    "classified_record_id",
     "classified_record_seen",
     "close_classified_record_scope",
     "mcp_tool_is_routine",
@@ -170,13 +172,15 @@ _DENIED_STATUSES: Final[frozenset[int]] = frozenset({401, 403})
 class _ClassifiedRecords:
     """Mutable marker for one request: which classified rows were built and committed?"""
 
-    __slots__ = ("built", "committed_subs", "preview")
+    __slots__ = ("built", "committed_ids", "committed_subs", "preview")
 
     def __init__(self) -> None:
         #: Rows built in this scope that have not committed yet, with the caller each names.
         self.built: dict[AuditLog, str] = {}
         #: Callers named by a committed classified row.
         self.committed_subs: set[str] = set()
+        #: The id of the first committed classified row for each caller.
+        self.committed_ids: dict[str, uuid.UUID] = {}
         #: The request ran a dry-run branch and changed nothing.
         self.preview = False
 
@@ -217,6 +221,19 @@ def classified_record_seen(operator_sub: str) -> bool:
     """Return whether code in the open scope committed a classified row for this caller."""
     scope = _current_scope.get()
     return scope is not None and operator_sub in scope.committed_subs
+
+
+def classified_record_id(operator_sub: str) -> uuid.UUID | None:
+    """Return the id of the first classified row committed for this caller, or ``None``.
+
+    The audit middleware sends it back as the request's audit receipt
+    (#4976): this row is the record of the change, with or without the
+    cutover.
+    """
+    scope = _current_scope.get()
+    if scope is None:
+        return None
+    return scope.committed_ids.get(operator_sub)
 
 
 def note_preview() -> None:
@@ -293,7 +310,13 @@ def _note_committed_records(session: Session) -> None:
     if scope is None or not scope.built:
         return
     for row in [row for row in scope.built if row in session]:
-        scope.committed_subs.add(scope.built.pop(row))
+        operator_sub = scope.built.pop(row)
+        scope.committed_subs.add(operator_sub)
+        # The identity key, not ``row.id``: reading an attribute after a
+        # commit can load the row again from the database.
+        identity = inspect(row).identity
+        if identity and isinstance(identity[0], uuid.UUID):
+            scope.committed_ids.setdefault(operator_sub, identity[0])
 
 
 def rest_request_is_routine(method: str, route_template: str | None) -> bool:

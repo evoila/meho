@@ -339,6 +339,7 @@ cli/
     │   ├── netdiag.go         # shared DNS / TLS / unreachable classifier for client diagnostics (#3666).
     │   └── netdiag_test.go    # table tests + a real TLS failure.
     ├── output/
+    │   ├── audit_receipt.go   # Meho-Audit-Id header reader + the `audit receipt: <id>` line (#4976).
     │   ├── format.go          # human + JSON formatters + structured exit codes.
     │   └── format_test.go     # human/JSON/exit-code pinning.
     └── version/
@@ -1027,6 +1028,35 @@ that header from one place, so every verb gets it without its own flag.
   keeps its own meaning. Only `MEHO_WORK_REF` reaches the header there.
 - No PersistentPreRun hooks exist below the root. If one is added, it
   must call `applyWorkRef` too (cobra runs only the nearest hook).
+
+## Audit receipt on writes with no body (#4976)
+
+Some write routes answer `204 No Content`. They have no body, so the
+audit id cannot come back in a JSON field the way `operation call`
+gets it. The backplane sends it in a response header instead:
+
+- The audit middleware (`backend/src/meho_backplane/audit.py`) puts
+  `Meho-Audit-Id: <id>` on every buffered response that has an audit
+  record. The id is the first audit row the request committed in the
+  caller's name (for example the `meho_connector_edit_group` row).
+  When the request wrote no such row, it is the request row the
+  middleware wrote. A request with no record gets no header.
+- `output.AuditIDFromResponse` reads the header. `output.WriteAuditReceipt`
+  prints `audit receipt: <id>`. `dispatch.WriteAuditReceipt` calls it,
+  so the line is the same for every command.
+
+These commands print the line and put `audit_id` in their `--json`
+output: `connector edit-group`, `connector enable`, `connector disable`,
+`connector delete`, `sensor delete`, `dashboard delete`,
+`conventions delete`, `scheduler cancel` and `topology unannotate`.
+With an older backplane there is no header: the text output has no
+receipt line and `audit_id` is `null`.
+
+`meho audit query --audit-id <id>` returns the row the receipt names.
+`backend/tests/test_audit_wrapper_cutover.py` proves this with the
+wrapper-row cutover on and off, and
+`backend/tests/test_api_v1_connectors_ingest.py` for `edit-group` and
+`enable`.
 
 ## Doctor flow (`meho doctor`, #3666)
 

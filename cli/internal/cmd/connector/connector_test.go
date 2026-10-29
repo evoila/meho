@@ -1586,14 +1586,19 @@ func TestConfirmEOF(t *testing.T) {
 // only input is the synthetic transitionResult envelope the verb
 // constructs locally (connector_id + action).
 func TestPrintTransitionResult(t *testing.T) {
+	auditID := "11111111-2222-3333-4444-555555555555"
 	r := transitionResult{
 		ConnectorID: "vmware-rest-9.0",
 		Action:      "enabled",
+		AuditID:     &auditID,
 	}
 	var buf bytes.Buffer
 	printTransitionResult(&buf, "enable", r)
 	out := buf.String()
-	for _, want := range []string{"enable vmware-rest-9.0", "enabled", "204 No Content"} {
+	for _, want := range []string{
+		"enable vmware-rest-9.0", "enabled", "204 No Content",
+		"audit receipt: 11111111-2222-3333-4444-555555555555\n",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("transition render missing %q in:\n%s", want, out)
 		}
@@ -2979,7 +2984,9 @@ func TestPatchGroupSendsBody(t *testing.T) {
 			if got.Name != nil {
 				t.Errorf("Name should be unset; got %+v", got.Name)
 			}
-			// Canonical T6 response: 204 No Content with no body.
+			// Canonical T6 response: 204 No Content with no body; the
+			// audit id comes back in the Meho-Audit-Id header (#4976).
+			w.Header().Set("Meho-Audit-Id", "11111111-2222-3333-4444-555555555555")
 			w.WriteHeader(http.StatusNoContent)
 		},
 	})
@@ -2987,8 +2994,12 @@ func TestPatchGroupSendsBody(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	whenToUse := "use for cluster ops"
-	if err := patchGroup(context.Background(), srv.URL, "vmware-rest-9.0", "cluster", api.EditGroupBody{WhenToUse: &whenToUse}); err != nil {
+	auditID, err := patchGroup(context.Background(), srv.URL, "vmware-rest-9.0", "cluster", api.EditGroupBody{WhenToUse: &whenToUse})
+	if err != nil {
 		t.Fatalf("patchGroup: %v", err)
+	}
+	if auditID == nil || *auditID != "11111111-2222-3333-4444-555555555555" {
+		t.Fatalf("patchGroup audit id: got %v", auditID)
 	}
 }
 
@@ -2999,16 +3010,18 @@ func TestPrintEditGroupResultRendersBody(t *testing.T) {
 	whenToUse := "use for cluster lifecycle ops"
 	name := "Cluster"
 	var buf bytes.Buffer
+	auditID := "11111111-2222-3333-4444-555555555555"
 	printEditGroupResult(&buf, "vmware-rest-9.0", "cluster", api.EditGroupBody{
 		WhenToUse: &whenToUse,
 		Name:      &name,
-	})
+	}, &auditID)
 	out := buf.String()
 	for _, want := range []string{
 		"vmware-rest-9.0/cluster",
 		"204 No Content",
 		"name: Cluster",
 		"when_to_use: use for cluster lifecycle ops",
+		"audit receipt: 11111111-2222-3333-4444-555555555555\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("edit-group render missing %q in:\n%s", want, out)
@@ -3140,14 +3153,19 @@ func TestPrintEditOpWarnings(t *testing.T) {
 func TestPostTransitionEnable204(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
 		"POST /api/v1/connectors/vmware-rest-9.0/enable": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Meho-Audit-Id", "enable-audit-id")
 			w.WriteHeader(http.StatusNoContent)
 		},
 	})
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if err := postTransition(context.Background(), srv.URL, verbEnable, "vmware-rest-9.0"); err != nil {
+	auditID, err := postTransition(context.Background(), srv.URL, verbEnable, "vmware-rest-9.0")
+	if err != nil {
 		t.Fatalf("postTransition enable: %v", err)
+	}
+	if auditID == nil || *auditID != "enable-audit-id" {
+		t.Fatalf("postTransition enable audit id: got %v", auditID)
 	}
 }
 
@@ -3156,14 +3174,19 @@ func TestPostTransitionEnable204(t *testing.T) {
 func TestPostTransitionDisable204(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
 		"POST /api/v1/connectors/vmware-rest-9.0/disable": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Meho-Audit-Id", "disable-audit-id")
 			w.WriteHeader(http.StatusNoContent)
 		},
 	})
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if err := postTransition(context.Background(), srv.URL, verbDisable, "vmware-rest-9.0"); err != nil {
+	auditID, err := postTransition(context.Background(), srv.URL, verbDisable, "vmware-rest-9.0")
+	if err != nil {
 		t.Fatalf("postTransition disable: %v", err)
+	}
+	if auditID == nil || *auditID != "disable-audit-id" {
+		t.Fatalf("postTransition disable audit id: got %v", auditID)
 	}
 }
 

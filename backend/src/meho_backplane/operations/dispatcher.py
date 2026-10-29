@@ -391,6 +391,7 @@ from meho_backplane.redaction import (
     apply_connector_boundary_redaction,
     manifest_to_audit_payload,
 )
+from meho_backplane.redaction.secret_fields import scrub_secret_fields
 from meho_backplane.settings import get_settings
 
 _log = structlog.get_logger(__name__)
@@ -1109,14 +1110,17 @@ async def _reduce_and_audit_composite_error(
     inline envelope (``delivery="unavailable"``) instead of leaking it; the
     audit row still records the raw payload and the redaction manifest.
     """
-    error_summary = _composite_error_summary(error_code, redaction.redacted)
+    # #5031: the value of each secret-named field goes before the reducer
+    # stores the full envelope behind a handle, so the stored copy is clean too.
+    full_envelope: dict[str, Any] = scrub_secret_fields(redaction.redacted)
+    error_summary = _composite_error_summary(error_code, full_envelope)
     serialised_manifest = manifest_to_audit_payload(redaction.manifest)
-    envelope: dict[str, Any] | None = redaction.redacted
+    envelope: dict[str, Any] | None = full_envelope
     handle: ResultHandle | None = None
     delivery: Literal["complete", "partial", "unavailable"] | None = None
     try:
         summary, handle = await _DEFAULT_REDUCER.reduce(
-            redaction.redacted,
+            full_envelope,
             descriptor.response_schema,
             _build_reducer_context(
                 op_id=op_id,
@@ -1137,7 +1141,7 @@ async def _reduce_and_audit_composite_error(
     else:
         if handle is not None:
             envelope = dict(summary) if isinstance(summary, dict) else {"value": summary}
-            envelope.update(_terminal_error_inline_fields(redaction.redacted))
+            envelope.update(_terminal_error_inline_fields(full_envelope))
     duration_ms = _elapsed_ms(started)
     return await _audit_error_and_return(
         result_composite_terminal_error(
@@ -1846,8 +1850,8 @@ async def _audit_error_and_return(
 
     #5031: then, for every operation, secrets are removed from the whole
     result (:func:`~meho_backplane.operations._vendor_text.redact_error_result`):
-    secret-named fields and Tier-1 shapes in every string of ``error`` and
-    ``extras``.
+    secret-named fields and Tier-1 shapes in every string of ``error``,
+    ``extras`` and ``result``.
     """
     result = withhold_vendor_text(result, op_id=descriptor.op_id, tags=descriptor.tags)
     result = redact_error_result(result)

@@ -10,8 +10,11 @@ vendor answer with planted secrets:
 
 * a normal answer;
 * error answers: HTTP 500, 422, 403 and 401 with a JSON body, a session login
-  the vendor refused, and a plain raised error whose text holds the vendor's
-  JSON or a Python dict.
+  the vendor refused, a plain raised error whose text holds the vendor's
+  JSON or a Python dict, an error result the handler returns with the
+  vendor's answer in ``result``, and a multi-step operation's error envelope
+  (an ``issues[]`` entry with ``severity == "error"``) with the vendor's
+  answer inside.
 
 The planted values are a token, a password field and a vendor's encrypted
 password field. For each run the test checks that no planted value is in:
@@ -29,7 +32,10 @@ What the normal answer holds: secrets with a label in the text
 secret-named field such as ``{"password": ...}`` only for a credential read,
 and the audit row's ``raw_payload`` keeps the raw answer on purpose (see
 ``docs/codebase/redaction.md``), so neither is checked for the normal answer.
-The trace removes secret-named fields for every answer.
+The row of a multi-step error envelope keeps the raw answer too, so its
+``raw_payload`` is not checked either; its result, its ``payload`` and the
+stored copy behind a result handle are cleaned. The trace removes
+secret-named fields for every answer.
 
 Every planted value starts with :data:`PLANTED_MARKER`. The capture check
 (``test_capture_secret_scan.py``) fails when that marker is in a saved test
@@ -60,12 +66,14 @@ from meho_backplane.connectors.registry import (
     product_impl_id_round_trips,
     register_connector_v2,
 )
-from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
+from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.operations import (
+    DispatchChild,
     PassThroughReducer,
     dispatch,
+    register_composite_operation,
     register_typed_operation,
     reset_dispatcher_caches,
     set_default_reducer,
@@ -192,6 +200,32 @@ def _return_normal_answer() -> Any:
     return _VENDOR_NORMAL_ANSWER
 
 
+def _return_error_result() -> Any:
+    """An error result a handler returns (#4274), with the vendor's answer in ``result``."""
+    return OperationResult(
+        status="error",
+        op_id="set-by-the-dispatcher",
+        result=_VENDOR_ERROR_BODY,
+        error=f"vendor refused: {_VENDOR_ERROR_BODY!r}",
+        duration_ms=0,
+        extras={"error_code": "vendor_refused", "detail": _VENDOR_ERROR_BODY},
+    )
+
+
+#: A multi-step operation's error envelope (#3809) with the vendor's answer inside.
+_COMPOSITE_ERROR_ENVELOPE: dict[str, Any] = {
+    "status": "create_error",
+    "issues": [
+        {
+            "severity": "error",
+            "message": f"vendor said {json.dumps(_VENDOR_ERROR_BODY)}",
+            "rejected": _VENDOR_ERROR_BODY,
+        }
+    ],
+    "account": _VENDOR_STRUCTURED_ANSWER["account"],
+}
+
+
 _ANSWERS: dict[str, Callable[[], Any]] = {
     "normal": _return_normal_answer,
     "http_500": _raise_http_500,
@@ -201,7 +235,11 @@ _ANSWERS: dict[str, Callable[[], Any]] = {
     "login_refused": _raise_login_refused,
     "error_json_text": _raise_json_text,
     "error_python_dict_text": _raise_python_dict_text,
+    "error_result_returned": _return_error_result,
 }
+
+#: The answer of the multi-step operation; it is registered on its own.
+_COMPOSITE_ANSWER = "error_composite_envelope"
 
 _current_answer: list[Callable[[], Any]] = [_return_normal_answer]
 
@@ -209,6 +247,13 @@ _current_answer: list[Callable[[], Any]] = [_return_normal_answer]
 async def _planted_handler(operator: Operator, target: Any, params: dict[str, Any]) -> Any:
     """Module-level typed handler: returns or raises the current planted answer."""
     return _current_answer[0]()
+
+
+async def _planted_composite_handler(
+    operator: Operator, target: Any, params: dict[str, Any], dispatch_child: DispatchChild
+) -> dict[str, Any]:
+    """Module-level multi-step handler: returns the error envelope with planted secrets."""
+    return _COMPOSITE_ERROR_ENVELOPE
 
 
 # ---------------------------------------------------------------------------
@@ -328,13 +373,30 @@ async def test_planted_secrets_stay_out_of_results_audit_rows_and_logs(
             embedding_service=embedding,
             safety_level="safe",
         )
+    composite_op_id = f"{product}.composite.planted_secret_{_COMPOSITE_ANSWER}.read"
+    op_ids[_COMPOSITE_ANSWER] = composite_op_id
+    await register_composite_operation(
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        op_id=composite_op_id,
+        handler=_planted_composite_handler,
+        summary="Made-up multi-step read for the planted-secret test.",
+        description="Returns an error envelope with planted secrets.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=embedding,
+        safety_level="safe",
+        requires_approval=False,
+    )
 
     # MEHO's own loggers at every level; other libraries at INFO and up (the
     # SQLite driver's DEBUG lines echo every statement, raw_payload included).
     caplog.set_level(logging.INFO)
     caplog.set_level(logging.DEBUG, logger="meho_backplane")
     leaks: dict[str, list[str]] = {}
-    for answer, make_answer in _ANSWERS.items():
+    answers: dict[str, Callable[[], Any]] = {**_ANSWERS, _COMPOSITE_ANSWER: _return_normal_answer}
+    for answer, make_answer in answers.items():
         _current_answer[0] = make_answer
         caplog.clear()
         with structlog.testing.capture_logs() as structured_logs:
@@ -352,8 +414,11 @@ async def test_planted_secrets_stay_out_of_results_audit_rows_and_logs(
 
         rows = await _audit_rows(op_ids[answer])
         assert len(rows) == 1, answer
-        # An error row keeps no raw answer; a normal row keeps it on purpose.
-        row_text = _row_text(rows[0], with_raw_payload=answer != "normal")
+        # An error row keeps no raw answer. A normal row keeps it on purpose,
+        # and so does the row of a multi-step error envelope: the handler
+        # returned it like a normal answer (#4223).
+        keeps_raw = answer in ("normal", _COMPOSITE_ANSWER)
+        row_text = _row_text(rows[0], with_raw_payload=not keeps_raw)
 
         for place, text in (
             ("result", result.model_dump_json()),

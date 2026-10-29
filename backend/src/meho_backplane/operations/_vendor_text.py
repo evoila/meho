@@ -27,8 +27,9 @@ For every operation, :func:`redact_error_result` then removes secrets from
 the whole error result (#5031). The error builders clean each free text, but
 some fields come straight from the vendor (the ``errors[]`` list of an HTTP
 422, the permission headers of a 403), and a connector can add its own. So
-the same place cleans every string and every field: the value of each
-secret-named field is replaced, then the Tier-1 default policy runs.
+the same place cleans every string and every field of ``error``, ``extras``
+and ``result``: the value of each secret-named field is replaced, then the
+Tier-1 default policy runs.
 """
 
 from __future__ import annotations
@@ -130,19 +131,31 @@ def _redacted(node: Any, policy: RedactionPolicy) -> Any:
 
 
 def redact_error_result(result: OperationResult) -> OperationResult:
-    """Return *result* with secrets removed from its ``error`` and ``extras``.
+    """Return *result* with secrets removed from its ``error``, ``extras`` and ``result``.
 
-    Runs on every error result, for every operation. The default policy is
-    pinned (:func:`~meho_backplane.redaction.resolver.get_default_policy`), the
-    same as the error builders use, so a registered shadow-mode policy cannot
-    turn it off. If the redaction fails, the result keeps only its
-    ``error_code`` and the summary :data:`ERROR_TEXT_WITHHELD`.
+    Runs on every error result, for every operation. ``result`` is set on an
+    error a handler returned (#4274) and on a multi-step operation's error
+    envelope (#3809); both can carry the vendor's detail. The default policy
+    is pinned (:func:`~meho_backplane.redaction.resolver.get_default_policy`),
+    the same as the error builders use, so a registered shadow-mode policy
+    cannot turn it off. If the redaction fails, the result keeps only its
+    ``error_code`` and the summary :data:`ERROR_TEXT_WITHHELD`: ``result`` and
+    ``handle`` are dropped and ``delivery`` is ``"unavailable"``.
     """
     try:
         policy = get_default_policy()
         error = _redacted(result.error, policy)
         extras = _redacted(dict(result.extras), policy)
+        payload = _redacted(result.result, policy)
     except Exception:  # fail-closed: never send an error result that may hold a secret
         kept = {key: result.extras[key] for key in ("error_code",) if key in result.extras}
-        return result.model_copy(update={"error": ERROR_TEXT_WITHHELD, "extras": kept})
-    return result.model_copy(update={"error": error, "extras": extras})
+        return result.model_copy(
+            update={
+                "error": ERROR_TEXT_WITHHELD,
+                "extras": kept,
+                "result": None,
+                "handle": None,
+                "delivery": "unavailable",
+            }
+        )
+    return result.model_copy(update={"error": error, "extras": extras, "result": payload})

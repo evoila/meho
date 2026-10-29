@@ -193,7 +193,7 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
-from meho_backplane.operations._lookup import parse_connector_id
+from meho_backplane.operations._lookup import enabled_for_tenant_clause, parse_connector_id
 from meho_backplane.operations.ingest.list_connectors import list_ingested_connectors
 from meho_backplane.operations.meta_tools import (
     ConnectorNotIngestedError,
@@ -368,7 +368,7 @@ async def _descriptor_ids_for_op_ids(
                 EndpointDescriptor.version == version,
                 EndpointDescriptor.impl_id == impl_id,
                 EndpointDescriptor.op_id.in_(op_ids),
-                EndpointDescriptor.is_enabled.is_(True),
+                enabled_for_tenant_clause(tenant_id=tenant_id),
                 (EndpointDescriptor.tenant_id.is_(None))
                 | (EndpointDescriptor.tenant_id == tenant_id),
             )

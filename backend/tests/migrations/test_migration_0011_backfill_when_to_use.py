@@ -55,7 +55,7 @@ correct -- testcontainers replay would only re-verify the dialect).
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
@@ -235,6 +235,7 @@ def _read_when_to_use(sync_url: str, row_id: UUID) -> tuple[str, str]:
 
 def test_template_row_is_backfilled_to_curated(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Built-in template row -> curated string after upgrade.
 
@@ -248,7 +249,7 @@ def test_template_row_is_backfilled_to_curated(
     cfg, sync_url = alembic_cfg
     # Step 1 -- upgrade to 0010 (the revision before this migration)
     # so the table exists but the data fix hasn't run yet.
-    command.upgrade(cfg, "0010")
+    copy_migrated_db(cfg, "0010")
 
     product, version, impl_id, group_key = _TARGET_NATURAL_KEY
     row_id = _insert_operation_group_row(
@@ -277,6 +278,7 @@ def test_template_row_is_backfilled_to_curated(
 
 def test_operator_edited_row_is_preserved(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Operator-edited row -> unchanged across upgrade.
 
@@ -288,7 +290,7 @@ def test_operator_edited_row_is_preserved(
     key matches a curated entry -- the operator's intent wins.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0010")
+    copy_migrated_db(cfg, "0010")
 
     product, version, impl_id, group_key = _TARGET_NATURAL_KEY
     edited_text = (
@@ -317,6 +319,7 @@ def test_operator_edited_row_is_preserved(
 
 def test_tenant_scoped_row_is_preserved(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Tenant-scoped row -> unchanged even when the prose is the template.
 
@@ -329,7 +332,7 @@ def test_tenant_scoped_row_is_preserved(
     in curation.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0010")
+    copy_migrated_db(cfg, "0010")
 
     product, version, impl_id, group_key = _TARGET_NATURAL_KEY
     template = _stamped_template(group_key, product, impl_id)
@@ -356,6 +359,7 @@ def test_tenant_scoped_row_is_preserved(
 
 def test_unmapped_natural_key_is_preserved(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Row outside the curated payload -> unchanged across upgrade.
 
@@ -367,7 +371,7 @@ def test_unmapped_natural_key_is_preserved(
     nothing else moves.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0010")
+    copy_migrated_db(cfg, "0010")
 
     product, version, impl_id, group_key = _UNMAPPED_NATURAL_KEY
     template = _stamped_template(group_key, product, impl_id)
@@ -392,6 +396,7 @@ def test_unmapped_natural_key_is_preserved(
 
 def test_re_running_migration_is_idempotent(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Second ``upgrade head`` is a no-op on already-backfilled rows.
 
@@ -415,7 +420,7 @@ def test_re_running_migration_is_idempotent(
     asserting nothing moves.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0010")
+    copy_migrated_db(cfg, "0010")
 
     product, version, impl_id, group_key = _TARGET_NATURAL_KEY
     row_id = _insert_operation_group_row(

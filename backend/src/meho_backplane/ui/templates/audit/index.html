@@ -204,7 +204,8 @@
               gated_op_classes=drawer.gated_op_classes,
               references=drawer.references, trace=drawer.trace,
               is_execution=drawer.is_execution,
-              event_class_label=drawer.event_class_label %}
+              event_class_label=drawer.event_class_label,
+              tenant_label=drawer.tenant_label %}
         {% include "audit/_drawer.html" %}
       {% endwith %}
     {% else %}

@@ -100,6 +100,11 @@ class ConnectorReviewOp(BaseModel):
     # is re-ingested. Additive with a default so existing construction
     # call sites keep working; the service sets it from the row.
     needs_reingest: bool = False
+    # #5029: the reading tenant's own on/off setting for a built-in op.
+    # ``None`` means the tenant uses the install default (``is_enabled``),
+    # or the payload is not for a built-in connector. The effective value
+    # is this field when set, else ``is_enabled``.
+    tenant_enabled: bool | None = None
 
 
 class ConnectorReviewDeleteOp(BaseModel):

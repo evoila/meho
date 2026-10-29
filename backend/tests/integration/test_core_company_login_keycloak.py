@@ -46,6 +46,8 @@ import json
 import os
 import re
 import secrets
+import shutil
+import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
@@ -113,7 +115,7 @@ def _subchart_image() -> str:
     return f"{image['repository']}@{image['digest']}"
 
 
-def _wait_for_realm(base_url: str, timeout: float = 120.0) -> None:
+def _wait_for_realm(base_url: str, logs: Callable[[], str], timeout: float = 120.0) -> None:
     deadline = time.monotonic() + timeout
     while True:
         try:
@@ -122,7 +124,7 @@ def _wait_for_realm(base_url: str, timeout: float = 120.0) -> None:
         except httpx.TransportError:
             pass
         if time.monotonic() > deadline:
-            pytest.fail("Keycloak did not serve realm meho in time")
+            pytest.fail(f"Keycloak did not serve realm meho in time. Keycloak log:\n{logs()}")
         time.sleep(2)
 
 
@@ -189,17 +191,26 @@ def _company_realm(password: str, broker_secret: str) -> dict[str, Any]:
     }
 
 
-def _realm_file_with_the_company_login_roles(folder: Path) -> Path:
-    """The realm file as the chart's ConfigMap renders it with the login on."""
+def _realm_file_with_the_company_login_roles() -> Path:
+    """The realm file as the chart's ConfigMap renders it with the login on.
+
+    It goes into a folder of its own that the container's user can read
+    (pytest's temp folders are private to the runner), removed by the
+    fixture at the end.
+    """
     realm = json.loads((_SUBCHART / "files" / "meho-realm.json").read_text())
     (account,) = realm["users"]
     account["clientRoles"]["realm-management"] += list(ROLES)
-    (folder / "meho-realm.json").write_text(json.dumps(realm, indent=2))
+    folder = Path(tempfile.mkdtemp(prefix="meho-company-login-realm-"))
+    folder.chmod(0o755)
+    realm_file = folder / "meho-realm.json"
+    realm_file.write_text(json.dumps(realm, indent=2))
+    realm_file.chmod(0o644)
     return folder
 
 
 @pytest.fixture(scope="module")
-def keycloak(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Keycloak]:
+def keycloak() -> Iterator[_Keycloak]:
     """Keycloak with realm ``meho`` imported and realm ``company`` added."""
     if not DOCKER_AVAILABLE:
         pytest.skip(SKIP_REASON)
@@ -218,17 +229,14 @@ def keycloak(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Keycloak]:
         SECRET_ENV: secrets.token_hex(16),
     }
     image = os.environ.get("MEHO_TEST_CORE_KEYCLOAK_IMAGE") or _subchart_image()
+    import_dir = _realm_file_with_the_company_login_roles()
     container = (
         DockerContainer(image)
         .with_command("start-dev --import-realm")
         .with_env("KC_HTTP_RELATIVE_PATH", "/auth")
         .with_env("KC_BOOTSTRAP_ADMIN_CLIENT_ID", bootstrap[0])
         .with_env("KC_BOOTSTRAP_ADMIN_CLIENT_SECRET", bootstrap[1])
-        .with_volume_mapping(
-            str(_realm_file_with_the_company_login_roles(tmp_path_factory.mktemp("realm"))),
-            "/opt/keycloak/data/import",
-            "ro",
-        )
+        .with_volume_mapping(str(import_dir), "/opt/keycloak/data/import", "ro")
         .with_exposed_ports(8080)
     )
     for name in (
@@ -242,17 +250,19 @@ def keycloak(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Keycloak]:
     try:
         container.start()
     except Exception as exc:
+        shutil.rmtree(import_dir, ignore_errors=True)
         pytest.skip(f"Keycloak container failed to start ({type(exc).__name__}): {exc}")
     try:
-        wait_for_log_message(container, "Listening on:", timeout=240)
-        host = container.get_container_host_ip()
-        base_url = f"http://{host}:{container.get_exposed_port(8080)}/auth"
-        _wait_for_realm(base_url)
 
         def logs() -> str:
             out, err = container.get_logs()
             lines = (out + err).decode(errors="replace").splitlines()
             return "\n".join(line for line in lines if "WARN" in line or "ERROR" in line)[-4000:]
+
+        wait_for_log_message(container, "Listening on:", timeout=240)
+        host = container.get_container_host_ip()
+        base_url = f"http://{host}:{container.get_exposed_port(8080)}/auth"
+        _wait_for_realm(base_url, logs)
 
         kc = _Keycloak(
             base_url=base_url,
@@ -269,6 +279,7 @@ def keycloak(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Keycloak]:
         yield kc
     finally:
         container.stop()
+        shutil.rmtree(import_dir, ignore_errors=True)
 
 
 @pytest.fixture(scope="module")

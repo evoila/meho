@@ -117,9 +117,8 @@ the tests set it, as `install.sh` does.
    folders, with the on-disk `emptyDir` volumes of the core's Jobs), as
    RKE2's own uninstall script does. **Kept:** `server/manifests/` (the
    storage manifest of the form-2 install), `agent/images/` (the image
-   archives) and `/etc/rancher/rke2/config.yaml`. The pod-security file
-   `/etc/rancher/rke2/meho-pss.yaml` must stay too, but the install does
-   not write it before #4636, so the check does not require it yet. RKE2
+   archives), `/etc/rancher/rke2/config.yaml` and the pod security file
+   `/etc/rancher/rke2/meho-pss.yaml` of the CIS profile. RKE2
    makes new certificate
    authorities, a new Secrets key and a new token at first start, and
    imports the archives again.
@@ -159,8 +158,9 @@ the tests set it, as `install.sh` does.
    sudo rule; `rke2-server` enabled; an SSH host key; the build user
    and its home; a machine-id other than `uninitialized`. It also checks
    that what must stay is there: `agent/images/`, `server/manifests/`,
-   `config.yaml`, the preset file, `/opt/meho/appliance/download/install.sh`
-   and `/etc/cloud/cloud-init.disabled`.
+   `config.yaml`, `meho-pss.yaml`, the preset file,
+   `/opt/meho/appliance/download/install.sh` and
+   `/etc/cloud/cloud-init.disabled`.
 6. **Power off:** `sync`, `systemctl poweroff`.
 
 ### `rewrite-ovf.sh <file.ovf> <product-section.xml> <version>`
@@ -217,18 +217,11 @@ test (#4816).
 
 ## Known issues
 
-- **Not run against vCenter yet.** The lab's test place (an internal
-  ticket) is not set up, so steps 1, 2 and 5 are
-  written from the `govc` reference and the lab's own cloud-image deploys,
-  and wait for the first build by hand. The first run will measure the
-  times and may need the waits changed.
-- **`meho-host admin-network none`** is in evoila/meho#5066, not merged
-  yet. A build from a form-2 download without it fails in the clean step,
-  loudly, with the VM still on.
-- **`/etc/rancher/rke2/meho-pss.yaml` is not in the OVA yet.** The form-2
-  install writes it with the CIS profile (#4636), which is open. When it
-  does, add the file to the must-stay list of `check_clean` and to the
-  fake machine of the tests.
+- **Not run against vCenter yet.** The lab's test place is ready, but
+  steps 1, 2 and 5 have not run. They are written from the `govc`
+  reference and the lab's own cloud-image deploys, and wait for the first
+  build by hand. The first run will measure the times and may need the
+  waits changed.
 - **The first-start service (#4812)**, the console banner and the
   hardening (#4640) are not in the OVA yet. `add_appliance_pieces` in
   `build.sh` is where their install lines go. Until #4812 lands, the

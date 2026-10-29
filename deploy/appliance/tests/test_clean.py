@@ -329,6 +329,7 @@ class CheckTests(CleanTestCase):
             f"{RKE2}/server/manifests": f"{RKE2}/server/manifests is missing; it must stay",
             "/etc/systemd/system-preset/10-meho-appliance.preset": "/etc/systemd/system-preset/10-meho-appliance.preset is missing; it must stay",
             "/etc/rancher/rke2/config.yaml": "/etc/rancher/rke2/config.yaml is missing; it must stay",
+            "/etc/rancher/rke2/meho-pss.yaml": "/etc/rancher/rke2/meho-pss.yaml is missing; it must stay",
             "/opt/meho/appliance/download/install.sh": "/opt/meho/appliance/download/install.sh is missing; it must stay",
             "/etc/cloud/cloud-init.disabled": "/etc/cloud/cloud-init.disabled is missing; it must stay",
         }

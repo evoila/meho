@@ -28,10 +28,10 @@
 #      the build's network file; cloud-init's state, logs and the
 #      machine-id; the SSH host keys; SSH closed for every address
 #      (meho-host admin-network none); the logs; fstrim
-# What stays: server/manifests/, agent/images/, /etc/rancher/rke2/config.yaml
-# and the appliance pieces under /opt/meho/appliance. The preset file that
-# keeps RKE2 off at the first boot is written. (/etc/rancher/rke2/meho-pss.yaml
-# stays too once the install writes it, #4636.)
+# What stays: server/manifests/, agent/images/, /etc/rancher/rke2/config.yaml,
+# the pod security file /etc/rancher/rke2/meho-pss.yaml and the appliance
+# pieces under /opt/meho/appliance. The preset file that keeps RKE2 off at
+# the first boot is written.
 #
 # Usage:
 #   clean.sh [--build-user <name>]   clean, check, power off
@@ -64,6 +64,7 @@ readonly RKE2_KUBECTL=$RKE2_DIR/bin/kubectl
 readonly RKE2_KUBECONFIG=/etc/rancher/rke2/rke2.yaml
 readonly RKE2_NODE_PASSWORD=/etc/rancher/node/password
 readonly RKE2_CONFIG=/etc/rancher/rke2/config.yaml
+readonly RKE2_POD_SECURITY=/etc/rancher/rke2/meho-pss.yaml
 # systemd treats the appliance's first boot (machine-id "uninitialized") as
 # a first boot and enables every unit without a preset rule. This file
 # keeps RKE2 off until first start enables it (systemd.preset(5)).
@@ -295,9 +296,7 @@ check_clean() {
     for item in "${RKE2_KEEP[@]}"; do
         [[ -d ${HOST_ROOT}${RKE2_DIR}/$item ]] || left "$RKE2_DIR/$item is missing; it must stay"
     done
-    # /etc/rancher/rke2/meho-pss.yaml must stay too, once the install writes
-    # it (#4636); add it here then.
-    for item in "$RKE2_CONFIG" "$RKE2_PRESET" "$APPLIANCE_INSTALL" "$CLOUD_INIT_OFF"; do
+    for item in "$RKE2_CONFIG" "$RKE2_POD_SECURITY" "$RKE2_PRESET" "$APPLIANCE_INSTALL" "$CLOUD_INIT_OFF"; do
         [[ -f ${HOST_ROOT}${item} ]] || left "$item is missing; it must stay"
     done
     found=$(find "${HOST_ROOT}/etc/ssh" -maxdepth 1 -name 'ssh_host_*' 2>/dev/null | head -n 1)

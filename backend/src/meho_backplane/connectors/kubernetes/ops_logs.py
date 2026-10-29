@@ -33,6 +33,16 @@ from the tail, and drop the leading lines that push the response past
 so the operator can decide whether to retry with a smaller ``--tail``
 or a tighter ``--since``.
 
+Time windows (#5071): ``since_time`` / ``until_time`` read one window of
+the log, oldest line first, so a caller can page through a log that is
+longer than the 1 MiB cap. In this mode the handler asks Kubernetes for
+``timestamps=true`` (every line starts with its RFC 3339 time), keeps
+the *oldest* lines that fit in the cap, and reports ``last_line_time``
+so the next call can start there. ``kubernetes_asyncio`` 36 does not
+expose the API's ``sinceTime`` query parameter on
+``read_namespaced_pod_log``, so this mode calls the same ``/log`` path
+through :meth:`ApiClient.call_api` (see :mod:`.ops_logs_window`).
+
 References
 ----------
 * Parent task: G3.2-T5 (#325).
@@ -49,6 +59,17 @@ from typing import TYPE_CHECKING, Any
 
 from kubernetes_asyncio import client
 
+from meho_backplane.connectors.kubernetes.ops_logs_window import (
+    RFC3339_PATTERN,
+    LogWindow,
+    LogWindowError,
+    parse_rfc3339,
+    read_pod_log_window,
+    select_window,
+    window_from_params,
+    window_query,
+)
+
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
@@ -60,10 +81,12 @@ __all__ = [
     "K8S_LOGS_RESPONSE_SCHEMA",
     "MAX_BODY_BYTES",
     "MAX_TAIL_LINES",
+    "LogWindowError",
     "MultiContainerAmbiguityError",
     "PodNotFoundError",
     "k8s_logs",
     "parse_duration",
+    "parse_rfc3339",
     "resolve_pod_and_container",
     "truncate_lines_to_byte_cap",
 ]
@@ -85,6 +108,15 @@ MAX_TAIL_LINES = 5000
 #: terminal scrollback and the MCP envelope's practical payload
 #: ceiling (no hard limit, but >1 MB choices stall clients).
 MAX_BODY_BYTES = 1024 * 1024
+
+#: Server-side ``limitBytes`` for a time-window read. Without ``tail``,
+#: a window read goes forward from ``since_time`` to the end of the log,
+#: which can be many MiB on a long-running pod. Kubernetes stops after
+#: this many bytes (it may cut the last line in half), so the handler
+#: never holds more than this in memory. The headroom above
+#: ``MAX_BODY_BYTES`` covers the lines Kubernetes sends from the start
+#: of the ``since_time`` second, which the handler drops itself.
+WINDOW_LIMIT_BYTES = MAX_BODY_BYTES + 64 * 1024
 
 
 #: JSON Schema 2020-12 for ``k8s.logs`` ``params``. The dispatcher
@@ -149,6 +181,25 @@ K8S_LOGS_PARAMETER_SCHEMA: dict[str, Any] = {
                 "``previous=true`` flag."
             ),
         },
+        "since_time": {
+            "type": "string",
+            "pattern": RFC3339_PATTERN,
+            "description": (
+                "Exact start time, RFC 3339 (e.g. '2026-08-01T00:00:00Z'). "
+                "Reads the log forward from this time, oldest line "
+                "first, and every line starts with its timestamp. "
+                "Cannot be combined with 'since'."
+            ),
+        },
+        "until_time": {
+            "type": "string",
+            "pattern": RFC3339_PATTERN,
+            "description": (
+                "Exact end time, RFC 3339. Lines after this time are "
+                "dropped by MEHO (Kubernetes has no end filter). Needs "
+                "'since_time'."
+            ),
+        },
     },
     "required": ["pod_name", "namespace"],
     "additionalProperties": False,
@@ -169,6 +220,8 @@ K8S_LOGS_RESPONSE_SCHEMA: dict[str, Any] = {
         "line_count": {"type": "integer", "minimum": 0},
         "byte_count": {"type": "integer", "minimum": 0},
         "truncated_byte_count": {"type": "integer", "minimum": 0},
+        "truncated_end": {"type": "string", "enum": ["end"]},
+        "last_line_time": {"type": "string"},
     },
     "required": ["pod", "namespace", "container", "lines", "truncated"],
     "additionalProperties": False,
@@ -207,18 +260,44 @@ K8S_LOGS_LLM_INSTRUCTIONS: dict[str, Any] = {
             f"Defaults to 100; capped at {MAX_TAIL_LINES}. Prefer "
             "'since' over very large tails -- the response is capped "
             f"at {MAX_BODY_BYTES // (1024 * 1024)} MiB and oversize "
-            "responses truncate from the front."
+            "responses truncate from the front. With 'since_time', "
+            "leave 'tail' unset: a tail picks the newest lines, so "
+            "an older window would come back empty."
         ),
         "since": (
             "Duration string (e.g. '5m', '1h', '24h', '7d'). Server-"
             "side filter. Combine with a moderate tail for time-"
-            "bounded slices."
+            "bounded slices. Cannot be combined with 'since_time'."
         ),
         "previous": (
             "Set true to fetch the previous container instance's logs "
             "(after a crash + restart). Defaults to false."
         ),
+        "since_time": (
+            "RFC 3339 start time. Use it to read an older part of a "
+            "long log, one window per call. The answer holds the "
+            "oldest lines from that time, at most "
+            f"{MAX_BODY_BYTES // (1024 * 1024)} MiB. When the window "
+            "is bigger, 'truncated' is true, 'truncated_end' is "
+            "'end' and 'last_line_time' is the time of the last line "
+            "kept: call again with since_time set to that value to get "
+            "the next lines. The next call starts again with the "
+            "line(s) at that exact time, so nothing is skipped."
+        ),
+        "until_time": (
+            "RFC 3339 end time; needs 'since_time'. Lines after it are "
+            "left out. Use since_time + until_time for a fixed window "
+            "such as '1 August to 10 August'."
+        ),
     },
+    "limits": (
+        f"At most {MAX_TAIL_LINES} lines with 'tail' and "
+        f"{MAX_BODY_BYTES // (1024 * 1024)} MiB per call. To read past "
+        "the newest MiB, page back in time with since_time (and "
+        "until_time). Kubernetes keeps only part of a log: the node "
+        "rotates old log files away, and MEHO cannot read what "
+        "Kubernetes no longer serves."
+    ),
     "output_shape": (
         "Flat dict: {'pod': <resolved-name>, 'namespace', 'container', "
         "'lines': [<str>], 'truncated': <bool>}. ``lines`` is "
@@ -226,7 +305,10 @@ K8S_LOGS_LLM_INSTRUCTIONS: dict[str, Any] = {
         "window is the most-recent log line). When truncated is true, "
         "extras carries 'line_count', 'byte_count', and "
         "'truncated_byte_count' so callers can render an 'X KiB "
-        "dropped from the front' hint. A large ``lines`` collection is "
+        "dropped from the front' hint. With 'since_time', each line "
+        "starts with its RFC 3339 time and a cut window instead "
+        "carries 'truncated_end': 'end', 'line_count' and "
+        "'last_line_time'. A large ``lines`` collection is "
         "reduced to a JSONFlux handle whose inline ``sample`` shows the "
         "most-recent lines (not the oldest) -- see ``result_ordering`` "
         "below."
@@ -375,8 +457,14 @@ async def resolve_pod_and_container(
     raise MultiContainerAmbiguityError(pod.metadata.name, container_names)
 
 
-def truncate_lines_to_byte_cap(lines: list[str], cap_bytes: int) -> tuple[list[str], int]:
+def truncate_lines_to_byte_cap(
+    lines: list[str], cap_bytes: int, *, keep_oldest: bool = False
+) -> tuple[list[str], int]:
     """Keep the most-recent lines that fit in ``cap_bytes`` UTF-8 bytes.
+
+    With ``keep_oldest=True`` the cut runs the other way: the oldest
+    lines are kept and the newest are dropped (time-window reads go
+    forward from ``since_time``).
 
     Returns ``(kept_lines, dropped_byte_count)``. The cap accounts for
     the joining newline between lines (one byte per join, no trailing
@@ -387,6 +475,9 @@ def truncate_lines_to_byte_cap(lines: list[str], cap_bytes: int) -> tuple[list[s
     """
     if not lines:
         return [], 0
+    if keep_oldest:
+        kept_newest_first, dropped = truncate_lines_to_byte_cap(lines[::-1], cap_bytes)
+        return kept_newest_first[::-1], dropped
 
     kept_reversed: list[str] = []
     running_bytes = 0
@@ -435,10 +526,13 @@ async def k8s_logs(
     * :class:`PodNotFoundError` -- prefix matched zero or many pods.
     * :class:`MultiContainerAmbiguityError` -- multi-container pod
       missing ``--container``.
+    * :class:`LogWindowError` -- unusable ``since_time`` /
+      ``until_time`` (bad time, or combined with ``since``).
     * :class:`kubernetes_asyncio.client.ApiException` -- API errors
       (RBAC, missing namespace, container not running yet for
       ``previous=true``).
     """
+    window = window_from_params(params)
     pod_name = params["pod_name"]
     namespace = params["namespace"]
     # ``tail`` is schema-defaulted to 100 but the dispatcher passes
@@ -461,6 +555,19 @@ async def k8s_logs(
         v1, namespace, pod_name, container_param
     )
 
+    if window is not None:
+        query = window_query(
+            window,
+            container=container_name,
+            previous=previous,
+            tail_lines=tail if "tail" in params else None,
+            limit_bytes=WINDOW_LIMIT_BYTES,
+        )
+        window_body = await read_pod_log_window(
+            api_client, name=exact_name, namespace=namespace, query=query
+        )
+        return _window_result(exact_name, namespace, container_name, window_body, window)
+
     # ``kubernetes_asyncio`` accepts every parameter as a kwarg; pass
     # only the ones with non-default values so the wire request stays
     # minimal and the server doesn't have to short-circuit None
@@ -478,7 +585,11 @@ async def k8s_logs(
         kwargs["since_seconds"] = since_seconds
 
     body: str = await v1.read_namespaced_pod_log(**kwargs)
+    return _newest_result(exact_name, namespace, container_name, body)
 
+
+def _newest_result(pod: str, namespace: str, container: str, body: str) -> dict[str, Any]:
+    """Build the ``k8s.logs`` answer for the default read (newest lines)."""
     # ``read_namespaced_pod_log`` returns the body as a single string;
     # an empty cluster log returns "" (no trailing newline). Split on
     # \n and drop the trailing empty token the split produces when
@@ -496,9 +607,9 @@ async def k8s_logs(
         truncated = True
 
     result: dict[str, Any] = {
-        "pod": exact_name,
+        "pod": pod,
         "namespace": namespace,
-        "container": container_name,
+        "container": container,
         "lines": lines,
         "truncated": truncated,
     }
@@ -506,4 +617,41 @@ async def k8s_logs(
         result["line_count"] = len(lines)
         result["byte_count"] = byte_count
         result["truncated_byte_count"] = truncated_byte_count
+    return result
+
+
+def _window_result(
+    pod: str,
+    namespace: str,
+    container: str,
+    body: str,
+    window: LogWindow,
+) -> dict[str, Any]:
+    """Build the ``k8s.logs`` answer for a ``since_time`` read.
+
+    Keeps the oldest lines that fit in :data:`MAX_BODY_BYTES`. When the
+    body reached :data:`WINDOW_LIMIT_BYTES`, Kubernetes stopped early and
+    may have cut the last line in half, so that line is dropped and the
+    window counts as cut at the end.
+    """
+    lines = body.split("\n")
+    stopped_early = len(body.encode("utf-8")) >= WINDOW_LIMIT_BYTES
+    if lines and (lines[-1] == "" or stopped_early):
+        lines.pop()
+    selected, stamps, reached_until = select_window(lines, window)
+    kept, _ = truncate_lines_to_byte_cap(selected, MAX_BODY_BYTES, keep_oldest=True)
+    cut = len(kept) < len(selected) or (stopped_early and not reached_until)
+
+    result: dict[str, Any] = {
+        "pod": pod,
+        "namespace": namespace,
+        "container": container,
+        "lines": kept,
+        "truncated": cut,
+    }
+    if cut:
+        result["truncated_end"] = "end"
+        result["line_count"] = len(kept)
+        if kept:
+            result["last_line_time"] = stamps[len(kept) - 1]
     return result

@@ -134,7 +134,7 @@ copy this pattern in G3.x).
 
 1. Dispatcher validates `params` against `K8S_LOGS_PARAMETER_SCHEMA`
    (pod_name + namespace required; tail capped at 5000; since matches
-   `^\s*\d+\s*[smhd]\s*$`).
+   `^\s*\d+\s*[smhd]\s*$`; since_time / until_time are RFC 3339 times).
 2. `KubernetesConnector.logs(target, params)` delegates to
    `ops_logs.k8s_logs(connector, target, params)`.
 3. `k8s_logs` resolves the `ApiClient` for the target via
@@ -160,9 +160,45 @@ copy this pattern in G3.x).
    `truncated=True`, `line_count`, `byte_count`,
    `truncated_byte_count` for operator-facing "X KiB dropped" hints.
 
+### `k8s.logs` -- reading an older part of a long log
+
+Without `since_time`, `k8s.logs` returns the newest part of a log:
+at most 5,000 lines with `tail`, and at most 1 MiB per call (the
+oldest lines are dropped first). To read further back, use a time
+window:
+
+* `since_time` -- exact start time (RFC 3339). The handler reads
+  forward from that time, oldest line first. It sends no `tailLines`
+  unless the caller set `tail`. A call may set `since` or
+  `since_time`, not both (`LogWindowError`).
+* `until_time` -- exact end time (RFC 3339); needs `since_time`.
+  Kubernetes has no end filter, so MEHO drops the lines after it.
+* In this mode the handler asks for `timestamps=true`, so every
+  returned line starts with its RFC 3339 nanosecond time.
+* The window code lives in `ops_logs_window.py`. The request is
+  built with `ApiClient.call_api` on the same `/log`
+  path, because `kubernetes_asyncio`'s `read_namespaced_pod_log`
+  does not accept `since_time`. It also sends
+  `limitBytes = 1 MiB + 64 KiB`, so a forward read from an old time
+  never pulls the whole rest of the log into memory.
+* The API server passes `sinceTime` to the node in whole seconds.
+  The handler drops the extra lines from the start of that second
+  itself (`ops_logs_window.select_window`).
+* When the window is bigger than 1 MiB, the oldest lines that fit are
+  kept. The answer has `truncated: true`, `truncated_end: "end"`,
+  `line_count` and `last_line_time` (the time of the last line kept).
+* Paging: call again with `since_time` set to `last_line_time`. The
+  next answer starts again with the line(s) at that exact time (the
+  start is inclusive), so no line is skipped; drop the repeated
+  lines. Repeat until `truncated` is false.
+* A long window still comes back behind a result handle, as any long
+  `lines` list does.
+* Limit: Kubernetes keeps only part of a log. The node rotates old log
+  files away, and MEHO cannot read what Kubernetes no longer serves.
+
 ## Dependencies
 
-* `kubernetes_asyncio>=32,<33` (target K8s 1.32 API; async fork of the
+* `kubernetes_asyncio>=36.1,<37` (async fork of the
   official Python client; no thread offload; loads kubeconfig from a
   dict).
 * `httpx` -- only used by the kubeconfig-free `probe()` against
@@ -185,6 +221,9 @@ copy this pattern in G3.x).
   `tools/call` envelope has no streaming shape in 2025-06-18; the
   connector's `OperationResult` is single-response). Operators
   following live logs continue using `kubectl-vcf.sh -f` until v0.2.next.
+* **Paging gets stuck on a huge burst with one timestamp.** If more
+  than 1 MiB of lines share the exact same timestamp, `last_line_time`
+  does not move forward and the next page repeats the same lines.
 * **1 MiB body cap is not configurable per-target.** The cap matches
   the operator's typical terminal scrollback and the MCP envelope's
   practical payload ceiling. A per-target override is v0.2.next.

@@ -542,6 +542,7 @@ async def _redispatch_approved(
             subop_params_hash=request.params_hash,
             resume_parent=resume_parent,
             requester=requester_of(request),
+            proposed_effect=request.proposed_effect,
         ) as parent_call:
             if parent_call is None:
                 return await call_operation_with_approval(

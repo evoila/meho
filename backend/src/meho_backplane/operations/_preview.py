@@ -76,6 +76,7 @@ writes are the separate follow-up #1452).
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
@@ -94,6 +95,8 @@ __all__ = [
     "PREVIEW_REASON_CREDENTIAL_REDACTED",
     "PREVIEW_REASON_NOT_POPULATED",
     "PreviewContext",
+    "approved_preview",
+    "approved_preview_var",
     "blast_radius_missing_reason",
     "build_permission_preflight",
     "build_proposed_effect",
@@ -145,6 +148,33 @@ _PREVIEW_ERROR_MAX_LEN: int = 500
 #: unavailable; only the message is withheld. Returning the raw text
 #: instead would be the leak this redaction exists to close.
 _PREVIEW_ERROR_WITHHELD: str = "<message withheld: redaction unavailable>"
+
+#: The park-time preview of the request that is being re-run after its
+#: approval, as ``(op_id, preview)``: *op_id* is the parked op and *preview*
+#: the dict its builder returned (``{}`` when the park stored no computed
+#: preview). Bound by
+#: :func:`~meho_backplane.operations.approval_queue.composite_resume_binding`
+#: on both resume paths for the whole re-run, so a handler that resolves a
+#: name at park time can act on the object the approver saw instead of
+#: looking the name up again (#5202). ``None`` for every ordinary dispatch.
+approved_preview_var: ContextVar[tuple[str, dict[str, Any]] | None] = ContextVar(
+    "approved_preview",
+    default=None,
+)
+
+
+def approved_preview(op_id: str) -> dict[str, Any] | None:
+    """The preview the approver saw for *op_id*, during the approved re-run of that op.
+
+    ``None`` on an ordinary dispatch and when the re-run is for a different
+    op (a sub-op park re-runs its parent composite; the parent must not read
+    the sub-op's preview as its own). An empty dict means the call was
+    approved but its park stored no computed preview.
+    """
+    bound = approved_preview_var.get()
+    if bound is None or bound[0] != op_id:
+        return None
+    return bound[1]
 
 
 def preview_failure_reason(exc: Exception) -> str:

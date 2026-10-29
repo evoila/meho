@@ -16,7 +16,14 @@
   ``cdrom`` is the drive id the mount returned.
 
 Both wait for approval (``requires_approval=True``). The VM is named only by
-its id: after approval the change must run on the VM the approver saw. Both
+its id: after approval the change must run on the VM the approver saw. The
+same holds for a library item named by name: the approval preview looks the
+name up and shows the item id, and the approved run mounts exactly that id
+(read back with :func:`~meho_backplane.operations._preview.approved_preview`)
+instead of looking the name up again. When the preview showed no id (the
+name fit no item or more than one, or the read failed), the approved run
+sends nothing (``item_not_pinned``). A write that policy holds saves the id
+on its approval row as well, so its resume mounts the same item. Both
 call vSphere REST on the connector session through the shared write seam
 (:func:`._write._write_sub_op`), so they need no catalog ingest and work on
 vCenter 8 and 9. vCenter answers HTTP 400 when it refuses the change (for
@@ -51,9 +58,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware import (
 )
 from meho_backplane.operations._preview import (
     PreviewContext,
+    approved_preview,
     preview_failure_reason,
     register_preview_builder,
 )
+from meho_backplane.operations.composite import composite_resume_state
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -139,13 +148,44 @@ async def _find_one(
     }
 
 
+def _pinned_library_item() -> tuple[str | None, dict[str, Any] | None]:
+    """The item id an approval pinned, if this run follows one.
+
+    ``(id, None)`` when the approval preview of this change, or the approval
+    row of its held write, saved the id. ``(None, failure)`` when the change
+    was approved but its preview showed no id. ``(None, None)`` when no
+    approval is involved, so the caller looks the name up live.
+    """
+    preview = approved_preview(OP_ID_MOUNT_LIBRARY_ISO)
+    if preview is not None:
+        pinned = preview.get("library_item")
+        if isinstance(pinned, str) and pinned:
+            return pinned, None
+        return None, {
+            "status": "item_not_pinned",
+            "guidance": (
+                "The approved call names the item by name, but the approval preview "
+                "showed no item id, so MEHO does not look the name up again. Nothing "
+                "was sent. Call again with library_item, the id of the item you mean."
+            ),
+        }
+    state = composite_resume_state(OP_ID_MOUNT_LIBRARY_ISO) or {}
+    saved = state.get("library_item")
+    if isinstance(saved, str) and saved:
+        return saved, None
+    return None, None
+
+
 async def _resolve_library_item(
     connector: VmwareRestConnector, target: Any, operator: Operator, params: dict[str, Any]
 ) -> tuple[str | None, dict[str, Any] | None]:
-    """Resolve the library item id: the id as given, or one lookup by name."""
+    """Resolve the item id: as given, as an approval pinned it, or by one name lookup."""
     item_id = params.get("library_item")
     if isinstance(item_id, str) and item_id:
         return item_id, None
+    pinned, failure = _pinned_library_item()
+    if pinned is not None or failure is not None:
+        return pinned, failure
     spec: dict[str, Any] = {"name": params["library_item_name"]}
     library_name = params.get("library_name")
     if isinstance(library_name, str) and library_name:
@@ -203,7 +243,12 @@ async def vm_cdrom_mount_library_iso_composite(
     envelope["library_item"] = item_id
     try:
         gate, payload = await _write_sub_op(
-            connector, target, operator, _OP_MOUNT_ISO, {"library_item": item_id, "vm": vm}
+            connector,
+            target,
+            operator,
+            _OP_MOUNT_ISO,
+            {"library_item": item_id, "vm": vm},
+            resume_state={"library_item": item_id},
         )
     except httpx.HTTPError as exc:
         answer = _vendor_answer(envelope, exc)
@@ -384,10 +429,12 @@ MOUNT_LIBRARY_ISO_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
                 "ambiguous_library",
                 "item_not_found",
                 "ambiguous_item",
+                "item_not_pinned",
             ],
             "description": (
                 "mounted: a new CD drive holds the ISO; refused / not_found: vCenter said "
-                "no, nothing changed; the other values: the name lookup failed, nothing sent."
+                "no, nothing changed; the other values: the name lookup failed, or the "
+                "approval preview pinned no item id; nothing sent."
             ),
         },
         "vm": {"type": "string", "description": "VM id."},
@@ -457,18 +504,21 @@ MOUNT_LIBRARY_ISO_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
     ),
     "parameter_hints": {
         "library_item": "The item id; best, because it pins the exact item.",
-        "library_item_name": "The item name, when you do not have the id.",
+        "library_item_name": (
+            "The item name, when you do not have the id. The approval preview looks it "
+            "up and the approved run mounts the item the approver saw."
+        ),
         "library_name": "Scopes the name lookup to one library.",
     },
     "output_shape": (
         "{status: mounted|refused|not_found|library_not_found|ambiguous_library|"
-        "item_not_found|ambiguous_item, vm, library_item, cdrom, cdrom_info, candidates, "
-        "error_type, guidance}."
+        "item_not_found|ambiguous_item|item_not_pinned, vm, library_item, cdrom, "
+        "cdrom_info, candidates, error_type, guidance}."
     ),
     "next_step": (
         "Keep cdrom: vmware.composite.vm.cdrom.unmount_library_iso needs it. Not safe "
-        "to run twice: a second call adds a second drive. On ambiguous_item, call again "
-        "with one id from candidates."
+        "to run twice: a second call adds a second drive. On ambiguous_item or "
+        "item_not_pinned, call again with one id (from candidates)."
     ),
 }
 

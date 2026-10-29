@@ -2009,6 +2009,7 @@ def composite_resume_binding(
     subop_params_hash: str,
     resume_parent: dict[str, Any] | None,
     requester: ResumeRequester | None = None,
+    proposed_effect: dict[str, Any] | None = None,
 ) -> Iterator[tuple[str, dict[str, Any]] | None]:
     """Set up the re-entry of a parent composite for an approved sub-op park.
 
@@ -2039,11 +2040,48 @@ def composite_resume_binding(
     the start. It binds :data:`resume_requester_var` with *requester*, the
     requester of the request being re-run, so a step that waits again is
     saved for that requester on both resume paths (#4217).
-    """
-    if resume_parent is None:
-        yield None
-        return
 
+    For every park, direct or sub-op, the block also binds
+    :data:`~meho_backplane.operations._preview.approved_preview_var` with
+    the approved request's op id and the computed preview its park stored
+    (the ``preview`` body of *proposed_effect*, or ``{}``). A handler reads
+    it with :func:`~meho_backplane.operations._preview.approved_preview`,
+    so a name it resolved at park time is not looked up again after the
+    approval; the re-run acts on the object the approver saw (#5202).
+    """
+    from meho_backplane.operations._preview import approved_preview_var
+
+    preview_token = approved_preview_var.set((subop_op_id, _approved_preview_body(proposed_effect)))
+    try:
+        if resume_parent is None:
+            yield None
+        else:
+            with _composite_parent_binding(
+                subop_op_id=subop_op_id,
+                subop_params_hash=subop_params_hash,
+                resume_parent=resume_parent,
+                requester=requester,
+            ) as parent_call:
+                yield parent_call
+    finally:
+        approved_preview_var.reset(preview_token)
+
+
+def _approved_preview_body(proposed_effect: dict[str, Any] | None) -> dict[str, Any]:
+    """The computed preview a park stored, or ``{}`` when it stored none."""
+    body = (proposed_effect or {}).get("preview")
+    return body if isinstance(body, dict) else {}
+
+
+@contextmanager
+def _composite_parent_binding(
+    *,
+    subop_op_id: str,
+    subop_params_hash: str,
+    resume_parent: dict[str, Any],
+    requester: ResumeRequester | None,
+) -> Iterator[tuple[str, dict[str, Any]]]:
+    """Bind the composite re-entry vars of :func:`composite_resume_binding`."""
     from meho_backplane.operations.composite import (
         CompositeResumeState,
         composite_resume_scope_var,
@@ -2158,6 +2196,7 @@ async def _dispatch_resume_with_bound_context(
                 subop_params_hash=request.params_hash,
                 resume_parent=resume_parent,
                 requester=requester_of(request),
+                proposed_effect=request.proposed_effect,
             ) as parent_call,
         ):
             dispatch_op_id, dispatch_params = (

@@ -33,6 +33,7 @@ from meho_backplane.connectors.vmware_rest.composites._register import (
 )
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext
 from meho_backplane.operations._validate import validate_params
+from meho_backplane.operations.approval_queue import composite_resume_binding
 
 _VM = "vm-42"
 _ITEM = "0b6e3e0c-1f2a-4c55-9a51-2f6d7a8b9c01"
@@ -67,6 +68,9 @@ def _status_error(path: str, status: int, body: dict[str, Any]) -> httpx.HTTPErr
 
 class _RestFake:
     """Recording double for the connector's REST session."""
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     def __init__(self) -> None:
         self.gets: dict[str, Any] = {_CDROMS: [{"cdrom": "3000"}]}
@@ -225,6 +229,91 @@ async def test_mount_by_name_looks_up_the_item_first(gate: _GateRecorder) -> Non
     assert conn.posts[1] == (_MOUNT, {"library_item": _ITEM, "vm": _VM})
     assert out["status"] == "mounted"
     assert out["library_item"] == _ITEM
+    # A held write saves the id it resolved, so its resume mounts the same item.
+    (call,) = gate.calls
+    assert call["resume_state"] == {"library_item": _ITEM}
+
+
+async def test_mount_by_name_after_approval_mounts_the_item_the_approver_saw(
+    gate: _GateRecorder,
+) -> None:
+    """The name points at another item by the time the approved call runs."""
+    conn = _RestFake()
+    preview = await _PREVIEW_BUILDERS[iso.OP_ID_MOUNT_LIBRARY_ISO](
+        _ctx(conn, vm=_VM, library_item_name="boot.iso")
+    )
+    assert preview is not None and preview["library_item"] == _ITEM
+    conn.post_results[_FIND_ITEM] = ["item-replaced"]
+    conn.posts.clear()
+    with composite_resume_binding(
+        subop_op_id=iso.OP_ID_MOUNT_LIBRARY_ISO,
+        subop_params_hash="h",
+        resume_parent=None,
+        proposed_effect={"op_class": "write", "preview": preview},
+    ):
+        out = await _mount(conn, vm=_VM, library_item_name="boot.iso")
+    assert conn.posts == [(_MOUNT, {"library_item": _ITEM, "vm": _VM})]
+    assert out["status"] == "mounted"
+    assert out["library_item"] == _ITEM
+
+
+@pytest.mark.parametrize(
+    "proposed_effect",
+    [
+        {"op_class": "write", "preview": {"status": "ambiguous_item", "candidates": ["a", "b"]}},
+        {"op_class": "write", "preview": {"summary": "x", "read_error": "ConnectError: boom"}},
+        {"op_class": "write", "preview_unavailable": True},
+        None,
+    ],
+)
+async def test_mount_by_name_after_approval_without_a_pinned_item_sends_nothing(
+    gate: _GateRecorder, proposed_effect: dict[str, Any] | None
+) -> None:
+    conn = _RestFake()
+    with composite_resume_binding(
+        subop_op_id=iso.OP_ID_MOUNT_LIBRARY_ISO,
+        subop_params_hash="h",
+        resume_parent=None,
+        proposed_effect=proposed_effect,
+    ):
+        out = await _mount(conn, vm=_VM, library_item_name="boot.iso")
+    _assert_schema(iso.MOUNT_LIBRARY_ISO_RESPONSE_SCHEMA, out)
+    assert out["status"] == "item_not_pinned"
+    assert "library_item" in out["guidance"]
+    assert conn.posts == []
+    assert gate.calls == []
+
+
+async def test_mount_by_id_after_approval_ignores_the_preview(gate: _GateRecorder) -> None:
+    conn = _RestFake()
+    with composite_resume_binding(
+        subop_op_id=iso.OP_ID_MOUNT_LIBRARY_ISO,
+        subop_params_hash="h",
+        resume_parent=None,
+        proposed_effect={"op_class": "write", "preview": {"library_item": "other"}},
+    ):
+        out = await _mount(conn, vm=_VM, library_item=_ITEM)
+    assert conn.posts == [(_MOUNT, {"library_item": _ITEM, "vm": _VM})]
+    assert out["library_item"] == _ITEM
+
+
+async def test_mount_resume_of_a_held_write_mounts_the_saved_item(gate: _GateRecorder) -> None:
+    """A held mount saved the id; its resume does not look the name up again."""
+    conn = _RestFake()
+    conn.post_results[_FIND_ITEM] = ["item-replaced"]
+    with composite_resume_binding(
+        subop_op_id="POST:/vcenter/iso/image?action=mount",
+        subop_params_hash="h",
+        resume_parent={
+            "op_id": iso.OP_ID_MOUNT_LIBRARY_ISO,
+            "params": {"vm": _VM, "library_item_name": "boot.iso"},
+            "state": {"library_item": _ITEM},
+        },
+        proposed_effect={"op_class": "write", "preview": {"params": {"library_item": _ITEM}}},
+    ):
+        out = await _mount(conn, vm=_VM, library_item_name="boot.iso")
+    assert conn.posts == [(_MOUNT, {"library_item": _ITEM, "vm": _VM})]
+    assert out["status"] == "mounted"
 
 
 async def test_mount_by_name_in_one_library(gate: _GateRecorder) -> None:

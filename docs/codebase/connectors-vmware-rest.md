@@ -2211,6 +2211,17 @@ add, they take the VM id (`vm`) only, and no VM name.
   `POST /vcenter/iso/image?action=mount` with `{library_item, vm}`. vCenter
   answers with the new drive id (`cdrom`); MEHO reads the drive back
   (`cdrom_info`). Not safe to run twice: each call adds a drive.
+  **The approved run mounts the item the approver saw.** The approval
+  preview looks the name up and shows the item id. After the approval, the
+  handler does not look the name up again: it reads the preview back with
+  `approved_preview(op_id)` (`operations/_preview.py`, bound by
+  `composite_resume_binding` on both resume paths, see
+  [approvals.md](approvals.md)) and mounts that id. So a rename or a
+  replaced item between park and approval cannot change what is mounted.
+  When the preview showed no id (the name fit no item or more than one, or
+  the read failed), the approved run sends nothing and answers
+  `item_not_pinned`. A mount write that policy holds saves the id as
+  `resume_state`, so its resume mounts the same item too.
 - **`vmware.composite.vm.cdrom.unmount_library_iso`**. One
   `POST /vcenter/iso/image?action=unmount` with `{vm, cdrom}`, where `cdrom`
   is the id the mount returned. vCenter answers 204.
@@ -2226,6 +2237,13 @@ checks every REST call against the pinned `vcenter.yaml` of 8.0 and 9.0 (it
 skips without the vendor spec files), and checks that the two request bodies
 match the `Iso.Image` rows of `_governed_iso_recipe.py`. Tests use a REST fake
 (`test_connectors_vmware_rest_composites_cdrom_library_iso.py`).
+
+On the command line, `meho vmware vm cdrom mount-library-iso <vm-name-or-id>
+--library-item <id>` (or `--library-item-name <name> [--library-name <library>]`)
+and `meho vmware vm cdrom unmount-library-iso <vm-name-or-id> --cdrom <id>`
+(`cli/internal/cmd/vmware/vm_cdrom.go`) run the two operations through the
+same dispatch path as MCP. The VM name is resolved to its id on the client,
+like `vm info`, so the approval names the VM id.
 
 ### Shared disks for WSFC/FCI — bus-sharing, eagerzeroedthick, shared-attach (#3256)
 

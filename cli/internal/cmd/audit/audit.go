@@ -10,6 +10,9 @@
 //     [--op-class C] [--result-status S] [--since DUR] [--until DUR]
 //     [--limit N] [--cursor C] [--json]` — full filter via
 //     POST /api/v1/audit/query.
+//   - `meho audit count [filters of query] [--filter-work-ref REF]
+//     [--json]` (#4983) — rows per event class for the whole matching
+//     set via POST /api/v1/audit/class-counts.
 //   - `meho audit recent [--limit N] [--json]` — shortcut over
 //     POST /api/v1/audit/query with since="24h" bound at the CLI.
 //   - `meho audit show <audit-id> [--json]` — single-row detail via
@@ -79,7 +82,7 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "audit",
-		Short: "Query the MEHO audit log (query / recent / show / who-touched / my-recent / replay / reflex / trace)",
+		Short: "Query the MEHO audit log (query / count / recent / show / who-touched / my-recent / replay / reflex / trace)",
 		Long: "Query the WORM-grade audit log written by the backplane on " +
 			"every authenticated request. Wraps the G8.1-T2 REST surface " +
 			"(/api/v1/audit/*). All verbs are tenant-scoped via the operator's " +
@@ -87,6 +90,7 @@ func NewRootCmd() *cobra.Command {
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newQueryCmd())
+	cmd.AddCommand(newCountCmd())
 	cmd.AddCommand(newRecentCmd())
 	cmd.AddCommand(newShowCmd())
 	cmd.AddCommand(newWhoTouchedCmd())

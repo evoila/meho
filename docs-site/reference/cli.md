@@ -673,11 +673,33 @@ meho argocd repo list [flags]
 
 ## `meho audit`
 
-Query the MEHO audit log (query / recent / show / who-touched / my-recent / replay / reflex / trace)
+Query the MEHO audit log (query / count / recent / show / who-touched / my-recent / replay / reflex / trace)
 
 ```
 meho audit
 ```
+
+### `meho audit count`
+
+Count the audit rows that match a filter, per event class
+
+```
+meho audit count [flags]
+```
+
+- `--audit-id` — count only this audit-id (UUID)
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--filter-work-ref` — count only the rows of one change-ticket reference
+- `--json` — print the backplane's answer as it came instead of the summary
+- `--op-class` — count only one op-class (read|write|credential_read|audit_query|other)
+- `--op-id` — count only one op-id (glob with * wildcards)
+- `--parent-audit-id` — count only the rows whose parent is this audit-id (UUID)
+- `--principal` — count only one operator (part of the user id or the name; case does not matter)
+- `--result-status` — count only one result-status (ok|error|denied|pending)
+- `--session-id` — count only one agent session (UUID)
+- `--since` — start of the window; 24h / 7d / 30m / 2w shorthand or ISO-8601 (default: the last 24 hours)
+- `--target` — count only one target (name or alias; server-side resolution)
+- `--until` — end of the window; accepts the same shorthand as --since (default: now)
 
 ### `meho audit my-recent`
 
@@ -3525,7 +3547,7 @@ meho nsx transport-zone list [flags]
 
 ## `meho operation`
 
-operation meta-tool surface (groups / search / call)
+operation meta-tool surface (groups / search / call / preview / result-query / subops)
 
 ```
 meho operation
@@ -3604,6 +3626,18 @@ meho operation search <connector_id> [query] [flags]
 - `--limit` — max hits to return (1..50, clamped by the API at 50)
 - `--op-id` — show this one operation's call contract instead of ranked hits
 - `--scores` — add ranking scores to each hit (honoured for tenant_admin only)
+
+### `meho operation subops`
+
+List the child steps of a multi-step operation and whether a grant may cover each
+
+```
+meho operation subops <op_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--connector` — connector id to ask for (e.g. vmware-rest-8.0); default: the composite's own connector
+- `--json` — print the backplane's answer as it came instead of the table
 
 ## `meho pfsense`
 

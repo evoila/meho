@@ -48,6 +48,8 @@ names.
   tree over `GET /api/v1/audit/sessions/{id}/replay` (`--json`,
   `--max-depth`; a 413 `session_too_large` redirects to
   `query --session-id`) — plus a `--session-id` filter on `query`.
+  `count` (#4983) counts the rows that match the `query` filters, per
+  event class, in one call (`POST /api/v1/audit/class-counts`).
   #4855 adds `trace list` (the operation runs that still have a stored
   flight-recorder trace, via `query` with `has_trace=true`, audit id
   first) and `trace show <audit-id>` (one trace over
@@ -198,6 +200,7 @@ cli/
     │   ├── audit/            # G8.1-T3 #467 — `meho audit …` verb tree.
     │   │   ├── audit.go          # NewRootCmd + shared typed-client helpers (G0.12-T5 #1263).
     │   │   ├── query.go          # `meho audit query` (POST /api/v1/audit/query).
+    │   │   ├── count.go          # `meho audit count` (#4983; POST /api/v1/audit/class-counts) — the query filters without --limit / --cursor; work-ref filter is --filter-work-ref; prints the counted window.
     │   │   ├── recent.go         # `meho audit recent` — shortcut for `query --since 24h`.
     │   │   ├── show.go           # `meho audit show <audit-id>` (GET /api/v1/audit/show/{id}).
     │   │   ├── who_touched.go    # `meho audit who-touched <target>` (GET /api/v1/audit/who-touched/{target}).
@@ -207,6 +210,7 @@ cli/
     │   │   ├── trace_show.go     # `meho audit trace show <audit-id>` (GET /api/v1/audit/{id}/trace) — header + one line per span; no header/body values.
     │   │   ├── audit_test.go     # helper + URL-normalisation + register-all-verbs tests.
     │   │   ├── query_test.go     # body-marshal + render + 400-passthrough + --session-id tests.
+    │   │   ├── count_test.go     # window + per-class render, wire filters, --json as it came, refused --since, flag names.
     │   │   ├── show_test.go      # path-escape + 404 / 422 surface + summary render tests.
     │   │   ├── replay_test.go    # tree render + --json + --max-depth fold + 413 redirect tests.
     │   │   ├── trace_test.go     # has_trace body + audit-id-first table + --json + 403 tests.
@@ -266,6 +270,7 @@ cli/
     │   │   ├── groups.go         # `meho operation groups` (GET /api/v1/operations/groups) — typed via api.GetGroupsApiV1OperationsGroupsGetParams.
     │   │   ├── search.go         # `meho operation search` (GET /api/v1/operations/search) — typed via api.GetSearchApiV1OperationsSearchGetParams. A 200 with the backplane's `status: "rate_limited"` envelope is rendered as unexpected_response (exit 4) with the wait, in both ranked and `--op-id` mode.
     │   │   ├── call.go           # `meho operation call`   (POST /api/v1/operations/call) — typed via api.CallOperationBody + FromCallOperationBodyTarget0.
+    │   │   ├── subops.go         # `meho operation subops` (#4983; GET /api/v1/operations/governed-subops) — child steps, risk level, grantable; the 404 `no_governed_subops` answer prints a plain note, exit 0.
     │   │   ├── operation_test.go # render + helper + sentinel tests.
     │   │   └── client_test.go    # G0.12-T2 #1260 — fakeOperationsClient mocks the operationsAPI seam; asserts typed request params + 401 refresh dance + error classification.
     │   ├── retrieval/         # G4.3-T2 #441 — retrieval-quality tooling. G0.12-T12 #1270 moved every verb onto the generated `api.ClientWithResponses` (no consumer-side struct copies).
@@ -1434,6 +1439,15 @@ narrow-waist contract.
   Paging a document handle without `--path` is a server 422; the CLI
   shows the server's message and adds the `--path` form that works
   (`resultquery_path.go`).
+- `meho operation subops <op_id> [--connector <connector_id>]` (#4983)
+  — calls `GET /api/v1/operations/governed-subops`. Prints one row per
+  child step of a multi-step operation: the op id, the risk level
+  (`unknown` when the step has no descriptor), and whether a standing
+  grant may cover it, with the reason when not. `--connector` sends
+  `connector_id`. When the op has no child steps, the route answers 404
+  with `reason: no_governed_subops`; the command prints one plain line
+  and exits 0. Any other 404 stays an error. `--json` prints the answer
+  as it came (`subops.go`).
 
 ### Reserved flags (same shape across all three verbs)
 

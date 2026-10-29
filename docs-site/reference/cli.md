@@ -1281,6 +1281,56 @@ meho connector review <connector_id> [flags]
 - `--json` — emit machine-readable JSON to stdout instead of the human render
 - `--prefer` — which connector to use when the id matches both a built-in connector and one in your tenant: tenant, builtin, or legacy (your tenant's old copy stored under a former product name; the copy delete removes first) (default: stop with an error that asks you to pick one)
 
+### `meho connector tenant-setting`
+
+Turn built-in operations on or off for one tenant only
+
+```
+meho connector tenant-setting
+```
+
+#### `meho connector tenant-setting set`
+
+Turn one built-in operation on or off for this tenant
+
+```
+meho connector tenant-setting set <connector_id> <op_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--default` — use the install default again
+- `--json` — emit machine-readable JSON to stdout instead of the human summary
+- `--off` — turn it off for this tenant
+- `--on` — turn it on for this tenant
+- `--tenant-id` — act on this tenant instead of your own (needs platform_admin)
+
+#### `meho connector tenant-setting set-group`
+
+Turn every built-in operation in one group on or off for this tenant
+
+```
+meho connector tenant-setting set-group <connector_id> <group_key> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--default` — use the install default again
+- `--json` — emit machine-readable JSON to stdout instead of the human summary
+- `--off` — turn it off for this tenant
+- `--on` — turn it on for this tenant
+- `--tenant-id` — act on this tenant instead of your own (needs platform_admin)
+
+#### `meho connector tenant-setting show`
+
+List the operations this tenant turned on or off, with the install default
+
+```
+meho connector tenant-setting show <connector_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit machine-readable JSON to stdout instead of the human summary
+- `--tenant-id` — act on this tenant instead of your own (needs platform_admin)
+
 ## `meho conventions`
 
 Manage tenant conventions (list / show / create / edit / delete / history)

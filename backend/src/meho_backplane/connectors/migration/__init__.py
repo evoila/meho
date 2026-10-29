@@ -15,13 +15,20 @@ Importing the package (the lifespan's connector import pass walks
 onto the lifespan registrar list, so the operations are in
 ``endpoint_descriptor`` before the first call. The connector id is
 ``migration-assess-1.x``.
+
+The source adapters (:mod:`.source_register`) are queued the same way. They
+are registered on the connectors they read (``hyperv.migration.inventory``
+on ``hyperv-ssh-2022.x``, and so on), not on ``migration-assess-1.x``.
 """
 
 from meho_backplane.connectors.migration.ops import register_migration_operations
+from meho_backplane.connectors.migration.source_register import register_source_adapters
 from meho_backplane.operations.typed_register import register_typed_op_registrar
 
 register_typed_op_registrar(register_migration_operations)
+register_typed_op_registrar(register_source_adapters)
 
 __all__ = [
     "register_migration_operations",
+    "register_source_adapters",
 ]

@@ -196,6 +196,8 @@ def test_result_query_invalid_uuid_is_invalid_params(
     body = response.json()
     assert body["error"]["code"] == INVALID_PARAMS
     assert body["error"]["data"]["reason"] == "invalid_handle_id"
+    # A model that passes a knowledge slug learns how to read the entry (#4138).
+    assert "`search_knowledge` with `slug`" in body["error"]["message"]
 
 
 def test_result_query_rejects_extra_argument(

@@ -32,7 +32,7 @@ cookbook through ``asyncio.run``, so the test functions stay sync.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Final
 from uuid import UUID, uuid4
@@ -152,6 +152,7 @@ def _read_row(sync_url: str, row_id: UUID) -> tuple[str, str]:
 
 def test_live_vcf_logs_target_reconciled_to_vrli(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A live ``product='vcf-logs'`` target carries ``'vrli'`` after upgrade.
 
@@ -159,7 +160,7 @@ def test_live_vcf_logs_target_reconciled_to_vrli(
     sees the change.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0045")
+    copy_migrated_db(cfg, "0045")
 
     row_id = _insert_target(sync_url, name="vrli-prod", product="vcf-logs")
 
@@ -172,10 +173,11 @@ def test_live_vcf_logs_target_reconciled_to_vrli(
 
 def test_soft_deleted_vcf_logs_target_preserved(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A soft-deleted ``vcf-logs`` tombstone is left under the stale spelling."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0045")
+    copy_migrated_db(cfg, "0045")
 
     row_id = _insert_target(
         sync_url,
@@ -194,10 +196,11 @@ def test_soft_deleted_vcf_logs_target_preserved(
 
 def test_unrelated_product_untouched(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A ``product='vmware'`` target is not rewritten — the rename is vRLI-scoped."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0045")
+    copy_migrated_db(cfg, "0045")
 
     row_id = _insert_target(sync_url, name="vc-prod", product="vmware")
 
@@ -209,6 +212,7 @@ def test_unrelated_product_untouched(
 
 def test_upgrade_is_idempotent(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Re-running the upgrade against an already-reconciled DB changes nothing.
 
@@ -226,7 +230,7 @@ def test_upgrade_is_idempotent(
     ``add_column("targets", "tls_server_name")`` → "duplicate column").
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0045")
+    copy_migrated_db(cfg, "0045")
 
     row_id = _insert_target(sync_url, name="vrli-prod", product="vcf-logs")
 
@@ -246,6 +250,7 @@ def test_upgrade_is_idempotent(
 
 def test_downgrade_restores_vcf_logs(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``downgrade`` rewrites live ``vrli`` targets back to ``vcf-logs``.
 
@@ -254,7 +259,7 @@ def test_downgrade_restores_vcf_logs(
     against the older code.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     row_id = _insert_target(sync_url, name="vrli-prod", product="vrli")
 

@@ -20,7 +20,12 @@ Job runs it, with a fake Secret store in place of the Kubernetes API:
    the backplane's REST API. It waits for approval, the first admin cannot
    approve it alone, and the second person approves it through the
    approvals API, which runs the write.
-4. The second run logs in as ``meho-admin`` and changes nothing: the realm
+4. The plan names one extra tenant. Its five groups carry only
+   ``meho_tenant``: a person in ``MEHO-Readers`` and
+   ``MEHO-lab-b-Operators`` gets both tenants in ``meho_tenants`` and the
+   first tenant's ``tenant_id`` as before; a person only in the extra
+   tenant's groups gets no ``tenant_id``.
+5. The second run logs in as ``meho-admin`` and changes nothing: the realm
    and the Secrets are the same, and the output holds no secret.
 
 Set ``MEHO_TEST_CORE_KEYCLOAK_IMAGE`` to use a mirror of the subchart's
@@ -29,6 +34,8 @@ image. Skips when Docker is missing or the container cannot start.
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import secrets
 import time
@@ -37,6 +44,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
+from uuid import UUID
 
 import httpx
 import pytest
@@ -56,6 +64,7 @@ from meho_backplane.core.keycloak import (
     BOOTSTRAP_SECRET_ENV,
     HttpAdmin,
     Plan,
+    TenantPlan,
     finish_realm,
 )
 from meho_backplane.operations import (
@@ -70,6 +79,7 @@ _SUBCHART = (
 )
 _PUBLIC_URL = "https://meho.example.test"
 _TENANT_ID = "6b0d7c55-41a8-4b52-9a8e-2f3c1d0e9a77"
+_LAB_B_ID = "5d0f7a3e-1c2b-4e8d-9f6a-7b3c2d1e0f9a"
 
 
 @dataclass
@@ -122,6 +132,7 @@ def _plan() -> Plan:
         first_login_secret="rel-core-first-login",
         admin_username="admin",
         approver_username="approver",
+        tenants=(TenantPlan(name="lab-b", id=UUID(_LAB_B_ID)),),
     )
 
 
@@ -140,6 +151,7 @@ def keycloak() -> Iterator[_Keycloak]:
         BOOTSTRAP_SECRET_ENV: secrets.token_hex(16),
         "MEHO_REALM_PUBLIC_URL": _PUBLIC_URL,
         "MEHO_REALM_TENANT_ID": _TENANT_ID,
+        "MEHO_REALM_TENANT_NAME": "main",
         ADMIN_SECRET_ENV: secrets.token_hex(16),
         "MEHO_REALM_WEB_CLIENT_SECRET": secrets.token_hex(16),
         "MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET": secrets.token_hex(16),
@@ -153,6 +165,7 @@ def keycloak() -> Iterator[_Keycloak]:
         .with_env("KC_BOOTSTRAP_ADMIN_CLIENT_SECRET", env[BOOTSTRAP_SECRET_ENV])
         .with_env("MEHO_REALM_PUBLIC_URL", _PUBLIC_URL)
         .with_env("MEHO_REALM_TENANT_ID", _TENANT_ID)
+        .with_env("MEHO_REALM_TENANT_NAME", "main")
         .with_env("MEHO_REALM_ADMIN_CLIENT_SECRET", env[ADMIN_SECRET_ENV])
         .with_env("MEHO_REALM_WEB_CLIENT_SECRET", env["MEHO_REALM_WEB_CLIENT_SECRET"])
         .with_env(
@@ -337,6 +350,70 @@ async def test_second_person_is_an_operator(
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role is TenantRole.OPERATOR
     assert operator.platform_admin is False
+
+
+def _person_in(kc: _Keycloak, username: str, groups: list[str]) -> str:
+    """Make a person with a full profile in *groups*; return the password."""
+    admin = f"{kc.base_url}/admin/realms/meho"
+    password = secrets.token_urlsafe(18)
+    httpx.post(
+        f"{admin}/users",
+        headers=_admin_headers(kc),
+        json={
+            "username": username,
+            "enabled": True,
+            "email": f"{username}@example.com",
+            "emailVerified": True,
+            "firstName": "Test",
+            "lastName": username,
+            "credentials": [{"type": "password", "value": password, "temporary": False}],
+            "groups": [f"/{group}" for group in groups],
+        },
+    ).raise_for_status()
+    return password
+
+
+def _claims(kc: _Keycloak, username: str, password: str) -> dict[str, Any]:
+    resp = _password_login(kc, username, password)
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()["access_token"].split(".")[1]
+    claims: dict[str, Any] = json.loads(
+        base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+    )
+    return claims
+
+
+def test_extra_tenant_groups_carry_only_meho_tenant(keycloak: _Keycloak) -> None:
+    admin = f"{keycloak.base_url}/admin/realms/meho"
+    headers = _admin_headers(keycloak)
+    for role in ("Readers", "Operators", "SA-Operators", "Admins", "Approvers"):
+        name = f"MEHO-lab-b-{role}"
+        found = httpx.get(
+            f"{admin}/groups", headers=headers, params={"search": name, "exact": "true"}
+        ).json()
+        group = httpx.get(f"{admin}/groups/{found[0]['id']}", headers=headers).json()
+        assert group["attributes"] == {"meho_tenant": [f"{_LAB_B_ID}:lab-b:{role}"]}, name
+
+
+def test_a_person_in_two_tenants_gets_both_in_meho_tenants(keycloak: _Keycloak) -> None:
+    _allow_password_grant_on_cli(keycloak)
+    password = _person_in(keycloak, "two-tenants", ["MEHO-Readers", "MEHO-lab-b-Operators"])
+    claims = _claims(keycloak, "two-tenants", password)
+    assert sorted(claims["meho_tenants"]) == sorted(
+        [f"{_TENANT_ID}:main:Readers", f"{_LAB_B_ID}:lab-b:Operators"]
+    )
+    # The claims MEHO reads today still come from the first tenant's group.
+    assert claims["tenant_id"] == _TENANT_ID
+    assert claims["tenant_role"] == "read_only"
+
+
+def test_a_person_only_in_the_extra_tenant_gets_no_tenant_id(keycloak: _Keycloak) -> None:
+    _allow_password_grant_on_cli(keycloak)
+    password = _person_in(keycloak, "lab-b-only", ["MEHO-lab-b-Admins"])
+    claims = _claims(keycloak, "lab-b-only", password)
+    assert claims["meho_tenants"] == [f"{_LAB_B_ID}:lab-b:Admins"]
+    for name in ("tenant_id", "tenant_role", "approver", "platform_admin"):
+        assert name not in claims, name
 
 
 def test_a_create_with_an_unknown_group_makes_no_user(keycloak: _Keycloak) -> None:

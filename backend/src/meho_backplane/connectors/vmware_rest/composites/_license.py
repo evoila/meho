@@ -37,7 +37,6 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
-from meho_backplane.connectors._shared.license_key import mask_license_key
 from meho_backplane.connectors.vmware_rest.composites._write import _write_vmomi_sub_op
 from meho_backplane.connectors.vmware_rest.license_common import (
     LICENSE_ROW_SCHEMA,
@@ -50,6 +49,7 @@ from meho_backplane.connectors.vmware_rest.license_common import (
     read_license_inventory,
 )
 from meho_backplane.connectors.vmware_rest.vim_body import unwrap_vim_value
+from meho_backplane.connectors.vmware_shared.license_key import mask_license_key
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator

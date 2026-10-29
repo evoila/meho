@@ -71,6 +71,7 @@ var typedOpCLICoverage = map[string]string{
 	"vcfa.provider.role.list":        "",
 	"vcfa.provider.org.create":       "",
 	"vcfa.provider.role.create":      "",
+	"vcfa.provider.role.delete":      "",
 	"vcfa.provider.user.create":      "",
 	"vcfa.provider.api_token.create": "",
 	"vcfa.provider.api_token.revoke": "",

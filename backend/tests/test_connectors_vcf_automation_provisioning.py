@@ -64,6 +64,7 @@ _EXPECTED_TIERS: dict[str, tuple[str, bool]] = {
     "vcfa.provider.role.list": ("safe", False),
     "vcfa.provider.org.create": ("caution", True),
     "vcfa.provider.role.create": ("caution", True),
+    "vcfa.provider.role.delete": ("dangerous", True),
     "vcfa.provider.user.create": ("caution", True),
     "vcfa.provider.api_token.create": ("dangerous", True),
     "vcfa.provider.api_token.revoke": ("dangerous", True),
@@ -240,6 +241,8 @@ async def test_org_create_bad_name_fails_schema(vcfa: VcfAutomationConnector) ->
 # Global role create
 # ---------------------------------------------------------------------------
 
+#: A global role can only be published to an All Apps org (not a VM Apps org).
+_ALL_APPS_ORG = {**ORG, "isClassicTenant": False}
 _BASE_ROLE = {"id": "urn:vcloud:globalRole:base", "name": "Organization Administrator"}
 _TOKEN_RIGHT = {"id": "urn:vcloud:right:tok", "name": "API Tokens: Manage"}
 _BASE_RIGHTS = [{"id": "urn:vcloud:right:a", "name": "Right A"}, _TOKEN_RIGHT]
@@ -258,7 +261,7 @@ def _mount_role_reads(mock: respx.MockRouter, *, existing: bool = False) -> None
     mock.get(_RIGHTS).mock(
         side_effect=by_filter({"name==API Tokens: Manage": [_TOKEN_RIGHT]}, default=[])
     )
-    mock.get(_ORGS).mock(side_effect=by_filter({"name==example-org": [ORG]}))
+    mock.get(_ORGS).mock(side_effect=by_filter({"name==example-org": [_ALL_APPS_ORG]}))
 
 
 _ROLE_PARAMS = {

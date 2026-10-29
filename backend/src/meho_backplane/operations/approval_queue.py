@@ -142,6 +142,7 @@ __all__ = [
     "ResultAccessForbiddenError",
     "SelfApprovalForbiddenError",
     "UnauthorizedApprovalError",
+    "WithdrawForbiddenError",
     "approval_result_state",
     "approve_request",
     "claim_resume",
@@ -160,6 +161,7 @@ __all__ = [
     "rehydrate_resume_target",
     "reject_request",
     "resume_dispatch_after_approval",
+    "withdraw_request",
 ]
 
 
@@ -396,6 +398,24 @@ class ResultAccessForbiddenError(ApprovalError):
         super().__init__(
             f"principal {principal_sub!r} is not the owner of approval_request "
             f"{request_id}; its result is readable only by the originating principal"
+        )
+
+
+class WithdrawForbiddenError(ApprovalError):
+    """A principal other than the sender tried to withdraw a request (#4987).
+
+    Raised by :func:`withdraw_request` when
+    ``operator.sub != request.principal_sub``. Only the principal that sent
+    the request may take it back; an approver may not. The route layer maps
+    this to 403.
+    """
+
+    def __init__(self, *, request_id: uuid.UUID, principal_sub: str) -> None:
+        self.request_id = request_id
+        self.principal_sub = principal_sub
+        super().__init__(
+            f"principal {principal_sub!r} did not send approval_request {request_id}; "
+            "only the sender can withdraw it"
         )
 
 
@@ -1518,6 +1538,81 @@ async def reject_request(
         reason=reason or None,
     )
     request._audit_id = reject_audit_id  # type: ignore[attr-defined]
+    return request
+
+
+async def withdraw_request(
+    session: AsyncSession,
+    request_id: uuid.UUID,
+    *,
+    operator: Operator,
+    reason: str = "",
+) -> ApprovalRequest:
+    """The sender takes back its own pending request (#4987).
+
+    A withdrawal is not a decision. Any kind of principal (person, agent,
+    service) may withdraw, but only the one that sent the request
+    (``operator.sub == request.principal_sub``). The row moves to
+    ``withdrawn`` with ``withdrawn_at`` and ``withdraw_reason`` set;
+    ``reviewed_by`` and ``decided_at`` stay NULL. One ``approval.withdraw``
+    audit row records it. The original call never runs: approve, reject
+    and decide then see a closed row and refuse (409).
+
+    Args:
+        session: Open :class:`AsyncSession`; flushed, not committed.
+        request_id: The pending row's id.
+        operator: The authenticated sender.
+        reason: Optional free-text reason, stored on the row and the
+            audit row.
+
+    Returns:
+        The updated, flushed :class:`ApprovalRequest`.
+
+    Raises:
+        ApprovalNotFoundError: No row for *request_id* in this tenant.
+        WithdrawForbiddenError: The caller did not send the request.
+        ApprovalRequestAlreadyDecidedError: Row is not ``pending``.
+    """
+    # Same row lock as approve / reject: a racing decision or expiry
+    # waits, then sees the closed row and refuses.
+    request = await _load_for_tenant(session, request_id, operator.tenant_id, for_update=True)
+    # Owner check first, so a non-sender learns nothing about the state.
+    if operator.sub != request.principal_sub:
+        raise WithdrawForbiddenError(request_id=request_id, principal_sub=operator.sub)
+    if request.status != ApprovalRequestStatus.PENDING.value:
+        raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
+
+    request.status = ApprovalRequestStatus.WITHDRAWN.value
+    request.withdrawn_at = _now()
+    request.withdraw_reason = reason or None
+    await discard_handoff(session, request.id, request.tenant_id)
+    await session.flush()
+
+    extra: dict[str, Any] = {"withdrawn_by": operator.sub}
+    if reason:
+        extra["reason"] = reason
+    withdraw_audit_id = uuid.uuid4()
+    await _write_audit_row(
+        session,
+        audit_id=withdraw_audit_id,
+        # Not APPROVAL_DECISION: nobody decided. The sender ran an action.
+        event_class=AuditEventClass.OPERATION_EXECUTION,
+        operator=operator,
+        request=request,
+        path="approval.withdraw",
+        status_code=_DECISION_STATUS_CODE_APPROVED,
+        duration_ms=0.0,
+        extra_payload=extra,
+    )
+
+    _log().info(
+        "approval_request_withdrawn",
+        approval_request_id=str(request_id),
+        op_id=request.op_id,
+        principal_sub=operator.sub,
+        tenant_id=str(operator.tenant_id),
+    )
+    request._audit_id = withdraw_audit_id  # type: ignore[attr-defined]
     return request
 
 
@@ -2675,7 +2770,8 @@ async def record_approval_step_event(
     """Record an approval lifecycle step for the paired add-on that asked for it.
 
     *decision* is one of ``"pending"`` (creation), ``"approved"``,
-    ``"rejected"``, or ``"expired"`` (sweeper-driven). The event kind is
+    ``"rejected"``, ``"expired"`` (sweeper-driven), or ``"withdrawn"``
+    (the sender took it back, #4987). The event kind is
     ``approval.<decision>``.
 
     #3027 step-event push: the outcome is durably recorded for the paired

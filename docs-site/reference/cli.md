@@ -386,7 +386,7 @@ meho agent-principal revoke <name> [flags]
 
 ## `meho approvals`
 
-Manage approval requests (list / show / approve / reject)
+Manage approval requests (list / show / approve / reject / withdraw)
 
 ```
 meho approvals
@@ -416,7 +416,7 @@ meho approvals list [flags]
 - `--json` — emit raw JSON array instead of the human table
 - `--limit` — max requests to return (1..500; no limit when omitted)
 - `--offset` — skip this many requests first (default 0)
-- `--status` — filter by status: pending, approved, rejected, expired, all (default: pending)
+- `--status` — filter by status: pending, approved, rejected, expired, withdrawn, all (default: pending)
 - `--work-ref` — filter by external change-ticket reference, exact match
 
 ### `meho approvals reject`
@@ -441,6 +441,18 @@ meho approvals show <id> [flags]
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit raw JSON instead of the human-readable view
+
+### `meho approvals withdraw`
+
+Withdraw your own pending approval request
+
+```
+meho approvals withdraw <id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw JSON response instead of summary
+- `--reason` — optional reason for the withdrawal
 
 ## `meho argocd`
 

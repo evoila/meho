@@ -259,12 +259,22 @@ jobs:
           # base sha is `main` as of when the PR was opened. Once `main`
           # moves, a diff against it also lists other PRs' files and a
           # docs-only PR loses the fast path (#4657).
-          elif ! changed="$(git diff --name-only --no-renames HEAD^1 HEAD)"; then
+          # core.quotePath=false: git prints a path with non-ASCII bytes
+          # (e.g. `café.json`) as is. By default git wraps such a path in
+          # double quotes and escapes the bytes, and the classifiers below
+          # would not match it (#5310).
+          elif ! changed="$(git -c core.quotePath=false diff --name-only --no-renames HEAD^1 HEAD)"; then
             # Diff unavailable -> keep fail-safe defaults (full run + migration gate on).
             echo "git diff failed -> migrations=${migrations}, docs_only=${docs_only} (fail-safe full run)"
           elif [ -z "${changed}" ]; then
             # No file changes (e.g. an empty / branch-only PR) -> full run, fail-safe.
             echo "empty diff -> migrations=${migrations}, docs_only=${docs_only} (fail-safe full run)"
+          elif grep -q '^"' <<<"${changed}"; then
+            # git still quotes a path that holds a double quote, a backslash
+            # or a control character. The classifiers below work line by
+            # line and cannot read such a path -> keep fail-safe defaults.
+            printf 'changed files (HEAD^1..HEAD):\n%s\n' "${changed}"
+            echo "quoted path in the diff -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python} (fail-safe full run)"
           else
             printf 'changed files (HEAD^1..HEAD):\n%s\n' "${changed}"
             # --- migration classification (#2140, unchanged) ---

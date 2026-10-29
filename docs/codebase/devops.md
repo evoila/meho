@@ -1865,7 +1865,12 @@ runs one short job instead.
   `pull_request`, the diff could be computed, no changed path apart from
   `.md` files is under `backend/`, and `.github/workflows/ci.yml` did not
   change. `push` and `merge_group` always keep it `true`. It uses the same
-  `HEAD^1..HEAD` diff as `docs_only`.
+  `HEAD^1..HEAD` diff as `docs_only`. The diff runs with
+  `core.quotePath=false`, so a path with non-ASCII characters (for example
+  `café.json`) is printed as is and the `backend/` check sees it. Git still
+  quotes a path that holds a double quote, a backslash or a control
+  character; such a line keeps every fail-safe default (full run and
+  migration gate on).
 - **What skips.** `python-lint`, the four `python-unit-shard` legs and
   `python-integration` skip by their own `if:` when `backend_python` is
   `false`, the same way as on a docs-only PR.

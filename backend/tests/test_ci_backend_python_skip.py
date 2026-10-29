@@ -149,6 +149,26 @@ def test_unknown_diff_runs_everything(tmp_path: Path) -> None:
     assert _detect(tmp_path, "pull_request", None)["backend_python"] == "true"
 
 
+def test_non_ascii_backend_path_runs_everything(tmp_path: Path) -> None:
+    # By default git prints `"backend/tests/fixtures/caf\303\251.json"`, in
+    # quotes, and the backend/ check would miss it (#5310).
+    outputs = _detect(tmp_path, "pull_request", ["backend/tests/fixtures/café.json"])
+    assert outputs["backend_python"] == "true"
+
+
+def test_non_ascii_path_outside_backend_still_skips_the_python_lanes(tmp_path: Path) -> None:
+    outputs = _detect(tmp_path, "pull_request", ["cli/internal/cmd/café.go"])
+    assert outputs["backend_python"] == "false"
+    assert outputs["docs_only"] == "false"
+
+
+def test_quoted_path_runs_everything(tmp_path: Path) -> None:
+    # git always quotes a path that holds a double quote; the detector then
+    # keeps every fail-safe default.
+    outputs = _detect(tmp_path, "pull_request", ['cli/internal/cmd/say "hi".go'])
+    assert outputs == {"migrations": "true", "docs_only": "false", "backend_python": "true"}
+
+
 # --- Job gates ----------------------------------------------------------------
 
 

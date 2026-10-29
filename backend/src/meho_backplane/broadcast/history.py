@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Shared Broadcast read primitives: filter, parse, serialise, advisory.
+"""Shared Broadcast read primitives: filter, parse, serialise.
 
 The Broadcast readers (``meho_broadcast_recent`` / ``meho_broadcast_watch``,
 ``GET /api/v1/broadcast/recent``, the SSE feeds, the UI history pane and
@@ -10,11 +10,13 @@ order (:mod:`meho_backplane.broadcast.archive_reader`, #3748, #3758).
 This module holds the primitives they share: :func:`event_matches`,
 :func:`row_to_announcement` and :func:`dump_event_wire`.
 
-It also holds the dispatch-time target-activity advisory, which still
-scans the per-tenant Valkey stream (:func:`parse_entry` /
+It also holds the per-tenant Valkey stream parsers (:func:`parse_entry` /
 :func:`select_event_model`; since #3758 only agent announcements are
-written to that stream), and the caller's active-claim lookup
-(:func:`announce_claim_gap`), which reads the archive (#4091).
+written to that stream) and :data:`WRITE_OP_CLASSES`. Two dispatch-time
+features build on these and live in their own modules (#5005): the
+target-activity advisory (:mod:`meho_backplane.broadcast.target_advisory`)
+and the caller's active-claim lookup
+(:mod:`meho_backplane.broadcast.announce_claim_lookup`).
 
 Tenant scoping
 ==============
@@ -33,31 +35,21 @@ References
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
-from typing import Any, Final, Literal, cast
+from datetime import UTC, datetime
+from typing import Any, Final
 
 import structlog
 from pydantic import ValidationError
-from sqlalchemy import select
 
-from meho_backplane.auth.delegation import resolve_actor_sub
-from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
-from meho_backplane.broadcast.client import get_broadcast_client
-from meho_backplane.broadcast.events import BroadcastEvent, classify_op
-from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.broadcast.events import BroadcastEvent
 from meho_backplane.db.models import AgentAnnouncement
-from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import wrap_untrusted_text
 
 __all__ = [
     "DEFAULT_WINDOW_MINUTES",
     "OP_CLASS_ENUM",
     "WRITE_OP_CLASSES",
-    "ClaimGap",
-    "announce_claim_gap",
-    "build_target_activity_advisory",
-    "caller_has_active_announce_claim",
     "dump_event_wire",
     "event_matches",
     "parse_entry",
@@ -74,10 +66,6 @@ _log = structlog.get_logger(__name__)
 #: this default; the UI history route does NOT use it (the UI always
 #: passes an explicit retention-bound ``since``).
 DEFAULT_WINDOW_MINUTES: Final[int] = 30
-
-#: ``XREVRANGE`` upper anchor. ``"+"`` is Valkey's "latest available
-#: entry" sentinel.
-_XRANGE_END: Final[str] = "+"
 
 #: Allowed ``op_class`` filter values -- exactly the classes
 #: :func:`classify_op` can return, no more and no fewer
@@ -472,316 +460,3 @@ def row_to_announcement(row: AgentAnnouncement) -> AgentAnnouncementEvent:
 WRITE_OP_CLASSES: Final[frozenset[str]] = frozenset(
     {"write", "credential_write", "credential_mint"}
 )
-
-#: op_class values that carry the dispatch-time target-activity advisory
-#: (#2550). Only mutating classes qualify -- a write is where crossfire
-#: matters. Read-class dispatches skip the stream read entirely, keeping
-#: the hot read path free of the lookup. Aliases :data:`WRITE_OP_CLASSES`
-#: so the #2550 gate and the #3133 features stay in lockstep.
-_ADVISORY_WRITE_OP_CLASSES: Final[frozenset[str]] = WRITE_OP_CLASSES
-
-#: Maximum advisory entries surfaced on a single dispatch response. The
-#: advisory is an awareness nudge, not an audit -- the caller who needs
-#: the full picture queries ``meho_broadcast_recent``.
-_ADVISORY_MAX_ENTRIES: Final[int] = 5
-
-#: Bounded scan cap for the advisory stream read. The window (settings
-#: knob) already bounds the range in time; this caps the entry count so
-#: a burst inside the window can't turn one dispatch into an unbounded
-#: read. The read is newest-first (``XREVRANGE``), so this cap keeps the
-#: NEWEST entries in the window -- the ones the advisory cares about --
-#: rather than clipping them off the tail (the busy-target crossfire case
-#: an oldest-first ``XRANGE`` + ``COUNT`` would silently invert).
-_ADVISORY_SCAN_LIMIT: Final[int] = 100
-
-#: The ``extras`` key the advisory rides on the :class:`OperationResult`.
-ADVISORY_EXTRAS_KEY: Final[str] = "target_activity_advisory"
-
-
-def _advisory_entry(event: BroadcastEvent | AgentAnnouncementEvent) -> dict[str, Any]:
-    """Project one parsed stream event onto the compact advisory shape.
-
-    Structured, server-derived fields ONLY -- ``principal_sub`` /
-    ``actor_sub`` (lineage), ``kind``, the operation's ``op_id`` or the
-    announcement's ``phase``, and ``ts`` (ISO-8601). Read straight off the
-    parsed model, so agent-authored free text (``activity`` / ``scope`` /
-    ``target`` / ``targets``) is never even touched: the untrusted-prose
-    envelope cannot enter an op response (Initiative #2543, review finding
-    27). An :class:`AgentAnnouncementEvent` is labelled ``announcement``;
-    a :class:`BroadcastEvent` is an ``operation``.
-    """
-    if isinstance(event, AgentAnnouncementEvent):
-        return {
-            "principal_sub": event.principal_sub,
-            "kind": "announcement",
-            "phase": event.phase,
-            "ts": event.ts.isoformat(),
-        }
-    entry: dict[str, Any] = {
-        "principal_sub": event.principal_sub,
-        "kind": "operation",
-        "op_id": event.op_id,
-        "ts": event.ts.isoformat(),
-    }
-    if event.actor_sub is not None:
-        entry["actor_sub"] = event.actor_sub
-    return entry
-
-
-async def _recent_target_events_newest_first(
-    operator: Operator,
-    *,
-    target_name: str,
-    window_minutes: int,
-    limit: int,
-) -> list[BroadcastEvent | AgentAnnouncementEvent]:
-    """Read active, target-matched events in the window, newest first.
-
-    A single ``XREVRANGE meho:feed:{tenant} + <since-ms>`` capped at
-    *limit*: reverse order means the ``COUNT`` cap keeps the NEWEST
-    entries in the window, so the advisory samples the tail (recent
-    crossfire) rather than the head. Target and ``active_only`` filtering
-    run in-process on the parsed model -- the same
-    :func:`event_matches` narrowing every other reader uses, before any
-    prose wrap. Propagates :class:`redis.exceptions.RedisError` to the
-    caller's fail-open guard.
-    """
-    client = get_broadcast_client()
-    key = stream_key(operator.tenant_id)
-    since_ms = max(
-        int((datetime.now(UTC) - timedelta(minutes=window_minutes)).timestamp() * 1000), 0
-    )
-    raw_entries = cast(
-        "list[tuple[str, dict[str, str]]]",
-        await client.xrevrange(key, max=_XRANGE_END, min=str(since_ms), count=limit),
-    )
-    now = datetime.now(UTC)
-    events: list[BroadcastEvent | AgentAnnouncementEvent] = []
-    for entry_id, fields in raw_entries:
-        event = parse_entry(entry_id, fields, stream_key=key)
-        if event is None:
-            continue
-        if event_matches(
-            event, op_class=None, principal=None, target=target_name, active_only=True, now=now
-        ):
-            events.append(event)
-    return events
-
-
-async def build_target_activity_advisory(
-    operator: Operator,
-    *,
-    op_id: str,
-    target_name: str | None,
-) -> dict[str, Any]:
-    """Build the ``extras`` fragment advising of recent peer activity.
-
-    Post-op awareness for a write-class dispatch (#2550): when the op
-    mutates a target that another principal has touched recently -- an
-    operation or an active announcement claim -- the response carries a
-    compact advisory so the caller learns about the overlap at the moment
-    it matters. This is NOT a lock or a block; pre-op checking remains the
-    discipline's ``meho_broadcast_recent`` read step.
-
-    Returns ``{"target_activity_advisory": [...]}`` with up to
-    :data:`_ADVISORY_MAX_ENTRIES` most-recent peer entries in chronological
-    order, or an empty dict (no key added) when the advisory does not
-    apply. The empty-dict short-circuits, in order:
-
-    * the feature is disabled (``dispatch_activity_advisory_window_minutes
-      == 0``);
-    * the op is not write-class (read-class dispatches perform no stream
-      read -- the frozenset check returns before any Valkey call);
-    * the dispatch has no target;
-    * no peer activity was found in the window.
-
-    Fail-open and bounded: the success path awaits a single, count-capped
-    ``XREVRANGE`` (a small, bounded cost -- not free), and a broad guard
-    swallows any error (a Valkey teardown included) so the advisory lookup
-    never converts a successful op into a failure. Because the read is
-    newest-first, the ``COUNT`` cap keeps the newest window entries, so
-    ``[-_ADVISORY_MAX_ENTRIES:]`` after re-chronologising is the genuinely
-    most-recent peer activity even on a target emitting more than
-    :data:`_ADVISORY_SCAN_LIMIT` events in the window.
-    """
-    window_minutes = get_settings().dispatch_activity_advisory_window_minutes
-    if window_minutes <= 0:
-        return {}
-    if classify_op(op_id) not in _ADVISORY_WRITE_OP_CLASSES:
-        return {}
-    if not target_name:
-        return {}
-
-    caller_principal = operator.sub
-    caller_actor = resolve_actor_sub()
-    try:
-        events = await _recent_target_events_newest_first(
-            operator,
-            target_name=target_name,
-            window_minutes=window_minutes,
-            limit=_ADVISORY_SCAN_LIMIT,
-        )
-    except Exception:
-        # Advisory is best-effort awareness; any failure (a Valkey
-        # teardown, a parse bug) must never convert a successful dispatch
-        # into a failure.
-        _log.warning(
-            "target_activity_advisory_failed",
-            stream_key=stream_key(operator.tenant_id),
-        )
-        return {}
-
-    # ``events`` is newest-first; drop the caller's own activity, keep the
-    # newest _ADVISORY_MAX_ENTRIES, then restore chronological order.
-    peers = [
-        event
-        for event in events
-        if not (
-            event.principal_sub == caller_principal
-            and getattr(event, "actor_sub", None) == caller_actor
-        )
-    ]
-    if not peers:
-        return {}
-    newest = peers[:_ADVISORY_MAX_ENTRIES]
-    return {ADVISORY_EXTRAS_KEY: [_advisory_entry(event) for event in reversed(newest)]}
-
-
-#: Lookback for the caller's own active-claim lookup. Announcement TTLs are
-#: bounded at 1440 minutes (``AgentAnnouncementEvent.ttl_minutes`` upper
-#: bound), so a claim older than this window can no longer be active.
-_CLAIM_SCAN_WINDOW_MINUTES: Final[int] = 1440
-
-#: Most archive rows the claim lookup reads, newest first (#4091). The rows
-#: are only the caller's own announcements of the last day, so normal use
-#: stays far below this. The cap bounds the cost for a principal that
-#: announces all day at the rate limit; such a principal does not see a
-#: claim it made more than this many announcements ago.
-_CLAIM_SCAN_LIMIT: Final[int] = 500
-
-#: Why no active claim of the caller covers a write-class op (#4091). The
-#: reflex advisory names the reason, so the agent knows what to fix:
-#:
-#: * ``no_claim`` -- the caller has no active announcement at all;
-#: * ``other_target`` -- the caller's active announcements name other targets;
-#: * ``other_op_class`` -- an active announcement names this target but
-#:   declared another ``planned_op_class``;
-#: * ``expired`` -- an announcement would cover the op, but its TTL ran out.
-ClaimGap = Literal["no_claim", "other_target", "other_op_class", "expired"]
-
-#: When the caller's announcements give different reasons, the one closest
-#: to a covering claim wins: an expired claim for this exact op says more
-#: than an active claim for another target.
-_CLAIM_GAP_RANK: Final[dict[ClaimGap, int]] = {
-    "no_claim": 0,
-    "other_target": 1,
-    "other_op_class": 2,
-    "expired": 3,
-}
-
-
-def _claim_covers_target(event: AgentAnnouncementEvent, target_name: str | None) -> bool:
-    """Whether an announce claim's target attribution covers the op's target.
-
-    A claim that named no target (neither ``target`` nor ``targets``) is
-    target-agnostic and covers any op. A target-less op
-    (``target_name is None``) is covered by any claim. Otherwise the claim
-    must name the op's target (exact match via :func:`_target_matches`).
-    """
-    claim_has_target = event.target is not None or bool(event.targets)
-    if not claim_has_target or target_name is None:
-        return True
-    return _target_matches(event, target_name)
-
-
-def _claim_gap(
-    claim: AgentAnnouncementEvent,
-    *,
-    op_class: str,
-    target_name: str | None,
-    now: datetime,
-) -> ClaimGap | None:
-    """Why *claim* does not cover the op, or ``None`` when it does."""
-    covers_target = _claim_covers_target(claim, target_name)
-    covers_class = claim.planned_op_class is None or claim.planned_op_class == op_class
-    expired = _is_expired_claim(claim, now)
-    if covers_target and covers_class:
-        return "expired" if expired else None
-    if expired:
-        return "no_claim"
-    return "other_op_class" if covers_target else "other_target"
-
-
-async def announce_claim_gap(
-    operator: Operator,
-    *,
-    op_id: str,
-    target_name: str | None,
-) -> ClaimGap | None:
-    """Return ``None`` when the caller holds an active claim covering this op.
-
-    Otherwise return why not (:data:`ClaimGap`). Shared by the #3133 reflex
-    advisory's announce-before-mutate heuristic and the #3133 opt-in
-    announce gate (through :func:`caller_has_active_announce_claim`), so
-    the two agree on what "an active claim covering this op" means.
-
-    Reads the caller's announcements of the last
-    :data:`_CLAIM_SCAN_WINDOW_MINUTES` minutes from the
-    ``agent_announcement`` archive (newest first, at most
-    :data:`_CLAIM_SCAN_LIMIT` rows): the record ``meho_broadcast_recent``
-    reads too. Not the Valkey stream (#4091): its write may fail, and a
-    capped read of it drops a claim behind other principals' entries.
-
-    A claim covers the op when all hold:
-
-    * it was published for this principal (``principal_sub ==
-      operator.sub``, so a delegated agent's claim rides its human
-      principal's ``sub``);
-    * it has not expired (a claim with no ``ttl_minutes`` never expires);
-    * its declared ``planned_op_class`` matches the op's
-      :func:`classify_op` class, or the claim declared no class (a
-      class-agnostic claim covers any op); and
-    * its target attribution covers the op (see :func:`_claim_covers_target`),
-      matched on the stored values, never on the read tools' untrusted wrap.
-
-    Propagates database errors to the caller's fail-open guard (reflex
-    advisory: ``{}``; announce gate: "do not block").
-    """
-    since = datetime.now(UTC) - timedelta(minutes=_CLAIM_SCAN_WINDOW_MINUTES)
-    stmt = (
-        select(AgentAnnouncement)
-        .where(
-            AgentAnnouncement.tenant_id == operator.tenant_id,
-            AgentAnnouncement.principal_sub == operator.sub,
-            AgentAnnouncement.created_at >= since,
-        )
-        .order_by(AgentAnnouncement.created_at.desc())
-        .limit(_CLAIM_SCAN_LIMIT)
-    )
-    async with get_sessionmaker()() as session:
-        rows = (await session.execute(stmt)).scalars().all()
-    now = datetime.now(UTC)
-    op_class = classify_op(op_id)
-    gap: ClaimGap = "no_claim"
-    for row in rows:
-        row_gap = _claim_gap(
-            row_to_announcement(row), op_class=op_class, target_name=target_name, now=now
-        )
-        if row_gap is None:
-            return None
-        if _CLAIM_GAP_RANK[row_gap] > _CLAIM_GAP_RANK[gap]:
-            gap = row_gap
-    return gap
-
-
-async def caller_has_active_announce_claim(
-    operator: Operator,
-    *,
-    op_id: str,
-    target_name: str | None,
-) -> bool:
-    """Return ``True`` iff the caller holds an active claim covering this op.
-
-    The yes/no form of :func:`announce_claim_gap`, for the announce gate.
-    """
-    return await announce_claim_gap(operator, op_id=op_id, target_name=target_name) is None

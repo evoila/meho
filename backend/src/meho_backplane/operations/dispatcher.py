@@ -270,8 +270,8 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
 from meho_backplane.broadcast.events import classify_op, scrub_secret_named_values
-from meho_backplane.broadcast.history import build_target_activity_advisory
 from meho_backplane.broadcast.reflex import build_reflex_advisory
+from meho_backplane.broadcast.target_advisory import build_target_activity_advisory
 from meho_backplane.checks.advisory import build_checks_alert_advisory
 from meho_backplane.connectors import (
     OperationResult,

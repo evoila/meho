@@ -54,7 +54,7 @@ from meho_backplane.broadcast import (
     get_broadcast_client,
     reset_broadcast_client_for_testing,
 )
-from meho_backplane.broadcast.history import ADVISORY_EXTRAS_KEY
+from meho_backplane.broadcast.target_advisory import ADVISORY_EXTRAS_KEY
 from meho_backplane.checks.advisory import (
     _ADVISORY_MAX_DASHBOARDS,
     CHECKS_ADVISORY_EXTRAS_KEY,

@@ -3075,6 +3075,11 @@ class AgentAnnouncement(Base):
       ``(tenant_id, work_ref)``. Drives the exact-match ``work_ref``
       filter, mirroring :class:`AgentRun`'s
       ``agent_run_tenant_work_ref_idx``.
+    * ``agent_announcement_tenant_principal_created_at_idx`` --
+      ``(tenant_id, principal_sub, created_at DESC)`` (migration
+      ``0120``, #5005). Drives the caller's active-claim lookup
+      (:mod:`meho_backplane.broadcast.announce_claim_lookup`), which
+      reads only the caller's own rows, newest first.
 
     Trusted claim columns (#3736, migration ``0112``). All nullable; a
     row written before trusted admission keeps NULL in all six and is

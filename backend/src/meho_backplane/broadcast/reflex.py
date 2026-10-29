@@ -5,7 +5,7 @@
 
 The **third** in-band ``extras`` fragment on successful dispatch
 responses, beside the #2550 ``target_activity_advisory``
-(:mod:`meho_backplane.broadcast.history`) and the #2718
+(:mod:`meho_backplane.broadcast.target_advisory`) and the #2718
 ``checks_alert_advisory`` (:mod:`meho_backplane.checks.advisory`). It
 nudges an agent toward the coordination discipline the backplane already
 exposes but does not otherwise enforce: read the feed before starting,
@@ -22,7 +22,7 @@ Heuristics (v1):
   (:func:`~meho_backplane.broadcast.events.classify_op` in
   :data:`~meho_backplane.broadcast.history.WRITE_OP_CLASSES`) and the
   caller holds no active announce claim covering it
-  (:func:`~meho_backplane.broadcast.history.announce_claim_gap`). A
+  (:func:`~meho_backplane.broadcast.announce_claim_lookup.announce_claim_gap`). A
   one-liner names ``meho_broadcast_announce`` and says why no claim
   covers the op: none at all, expired, another target, or another
   planned op class (#4091).
@@ -68,13 +68,10 @@ import structlog
 from sqlalchemy import exists, select
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.broadcast.announce_claim_lookup import ClaimGap, announce_claim_gap
 from meho_backplane.broadcast.client import get_broadcast_client
 from meho_backplane.broadcast.events import classify_op
-from meho_backplane.broadcast.history import (
-    WRITE_OP_CLASSES,
-    ClaimGap,
-    announce_claim_gap,
-)
+from meho_backplane.broadcast.history import WRITE_OP_CLASSES
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, RequestUsageEvent
 from meho_backplane.settings import get_settings

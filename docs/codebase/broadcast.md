@@ -409,7 +409,8 @@ Three independent extras fragments now ride the same dispatcher success
 path, merged as a clobber-free union of distinct keys
 (`extras={**activity, **checks, **reflex}`):
 
-1. `target_activity_advisory` — this fragment (#2550), write-class only.
+1. `target_activity_advisory` — this fragment (#2550), built in
+   `broadcast/target_advisory.py`, write-class only.
 2. `checks_alert_advisory` — #2718, built in `checks/advisory.py`,
    deduped per caller via Valkey `SET NX EX`, applied to **all** op
    classes; see [`docs/codebase/checks-advisory.md`](checks-advisory.md).
@@ -963,6 +964,8 @@ investigation. #1305 is the closing fix.
   - Override CRUD (REST): `backend/src/meho_backplane/api/v1/broadcast_overrides.py`.
   - Override UI tab (BFF, tenant_admin): `backend/src/meho_backplane/ui/routes/broadcast/overrides.py` — the Overrides tab on `/ui/broadcast` (#1891). Lists/creates/deletes `BroadcastOverride` rows through the REST plane's `list_overrides_impl` / `create_override_impl` / `delete_override_impl` in-process (the same impl the admin MCP tools call), gated to `tenant_admin` via `resolve_operator_or_403`; delete is a two-step `<dialog>` confirm that spells out the re-exposure consequence; the create form echoes the 422 glob-not-regex / 409 already-exists as inline errors. The sensitive-op cross-link in the event drawer (`_event_drawer.html`) pre-fills the create form's `op_id_pattern`.
   - History (XRANGE) helper: `backend/src/meho_backplane/broadcast/history.py`.
+  - Dispatch-time target-activity advisory (#2550): `backend/src/meho_backplane/broadcast/target_advisory.py`.
+  - Caller's active-claim lookup (#4091): `backend/src/meho_backplane/broadcast/announce_claim_lookup.py`.
   - Client / lifespan: `backend/src/meho_backplane/broadcast/client.py`.
 - Valkey commands:
   - `XADD` — https://valkey.io/commands/xadd/

@@ -173,6 +173,9 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
         "vault.kv.patch or secret.move) and compare again. A 'forbidden' copy needs a "
         "caller whose Vault role may read it."
     ),
+    # Keep the verdict inline if the copies list is ever stored behind a
+    # handle; the reducer copies no scalar of a credential-class op by itself.
+    "result_scalars": {"keys": ["same"]},
 }
 
 

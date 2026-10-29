@@ -225,6 +225,9 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
         "vault.kv.put or vault.kv.patch for Vault. Then restart the workload that "
         "reads the Secret at start (k8s.rollout.restart) and compare again."
     ),
+    # Keep the verdict inline if the copies list is ever stored behind a
+    # handle; the reducer copies no scalar of a credential-class op by itself.
+    "result_scalars": {"keys": ["same"]},
 }
 
 

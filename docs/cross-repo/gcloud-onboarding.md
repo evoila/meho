@@ -142,9 +142,16 @@ The target SA (`target.gcp_impersonate_sa`) must have at minimum:
 | `gcloud.compute.instances.list` | `roles/compute.viewer` |
 | `gcloud.compute.networks.list` | `roles/compute.viewer` |
 | `gcloud.compute.subnetworks.list` | `roles/compute.viewer` |
+| `gcloud.iam.workload_identity_pools.list`, `gcloud.iam.workload_identity_pools.providers.list` | `roles/iam.workloadIdentityPoolViewer` |
+| `gcloud.iam.workload_identity_pools.delete` (a person must approve) | `iam.workloadIdentityPools.delete`, e.g. in `roles/iam.workloadIdentityPoolAdmin` |
+| `gcloud.iam.service_accounts.policy.read` | `iam.serviceAccounts.getIamPolicy` on the service account |
+| `gcloud.iam.service_accounts.binding.remove` (a person must approve) | `iam.serviceAccounts.getIamPolicy` and `iam.serviceAccounts.setIamPolicy`, e.g. in `roles/iam.serviceAccountAdmin` |
 
-A single `roles/viewer` project-level binding covers most of these;
-assign narrower custom roles for production least-privilege setups.
+A single `roles/viewer` project-level binding covers most of the reads;
+assign narrower custom roles for production least-privilege setups. The two
+changes need the write permissions above. MEHO checks them with Google's
+`testIamPermissions` before it asks a person to approve, and refuses at once
+when one is missing.
 
 ## Prerequisites
 

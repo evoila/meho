@@ -1402,7 +1402,9 @@ narrow-waist contract.
   MCP-only. Whenever the op resolved, the human output also prints one
   plain line with the risk level and what MEHO would do with this call
   for this caller and target (#3973 / #4923) — for example "Risk level:
-  dangerous. This call waits for approval." — and `--json` carries
+  dangerous. This call waits for approval. A second person must approve
+  it." The line says a second person must approve only for `dangerous`
+  and `destructive`, where that is always true (#4963). `--json` carries
   `safety_level`, `requires_approval`, `policy_verdict` and
   `policy_reason`. The verb exits 1 on a non-ok
   envelope (`status="error"` for input faults, `status="unavailable"` for

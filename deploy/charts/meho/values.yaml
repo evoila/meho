@@ -1221,6 +1221,16 @@ coreKeycloak:
   hostname: ""
   # -- The first tenant's id (a UUID). Pick one per install and keep it.
   firstTenantId: ""
+  # -- The first tenant's short name (lowercase letters, digits, dashes).
+  # The five role groups carry it in the `meho_tenant` attribute.
+  tenantName: main
+  # -- More tenants, as a list of `{name, id}` (`id` is a UUID you pick and
+  # keep). The bootstrap Job makes five groups for each one:
+  # `MEHO-<name>-Readers`, `-Operators`, `-SA-Operators`, `-Admins` and
+  # `-Approvers`. Empty by default: a site with one tenant needs nothing
+  # here. Putting people in these groups waits for a second person's
+  # approval when done through MEHO.
+  tenants: []
   ingress:
     # -- Also route the admin console (`/auth/admin`, `/auth/realms/master`)
     # on the MEHO host. Default false: the admin console is then not

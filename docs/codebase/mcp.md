@@ -416,6 +416,47 @@ Tests: `tests/test_operations_meta_tools.py` (enum lock),
 `tests/test_api_v1_operations.py`
 (`test_post_call_rate_limited_rides_200_envelope`).
 
+### The audit status of `call_operation` and `preview_operation` (#4751)
+
+Some calls fail before any operation runs: the `op_id` or the connector
+does not exist, or the params do not match the schema. The dispatcher
+writes no operation row for them. So the MCP tool-call row must say that
+the call failed. `handle_tools_call` sets the row's `status_code` from
+the envelope `status`, with the same rule as `isError`
+(`_operation_result_audit` in `mcp/handlers.py`):
+
+| `status` | `extras.error_code` | row `status_code` |
+|---|---|---|
+| `ok`, `awaiting_approval`, anything else | any | `200` |
+| `error` | `unknown_op`, `unknown_connector` | `404` |
+| `error` | any other code | `400` |
+| `denied` | any | `403` |
+| `rate_limited` | any | `429` |
+
+The row's payload also carries `result_status` (the envelope `status`)
+and `error_code` (from `extras.error_code`, when there is one), so a
+query can filter on them. A call that did run keeps its own operation
+row from the dispatcher; that row still holds the exact result. Every
+other tool keeps `status_code = 200` when its handler returns.
+
+The counts that read only `status_code = 200` tool-call rows (the
+reflex adoption numbers and the retrieval usage numbers) no longer count
+a `call_operation` that failed or was refused.
+
+With `AUDIT_WRAPPER_ROWS_RETIRED=true` the cut-over rules in
+`audit_cutover.py` decide what is written:
+
+- `404`, `400` and `429`: no tool-call row (`call_operation` is a
+  routine tool, and other 4xx write nothing). The request usage event
+  holds the real outcome: `not_found`, `client_error` or
+  `rate_limited`.
+- `403`: no tool-call row when the dispatcher already wrote its policy
+  row for the caller. Otherwise one `policy_decision` row.
+- `200`: no tool-call row. A call that ran or waits for approval has
+  the dispatcher's own row.
+
+Tests: `tests/test_mcp_call_operation_audit_status.py`.
+
 ### Response wire ceiling (#3641)
 
 A completed `call_operation` response is also checked against a wire ceiling,

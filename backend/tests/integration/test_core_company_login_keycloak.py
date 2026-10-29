@@ -60,11 +60,17 @@ import yaml
 
 from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt_for_audience
 from meho_backplane.auth.operator import TenantRole
-from meho_backplane.core.company_login import MAPPER_PREFIX, ROLES, SECRET_ENV
+from meho_backplane.core.company_login import (
+    CLEANUP_CONFIG_KEY,
+    MAPPER_PREFIX,
+    ROLES,
+    SECRET_ENV,
+)
 from meho_backplane.core.keycloak import (
     ADMIN_SECRET_ENV,
     HttpAdmin,
     Plan,
+    RealmStageError,
     finish_realm,
 )
 from meho_backplane.settings import get_settings
@@ -644,6 +650,55 @@ async def test_a_removed_line_removes_its_mapper_and_takes_its_group_away(
     assert "tenant_id" not in claims
     assert "tenant_role" not in claims
     assert not claims.get("groups")
+
+
+class _LeavingGroupsTimesOut(httpx.AsyncHTTPTransport):
+    """Keycloak answers, except that the requests that take a person out of
+    a group time out: the Job stops in the middle of the group cleanup."""
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "DELETE" and "/users/" in path and "/groups/" in path:
+            raise httpx.ReadTimeout("Keycloak does not answer", request=request)
+        return await super().handle_async_request(request)
+
+
+async def test_a_cleanup_that_times_out_is_finished_at_the_next_run(
+    keycloak: _Keycloak, store: _FakeStore, capfd: pytest.CaptureFixture[str]
+) -> None:
+    _company_groups(keycloak, ["acme-ops"])
+    assert _company_login(keycloak)["groups"] == ["MEHO-Admins"]
+    capfd.readouterr()
+
+    async with httpx.AsyncClient(
+        base_url=keycloak.base_url, timeout=30, transport=_LeavingGroupsTimesOut()
+    ) as http:
+        with pytest.raises(RealmStageError, match="ReadTimeout"):
+            await finish_realm(
+                _plan(group_map={"acme-ops": "MEHO-Operators"}),
+                keycloak.env,
+                HttpAdmin(http),
+                store,
+            )
+
+    # The mapper already points at the new group, so it no longer says which
+    # group it granted; the note on the provider does.
+    assert _mappers(keycloak)[f"{MAPPER_PREFIX}acme-ops"]["config"]["group"] == "/MEHO-Operators"
+    assert _meho_groups(keycloak) == ["MEHO-Admins"]
+    note = _snapshot(keycloak)["provider"]["config"][CLEANUP_CONFIG_KEY]
+    assert json.loads(note) == ["/MEHO-Admins"]
+    capfd.readouterr()
+
+    await _run_stage(keycloak, store, group_map={"acme-ops": "MEHO-Operators"})
+
+    output = capfd.readouterr().out
+    assert "identity provider company: finishing the group cleanup of an earlier run" in output
+    assert "group /MEHO-Admins: 1 company login member(s) removed" in output
+    assert _meho_groups(keycloak) == []
+    assert CLEANUP_CONFIG_KEY not in _snapshot(keycloak)["provider"]["config"]
+    claims = _company_login(keycloak)
+    assert claims["groups"] == ["MEHO-Operators"]
+    assert claims["tenant_role"] == "operator"
 
 
 def _login_form_shows(kc: _Keycloak) -> None:

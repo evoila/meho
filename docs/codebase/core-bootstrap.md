@@ -158,7 +158,11 @@ stage (`core/company_login.py`, `ensure_company_login`) does this, in order:
    MEHO group, the Job takes the people who came in through the company
    login out of the old group. Local accounts and other memberships stay. A
    person whom another line still maps to that group gets it back at the
-   next login.
+   next login. Before it changes any mapper, the Job writes the old groups
+   onto the provider (config key `meho.groupCleanup`) and removes that
+   note when the people are out. So a run that stops in the middle of the
+   cleanup, for example on a timeout, finishes it at the next run and
+   nobody keeps an old group.
 4. **Auto-redirect.** With `autoRedirect: true`, the "Identity Provider
    Redirector" step of the realm's browser login flow gets the company
    login as its default (config alias `meho-company-login-redirect`), so

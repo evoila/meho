@@ -16,11 +16,13 @@ import copy
 import json
 import re
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 
 from meho_backplane.core.company_login import (
+    CLEANUP_CONFIG_KEY,
     MAPPER_PREFIX,
     REDIRECT_CONFIG_ALIAS,
     SECRET_ENV,
@@ -72,6 +74,8 @@ class CompanyKeycloak(FakeKeycloak):
         self.forbidden = False
         # Usernames of the people that came in through the company login.
         self.linked: set[str] = set()
+        # Says which requests (method, path) time out instead of answering.
+        self.times_out: Callable[[str, str], bool] | None = None
 
     def state(self) -> dict[str, Any]:
         return {
@@ -101,6 +105,9 @@ class CompanyKeycloak(FakeKeycloak):
         if self.forbidden and self._company_path(path):
             self.calls.append((method, path))
             return Reply(403, {"error": "HTTP 403 Forbidden"})
+        if self.times_out is not None and self.times_out(method, path):
+            self.calls.append((method, path))
+            raise RealmStageError("Keycloak request failed: ReadTimeout")
         return await super().call(method, path, json=json, params=params)
 
     def _get(self, path: str, body: Any, params: dict[str, str]) -> Reply:
@@ -368,9 +375,89 @@ async def test_a_line_that_keeps_its_group_takes_nobody_out() -> None:
     kc = _fresh()
     await _run(kc)
     kc.person("jane", ["MEHO-Operators"], linked=True)
+    kc.calls.clear()
     await _run(kc, groups_claim="roles")
     assert kc.users["jane"]["groups"] == ["MEHO-Operators"]
     assert not any(path.endswith("/members") for _, path in kc.calls)
+    # The provider is written once, by the provider step; no cleanup note.
+    assert kc.calls.count(("PUT", f"{_IDP}/company")) == 1
+    assert CLEANUP_CONFIG_KEY not in kc.providers["company"]["config"]
+
+
+def _leaves_a_group(method: str, path: str) -> bool:
+    return method == "DELETE" and "/users/" in path and "/groups/" in path
+
+
+async def test_a_cleanup_that_times_out_is_finished_at_the_next_run(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    kc = _fresh()
+    await _run(kc)
+    kc.person("jane", ["MEHO-Operators"], linked=True)
+    kc.person("bob", ["MEHO-Readers"], linked=True)
+    kc.times_out = _leaves_a_group
+
+    # Ops now gives another group; Readers is no longer mapped.
+    with pytest.raises(RealmStageError, match="ReadTimeout"):
+        await _run(kc, group_map={"Ops": "MEHO-Admins"})
+
+    # Keycloak already has the new mappers, so they no longer say which
+    # groups they granted; the note on the provider does.
+    mappers = kc.mappers()
+    assert mappers[f"{MAPPER_PREFIX}Ops"]["config"]["group"] == "/MEHO-Admins"
+    assert f"{MAPPER_PREFIX}Readers" not in mappers
+    assert kc.users["jane"]["groups"] == ["MEHO-Operators"]
+    assert kc.users["bob"]["groups"] == ["MEHO-Readers"]
+    note = kc.providers["company"]["config"][CLEANUP_CONFIG_KEY]
+    assert json.loads(note) == ["/MEHO-Operators", "/MEHO-Readers"]
+    kc.times_out = None
+    capfd.readouterr()
+
+    await _run(kc, group_map={"Ops": "MEHO-Admins"})
+
+    assert kc.users["jane"]["groups"] == []
+    assert kc.users["bob"]["groups"] == []
+    assert CLEANUP_CONFIG_KEY not in kc.providers["company"]["config"]
+    assert kc.providers["company"]["config"]["clientSecret"] == _SECRET
+    output = capfd.readouterr().out
+    assert "identity provider company: finishing the group cleanup of an earlier run" in output
+    assert f"mapper {MAPPER_PREFIX}Ops: kept" in output
+    assert "group /MEHO-Operators: 1 company login member(s) removed" in output
+    assert "group /MEHO-Readers: 1 company login member(s) removed" in output
+    assert _SECRET not in output
+
+
+async def test_a_run_that_stops_at_a_mapper_change_leaves_the_note_for_the_next_run() -> None:
+    kc = _fresh()
+    await _run(kc)
+    kc.person("jane", ["MEHO-Operators", "MEHO-Readers"], linked=True)
+    kc.times_out = lambda method, path: method in ("PUT", "DELETE") and "/mappers/" in path
+
+    with pytest.raises(RealmStageError, match="ReadTimeout"):
+        await _run(kc, group_map={"Ops": "MEHO-Admins"})
+
+    assert kc.mappers()[f"{MAPPER_PREFIX}Ops"]["config"]["group"] == "/MEHO-Operators"
+    assert json.loads(kc.providers["company"]["config"][CLEANUP_CONFIG_KEY]) == [
+        "/MEHO-Operators",
+        "/MEHO-Readers",
+    ]
+    assert kc.users["jane"]["groups"] == ["MEHO-Operators", "MEHO-Readers"]
+    kc.times_out = None
+
+    await _run(kc, group_map={"Ops": "MEHO-Admins"})
+
+    assert kc.mappers()[f"{MAPPER_PREFIX}Ops"]["config"]["group"] == "/MEHO-Admins"
+    assert f"{MAPPER_PREFIX}Readers" not in kc.mappers()
+    assert kc.users["jane"]["groups"] == []
+    assert CLEANUP_CONFIG_KEY not in kc.providers["company"]["config"]
+
+
+async def test_an_unreadable_note_stops_the_stage() -> None:
+    kc = _fresh()
+    await _run(kc)
+    kc.providers["company"]["config"][CLEANUP_CONFIG_KEY] = "not json"
+    with pytest.raises(RealmStageError, match=f"unreadable {CLEANUP_CONFIG_KEY}"):
+        await _run(kc)
 
 
 async def test_a_big_group_is_read_page_by_page() -> None:

@@ -19,7 +19,10 @@ and come back with a MEHO token from Keycloak:
   other mappers. When a line goes away or points at another MEHO group, the
   people the company login put into the old group leave it, because
   Keycloak's FORCE sync fixes a membership only through a mapper that
-  still exists;
+  still exists. Before it changes any mapper, the stage notes the old
+  groups on the provider (config key ``meho.groupCleanup``) and clears the
+  note when the people are out, so a run that stops in the middle of the
+  cleanup finishes it at the next run;
 * the company login as the default of the "Identity Provider Redirector"
   step when ``autoRedirect`` is on; that default is removed when it is off.
 
@@ -39,6 +42,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from meho_backplane.core.keycloak_api import REALM, Admin, RealmStageError, Reply, expect
 
 __all__ = [
+    "CLEANUP_CONFIG_KEY",
     "MAPPER_PREFIX",
     "REDIRECT_CONFIG_ALIAS",
     "ROLES",
@@ -50,6 +54,10 @@ __all__ = [
 SECRET_ENV = "MEHO_COMPANY_LOGIN_CLIENT_SECRET"
 MAPPER_PREFIX = "meho-group-"
 REDIRECT_CONFIG_ALIAS = "meho-company-login-redirect"
+# On the provider: the MEHO groups whose company login members still have
+# to leave, as a JSON list of group paths. Set before the mappers change,
+# removed when the cleanup is done.
+CLEANUP_CONFIG_KEY = "meho.groupCleanup"
 # The realm-management roles the Job's account needs on top of manage-clients
 # and manage-users. The chart gives them to meho-admin when the company login
 # is on; Keycloak applies that at the realm's first start only.
@@ -252,46 +260,87 @@ class _CompanyLogin:
                 )
 
     async def ensure_mappers(self, groups: GroupLookup) -> None:
+        current = await self._current() or {}
         url = f"{self.idp_url}/mappers"
         listed = expect(
             await self.admin.call("GET", url), 200, what=f"cannot list the mappers of {self.label}"
         ).data
         ours = {m["name"]: m for m in listed if str(m.get("name", "")).startswith(MAPPER_PREFIX)}
-        # The MEHO groups that a removed or changed line granted until now.
-        old_groups: set[str] = set()
-        for company_group, meho_group in sorted(self.plan.group_map.items()):
-            want = self._mapper(company_group, meho_group)
-            name = want["name"]
-            have = ours.pop(name, None)
-            if have is None:
-                expect(
-                    await self.admin.call("POST", url, json=want),
-                    201,
-                    what=f"cannot create mapper {name}",
-                )
-                _say(f"mapper {name}: created")
-            elif self._same(have, want):
-                _say(f"mapper {name}: kept")
-            else:
-                expect(
-                    await self.admin.call(
-                        "PUT", f"{url}/{have['id']}", json={**want, "id": have["id"]}
-                    ),
-                    204,
-                    what=f"cannot update mapper {name}",
-                )
-                _say(f"mapper {name}: updated")
-                if self._group_of(have) != want["config"]["group"]:
-                    old_groups.add(self._group_of(have))
-        for name, stale in sorted(ours.items()):
+        wanted = [self._mapper(c, g) for c, g in sorted(self.plan.group_map.items())]
+        stale = {
+            name: have for name, have in ours.items() if name not in {w["name"] for w in wanted}
+        }
+        # The MEHO groups that a removed or changed line granted until now,
+        # plus those an earlier run noted but did not finish. The note goes
+        # onto the provider before any mapper changes, because once a mapper
+        # is changed or gone, nothing else says which group it granted.
+        noted = self._noted_cleanup(current)
+        old_groups = {self._group_of(m) for m in stale.values()} | {
+            self._group_of(ours[w["name"]])
+            for w in wanted
+            if w["name"] in ours and self._group_of(ours[w["name"]]) != w["config"]["group"]
+        }
+        to_clean = (noted | old_groups) - {""}
+        if noted:
+            _say(f"{self.label}: finishing the group cleanup of an earlier run")
+        if to_clean - noted:
+            await self._note_cleanup(current, to_clean)
+        for want in wanted:
+            await self._ensure_mapper(url, want, ours.get(want["name"]))
+        for name, old in sorted(stale.items()):
             expect(
-                await self.admin.call("DELETE", f"{url}/{stale['id']}"),
+                await self.admin.call("DELETE", f"{url}/{old['id']}"),
                 204,
                 what=f"cannot remove mapper {name}",
             )
             _say(f"mapper {name}: removed")
-            old_groups.add(self._group_of(stale))
-        await self._leave_groups(old_groups - {""}, groups)
+        if to_clean:
+            await self._leave_groups(to_clean, groups)
+            await self._note_cleanup(current, set())
+
+    async def _ensure_mapper(
+        self, url: str, want: Mapping[str, Any], have: Mapping[str, Any] | None
+    ) -> None:
+        name = want["name"]
+        if have is None:
+            expect(
+                await self.admin.call("POST", url, json=want),
+                201,
+                what=f"cannot create mapper {name}",
+            )
+            _say(f"mapper {name}: created")
+        elif self._same(have, want):
+            _say(f"mapper {name}: kept")
+        else:
+            expect(
+                await self.admin.call(
+                    "PUT", f"{url}/{have['id']}", json={**want, "id": have["id"]}
+                ),
+                204,
+                what=f"cannot update mapper {name}",
+            )
+            _say(f"mapper {name}: updated")
+
+    def _noted_cleanup(self, current: Mapping[str, Any]) -> set[str]:
+        raw = str((current.get("config") or {}).get(CLEANUP_CONFIG_KEY) or "[]")
+        try:
+            paths = json.loads(raw)
+        except ValueError:
+            raise RealmStageError(
+                f"{self.label} holds an unreadable {CLEANUP_CONFIG_KEY} value; remove it by hand"
+            ) from None
+        return {str(path) for path in paths} if isinstance(paths, list) else set()
+
+    async def _note_cleanup(self, current: Mapping[str, Any], paths: set[str]) -> None:
+        config = {k: v for k, v in (current.get("config") or {}).items() if k != CLEANUP_CONFIG_KEY}
+        if paths:
+            config[CLEANUP_CONFIG_KEY] = json.dumps(sorted(paths))
+        body = {**current, "config": {**config, _SECRET_KEY: self.secret}}
+        expect(
+            await self.admin.call("PUT", self.idp_url, json=body),
+            204,
+            what=f"cannot note the group cleanup on {self.label}",
+        )
 
     @staticmethod
     def _group_of(mapper: Mapping[str, Any]) -> str:

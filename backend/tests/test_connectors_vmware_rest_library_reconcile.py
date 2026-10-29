@@ -37,7 +37,12 @@ import httpx
 import pytest
 import respx
 
-from meho_backplane.connectors.vmware_rest.composites import _library, _library_delete
+from meho_backplane.connectors.vmware_rest.composites import (
+    _library,
+    _library_delete,
+    _library_local,
+    _library_upload,
+)
 from meho_backplane.operations.ingest import parse_openapi
 from tests.acceptance._vcenter_spec import VCENTER_SPEC_REASON, resolve_vcenter_yaml
 
@@ -53,10 +58,11 @@ _GETADDRINFO_PATCH = patch(
 def _required_sub_op_ids() -> set[str]:
     """Union of every ``_SUB_OPS_*`` op_id across the content-library composites.
 
-    Sweeps the SUBSCRIBED-library module and the #3339 / #3331 delete module.
+    Sweeps the SUBSCRIBED-library module, the delete module, and the local
+    library create + item upload modules.
     """
     raw: set[str] = set()
-    for module in (_library, _library_delete):
+    for module in (_library, _library_delete, _library_local, _library_upload):
         for name in dir(module):
             if name.startswith("_SUB_OPS_"):
                 raw.update(getattr(module, name))
@@ -126,6 +132,33 @@ def test_library_delete_manifests_are_expected() -> None:
         "GET:/content/library/{libraryId}",
         "GET:/content/library/item/{libraryItemId}/file",
         "DELETE:/content/library/item/{libraryItemId}",
+    }
+
+
+def test_local_library_manifests_are_expected() -> None:
+    """The local library create and the item upload: their declared REST paths."""
+    assert [n for n in dir(_library_local) if n.startswith("_SUB_OPS_")] == [
+        "_SUB_OPS_CONTENT_LIBRARY_CREATE"
+    ]
+    assert [n for n in dir(_library_upload) if n.startswith("_SUB_OPS_")] == [
+        "_SUB_OPS_CONTENT_LIBRARY_ITEM_UPLOAD"
+    ]
+    assert set(_library_local._SUB_OPS_CONTENT_LIBRARY_CREATE) == {
+        "POST:/content/library?action=find",
+        "GET:/content/library/{libraryId}",
+        "GET:/vcenter/datastore",
+        "POST:/content/local-library",
+    }
+    assert set(_library_upload._SUB_OPS_CONTENT_LIBRARY_ITEM_UPLOAD) == {
+        "POST:/content/library?action=find",
+        "GET:/content/library/{libraryId}",
+        "POST:/content/library/item?action=find",
+        "GET:/content/library/item/{libraryItemId}",
+        "POST:/content/library/item",
+        "POST:/content/library/item/update-session",
+        "POST:/content/library/item/update-session/{updateSessionId}/file",
+        "POST:/content/library/item/update-session/{updateSessionId}?action=complete",
+        "GET:/content/library/item/update-session/{updateSessionId}",
     }
 
 

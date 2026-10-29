@@ -58,7 +58,8 @@ CONTENT_LIBRARY_FIND_REST_CALLS: Final = (FIND_LIBRARY_CALL, FIND_LIBRARY_ITEM_C
 #: Shared with the content-library composites: the same key and text.
 CONTENT_LIBRARY_GROUP_KEY: Final = "content_library"
 CONTENT_LIBRARY_WHEN_TO_USE: Final = (
-    "Use for the governed SUBSCRIBED content-library surface -- create a "
+    "Use for governed content libraries, local and SUBSCRIBED. Subscribed: "
+    "create a "
     "content library subscribed to a remote publisher, force / confirm its "
     "synchronisation, and list its items. The right group for standing up "
     "the Tanzu Kubernetes release (TKr / VKr) image source a vSphere "
@@ -73,7 +74,11 @@ CONTENT_LIBRARY_WHEN_TO_USE: Final = (
     "library', or 'which TKr images are available?'. Distinct from the "
     "content-library *item* deploy/import (the 'vm' group's "
     "deploy_from_library / import_from_library) -- this group is the "
-    "library-container lifecycle, not the VM deploy. Teardown "
+    "library-container lifecycle, not the VM deploy. Local libraries "
+    "(caution, needs approval): make one on a datastore "
+    "(content_library.create) and let vCenter download an ISO, OVA or OVF "
+    "file from an http(s) URL into a new item (content_library.item.upload). "
+    "Teardown "
     "(destructive, always needs approval): delete a whole local or "
     "subscribed library (content_library.delete -- refused while another "
     "library subscribes to it; a library with items needs "

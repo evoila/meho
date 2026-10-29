@@ -2833,7 +2833,15 @@ All three delegate to `ReviewService.delete_connector`
     alone leaves the body optional). A shared body parameter
     (`#/parameters/Name` with `in: body`) is built once with the root
     `consumes` list; a path with an operation whose `consumes` differs
-    gets its own copy, so the body media type is kept. An array query
+    gets its own copy, so the body media type is kept. A path that
+    declares a body and has an operation with its own body also gets
+    the copies, so the operation's body replaces the path's by name and
+    place as Swagger 2.0 says (the library alone would count two bodies
+    and refuse the file). A path item that is only a reference to
+    another place in the same file (`$ref: "#/paths/~1widgets"`) is
+    replaced by a copy of what it points to before the conversion; the
+    library alone would write an empty path and drop its operations. A
+    reference that points nowhere is refused. An array query
     parameter with no `collectionFormat` keeps the Swagger 2.0 default,
     one comma-separated value (`ids=1,2`); the library alone would
     leave the OpenAPI 3 default, which repeats the name (`ids=1&ids=2`).

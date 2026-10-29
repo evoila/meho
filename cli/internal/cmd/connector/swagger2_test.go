@@ -793,3 +793,136 @@ func TestConvertSwagger2QueryArraysKeepCommaDefault(t *testing.T) {
 		}
 	}
 }
+
+// pathRefSwagger2YAML declares one path as a reference to another path in
+// the same file, and one path that references a path item kept under an
+// extension.
+const pathRefSwagger2YAML = `swagger: "2.0"
+info:
+  title: Widget API
+  version: "1"
+x-path-items:
+  gadget:
+    get:
+      operationId: listGadgets
+      responses:
+        200:
+          description: ok
+paths:
+  /widgets:
+    get:
+      operationId: listWidgets
+      responses:
+        200:
+          description: ok
+  /widgets-alias:
+    $ref: "#/paths/~1widgets"
+  /gadgets:
+    $ref: "#/x-path-items/gadget"
+    parameters:
+      - name: limit
+        in: query
+        type: integer
+`
+
+func TestConvertSwagger2ResolvesPathReferences(t *testing.T) {
+	out, conv, err := convertSwagger2([]byte(pathRefSwagger2YAML))
+	if err != nil {
+		t.Fatalf("convertSwagger2: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("converted output is not JSON: %v", err)
+	}
+	if conv.Paths != 3 || conv.Operations != 3 {
+		t.Errorf("summary = %+v, want 3 paths, 3 operations", conv)
+	}
+	for _, tc := range []struct{ path, opID string }{
+		{"/widgets", "listWidgets"},
+		{"/widgets-alias", "listWidgets"},
+		{"/gadgets", "listGadgets"},
+	} {
+		if got := dig(t, doc, "paths", tc.path, "get", "operationId"); got != tc.opID {
+			t.Errorf("%s: operationId = %v, want %s", tc.path, got, tc.opID)
+		}
+	}
+	params, _ := dig(t, doc, "paths", "/gadgets", "parameters").([]any)
+	if len(params) != 1 || dig(t, params[0], "name") != "limit" {
+		t.Errorf("/gadgets must keep its own parameters next to the reference; got %v", params)
+	}
+}
+
+func TestConvertSwagger2RefusesDanglingPathReference(t *testing.T) {
+	for name, tc := range map[string]struct{ ref, want string }{
+		"missing": {`"#/paths/~1nothing"`, "points to nothing"},
+		"loop":    {`"#/paths/~1loop"`, "loop"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			spec := "swagger: \"2.0\"\ninfo: {title: t, version: '1'}\npaths:\n  /loop:\n    $ref: " + tc.ref + "\n"
+			_, _, err := convertSwagger2([]byte(spec))
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "/loop") {
+				t.Fatalf("want an error naming the path and %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+// overriddenBodySwagger2YAML declares a shared body on a path and lets one
+// operation replace it with an inline body of the same name. No consumes
+// list differs, so the copy is needed only for the override.
+const overriddenBodySwagger2YAML = `swagger: "2.0"
+info:
+  title: Widget API
+  version: "1"
+consumes: [application/json]
+parameters:
+  Payload:
+    name: payload
+    in: body
+    required: true
+    schema:
+      type: object
+paths:
+  /widgets/{id}:
+    parameters:
+      - $ref: "#/parameters/Payload"
+    put:
+      operationId: replaceWidget
+      responses:
+        200:
+          description: replaced
+    patch:
+      operationId: patchWidget
+      parameters:
+        - name: payload
+          in: body
+          schema:
+            type: array
+            items:
+              type: string
+      responses:
+        200:
+          description: patched
+`
+
+func TestConvertSwagger2OperationBodyOverridesSharedPathBody(t *testing.T) {
+	out, _, err := convertSwagger2([]byte(overriddenBodySwagger2YAML))
+	if err != nil {
+		t.Fatalf("convertSwagger2: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("converted output is not JSON: %v", err)
+	}
+	put := dig(t, doc, "paths", "/widgets/{id}", "put", "requestBody").(map[string]any)
+	if dig(t, put, "required") != true || dig(t, put, "content", "application/json", "schema", "type") != "object" {
+		t.Errorf("put must keep the shared body; got %v", put)
+	}
+	patch := dig(t, doc, "paths", "/widgets/{id}", "patch", "requestBody").(map[string]any)
+	if _, required := patch["required"]; required {
+		t.Errorf("patch must use its own optional body; got %v", patch)
+	}
+	if dig(t, patch, "content", "application/json", "schema", "type") != "array" {
+		t.Errorf("patch must use its own schema; got %v", patch)
+	}
+}

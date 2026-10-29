@@ -4,13 +4,17 @@
 package connector
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"net/url"
 	"os"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/getkin/kin-openapi/openapi2"
@@ -103,6 +107,8 @@ func isSwagger2Version(v any) bool {
 		return n == 2
 	case int:
 		return n == 2
+	case json.Number:
+		return n.String() == "2" || n.String() == "2.0"
 	}
 	return false
 }
@@ -115,25 +121,38 @@ func convertSwagger2(content []byte) ([]byte, swagger2Conversion, error) {
 	if err != nil {
 		return nil, conv, fmt.Errorf("read document: %w", err)
 	}
+	// UseNumber keeps large numbers as written when the tree is written
+	// back below.
 	var tree any
-	if err := json.Unmarshal(asJSON, &tree); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(asJSON))
+	dec.UseNumber()
+	if err := dec.Decode(&tree); err != nil {
 		return nil, conv, fmt.Errorf("read document: %w", err)
 	}
-	if root, ok := tree.(map[string]any); ok && isSwagger2Version(root["swagger"]) {
-		if _, isText := root["swagger"].(string); !isText {
+	changed := false
+	if root, ok := tree.(map[string]any); ok {
+		if _, isText := root["swagger"].(string); !isText && isSwagger2Version(root["swagger"]) {
 			// An unquoted `swagger: 2.0` arrives as a number; the
 			// Swagger 2.0 reader wants the text "2.0".
 			root["swagger"] = "2.0"
-			if asJSON, err = json.Marshal(root); err != nil {
-				return nil, conv, fmt.Errorf("read document: %w", err)
-			}
+			changed = true
 		}
+		resolved, err := resolvePathRefs(root)
+		if err != nil {
+			return nil, conv, err
+		}
+		changed = changed || resolved
 	}
 	if ref, where, found := findExternalRef(tree, "#", false); found {
 		return nil, conv, fmt.Errorf(
 			"the reference %q at %s points to another file or a URL; MEHO reads one "+
 				"self-contained file and fetches nothing. Put the referenced definitions "+
 				"into this file, then try again", ref, where)
+	}
+	if changed {
+		if asJSON, err = json.Marshal(tree); err != nil {
+			return nil, conv, fmt.Errorf("read document: %w", err)
+		}
 	}
 	var doc2 openapi2.T
 	if err := doc2.UnmarshalJSON(asJSON); err != nil {
@@ -166,6 +185,101 @@ func convertSwagger2(content []byte) ([]byte, swagger2Conversion, error) {
 		conv.SecuritySchemes = len(doc3.Components.SecuritySchemes)
 	}
 	return out, conv, nil
+}
+
+// resolvePathRefs replaces each path item that references another place
+// in the same file (`$ref: "#/paths/~1widgets"`) with a copy of the
+// referenced object. The converter ignores a path item's $ref and writes
+// an empty path, so the operations would be lost. Swagger 2.0 leaves a
+// clash between the referenced object and the path item's own keys
+// undefined; here the path item's own keys win. A reference to another
+// file is left for findExternalRef to refuse. A reference that points
+// nowhere, or that runs in a loop, is refused with the path's name.
+func resolvePathRefs(root map[string]any) (bool, error) {
+	paths, _ := root["paths"].(map[string]any)
+	changed := false
+	for name, raw := range paths {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		ref, ok := item["$ref"].(string)
+		if !ok || !strings.HasPrefix(ref, "#") {
+			continue
+		}
+		target, err := followPathRef(root, ref)
+		if err != nil {
+			return false, fmt.Errorf("path %q: %w", name, err)
+		}
+		merged := maps.Clone(target)
+		for k, v := range item {
+			if k != "$ref" {
+				merged[k] = v
+			}
+		}
+		paths[name] = merged
+		changed = true
+	}
+	return changed, nil
+}
+
+// followPathRef returns the object a path item reference points to,
+// following a reference that points to another reference.
+func followPathRef(root map[string]any, ref string) (map[string]any, error) {
+	seen := map[string]bool{}
+	for {
+		if seen[ref] {
+			return nil, fmt.Errorf("the reference %q runs in a loop", ref)
+		}
+		seen[ref] = true
+		target, ok := lookupPointer(root, ref)
+		if !ok {
+			return nil, fmt.Errorf("the reference %q points to nothing in this file", ref)
+		}
+		next, isRef := target["$ref"].(string)
+		if !isRef {
+			return target, nil
+		}
+		if !strings.HasPrefix(next, "#") {
+			return nil, fmt.Errorf("the reference %q points to %q, which is another file or a URL", ref, next)
+		}
+		ref = next
+	}
+}
+
+// lookupPointer resolves a JSON pointer in a URI fragment ("#/a/b~1c")
+// against the decoded document and returns the object it names.
+func lookupPointer(root map[string]any, ref string) (map[string]any, bool) {
+	pointer, err := url.PathUnescape(strings.TrimPrefix(ref, "#"))
+	if err != nil {
+		return nil, false
+	}
+	if pointer == "" {
+		return root, true
+	}
+	if !strings.HasPrefix(pointer, "/") {
+		return nil, false
+	}
+	var node any = root
+	for _, step := range strings.Split(pointer[1:], "/") {
+		step = pointerUnescaper.Replace(step)
+		switch v := node.(type) {
+		case map[string]any:
+			if node = v[step]; node == nil {
+				return nil, false
+			}
+		case []any:
+			i, err := strconv.Atoi(step)
+			if err != nil || i < 0 || i >= len(v) {
+				return nil, false
+			}
+			node = v[i]
+		default:
+			return nil, false
+		}
+	}
+	target, ok := node.(map[string]any)
+	return target, ok
 }
 
 // inheritRootProduces copies the document's `produces` list to every
@@ -217,18 +331,27 @@ func inlineSharedResponses(doc2 *openapi2.T) {
 }
 
 // inlineSharedBodies copies a shared body parameter (`#/parameters/Name`
-// with `in: body`) into every path that has an operation with its own
-// `consumes` list that differs from the root list. The converter builds a
-// shared body once, with the root list, and an operation keeps only a
-// reference to it; an operation that accepts another media type would
-// then still say it accepts the root's. The copy replaces the reference
-// in the path's own parameters and in all of the path's operations,
-// because an operation overrides a path-level parameter only when both
-// are written the same way. A path whose operations all accept the root
-// list keeps the references.
+// with `in: body`) into every path that needs its own copy. The copy
+// replaces the reference in the path's own parameters and in all of the
+// path's operations. A path needs it in two cases:
+//
+//   - An operation has its own `consumes` list that differs from the
+//     root list. The converter builds a shared body once, with the root
+//     list, and an operation keeps only a reference to it; an operation
+//     that accepts another media type would then still say it accepts
+//     the root's.
+//   - The path declares a body and an operation declares its own body.
+//     Swagger 2.0 lets the operation's body replace the path's when both
+//     have the same name and place, but the converter sees an override
+//     only when both are written the same way. A reference next to an
+//     inline body would count as two bodies, and the converter would
+//     refuse a valid file. With the copies in place, both are inline and
+//     are matched by name and place.
+//
+// Any other path keeps the references.
 func inlineSharedBodies(doc2 *openapi2.T) {
 	for _, item := range doc2.Paths {
-		if !hasOwnConsumes(item, doc2.Consumes) {
+		if !hasOwnConsumes(item, doc2.Consumes) && !overridesPathBody(item, doc2.Parameters) {
 			continue
 		}
 		copySharedBodies(item.Parameters, doc2.Parameters)
@@ -236,6 +359,29 @@ func inlineSharedBodies(doc2 *openapi2.T) {
 			copySharedBodies(op.Parameters, doc2.Parameters)
 		}
 	}
+}
+
+// overridesPathBody reports whether the path declares a body parameter
+// and one of its operations declares a body parameter of its own.
+func overridesPathBody(item *openapi2.PathItem, shared map[string]*openapi2.Parameter) bool {
+	if !slices.ContainsFunc(item.Parameters, func(p *openapi2.Parameter) bool { return isBodyParam(p, shared) }) {
+		return false
+	}
+	for _, op := range item.Operations() {
+		if slices.ContainsFunc(op.Parameters, func(p *openapi2.Parameter) bool { return isBodyParam(p, shared) }) {
+			return true
+		}
+	}
+	return false
+}
+
+// isBodyParam reports whether a parameter, inline or shared, is `in: body`.
+func isBodyParam(param *openapi2.Parameter, shared map[string]*openapi2.Parameter) bool {
+	if name, isShared := strings.CutPrefix(param.Ref, "#/parameters/"); isShared {
+		def, ok := shared[name]
+		return ok && def.In == "body"
+	}
+	return param.In == "body"
 }
 
 // hasOwnConsumes reports whether an operation of the path declares a
@@ -396,6 +542,8 @@ func printSwagger2Conversions(w io.Writer, convs []swagger2Conversion, savedTo s
 }
 
 var pointerEscaper = strings.NewReplacer("~", "~0", "/", "~1")
+
+var pointerUnescaper = strings.NewReplacer("~1", "/", "~0", "~")
 
 // dataKeys are the Swagger 2.0 keys whose value is free data, not spec
 // objects, so a "$ref" key inside them is not a reference.

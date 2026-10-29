@@ -4012,6 +4012,56 @@ waits for approval; the shelf-gated lane checks every rule against the
 pinned `vcenter.yaml` and `vi-json.yaml` files) and `test_delete_names.py`
 (the vSAN prefixes and the `action=delete` query).
 
+### Older-API VM power, clone, snapshot and migrate calls wait for approval (#3869)
+
+These generic calls on the older vCenter API (VI-JSON) now wait until a
+second person approves. VI-JSON sends every method as a `POST` to
+`/<Type>/{moId}/<Method>`, so the parser gave them `caution` without
+approval, and a person's call ran at once. The typed operations for the
+same work (`vm.power`, `vm.power.bulk`, `vm.clone`, `vm.snapshot.revert`,
+`vm.snapshot.create`, `vm.migrate`) already waited.
+
+`ingest_safety.py` raises them on the 8.0 and 9.0 catalogs:
+
+| What it does | Methods | Risk level |
+|---|---|---|
+| Power a VM on, off, reset, suspend; shut down, restart or put the guest on standby | `VirtualMachine`: `PowerOnVM_Task`, `PowerOffVM_Task`, `ResetVM_Task`, `SuspendVM_Task`, `ShutdownGuest`, `RebootGuest`, `StandbyGuest` | `dangerous`, waits for approval |
+| Stop a VM process at once; stop a fault-tolerance secondary VM | `VirtualMachine`: `TerminateVM`, `TerminateFaultTolerantVM_Task` | `dangerous`, waits for approval |
+| Power on many VMs; power a vApp; start or stop the VMs of a host in autostart order | `Datacenter.PowerOnMultiVM_Task`; `VirtualApp`: `PowerOnVApp_Task`, `PowerOffVApp_Task`, `SuspendVApp_Task`; `HostAutoStartManager`: `AutoStartPowerOn`, `AutoStartPowerOff` | `dangerous`, waits for approval |
+| Clone a VM or a vApp | `VirtualMachine`: `CloneVM_Task`, `InstantClone_Task`; `VirtualApp.CloneVApp_Task` | `dangerous`, waits for approval |
+| Go back to a snapshot | `VirtualMachine.RevertToCurrentSnapshot_Task`, `VirtualMachineSnapshot.RevertToSnapshot_Task` | `dangerous`, waits for approval |
+| Move a VM to another host or pool | `VirtualMachine.MigrateVM_Task` | `dangerous`, waits for approval |
+| Take a snapshot | `VirtualMachine`: `CreateSnapshot_Task`, `CreateSnapshotEx_Task` | stays `caution`, waits for approval |
+
+The lists are `VMWARE_VIM_VM_STATE_WRITES` (checked by
+`is_vmware_vim_vm_state_write`) and `VMWARE_VIM_SNAPSHOT_CREATES` (checked
+by `is_vmware_vim_snapshot_create`). A rule matches with or without the
+`/api` mount and with any spelling of the path parameter; a path with a
+query does not match. A floor only raises a level; a row that is already
+`destructive` stays `destructive`. The snapshot create stays `caution`,
+like the typed `vm.snapshot.create`: a new snapshot does not change the
+running VM. `RelocateVM_Task` has its own rule (#4749). The snapshot
+removals (`RemoveSnapshot_Task`, `RemoveAllSnapshots_Task`) are deletes, so
+the parser's delete-name rule already makes them wait. Checks such as
+`CheckPowerOn_Task` and `CheckClone_Task` keep their level.
+
+**One approval is enough.** Typed operations that use these methods (for
+example `vm.snapshot.create`, `vm.snapshot.revert` and
+`vm.clone_from_template`) send them as governed sub-steps with the shared
+sub-op posture (an in-memory descriptor). The raised generic rows do not reach that gate, so a typed
+operation still waits for one approval only.
+
+**Running installs.** Rows already in the database change only on the next
+ingest. To get the new levels, run the catalog ingest again for `vmware/9.0`
+and `vmware/8.0` (the same `--spec` ingest of `vi-json.yaml` the install
+used before).
+
+Tests: `test_connectors_vmware_rest_vim_vm_state_approval.py` (a hand-made
+spec for 8.0 and 9.0, the checks that keep their level, no rule lowers a
+level, a person's `TerminateVM` and `CreateSnapshot_Task` calls wait for
+approval; the shelf-gated lane checks every rule against the pinned 9.0
+`vi-json.yaml`).
+
 ### Alarms: list, acknowledge, reset to green (`#4383`, part 1)
 
 What an operator or agent can do now, through MEHO:

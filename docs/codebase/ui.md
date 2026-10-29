@@ -3331,7 +3331,16 @@ have no service-principal registry, so their stored subject is shown directly;
 concrete target UUIDs resolve through the tenant-scoped target resolver and
 unresolved or selector scopes remain explicit. All writes are CSRF-gated and
 call the existing grant services in-process, preserving their validation,
-tenant isolation, and audit behavior. Principal, expiry, and service-revoked
+tenant isolation, and audit behavior. When the server refuses the "Issue
+grant" form, it answers 422 and draws the form again with the typed values.
+Each refused field shows its message next to the field. The schema names
+`op_id` and `op_pattern` show at the form's `op` field. An error that belongs
+to no single field (for example a target UUID together with a selector, or a
+grant-service rule such as the sandbox-mode 30-day limit) shows at the top of
+the form. An error key with no place on the form also goes to the top, so a
+refused form is never silent. The agent grant service puts the field name in
+its message (for example a wrong target scope), so that message shows next to
+its field, the same way as on the agent-grants page. Principal, expiry, and service-revoked
 history filters remain explicit; each table paginates independently so moving
 through service history never changes the agent cursor. The agent section
 opens the established human-only elevation modal, including its required

@@ -400,10 +400,11 @@ async def provider_role_delete(
 ) -> dict[str, Any]:
     """``vcfa.provider.role.delete`` — ``DELETE /cloudapi/1.0.0/globalRoles/{id}``.
 
-    Resolves the role by name first. An exact name match wins; when
-    several roles match the name only case-insensitively, the call answers
-    ``invalid_request`` and nothing is sent. A missing role (or a ``404`` on the
-    delete) answers ``unchanged``, so a second run is safe. A built-in
+    Resolves the role by its exact name first; a role whose name differs
+    by case alone is never taken. When several roles carry exactly that
+    name, the call answers ``invalid_request`` and nothing is sent. A
+    missing role (or a ``404`` on the delete) answers ``unchanged``, so a
+    second run is safe and cannot take a second role. A built-in
     (``readOnly``) role answers ``invalid_request`` and nothing is sent. A
     role the appliance will not delete (for example one that users still
     hold) raises the upstream 4xx, which the dispatcher maps to

@@ -171,16 +171,17 @@ lookups in `_lookups.py`, paths in `_paths.py`, and park-time previews in
   takes one of them. `role.delete` removes a global role nobody needs: a
   missing role (or a `404` on the delete) is `unchanged`, a built-in
   (`readOnly`) role is `invalid_request` with nothing sent, and a refused
-  delete (for example a role users still hold) is a `connector_error`. An
-  exact name match wins; when several roles match the name only
-  case-insensitively, the call is `invalid_request` with nothing sent. Its
+  delete (for example a role users still hold) is a `connector_error`. Only
+  an exact name match counts (case matters), so a repeated delete cannot
+  take a role that differs by case alone; when several roles carry exactly
+  that name, the call is `invalid_request` with nothing sent. Its
   approval card reads the role once with the same rules
   (`would: delete | unchanged | refuse_built_in | refuse_ambiguous_name`).
 - **Errors.** Upstream 4xx/5xx raise and
   the dispatcher maps them (`connector_error` / `connector_http_403` with
   `upstream_message`); a rejected login is `connector_auth_failed`.
 - **Name lookups** use the FIQL `filter` (`name==<v>`), compared
-  case-insensitively; a value containing a FIQL-reserved character
+  case-insensitively (`role.delete` is the exception: exact name only); a value containing a FIQL-reserved character
   (`,;()*=!<>` or a quote — e.g. "Org Admin (API token)") is matched by
   paging the full list (the `go-vcloud-director`
   fallback). Org scoping uses the `X-VMWARE-VCLOUD-TENANT-CONTEXT` (org

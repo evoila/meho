@@ -27,9 +27,9 @@ generic params echo, so the bespoke builder is their only preview;
 deployment once so the approver sees its name and project, not only an id.
 ``vcfa.provider.role.delete`` reads the role once, with the same rules as
 the call, so the approver sees ``would: "delete"``, ``"unchanged"`` (no
-such role), ``"refuse_built_in"`` (a ``readOnly`` role) or
-``"refuse_ambiguous_name"`` (several roles match the name only
-case-insensitively).
+such role with exactly that name), ``"refuse_built_in"`` (a ``readOnly``
+role) or ``"refuse_ambiguous_name"`` (several roles carry exactly that
+name).
 """
 
 from __future__ import annotations

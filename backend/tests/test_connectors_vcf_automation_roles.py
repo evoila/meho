@@ -24,7 +24,9 @@ from collections.abc import AsyncIterator, Iterator
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
+from urllib.parse import unquote
 
+import httpx
 import pytest
 import respx
 
@@ -323,7 +325,35 @@ async def test_role_delete_picks_the_exact_name_match(vcfa: VcfAutomationConnect
     assert not other.called
 
 
-async def test_role_delete_refuses_a_name_with_no_single_exact_match(
+async def test_role_delete_repeated_leaves_the_case_twin_alone(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    """The second run of the same delete must not take the role that differs by case."""
+    roles = list(_CASE_TWINS)
+
+    def _list(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=page(roles))
+
+    def _delete(request: httpx.Request) -> httpx.Response:
+        role_id = unquote(request.url.path.rsplit("/", 1)[-1])
+        roles[:] = [r for r in roles if r["id"] != role_id]
+        return httpx.Response(204)
+
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(_GLOBAL_ROLES).mock(side_effect=_list)
+        delete = mock.delete(url__regex=r".*/globalRoles/.*").mock(side_effect=_delete)
+        first = await run("vcfa.provider.role.delete", {"name": "custom org admin"})
+        second = await run("vcfa.provider.role.delete", {"name": "custom org admin"})
+    assert first["result"]["status"] == "deleted", first
+    assert first["result"]["role"]["id"] == "urn:vcloud:globalRole:d"
+    assert second["result"]["status"] == "unchanged", second
+    assert second["result"]["role"] is None
+    assert delete.call_count == 1
+    assert roles == [_CUSTOM_ROLE]
+
+
+async def test_role_delete_never_takes_a_role_that_differs_only_by_case(
     vcfa: VcfAutomationConnector,
 ) -> None:
     builder = _PREVIEW_BUILDERS["vcfa.provider.role.delete"]
@@ -339,6 +369,40 @@ async def test_role_delete_refuses_a_name_with_no_single_exact_match(
         mock.get(_GLOBAL_ROLES).mock(side_effect=by_filter({"name==CUSTOM ORG ADMIN": _CASE_TWINS}))
         delete = mock.delete(url__regex=r".*/globalRoles/.*").respond(204)
         result = await run("vcfa.provider.role.delete", {"name": "CUSTOM ORG ADMIN"})
+        preview = await builder(ctx)
+    out = result["result"]
+    assert out["status"] == "unchanged", out
+    assert out["role"] is None
+    assert not delete.called
+    assert preview["would"] == "unchanged", preview
+    assert preview["exists"] is False
+
+
+#: Two roles that carry exactly the same name.
+_EXACT_TWINS = [
+    _CUSTOM_ROLE,
+    {"id": "urn:vcloud:globalRole:e", "name": "Custom Org Admin", "readOnly": False},
+]
+
+
+async def test_role_delete_refuses_a_name_shared_by_two_roles(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    builder = _PREVIEW_BUILDERS["vcfa.provider.role.delete"]
+    target = await resolved_target()
+    ctx = SimpleNamespace(
+        connector_instance=vcfa,
+        operator=OPERATOR,
+        target=target,
+        params={"name": "Custom Org Admin"},
+    )
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(_GLOBAL_ROLES).mock(
+            side_effect=by_filter({"name==Custom Org Admin": _EXACT_TWINS})
+        )
+        delete = mock.delete(url__regex=r".*/globalRoles/.*").respond(204)
+        result = await run("vcfa.provider.role.delete", {"name": "Custom Org Admin"})
         preview = await builder(ctx)
     out = result["result"]
     assert out["status"] == "invalid_request", out

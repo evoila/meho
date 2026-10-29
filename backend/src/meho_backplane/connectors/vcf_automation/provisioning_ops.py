@@ -560,10 +560,10 @@ _ROLE_DELETE = VcfaTypedOp(
     path=PROVIDER_GLOBAL_ROLE_PATH,
     summary="Delete a custom VCF Automation global role by name; safe to run twice.",
     description=(
-        "Finds the global role by name and deletes it with DELETE "
-        "/cloudapi/1.0.0/globalRoles/{id}. A role that does not exist answers "
-        "'unchanged'. A built-in role is refused and nothing is sent. When several "
-        "roles match the name only by case, the call is refused; use the exact name."
+        "Finds the global role by its exact name (case matters) and deletes it "
+        "with DELETE /cloudapi/1.0.0/globalRoles/{id}. A role that does not exist "
+        "answers 'unchanged'. A built-in role is refused and nothing is sent. When "
+        "several roles carry exactly that name, the call is refused."
     ),
     parameter_schema={
         "type": "object",

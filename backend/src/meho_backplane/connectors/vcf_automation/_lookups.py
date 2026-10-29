@@ -186,28 +186,24 @@ async def find_global_role_to_delete(
     operator: Operator,
     name: str,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """The one global role a delete of *name* targets, or why the delete must stop.
+    """The one global role named exactly *name*, or why the delete must stop.
 
-    Returns ``(role, None)`` for one match, ``(None, None)`` for no match,
-    and ``(None, reason)`` when more than one role matches the name
-    case-insensitively and not exactly one of them matches it exactly. A
-    delete must never guess between two roles.
+    Only an exact name match counts. A role whose name differs by case alone
+    is never taken, so repeating a delete cannot remove a second role once
+    the exact match is gone. Returns ``(role, None)`` for one match,
+    ``(None, None)`` for no match, and ``(None, reason)`` when several roles
+    carry exactly this name. A delete must never guess between two roles.
     """
     params = {"filter": f"name=={name}"} if fiql_safe(name) else None
-    wanted = name.casefold()
     rows = await list_all(connector, target, operator, PROVIDER_GLOBAL_ROLES_PATH, params=params)
-    matches = [
-        row for row in rows if isinstance(row.get("name"), str) and row["name"].casefold() == wanted
-    ]
-    if len(matches) <= 1:
-        return (matches[0] if matches else None), None
-    exact = [row for row in matches if row["name"] == name]
+    exact = [row for row in rows if row.get("name") == name]
     if len(exact) == 1:
         return exact[0], None
-    names = sorted(str(row["name"]) for row in matches)
+    if not exact:
+        return None, None
     return None, (
-        f"{len(matches)} global roles match the name {name!r} ({', '.join(names)}); "
-        "nothing was deleted. Run again with the exact name of one role."
+        f"{len(exact)} global roles are named {name!r}; nothing was deleted. "
+        "Remove the duplicate in the VCF Automation console first."
     )
 
 

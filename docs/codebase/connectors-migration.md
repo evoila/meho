@@ -14,9 +14,13 @@ The first part, in this package today:
   merges them (`inventory_load.py`).
 - **The Azure Migrate CSV mapping** (`azure_migrate_csv.py`) and the
   read `migration.inventory.csv` (`ops.py`).
+- **The source adapters**: one multi-step read per source connector that
+  collects the estate into the inventory shape (`source_*.py`, shared parts
+  in `adapter_kit.py`, registrar in `source_register.py`).
 
-The source adapters live with their connectors. The first one is the VMware
-read `vmware.migration.inventory` (see "VMware source adapter" below).
+The VMware read `vmware.migration.inventory` lives with the vCenter
+connector (see "VMware source adapter" below). The other adapters are in
+this package (see "Source adapters" below).
 
 Like `connectors/audit/`, the package has no connector class. Its
 operations are registered under the natural key
@@ -128,11 +132,20 @@ handle_ids)`:
 3. Decodes and checks each record in a worker thread
    (`asyncio.to_thread`), because a stored result can be several MB.
 4. Merges the envelopes in handle order (`merge_inventories`). A handle
-   given twice is read once. A repeated `source_id`, or a server whose BIOS
-   UUID was already seen, stays in `records` and is listed in
-   `duplicates`; the caller decides what that means. A repeated record's
-   BIOS UUID still counts, so a machine whose first record had no BIOS
-   UUID is still matched to a later record from another source.
+   given twice is read once. A repeated `source_id`, or a server that
+   shares a BIOS UUID or an instance UUID with another record, stays in
+   `records` and is listed in `duplicates`; the caller decides what that
+   means. The match comes from `IdentityIndex` in `contracts.py`, which
+   the VMware adapter uses too, so `same_as` always names the first record
+   of the machine, also through a chain of matches. A BIOS UUID matches
+   in both forms a machine reports it: as the hypervisor shows it, and as
+   the guest OS shows it with the bytes of the first three groups
+   reversed (newer firmware tables keep them that way; a VMware VM from
+   hardware version 13 on, for example). `bios_uuid_match_key` turns both
+   forms into one key, so a Kubernetes node or a host read inside its OS
+   still matches its VM record. A repeated record's BIOS UUID still
+   counts, so a machine whose first record had no BIOS UUID is still
+   matched to a later record from another source.
 
 ### `migration.inventory.csv`
 
@@ -181,6 +194,124 @@ The mapping (`inventory_to_csv`):
   with `cleaned_text`.
 - Line ends are CRLF (RFC 4180); `LINE_END` in `azure_migrate_csv.py`.
   The file has no byte order mark.
+
+### Source adapters
+
+One multi-step read per source, registered on the source's own connector
+(not on `migration-assess-1.x`), group `migration`, `safe`,
+`requires_approval: false` on purpose:
+
+| Op | Connector | Records | Module |
+|---|---|---|---|
+| `hyperv.migration.inventory` | `hyperv-ssh-2022.x` | one server per VM | `source_hyperv.py` |
+| `proxmox.migration.inventory` | `proxmox-api-8.x` | one server per QEMU VM | `source_proxmox.py` |
+| `linux.migration.inventory` | `linux-ssh-1.x` | one server: the host | `source_hosts.py` |
+| `winsrv.migration.inventory` | `winsrv-ssh-2022.x` | one server: the host | `source_hosts.py` |
+| `k8s.migration.inventory` | `k8s-1.x` | one server per node, one workload per Deployment / StatefulSet / DaemonSet | `source_k8s.py` |
+
+How every adapter works (`adapter_kit.py`):
+
+1. It reads the source only through its connector's own operations, as
+   child calls (`dispatch_child`). Each child call has its own audit row,
+   linked to the adapter's row. `read_child` takes the child's **full**
+   answer from the dispatcher's capture (`full_result_capture_var`, the
+   same seam the sensor runner uses), because a large child answer reaches
+   the parent only as a summary plus a handle. At most four child reads run
+   at a time.
+2. A failed child read is an omission with a reason (`no_permission` when
+   the child was denied, `collection_failed` otherwise). The item stays in
+   the inventory with the affected fields unknown. Only an item that cannot
+   be a record at all (a Proxmox template, a node without a name) is left
+   out; it is counted in `left_out_items`.
+3. `record_with_reasons` gives every null field without a special reason
+   the default reason `not_reported_by_source`. Fields MEHO does not read
+   for a source are `not_supported`; measurements are `not_measured`.
+4. The inventory is **always stored**, also when it is small, as a
+   document record of the result handle store (the record kind the
+   JSONFlux reducer writes for a large single object, one hour). The answer
+   is short: `inventory_handle`, `expires_at`, `connector_id`, `target`,
+   `collected_at`, `record_counts`, `source_totals`, `left_out_items`,
+   `counts_match`, `omission_count`, `omissions`. So every adapter answer
+   has a handle `migration.inventory.csv` can read, and `result_query`
+   reads the records (path `/records`). When the `omissions` list makes
+   the answer larger than the inline limit (4 KB), the reducer stores the
+   omissions as rows. The three count dicts are then kept by a
+   `result_objects` hint: inline (every kind listed, a kind without a
+   value is null) and whole with the rows, so `result_query` with path
+   `/source_totals` reads them back.
+5. `counts_match` is true only when the source's own total was read in
+   full for every kind the source counts, and records plus left-out items
+   equal it. A total that was not read, or was read only in part (an
+   offline Proxmox node, a denied or failed workload list), gives `false`
+   and no entry in `source_totals`: the inventory was not checked, which
+   is not the same as a match.
+6. A BIOS UUID is an identity hint only when it can name one machine.
+   `usable_bios_uuid` drops a placeholder (all zero or all `f`, which
+   firmware without a serial reports) and anything that is not a UUID.
+   Two machines with the same placeholder stay two records.
+7. Every adapter fills the disk flags the readiness check reads where the
+   platform defines them. Hyper-V and Proxmox never leave a disk out of a
+   snapshot, so `independent` is `false` on every disk there. The host
+   adapters see a machine from inside its OS, where snapshots and the
+   hypervisor's disk settings are not visible (`not_supported`); for a VM,
+   read it through its hypervisor's adapter to get them.
+
+Per source:
+
+- **Hyper-V.** `hyperv.vms.list` (the source total), `hyperv.vms.guest.list`
+  (BIOS GUID and guest OS from the integration services), and per VM
+  `hyperv.vms.config`, `hyperv.disks.vm.list`, `hyperv.disks.vhd.get` per
+  disk, `hyperv.checkpoints.list`. `source_id` is `hyperv:<VM id>`; the VM
+  id stays the same when a VM moves between cluster nodes, so reading every
+  node and merging finds each VM once. Generation 1 is BIOS, generation 2 is
+  UEFI. Configured memory is the startup memory; assigned memory is what
+  the VM has now (it differs with dynamic memory; unknown when off). Disk
+  size is the VHDX size, used space is the file size on the host, a shared
+  disk is `SupportPersistentReservations`, a pass-through physical disk is
+  a raw mapping. Checkpoints count as snapshots; a checkpoint always takes
+  every virtual hard disk, so no disk is `independent`.
+  Hyper-V allows two VMs with the same name, and the per-VM reads find a VM
+  by name, so for a repeated name those reads are skipped (`not_supported`).
+- **Proxmox VE.** Only `proxmox.api.get`: `nodes`, `nodes/{node}/qemu`,
+  each VM's `config` and `snapshot`, and for a running VM with the guest
+  agent on, `agent/get-osinfo`. Cores are cores times sockets. `ovmf` is
+  UEFI; Secure Boot is on when the EFI disk has `pre-enrolled-keys=1`.
+  The SMBIOS `uuid` and the network cards' MAC addresses are identity
+  hints. A snapshot always takes every disk, so no disk is `independent`.
+  Templates are counted and left out. A node that is not online, or whose
+  VM list fails, makes the VM total unknown (`counts_match` false).
+  `source_id` is `proxmox:<target>:<vmid>`.
+- **Linux host.** `linux.about` and `linux.file.read` of
+  `/sys/devices/system/cpu/online` (cores), `/proc/meminfo` (`MemTotal`,
+  a little less than the installed memory), `/proc/partitions` (whole
+  disks), `/sys/firmware/efi` (exists only on UEFI; a BIOS host gets
+  `secure_boot` `false`, a UEFI host `not_supported`),
+  `/sys/class/dmi/id/product_uuid` (root only; empty without root, so
+  `no_permission`), `sys_vendor` / `product_name` (a known hypervisor
+  name makes it `virtual`), `/etc/machine-id` (the stable `source_id`).
+- **Windows Server host.** `winsrv.system.os-info`,
+  `winsrv.system.hardware`, `winsrv.storage.disk.list`. `source_id` is the
+  product UUID, or the host name when the UUID is missing or a placeholder.
+  BIOS firmware cannot have Secure Boot, so `secure_boot` is `false` there.
+  On UEFI it is the read value, or unknown when the read gave none (it
+  needs admin rights).
+- **Kubernetes.** `k8s.node.list` (one server per node, with
+  `system_uuid` as BIOS UUID and the node capacity), `k8s.workload.list`
+  for each kind, all namespaces, page by page (at most 40 pages of 500),
+  `k8s.persistentvolumeclaim.list` (claim sizes), and per workload
+  `k8s.pod.list` with its `pod_selector`, page by page. A workload's
+  `nodes` holds the `source_id` of its nodes' records, so workloads link
+  to nodes. When a later page of a list fails, the rows of the earlier
+  pages are kept and an omission names the rest ("... after the first
+  500"); for a workload list the kind's total is then unknown. CPU and
+  memory are sums over the containers per replica, given only when every
+  container sets the value. The containers include the sidecars (init
+  containers with `restartPolicy: Always`), because they run next to the
+  app for the life of the pod. A node that is a VM has the VM's BIOS UUID, so
+  the merge lists it as a duplicate of the VM record, also when the node
+  shows the UUID with the bytes of the first three groups reversed. One
+  UUID reported by two nodes of the cluster cannot name one machine, so
+  both nodes get none and an omission says so.
 
 ### VMware source adapter: `vmware.migration.inventory`
 
@@ -242,10 +373,11 @@ The record, from the VM's properties:
 A property vCenter refuses (`NoPermission`) makes its field unknown with the
 reason `no_permission`.
 
-**The BIOS UUID form.** Every source adapter stores the BIOS UUID in the form
+**The BIOS UUID form.** The VMware adapter stores the BIOS UUID in the form
 the guest OS reports it (`dmidecode`, Windows WMI), lower case. That is the
 common form, because a read inside the guest cannot know the VM's hardware
-version. From virtual hardware version 13 on, the VM's firmware reports SMBIOS
+version. (The loader matches a BIOS UUID in both forms anyway, see
+`bios_uuid_match_key`.) From virtual hardware version 13 on, the VM's firmware reports SMBIOS
 2.7, and the guest shows the first three groups of the UUID with their bytes
 reversed against vCenter's `config.uuid` (vendor article 53609): vCenter's
 `4201aaaa-0000-4000-...` is `aaaa0142-0000-0040-...` in the guest. So
@@ -314,6 +446,19 @@ the stored result.
 
 ## Tests
 
+`backend/tests/test_migration_source_adapters.py` runs each adapter with a
+fake `dispatch_child` and made-up child answers, stores the inventory in an
+in-memory result store, and reads it back through the loader. It covers
+failed and denied child reads, the counts check (also when a total could
+not be read in full), a VM name used twice, a shortened child answer, a
+Kubernetes node that matches a Hyper-V VM, a node that matches a VMware VM
+whose UUID it reports with reversed bytes, placeholder and shared BIOS
+UUIDs, a failed second page, pod paging, and the count dicts read back
+from the handle of a long answer.
+`backend/tests/test_migration_source_reads.py` covers the reads added for
+the adapters (`hyperv.vms.guest.list`, `winsrv.system.hardware`,
+`k8s.workload.list`, and the new `k8s.node.list` fields).
+
 `backend/tests/test_migration_contracts.py` pins the shapes with made-up
 fixtures: a Windows VM with three disks, a Linux VM with no utilization,
 the same Linux machine read through its guest OS (same BIOS UUID), a
@@ -325,20 +470,22 @@ header, column for column.
 
 ## Known issues
 
-- Only handles are accepted. An inventory small enough to come back inline
-  has no handle yet; the inventory reads of the later work decide how they
-  store their result.
+- Only handles are accepted. The source adapters always store their
+  inventory, so this holds for them.
+- Hyper-V reads one host. A cluster is read node by node; the VM id merges
+  the results.
+- A bare-metal Kubernetes node has no disk, firmware or boot data; only the
+  OS and capacity from the node object.
+- Disk speeds and utilization are not read by the adapters of this package
+  yet (`not_measured`), so sizing from these inventories is "allocated".
 - The VCF Operations source gives only the latest values, not a history
   window. A history read of VCF Operations would need a new operation of
   that connector.
 - The VMware adapter reads vCenter targets. A standalone ESXi host is not
   covered.
-- Duplicate servers are matched by exact BIOS UUID or instance UUID. The
-  common form of the BIOS UUID is the one the guest reports (see "The BIOS
-  UUID form" above). The vCenter adapter converts to it from the hardware
-  version; a source adapter that reads inside the guest stores the value as
-  the guest shows it, lower case. A vCenter VM whose hardware version cannot
-  be read keeps vCenter's form and may then not match its guest record.
+- Duplicate servers are matched by BIOS UUID, in its two byte orders, or by
+  exact instance UUID. A record keeps the UUID text as its source reported
+  it; only the match key is shared.
 - `net.received.average` and `net.transmitted.average` are not in vCenter's
   default statistics level 1, so network in and out are often unknown.
 

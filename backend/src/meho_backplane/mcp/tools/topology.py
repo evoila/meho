@@ -123,9 +123,10 @@ from meho_backplane.mcp.server import (
     McpPermissionDeniedError,
 )
 from meho_backplane.mcp.tools._topology_answer import COMPLETENESS_SCHEMA, bounded_answer
-from meho_backplane.operations._lookup import parse_connector_id
+from meho_backplane.operations._lookup import connector_product_known, parse_connector_id
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.operations.meta_tools import UnknownConnectorError
 from meho_backplane.settings import get_settings
 from meho_backplane.topology.evidence import (
     FRESHNESS_COPY,
@@ -1548,7 +1549,10 @@ async def _list_targets_handler(
     ``connector_id`` is canonicalised through
     :func:`~meho_backplane.operations._lookup.parse_connector_id` and
     only its product component drives a ``TargetORM.product`` exact-match
-    filter (targets carry a product slug, not a connector id).
+    filter (targets carry a product slug, not a connector id). When that
+    filter finds nothing and no connector the caller can see has the
+    product, the id is wrong: the answer is the unknown-connector
+    ``-32602`` with close ids, not an empty list (#4136).
 
     Soft-deleted targets (``deleted_at IS NOT NULL``, G0.14-T4 #1145)
     are excluded — same filter the REST list route applies so MCP and
@@ -1603,6 +1607,9 @@ async def _list_targets_handler(
         result = await session.execute(stmt)
         rows = result.all()
 
+    if not rows and connector_id:
+        await _reject_unknown_connector(scope_tenant_id, connector_id)
+
     targets = [
         {
             "id": str(t.id),
@@ -1617,6 +1624,23 @@ async def _list_targets_handler(
     # name as the keyset cursor. A short page is definitively the end.
     next_cursor = targets[-1]["name"] if len(targets) == limit else None
     return await _reduce_target_page(operator, {"targets": targets, "next_cursor": next_cursor})
+
+
+async def _reject_unknown_connector(tenant_id: uuid.UUID, connector_id: str) -> None:
+    """Raise the unknown-connector ``-32602`` when no visible connector has the id's product.
+
+    Runs only when the ``connector_id`` filter found no target (#4136).
+    Without it, a wrong id such as ``vmware-rest`` (product
+    ``vmware-rest``, which no target has) came back as an empty list with
+    no warning. A known product with no targets still returns the empty
+    list. The error is the one ``search_operations`` raises, with the
+    close ids the caller can see.
+    """
+    product, _version, _impl_id = parse_connector_id(connector_id)
+    if await connector_product_known(tenant_id=tenant_id, product=product):
+        return
+    exc = await UnknownConnectorError.for_caller(tenant_id=tenant_id, connector_id=connector_id)
+    raise McpInvalidParamsError(f"list_targets: {exc}", data=exc.as_error_data())
 
 
 async def _reduce_target_page(operator: Operator, page: dict[str, Any]) -> dict[str, Any]:

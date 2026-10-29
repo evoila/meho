@@ -7,7 +7,12 @@
 .github/workflows/chart.yml:generic-api-key:300
 backend/tests/test_chart_core_secrets.py:generic-api-key:65
 #
-# The example certificate thumbprint in the Entra ID test fixture. It is
-# the base64 form of a placeholder word, not a credential. Same case as
-# above: every merge commit that brings the fixture in from main hits it.
+# The example certificate thumbprint in the Entra ID test fixtures. It is
+# base64 for the words "EXAMPLETHUMBPRINT", not a credential. The hook sees
+# it in every merge commit that brings the fixtures in from main.
 backend/tests/_entra_fixtures.py:generic-api-key:217
+#
+# The placeholder account key in the Azure storage tests. It is base64 for
+# the words "fake-account-key-for-tests-only", not a credential. The hook
+# sees it in every merge commit that brings the test in from main.
+backend/tests/test_connectors_azure_storage.py:generic-api-key:114

@@ -358,14 +358,23 @@ _INSTANCE_STATUS = _envelope(
             "Progress of the last holodeck.instance.remove of this instance. Only "
             "with instance_id, and only after a remove was started.",
             {
-                "state": _f("string", "running, done or failed."),
+                "state": _f(
+                    "string",
+                    "running, done or failed. interrupted: the script ended (for "
+                    "example by the router reboot) before it finished; call "
+                    "holodeck.instance.remove again to finish it.",
+                ),
                 "started_at": _f(["string", "null"], "When the remove started (UTC)."),
                 "finished_at": _f(["string", "null"], "When the remove ended (UTC)."),
                 "reset_router": _f("boolean", "True when the HoloRouter was reset."),
+                "resumed": _f("boolean", "True when a second call finished an interrupted remove."),
                 "error": _f(["string", "null"], "Error text of Remove-HoloDeckInstance."),
                 "leftover_error": _f(["string", "null"], "Why MEHO could not list VMs."),
                 "moved_to": _f(["string", "null"], "Folder the state files moved to."),
                 "moved_files": _f("array", "Files that moved.", items={"type": "string"}),
+                "move_errors": _f(
+                    "array", "Files that did not move, with the error.", items={"type": "string"}
+                ),
             },
         ),
         "error": _ERROR,
@@ -386,9 +395,14 @@ _INSTANCE_REMOVE = _envelope(
         "config_id": _f("string", "The config MEHO loaded before the delete."),
         "reset_router": _f("boolean", "True when the HoloRouter is reset and rebooted."),
         "move_state_files": _f("boolean", "True when the state files are moved aside."),
+        "resumed": _f(
+            "boolean",
+            "True when the call only finishes an interrupted remove: no VM is deleted, "
+            "the leftover VMs are listed and the files move.",
+        ),
         "vms": _f(
             "array",
-            "VM names Get-HoloDeckInstance listed for the instance.",
+            "VM names that Get-HoloDeckInstance or the instance's state file names.",
             items={"type": "string"},
         ),
         "files_to_move": _f(

@@ -31,6 +31,7 @@ from meho_backplane.connectors.holodeck.ops_remove import (
     _instance_remove_preview,
     file_name_pattern,
     instance_vms,
+    read_remove_record,
 )
 from meho_backplane.operations._preview import (
     _PREVIEW_BUILDERS,
@@ -42,7 +43,10 @@ from meho_backplane.settings import get_settings
 
 _PWSH = "meho_backplane.connectors.holodeck.ops_remove.pwsh_run"
 _STATUS_PWSH = "meho_backplane.connectors.holodeck.ops_deploy.pwsh_run"
-_SECRET = "not-a-real-password-123"
+# The made-up password starts with the instance prefix on purpose: a VM search
+# that reads every text would take it for a VM name.
+_SECRET = "lab01-not-a-real-password-123"
+_RECORD_CMD = "cat /holodeck-runtime/logs/lab01-remove.json"
 
 
 @pytest.fixture(autouse=True)
@@ -115,7 +119,60 @@ def _decoded_script(launch: str) -> str:
     return base64.b64decode(encoded).decode("utf-16-le")
 
 
-async def _remove(params: dict[str, Any], check: Any, *, exit_status: int = 0) -> tuple[Any, Any]:
+def _record_stdout(record: dict[str, Any], *, tmux_alive: bool | None) -> str:
+    """What the record read command prints: the file, then the tmux session list."""
+    text = json.dumps(record)
+    if tmux_alive is None:
+        return text
+    sessions = "holodeck-deploy-other\nholodeck-remove-lab01\n" if tmux_alive else ""
+    return f"{text}\n\n__tmux_sessions__\n{sessions}"
+
+
+def _interrupted_record(**overrides: Any) -> dict[str, Any]:
+    """A progress file of a remove whose script was killed by the router reboot."""
+    record: dict[str, Any] = {
+        "instance_id": "lab01",
+        "state": "running",
+        "started_at": "2026-01-01T10:00:00.1234567Z",
+        "finished_at": None,
+        "reset_router": True,
+        "resumed": False,
+        "error": None,
+        "leftover_vms": None,
+        "leftover_error": None,
+        "moved_to": None,
+        "moved_files": [],
+        "move_errors": [],
+    }
+    record.update(overrides)
+    return record
+
+
+def _commands(*, record: dict[str, Any] | None, tmux_alive: bool | None, exit_status: int) -> Any:
+    """Answer the record read and the tmux launch of ``_run_command``."""
+
+    async def run(target: Any, cmd: str, operator: Any = None) -> Any:
+        if cmd.startswith("cat "):
+            if record is None:
+                return _proc(exit_status=1)
+            return _proc(stdout=_record_stdout(record, tmux_alive=tmux_alive))
+        return _proc(stderr="duplicate session", exit_status=exit_status)
+
+    return run
+
+
+def _launches(mock_cmd: Any) -> list[str]:
+    return [c.args[1] for c in mock_cmd.call_args_list if c.args[1].startswith("tmux ")]
+
+
+async def _remove(
+    params: dict[str, Any],
+    check: Any,
+    *,
+    exit_status: int = 0,
+    record: dict[str, Any] | None = None,
+    tmux_alive: bool | None = False,
+) -> tuple[Any, Any]:
     connector = HolodeckConnector()
     with (
         patch(_PWSH, new_callable=AsyncMock) as mock_pwsh,
@@ -125,7 +182,9 @@ async def _remove(params: dict[str, Any], check: Any, *, exit_status: int = 0) -
             mock_pwsh.side_effect = check
         else:
             mock_pwsh.return_value = check
-        mock_cmd.return_value = _proc(stderr="duplicate session", exit_status=exit_status)
+        mock_cmd.side_effect = _commands(
+            record=record, tmux_alive=tmux_alive, exit_status=exit_status
+        )
         result = await connector.instance_remove(_StubTarget(), params)
     return result, mock_cmd
 
@@ -238,7 +297,160 @@ async def test_remove_can_keep_state_files() -> None:
 async def test_remove_unknown_instance_is_unchanged() -> None:
     result, mock_cmd = await _remove({"instance_id": "gone01"}, _check(instance=None))
     assert result["status"] == "unchanged"
+    # Only the progress file is read; nothing starts.
+    assert [c.args[1] for c in mock_cmd.call_args_list] == [
+        "cat /holodeck-runtime/logs/gone01-remove.json && { echo; echo __tmux_sessions__; "
+        "tmux list-sessions -F '#S' 2>/dev/null; true; }"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_remove_refuses_a_listed_instance_without_vm_names() -> None:
+    bare = {"InstanceID": "lab01", "Status": "Completed", "Target": {"password": _SECRET}}
+    result, mock_cmd = await _remove({"instance_id": "lab01"}, _check(instance=bare, state=[]))
+    assert result["status"] == "refused"
+    assert "state file" in result["reason"]
+    assert "Nothing was deleted" in result["reason"]
+    assert _SECRET not in json.dumps(result)
     mock_cmd.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_remove_takes_vms_from_the_state_file() -> None:
+    bare = {"InstanceID": "lab01", "Status": "Completed"}
+    state = {
+        "Target": {"hostname": "vcenter.example.invalid", "password": _SECRET},
+        "Hosts": [{"Name": "lab01-esx-01a", "Host": "esx-a.example.invalid"}],
+        "Installer": {"VMName": "lab01-vcfinstaller-a"},
+    }
+    result, mock_cmd = await _remove({"instance_id": "lab01"}, _check(instance=bare, state=state))
+    assert result["status"] == "started"
+    assert result["vms"] == ["lab01-esx-01a", "lab01-vcfinstaller-a"]
+    assert _SECRET not in json.dumps(result)
+    assert len(_launches(mock_cmd)) == 1
+
+
+@pytest.mark.asyncio
+async def test_check_script_reads_the_state_files() -> None:
+    connector = HolodeckConnector()
+    with (
+        patch(_PWSH, new_callable=AsyncMock, return_value=_check()) as mock_pwsh,
+        patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd,
+    ):
+        mock_cmd.side_effect = _commands(record=None, tmux_alive=None, exit_status=0)
+        await connector.instance_remove(_StubTarget(), {"instance_id": "lab01"})
+    script = mock_pwsh.call_args.args[2]
+    assert "state = @() }" in script
+    assert (
+        "if ($d -eq '/holodeck-runtime/state' -and $f.Extension -eq '.json') { try { "
+        "$out.state += ,(Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json) }"
+    ) in script
+
+
+@pytest.mark.asyncio
+async def test_remove_resumes_an_interrupted_run() -> None:
+    result, mock_cmd = await _remove(
+        {"instance_id": "lab01", "reset_router": True},
+        _check(instance=None),
+        record=_interrupted_record(),
+        tmux_alive=False,
+    )
+    assert result["status"] == "started"
+    assert result["resumed"] is True
+    assert result["reset_router"] is False
+    assert result["vms"] == []
+    assert result["files_to_move"] == [
+        "/holodeck-runtime/config/cfg0001.json",
+        "/holodeck-runtime/state/lab01-state.json",
+    ]
+    (launch,) = _launches(mock_cmd)
+    script = _decoded_script(launch)
+    assert "Remove-HoloDeckInstance" not in script
+    assert "Import-HoloDeckConfig -ConfigID 'cfg0001'" in script
+    assert "Get-VM -Name ($id + '-*') -ErrorAction Stop" in script
+    assert "Move-Item -LiteralPath $p" in script
+    assert "started_at = '2026-01-01T10:00:00.1234567Z';" in script
+    assert "reset_router = $true; resumed = $true;" in script
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("record", "tmux_alive"),
+    [
+        (_interrupted_record(), True),  # the remove still runs
+        (_interrupted_record(), None),  # MEHO could not list the tmux sessions
+        (_interrupted_record(state="done"), False),  # finished: nothing to resume
+        (_interrupted_record(error="VM is locked"), False),  # the cmdlet failed
+    ],
+)
+async def test_remove_unknown_instance_with_a_record_that_is_not_interrupted_is_unchanged(
+    record: dict[str, Any], tmux_alive: bool | None
+) -> None:
+    result, mock_cmd = await _remove(
+        {"instance_id": "lab01"}, _check(instance=None), record=record, tmux_alive=tmux_alive
+    )
+    assert result["status"] == "unchanged"
+    assert _launches(mock_cmd) == []
+
+
+@pytest.mark.asyncio
+async def test_remove_script_saves_the_record_right_after_the_cmdlet() -> None:
+    _, mock_cmd = await _remove({"instance_id": "lab01", "reset_router": True}, _check())
+    script = _decoded_script(mock_cmd.call_args.args[1])
+    # The cmdlet's outcome is on disk before the router reboot can kill the script.
+    assert (
+        "Remove-HoloDeckInstance -InstanceID $id -ResetHoloRouter -ErrorAction Stop } "
+        "catch { $r.error = $_.Exception.Message }; Save-Record; "
+    ) in script
+    assert "resumed = $false;" in script
+
+
+@pytest.mark.asyncio
+async def test_remove_script_records_failed_moves() -> None:
+    _, mock_cmd = await _remove({"instance_id": "lab01"}, _check())
+    script = _decoded_script(mock_cmd.call_args.args[1])
+    assert "move_errors = @() }" in script
+    assert (
+        "try { $sub = Join-Path $dest (Split-Path -Parent $p).Substring(18); "
+        "$null = [System.IO.Directory]::CreateDirectory($sub); "
+        "Move-Item -LiteralPath $p -Destination $sub -Force -ErrorAction Stop; "
+        "$r.moved_files += $p } "
+        "catch { $r.move_errors += ($p + ': ' + $_.Exception.Message) }"
+    ) in script
+    assert "if ($r.moved_files.Count -gt 0) { $r.moved_to = $dest }" in script
+
+
+@pytest.mark.asyncio
+async def test_remove_script_stops_on_a_failed_vm_read() -> None:
+    _, mock_cmd = await _remove({"instance_id": "lab01"}, _check())
+    script = _decoded_script(mock_cmd.call_args.args[1])
+    assert "leftover_vms = $null;" in script
+    assert (
+        "$r.leftover_vms = @(Get-VM -Name ($id + '-*') -ErrorAction Stop "
+        "| ForEach-Object { $_.Name }) } catch { $r.leftover_error = $_.Exception.Message }"
+    ) in script
+    assert "-ErrorAction SilentlyContinue" not in script
+
+
+@pytest.mark.asyncio
+async def test_read_remove_record_tells_if_the_tmux_session_is_alive() -> None:
+    connector = HolodeckConnector()
+    target = _StubTarget()
+    cases: list[tuple[str, bool | None]] = [
+        (_record_stdout(_interrupted_record(), tmux_alive=True), True),
+        (_record_stdout(_interrupted_record(), tmux_alive=False), False),
+        (_record_stdout(_interrupted_record(), tmux_alive=None), None),
+    ]
+    for stdout, expected in cases:
+        with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+            mock_cmd.return_value = _proc(stdout=stdout)
+            record = await read_remove_record(connector, target, "lab01", None)
+        assert record is not None
+        assert record["tmux_alive"] is expected
+        assert record["state"] == "running"
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(exit_status=1)
+        assert await read_remove_record(connector, target, "lab01", None) is None
 
 
 @pytest.mark.asyncio
@@ -350,8 +562,20 @@ def test_instance_vms_keeps_only_names_and_locations() -> None:
         {"name": "lab01-esx-02a", "location": "esx-a.example.invalid"},
         {"name": "lab01-vcfinstaller-a", "location": "ds-01"},
     ]
+    assert _SECRET not in json.dumps(vms)
     assert instance_vms(None, "lab01") == []
     assert instance_vms([{"Name": "other-esx-01a"}], "lab01") == []
+
+
+def test_instance_vms_skips_secret_fields_and_bare_texts() -> None:
+    record = {
+        "Password": "lab01-password-looks-like-a-vm",
+        "Target": {"Token": "lab01-token", "ApiSecret": "lab01-secret", "Pwd": "lab01-pwd"},
+        "Credentials": {"Name": "lab01-under-a-secret-key"},
+        "Notes": ["lab01-a-bare-text", {"Comment": "lab01-not-a-name-field"}],
+        "Hosts": [{"Name": "lab01-esx-01a", "Host": {"Password": "lab01-x"}}],
+    }
+    assert instance_vms(record, "lab01") == [{"name": "lab01-esx-01a", "location": None}]
 
 
 # ---------------------------------------------------------------------------
@@ -359,9 +583,11 @@ def test_instance_vms_keeps_only_names_and_locations() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _status(record: dict[str, Any] | None, pwsh: Any) -> dict[str, Any]:
+async def _status(
+    record: dict[str, Any] | None, pwsh: Any, *, tmux_alive: bool | None = None
+) -> dict[str, Any]:
     connector = HolodeckConnector()
-    stdout = json.dumps(record) if record is not None else ""
+    stdout = _record_stdout(record, tmux_alive=tmux_alive) if record is not None else ""
     with (
         patch(_STATUS_PWSH, new_callable=AsyncMock) as mock_pwsh,
         patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd,
@@ -373,8 +599,93 @@ async def _status(record: dict[str, Any] | None, pwsh: Any) -> dict[str, Any]:
         mock_cmd.return_value = _proc(stdout=stdout, exit_status=0 if record else 1)
         result = await connector.instance_status(_StubTarget(), {"instance_id": "lab01"})
     mock_cmd.assert_called_once()
-    assert "cat /holodeck-runtime/logs/lab01-remove.json" in mock_cmd.call_args.args[1]
+    assert _RECORD_CMD in mock_cmd.call_args.args[1]
+    assert "tmux list-sessions -F '#S'" in mock_cmd.call_args.args[1]
     return result
+
+
+@pytest.mark.asyncio
+async def test_status_interrupted_remove_is_removed_with_a_resume_note() -> None:
+    result = await _status(_interrupted_record(), None, tmux_alive=False)
+    assert result["status"] == "removed"
+    assert result["leftover_vms"] is None
+    assert result["removal"]["state"] == "interrupted"
+    assert result["removal"]["reset_router"] is True
+    assert "error" not in result
+    (note,) = result["notes"]
+    assert "tmux session is gone" in note
+    assert "call holodeck.instance.remove again" in note
+
+
+@pytest.mark.asyncio
+async def test_status_running_remove_with_a_live_session_is_running() -> None:
+    result = await _status(_interrupted_record(), {"Status": "Completed"}, tmux_alive=True)
+    assert result["status"] == "completed"
+    assert result["removal"]["state"] == "running"
+    assert result["leftover_vms"] is None
+    assert any(note.startswith("a remove is running") for note in result["notes"])
+
+
+@pytest.mark.asyncio
+async def test_status_interrupted_remove_with_a_cmdlet_error_is_not_removed() -> None:
+    record = _interrupted_record(error="VM is locked")
+    result = await _status(record, None, tmux_alive=False)
+    assert result["status"] == "unknown"
+    assert result["removal"]["state"] == "interrupted"
+    assert any("the last remove failed: VM is locked" in note for note in result["notes"])
+
+
+@pytest.mark.asyncio
+async def test_status_resumed_remove_is_removed() -> None:
+    record = _interrupted_record(
+        state="done",
+        resumed=True,
+        finished_at="2026-01-01T10:40:00Z",
+        leftover_vms=[],
+        moved_to="/holodeck-runtime/removed/lab01-20260101-104000",
+        moved_files=["/holodeck-runtime/state/lab01-state.json"],
+    )
+    result = await _status(record, None, tmux_alive=False)
+    assert result["status"] == "removed"
+    assert result["removal"]["resumed"] is True
+    assert result["leftover_vms"] == []
+    assert result["notes"] == []
+
+
+@pytest.mark.asyncio
+async def test_status_tells_an_empty_vm_search_from_a_failed_read() -> None:
+    empty = _interrupted_record(state="done", leftover_vms=[])
+    result = await _status(empty, None)
+    assert result["status"] == "removed"
+    assert result["leftover_vms"] == []
+    assert result["notes"] == []
+
+    failed = _interrupted_record(state="done", leftover_vms=None, leftover_error="not connected")
+    result = await _status(failed, None)
+    assert result["status"] == "removed"
+    assert result["leftover_vms"] is None
+    assert result["removal"]["leftover_error"] == "not connected"
+    (note,) = result["notes"]
+    assert "could not list the VMs that are left: not connected" in note
+
+
+@pytest.mark.asyncio
+async def test_status_reports_files_that_did_not_move() -> None:
+    record = _interrupted_record(
+        state="done",
+        leftover_vms=[],
+        moved_to="/holodeck-runtime/removed/lab01-20260101-102000",
+        moved_files=["/holodeck-runtime/config/cfg0001.json"],
+        move_errors=["/holodeck-runtime/state/lab01-state.json: Access denied"],
+    )
+    result = await _status(record, None)
+    assert result["status"] == "removed"
+    assert result["removal"]["moved_files"] == ["/holodeck-runtime/config/cfg0001.json"]
+    assert result["removal"]["move_errors"] == [
+        "/holodeck-runtime/state/lab01-state.json: Access denied"
+    ]
+    (note,) = result["notes"]
+    assert note.startswith("1 file(s) did not move: /holodeck-runtime/state/lab01-state.json")
 
 
 @pytest.mark.asyncio
@@ -511,13 +822,25 @@ def _ctx(connector: HolodeckConnector, params: dict[str, Any]) -> PreviewContext
     )
 
 
+async def _preview(
+    params: dict[str, Any],
+    check: dict[str, Any],
+    *,
+    record: dict[str, Any] | None = None,
+    tmux_alive: bool | None = False,
+) -> dict[str, Any] | None:
+    connector = HolodeckConnector()
+    with (
+        patch(_PWSH, new_callable=AsyncMock, return_value=check),
+        patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd,
+    ):
+        mock_cmd.side_effect = _commands(record=record, tmux_alive=tmux_alive, exit_status=0)
+        return await _instance_remove_preview(_ctx(connector, params))
+
+
 @pytest.mark.asyncio
 async def test_preview_lists_vms_router_reset_and_files() -> None:
-    connector = HolodeckConnector()
-    with patch(_PWSH, new_callable=AsyncMock, return_value=_check()):
-        effect = await _instance_remove_preview(
-            _ctx(connector, {"instance_id": "lab01", "reset_router": True})
-        )
+    effect = await _preview({"instance_id": "lab01", "reset_router": True}, _check())
     assert effect is not None
     assert blast_radius_missing_reason(effect) is None
     radius = effect["blast_radius"]
@@ -525,6 +848,7 @@ async def test_preview_lists_vms_router_reset_and_files() -> None:
         "kind": "holodeck_instance",
         "instance_id": "lab01",
         "found": True,
+        "resume": False,
     }
     assert radius["irreversibility"] == "permanent"
     kinds = [child["kind"] for child in radius["children"]]
@@ -536,11 +860,7 @@ async def test_preview_lists_vms_router_reset_and_files() -> None:
 
 @pytest.mark.asyncio
 async def test_preview_without_reset_or_move() -> None:
-    connector = HolodeckConnector()
-    with patch(_PWSH, new_callable=AsyncMock, return_value=_check()):
-        effect = await _instance_remove_preview(
-            _ctx(connector, {"instance_id": "lab01", "move_state_files": False})
-        )
+    effect = await _preview({"instance_id": "lab01", "move_state_files": False}, _check())
     assert effect is not None
     kinds = {child["kind"] for child in effect["blast_radius"]["children"]}
     assert kinds == {"vm"}
@@ -548,20 +868,56 @@ async def test_preview_without_reset_or_move() -> None:
 
 @pytest.mark.asyncio
 async def test_preview_unknown_instance_deletes_nothing() -> None:
-    connector = HolodeckConnector()
-    with patch(_PWSH, new_callable=AsyncMock, return_value=_check(instance=[])):
-        effect = await _instance_remove_preview(_ctx(connector, {"instance_id": "gone01"}))
+    effect = await _preview({"instance_id": "gone01"}, _check(instance=[]))
     assert effect is not None
     assert blast_radius_missing_reason(effect) is None
     assert effect["blast_radius"]["children"] == []
     assert effect["blast_radius"]["object"]["found"] is False
+    assert effect["blast_radius"]["object"]["resume"] is False
+    assert effect["reset_router"] is False
+
+
+@pytest.mark.asyncio
+async def test_preview_refuses_a_listed_instance_without_vm_names() -> None:
+    bare = {"InstanceID": "lab01", "Status": "Completed"}
+    with pytest.raises(ValueError, match="cannot show what it would delete"):
+        await _preview({"instance_id": "lab01"}, _check(instance=bare, state=[]))
+
+
+@pytest.mark.asyncio
+async def test_preview_lists_vms_from_the_state_file() -> None:
+    bare = {"InstanceID": "lab01", "Status": "Completed"}
+    state = [{"Hosts": [{"Name": "lab01-esx-01a"}], "Target": {"password": _SECRET}}]
+    effect = await _preview({"instance_id": "lab01"}, _check(instance=bare, state=state))
+    assert effect is not None
+    vms = [child for child in effect["blast_radius"]["children"] if child["kind"] == "vm"]
+    assert vms == [{"kind": "vm", "name": "lab01-esx-01a", "location": None}]
+    assert _SECRET not in json.dumps(effect)
+
+
+@pytest.mark.asyncio
+async def test_preview_of_a_resume_lists_only_the_files() -> None:
+    effect = await _preview(
+        {"instance_id": "lab01", "reset_router": True},
+        _check(instance=None),
+        record=_interrupted_record(),
+        tmux_alive=False,
+    )
+    assert effect is not None
+    assert blast_radius_missing_reason(effect) is None
+    radius = effect["blast_radius"]
+    assert radius["object"] == {
+        "kind": "holodeck_instance",
+        "instance_id": "lab01",
+        "found": False,
+        "resume": True,
+    }
+    assert [child["kind"] for child in radius["children"]] == ["file_move", "file_move"]
+    assert effect["reset_router"] is False
+    assert "deletes no VM" in effect["note"]
 
 
 @pytest.mark.asyncio
 async def test_preview_older_toolkit_raises_version_message() -> None:
-    connector = HolodeckConnector()
-    with (
-        patch(_PWSH, new_callable=AsyncMock, return_value=_check(has_remove=False)),
-        pytest.raises(ValueError, match=r"9\.0\.1"),
-    ):
-        await _instance_remove_preview(_ctx(connector, {"instance_id": "lab01"}))
+    with pytest.raises(ValueError, match=r"9\.0\.1"):
+        await _preview({"instance_id": "lab01"}, _check(has_remove=False))

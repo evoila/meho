@@ -532,17 +532,21 @@ How a call runs:
 1. **Check (read-only).** One PowerShell script checks that
    `Remove-HoloDeckInstance` has `-InstanceID` (Holodeck 9.0.1 and later)
    and, when asked, `-ResetHoloRouter`; that `Get-HoloDeckInstance` exists
-   (9.0.2 and later); reads `Get-HoloDeckInstance -InstanceID <id>`; and
+   (9.0.2 and later); reads `Get-HoloDeckInstance -InstanceID <id>`;
    lists the instance's files under `/holodeck-runtime/config`, `output` and
    `state` (the file name holds the id as a whole word, so `lab01-state.json`
-   is not a file of `lab0`; or the file text holds `"<id>"`).
+   is not a file of `lab0`; or the file text holds `"<id>"`); and reads the
+   instance's JSON files under `state`.
 2. **Decide.**
    - A toolkit without the cmdlet, the parameter or the switch: `refused`,
      with a version message. MEHO does not guess.
    - An instance that `Get-HoloDeckInstance` does not list: `unchanged`.
-     Nothing is deleted.
+     Nothing is deleted. (One exception: an interrupted remove, see step 5.)
    - A failing `Get-HoloDeckInstance`: `refused`, with its error text. A
      failed read is never taken as "not there".
+   - A listed instance whose `Get-HoloDeckInstance` answer and state files
+     name no VM: `refused`. MEHO does not delete what it cannot show in the
+     preview.
    - The config to load: `config_id` when given, else the one config file
      that names the instance. None or several: `refused`, pass `config_id`.
 3. **Run in the background.** Like `holodeck.instance.start`, the delete
@@ -554,13 +558,21 @@ How a call runs:
    when the delete did not fail, moves the listed files into
    `/holodeck-runtime/removed/<id>-<yyyyMMdd-HHmmss>/`. The vendor cmdlet
    removes only the current VMs of the instance and does not clean the
-   config files, so these two steps close that gap.
+   config files, so these two steps close that gap. `Get-VM` stops on
+   error: an empty search gives `leftover_vms: []`, a failed read keeps
+   `leftover_vms` null and sets `leftover_error`. Each file moves on its
+   own: a file that did not move goes to `move_errors` with the error text,
+   and only moved files go to `moved_files`.
 4. **Progress file.** The script writes
-   `/holodeck-runtime/logs/<id>-remove.json` at the start and at the end
-   (`state` running / done / failed, `error`, `leftover_vms`, `moved_to`,
-   `moved_files`). `holodeck.instance.status` with `instance_id` reads it:
-   it adds `removal` and `leftover_vms`, and sets `status` to `removed` when
-   the delete finished without an error. The caller deletes each leftover VM
+   `/holodeck-runtime/logs/<id>-remove.json` at the start, right after the
+   cmdlet (so its outcome survives a reboot) and at the end (`state`
+   running / done / failed, `error`, `leftover_vms`, `leftover_error`,
+   `moved_to`, `moved_files`, `move_errors`, `resumed`).
+   `holodeck.instance.status` with `instance_id` reads it, and in the same
+   command lists the `tmux` sessions: it adds `removal` and `leftover_vms`,
+   and sets `status` to `removed` when the delete finished without an error.
+   A note names leftover VMs, a failed VM read and files that did not move.
+   The caller deletes each leftover VM
    with `vmware.composite.vm.destroy`. The file stays after the remove, and a
    later deploy may use the same id. So an old file never hides a newer
    deploy: `status` becomes `removed` only when `Get-HoloDeckInstance` no
@@ -572,23 +584,37 @@ How a call runs:
    instance answers `null`, and a failed `Get-HoloDeckInstance` call keeps
    `status` as `unknown`, keeps its `error`, and adds a note. A failed read
    never sets `removed`.
+5. **Interrupted run.** With `reset_router` the HoloRouter reboots at the
+   end of the cmdlet and kills the script before the last two steps
+   (leftover VMs, file move). The progress file then still says `running`
+   while the `tmux` session `holodeck-remove-<id>` is gone. The status op
+   reports `removal.state` `interrupted`; when the cmdlet wrote no error and
+   `Get-HoloDeckInstance` no longer lists the instance, `status` is
+   `removed` and a note says how to finish. A second
+   `holodeck.instance.remove` call with the same `instance_id` then runs
+   only the two missing steps, without the cmdlet, keeps the old start time
+   in the progress file and answers `started` with `resumed: true`. A
+   record whose `tmux` session still runs, or that holds the cmdlet's error,
+   is not resumed: the call is `unchanged`.
 
 **Approval preview.** The preview builder (registered in `ops_remove.py`)
 runs the same read-only check. Its `blast_radius` names the instance
-(`object`), lists each VM and where it runs, the router reset and each file
-that moves (`children`), and says `permanent`. An old toolkit or a failed
-check makes the builder raise, so the call does not wait for approval and
-the caller reads why. An unknown instance waits with an empty list: the call
-will change nothing.
+(`object`, with `found` and `resume`), lists each VM and where it runs, the
+router reset and each file that moves (`children`), and says `permanent`.
+An old toolkit, a failed check, or a listed instance without a VM name
+makes the builder raise, so the call does not wait for approval and the
+caller reads why. An unknown instance waits with an empty list: the call
+will change nothing. A call that finishes an interrupted remove lists only
+the files that move, and its note says that no VM is deleted.
 
 **No secrets.** No parameter is a password. The script reads the vCenter
 login from the loaded config on the appliance, by variable name only. The
-`Get-HoloDeckInstance` answer is never passed on: MEHO keeps only VM names
-and where they run (`instance_vms`).
-
-**Limit.** With `reset_router` the HoloRouter reboots at the end of the
-cmdlet. The reboot can stop the later steps (leftover VMs, file move); the
-progress file then stays at `running`, and the status op says so in a note.
+`Get-HoloDeckInstance` answer and the state files are never passed on:
+`instance_vms` reads only known VM name fields (`Name`, `VMName`,
+`HostName`, ...) whose value starts with `<id>-`, skips every field whose
+name says it is a secret (password, token, credential, ...) with everything
+under it, and ignores plain text outside a name field. So a password that
+starts with the instance id never becomes a VM name in a result or a preview.
 
 ### `execute(target, op_id, params)`
 

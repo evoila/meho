@@ -1037,10 +1037,14 @@ gets it. The backplane sends it in a response header instead:
 
 - The audit middleware (`backend/src/meho_backplane/audit.py`) puts
   `Meho-Audit-Id: <id>` on every buffered response that has an audit
-  record. The id is the first audit row the request committed in the
-  caller's name (for example the `meho_connector_edit_group` row).
-  When the request wrote no such row, it is the request row the
-  middleware wrote. A request with no record gets no header.
+  record. The id is the first `operation_execution` row the request
+  committed in the caller's name (for example the
+  `meho_connector_edit_group` row). A call allowed by a standing grant
+  saves an approval decision row before the operation runs; the header
+  still names the execution row, the same row as the body's `audit_id`.
+  When the request saved no execution row, it is the first other row it
+  saved in the caller's name (for example a decision row). When it saved
+  none, it is the request row the middleware wrote. A request with no record gets no header.
 - `output.AuditIDFromResponse` reads the header. `output.WriteAuditReceipt`
   prints `audit receipt: <id>`. `dispatch.WriteAuditReceipt` calls it,
   so the line is the same for every command.

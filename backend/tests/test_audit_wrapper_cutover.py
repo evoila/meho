@@ -545,6 +545,31 @@ async def _recorded(operator: Operator = Depends(verify_jwt_and_bind)) -> Respon
     return Response(status_code=204)
 
 
+@_probe.post("/granted", status_code=204, response_class=Response)
+async def _granted(operator: Operator = Depends(verify_jwt_and_bind)) -> Response:
+    """A call a standing grant allows: the decision row commits first, then the execution row."""
+    await _store(
+        _classified_row(
+            AuditEventClass.APPROVAL_DECISION, operator_sub=operator.sub, path="probe.grant"
+        ),
+        commit=True,
+    )
+    await _store(_classified_row(operator_sub=operator.sub, path="probe.granted"), commit=True)
+    return Response(status_code=204)
+
+
+@_probe.post("/decided", status_code=204, response_class=Response)
+async def _decided(operator: Operator = Depends(verify_jwt_and_bind)) -> Response:
+    """A request that saves only a decision row in the caller's name."""
+    await _store(
+        _classified_row(
+            AuditEventClass.APPROVAL_DECISION, operator_sub=operator.sub, path="probe.decided"
+        ),
+        commit=True,
+    )
+    return Response(status_code=204)
+
+
 class _Caller:
     """The REST caller; tests switch its role."""
 
@@ -1413,3 +1438,23 @@ async def test_rest_response_names_its_audit_record(retired: bool) -> None:
         assert _receipt(read) is None
     else:
         assert rows[_receipt(read)].path == "/api/v1/operations/groups"
+
+
+async def test_rest_receipt_prefers_the_execution_row(retired: bool) -> None:
+    """``Meho-Audit-Id`` names the execution row even when a decision row commits first.
+
+    A call a standing grant allows saves its approval decision row before
+    the operation runs. The receipt must name the execution row, the same
+    row as the ``audit_id`` in the response body. With no execution row,
+    the receipt falls back to the first row the request saved.
+    """
+    client, _caller = _rest_client()
+    granted = client.post("/api/v1/cutover-probe/granted")
+    decided = client.post("/api/v1/cutover-probe/decided")
+    assert (granted.status_code, decided.status_code) == (204, 204)
+
+    rows = {row.id: row for row in await _audit_rows()}
+    granted_row = rows[_receipt(granted)]
+    assert (granted_row.path, granted_row.event_class) == ("probe.granted", "operation_execution")
+    decided_row = rows[_receipt(decided)]
+    assert (decided_row.path, decided_row.event_class) == ("probe.decided", "approval_decision")

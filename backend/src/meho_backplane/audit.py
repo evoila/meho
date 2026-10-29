@@ -53,9 +53,14 @@ Audit receipt header (#4976)
 ============================
 
 A buffered response carries the id of the request's audit record in the
-``Meho-Audit-Id`` header: the first classified row the request committed
-in the caller's name (the record of the change, for example a connector
-edit), else the wrapper row this middleware wrote. A request with no
+``Meho-Audit-Id`` header: the first ``operation_execution`` row the
+request committed in the caller's name (the record of the change, for
+example a connector edit or a dispatched operation). When there is no
+such row, it is the first other classified row the request committed in
+the caller's name (for example a decision row), else the wrapper row this
+middleware wrote. A call allowed by a standing grant saves its approval
+decision row first, so the header still names the execution row, the
+same row as the ``audit_id`` in the response body. A request with no
 record (a routine read after the cutover, an unauthenticated request, a
 streamed response) gets no header. Routes that answer ``204 No Content``
 have no body to carry the id, so ``meho`` reads it from this header and

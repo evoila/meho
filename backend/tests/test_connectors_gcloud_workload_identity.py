@@ -313,7 +313,9 @@ async def test_sa_policy_read_asks_for_version_3(connector: GcloudConnector) -> 
             _OPERATOR, _TARGET, params={"service_account_email": _SA}
         )
 
-    assert json.loads(route.calls[0].request.content) == {"options": {"requestedPolicyVersion": 3}}
+    request = route.calls[0].request
+    assert request.url.params["options.requestedPolicyVersion"] == "3"
+    assert json.loads(request.content) == {}
     assert result["etag"] == "BwYread="
     assert result["version"] == 3
     assert result["bindings"][0] == {
@@ -409,6 +411,27 @@ async def test_binding_remove_refuses_a_member_held_only_through_a_condition(
         mock.post(f"{_SA_URL}:getIamPolicy").respond(200, json=policy)
         set_route = mock.post(f"{_SA_URL}:setIamPolicy").respond(200, json={})
         with pytest.raises(ValueError, match="condition"):
+            await connector.gcloud_sa_binding_remove(
+                _OPERATOR,
+                _TARGET,
+                params={"service_account_email": _SA, "role": _WIF_ROLE, "member": _OLD_MEMBER},
+            )
+    assert set_route.call_count == 0
+
+
+async def test_binding_remove_refuses_a_policy_with_hidden_conditions(
+    connector: GcloudConnector,
+) -> None:
+    policy = _policy()
+    policy["version"] = 1
+    policy["bindings"][2] = {
+        "role": f"{_WIF_ROLE}_withcond_1a2b3c4d5e6f7a8b9c0d",
+        "members": [_OLD_MEMBER],
+    }
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post(f"{_SA_URL}:getIamPolicy").respond(200, json=policy)
+        set_route = mock.post(f"{_SA_URL}:setIamPolicy").respond(200, json={})
+        with pytest.raises(ValueError, match="_withcond_"):
             await connector.gcloud_sa_binding_remove(
                 _OPERATOR,
                 _TARGET,

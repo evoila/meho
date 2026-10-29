@@ -93,6 +93,10 @@ _BINDING_REMOVE_PERMISSIONS: Final[tuple[str, ...]] = (
 #: Google returns 409 (ABORTED) when the etag no longer matches; 412 is accepted too.
 _ETAG_CONFLICT_STATUSES: Final[frozenset[int]] = frozenset({409, 412})
 
+#: When Google answers with a policy version lower than 3, a binding with a
+#: condition shows up under a renamed role that contains this text.
+_HIDDEN_CONDITION_MARK: Final[str] = "_withcond_"
+
 
 class GcloudPolicyChangedError(ConnectorUpstreamError):
     """Google refused a policy write because the policy changed after MEHO read it."""
@@ -185,11 +189,16 @@ async def _list_all(
 async def _get_sa_policy(
     connector: GcloudConnector, target: GcloudTargetLike, account: str, *, operator: Operator
 ) -> dict[str, Any]:
-    """Read the IAM policy of one service account, asking for version 3."""
-    url = f"{_IAM_API}/{_service_account_name(target, account)}:getIamPolicy"
-    return await connector._post_json_abs(
-        target, url, operator=operator, json_body={"options": {"requestedPolicyVersion": 3}}
+    """Read the IAM policy of one service account, asking for version 3.
+
+    For this call Google takes the version only as the query parameter
+    ``options.requestedPolicyVersion``; the request body stays empty.
+    """
+    url = (
+        f"{_IAM_API}/{_service_account_name(target, account)}:getIamPolicy"
+        "?options.requestedPolicyVersion=3"
     )
+    return await connector._post_json_abs(target, url, operator=operator)
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +411,12 @@ async def sa_binding_remove(
     member = _checked(params, "member", MEMBER_PATTERN, "an IAM member as written in the policy")
 
     policy = await _get_sa_policy(connector, target, account, operator=operator)
+    if any(_HIDDEN_CONDITION_MARK in str(b.get("role", "")) for b in policy.get("bindings") or []):
+        raise ValueError(
+            "Google returned this policy in an older format that hides the conditions of some "
+            "bindings (a role name contains '_withcond_'). MEHO cannot change such a policy "
+            "safely; nothing was changed."
+        )
     etag = policy.get("etag")
     new_bindings, removed, only_conditional, members_left = _without_member(
         list(policy.get("bindings") or []), role, member

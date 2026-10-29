@@ -84,11 +84,15 @@ How they behave:
   it for 30 days and it can be restored in that time, and its ID cannot be
   used again in those days. The result says so (`restorable_for_days: 30`,
   `note`).
-- **Binding removal** reads the policy (version 3), drops only the named
+- **Binding removal** reads the policy (version 3, asked for with the
+  query parameter `options.requestedPolicyVersion=3`; the body is empty),
+  drops only the named
   member from the named role, only in bindings without a condition, drops a
   binding left with no member, and writes the policy back with the `etag` it
   read. If the member holds the role only through a binding with a
-  condition, MEHO refuses. If the member is not there, nothing is sent
+  condition, MEHO refuses. If Google still answers in an older format (a
+  role name contains `_withcond_`, which hides a condition), MEHO refuses
+  too. If the member is not there, nothing is sent
   (`removed: false`). If someone changed the policy in between, Google
   answers `409`; MEHO raises `GcloudPolicyChangedError` (a
   `ConnectorUpstreamError`), changes nothing and does **not** retry.

@@ -8914,6 +8914,16 @@
               "nullable": true,
               "title": "Authorization"
             }
+          },
+          {
+            "name": "X-MEHO-Runner-Wire-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Wire-Version"
+            }
           }
         ],
         "responses": {
@@ -8969,6 +8979,16 @@
               "type": "string",
               "nullable": true,
               "title": "Authorization"
+            }
+          },
+          {
+            "name": "X-MEHO-Runner-Wire-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Wire-Version"
             }
           }
         ],
@@ -9076,7 +9096,7 @@
           "checks"
         ],
         "summary": "Get Assignment",
-        "description": "Return runner *runner*'s versioned assignment (runner-authenticated).\n\nA runner may fetch only its own assignment\n(:func:`assert_runner_scope`). ``known_version`` matching the current\ncontent digest yields ``304 Not Modified`` (empty body); the runner\nkeeps its cache.",
+        "description": "Return runner *runner*'s versioned assignment (runner-authenticated).\n\nA runner may fetch only its own assignment\n(:func:`assert_runner_scope`). A runner on another wire version gets a\n409 that names both versions. ``known_version`` matching the current\ncontent digest yields ``304 Not Modified`` (empty body); the runner\nkeeps its cache.",
         "operationId": "get_assignment_api_v1_checks_assignment_get",
         "parameters": [
           {
@@ -9107,6 +9127,16 @@
               "type": "string",
               "nullable": true,
               "title": "Authorization"
+            }
+          },
+          {
+            "name": "X-MEHO-Runner-Wire-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Wire-Version"
             }
           }
         ],
@@ -9151,6 +9181,16 @@
               "type": "string",
               "nullable": true,
               "title": "Authorization"
+            }
+          },
+          {
+            "name": "X-MEHO-Runner-Wire-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Wire-Version"
             }
           }
         ],
@@ -26705,6 +26745,16 @@
               "low"
             ],
             "title": "Confidence"
+          },
+          "secret_ref": {
+            "type": "string",
+            "nullable": true,
+            "title": "Secret Ref"
+          },
+          "extras": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Extras"
           }
         },
         "type": "object",
@@ -26715,7 +26765,7 @@
           "confidence"
         ],
         "title": "CandidateHint",
-        "description": "One candidate target a connector's :meth:`Connector.list_candidates` returns.\n\nCandidates are potentially-reachable targets the connector inferred\nfrom an existing seed (e.g. a vCenter exposing its managed ESXi\nhosts; a kubeconfig listing peer cluster contexts). The\nG9.1-T6 ``meho targets discover`` CLI verb surfaces these to the\noperator; auto-registration is intentionally out of scope per\nInitiative #363 (operator runs ``meho targets import`` after review).\n\n``evidence`` is the debugging payload \u2014 whatever made the connector\nthink this candidate exists (e.g. ``{\"source\": \"kubeconfig\",\n\"context_name\": \"cluster-2\"}``); ``confidence`` is the connector's\nself-assessment of probe-vs-curation reliability."
+        "description": "One candidate target a connector's :meth:`Connector.list_candidates` returns.\n\nCandidates are potentially-reachable targets the connector inferred\nfrom an existing seed (e.g. a vCenter exposing its managed ESXi\nhosts; a kubeconfig listing peer cluster contexts). The\nG9.1-T6 ``meho targets discover`` CLI verb surfaces these to the\noperator; auto-registration is intentionally out of scope per\nInitiative #363 (operator runs ``meho targets import`` after review).\n\n``evidence`` is the debugging payload \u2014 whatever made the connector\nthink this candidate exists (e.g. ``{\"source\": \"kubeconfig\",\n\"context_name\": \"cluster-2\"}``); ``confidence`` is the connector's\nself-assessment of probe-vs-curation reliability.\n\n``secret_ref`` and ``extras`` are set when the connector knows them:\nthe secret reference and the target extras a target for this candidate\nneeds (Azure: the seed's secret reference and ``subscription_id``,\n``tenant_id`` and ``cloud``). ``meho targets discover --import-yaml``\nwrites them into a file that ``meho targets import`` reads."
       },
       "CapabilityDeclaration": {
         "properties": {
@@ -33799,6 +33849,11 @@
             "format": "date-time",
             "nullable": true,
             "title": "Last Seen At"
+          },
+          "wire_version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Wire Version"
           }
         },
         "type": "object",
@@ -35894,6 +35949,7 @@
               "argocd",
               "azure",
               "bind9",
+              "entra",
               "fleet",
               "gcloud",
               "gh",

@@ -9,6 +9,11 @@ array plus one recognised Boolean outcome field (`handshake`, `reachable`,
 that rule. A lone `status` is not enough to qualify: it can be an opaque vendor
 state rather than a complete outcome.
 
+An operation may declare `result_document: {"always": true}` when other
+operations load its whole result by handle (the migration inventory reads):
+the reducer then stores the payload as a document record whatever its size.
+See "Document records" in `result-spill.md`.
+
 An operation may declare `result_objects` for a bounded top-level identity
 projection. `result_object_truncations` names an inline field whose value was
 bounded. Every object the hint names is also stored whole with the spilled

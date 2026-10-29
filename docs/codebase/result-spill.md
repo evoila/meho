@@ -318,6 +318,14 @@ the reducer keeps it **whole** as a document record under a handle:
   is not stored either (`reason=admission_limit_exceeded`).
 - Credential-class ops and reduces without an `op_id` pass through
   unchanged, as before.
+- An op may declare `llm_instructions.result_document: {"always": true}`
+  (the dispatcher forwards it as `context["result_document"]`). Then the
+  reducer skips collection detection and keeps the payload as a document
+  record whatever its size, so a small result gets a handle too. The
+  migration inventory reads use it: other operations load the inventory
+  by its handle. When the store did not keep a small payload, it passes
+  through inline as without the hint. A malformed hint is logged and
+  ignored.
 - A multi-step operation's failure envelope (an `issues[]` entry with
   `severity: "error"`, #3809) takes the same reducer path as a success
   payload (#4223). An oversized refusal — `folder.create`'s
@@ -518,6 +526,32 @@ handler builds the reducer context itself (the caller's `tenant_id` and
 page spills and reads back through `result_query` like a dispatched
 result. The spill is keyed to the caller even for a cross-tenant
 `platform_admin` listing. See [`targets.md`](targets.md).
+
+### `meho_connector_list` (#4121)
+
+`meho_connector_list` works the same way. Its handler in
+`mcp/tools/connector_admin.py` has two steps:
+
+- `list_connector_rows` reads the connectors and builds the rows. By
+  default each row is short: `connector_id`, `product`, `version`,
+  `status`, `dispatchable`, `scope`. `detail="full"` gives every
+  `ConnectorListItem` field. `product` keeps one product only; empty
+  text means no filter.
+- `reduce_connector_list` runs the rows through `JsonFluxReducer` with
+  `op_id="meho_connector_list"`, the caller's `tenant_id` and
+  `operator_sub`, and a `pagination_hint` that says to narrow with
+  `product`. Over 50 rows or 4 KB, the answer is the summary plus a
+  `handle`.
+
+The short `status` uses the words of the `status` filter (`staged`,
+`enabled`, `disabled`), plus `registered` for a connector with no
+operations yet and `mixed` for one whose groups are partly enabled and
+partly disabled.
+
+A hosted agent run uses the two steps apart: the toolset first drops the
+connectors outside the agent's allow-list, then reduces. So a handle
+never holds a connector the agent may not see. See
+[`agent-runtime.md`](agent-runtime.md).
 
 ## Diagnosis: the RDC cycle-8 `k8s.logs tail=300` finding (#1629)
 

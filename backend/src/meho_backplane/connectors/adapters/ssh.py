@@ -269,10 +269,11 @@ class SshConnector(Connector):
         # in parallel. Keyed on the same tenant-unique tuple as the pool.
         self._connect_locks: dict[tuple[str, str], asyncio.Lock] = {}
         # Per-target drop counter (#3879). ``invalidate_credentials`` raises
-        # it; ``_connect`` reads it before the handshake and keeps the new
-        # connection only when it is unchanged after. So a login that was
-        # started with the old target values, and finishes after the drop,
-        # never lands in the pool.
+        # it; ``_connect`` reads it on entry, checks it again once it holds
+        # the connect lock, and keeps the new connection only when it is
+        # still unchanged after the handshake. So a call that was started
+        # with the old target values never puts a login in the pool, whether
+        # it was waiting for the lock or already logging in during the drop.
         self._pool_generations: dict[tuple[str, str], int] = {}
 
     async def _resolve_secret(self, target: Target, operator: Operator | None) -> dict[str, Any]:
@@ -345,6 +346,11 @@ class SshConnector(Connector):
         lock, evicts stale/closed entries, and opens a fresh connection.
         """
         cache_key = target_cache_key(target)
+        # Read the drop counter first (#3879). A call that waits for the
+        # per-target lock keeps the target values it was given. When a drop
+        # runs while it waits, those values are old, and the call must not
+        # log in with them after it gets the lock.
+        generation = self._pool_generations.get(cache_key, 0)
         # Fast path: check without acquiring any lock.
         entry = self._connections.get(cache_key)
         if entry is not None:
@@ -375,7 +381,12 @@ class SshConnector(Connector):
                     await conn.wait_closed()
                 del self._connections[cache_key]
 
-            generation = self._pool_generations.get(cache_key, 0)
+            if self._pool_generations.get(cache_key, 0) != generation:
+                # The target changed while this call waited for the lock.
+                # The connection the lock holder made with the old values
+                # was already dropped; this call must not make another one.
+                logger.info("ssh_login_dropped_target_changed", target=target.name)
+                raise SshTargetChangedError(target.name)
             auth_kwargs = await self._auth_config(target, operator)
             # ``known_hosts`` is fail-closed: the base ``_auth_config`` (and
             # every subclass override) resolves it via

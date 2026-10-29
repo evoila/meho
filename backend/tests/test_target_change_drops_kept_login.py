@@ -281,6 +281,54 @@ async def test_ssh_login_that_finishes_after_the_drop_is_not_kept() -> None:
     assert conn._connections[target_cache_key(target)][0] is fresh
 
 
+@pytest.mark.asyncio
+async def test_ssh_call_that_waited_for_the_lock_during_the_drop_is_not_kept() -> None:
+    """Two calls with the old target: one logs in, one waits for the lock. Then the drop runs.
+
+    The first login is closed. The second call must not log in with its old
+    target values after it gets the lock, or the old login would land in the
+    pool again.
+    """
+    target = _Target(host="srv.test.invalid", port=22)
+    conn = _Ssh()
+    stale, fresh = _FakeSshConnection(), _FakeSshConnection()
+    handshake_started, change_committed = asyncio.Event(), asyncio.Event()
+    handshakes = 0
+
+    async def _slow_connect(*_args: Any, **_kwargs: Any) -> _FakeSshConnection:
+        nonlocal handshakes
+        handshakes += 1
+        handshake_started.set()
+        await change_committed.wait()
+        return stale
+
+    async def _auth(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"username": "u", "known_hosts": None, "password": "p"}
+
+    with patch.object(conn, "_auth_config", _auth), patch("asyncssh.connect", _slow_connect):
+        first = asyncio.create_task(conn._connect(target))  # type: ignore[arg-type]
+        await handshake_started.wait()
+        second = asyncio.create_task(conn._connect(target))  # type: ignore[arg-type]
+        await asyncio.sleep(0)  # the second call now waits for the connect lock
+        await conn.invalidate_credentials(target)  # type: ignore[arg-type]
+        change_committed.set()
+        with pytest.raises(SshTargetChangedError):
+            await first
+        with pytest.raises(SshTargetChangedError):
+            await second
+
+    assert handshakes == 1
+    assert stale.closed
+    assert conn._connections == {}
+
+    async def _fast_connect(*_args: Any, **_kwargs: Any) -> _FakeSshConnection:
+        return fresh
+
+    with patch.object(conn, "_auth_config", _auth), patch("asyncssh.connect", _fast_connect):
+        assert await conn._connect(target) is fresh  # type: ignore[arg-type]
+    assert conn._connections[target_cache_key(target)][0] is fresh
+
+
 # ---------------------------------------------------------------------------
 # forget_target_in_connectors
 # ---------------------------------------------------------------------------

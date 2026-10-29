@@ -306,12 +306,31 @@ vCenter variant — owned by the profiled-dispatch wiring
    `"none"`. Each row's `EndpointDescriptor.group_id` is set to the
    matching group's UUID; sentinel and unknown-key entries leave
    `group_id=NULL`.
+3. **Extend rounds for leftovers (#4972)** — when ops are still
+   without a group after a filing pass (on a full run or a re-run),
+   the run makes another "extend" round: Pass 1 lists every group so
+   far and asks for new groups for the leftovers (`[]` is a valid
+   answer), then Pass 2 files the leftovers into the new groups only.
+   Before this, a full run stopped after one Pass 2, and a re-run
+   stopped after one extend round, so ops past the `max_groups` limit
+   (15) stayed without a group. The rounds stop when every op has a
+   group, when the model proposes no new group, when a round files
+   no op, or after `DEFAULT_MAX_EXTEND_ROUNDS` (3) rounds. The round
+   limit bounds the model calls and logs
+   `llm_grouping_extend_round_limit_reached`. An op that already has a
+   group is never moved, and no group is renamed. We chose more rounds
+   over one catch-all "other" group because the ops left over tend to
+   form real families (licences, sessions, agent manager), and a
+   catch-all group does not help an agent pick a group.
 
 The function commits exactly once at the end of both passes, in the
 same transaction as a single `meho_connector_llm_grouping` audit row
 that records `{connector_id, groups_created, operations_assigned,
-operations_unassigned, llm_call_count, batch_size,
-operations_added_by_group}`. Partial failure
+operations_unassigned, unassigned_op_ids, llm_call_count, batch_size,
+operations_added_by_group}`. `unassigned_op_ids` lists the op ids
+still without a group after the run, sorted, at most
+`UNASSIGNED_OP_IDS_LIMIT` (200); `operations_unassigned` keeps the
+full count. Partial failure
 (LLM output that fails schema validation) raises
 `LlmOutputInvalid`, rolls back the transaction, and leaves the
 connector in whatever state preceded the call — operator retries via
@@ -340,7 +359,8 @@ Idempotency:
     re-validation, #3685). Ops still left over get an "extend" Pass 1:
     the prompt lists the existing groups and asks for at most
     `max_groups` new ones, and `[]` is a valid answer. A second Pass 2
-    then files the leftovers into the new groups only.
+    then files the leftovers into the new groups only. More extend
+    rounds follow while ops are left (step 3 above).
   * Every Pass-1 proposal whose key already exists in the connector
     scope (typed keys included) is dropped, so no persisted group is
     renamed or duplicated.
@@ -349,6 +369,12 @@ Idempotency:
   composite, and ingested ops the group now holds. The ingest job result and
   `meho connector ingest` show it; the CLI prints a warning for a typed
   group that also holds ingested ops.
+* `GroupingResult.unassigned_op_ids` names the ops still without a
+  group (same list as the audit row). The ingest response and the
+  ingest job result carry it as `grouping.unassigned_op_ids`.
+  `meho connector ingest` and `meho connector ingest-status` print
+  each op id, and say how many more there are when the list was cut
+  (`meho connector review` shows them all).
 
 The LLM client is injected as a `LlmClient` `Protocol` (one async
 method, `generate_json`). Tests pass a deterministic stub from
@@ -747,8 +773,8 @@ per role in the T3 grouping run:
   validator; oversized prose rejected via bounded `max_length`.
 * `GroupingResult` — counts + timings the orchestrator returns
   (`groups_created`, `operations_assigned`, `operations_unassigned`,
-  `llm_call_count`, `llm_duration_ms`, and `groups`: one
-  `GroupSummary` per group). Surfaced in the operator-facing CLI / API
+  `unassigned_op_ids`, `llm_call_count`, `llm_duration_ms`, and
+  `groups`: one `GroupSummary` per group). Surfaced in the operator-facing CLI / API
   at T5.
 * `GroupingConfig` — tunable knobs (`batch_size`, `min_groups`,
   `max_groups`). Constructed from the keyword arguments to
@@ -1066,7 +1092,7 @@ default**. A tenant can now turn a built-in operation on or off for
 itself only. Other tenants keep the install default.
 
 - **Where it is stored.** The table `tenant_operation_setting`
-  (migration `0119`, model `TenantOperationSetting`): one row per
+  (migration `0120`, model `TenantOperationSetting`): one row per
   `(tenant_id, product, version, impl_id, op_id)` with `enabled`
   true or false. No row means "use the install default". The row is
   keyed on the operation's natural key, not on the descriptor id. A

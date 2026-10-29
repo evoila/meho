@@ -5,7 +5,7 @@
 
 The live lookup code (``count_known_ops`` and friends in
 ``operations/_lookup.py``) also reads ``tenant_operation_setting``
-(migration ``0119``, #5029). A test that stops at an older revision and
+(migration ``0120``, #5029). A test that stops at an older revision and
 then calls that code needs the table to exist. :func:`tenant_setting_table`
 creates it (empty, so every tenant uses the install default) for the
 duration of the probe and drops it again, so a later

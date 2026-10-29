@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Load inventories from stored results and merge them.
+"""Load inventories from stored results or from the call itself, and merge them.
 
 An inventory read returns one :class:`~.contracts.InventoryEnvelope`. When
-it is large, MEHO stores it whole as a stored result (a *document record*
-of the result handle store) and the caller gets a handle id. The
-assessment operations take those handle ids, and :func:`load_inventories`
-reads them back.
+it is large, or when the read asks for it with the ``result_handle`` hint,
+MEHO stores it whole as a stored result (a *document record* of the result
+handle store) and the caller gets a handle id. The assessment operations
+take those handle ids, and :func:`load_inventories` reads them back. They
+also take inventories given inline in the call (#5143); those are checked
+with the same rules as a stored one.
 
 Rules:
 
@@ -17,8 +19,10 @@ Rules:
   a stored result lasts one hour by default, so the fix is to run the
   inventory read again.
 * ``schema_version`` is checked before the rest, so an inventory of a
-  newer shape is refused by name and not read wrongly.
-* Merging keeps the handle order. A record whose ``source_id`` was seen
+  newer shape is refused by name and not read wrongly. This applies to
+  stored and inline inventories alike.
+* Stored inventories come first, in handle order, then inline ones, in the
+  given order. Merging keeps that order. A record whose ``source_id`` was seen
   before, or a server that shares a BIOS UUID or an instance UUID with
   another record, is kept in ``records`` but listed in ``duplicates``. A
   BIOS UUID matches in both forms a machine reports it, as the hypervisor
@@ -88,12 +92,35 @@ class Duplicate:
 
 @dataclass(frozen=True)
 class LoadedInventory:
-    """The inventories of all handles, in handle order, and their merged records."""
+    """All inventories, in merge order, and their merged records.
 
-    handle_ids: list[str]
+    ``handle_ids`` has one entry per inventory in ``envelopes``: the handle
+    id of a stored inventory, or ``None`` for an inline one.
+    """
+
+    handle_ids: list[str | None]
     envelopes: list[InventoryEnvelope]
     records: list[InventoryRecord] = field(default_factory=list)
     duplicates: list[Duplicate] = field(default_factory=list)
+
+    def sources(self) -> list[dict[str, Any]]:
+        """Where each inventory came from, for the ``sources`` of a report.
+
+        ``origin`` is ``"stored"`` (with its ``handle_id``) or ``"inline"``
+        (no handle id), so a report shows which data MEHO stored itself.
+        """
+        sources: list[dict[str, Any]] = []
+        for handle_id, envelope in zip(self.handle_ids, self.envelopes, strict=True):
+            entry: dict[str, Any] = (
+                {"origin": "inline"}
+                if handle_id is None
+                else {"origin": "stored", "handle_id": handle_id}
+            )
+            entry["connector_id"] = envelope.source.connector_id
+            entry["target"] = envelope.source.target
+            entry["collected_at"] = envelope.source.collected_at.isoformat()
+            sources.append(entry)
+        return sources
 
 
 def _not_found(handle_id: UUID) -> InventoryLoadError:
@@ -135,20 +162,28 @@ def _decode_envelope(
         ) from None
     if stored is None:
         raise _not_found(handle_id)
-    document: Any = stored.document
+    return _check_inventory(stored.document, f"handle {handle_id}")
+
+
+def _check_inventory(document: Any, label: str) -> InventoryEnvelope:
+    """Check one inventory, stored or inline: schema version first, then the shape.
+
+    *label* names it in the message (``handle <id>`` or ``inline inventory <n>``).
+    Sync; runs in a worker thread.
+    """
     if not isinstance(document, dict):
-        raise InventoryLoadError(f"handle {handle_id} does not hold an inventory")
+        raise InventoryLoadError(f"{label} does not hold an inventory")
     version = document.get("schema_version")
     if version != INVENTORY_SCHEMA_VERSION:
         raise InventoryLoadError(
-            f"handle {handle_id} holds inventory schema version {version!r}; "
+            f"{label} holds inventory schema version {version!r}; "
             f"this MEHO reads version {INVENTORY_SCHEMA_VERSION!r}"
         )
     try:
         return InventoryEnvelope.model_validate(document)
     except ValidationError as exc:
         raise InventoryLoadError(
-            f"handle {handle_id} does not hold a valid inventory: {_validation_summary(exc)}"
+            f"{label} does not hold a valid inventory: {_validation_summary(exc)}"
         ) from None
 
 
@@ -177,20 +212,30 @@ def merge_inventories(
 
 async def load_inventories(
     operator: Operator,
-    handle_ids: list[str],
+    handle_ids: list[str] | None = None,
     *,
+    inventories: list[Any] | None = None,
     store: ResultHandleStore | None = None,
 ) -> LoadedInventory:
-    """Read every handle of *operator*'s tenant as an inventory and merge them.
+    """Read the stored and the inline inventories and merge them.
+
+    Each handle is read from *operator*'s tenant; a handle given twice is
+    read once. Each of *inventories* is an inventory given inline in the
+    call. At least one handle or inline inventory is needed, and at most
+    :data:`MAX_INVENTORY_HANDLES` of both together.
 
     Raises :class:`InventoryLoadError` for the first handle that is not a
-    UUID, is missing or expired, is not an inventory, or has another
-    schema version. A handle given twice is read once.
+    UUID, is missing or expired, or for the first inventory (stored or
+    inline) that is not an inventory or has another schema version.
     """
-    if not handle_ids:
-        raise InventoryLoadError("give at least one inventory handle")
-    if len(handle_ids) > MAX_INVENTORY_HANDLES:
-        raise InventoryLoadError(f"give at most {MAX_INVENTORY_HANDLES} inventory handles")
+    handle_ids = handle_ids or []
+    inventories = inventories or []
+    if not handle_ids and not inventories:
+        raise InventoryLoadError("give at least one inventory handle or one inline inventory")
+    if len(handle_ids) + len(inventories) > MAX_INVENTORY_HANDLES:
+        raise InventoryLoadError(
+            f"give at most {MAX_INVENTORY_HANDLES} inventories, handles and inline ones together"
+        )
     resolved = store if store is not None else get_result_handle_store()
     ordered = list(dict.fromkeys(_parse_handle_id(raw) for raw in handle_ids))
     envelopes: list[InventoryEnvelope] = []
@@ -203,9 +248,13 @@ async def load_inventories(
                 _decode_envelope, resolved, raw, operator_sub=operator.sub, handle_id=handle_id
             )
         )
+    for number, document in enumerate(inventories, start=1):
+        envelopes.append(
+            await asyncio.to_thread(_check_inventory, document, f"inline inventory {number}")
+        )
     records, duplicates = merge_inventories(envelopes)
     return LoadedInventory(
-        handle_ids=[str(handle_id) for handle_id in ordered],
+        handle_ids=[str(handle_id) for handle_id in ordered] + [None] * len(inventories),
         envelopes=envelopes,
         records=records,
         duplicates=duplicates,

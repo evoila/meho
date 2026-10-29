@@ -1082,7 +1082,7 @@ Five synthetic connectors follow this mould (natural key
 | `topology-graph-1.x` | `topology.create_node` / `.annotate` / … | `meho_topology_create_node` / `_annotate` / … | #2537 |
 | `targets-registry-1.x` | `targets.register` | `meho_targets_register` | #2861 |
 | `audit-integrity-1.x` | `audit.loose_rows` | (dispatch-only; a `safe` read a Sensor pins) | #4670 |
-| `migration-assess-1.x` | `migration.inventory.csv` | (dispatch-only; a `safe` read of stored inventories) | #5099 |
+| `migration-assess-1.x` | `migration.inventory.csv` | (dispatch-only; a `safe` read of stored or inline inventories) | #5099 |
 
 `meho_targets_register` (#2861,
 `mcp/tools/targets_register.py` + `connectors/targets/`) closes the last

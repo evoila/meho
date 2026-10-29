@@ -120,6 +120,12 @@ environment cannot run code in the checks.
      `sitecustomize` or `usercustomize` in any form Python can import
      (a `.py` file, a compiled `.pyc` file, an extension module such as
      `.so`, or a folder). Python would run these before MEHO starts.
+   - no compiled-file cache (`__pycache__` folder) above the wheel's own
+     folder: not at the top of `site-packages`, not in `meho_backplane/`,
+     and not directly in `connectors/`. Python can load a compiled file
+     from such a cache instead of the source next to it, so a cache there
+     could replace code of the public image. A cache inside the wheel's
+     own folder is fine.
    - a connector wheel has files only in `meho_backplane/connectors/<folder>/`.
      Any other file, for example in MEHO's core files, is refused.
    - an extra wheel has no files in `meho_backplane/`, and no files for the
@@ -143,7 +149,9 @@ environment cannot run code in the checks.
      name, so a connector folder `registry/` would take the place of MEHO's
      `connectors/registry.py`, and an extra wheel's folder `foo/` would take
      the place of a base library's `foo.py`. Both are refused. The same
-     check applies to start-up hooks after install.
+     checks apply to start-up hooks and to compiled-file caches after
+     install: a new `__pycache__` folder next to modules of the public
+     image is refused, even when a connector wheel names it as its folder.
    - each connector package is installed, with its folders.
 5. **Output**: the new files are copied to an output folder, and the
    allowlist file `/app/connector-packages.json` is written there. For each

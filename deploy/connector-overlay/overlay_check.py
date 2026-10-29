@@ -11,17 +11,20 @@ three steps in a throwaway build stage:
    Refuse a wheel whose file list does not match its own ``RECORD``, a
    wheel with a start-up hook (a ``.pth`` file, or any importable form of
    ``sitecustomize`` or ``usercustomize``: a module file, a compiled file,
-   an extension module or a package folder), a connector wheel with files
-   outside its own connector folders, and an extra wheel with files in
-   MEHO's own package.
+   an extension module or a package folder), a wheel with a compiled-file
+   cache (``__pycache__``) above its own folder, a connector wheel with
+   files outside its own connector folders, and an extra wheel with files
+   in MEHO's own package.
 2. ``snapshot``: record every file and every installed package version of
    the base image's environment. The base image installs exactly the
    versions of its lock file, so this is the lock to check against.
 3. ``finish``: after ``uv pip install``, compare the environment with the
    snapshot. Refuse any library whose version changed, any base file that
-   changed or went away, any new file that is not in a new folder, and any
+   changed or went away, any new file that is not in a new folder, any
    new module or package whose name an existing one already has (Python
-   would import the new one instead).
+   would import the new one instead), and any new compiled-file cache next
+   to modules of the base image (Python could load it instead of their
+   source).
    Then copy only the new files to an output folder and write the
    allowlist file (``/app/connector-packages.json``) that MEHO checks at
    start.
@@ -52,6 +55,7 @@ from pathlib import Path, PurePosixPath
 CONNECTORS_PREFIX = ("meho_backplane", "connectors")
 ALLOWLIST_PATH = PurePosixPath("/app/connector-packages.json")
 STARTUP_HOOK_MODULES = frozenset({"sitecustomize", "usercustomize"})
+PYCACHE = "__pycache__"
 # The file endings Python imports a module from: source, compiled, and extension modules.
 _MODULE_SUFFIXES = (".py", ".pyc", ".pyw", ".pyd", ".so")
 _FOLDER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -133,6 +137,18 @@ def _is_startup_hook(path: PurePosixPath) -> bool:
     return _module_name(path.parts[0], is_dir=len(path.parts) > 1) in STARTUP_HOOK_MODULES
 
 
+def _cache_above_own_folder(parts: tuple[str, ...], owned: int) -> bool:
+    """Whether a ``__pycache__`` folder in ``parts`` sits above the wheel's own folder.
+
+    Python loads ``X/__pycache__/name.cpython-NNN.pyc`` instead of ``X/name.py``
+    when the compiled file says its source is unchanged. A cache next to the
+    base image's modules can so replace their code. ``owned`` is the depth of
+    the folder the wheel owns: 1 for a top-level package, 3 for a connector
+    folder. A cache inside that folder only replaces the wheel's own code.
+    """
+    return PYCACHE in parts[:owned]
+
+
 def _install_path(name: str, data_dir: str, where: str) -> PurePosixPath:
     """The path a wheel entry lands at, relative to site-packages."""
     path = PurePosixPath(name)
@@ -147,6 +163,13 @@ def _install_path(name: str, data_dir: str, where: str) -> PurePosixPath:
         raise BuildError(
             f"{where}: the file {name} is a start-up hook: Python would run it before MEHO "
             "starts. Overlay wheels may not add one."
+        )
+    owned = 3 if path.parts[0] == CONNECTORS_PREFIX[0] else 1
+    if _cache_above_own_folder(path.parts, owned):
+        raise BuildError(
+            f"{where}: the file {name} is in a compiled-file cache (__pycache__) next to "
+            "modules of the base image. Python could load it instead of their source. "
+            "Overlay wheels may only have a cache inside their own folder."
         )
     return path
 
@@ -328,6 +351,9 @@ def _refusal(
     inner = PurePosixPath(*rel.parts[len(site.parts) :])
     if _is_startup_hook(inner):
         return "is a start-up hook"
+    owned = 3 if inner.parts[0] == CONNECTORS_PREFIX[0] else 1
+    if _cache_above_own_folder(inner.parts, owned):
+        return "is a compiled-file cache next to modules of the base image (overlap)"
     if inner.parts[0] == CONNECTORS_PREFIX[0]:
         parts = inner.parts
         if len(parts) >= 4 and parts[:2] == CONNECTORS_PREFIX and parts[2] in folders:
@@ -346,8 +372,9 @@ def check_files(
     site: PurePosixPath,
     folders: set[str],
 ) -> list[str]:
-    """Base files must stay as they were; new files must sit in new folders, and no new
-    module or package may have the name of one the base image has. Returns the new files."""
+    """Base files must stay as they were; new files must sit in new folders, no new module
+    or package may have the name of one the base image has, and no new compiled-file cache
+    may sit next to base modules. Returns the new files."""
     changed = sorted(p for p, st in before.items() if after.get(p) != st)
     if changed:
         raise BuildError(

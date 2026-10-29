@@ -146,6 +146,43 @@ def test_extra_wheel_with_a_name_that_only_looks_like_a_hook_is_read(tmp_path: P
     assert oc.read_wheel(path, connector=False).name == "helper-lib"
 
 
+def test_connector_wheel_with_a_cache_folder_as_its_folder_is_refused(tmp_path: Path) -> None:
+    files = {"meho_backplane/connectors/__pycache__/__init__.cpython-312.pyc": "x"}
+    path = make_wheel(tmp_path, "example-connectors", "1.0", files)
+    with pytest.raises(
+        oc.BuildError, match=r"__init__\.cpython-312\.pyc is in a compiled-file cache"
+    ):
+        oc.read_wheel(path, connector=True)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "__pycache__/flatlib.cpython-312.pyc",
+        "meho_backplane/__pycache__/__init__.cpython-312.pyc",
+        "meho_backplane/connectors/__pycache__/registry.cpython-312.pyc",
+    ],
+)
+def test_extra_wheel_with_a_cache_next_to_base_modules_is_refused(
+    tmp_path: Path, entry: str
+) -> None:
+    path = make_wheel(tmp_path, "helper-lib", "1.0", {entry: "x"})
+    with pytest.raises(oc.BuildError, match="is in a compiled-file cache"):
+        oc.read_wheel(path, connector=False)
+
+
+def test_wheel_with_a_cache_inside_its_own_folder_is_read(tmp_path: Path) -> None:
+    files = {
+        **_connector_files(),
+        "meho_backplane/connectors/example_widget/__pycache__/__init__.cpython-312.pyc": "x",
+    }
+    path = make_wheel(tmp_path, "example-connectors", "1.0", files)
+    assert oc.read_wheel(path, connector=True).folders == ("example_widget",)
+    files = {"helper_lib/__init__.py": "", "helper_lib/__pycache__/__init__.cpython-312.pyc": "x"}
+    path = make_wheel(tmp_path, "helper-lib", "1.0", files)
+    assert oc.read_wheel(path, connector=False).name == "helper-lib"
+
+
 def test_extra_wheel_with_pth_in_data_folder_is_refused(tmp_path: Path) -> None:
     path = make_wheel(
         tmp_path, "helper-lib", "1.0", {"helper_lib-1.0.data/purelib/zz.pth": "import os\n"}
@@ -255,6 +292,35 @@ def test_installed_startup_hook_is_refused(entry: str) -> None:
 def test_installed_module_with_the_name_of_a_base_module_is_refused(entry: str) -> None:
     with pytest.raises(oc.BuildError, match=rf"{re.escape(entry)} \(takes the place of a module"):
         _check_added(entry)
+
+
+def test_installed_cache_as_a_connector_folder_is_refused() -> None:
+    entry = "meho_backplane/connectors/__pycache__/__init__.cpython-312.pyc"
+    with pytest.raises(oc.BuildError, match=rf"{re.escape(entry)} \(is a compiled-file cache"):
+        _check_added(entry, folders={"__pycache__"})
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "__pycache__/flatlib.cpython-312.pyc",
+        "meho_backplane/__pycache__/__init__.cpython-312.pyc",
+    ],
+)
+def test_installed_cache_next_to_base_modules_is_refused(entry: str) -> None:
+    with pytest.raises(oc.BuildError, match=rf"{re.escape(entry)} \(is a compiled-file cache"):
+        _check_added(entry)
+
+
+def test_installed_cache_inside_a_new_folder_is_allowed() -> None:
+    new = _check_added(
+        "helper_lib/__init__.py",
+        "helper_lib/__pycache__/__init__.cpython-312.pyc",
+        "meho_backplane/connectors/example_widget/__init__.py",
+        "meho_backplane/connectors/example_widget/__pycache__/__init__.cpython-312.pyc",
+        folders={"example_widget"},
+    )
+    assert len(new) == 4
 
 
 def test_installed_connector_folder_with_the_name_of_a_base_module_is_refused() -> None:

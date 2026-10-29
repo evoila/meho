@@ -111,7 +111,10 @@ Detail payloads land in ``extras``. Codes:
   connector-resolution time (G0.20-T6 #1142 follow-up, #1506) before the
   handler proceeds unbound and trips ``dispatch_typed``'s self-guard
   :exc:`RuntimeError`. A module-level handler (no ``self``) needs no
-  target and dispatches unchanged.
+  target and dispatches unchanged. Since #4139 every op that needs a
+  target (:func:`descriptor_requires_target`, which includes every
+  ``ingested`` op) is checked right after the descriptor lookup, before
+  the policy gate, so it never surfaces as ``no_connector``.
 * ``handler_unreachable`` -- ``importlib`` couldn't resolve
   ``handler_ref``, or the resolved symbol is not callable.
 * ``denied`` -- the policy gate issued an outright ``deny`` verdict.
@@ -1310,7 +1313,7 @@ async def _run_branch_with_error_handling(
     vRLI's ``440``); G0.29-T2 (#2067) then makes that status *recoverable*
     at the dispatch path itself (the delegation lives in
     :func:`_handle_http_status_error`): a session-stateful connector that
-    advertises a duck-typed ``invalidate_session(target)`` hook has its
+    advertises a duck-typed ``invalidate_session(target, *, rejected)`` hook has its
     cached token evicted and the op re-dispatched once, so an expired vCenter
     (401) / vRLI (440) session re-logs-in and recovers without a backplane
     restart. Only when the re-login *also* fails does the missing/invalid/
@@ -1968,7 +1971,7 @@ async def _handle_http_status_error(
     future ``ProfiledRestConnector`` traverse: this is the only place a
     generic-ingested dispatch acts on an auth failure. When the status is
     auth-class **and** the connector advertises a duck-typed
-    ``invalidate_session(target)`` hook, evict the cached session token and
+    ``invalidate_session(target, *, rejected)`` hook, evict the cached session token and
     re-dispatch the *same* ingested request exactly once. A re-login that
     succeeds returns the raw payload up to the caller's success path, which
     runs the redact -> reduce -> audit sequence -- so a recovered call writes
@@ -2003,6 +2006,7 @@ async def _handle_http_status_error(
     if is_auth_failure and callable(invalidate_session):
         recovered = await _retry_after_session_invalidation(
             invalidate_session=invalidate_session,
+            rejected=http_exc.request,
             descriptor=descriptor,
             connector_instance=connector_instance,
             operator=operator,
@@ -2036,7 +2040,8 @@ async def _handle_http_status_error(
 
 async def _retry_after_session_invalidation(
     *,
-    invalidate_session: Callable[[Any], Awaitable[None]],
+    invalidate_session: Callable[..., Awaitable[None]],
+    rejected: httpx.Request,
     descriptor: EndpointDescriptor,
     connector_instance: Connector | None,
     operator: Operator,
@@ -2066,8 +2071,13 @@ async def _retry_after_session_invalidation(
     every other status => its usual shape); any other exception (a
     second-attempt ``ConnectError``, a loader ``RuntimeError`` from the
     re-login itself, ...) flattens to ``connector_error``.
+
+    The hook gets the *rejected* request (#5033). A connector whose token is
+    shared by several targets drops its cached token only when the rejected
+    request sent it: a late ``401`` must not drop the new token another call
+    just logged in for.
     """
-    await invalidate_session(target)
+    await invalidate_session(target, rejected=rejected)
     try:
         raw = await _run_source_kind_branch(
             descriptor=descriptor,
@@ -2345,6 +2355,25 @@ def _result_digest_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, 
     return None
 
 
+def _result_document_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, Any] | None:
+    """Extract ``result_document`` from a descriptor's ``llm_instructions``.
+
+    An op whose whole result other operations load by its handle (the
+    migration inventory reads) attaches ``{"always": true}`` under
+    ``llm_instructions.result_document``; the reducer then keeps the payload
+    as a document record whatever its size. A plain dict is returned, as for
+    the other hints; the reducer validates it. ``None`` when the op did not
+    register the hint.
+    """
+    instructions = descriptor.llm_instructions
+    if not isinstance(instructions, dict):
+        return None
+    raw = instructions.get("result_document")
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
 async def _unavailable_delivery_result(
     *,
     op_id: str,
@@ -2554,6 +2583,9 @@ def _build_reducer_context(
     result_digest = _result_digest_from_descriptor(descriptor)
     if result_digest is not None:
         reducer_context["result_digest"] = result_digest
+    result_document = _result_document_from_descriptor(descriptor)
+    if result_document is not None:
+        reducer_context["result_document"] = result_document
     return reducer_context
 
 
@@ -3237,6 +3269,11 @@ async def dispatch(
             triple=(product, version, impl_id),
             started=started,
         )
+    # #4139: an op that needs a target (every ingested op, or a typed op
+    # bound to a connector) and got none fails here with one clear line,
+    # before the catalog guard, the policy gate or a wait for approval.
+    if target is None and descriptor_requires_target(descriptor):
+        return result_target_required(op_id, _elapsed_ms(started))
 
     # --- Step 3: catalog target guard + parameter_schema validation -------
     # A connector may opt an ingested catalog into a target-compatibility

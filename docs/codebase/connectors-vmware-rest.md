@@ -8,8 +8,8 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 74 hand-authored composites
-that orchestrate cross-spec workflows: 16 read composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 75 hand-authored composites
+that orchestrate cross-spec workflows: 17 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
 in `#2258`; plus the four guest-operations reads `#3100` and the
@@ -18,7 +18,8 @@ Supervisor status read `#3281` + the vSphere Namespace status read
 the two SUBSCRIBED content-library reads `content_library.subscribed.status` +
 `content_library.subscribed.items.list` / `#3495` + the datastore
 cache-refresh read `datastore.refresh` / `#3789` + the VM limit and
-reservation read `vm.resource_allocation.show` / `#3880`) and 58 write
+reservation read `vm.resource_allocation.show` / `#3880` + the migration
+inventory read `vmware.migration.inventory`) and 58 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
 governed vSphere Namespace `namespace.create` (caution) +
 `namespace.delete` (destructive) / `#3502` (see the **Governed vSphere
@@ -492,8 +493,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `vcenter.yaml` by `test_connectors_vmware_rest_library_reconcile.py`.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 74
-  `_CompositeSpec` rows (16 read — incl. the `#3789` datastore
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 75
+  `_CompositeSpec` rows (17 read — incl. the `#3789` datastore
   cache-refresh read `datastore.refresh` — + 46 dangerous/destructive
   writes + 12 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
@@ -569,14 +570,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     An oversized / malformed request fails `validate_params` in the
     dispatcher and returns a structured `invalid_params` result before
     any read is issued. Returns `{properties: {path: val}, missing:
-    [path]}`, surfacing the `ObjectContent.missingSet`. It additionally
+    [path]}`. Every requested path is in one of the two, so an empty
+    `missing` really means every path came back. It additionally
     surfaces the per-property `missingSet` fault **type names** —
     `missing_properties: [{path, fault_type?}]` plus a
     `missing_fault_summary: {fault_type: count}` roll-up (concrete vim
     fault class names only, e.g. `NoPermission` / `InvalidProperty`,
-    **never** fault text, which can echo a property value) — so an
-    operator can tell a genuinely-unset property from a per-property
-    permission/auth/invalid fault (#3708). The op passes paths through
+    **never** fault text, which can echo a property value) (#3708).
+    vCenter sends a fault with every `missingSet` entry. A property that
+    is not set, or whose value is a link to an object the login cannot
+    see, is in neither `propSet` nor `missingSet`. `object_collect_impl`
+    adds each such path to `missing` and `missing_properties` without a
+    `fault_type`, in request order; `missing_fault_summary` counts only
+    real faults. This runs after `_collect_with_auth_health_reset`, so
+    the stale-session reset and the ESXi probe, which share that helper,
+    still judge the raw answer (#5131). The op passes paths through
     as given. Its description and `properties` hint tell callers that
     vCenter 8.0.x rejects a path into a cluster's `configurationEx`
     (`configurationEx.rule` / `.group` / `.drsConfig`), so they request
@@ -1177,10 +1185,14 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
      excluded composite with its reason. The test
      `test_connectors_vmware_rest_catalog_parity.py` fails when a composite
      or typed op on 9.0 is neither on 8.0 nor in that list.
-   - The governed child ops inside a composite keep their
-     `vmware-rest-9.0` keys on both catalogs. One grant set covers the
-     composite on either catalog, and approving a parked child op re-runs
-     the composite on the 9.0 catalog, where it is also registered.
+   - The write steps inside a composite are checked under the connector
+     the target resolves to (#4991): `vmware-rest-8.0` for an 8.0.x
+     target, `vmware-rest-9.0` for a 9.x target. The handlers read it off
+     the connector instance (`_step_connector_id` in `composites/_write.py`).
+     So a step grant for an 8.0.x target names `vmware-rest-8.0`, and
+     approving a parked step re-runs the composite on the 8.0 catalog.
+     The Supervisor and namespace composites are not on that catalog, so an
+     approved step of one of them on an 8.0.x target cannot resume there.
    - VI-JSON needs vCenter 8.0 U1 or later, so the VI-JSON composites do
      not work on an 8.0 GA target.
    - When the 9.0 catalog refuses an ingested op for an 8.0.x target
@@ -1192,8 +1204,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 74 `vmware.composite.*` rows with
-   `source_kind="composite"` — 16 reads (15 with `safety_level="safe"` +
+   queued registrar and upserts: the 75 `vmware.composite.*` rows with
+   `source_kind="composite"` — 17 reads (16 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
    service principals), and 58 writes, all `requires_approval=True`
@@ -1586,7 +1598,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 74 composites (16 reads + 58 writes) land as `source_kind="composite"`
+The 75 composites (17 reads + 58 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1683,7 +1695,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 74 composites are hand-authored aggregators the connector ships as
+The 75 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the

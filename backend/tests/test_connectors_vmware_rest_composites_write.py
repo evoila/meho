@@ -137,6 +137,9 @@ class _RecordingConnector:
     partial-failure paths are exercised.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(
         self,
         responses: dict[str, Any] | list[Any],
@@ -5869,6 +5872,9 @@ class _MaintenanceExitConnector:
     provably off the wire.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(
         self,
         host_reads: list[dict[str, Any] | Exception],
@@ -7247,6 +7253,9 @@ class _DiskGrowConnector:
     keys them by.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(
         self,
         *,
@@ -7618,6 +7627,9 @@ class _DiskAttachConnector:
     every ``ReconfigVM_Task`` add so a parked/refused write is provably off
     the wire.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     def __init__(
         self,
@@ -8087,6 +8099,9 @@ class _CloneFromTemplateConnector:
     ``RetrievePropertiesEx`` reads are keyed apart by the request body's
     ``specSet`` object type — exactly the seam a real vCenter keys them by.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     _MOUNT = "/api"
 
@@ -8620,6 +8635,9 @@ class _DrsRuleConnector:
     works, a path into it fails with HTTP 500 ``InvalidProperty``.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     _MOUNT = "/api"
 
     def __init__(
@@ -8986,6 +9004,9 @@ class _FolderCreateConnector:
     Folder MoRef directly, so **no** ``RetrievePropertiesEx`` poll ever fires.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     _MOUNT = "/api"
 
     def __init__(
@@ -9264,6 +9285,9 @@ class _ResourcePoolConnector:
     serves the ``ClusterComputeResource.resourcePool`` root-pool read.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     _MOUNT = "/api"
 
     def __init__(
@@ -9359,6 +9383,9 @@ class _VmHostRuleConnector:
     The cluster read answers like vCenter 8.0.x: the whole ``configurationEx``
     works, a path into it fails with HTTP 500 ``InvalidProperty``.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     _MOUNT = "/api"
 

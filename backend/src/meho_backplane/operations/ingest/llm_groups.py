@@ -48,6 +48,16 @@ Re-running on a partially-grouped connector (#3713):
   the leftovers, followed by a Pass 2 over the leftovers against the
   new groups only.
 
+Ops still left over after a filing pass (#4972), on a full run or a
+re-run, get more "extend" rounds: each round shows the model every
+group so far, asks for new groups for the leftovers, and files the
+leftovers into the new groups. The rounds stop when every op has a
+group, when the model proposes no new group, when a round files no op,
+or after :data:`DEFAULT_MAX_EXTEND_ROUNDS` rounds (this limits the model
+calls; a warning is logged). The op ids still without a group are
+returned in :attr:`GroupingResult.unassigned_op_ids` (sorted, at most
+:data:`UNASSIGNED_OP_IDS_LIMIT`) and written to the audit row.
+
 The result carries one :class:`GroupSummary` per group in scope: how
 many ops this run added to it, and how many typed, composite, and
 ingested ops it now holds.
@@ -125,8 +135,10 @@ from meho_backplane.operations.ingest.group_truth import drop_unsupported_claims
 
 __all__ = [
     "DEFAULT_GROUPING_BATCH_SIZE",
+    "DEFAULT_MAX_EXTEND_ROUNDS",
     "DEFAULT_MAX_GROUPS",
     "DEFAULT_MIN_GROUPS",
+    "UNASSIGNED_OP_IDS_LIMIT",
     "GroupProposal",
     "GroupSummary",
     "GroupingConfig",
@@ -143,6 +155,15 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
+
+#: Most "extend" rounds one run makes for ops still without a group
+#: (#4972). Each round costs one Pass-1 call plus the Pass-2 batches for
+#: the leftovers, so this bounds the model calls of a run.
+DEFAULT_MAX_EXTEND_ROUNDS = 3
+
+#: Most op ids :attr:`GroupingResult.unassigned_op_ids` and the audit
+#: row list. :attr:`GroupingResult.operations_unassigned` keeps the total.
+UNASSIGNED_OP_IDS_LIMIT = 200
 
 
 # ---------------------------------------------------------------------------
@@ -203,11 +224,15 @@ class GroupingResult:
         returned ``"none"`` for them, omitted them from the
         response, or assigned them to an unknown ``group_key``.
         Operator assigns these manually via T4's ``edit_op``.
+    unassigned_op_ids:
+        The op ids still without a group after the run, sorted, at most
+        :data:`UNASSIGNED_OP_IDS_LIMIT`. The list is shorter than
+        *operations_unassigned* only when the limit cut it.
     llm_call_count:
         Total LLM calls issued. ``1 + ceil(op_count / batch_size)``
         on a full grouping run (1 Pass-1 + N Pass-2 batches). Zero
-        on a no-op re-run that found every op already grouped. A
-        re-run with leftover ops adds one "extend" Pass-1 call, plus
+        on a no-op re-run that found every op already grouped. Each
+        "extend" round for leftover ops adds one Pass-1 call, plus
         Pass-2 batches for the leftovers when it proposed groups.
     llm_duration_ms:
         Wall-clock time spent inside
@@ -226,6 +251,7 @@ class GroupingResult:
     llm_call_count: int
     llm_duration_ms: float
     groups: tuple[GroupSummary, ...] = ()
+    unassigned_op_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,6 +314,7 @@ class _PhaseTotals:
     groups_created: int = 0
     operations_assigned: int = 0
     operations_unassigned: int = 0
+    unassigned_op_ids: tuple[str, ...] = ()
     added_by_key: Counter[str] = field(default_factory=Counter)
     created_keys: set[str] = field(default_factory=set)
     groups: tuple[GroupSummary, ...] = ()
@@ -603,7 +630,7 @@ async def _create_groups_and_assign(
     reserved_keys: set[str],
     config: GroupingConfig,
     totals: _PhaseTotals,
-) -> None:
+) -> list[GroupProposal]:
     """Propose new groups for *operations* (Pass 1), persist them, then assign (Pass 2).
 
     *existing_groups* empty -- a full grouping run. Otherwise an
@@ -615,6 +642,8 @@ async def _create_groups_and_assign(
     The extend run is best effort: if its Pass-1 output is invalid, the
     leftovers stay ungrouped and the assignments already made into the
     existing groups still commit. On a full run the error propagates.
+
+    Returns the new groups it persisted (empty when it created none).
     """
     _log.info(
         "llm_grouping_pass1_start",
@@ -642,7 +671,7 @@ async def _create_groups_and_assign(
             leftover_op_count=len(operations),
             error=str(exc),
         )
-        return
+        return []
     clashing = [p.group_key for p in proposals if p.group_key in reserved_keys]
     if clashing:
         _log.warning(
@@ -657,7 +686,7 @@ async def _create_groups_and_assign(
         proposed_group_count=len(proposals),
     )
     if not proposals:
-        return
+        return []
     persisted_rows = _persist_proposed_groups(session, triple=triple, proposals=proposals)
     await session.flush()
     totals.groups_created += len(persisted_rows)
@@ -672,6 +701,64 @@ async def _create_groups_and_assign(
         totals=totals,
     )
     _check_new_group_texts(triple=triple, rows=persisted_rows, operations=operations)
+    return proposals
+
+
+async def _extend_until_grouped(
+    session: AsyncSession,
+    llm_client: LlmClient,
+    *,
+    triple: _ConnectorTriple,
+    operations: Sequence[EndpointDescriptor],
+    groups: Sequence[GroupProposal],
+    reserved_keys: set[str],
+    config: GroupingConfig,
+    totals: _PhaseTotals,
+) -> None:
+    """Run "extend" rounds until every op in *operations* has a group (#4972).
+
+    *groups* are the groups the ops were already offered. Each round
+    shows the model all of them, asks for new groups for the ops still
+    without one, and files those ops into the new groups only. An op
+    that already has a group is never moved, and no group is renamed.
+    The rounds stop early when the model proposes no new group or when
+    a round files no op; the round limit is logged as a warning.
+    """
+    offered = list(groups)
+    for round_index in range(DEFAULT_MAX_EXTEND_ROUNDS):
+        leftovers = [op for op in operations if op.group_id is None]
+        if not leftovers:
+            return
+        new_groups = await _create_groups_and_assign(
+            session,
+            llm_client,
+            triple=triple,
+            operations=leftovers,
+            existing_groups=offered,
+            reserved_keys=reserved_keys,
+            config=config,
+            totals=totals,
+        )
+        still_left = sum(1 for op in leftovers if op.group_id is None)
+        if not new_groups or still_left == len(leftovers):
+            _log.info(
+                "llm_grouping_extend_stopped",
+                connector_id=triple.connector_id,
+                round_index=round_index,
+                leftover_op_count=still_left,
+                reason="no_new_groups" if not new_groups else "no_op_filed",
+            )
+            return
+        offered.extend(new_groups)
+        reserved_keys.update(g.group_key for g in new_groups)
+    still_left = sum(1 for op in operations if op.group_id is None)
+    if still_left:
+        _log.warning(
+            "llm_grouping_extend_round_limit_reached",
+            connector_id=triple.connector_id,
+            max_extend_rounds=DEFAULT_MAX_EXTEND_ROUNDS,
+            leftover_op_count=still_left,
+        )
 
 
 async def _summarise_groups(
@@ -721,6 +808,7 @@ def _build_result(triple: _ConnectorTriple, totals: _PhaseTotals) -> GroupingRes
         llm_call_count=totals.llm_call_count,
         llm_duration_ms=totals.llm_duration_ms,
         groups=totals.groups,
+        unassigned_op_ids=totals.unassigned_op_ids,
     )
 
 
@@ -744,6 +832,7 @@ async def _write_grouping_audit_row(
             "groups_created": totals.groups_created,
             "operations_assigned": totals.operations_assigned,
             "operations_unassigned": totals.operations_unassigned,
+            "unassigned_op_ids": list(totals.unassigned_op_ids),
             "llm_call_count": totals.llm_call_count,
             "batch_size": config.batch_size,
             "operations_added_by_group": dict(sorted(totals.added_by_key.items())),
@@ -780,7 +869,7 @@ async def _drive_two_pass_grouping(
     reserved_keys = {g.group_key for g in existing_groups}
 
     if not candidates:
-        await _create_groups_and_assign(
+        offered = await _create_groups_and_assign(
             session,
             llm_client,
             triple=triple,
@@ -798,31 +887,33 @@ async def _drive_two_pass_grouping(
             candidate_group_count=len(candidates),
             unassigned_op_count=len(unassigned_ops),
         )
-        candidate_proposals = _project_persisted_groups(candidates)
+        offered = _project_persisted_groups(candidates)
         await _assign_and_apply(
             llm_client,
             triple=triple,
             operations=unassigned_ops,
-            groups=candidate_proposals,
+            groups=offered,
             group_key_to_id={g.group_key: g.id for g in candidates},
             config=config,
             totals=totals,
         )
-        leftovers = [op for op in unassigned_ops if op.group_id is None]
-        if leftovers:
-            await _create_groups_and_assign(
-                session,
-                llm_client,
-                triple=triple,
-                operations=leftovers,
-                existing_groups=candidate_proposals,
-                reserved_keys=reserved_keys,
-                config=config,
-                totals=totals,
-            )
+    if offered:
+        await _extend_until_grouped(
+            session,
+            llm_client,
+            triple=triple,
+            operations=unassigned_ops,
+            groups=offered,
+            reserved_keys=reserved_keys | totals.created_keys,
+            config=config,
+            totals=totals,
+        )
 
     totals.operations_assigned = sum(totals.added_by_key.values())
     totals.operations_unassigned = len(unassigned_ops) - totals.operations_assigned
+    totals.unassigned_op_ids = tuple(
+        sorted(op.op_id for op in unassigned_ops if op.group_id is None)[:UNASSIGNED_OP_IDS_LIMIT]
+    )
     totals.groups = await _summarise_groups(session, triple=triple, totals=totals)
 
 

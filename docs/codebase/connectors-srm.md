@@ -75,8 +75,9 @@ other modes raise `NotImplementedError`.
   the stored handler of `srm.about` names `SrmConnector`. MEHO binds it
   only to an `SrmConnector`, so an `srm.*` operation cannot run on a `vr`
   target (the call ends with a `connector_error` before any HTTP
-  request). The base caches one session id per target and tenant
-  (`target_cache_key`).
+  request). The base caches one session id per credential
+  (`credential_cache_key`: tenant, secret and login host), so two SRM
+  targets that share one credential share one session.
 - `SrmTargetLike` (`session.py`) -- the minimum target shape: `id`,
   `tenant_id`, `name`, `host`, `port`, `secret_ref`, `auth_model`.
 - `SrmSessionLoader` (`session.py`) -- an async callable

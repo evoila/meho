@@ -170,3 +170,101 @@ func TestRunDiscoverCrossTenantSeed404(t *testing.T) {
 		t.Errorf("expected unexpected_response; got %q", stderr.String())
 	}
 }
+
+// azureCandidateResult is one candidate as the Azure connector returns it,
+// plus one skipped connector. Every value is made up.
+func azureCandidateResult() api.TargetsDiscoverResult {
+	port := 443
+	secretRef := "tenants/example/azure-login-a"
+	extras := map[string]interface{}{
+		"subscription_id": "11111111-0000-0000-0000-00000000e003",
+		"tenant_id":       "00000000-0000-0000-0000-00000000a001",
+		"cloud":           "AzureCloud",
+	}
+	return api.TargetsDiscoverResult{
+		Discovered: []api.CandidateHint{{
+			Name:       "azure-example-11111111",
+			Host:       "management.azure.com",
+			Port:       &port,
+			SecretRef:  &secretRef,
+			Extras:     &extras,
+			Confidence: api.CandidateHintConfidence("high"),
+		}},
+		Skipped: []api.SkippedConnector{{Name: "other-impl", Reason: "no candidates"}},
+	}
+}
+
+// TestPrintImportYAMLIsAnImportFile — the --import-yaml output is a file
+// `meho targets import` reads: it parses, and each candidate maps to a
+// create body with the product, host, port, secret_ref and extras.
+func TestPrintImportYAMLIsAnImportFile(t *testing.T) {
+	result := azureCandidateResult()
+	var out, errOut bytes.Buffer
+	if err := printImportYAML(&out, &errOut, "azure", &result); err != nil {
+		t.Fatalf("printImportYAML: %v", err)
+	}
+	entries, err := parseTargetsYAML(out.Bytes())
+	if err != nil {
+		t.Fatalf("output is not an import file: %v\n%s", err, out.String())
+	}
+	if len(entries) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(entries))
+	}
+	body, warnings := entryToCreateBody(entries[0])
+	if len(warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", warnings)
+	}
+	for key, want := range map[string]interface{}{
+		"name":       "azure-example-11111111",
+		"product":    "azure",
+		"host":       "management.azure.com",
+		"port":       443,
+		"secret_ref": "tenants/example/azure-login-a",
+	} {
+		if body[key] != want {
+			t.Errorf("body[%q] = %v; want %v", key, body[key], want)
+		}
+	}
+	extras, ok := body["extras"].(map[string]any)
+	if !ok || extras["subscription_id"] != "11111111-0000-0000-0000-00000000e003" ||
+		extras["cloud"] != "AzureCloud" {
+		t.Errorf("extras not carried over: %#v", body["extras"])
+	}
+	if !strings.Contains(errOut.String(), "skipped other-impl: no candidates") {
+		t.Errorf("skipped connector should go to stderr; got %q", errOut.String())
+	}
+}
+
+// TestRunDiscoverImportYAML — --import-yaml through the verb: stdout is the
+// import file, stderr carries the skipped connectors.
+func TestRunDiscoverImportYAML(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/targets/discover", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("seed_target"); got != "azure-sub-a" {
+			t.Errorf("seed_target param: got %q; want azure-sub-a", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(azureCandidateResult())
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newRunCmd(t)
+	err := runDiscover(cmd, discoverOptions{
+		Product: "azure", SeedTarget: "azure-sub-a", ImportYAML: true, BackplaneOverride: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("runDiscover --import-yaml: %v; stderr=%s", err, stderr.String())
+	}
+	entries, err := parseTargetsYAML(stdout.Bytes())
+	if err != nil || len(entries) != 1 || entries[0]["name"] != "azure-example-11111111" {
+		t.Fatalf("stdout is not the import file (%v): %s", err, stdout.String())
+	}
+	if strings.Contains(stdout.String(), "skipped") {
+		t.Errorf("stdout should hold only the file; got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "skipped other-impl") {
+		t.Errorf("stderr should name the skipped connector; got %q", stderr.String())
+	}
+}

@@ -41,7 +41,6 @@ import respx
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.vcf_logs import (
     VRLI_CONNECTOR_ID,
@@ -50,6 +49,7 @@ from meho_backplane.connectors.vcf_logs import (
     VRLI_VERSION,
     VcfLogsConnector,
 )
+from meho_backplane.connectors.vcf_logs.connector import _session_cache_key
 from meho_backplane.connectors.vcf_logs.typed_ops import (
     _CONSTRAINTS_RESERVED_SAFE,
     VRLI_EVENT_QUERY_OP,
@@ -568,7 +568,7 @@ async def test_event_query_440_recovers_on_the_typed_path() -> None:
                 },
             )
             # Read the token cache before aclose() clears it.
-            cached = instance._session_tokens.get(target_cache_key(target))
+            cached = instance._session_tokens.get(_session_cache_key(target))
         finally:
             await instance.aclose()
             reset_dispatcher_caches()

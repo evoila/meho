@@ -190,6 +190,40 @@ async def test_broadcast_discipline_band_present_exactly_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_include_broadcast_false_drops_only_the_broadcast_band() -> None:
+    """``include_broadcast=False`` leaves out the broadcast band and keeps the rest (#4113).
+
+    The MCP ``initialize`` path passes ``False`` for a session that cannot
+    call the broadcast tools. The conventions band must still be there,
+    unchanged, and no broadcast tool name may appear.
+    """
+    tenant = uuid.uuid4()
+    await _insert_convention(
+        tenant_id=tenant,
+        slug="rbac",
+        title="RBAC is canonical",
+        body="Every operation runs through MEHO's RBAC layer.",
+        priority=100,
+    )
+
+    full = await assemble_preamble(tenant, _NO_RUNS_OPERATOR)
+    without = await assemble_preamble(tenant, _NO_RUNS_OPERATOR, include_broadcast=False)
+
+    assert BROADCAST_BLOCK_START not in without.text
+    assert "meho_broadcast_" not in without.text
+    assert without.text.startswith(BLOCK_START)
+    assert full.text == f"{BROADCAST_DISCIPLINE_BAND}\n\n{without.text}"
+
+
+@pytest.mark.asyncio
+async def test_include_broadcast_false_on_empty_tenant_is_empty() -> None:
+    """An empty tenant with the broadcast band left out gets an empty preamble (#4113)."""
+    result = await assemble_preamble(uuid.uuid4(), _NO_RUNS_OPERATOR, include_broadcast=False)
+    assert result.text == ""
+    assert result.dropped_slugs == []
+
+
+@pytest.mark.asyncio
 async def test_priority_ordered_packing_higher_priority_appears_first() -> None:
     """Higher-priority entries appear ABOVE lower-priority entries.
 

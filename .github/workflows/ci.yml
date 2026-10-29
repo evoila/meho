@@ -2102,7 +2102,7 @@ jobs:
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.migrations == 'true')
     runs-on: meho-runners-ci
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       # Surfaced as a job-level env var purely so the Docker Hub login
       # step can test it in an `if:`. The `secrets` context is NOT

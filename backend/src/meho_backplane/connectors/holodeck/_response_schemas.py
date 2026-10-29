@@ -435,6 +435,15 @@ def _dns_host_write(states: list[str]) -> dict[str, Any]:
                         "reverse": _f(
                             "array", "Names the pod gave for the address.", items={"type": "string"}
                         ),
+                        "forward_status": _f(
+                            ["string", "null"],
+                            "DNS status of the name query (NOERROR, NXDOMAIN, SERVFAIL, ...); "
+                            "null when dig did not run.",
+                        ),
+                        "reverse_status": _f(
+                            ["string", "null"],
+                            "DNS status of the address query; null when dig did not run.",
+                        ),
                         "ok": _f("boolean", "True when the pod answered as expected."),
                         "error": _f("string", "Set when the pod could not be asked."),
                     },

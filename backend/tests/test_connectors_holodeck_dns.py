@@ -34,6 +34,8 @@ from meho_backplane.connectors.holodeck import HolodeckConnector, ops_dns
 from meho_backplane.connectors.holodeck.dns_hosts import (
     HolodeckDnsError,
     bound_dns_entry,
+    dig_answers,
+    dig_status,
     parse_hosts,
     plan_add,
     plan_remove,
@@ -159,6 +161,35 @@ def test_plan_remove_missing_line_is_absent() -> None:
     assert plan_remove(_HOSTS, "192.0.2.10", "appliance01.example.test") is None
 
 
+_DIG_SERVFAIL = (
+    ";; Got answer:\n"
+    ";; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 9501\n"
+    ";; flags: qr aa; QUERY: 1, ANSWER: 0, AUTHORITY: 0, ADDITIONAL: 0\n\n"
+)
+_DIG_ANSWER = (
+    ";; Got answer:\n"
+    ";; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 3799\n"
+    ";; flags: qr aa; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 0\n\n"
+    ";; ANSWER SECTION:\n"
+    "www.example.test.\t0\tIN\tCNAME\tappliance01.example.test.\n"
+    "appliance01.example.test. 0\tIN\tA\t192.0.2.10\n\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [(_DIG_SERVFAIL, "SERVFAIL"), (_DIG_ANSWER, "NOERROR"), ("", None), ("192.0.2.10\n", None)],
+)
+def test_dig_status_reads_the_header_line(stdout: str, expected: str | None) -> None:
+    assert dig_status(stdout) == expected
+
+
+def test_dig_answers_keeps_only_the_wanted_record_type() -> None:
+    assert dig_answers(_DIG_ANSWER, "A") == ["192.0.2.10"]
+    assert dig_answers(_DIG_ANSWER, "AAAA") == []
+    assert dig_answers(_DIG_SERVFAIL, "A") == []
+
+
 def test_plan_remove_refuses_line_it_did_not_write() -> None:
     text = "192.0.2.2 dc01.example.test dc01\n"
     with pytest.raises(HolodeckDnsError) as exc:
@@ -233,6 +264,11 @@ class _FakeRouter:
         self.files: dict[str, str] = {}
         self.commands: list[str] = []
         self.has_dig = has_dig
+        #: Query (a name, or "-x" for the address) -> DNS status dig reports
+        #: instead of the real one. None: dig prints nothing at all.
+        self.dig_status: dict[str, str | None] = {}
+        #: When True, a pod that is shutting down stays in the pod list.
+        self.keep_old_pods = False
         self.change_before_patch: str | None = None
         #: SSH timeout passed per command (None: the SSH layer's default).
         self.timeouts: dict[str, float | None] = {}
@@ -269,7 +305,8 @@ class _FakeRouter:
         items.append({"metadata": {"name": "coredns-abc", "labels": {}}, "status": {}})
         out = json.dumps({"items": items})
         # Old pods are gone the next time someone looks.
-        self.pods = [p for p in self.pods if not p["deleting"]]
+        if not self.keep_old_pods:
+            self.pods = [p for p in self.pods if not p["deleting"]]
         return out
 
     def _patch(self, cmd: str) -> tuple[str, str, int]:
@@ -296,16 +333,29 @@ class _FakeRouter:
         if not self.has_dig:
             return "", "dig: command not found", 127
         tokens = shlex.split(cmd)
-        server = tokens[4].lstrip("@")
-        pod = next(p for p in self.pods if p["ip"] == server)
+        at = next(i for i, t in enumerate(tokens) if t.startswith("@"))
+        pod = next(p for p in self.pods if p["ip"] == tokens[at].lstrip("@"))
         rows = parse_hosts(pod["hosts"])
-        if tokens[5] == "-x":
-            address = str(ipaddress.ip_address(tokens[6]))
-            names = [n for r in rows if r["address"] == address for n in r["names"]]
-            return "".join(f"{n}.\n" for n in names), "", 0
-        name = tokens[5]
-        addrs = [r["address"] for r in rows if name in r["names"]]
-        return "".join(f"{a}\n" for a in addrs), "", 0
+        query = tokens[at + 1]
+        if query == "-x":
+            address = ipaddress.ip_address(tokens[at + 2])
+            records = [
+                (address.reverse_pointer, "PTR", f"{n}.")
+                for r in rows
+                if r["address"] == str(address)
+                for n in r["names"]
+            ]
+        else:
+            rtype = tokens[at + 2]
+            records = [
+                (query, rtype, r["address"])
+                for r in rows
+                if query in r["names"] and (":" in r["address"]) == (rtype == "AAAA")
+            ]
+        status = self.dig_status.get(query, "NOERROR" if records else "NXDOMAIN")
+        if status is None:
+            return "", "", 0
+        return _dig_output(status, records), "", 0
 
     def handle(self, cmd: str) -> tuple[str, str, int]:
         self.commands.append(cmd)
@@ -325,7 +375,7 @@ class _FakeRouter:
             return "successfully rolled out\n", "", 0
         if cmd == "kubectl get pods -n default -o json":
             return self._pods_json(), "", 0
-        if cmd.startswith("dig +short +time=2 +tries=1 @"):
+        if cmd.startswith("dig +noall +answer +comments +time=2 +tries=1 @"):
             return self._dig(cmd)
         return "", f"unknown command: {cmd}", 127
 
@@ -347,6 +397,21 @@ class _FakeRouter:
             return proc
 
         return AsyncMock(side_effect=_run)
+
+
+def _dig_output(status: str, records: list[tuple[str, str, str]]) -> str:
+    """The text ``dig +noall +answer +comments`` prints (BIND 9.18)."""
+    lines = [
+        ";; Got answer:",
+        f";; ->>HEADER<<- opcode: QUERY, status: {status}, id: 4066",
+        f";; flags: qr aa; QUERY: 1, ANSWER: {len(records)}, AUTHORITY: 0, ADDITIONAL: 0",
+        "",
+    ]
+    if records:
+        lines.append(";; ANSWER SECTION:")
+        lines.extend(f"{owner}.\t0\tIN\t{rtype}\t{data}" for owner, rtype, data in records)
+        lines.append("")
+    return "\n".join(lines) + "\n"
 
 
 _TARGET = types.SimpleNamespace(name="holorouter-dns-test", host="holorouter.test.invalid")
@@ -389,6 +454,8 @@ async def test_add_saves_writes_restarts_waits_and_checks() -> None:
     assert [c["pod"] for c in result["checks"]] == ["dnsmasq-dns-deployment-h2-x2"]
     assert result["checks"][0]["forward"] == ["192.0.2.10"]
     assert result["checks"][0]["reverse"] == ["appliance01.example.test"]
+    assert result["checks"][0]["forward_status"] == "NOERROR"
+    assert result["checks"][0]["reverse_status"] == "NOERROR"
     assert router.data["hosts"] == _HOSTS + "192.0.2.10 appliance01.example.test\n"
     assert {k: v for k, v in router.data.items() if k != "hosts"} == _OTHER_KEYS
     # The save ran before the write and holds the old value.
@@ -417,6 +484,54 @@ async def test_add_twice_changes_nothing_the_second_time() -> None:
     assert result["restarted"] is False
     assert result["verified"] is True
     assert not any("patch" in c or "rollout" in c or "-o yaml" in c for c in router.commands)
+
+
+_LINE = "192.0.2.10 appliance01.example.test\n"
+
+
+def _retry_during_rollout(router: _FakeRouter, old_hosts: str) -> None:
+    """Someone restarted dnsmasq a moment ago: the old pod still runs *old_hosts*."""
+    old = router.pods[0]
+    old["hosts"] = old_hosts
+    old["deleting"] = True
+    router.pods.append(router._pod())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("op", "hosts_now", "hosts_old", "state"),
+    [
+        ("dns_host_add", _HOSTS + _LINE, _HOSTS, "unchanged"),
+        ("dns_host_remove", _HOSTS, _HOSTS + _LINE, "absent"),
+    ],
+)
+async def test_retry_waits_for_old_pods_without_writing(
+    op: str, hosts_now: str, hosts_old: str, state: str
+) -> None:
+    router = _FakeRouter(hosts_now)
+    _retry_during_rollout(router, hosts_old)
+    router.keep_old_pods = True
+    result = await _call(router, op, _NEW)
+    assert result["state"] == state
+    assert result["error"].startswith("wait:")
+    assert result["verified"] is False
+    assert result["checks"] == []
+    assert result["changed"] is False
+    assert not any("patch" in c or "rollout" in c or "-o yaml" in c for c in router.commands)
+
+
+@pytest.mark.asyncio
+async def test_retry_checks_only_after_the_old_pod_is_gone() -> None:
+    router = _FakeRouter(_HOSTS + _LINE)
+    _retry_during_rollout(router, _HOSTS)
+    result = await _call(router, "dns_host_add", _NEW)
+    assert result["error"] is None, result
+    assert result["state"] == "unchanged"
+    assert result["verified"] is True
+    assert [c["pod"] for c in result["checks"]] == ["dnsmasq-dns-deployment-h2-x2"]
+    first_pod_look = router.commands.index("kubectl get pods -n default -o json")
+    first_dig = next(i for i, c in enumerate(router.commands) if c.startswith("dig "))
+    assert first_pod_look < first_dig
 
 
 @pytest.mark.asyncio
@@ -500,6 +615,49 @@ async def test_add_reports_not_verified_when_dig_is_missing() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["SERVFAIL", "REFUSED"])
+async def test_remove_is_not_verified_when_dns_fails(status: str) -> None:
+    router = _FakeRouter(_HOSTS + _LINE)
+    router.dig_status[_NEW["name"]] = status
+    result = await _call(router, "dns_host_remove", _NEW)
+    assert result["state"] == "removed"
+    assert result["verified"] is False
+    check = result["checks"][0]
+    assert check["ok"] is False
+    assert (check["forward"], check["reverse"]) == ([], [])
+    assert (check["forward_status"], check["reverse_status"]) == (status, "NXDOMAIN")
+    assert check["error"] == (
+        f"the pod did not answer: DNS status {status} for the name, NXDOMAIN for the address"
+    )
+
+
+@pytest.mark.asyncio
+async def test_remove_is_not_verified_when_dig_prints_no_status() -> None:
+    router = _FakeRouter(_HOSTS + _LINE)
+    router.dig_status["-x"] = None
+    result = await _call(router, "dns_host_remove", _NEW)
+    assert result["verified"] is False
+    check = result["checks"][0]
+    assert (check["forward_status"], check["reverse_status"]) == ("NXDOMAIN", None)
+    assert check["error"] == (
+        "the pod did not answer: DNS status NXDOMAIN for the name, missing for the address"
+    )
+
+
+@pytest.mark.asyncio
+async def test_add_is_not_verified_when_the_reverse_query_fails() -> None:
+    router = _FakeRouter()
+    router.dig_status["-x"] = "SERVFAIL"
+    result = await _call(router, "dns_host_add", _NEW)
+    assert result["state"] == "added"
+    assert result["verified"] is False
+    check = result["checks"][0]
+    assert check["forward"] == ["192.0.2.10"]
+    assert (check["forward_status"], check["reverse_status"]) == ("NOERROR", "SERVFAIL")
+    assert check["error"].endswith("SERVFAIL for the address")
+
+
+@pytest.mark.asyncio
 async def test_add_keeps_the_answer_when_ssh_fails_during_the_checks() -> None:
     router = _FakeRouter()
     router.raise_on["dig "] = ConnectionError("connection lost")
@@ -522,6 +680,7 @@ async def test_remove_then_remove_again_is_absent() -> None:
     assert (result["lines_before"], result["lines_after"]) == (3, 2)
     assert result["verified"] is True
     assert result["checks"][0]["forward"] == []
+    assert result["checks"][0]["forward_status"] == "NXDOMAIN"
     assert router.data["hosts"] == _HOSTS
 
     router.commands.clear()
@@ -535,18 +694,7 @@ async def test_remove_then_remove_again_is_absent() -> None:
 @pytest.mark.asyncio
 async def test_wait_fails_when_old_pods_stay() -> None:
     router = _FakeRouter()
-    real = router._pods_json
-
-    def _stuck() -> str:
-        for p in router.pods:
-            if p["hash"] == "h1":
-                p["deleting"] = True
-        pods = list(router.pods)
-        out = real()
-        router.pods = pods
-        return out
-
-    router._pods_json = _stuck  # type: ignore[method-assign]
+    router.keep_old_pods = True
     result = await _call(router, "dns_host_add", _NEW)
     assert result["error"].startswith("wait:")
     assert result["changed"] is True

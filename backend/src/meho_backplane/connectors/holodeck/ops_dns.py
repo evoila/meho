@@ -28,12 +28,16 @@ Both writes wait for a person to approve them. Each write:
    key changed;
 5. restarts the dnsmasq deployment (the pods read the file only at start),
    waits for the rollout and then until no old pod is left;
-6. asks every dnsmasq pod for the name and the address (``dig``).
+6. asks every dnsmasq pod for the name and the address (``dig``). The DNS
+   status of each answer must be ``NOERROR`` or ``NXDOMAIN``; a failed
+   query (``SERVFAIL``, ``REFUSED``, ...) never counts as verified.
 
 Adding a line that is already there, or removing one that is not there,
 changes nothing (no save, no restart) and reports ``unchanged`` /
-``absent``. A name or address that is already used with another partner
-is refused.
+``absent``. Such a call still waits until no old pod is left (step 5) and
+then runs the checks (step 6): a retry during a rollout must not report
+``verified`` while an old pod serves the old file. A name or address that
+is already used with another partner is refused.
 
 Shell safety: every command is a fixed ``kubectl`` / ``dig`` template.
 The only inputs are an IP address (checked with :mod:`ipaddress`) and a
@@ -64,6 +68,7 @@ from meho_backplane.connectors.holodeck.dns_hosts import (
     bound_dns_entry,
     canonical_address,
     dig_answers,
+    dig_status,
     dnsmasq_pods,
     parse_hosts,
     plan_add,
@@ -101,6 +106,11 @@ PATCH_CMD_MAX_BYTES: int = 100_000
 #: How long to wait for the old dnsmasq pods to go after the rollout.
 _POD_WAIT_INTERVAL_S: float = 2.0
 _POD_WAIT_ATTEMPTS: int = 45
+
+#: DNS statuses that are a real answer. Any other status (``SERVFAIL``,
+#: ``REFUSED``, ...) means the pod could not answer, so an empty answer
+#: proves nothing. ``dig`` exits with 0 for all of them.
+_DNS_ANSWERED = frozenset({"NOERROR", "NXDOMAIN"})
 
 
 # ---------------------------------------------------------------------------
@@ -178,23 +188,42 @@ async def _check_pod(
 ) -> dict[str, Any]:
     """Ask one pod for the name and the address; compare with what we expect."""
     address, name = entry
-    result: dict[str, Any] = {"pod": pod["name"], "pod_ip": pod["ip"], "forward": [], "reverse": []}
+    result: dict[str, Any] = {
+        "pod": pod["name"],
+        "pod_ip": pod["ip"],
+        "forward": [],
+        "reverse": [],
+        "forward_status": None,
+        "reverse_status": None,
+    }
     try:
         server = str(ipaddress.ip_address(pod["ip"] or ""))
     except ValueError:
         return {**result, "ok": False, "error": "pod has no IP address yet"}
     rtype = "AAAA" if ":" in address else "A"
-    base = f"dig +short +time=2 +tries=1 @{shlex.quote(server)}"
+    # Not ``+short``: it hides the header with the DNS status.
+    base = f"dig +noall +answer +comments +time=2 +tries=1 @{shlex.quote(server)}"
     try:
         forward = await router.run(f"{base} {shlex.quote(name)} {rtype}")
         reverse = await router.run(f"{base} -x {shlex.quote(address)}")
     except Exception as exc:
         # The change is already made; keep the answer and report the check.
         return {**result, "ok": False, "error": f"dig could not run: {_run_failure(exc)}"}
-    result["forward"] = dig_answers(forward["stdout"])
-    result["reverse"] = [a.rstrip(".").lower() for a in dig_answers(reverse["stdout"])]
+    result["forward"] = dig_answers(forward["stdout"], rtype)
+    result["reverse"] = [a.rstrip(".").lower() for a in dig_answers(reverse["stdout"], "PTR")]
     if forward["exit_status"] != 0 or reverse["exit_status"] != 0:
         return {**result, "ok": False, "error": "dig failed on the router"}
+    fwd_status, rev_status = dig_status(forward["stdout"]), dig_status(reverse["stdout"])
+    result["forward_status"], result["reverse_status"] = fwd_status, rev_status
+    if fwd_status not in _DNS_ANSWERED or rev_status not in _DNS_ANSWERED:
+        return {
+            **result,
+            "ok": False,
+            "error": (
+                f"the pod did not answer: DNS status {fwd_status or 'missing'} for the "
+                f"name, {rev_status or 'missing'} for the address"
+            ),
+        }
     present_fwd = address in {canonical_address(a) for a in result["forward"]}
     present_rev = name in result["reverse"]
     if expect_present:
@@ -303,6 +332,8 @@ async def _change_entry(router: _Router, params: dict[str, Any], *, adding: bool
         if new_hosts is None:
             result["state"] = "unchanged" if adding else "absent"
             result["lines_after"] = result["lines_before"]
+            # A retry during a rollout: an old pod may still serve the old file.
+            await _wait_for_new_pods(router)
         else:
             await _write_hosts(router, before, new_hosts, result)
             result["state"] = "added" if adding else "removed"
@@ -405,7 +436,8 @@ _PARAMS: dict[str, Any] = {
 
 _WRITE_OUTPUT = (
     "{op, state, changed, address, name, backup_path, lines_before, lines_after, "
-    "restarted, checks: [{pod, pod_ip, forward, reverse, ok}], verified, error}. "
+    "restarted, checks: [{pod, pod_ip, forward, reverse, forward_status, "
+    "reverse_status, ok}], verified, error}. "
 )
 
 DNS_OPS: tuple[HolodeckOp, ...] = (

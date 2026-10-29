@@ -146,8 +146,8 @@ Source: `backend/src/meho_backplane/connectors/holodeck/`.
   `holodeck_dns_host_add`, `holodeck_dns_host_remove`, and the small `_Router`
   helper that runs one op call's commands. The pure helpers are in
   `dns_hosts.py`: `bound_dns_entry` (input check), `parse_hosts`, `plan_add`,
-  `plan_remove`, `dnsmasq_pods`, `dig_answers`, and `HolodeckDnsError` (carries
-  the failed `step`).
+  `plan_remove`, `dnsmasq_pods`, `dig_status`, `dig_answers`, and
+  `HolodeckDnsError` (carries the failed `step`).
 
 - **`parse_photon_version`** (`connector.py`) — pure parser for
   `/etc/photon-release` output; recovers the `<major>.<minor>(.<patch>)?`
@@ -549,6 +549,9 @@ Each write runs these steps and stops at the first failure (the answer's
    line that is not exactly `<address> <name>`. When the line is already there
    (add) or not there (remove), nothing is written and nothing restarts:
    `state` is `unchanged` or `absent`. This makes both writes safe to run twice.
+   Such a call still runs the `wait` step (6) and then the `check` step (7):
+   a retry during a rollout must not report `verified` while an old pod
+   still serves the old file.
    Size limit: the patch (step 4) carries the whole `hosts` value twice, old
    and new, inside one shell argument, and Linux allows at most 128 KiB per
    argument. MEHO builds the patch command first and refuses with a `write`
@@ -581,8 +584,13 @@ Each write runs these steps and stops at the first failure (the answer's
    timeout, longer than its own 180 s wait (other steps keep the 30 s SSH
    default). When the router does not answer in time, `error` says so.
 7. `check` — ask every running dnsmasq pod, by its pod IP, with
-   `dig +short @<pod ip> <name> A|AAAA` and `dig +short @<pod ip> -x
-   <address>`. `verified` is true when every pod answers as expected (the
+   `dig +noall +answer +comments @<pod ip> <name> A|AAAA` and the same with
+   `-x <address>`. The `+comments` header carries the DNS status
+   (`forward_status` / `reverse_status` in each check). `dig` exits with 0
+   for every DNS status, so an empty `+short` answer would not tell a
+   missing record from a failed query: only `NOERROR` and `NXDOMAIN` count
+   as an answer, and `SERVFAIL`, `REFUSED` or a missing header make the
+   check fail. `verified` is true when every pod answers as expected (the
    pair present after an add, absent after a remove). `dig` must be on the
    router; when it is missing or fails, or the SSH call for it fails,
    `verified` is false, the check's `error` says why, and the change stays.

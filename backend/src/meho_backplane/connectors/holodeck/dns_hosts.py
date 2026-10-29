@@ -22,6 +22,7 @@ __all__ = [
     "bound_dns_entry",
     "canonical_address",
     "dig_answers",
+    "dig_status",
     "dnsmasq_pods",
     "parse_hosts",
     "plan_add",
@@ -35,6 +36,10 @@ DEPLOYMENT = "dnsmasq-dns-deployment"
 _LABEL = r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
 _NAME_RE = re.compile(rf"{_LABEL}(\.{_LABEL})*")
 NAME_MAX = 253
+
+#: The header line ``dig +comments`` prints: ``;; ->>HEADER<<- opcode: QUERY,
+#: status: NOERROR, id: 1234``.
+_DIG_STATUS_RE = re.compile(r"^;; ->>HEADER<<-.*\bstatus: ([A-Z]+)", re.MULTILINE)
 
 
 class HolodeckDnsError(ValueError):
@@ -157,12 +162,32 @@ def plan_remove(text: str, address: str, name: str) -> str | None:
     return "".join(line for i, line in enumerate(lines) if i not in drop)
 
 
-def dig_answers(stdout: str) -> list[str]:
-    return [
-        line.strip()
-        for line in stdout.splitlines()
-        if line.strip() and not line.strip().startswith(";")
-    ]
+def dig_status(stdout: str) -> str | None:
+    """Return the DNS status (``NOERROR``, ``NXDOMAIN``, ``SERVFAIL``, ...) of a
+    ``dig +comments`` answer, or ``None`` when there is no header line.
+
+    ``dig`` exits with 0 for every DNS status, so an empty answer alone does
+    not show whether the name is absent or the server failed.
+    """
+    match = _DIG_STATUS_RE.search(stdout)
+    return match.group(1) if match else None
+
+
+def dig_answers(stdout: str, rtype: str) -> list[str]:
+    """Return the data of the *rtype* records in a ``dig +noall +answer`` answer.
+
+    An answer line is ``<owner> <ttl> IN <type> <data>``; lines that start
+    with ``;`` are comments. Records of another type (for example a CNAME
+    in the chain) are left out.
+    """
+    answers: list[str] = []
+    for line in stdout.splitlines():
+        tokens = line.split()
+        if len(tokens) < 5 or tokens[0].startswith(";"):
+            continue
+        if tokens[2] == "IN" and tokens[3] == rtype:
+            answers.append(tokens[4])
+    return answers
 
 
 def dnsmasq_pods(payload: Any) -> list[dict[str, Any]]:

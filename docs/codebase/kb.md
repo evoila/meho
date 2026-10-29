@@ -333,6 +333,14 @@ The legacy `meho://kb/{slug}` read is unchanged: it returns the latest
 body, now with `revision_id` so a caller can cite that exact body.
 `add_to_knowledge` and `GET /api/v1/kb/{slug}` return the same field.
 
+`search_knowledge` with a `slug` argument (#4138) runs the same read
+as `meho://kb/{slug}` (`mcp/resources/kb.py::read_kb_entry`) and
+returns `{"entry": {...}}`. It has the same shape, the same tenant
+check, the same "not found" error and the same untrusted wrapper. It
+is there for MCP clients that give the model tools but no resources.
+With `slug` the other arguments are ignored. A call with neither
+`query` nor `slug` gets `-32602`.
+
 ### Delete path — `delete_entry`
 
 `kb/revisions.py::delete_entry_rows` first locks the head row, the

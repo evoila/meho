@@ -1813,6 +1813,10 @@ async def test_call_operation_empty_string_target_returns_target_required_envelo
     )
     assert result["status"] == "error"
     assert result["extras"]["error_code"] == "target_required"
+    # #4139: the message says what is missing and where a name comes from.
+    assert result["error"] == (
+        "target_required: this operation needs a target; call list_targets and pass a target name"
+    )
 
 
 @pytest.mark.asyncio

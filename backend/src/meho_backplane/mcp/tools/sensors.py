@@ -122,7 +122,7 @@ register_mcp_tool(
         name="meho_sensor_list",
         surface=ToolSurface.OPERATOR,
         description=(
-            "List sensors for the operator's tenant (Initiative #2416). "
+            "List sensors for the operator's tenant. "
             "Operator-level read. Returns {sensors: [sensor, ...]} sorted "
             "newest-first; each sensor carries the latest-result projection "
             "(last_state, last_value, last_evidence, last_evaluated_at, "
@@ -231,8 +231,8 @@ register_mcp_tool(
         name="meho_sensor_create",
         surface=ToolSurface.OPERATOR,
         description=(
-            "Create one sensor under the operator's tenant (Initiative "
-            "#2416). Tenant_admin only. A sensor pins an (op + args + "
+            "Create one sensor under the operator's tenant. "
+            "Tenant_admin only. A sensor pins an (op + args + "
             "assertion + cadence + severity) tuple the check runner "
             "evaluates on a schedule. Args: name (unique per tenant), "
             "connector_id + op_id (the operation; MUST resolve to a "
@@ -259,7 +259,7 @@ register_mcp_tool(
             "'sensor_name_conflict'. "
             "There is no update/pause path -- status is server-initialized "
             "to 'active' at create (clients cannot supply it) and "
-            "runner-parked to 'paused' by #2505. "
+            "set to 'paused' only by the check runner. "
             "Response: {sensor_id, sensor: {...}}."
         ),
         inputSchema={
@@ -343,7 +343,7 @@ register_mcp_tool(
                         "audit-attributes each evaluation to (default "
                         "__sensor__). Only the __sensor__ sentinel or your own "
                         "sub is accepted; any other value is refused with "
-                        "sensor_identity_sub_forbidden (#2699)."
+                        "sensor_identity_sub_forbidden."
                     ),
                 },
                 "tenant_id": {
@@ -351,7 +351,7 @@ register_mcp_tool(
                     "format": "uuid",
                     "description": (
                         "Target tenant UUID for cross-tenant admin create "
-                        "(platform-admin only, the #1638 cross-tenant "
+                        "(platform-admin only, the cross-tenant "
                         "capability -- a non-platform tenant-admin naming a "
                         "different tenant is refused with "
                         "'cross_tenant_requires_platform_admin'). When omitted "
@@ -397,7 +397,7 @@ register_mcp_tool(
         name="meho_sensor_delete",
         surface=ToolSurface.OPERATOR,
         description=(
-            "Hard-delete one sensor by id (Initiative #2416). Tenant_admin "
+            "Hard-delete one sensor by id. Tenant_admin "
             "only. Removes the row (no tombstone). Cross-tenant / absent id "
             "-> 'sensor_not_found' (existence not leaked across tenants). "
             "Response: {sensor_id, deleted: true}."
@@ -463,8 +463,8 @@ register_mcp_tool(
         name="meho_sensor_results",
         surface=ToolSurface.OPERATOR,
         description=(
-            "Per-tick evidence trend query for one sensor (Initiative #2780, "
-            "#2756). Operator-level read -- the forensic 'when did this start "
+            "Per-tick evidence trend query for one sensor. "
+            "Operator-level read -- the forensic 'when did this start "
             "degrading / how fast is it filling' history the latest-result "
             "projection discards. Returns {items: [{sensor_id, evaluated_at, "
             "state, value, evidence, reason}, ...], next_cursor} in "

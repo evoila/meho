@@ -77,7 +77,8 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key
+from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.system_operator import is_system_operator
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import (
@@ -145,11 +146,11 @@ def _extract_access_token(resp: httpx.Response) -> str | None:
 class SddcVcf5Connector(HttpConnector):
     """VCF 5.x SDDC Manager REST connector — ``POST /v1/tokens`` token-session auth.
 
-    Per-target minted bearers cached in :attr:`_session_tokens` (keyed on the
-    tenant-unique ``(tenant_id, target.id)`` tuple) under :attr:`_session_lock`, so
-    two same-named targets in different tenants never share a token
-    (evoila/meho#1642). :meth:`auth_headers` returns ``Authorization: Bearer
-    <accessToken>``.
+    Minted bearers cached in :attr:`_session_tokens` per credential
+    (``credential_cache_key``: tenant, secret and login host, #5033) under
+    :attr:`_session_lock`, so two targets that share one credential share one
+    token and two tenants never do (evoila/meho#1642). :meth:`auth_headers`
+    returns ``Authorization: Bearer <accessToken>``.
 
     :attr:`priority` is ``1`` — the shim-tie-break convention. The
     ``(product, version, impl_id)`` triple ``("sddc", "5.0", "sddc-vcf5")`` round-trips
@@ -176,10 +177,11 @@ class SddcVcf5Connector(HttpConnector):
         self._credentials_loader: SddcCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
         )
-        # Per-target minted-bearer cache, keyed on ``target_cache_key`` so the
-        # tenant-isolation invariant holds; a single lock serialises concurrent
-        # first-use callers so they don't double-POST /v1/tokens.
-        self._session_tokens: dict[tuple[str, str], str] = {}
+        # Minted-bearer cache, keyed on ``credential_cache_key`` (one token
+        # per credential; the tenant keeps tenants apart); a single lock
+        # serialises concurrent first-use callers so they don't double-POST
+        # /v1/tokens.
+        self._session_tokens: dict[tuple[str, ...], str] = {}
         self._session_lock = asyncio.Lock()
 
     async def auth_headers(self, target: SddcTargetLike, operator: Operator) -> dict[str, str]:
@@ -227,7 +229,7 @@ class SddcVcf5Connector(HttpConnector):
                 f"target={target.name!r} has no operator JWT (system-initiated calls "
                 "cannot read per-target vendor credentials)"
             )
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target)
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None and not is_system_operator(operator):
@@ -282,7 +284,7 @@ class SddcVcf5Connector(HttpConnector):
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code not in _SESSION_EXPIRED_STATUSES:
                 raise
-            await self._evict_session_token(target)
+            await self._evict_session_token(target, rejected=exc.request)
         try:
             return await self._get_json(target, path, operator=operator, params=params)
         except httpx.HTTPStatusError as exc:
@@ -469,7 +471,9 @@ class SddcVcf5Connector(HttpConnector):
     # Dispatch-path session-recovery hooks (#2067 / #2396)
     # ------------------------------------------------------------------
 
-    async def invalidate_session(self, target: SddcTargetLike) -> None:
+    async def invalidate_session(
+        self, target: SddcTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Public duck-typed session-eviction hook for the dispatch path (#2067).
 
         **The load-bearing 401-recovery hook.** On an auth-class status (SDDC
@@ -481,7 +485,7 @@ class SddcVcf5Connector(HttpConnector):
         the next dispatch without a backplane restart — the modern ``sddc_manager`` /
         NSX precedent (a connector *without* this hook wedges on the stale token).
         """
-        await self._evict_session_token(target)
+        await self._evict_session_token(target, rejected=rejected)
 
     async def invalidate_credentials(self, target: SddcTargetLike) -> None:
         """Establish-auth-failure companion hook (#2396).
@@ -493,10 +497,21 @@ class SddcVcf5Connector(HttpConnector):
         """
         await self._evict_session_token(target)
 
-    async def _evict_session_token(self, target: SddcTargetLike) -> None:
-        """Drop the cached session token for *target* under the session lock."""
+    async def _evict_session_token(
+        self, target: SddcTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
+        """Drop the cached session token for *target* under the session lock.
+
+        With *rejected*, the token is dropped only when that request sent it;
+        a newer token another call just logged in for stays (#5033).
+        """
         async with self._session_lock:
-            self._session_tokens.pop(target_cache_key(target), None)
+            drop_rejected_token(
+                self._session_tokens,
+                credential_cache_key(target),
+                rejected,
+                lambda token: {"Authorization": f"Bearer {token}"},
+            )
 
     async def aclose(self) -> None:
         """Clear cached session tokens, then tear down the httpx pool.

@@ -1016,6 +1016,42 @@ async def test_target_name_denormalization_left_join(session: AsyncSession) -> N
     assert by_target[None] is None
 
 
+@pytest.mark.asyncio
+async def test_tenant_name_comes_from_the_tenant_table(session: AsyncSession) -> None:
+    """Each row carries its tenant's name from the ``tenant`` table (#5238)."""
+    tenant_id = uuid.uuid4()
+    session.add(Tenant(id=tenant_id, slug="team-a", name="Team A"))
+    await session.commit()
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
+    )
+    await session.commit()
+
+    result = await query_audit(AuditQueryFilters(), tenant_id=tenant_id, session=session)
+
+    assert [(e.tenant_id, e.tenant_name) for e in result.rows] == [(tenant_id, "Team A")]
+
+
+@pytest.mark.asyncio
+async def test_tenant_name_is_none_without_a_tenant_row(session: AsyncSession) -> None:
+    """A row whose tenant row is gone still returns, with ``tenant_name=None``."""
+    tenant_id = uuid.uuid4()
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
+    )
+    await session.commit()
+
+    result = await query_audit(AuditQueryFilters(), tenant_id=tenant_id, session=session)
+
+    assert len(result.rows) == 1
+    assert result.rows[0].tenant_id == tenant_id
+    assert result.rows[0].tenant_name is None
+
+
 # ---------------------------------------------------------------------------
 # result_status derivation
 # ---------------------------------------------------------------------------

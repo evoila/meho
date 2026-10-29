@@ -768,6 +768,23 @@ func printGroupingGroups(w io.Writer, groups []api.GroupSummaryModel) {
 	}
 }
 
+// printUnassignedOps names the operations still without a group after
+// the grouping pass. The server caps the list; when it is cut, the line
+// after it says how many more there are and where to see them all.
+func printUnassignedOps(w io.Writer, connectorID string, g *api.GroupingResultModel) {
+	if g.UnassignedOpIds == nil || len(*g.UnassignedOpIds) == 0 {
+		return
+	}
+	ids := *g.UnassignedOpIds
+	fmt.Fprintf(w, "  operations without a group (%d):\n", g.OperationsUnassigned)
+	for _, id := range ids {
+		fmt.Fprintf(w, "    %s\n", id)
+	}
+	if more := g.OperationsUnassigned - len(ids); more > 0 {
+		fmt.Fprintf(w, "    ... and %d more (see `meho connector review %s`)\n", more, connectorID)
+	}
+}
+
 // printIngestSummary renders an IngestResponse for human eyes. The
 // shape matches what an operator running `meho connector ingest`
 // interactively expects to read: connector_id first (so they can
@@ -826,6 +843,7 @@ func printIngestSummary(w io.Writer, opts ingestOptions, r *api.IngestResponse) 
 		if r.Grouping.Groups != nil {
 			printGroupingGroups(w, *r.Grouping.Groups)
 		}
+		printUnassignedOps(w, r.Ingestion.ConnectorId, r.Grouping)
 	} else if !opts.DryRun {
 		fmt.Fprintln(w, "  grouping: skipped (backplane returned no grouping result)")
 	}

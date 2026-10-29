@@ -16,9 +16,10 @@ The declared set is introspected from the connector's live constants
 (the #2944 pattern — never a hardcoded mirror), across the three
 surfaces that hand-code a path:
 
-* :mod:`~meho_backplane.connectors.sddc_manager.typed_reads` — the 15
-  ``_*_PATH`` module constants (the audited reads plus the ``sddc.task.get``
-  build poll added in #3497). Every typed read dispatches through
+* :mod:`~meho_backplane.connectors.sddc_manager.typed_reads` — the 17
+  ``_*_PATH`` module constants (the audited reads, the ``sddc.task.get``
+  build poll added in #3497, and the two validation-result reads added in
+  #3518). Every typed read dispatches through
   :meth:`HttpConnector._get_json` (a GET-only seam that delegates to
   ``_request_json(target, "GET", ...)``), so each declares ``GET:``. The
   curated WLD **write** paths (#3497) are guarded separately against the
@@ -86,7 +87,9 @@ def test_typed_read_path_constants_are_all_discovered() -> None:
         "_CREDENTIALS_PATH",
         "_DOMAINS_PATH",
         "_DOMAIN_STATUS_PATH",
+        "_DOMAIN_VALIDATION_GET_PATH",
         "_HOSTS_PATH",
+        "_HOST_VALIDATION_GET_PATH",
         "_LICENSE_KEYS_PATH",
         "_NETWORK_POOLS_PATH",
         "_NETWORK_POOL_GET_PATH",

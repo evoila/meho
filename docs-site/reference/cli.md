@@ -98,8 +98,10 @@ Idempotently provision the public CLI + MCP clients in a Keycloak realm
 meho admin keycloak bootstrap-clients [flags]
 ```
 
+- `--add-tenant` — also make the five groups `MEHO-<name>-<Role>` of one more tenant with this short name
+- `--add-tenant-id` — the UUID of the `--add-tenant` tenant (default: the UUID its groups already carry, else a new one, printed at the end)
 - `--admin-user-email` — optional email for the new admin user
-- `--admin-user-username` — username of the admin user to provision in MEHO-Admins (required unless --skip-user-provisioning)
+- `--admin-user-username` — username of the admin user to provision in MEHO-Admins and MEHO-Platform-Admins (required unless --skip-user-provisioning)
 - `--admin-username` — master-realm admin username (or set KEYCLOAK_ADMIN_USER)
 - `--backplane-audience` — audience claim the `audience-meho-backplane` mapper emits (matches chart's `config.keycloakAudience`)
 - `--cli-client-id` — public client_id for the device-code flow (matches chart's `config.keycloakCliClientId`)
@@ -116,6 +118,7 @@ meho admin keycloak bootstrap-clients [flags]
 - `--realm` — target realm name (NOT the master realm — that's where the admin token is minted)
 - `--skip-user-provisioning` — skip the admin user step (use when people come from a directory or another login system); the five role groups are still created
 - `--tenant-id` — tenant UUID written as the `tenant_id` attribute on the five MEHO role groups (default: the all-zero UUID). Changing it later moves everyone to a new tenant
+- `--tenant-name` — the first tenant's short name (lowercase letters, digits, dashes), written into the `meho_tenant` attribute of the five MEHO role groups
 
 ## `meho agent`
 
@@ -386,7 +389,7 @@ meho agent-principal revoke <name> [flags]
 
 ## `meho approvals`
 
-Manage approval requests (list / show / approve / reject)
+Manage approval requests (list / show / approve / reject / withdraw)
 
 ```
 meho approvals
@@ -416,7 +419,7 @@ meho approvals list [flags]
 - `--json` — emit raw JSON array instead of the human table
 - `--limit` — max requests to return (1..500; no limit when omitted)
 - `--offset` — skip this many requests first (default 0)
-- `--status` — filter by status: pending, approved, rejected, expired, all (default: pending)
+- `--status` — filter by status: pending, approved, rejected, expired, withdrawn, all (default: pending)
 - `--work-ref` — filter by external change-ticket reference, exact match
 
 ### `meho approvals reject`
@@ -441,6 +444,18 @@ meho approvals show <id> [flags]
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit raw JSON instead of the human-readable view
+
+### `meho approvals withdraw`
+
+Withdraw your own pending approval request
+
+```
+meho approvals withdraw <id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw JSON response instead of summary
+- `--reason` — optional reason for the withdrawal
 
 ## `meho argocd`
 
@@ -4510,7 +4525,7 @@ meho service-principals grants create [flags]
 - `--connector-id` — exact connector id; globs are refused (required)
 - `--expires` — optional ISO 8601 UTC expiry
 - `--json` — emit raw ServiceGrantRead JSON
-- `--op-id` — exact operation id; globs are refused, and a delete operation is refused (delete grants are made in the web console, only in sandbox mode) (required)
+- `--op-id` — exact operation id; globs are refused. A delete operation needs a delete grant: only in sandbox mode, by a tenant admin, with --expires within 30 days. REST and the CLI refuse it unless MEHO_SANDBOX_DELETE_GRANTS_FROM_API is on; the server decides (required)
 - `--principal` — JWT sub of the service principal (required)
 - `--reason` — operator justification for this standing grant (required)
 - `--target` — target UUID (optional; targetless is not a wildcard)
@@ -5905,11 +5920,13 @@ meho vcf-operations symptom list [flags]
 
 ## `meho version`
 
-Print CLI version and build metadata
+Print CLI version and build metadata, and the backplane's version and connector packages
 
 ```
-meho version
+meho version [flags]
 ```
+
+- `--backplane` — backplane URL to read the version from (defaults to the URL recorded by the most recent `meho login`)
 
 ## `meho vmware`
 

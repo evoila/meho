@@ -45,6 +45,8 @@
     is_execution   -- bool: the row is an ``operation_execution`` record; only
                        then does the drawer read a trace (#3747)
     event_class_label -- str: plain label of the row's record type
+    tenant_label   -- str: the row's tenant name, or its id when the tenant
+                       row is gone (#5238)
 -#}
 {% from "_references.html" import what_happened, principal_chip, operation_ref, target_ref, status_badge, timestamp, work_ref_ref, lineage %}
 <aside
@@ -82,6 +84,8 @@
     <section aria-label="Operation">
       <h3 class="text-sm font-semibold uppercase opacity-60">Operation</h3>
       <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
+        <dt class="opacity-60">Tenant</dt>
+        <dd data-tenant>{{ tenant_label }}</dd>
         <dt class="opacity-60">Principal</dt>
         <dd>{{ principal_chip(references.principal) }}</dd>
         <dt class="opacity-60">Operation</dt>

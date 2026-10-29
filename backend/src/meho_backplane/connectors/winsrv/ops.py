@@ -13,7 +13,7 @@ windows_dns connector (identity canary + per-domain op groups on the
 ``SshConnector`` base) and adopts the rke2 approval-parked-write mold for
 its destructive ops.
 
-Op surface (23 ops across six groups; safety tier per the Initiative #3259
+Op surface (24 ops across six groups; safety tier per the Initiative #3259
 satellite table — reads ``safe``, recoverable writes ``caution``,
 destructive ``dangerous`` + ``requires_approval``):
 
@@ -21,6 +21,7 @@ destructive ``dangerous`` + ``requires_approval``):
 * ``winsrv.system.os-info``      [safe]      Get-CimInstance Win32_OperatingSystem.
 * ``winsrv.system.uptime``       [safe]      LastBootUpTime → uptime.
 * ``winsrv.system.pending-reboot`` [safe]    pending-reboot registry markers.
+* ``winsrv.system.hardware``     [safe]      processors, memory, product UUID, firmware type.
 * ``winsrv.service.list``        [safe]      Get-Service (list-shaped → JSONFlux).
 * ``winsrv.service.get``         [safe]      Get-Service -Name.
 * ``winsrv.service.start``       [caution]   Start-Service.
@@ -256,6 +257,7 @@ def _winsrv_ops() -> tuple[WinsrvOp, ...]:
     :func:`meho_backplane.connectors.windows_dns.ops._windows_dns_ops`.
     """
     from meho_backplane.connectors.winsrv.ops_features import FEATURE_OPS
+    from meho_backplane.connectors.winsrv.ops_hardware import HARDWARE_OPS
     from meho_backplane.connectors.winsrv.ops_localusers import LOCALUSER_OPS
     from meho_backplane.connectors.winsrv.ops_power import POWER_OPS
     from meho_backplane.connectors.winsrv.ops_services import SERVICE_OPS
@@ -265,6 +267,7 @@ def _winsrv_ops() -> tuple[WinsrvOp, ...]:
     return (
         _WINSRV_ABOUT_OP,
         *SYSTEM_OPS,
+        *HARDWARE_OPS,
         *SERVICE_OPS,
         *FEATURE_OPS,
         *POWER_OPS,

@@ -35,7 +35,9 @@ The ``connectors`` package records the allowed packages
 (:func:`record_installed_connector_packages`). Operation registration
 then marks each row a package writes with that package's name
 (:func:`connector_package_of`), and discovery and dispatch hide rows whose
-package is not installed (:func:`installed_connector_packages`).
+package is not installed (:func:`installed_connector_package_names`).
+The accepted packages themselves (:func:`installed_connector_packages`)
+are shown by ``GET /version``, ``GET /api/v1/health`` and the console.
 
 "Files belong to a distribution" is read from the installed file list of
 that distribution (its ``RECORD``, through :mod:`importlib.metadata`).
@@ -70,6 +72,7 @@ __all__ = [
     "ConnectorPackageError",
     "check_connector_folders",
     "connector_package_of",
+    "installed_connector_package_names",
     "installed_connector_packages",
     "load_connector_packages",
     "record_installed_connector_packages",
@@ -108,6 +111,10 @@ class ConnectorPackage(BaseModel):
     folders: list[Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]] = Field(
         min_length=1
     )
+
+
+_installed: tuple[ConnectorPackage, ...] = ()
+"""The packages the last successful start-up check accepted."""
 
 
 class _ConnectorPackageList(BaseModel):
@@ -255,7 +262,8 @@ def check_connector_folders(
     before any connector subpackage is imported. Raises
     :class:`ConnectorPackageError` that names the first folder (in name
     order) that is not allowed. On success, logs one
-    ``connector_packages_allowed`` line and returns the listed folders,
+    ``connector_packages_allowed`` line, keeps the accepted packages for
+    :func:`installed_connector_packages`, and returns the listed folders,
     each mapped to the name of its package.
     """
     path = CONNECTOR_PACKAGES_FILE if allowlist_path is None else allowlist_path
@@ -302,7 +310,19 @@ def check_connector_folders(
         ],
         source_checkout=editable_root is not None,
     )
+    global _installed
+    _installed = tuple(packages)
     return listed
+
+
+def installed_connector_packages() -> tuple[ConnectorPackage, ...]:
+    """The connector packages the start-up check accepted, in allowlist order.
+
+    Read from the allowlist file once, by :func:`check_connector_folders`.
+    Empty for the plain public image, which has no allowlist file.
+    ``GET /version``, ``GET /api/v1/health`` and the console show this list.
+    """
+    return _installed
 
 
 def record_installed_connector_packages(folders: Mapping[str, str]) -> None:
@@ -315,7 +335,7 @@ def record_installed_connector_packages(folders: Mapping[str, str]) -> None:
     _installed_folders.update(folders)
 
 
-def installed_connector_packages() -> frozenset[str]:
+def installed_connector_package_names() -> frozenset[str]:
     """Names of the connector packages that are installed and allowed in this process."""
     return frozenset(_installed_folders.values())
 

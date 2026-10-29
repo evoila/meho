@@ -70,6 +70,7 @@ from meho_backplane.operations.meta_tools import (
 )
 from meho_backplane.retrieval.embedding import EMBEDDING_DIMENSION
 from meho_backplane.settings import RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES, get_settings
+from meho_backplane.untrusted_text import VENDOR_TEXT_RULE
 
 # ---------------------------------------------------------------------------
 # Settings + isolation fixtures
@@ -2151,6 +2152,7 @@ async def test_search_operations_exact_op_returns_contract(
     assert contract["target"]["required"] is False
     assert contract["target"]["resolves_by"] == "name"
     assert "result_query" in contract["result_shape"]["guidance"]
+    assert VENDOR_TEXT_RULE in contract["result_shape"]["guidance"]
     assert "handle" in contract["result_shape"]["envelope_fields"]
     assert contract["pagination_hint"] == pagination_hint
     assert any("awaiting_approval" in rule for rule in contract["recovery"])
@@ -2184,6 +2186,8 @@ async def test_search_operations_exact_op_target_and_destructive_guidance(
     assert contract["pagination_hint"] is None
     assert any("preview_operation" in rule for rule in contract["recovery"])
     assert any("target_required" in rule for rule in contract["recovery"])
+    # #5032: every contract says vendor text is data, not only reads.
+    assert VENDOR_TEXT_RULE in contract["result_shape"]["guidance"]
 
 
 @pytest.mark.asyncio

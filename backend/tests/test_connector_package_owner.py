@@ -33,7 +33,7 @@ from meho_backplane import connector_packages
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connector_packages import (
     connector_package_of,
-    installed_connector_packages,
+    installed_connector_package_names,
     record_installed_connector_packages,
 )
 from meho_backplane.db.engine import get_sessionmaker
@@ -213,12 +213,12 @@ async def _rows() -> dict[str, EndpointDescriptor]:
 
 def test_connector_package_of_maps_installed_folders_only() -> None:
     _install()
-    assert installed_connector_packages() == frozenset({_PACKAGE})
+    assert installed_connector_package_names() == frozenset({_PACKAGE})
     assert connector_package_of("meho_backplane.connectors.widget_pkg.ops.Widget.list") == _PACKAGE
     assert connector_package_of("meho_backplane.connectors.vault.connector.VaultConnector") is None
     assert connector_package_of("tests.fixtures.composites.handlers.typed_sub_op_handler") is None
     _remove()
-    assert installed_connector_packages() == frozenset()
+    assert installed_connector_package_names() == frozenset()
     assert connector_package_of("meho_backplane.connectors.widget_pkg.ops.Widget.list") is None
 
 

@@ -365,15 +365,104 @@ tolerates an insert over a tombstone. A rebuild whose new predicate is
 data satisfies it (or backfill first), exactly as a new `create_index` on a
 populated table would.
 
+## Where the migration runs (#5233)
+
+One runner applies the migrations in every install:
+`python -m meho_backplane.db.migrate`
+(`backend/src/meho_backplane/db/migrate.py`). It runs `alembic upgrade head`
+and has no flags. The chart starts it in one of two places:
+
+| Install | Where the runner runs | Why |
+|---|---|---|
+| Bring your own PostgreSQL (`corePostgres.enabled: false`) | The `pre-install,pre-upgrade` hook Job `<release>-meho-migrate` (`deploy/charts/meho/templates/migration-job.yaml`), before the Deployment is created or rolled. | The database exists before `helm install`. This render does not change (`backend/tests/test_chart_bring_your_own_render.py`). |
+| Built-in PostgreSQL (`corePostgres.enabled: true`) | The `migrate` init container of every backplane pod (`deploy/charts/meho/templates/deployment.yaml`). The hook Job is not rendered. | Helm runs hooks before it creates the release objects, and the built-in database is one of them. A hook would wait for a database that does not exist yet, so one `helm install` could never finish. |
+
+An init container runs to the end before the pod's main container starts.
+It uses the same image (with the digest pin), command, environment,
+security context, volumes and `migrationJob.resources` as the Job;
+`backend/tests/test_chart_migrate_init_container.py` compares the two.
+
+The runner does four steps on one database connection:
+
+1. **Wait for the database.** In the pod, the built-in database starts at
+   the same time as MEHO. The runner tries to connect every 2 seconds, for
+   at most `MIGRATION_DB_WAIT_SECONDS` (default 300, the start-up budget of
+   the built-in PostgreSQL). It prints `migration_db_waiting: <ExcClass>;
+   waited <n> s of <limit> s` about every 15 seconds and
+   `migration_db_ready: after <n> s` when it connects. After the limit it
+   fails with `migration_failed: DatabaseNotReadyError: ...`. A server that
+   answers but refuses the login or does not know the database (SQLSTATE
+   class 28 or 3D) fails at once, because waiting does not fix a wrong
+   password. The wait does not rely on the pod's restart back-off, which can
+   grow to 5 minutes.
+2. **Take the migration lock.** Every replica runs the init container, and
+   two can start at once. The runner holds a session-level PostgreSQL
+   advisory lock, key `MIGRATION_LOCK_KEY` (`0x4D45484F4D494752`, ASCII
+   "MEHOMIGR"), on the same connection that runs the migrations. A second
+   runner prints `migration_lock_waiting`, waits with `pg_advisory_lock`,
+   then finds the schema at head and changes nothing. The lock is released
+   in a `finally`, and the server also releases it when the connection
+   closes. The runner commits right after it takes the lock: a session-level
+   lock outlives the transaction, and Alembic must find the connection
+   outside a transaction, or it treats it as the caller's transaction and
+   never commits the migrations.
+3. **Leave a newer database alone.** See the rollback contract below. When
+   the database is at a revision this image does not know, the runner prints
+   `migration_skipped: ...` and exits `0`.
+4. **Upgrade.** The connection goes to Alembic in
+   `Config.attributes["connection"]` (Alembic cookbook, "Programmatic API use
+   (connection sharing) With Asyncio"); `backend/alembic/env.py` uses it
+   instead of opening its own. A plain `alembic upgrade head` from the
+   command line still opens its own connection and takes no lock.
+
+Exit codes stay `0` (success, also a skipped run) and `1` (any failure),
+with the line `migration_failed: <ExcClass>: <msg>` on stderr.
+
+**What a failed migration does.** With the hook Job, Helm fails the release
+at the hook step, also without `--wait`. With the init container, the
+container exits `1` and the kubelet restarts it with back-off. The pod never
+gets Ready, so `helm install --wait` or `helm upgrade --wait` fails at its
+timeout, and on an upgrade the old pods keep serving (the Deployment's
+rolling update takes no old pod away before a new one is Ready, with one
+replica). Without `--wait`, Helm reports success and only the pod status
+shows the failure: install the built-in core with `--wait`. The form-2
+installer does (`deploy/linux-server/lib/core.sh`, `install_core`). To read
+the error: `kubectl logs <pod> -c migrate` (add `--previous` after a
+restart).
+
+**A lock that stays held.** The server releases the lock when the holding
+connection ends. If the node of a migrating pod dies without closing its
+connection, PostgreSQL notices this only through TCP keepalive, and the
+next runner waits until then. `SELECT pid FROM pg_locks WHERE locktype =
+'advisory' AND granted AND classid = 1296386127 AND objid = 1296648018`
+shows the holder; `pg_terminate_backend(pid)` ends it.
+
+Tests: `backend/tests/migrations/test_migrate_runner.py` (the wait, its time
+limit, a refused login, the lock with real processes against PostgreSQL, the
+skip on a newer database).
+
 ## Rollback contract (readiness ↔ migrations, #1607)
 
-The chart applies migrations from a `helm.sh/hook: pre-install,pre-upgrade`
-Job (`deploy/charts/meho/templates/migration-job.yaml`), so the schema moves
-**before** the Deployment rolls. Helm's `helm rollback` / `--atomic` reverts
-**manifests only** — hook side effects such as a committed migration survive
-(documented Helm limitation; hook resources are not tracked as part of the
-release). After any rollback across a migration the database is therefore
+The chart applies migrations before the new code serves: from a
+`helm.sh/hook: pre-install,pre-upgrade` Job when the install brings its own
+PostgreSQL, or from the `migrate` init container of each new backplane pod
+with the built-in PostgreSQL (see "Where the migration runs" above). Helm's
+`helm rollback` / `--atomic` reverts **manifests only** — a committed
+migration survives (documented Helm limitation; hook resources are not
+tracked as part of the release, and an init container's work is not a
+manifest). After any rollback across a migration the database is therefore
 *ahead* of the running image, by design.
+
+With the init container, every pod of the older release also runs the
+runner when it starts, for example after `helm rollback`. Alembic would fail
+there with `Can't locate revision identified by '<newer>'`, and the older
+pods could never start. So the runner checks first: when the database's
+revision does not resolve in this image's `versions/` directory (the same
+check as the readiness probe, `revision_known` in
+`backend/src/meho_backplane/db/migrations.py`), it leaves the database alone
+and exits `0`. The hook Job runs the same runner, so a `helm upgrade` to an
+older chart version also passes the migration step instead of failing on the
+unknown revision.
 
 Two enforced invariants make that state safe instead of an outage (and
 one more rule for data an older build must not act on, below):
@@ -386,7 +475,7 @@ one more rule for data an older build must not act on, below):
    (`backend/src/meho_backplane/db/migrations.py`) reports `ok=True` with
    detail `current=<newer> head=<older> db_ahead=true` when the DB's
    revision does not resolve in the image's `versions/` directory (only a
-   newer release's migration Job can have stamped it). A revision the image
+   newer release's migration can have stamped it). A revision the image
    *does* know that differs from head means the DB is **behind** — that
    still fails readiness, as does a fresh unmigrated DB.
 
@@ -497,6 +586,16 @@ avoid "event loop already running" errors.
 
 - Task #1607: pre-upgrade hook ↔ auto-rollback trap; db-ahead-tolerant
   readiness probe (G0.22, 2026-06-08 outage).
+- Task #5233: the migration as an init container with the built-in
+  PostgreSQL; the database wait, the advisory lock and the skip on a newer
+  database.
+- Alembic cookbook, "Programmatic API use (connection sharing) With
+  Asyncio": <https://alembic.sqlalchemy.org/en/latest/cookbook.html>.
+- PostgreSQL advisory locks (session level, released at session end):
+  <https://www.postgresql.org/docs/current/explicit-locking.html#ADVISORY-LOCKS>
+  and <https://www.postgresql.org/docs/current/functions-admin.html#FUNCTIONS-ADVISORY-LOCKS>.
+- Kubernetes init containers:
+  <https://kubernetes.io/docs/concepts/workloads/pods/init-containers/>.
 - Helm chart hooks (hook resources unmanaged by the release):
   <https://helm.sh/docs/topics/charts_hooks/>; `--atomic` rolls back
   manifests only, not hook side effects:

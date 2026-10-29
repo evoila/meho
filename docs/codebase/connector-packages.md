@@ -233,6 +233,24 @@ The server start, the satellite runner start, the OpenAPI schema build and
 the topology scope-repair tool all import the package, so all of them are
 covered.
 
+## Where operators see the installed packages
+
+The start-up check keeps the packages it accepted. MEHO reads the
+allowlist file only once, at start. `installed_connector_packages()` in
+`connector_packages.py` returns that list, and these places show it:
+
+- `GET /version` (no login needed): `connector_packages`, next to
+  `git_sha`, `build_date` and `chart_version`.
+- `GET /api/v1/health` and the MCP tool `meho_status`:
+  `connector_packages`.
+- `meho version` (when a backplane is known) and `meho status`: a
+  `Connector packages:` line, with one line per package.
+- The console dashboard: the "Connector packages" row in the Deploy
+  card, under the deployed version.
+
+Each entry has the name, version, wheel digest and folders, as in the
+allowlist file. For the plain public image the list is empty, and the CLI
+and the console say "none".
 ## When a package is removed
 
 Each operation row records the package that wrote it, in the column
@@ -271,8 +289,12 @@ in.
 
 - `ConnectorPackageError` — raised when the start must stop. The message
   starts with the error code.
-- `ConnectorPackage` — one entry of the allowlist file.
-- `installed_connector_packages()`, `connector_package_of()` — the
+- `ConnectorPackage` — one entry of the allowlist file. `GET /version` and
+  `GET /api/v1/health` use the same model for their `connector_packages`
+  list.
+- `installed_connector_packages()` — the packages the start-up check
+  accepted.
+- `installed_connector_package_names()`, `connector_package_of()` — the
   installed package names, and the package that owns a module path.
 - `installed_owner_clause()`, `package_visible_group_clause()` in
   `operations/_lookup.py` — the filters that hide a removed package's

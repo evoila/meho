@@ -65,7 +65,7 @@ the single source of truth in
 | --- | --- | --- | --- |
 | `read_only` | `meho-tenant-read-only` | `read`, `list` | — |
 | `operator` | `meho-tenant-operator` | `read`, `list` | `+ create,update` on the rotation sub-path `secret/data/tenants/<id>/rotation/*` |
-| `tenant_admin` | `meho-tenant-admin` | `create`, `read`, `update`, `delete`, `list` (full CRUD) | `+ full CRUD` on the break-glass sub-path `secret/data/tenants/<id>/privileged/*` |
+| `tenant_admin` | `meho-tenant-admin` | `create`, `read`, `update`, `delete`, `list` (full CRUD) | `+ full CRUD` on the break-glass sub-path `secret/data/tenants/<id>/privileged/*`; `+ update` on `secret/delete/tenants/<id>/*` (the version soft-delete) |
 
 Notes:
 
@@ -76,6 +76,12 @@ Notes:
   ([`connector-vault-policy.md`](./connector-vault-policy.md) §2).
 - **`list` is granted on `secret/metadata/...`**, not `secret/data/...`:
   KV-v2 authorises a LIST against the metadata path.
+- **The version soft-delete (`vault.kv.delete`) needs `update` on
+  `secret/delete/...`.** It posts to `<mount>/delete/<path>`, which Vault
+  authorises on that path, not on `/data/` (evoila/meho#3274). Only the
+  `tenant_admin` policy grants it. The permanent delete
+  (`vault.kv.metadata.delete`) needs `read` and `delete` on
+  `secret/metadata/...`, which the same policy already grants.
 - **Admin break-glass lives under `privileged/`** and is reachable by the
   `tenant_admin` policy *alone* — `read_only`/`operator` policies never
   template that sub-path, so a non-admin operator cannot reach it even
@@ -86,6 +92,12 @@ Notes:
   Vault forbids it, and it is what keeps one tenant's rendered path from
   matching another's
   ([policy templating constraints](https://developer.hashicorp.com/vault/docs/concepts/policies)).
+- **`k8s.secret.read_to_ref` writes to the tenant subtree.** The op writes a
+  kubeconfig to `secret/data/tenants/<id>/<register_as>`. Of the three
+  policies, only `meho-tenant-admin` grants `create` + `update` there.
+  The person who calls the op and the person who approves it both need
+  the grant
+  ([`connector-vault-policy.md`](./connector-vault-policy.md) §6.6).
 
 ## 2. The three policy bodies
 
@@ -135,6 +147,11 @@ path "secret/metadata/tenants/{{identity.entity.metadata.tenant_id}}/*" {
 }
 path "secret/data/tenants/{{identity.entity.metadata.tenant_id}}/privileged/*" {
   capabilities = ["create", "read", "update", "delete", "list"]
+}
+# The version soft-delete (vault.kv.delete) posts to <mount>/delete/<path>.
+# Vault authorises it with `update` on that /delete/ path, not on /data/.
+path "secret/delete/tenants/{{identity.entity.metadata.tenant_id}}/*" {
+  capabilities = ["update"]
 }
 ```
 
@@ -272,6 +289,10 @@ vault kv get -mount=secret "tenants/<other-tenant-uuid>/<target>"
 # 4. Capability probe for an operator's rotation write (operator role).
 vault token capabilities "secret/data/tenants/<tenant-uuid>/rotation/<target>"
 # Expect for operator: create read update
+
+# 5. Capability probe for a tenant admin's version soft-delete.
+vault token capabilities "secret/delete/tenants/<tenant-uuid>/<target>"
+# Expect for tenant_admin: update
 ```
 
 A `permission denied` on step 2 means either the entity metadata is

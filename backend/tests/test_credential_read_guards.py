@@ -50,6 +50,8 @@ _REDACTED = "[REDACTED:param_name]"
 # on the test source.
 _PASSWORD_SECRET = "super-secret" + "-esxi-pw"
 _FAKE_TSIG_VALUE = "exampleTsig" + "Value=="
+_FAKE_BARE_TSIG_VALUE = "exampleBare" + "Value=="
+_FAKE_COOKIE_VALUE = "0123abcd" + "ef" * 12
 
 _SDDC_PRODUCT = "sddc"
 _SDDC_VERSION = "9.0"
@@ -292,15 +294,27 @@ _NAMED_CONF = (
     "    algorithm hmac-sha256;\n"
     f'    secret "{_FAKE_TSIG_VALUE}";\n'
     "};\n"
+    'key "transfer-key" {\n'
+    "    algorithm hmac-sha256;\n"
+    f"    secret {_FAKE_BARE_TSIG_VALUE};\n"
+    "};\n"
     "options {\n"
     '    directory "/var/cache/bind";\n'
+    f"    cookie-secret {_FAKE_COOKIE_VALUE};\n"
     "    allow-transfer { key rndc-key; };\n"
     "};\n"
 )
 
-_NAMED_CONF_REDACTED = _NAMED_CONF.replace(
-    f'secret "{_FAKE_TSIG_VALUE}";', "secret [REDACTED:bind_key_secret];"
+_NAMED_CONF_REDACTED = (
+    _NAMED_CONF.replace(f'secret "{_FAKE_TSIG_VALUE}";', "secret [REDACTED:bind_key_secret];")
+    .replace(f"secret {_FAKE_BARE_TSIG_VALUE};", "secret [REDACTED:bind_key_secret];")
+    .replace(f"cookie-secret {_FAKE_COOKIE_VALUE};", "cookie-secret [REDACTED:bind_key_secret];")
 )
+
+
+def _assert_no_bind_secret(dumped: str) -> None:
+    for value in (_FAKE_TSIG_VALUE, _FAKE_BARE_TSIG_VALUE, _FAKE_COOKIE_VALUE):
+        assert value not in dumped
 
 
 class _NoOpBind9Connector(Connector):
@@ -358,7 +372,11 @@ async def _register_bind9_config_show(embedding_service: AsyncMock) -> None:
 async def test_bind9_config_show_key_secret_is_redacted(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """The key value becomes the placeholder; the rest of the file is unchanged."""
+    """Every key value becomes the placeholder; the rest of the file is unchanged.
+
+    The file holds a quoted secret, a secret without quotes and a
+    ``cookie-secret``. BIND accepts all of them.
+    """
     await _register_bind9_config_show(stub_embedding_service)
 
     result = await dispatch(
@@ -372,13 +390,13 @@ async def test_bind9_config_show_key_secret_is_redacted(
     assert isinstance(result.result, dict)
     assert result.result["file"] == "/etc/bind/named.conf"
     assert result.result["content"] == _NAMED_CONF_REDACTED
-    assert _FAKE_TSIG_VALUE not in result.model_dump_json()
+    _assert_no_bind_secret(result.model_dump_json())
 
 
 async def test_bind9_config_show_key_secret_stays_redacted_with_reveal_secret(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """``reveal_secret`` does not bring a key secret back: the text rule still runs."""
+    """``reveal_secret`` does not bring any key secret back: the text rule still runs."""
     await _register_bind9_config_show(stub_embedding_service)
 
     result = await dispatch(
@@ -391,4 +409,4 @@ async def test_bind9_config_show_key_secret_stays_redacted_with_reveal_secret(
     assert result.status == "ok", result.error
     assert isinstance(result.result, dict)
     assert result.result["content"] == _NAMED_CONF_REDACTED
-    assert _FAKE_TSIG_VALUE not in result.model_dump_json()
+    _assert_no_bind_secret(result.model_dump_json())

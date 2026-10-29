@@ -186,22 +186,30 @@ _KUBECONFIG = re.compile(
 )
 
 # BIND key secrets (#4617). A ``named.conf`` ``key`` block carries the
-# shared secret of a TSIG or rndc key as ``secret "<base64>";``. The
-# keyword is followed by whitespace, not ``=`` / ``:``, so ``api_key``
-# does not see it. BIND also allows comments (``/* */``, ``//``, ``#``)
-# between the keyword and the value. A look-behind cannot skip them
-# (it must be fixed-width), so the match covers the keyword, any
-# comments, and the quoted value, and the ``value`` group marks the
+# shared secret of a TSIG or rndc key as ``secret "<base64>";``, and
+# the ``options`` block can carry ``cookie-secret "<hex>";``. BIND reads
+# both values as a string, with or without quotes, so the rule matches
+# both forms. A value without quotes ends at white space or at one of
+# BIND's special characters (``; { } / " !``), and the rule only takes
+# it when the closing ``;`` follows, so plain prose such as "the
+# secret is in the vault" is left alone. The keyword is followed by
+# whitespace, not ``=`` / ``:``, so ``api_key`` does not see it. BIND
+# also allows comments (``/* */``, ``//``, ``#``) between the keyword
+# and the value. A look-behind cannot skip them (it must be
+# fixed-width), so the match covers the keyword, any comments, and the
+# value, and the ``value`` group marks the
 # part the engine replaces. The keyword and the comments stay in the
 # output, so the file stays readable.
 #
 # Two guards keep a key *name* that ends in ``secret`` (``key
 # "transfer-secret"``, ``key "secret"``, ``key "my secret"``) from
 # matching the wrong pair of quotes: the keyword may not sit directly
-# after a quote, a hyphen, or another word character, and the value
-# must be base64 (BIND lets whitespace split it). The text from a
-# name's closing quote to the real value's opening quote holds ``{``
-# and ``;``, so it never passes as a value.
+# after a quote, a hyphen, or another word character (``cookie-secret``
+# is matched as one keyword), and a quoted value must be base64 or hex
+# (BIND lets whitespace split it). The text from a name's closing quote
+# to the real value's opening quote holds ``{`` and ``;``, so it never
+# passes as a value. A value without quotes must follow white space or
+# a comment, so the opening quote of a name never starts one.
 #
 # The gap between the keyword and the value is matched once and never
 # re-tried (possessive ``*+``). A line comment runs to the end of its
@@ -212,11 +220,16 @@ _KUBECONFIG = re.compile(
 # the middleware busy for seconds (#4620 review).
 _BIND_COMMENT = r"(?:/\*[^*]*(?:\*(?!/)[^*]*)*\*/|//[^\n]*|#[^\n]*)"
 _BIND_KEY_SECRET = re.compile(
-    r"(?<![\w\"'-])secret(?:\s|"
+    r"(?<![\w\"'-])(?:cookie-)?secret(?:\s|"
     + _BIND_COMMENT
     + r')*+(?P<value>"[A-Za-z0-9+/=\s]{1,'
     + str(_VALUE_MAX)
-    + r'}")',
+    + r'}"'
+    + r'|(?<=[\s/])[^\s;{}/"!]{1,'
+    + str(_VALUE_MAX)
+    + r"}+(?=(?:\s|"
+    + _BIND_COMMENT
+    + r")*+;))",
     re.IGNORECASE,
 )
 

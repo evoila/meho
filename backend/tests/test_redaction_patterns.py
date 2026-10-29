@@ -240,6 +240,77 @@ def test_bind_key_secret_ignores_a_key_name_that_ends_in_secret(key_name: str) -
     assert block[start:end] == '"exampleTsigValue=="'
 
 
+# A fake secret and a fake cookie value, split so secret scanners do not flag them.
+_FAKE_BIND_SECRET = "exampleTsig" + "Value=="
+_FAKE_COOKIE_SECRET = "0123abcd" + "ef" * 12
+
+
+@pytest.mark.parametrize(
+    ("keyword", "value"),
+    [
+        ("secret", '"' + _FAKE_BIND_SECRET + '"'),
+        ("secret", _FAKE_BIND_SECRET),
+        ("cookie-secret", '"' + _FAKE_COOKIE_SECRET + '"'),
+        ("cookie-secret", _FAKE_COOKIE_SECRET),
+        ("Cookie-Secret", _FAKE_COOKIE_SECRET),
+    ],
+    ids=["quoted", "unquoted", "cookie-quoted", "cookie-unquoted", "cookie-upper"],
+)
+@pytest.mark.parametrize(
+    "separator",
+    [" ", "\n    ", " /* rotation note */ ", " // rotated last week\n    ", " # note\n    "],
+    ids=["space", "line-break", "block-comment", "line-comment", "hash-comment"],
+)
+def test_bind_key_secret_covers_every_value_form(keyword: str, value: str, separator: str) -> None:
+    """BIND reads ``secret`` and ``cookie-secret`` with or without quotes.
+
+    Every form is redacted, with a line break or a comment between the
+    keyword and the value. Only the value is replaced.
+    """
+    line = "    " + keyword + separator + value + ";\n"
+    result = redact(line, _BIND_KEY_SECRET_ONLY_POLICY)
+    assert result.redacted == "    " + keyword + separator + "[REDACTED:bind_key_secret];\n"
+    assert _FAKE_BIND_SECRET not in result.redacted
+    assert _FAKE_COOKIE_SECRET not in result.redacted
+    start, end = result.manifest[0].span
+    assert line[start:end] == value
+
+
+def test_bind_key_secret_unquoted_value_may_have_a_comment_before_the_semicolon() -> None:
+    line = "secret " + _FAKE_BIND_SECRET + " /* rotated */ ;"
+    result = redact(line, _BIND_KEY_SECRET_ONLY_POLICY)
+    assert result.redacted == "secret [REDACTED:bind_key_secret] /* rotated */ ;"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "the secret is in the vault;",
+        "secrets " + _FAKE_BIND_SECRET + ";",
+        "client_secret " + _FAKE_BIND_SECRET + ";",
+        "secret # " + _FAKE_BIND_SECRET + ";",
+    ],
+    ids=["prose", "longer-word", "other-label", "commented-out"],
+)
+def test_bind_key_secret_unquoted_form_leaves_other_text_alone(text: str) -> None:
+    """A word after ``secret`` is a value only where BIND would read one."""
+    result = redact(text, _BIND_KEY_SECRET_ONLY_POLICY)
+    assert result.redacted == text
+    assert result.manifest == ()
+
+
+def test_bind_key_secret_unquoted_value_in_a_key_named_secret() -> None:
+    """The key-name guard still holds when the real value has no quotes."""
+    block = (
+        'key "my secret" {\n    algorithm hmac-sha256;\n    secret ' + _FAKE_BIND_SECRET + ";\n};"
+    )
+    result = redact(block, _BIND_KEY_SECRET_ONLY_POLICY)
+    assert result.redacted == (
+        'key "my secret" {\n    algorithm hmac-sha256;\n    secret [REDACTED:bind_key_secret];\n};'
+    )
+    assert len(result.manifest) == 1
+
+
 def test_get_pattern_returns_compiled_regex() -> None:
     """get_pattern is the runtime accessor the engine uses."""
     pat = get_pattern("uuid")

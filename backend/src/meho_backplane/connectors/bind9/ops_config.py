@@ -375,7 +375,8 @@ _BIND9_CONFIG_SHOW_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": (
                 "File content as bind9 sees it, except that the value of "
-                'every ``secret "...";`` line is replaced with '
+                "every ``secret`` and ``cookie-secret`` line, with or "
+                "without quotes, is replaced with "
                 "``[REDACTED:bind_key_secret]``."
             ),
         },
@@ -396,7 +397,7 @@ BIND9_CONFIG_SHOW_LLM_INSTRUCTIONS: dict[str, Any] = {
         "(``extras.named_conf_path`` directory from the connector's "
         "fingerprint) are refused with no file content. For a zone "
         "file, use ``bind9.zone.read``. Key secrets in the file "
-        '(``secret "...";``) come back as '
+        "(the value of ``secret`` and ``cookie-secret``) come back as "
         "``[REDACTED:bind_key_secret]``. Use relative paths whenever "
         "possible -- they're inherently scoped and the agent doesn't "
         "have to remember the absolute root layout."

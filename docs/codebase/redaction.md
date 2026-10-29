@@ -122,7 +122,7 @@ production traffic cannot reach that branch.
 | `jwt` | `ey<base64url>.<base64url>.<base64url>` three-segment tokens |
 | `api_key` | Labelled credential pairs: `api_key`, `access_token`, `refresh_token`, `auth_token`, `session_token`, `token` (bare), `secret` / `secret_key` / `secret_id`, `private_key`, `password`, `passwd`, `pwd`, `client_secret` — each followed by `=` or `:` and an 8+ char value |
 | `kubeconfig` | YAML kubeconfig blobs (`apiVersion: v1` + `kind: Config`) |
-| `bind_key_secret` | The quoted value after the `secret` keyword in a BIND `key` block (`secret "<base64>";`, TSIG and rndc keys), also when BIND comments (`/* */`, `//`, `#`) sit between the keyword and the value; the keyword and the comments stay so the file stays readable. The value must be base64, and the keyword may not follow a quote, a hyphen, or a word character, so a key *name* like `"transfer-secret"` is not taken for the directive (#4617) |
+| `bind_key_secret` | The value after the `secret` keyword in a BIND `key` block (`secret "<base64>";`, TSIG and rndc keys) and after `cookie-secret` in the `options` block, with or without quotes, also when BIND comments (`/* */`, `//`, `#`) sit between the keyword and the value; the keyword and the comments stay so the file stays readable. A quoted value must be base64 or hex. A value without quotes must follow white space or a comment and be followed by `;`. The keyword may not follow a quote, a hyphen, or a word character, so a key *name* like `"transfer-secret"` is not taken for the directive (#4617) |
 | `uuid` | RFC 4122 canonical 8-4-4-4-12 hex |
 | `ipv4` | Dotted-quad with 0-255 per-octet bounds |
 | `ipv6` | Full + compressed RFC 5952 forms |

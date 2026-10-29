@@ -656,6 +656,75 @@ Notes:
   settings. A check made with a token from before the change still shows
   the old lease.
 
+### 6.6 Staging a Kubernetes Secret (`k8s.secret.read_to_ref`)
+
+`k8s.secret.read_to_ref` reads one value from a Kubernetes Secret and
+writes it to Vault. It is the way to register a guest cluster from its
+kubeconfig without the kubeconfig reaching the agent. The write goes
+through the same handler as `vault.kv.put`, so it needs the same
+`create` + `update` grant. What is different is **where** it writes.
+
+**The path is fixed.** The op always writes to
+
+```text
+secret/data/tenants/<tenant_id>/<register_as>
+```
+
+`<tenant_id>` is the caller's tenant. `<register_as>` is the target name
+the caller passes. You cannot choose another path, for two reasons:
+
+- `meho targets create --name <register_as>` without a `secret_ref`
+  reads this same path. That is how the staged kubeconfig reaches the new
+  target.
+- The tenant-scope guard (on by default) refuses a Vault write outside
+  `secret/tenants/<tenant_id>/`. A path such as `secret/meho/...` would be
+  refused by MEHO before it reaches Vault.
+
+**Which role writes.** The op writes with no Vault target. So step 1 of
+the §6.3 chain (a target's `vault_role`) never applies. The write uses
+the per-tenant role from `VAULT_OIDC_ROLE_BY_TENANT`, or else the global
+`VAULT_OIDC_ROLE` (usually `meho-mcp`). Running the op on another vault
+target does not change the role.
+
+**The grant it needs.** The policies of that role, or the identity-group
+policies of the caller, must give `create` + `update` on the tenant
+subtree:
+
+```hcl
+path "secret/data/tenants/{{identity.entity.metadata.tenant_id}}/*" {
+  capabilities = ["create", "read", "update"]
+}
+```
+
+The per-tenant policies in
+[`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md)
+already handle this:
+
+- `meho-tenant-admin` grants it. A `tenant_admin` can run the op.
+- `meho-tenant-operator` does **not** grant it. That policy can write
+  only under `tenants/<tenant_id>/rotation/*`. An `operator` gets
+  `write_capability_denied` at park time.
+- `meho-tenant-read-only` does not grant it.
+
+Do not add this grant to the shared `meho-mcp` policy for everyone. Give
+it through the per-tenant policy of the people who register clusters.
+
+**The tenant metadata must be set.** The templated path above only works
+when the caller's Vault entity carries the `tenant_id` metadata
+([`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md)
+§3). Without it, the grant does not apply and Vault denies the write.
+
+**Both people need the grant.** The op needs approval. MEHO checks the
+grant for the person who calls the op, at park time. After approval, the
+write runs with the token of the person who approves (see the §6.2 note
+on the reviewer token). So the approver needs the same grant. Check both
+with §6.2, using the path above:
+
+```bash
+vault token capabilities "secret/data/tenants/<tenant-uuid>/<register_as>"
+# Expect: create read update
+```
+
 ## Scope note — `shared_service_account` only; `per_user`/`impersonation` deferred
 
 This runbook covers the **`shared_service_account`** auth model: one

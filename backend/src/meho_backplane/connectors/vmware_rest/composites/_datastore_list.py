@@ -49,6 +49,7 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     _unwrap_value,
 )
 from meho_backplane.connectors.vmware_rest.composites._teardown_reads import (
+    IncompleteAnswerError,
     moref_values,
     read_many,
     read_object,
@@ -156,7 +157,13 @@ def _join(folder: str, name: str) -> str:
 async def _find_datastores(
     connector: VmwareRestConnector, target: Any, operator: Operator, flavor: str, name: str
 ) -> list[str]:
-    """Moids of the datastores named *name* (on vCenter, a ``datastore-N`` moid also works)."""
+    """Moids of the datastores named *name* (on vCenter, a ``datastore-N`` moid also works).
+
+    On ESXi the names come from one property read over the host's datastores.
+    When that read is partial (a datastore left out, or a name the session may
+    not read), the lookup raises :class:`IncompleteAnswerError` instead of
+    answering ``not_found`` for a datastore that may well exist.
+    """
     if flavor == HOST_FLAVOR_ESXI:
         datacenter = await read_object(
             connector,
@@ -167,9 +174,15 @@ async def _find_datastores(
             props=["datastore"],
         )
         moids = [moid for _type, moid in moref_values((datacenter or {}).get("datastore"))]
-        names, _complete = await read_many(
+        names, complete = await read_many(
             connector, target, operator, mo_type=_DATASTORE_MO_TYPE, moids=moids, props=["name"]
         )
+        if not complete:
+            raise IncompleteAnswerError(
+                "the ESXi host answered only part of its datastore list (a datastore left "
+                "out, or a name this session may not read); refusing to say whether "
+                f"datastore {name!r} exists on a partial answer"
+            )
         return [moid for moid, props in names.items() if props.get("name") == name]
     listing = _unwrap_value(
         await _read_sub_op(

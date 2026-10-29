@@ -7,8 +7,10 @@ Driven against the shared vim fake's datastore file tree, on a vCenter target
 (name found with ``GET /vcenter/datastore``) and a standalone ESXi target (name
 found on ``ha-datacenter``). Covers the file rows, the pattern, an empty folder,
 a missing folder / datastore, the typed refusals, ``include_usage`` (folder
-sums + VM users), a large listing and the ESXi SOAP shapes (one ``file`` entry
-that is not a list, a size given as text, the SOAP search envelope).
+sums + VM users), a large listing (raw, and through the real JSONFlux reducer
+to a result handle), a partial ESXi datastore answer, and the ESXi SOAP shapes
+(one ``file`` entry that is not a list, a size given as text, the SOAP search
+envelope).
 """
 
 from __future__ import annotations
@@ -19,8 +21,15 @@ import pytest
 from defusedxml.ElementTree import fromstring
 from jsonschema import Draft202012Validator, ValidationError
 
+from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.vmware_rest.composites import _datastore_list
 from meho_backplane.connectors.vmware_rest.composites._datastore_browse import Datastore
+from meho_backplane.connectors.vmware_rest.composites._storage_network_llm_instructions import (
+    STORAGE_NETWORK_LLM_INSTRUCTIONS,
+)
+from meho_backplane.connectors.vmware_rest.composites._teardown_reads import (
+    IncompleteAnswerError,
+)
 from meho_backplane.connectors.vmware_rest.composites.schemas import (
     DATASTORE_FILE_LIST_PARAMETER_SCHEMA,
     DATASTORE_FILE_LIST_RESPONSE_SCHEMA,
@@ -30,8 +39,14 @@ from meho_backplane.connectors.vmware_rest.soap import (
     parse_retrieve_result,
 )
 from meho_backplane.connectors.vmware_rest.vim_body import unwrap_vim_value
+from meho_backplane.operations import jsonflux_reducer as reducer_module
+from meho_backplane.operations import result_query as rq
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.operations.result_query import ResultQuerySpec, run_result_query
+from meho_backplane.settings import get_settings
 from tests._vmware_teardown_fake import VimFake, moref, operator
 
+_OP_ID = "vmware.composite.datastore.file.list"
 _VALIDATE_OUT = Draft202012Validator(DATASTORE_FILE_LIST_RESPONSE_SCHEMA).validate
 
 
@@ -287,14 +302,98 @@ async def test_include_usage_skips_vm_check_on_vsan() -> None:
     assert {e["name"]: e["size_bytes"] for e in out["entries"]}["old-lab"] == 10_000_500
 
 
-async def test_many_files_return_all_rows_for_the_reducer() -> None:
+def _many_files(count: int) -> _VcenterFake:
     conn = _vcenter()
-    for i in range(500):
+    for i in range(count):
         conn.files["demo-ds"][f"iso/file-{i:03}.iso"] = i
-    out = await _list(conn, path="iso")
+    return conn
+
+
+async def test_many_files_return_all_rows_for_the_reducer() -> None:
+    out = await _list(_many_files(500), path="iso")
     assert out["count"] == 503
     assert len(out["entries"]) == 503
     _VALIDATE_OUT(out)
+
+
+class _MemoryValkey:
+    """The two calls of the async Valkey client the result store uses."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+
+    async def set(self, name: str, value: Any, ex: int | None = None) -> None:
+        del ex
+        self.values[name] = value if isinstance(value, bytes) else str(value).encode()
+
+    async def get(self, name: str) -> bytes | None:
+        return self.values.get(name)
+
+
+@pytest.fixture
+def result_store(monkeypatch: pytest.MonkeyPatch) -> ResultHandleStore:
+    """The real result store on an in-memory stand-in for Valkey."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    store = ResultHandleStore(_MemoryValkey())  # type: ignore[arg-type]
+    monkeypatch.setattr(rq, "get_result_handle_store", lambda: store)
+    monkeypatch.setattr(reducer_module, "get_result_handle_store", lambda: store)
+    return store
+
+
+@pytest.mark.usefixtures("result_store")
+async def test_many_files_reduce_to_a_handle_that_keeps_the_status_fields() -> None:
+    """A long listing goes through the real reducer: a handle, the status fields inline.
+
+    The reducer context carries the op's registered ``result_scalars`` hint (the
+    dict the dispatcher lifts off the descriptor), so the fields an agent needs
+    before a drill-in stay next to the handle. The stored rows are read back
+    with ``result_query``, the way an agent does it.
+    """
+    op = operator()
+    out = await _list(_many_files(500), path="iso")
+    context = {
+        "op_id": _OP_ID,
+        "tenant_id": str(op.tenant_id),
+        "operator_sub": op.sub,
+        "result_scalars": STORAGE_NETWORK_LLM_INSTRUCTIONS[_OP_ID]["result_scalars"],
+    }
+
+    reduced, handle = await JsonFluxReducer().reduce(
+        out, DATASTORE_FILE_LIST_RESPONSE_SCHEMA, context
+    )
+
+    assert handle is not None
+    assert handle.total_rows == 503
+    assert handle.fetch_more is not None
+    assert handle.fetch_more.drill_in.available is True
+    assert "entries" not in reduced
+    assert reduced["row_count"] == 503
+    for key in STORAGE_NETWORK_LLM_INSTRUCTIONS[_OP_ID]["result_scalars"]["keys"]:
+        assert reduced[key] == out[key], key
+    assert reduced["status"] == "ok"
+    assert reduced["count"] == 503
+    assert reduced["datastore_moid"] == "datastore-17"
+    assert reduced["datastore_path"] == "[demo-ds] iso"
+
+    read = await run_result_query(
+        op,
+        handle.handle_id,
+        ResultQuerySpec(filter=[{"field": "name", "op": "=", "value": "file-007.iso"}]),
+    )
+    assert read["coverage"] == "complete"
+    assert read["rows"] == [
+        {
+            "name": "file-007.iso",
+            "path": "iso/file-007.iso",
+            "kind": "file",
+            "file_type": "FileInfo",
+            "size_bytes": 7,
+            "modified": None,
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +415,15 @@ async def test_esxi_finds_the_name_on_ha_datacenter() -> None:
 async def test_esxi_unknown_name_is_not_found() -> None:
     out = await _list(_esxi(), target=_Target("esxi"), datastore="other-ds")
     assert out["status"] == "not_found"
+
+
+async def test_esxi_partial_datastore_answer_is_not_treated_as_absent() -> None:
+    """A datastore name the session may not read: an error, never ``not_found``."""
+    conn = _esxi()
+    conn.unreadable[("Datastore", "local-ds-id")] = {"name"}
+    with pytest.raises(IncompleteAnswerError, match="only part of its datastore list"):
+        await _list(conn, target=_Target("esxi"), datastore="local-ds")
+    assert "SearchDatastore_Task" not in conn.methods()
 
 
 async def test_esxi_include_usage() -> None:

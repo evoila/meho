@@ -3624,7 +3624,10 @@ in one folder of a datastore, so a check can confirm a plain datastore file
   `classify_host_target`. On vCenter the name is looked up with
   `GET /vcenter/datastore` (`filter.names`, checked again on the client). A
   standalone ESXi host has no such call, so the name is matched in the
-  `datastore` list of `ha-datacenter`. Then the shared
+  `datastore` list of `ha-datacenter`. When that name read is partial (a
+  datastore left out, or a name the session may not read), the op raises
+  `IncompleteAnswerError` instead of answering `not_found` for a datastore
+  that may exist. Then the shared
   `_datastore_browse.resolve_datastore` reads name, type and browser.
 - **Listing.** One `SearchDatastore_Task` on the folder (the shared
   `_datastore_browse.search`). Each row: `name`, `path`, `kind`

@@ -57,8 +57,12 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import (
+    credential_cache_key,
+    target_cache_key,
+)
 from meho_backplane.connectors._shared.profile_auth import SESSION_SCHEME_SPECS
+from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
@@ -148,7 +152,7 @@ class InstallerConnector(HttpConnector):
         super().__init__()
         self._creds_cache: dict[tuple[str, str], dict[str, str]] = {}
         self._creds_lock = asyncio.Lock()
-        self._session_tokens: dict[tuple[str, str], str] = {}
+        self._session_tokens: dict[tuple[str, ...], str] = {}
         self._session_lock = asyncio.Lock()
         self._credentials_loader: InstallerCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
@@ -179,7 +183,7 @@ class InstallerConnector(HttpConnector):
         always re-establishes and its token is never written to the shared cache
         (#1008).
         """
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target)
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None and not is_system_operator(operator):
@@ -202,14 +206,23 @@ class InstallerConnector(HttpConnector):
             _log.info("installer_session_established", target=target.name, host=target.host)
             return token
 
-    async def invalidate_session(self, target: InstallerTargetLike) -> None:
+    async def invalidate_session(
+        self, target: InstallerTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Public duck-typed session-eviction hook for the dispatch path (#2067)."""
-        await self._invalidate_session(target)
+        await self._invalidate_session(target, rejected=rejected)
 
-    async def _invalidate_session(self, target: InstallerTargetLike) -> None:
+    async def _invalidate_session(
+        self, target: InstallerTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Drop the cached session token for *target* (credential cache left intact)."""
         async with self._session_lock:
-            self._session_tokens.pop(target_cache_key(target), None)
+            drop_rejected_token(
+                self._session_tokens,
+                credential_cache_key(target),
+                rejected,
+                lambda token: {"Authorization": f"Bearer {token}"},
+            )
 
     async def invalidate_credentials(self, target: InstallerTargetLike) -> None:
         """Public duck-typed credential-eviction hook for the dispatch path (#2396)."""
@@ -230,7 +243,7 @@ class InstallerConnector(HttpConnector):
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code not in _SESSION_EXPIRED_STATUSES:
                 raise
-            await self._invalidate_session(target)
+            await self._invalidate_session(target, rejected=exc.request)
         try:
             return await self._get_json(target, path, operator=operator, params=params)
         except httpx.HTTPStatusError as exc:
@@ -259,13 +272,16 @@ class InstallerConnector(HttpConnector):
         auth **before** the server processed it, so the first attempt had no
         effect and re-issuing once after a re-login cannot double-apply the write.
         Any other status propagates unretried.
+
+        With *rejected*, the token is dropped only when that request sent it;
+        a newer token another call just logged in for stays (#5033).
         """
         try:
             return await self._post_json(target, path, operator=operator, verb=verb, json=json)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code not in _SESSION_EXPIRED_STATUSES:
                 raise
-            await self._invalidate_session(target)
+            await self._invalidate_session(target, rejected=exc.request)
         try:
             return await self._post_json(target, path, operator=operator, verb=verb, json=json)
         except httpx.HTTPStatusError as exc:

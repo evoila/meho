@@ -20,7 +20,10 @@ Rules:
   newer shape is refused by name and not read wrongly.
 * Merging keeps the handle order. A record whose ``source_id`` was seen
   before, or a server that shares a BIOS UUID or an instance UUID with
-  another record, is kept in ``records`` but listed in ``duplicates``. The
+  another record, is kept in ``records`` but listed in ``duplicates``. A
+  BIOS UUID matches in both forms a machine reports it, as the hypervisor
+  shows it and as the guest OS shows it with the bytes of the first three
+  groups reversed (:func:`~.contracts.bios_uuid_match_key`). The
   match is found by the same :class:`~.contracts.IdentityIndex` the source
   reads use, after every record is in: ``same_as`` always names the first
   record of the machine, also through a chain of matches and whatever the

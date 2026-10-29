@@ -34,7 +34,7 @@ marks the cmdlet surface (stable across Windows Server 2019 → 2025).
 
 Source: `backend/src/meho_backplane/connectors/winsrv/`.
 
-## Op surface (23 ops across six groups)
+## Op surface (24 ops across six groups, plus one multi-step read)
 
 Safety tier is a reach decision per the Initiative #3259 satellite table: reads
 = `safe` (ride satellite runners); recoverable writes = `caution` (satellite-
@@ -48,6 +48,7 @@ central-dial / on-site only).
 | `winsrv.system.os-info` | safe | no | `Get-CimInstance Win32_OperatingSystem` |
 | `winsrv.system.uptime` | safe | no | `Win32_OperatingSystem.LastBootUpTime` |
 | `winsrv.system.pending-reboot` | safe | no | CBS / WU / Session-Manager marker registry keys |
+| `winsrv.system.hardware` | safe | no | `Win32_ComputerSystem` + `Win32_ComputerSystemProduct.UUID` + `Get-ComputerInfo -Property BiosFirmwareType` + `Confirm-SecureBootUEFI` |
 | `winsrv.service.list` | safe | no | `Get-Service` |
 | `winsrv.service.get` | safe | no | `Get-Service -Name` |
 | `winsrv.service.start` | caution | no | `Start-Service` |
@@ -85,6 +86,16 @@ cannot self-approve these — approval is a human decision (v0.1-spec §7), so a
 floors at the approval queue until an operator approves in the console / CLI.
 Reads ride satellite runners; the `dangerous` ops are excluded from satellites
 by the tier ladder.
+
+`winsrv.system.hardware` gives the machine facts a migration inventory needs:
+logical processors, memory in bytes, the SMBIOS product UUID, maker and model,
+`Uefi` or `Bios`, and Secure Boot. A part that fails (Secure Boot needs admin
+rights and a UEFI machine) is `null`; the read still answers.
+
+The multi-step read `winsrv.migration.inventory` (group `migration`, `safe`)
+returns the host as one server record in the common migration inventory
+shape. It lives in `connectors/migration/source_hosts.py`; see
+`connectors-migration.md`.
 
 ## Key types
 

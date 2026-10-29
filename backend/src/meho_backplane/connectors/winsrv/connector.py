@@ -275,6 +275,14 @@ class WinsrvConnector(SshConnector):
 
         return await _h(self, target, params, operator)
 
+    async def winsrv_hardware(
+        self, target: Target, params: dict[str, Any], operator: Operator | None = None
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``winsrv.system.hardware``."""
+        from meho_backplane.connectors.winsrv.ops_hardware import winsrv_hardware as _h
+
+        return await _h(self, target, params, operator)
+
     async def winsrv_uptime(
         self, target: Target, params: dict[str, Any], operator: Operator | None = None
     ) -> dict[str, Any]:

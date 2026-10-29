@@ -762,7 +762,7 @@ def test_operations_ui_preview_missing_target_name_is_inline_400() -> None:
     assert response.status_code == 400, response.text
     body = response.text
     assert 'data-preview-status="form_error"' in body
-    assert "requires a target" in body
+    assert "needs a target" in body
 
 
 def test_operations_ui_preview_malformed_params_json_is_inline_400() -> None:

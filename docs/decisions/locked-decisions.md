@@ -22,6 +22,18 @@ file** in this directory (see `pgvector-superuser-prerequisite.md`,
 `shipped-spec-provenance.md`, `jsonflux-license.md`). This file remains the
 register for the foundational set, because its `#N` numbering is load-bearing.
 
+One-per-file decisions that change an earlier written rule:
+
+- [approval-groups-and-self-approval.md](approval-groups-and-self-approval.md)
+  ([#3325](https://github.com/evoila/meho/issues/3325)) — who may approve,
+  what waits for approval, and how a person approves. It narrows one clause
+  of requirement 1 in `governed-delete-operations.md`: "no self-approval" no
+  longer holds for a member of MEHO-SA-Operators who approves on purpose.
+  "Mandatory human approval", "no standing grant" and "no autonomous-session
+  approval" stay. It also replaces "DENY for agent principals" for
+  `destructive` changes: an agent's request now waits for a person's
+  approval. Agents still never approve (v0.1-spec §7).
+
 ---
 
 ## Locked decisions

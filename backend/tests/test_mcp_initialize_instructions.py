@@ -76,6 +76,7 @@ def _initialize_envelope() -> dict[str, object]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
 async def test_initialize_instructions_omitted_for_empty_tenant(
     client_with_operator: tuple[TestClient, Operator],
     seeded_operator_tenant: None,
@@ -83,11 +84,13 @@ async def test_initialize_instructions_omitted_for_empty_tenant(
     """Empty tenant -> ``instructions`` carries the two static bands.
 
     Since G6.5-T6 (#2546) the static broadcast-discipline band is
-    injected into every assembled preamble, so even a tenant with no
+    injected into the assembled preamble, so even a tenant with no
     operational conventions receives it. #2675 appends the static
     feature-maturity band after the preamble. The ``instructions``
     field is therefore present and equals exactly those two bands (no
-    conventions block).
+    conventions block). Since #4113 the broadcast band needs a session
+    that can call ``meho_broadcast_announce``, so this test uses an
+    ``operator`` session.
     """
     client, _op = client_with_operator
 
@@ -98,9 +101,40 @@ async def test_initialize_instructions_omitted_for_empty_tenant(
     instructions = body["result"]["instructions"]
     assert instructions == f"{BROADCAST_DISCIPLINE_BAND}\n\n{FEATURE_MATURITY_BAND}"
     assert BLOCK_START not in instructions  # no conventions block
+    # #4113: the band tells the agent to skip a step whose tool its
+    # client does not offer (MEHO cannot see client-side tool hiding).
+    assert "If your client does not offer one of these tools, skip that step." in instructions
 
 
 @pytest.mark.asyncio
+async def test_initialize_instructions_omit_broadcast_for_read_only_session(
+    client_with_operator: tuple[TestClient, Operator],
+    seeded_operator_tenant: None,
+) -> None:
+    """A ``read_only`` session is not told to call broadcast tools it cannot see (#4113).
+
+    The broadcast tools need the ``operator`` role, so they are not on a
+    ``read_only`` session's tool list. Its instructions leave out the
+    broadcast band and keep the feature-maturity band.
+    """
+    client, op = client_with_operator
+    assert op.tenant_role is TenantRole.READ_ONLY
+
+    tools = post_mcp(client, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).json()
+    assert "meho_broadcast_announce" not in {t["name"] for t in tools["result"]["tools"]}
+
+    response = post_mcp(client, _initialize_envelope())
+    assert response.status_code == 200
+    body = response.json()
+    assert "error" not in body
+    instructions = body["result"]["instructions"]
+    assert instructions == FEATURE_MATURITY_BAND
+    assert "meho_broadcast_announce" not in instructions
+    assert BROADCAST_BLOCK_START not in instructions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
 async def test_initialize_instructions_populated_for_seeded_tenant(
     client_with_operator: tuple[TestClient, Operator],
     seeded_operator_tenant: None,
@@ -140,8 +174,8 @@ async def test_initialize_instructions_populated_for_seeded_tenant(
     instructions = body["result"]["instructions"]
     assert isinstance(instructions, str)
     assert instructions  # non-empty
-    # Since G6.5-T6 (#2546) the always-on broadcast-discipline band
-    # leads the preamble; the conventions block follows and (with no
+    # Since G6.5-T6 (#2546) the broadcast-discipline band (shown to an
+    # ``operator`` session, #4113) leads the preamble; the conventions block follows and (with no
     # priming / catalogue) closes the preamble text. #2675 appends the
     # feature-maturity band after the preamble, so it now closes the
     # instructions payload; the conventions delimiter still terminates

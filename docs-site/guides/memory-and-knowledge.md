@@ -138,7 +138,9 @@ Both searches return a short **snippet**, not the full body. To get the
 full Memory entry, read the hit's `locator`
 (`meho://memory/id/{document_uuid}`) with a resource read, or run
 `meho recall <scope>/<slug>`. It works for every scope, and MEHO checks
-your access again on that read. For knowledge, read `meho://kb/{slug}`. From the
+your access again on that read. For knowledge, read `meho://kb/{slug}`,
+or call `search_knowledge` again with the hit's `slug` (this works in
+clients that offer tools but no resource reads). From the
 CLI, use `meho recall <scope>/<slug>` / `meho kb show <slug>`.
 Omitting `scope` on `search_memory` searches every scope you can read;
 `search_knowledge` takes an optional `filters` object (e.g.

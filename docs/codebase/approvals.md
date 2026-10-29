@@ -22,14 +22,15 @@ truth:
 
 - **T4 owns the queue lifecycle** (`backend/src/meho_backplane/operations/approval_queue.py`):
   `create_pending_request`, `approve_request`, `reject_request`,
-  `expire_stale_requests`. Every mutation writes a synchronous audit
-  row in the same transaction (the "request" row on create; the
-  "decision" row on approve/reject/expire).
+  `expire_stale_requests`, `withdraw_request`. Every mutation writes a
+  synchronous audit row in the same transaction (the "request" row on
+  create; the "decision" row on approve/reject/expire; the
+  `approval.withdraw` row when the sender takes the request back).
 - **T5 wires the operator surfaces on top:** `GET /api/v1/approvals/{id}`
   (inspect), `meho_approvals_{list,get,approve,reject}` MCP tools, and
-  `meho approvals {list,show,approve,reject}` CLI verbs. Since #3758 no
+  `meho approvals {list,show,approve,reject,withdraw}` CLI verbs. Since #3758 no
   approval step is published to Broadcast. `record_approval_step_event`
-  records `approval.{pending,approved,rejected,expired}` only for the
+  records `approval.{pending,approved,rejected,expired,withdrawn}` only for the
   paired add-on that asked (#3027); the audit log records every step; the
   agent waiter, the bell badge and the console read the stored row.
 
@@ -472,9 +473,11 @@ model, or resume endpoint):
    exception message, so the `APPROVAL_ALLOW_SELF_APPROVAL` break-glass
    hint reaches the operator-facing REST `detail` and MCP error message
    rather than being dropped to a bare token (#1483). Even under break-glass the self-approval writes
-   its decision audit row, so the use is forensically visible. **Reject
-   is unguarded** — withdrawing one's own pending request is never a
-   privilege escalation. The guard runs after the role check and before
+   its decision audit row, so the use is forensically visible. Reject
+   has no self-guard. To take back your own pending request, do not
+   reject it: use withdraw (see
+   [The sender withdraws its own request](#the-sender-withdraws-its-own-request-4987)).
+   The guard runs after the role check and before
    the params-hash check, so a self-approver gets the precise refusal
    reason.
 
@@ -656,6 +659,44 @@ How a refusal reads:
 `features.approval_queue.delegated_decision_posture`:
 `"production_own_hand_only"` (switch off) or
 `"lab_class_delegation_allowed"` (switch on).
+
+## The sender withdraws its own request (#4987)
+
+The sender of a request can take it back while it still waits for
+approval. This is **not** a decision. Before #4987 the only way was to
+reject your own request, which looked like an approver said no, needed a
+person, and was a decision an agent must never make.
+
+- **Who:** only the sender (`operator.sub == request.principal_sub`).
+  Any kind of principal may do it: a person, an agent, or a service
+  account. Anyone else gets 403 `not_request_sender`, an approver
+  included. The route uses `verify_jwt_and_bind`, not the
+  approvals-plane gate and not `require_human_principal`.
+- **When:** only while the request is `pending`. A decided, expired or
+  already withdrawn request gets 409 `approval_request_already_<status>`.
+  The owner check runs first, so a non-sender never learns the state.
+- **What changes:** `withdraw_request` (`approval_queue.py`) takes the
+  same row lock as approve and reject, sets `status = 'withdrawn'`,
+  `withdrawn_at` and `withdraw_reason` (columns added by migration
+  `0119`), and drops a stored credential handoff (#3537).
+  `reviewed_by` and `decided_at` stay NULL.
+- **Audit:** one row, `path = 'approval.withdraw'`,
+  `event_class = 'operation_execution'` (not `approval_decision`),
+  `operator_sub` = the sender. The payload has `withdrawn_by` and the
+  optional `reason`, and no `decision` or `reviewed_by` key. A paired
+  add-on gets the `approval.withdrawn` step event (#3027).
+- **Nothing runs:** approve, reject and decide on a withdrawn request
+  see a closed row and answer 409 `approval_request_already_withdrawn`.
+  An agent run that waits in process for the decision stops at once
+  with `error_code = "approval_withdrawn"`.
+- **Surfaces:** `POST /api/v1/approvals/{id}/withdraw` with an optional
+  `reason` (answers with the updated request view), and
+  `meho approvals withdraw <id> [--reason TEXT]`. List, show and the
+  console show `withdrawn` with the time and the reason. The console
+  has a "Withdrawn" tab, and its request page says "Withdrawn by the
+  sender" and shows no approve or deny buttons.
+- **MCP:** there is no withdraw tool. Adding one to the agent tool list
+  is a separate team decision.
 
 ## Single-operator tenants: use an agent-requester, not break-glass (#1738)
 
@@ -1822,6 +1863,7 @@ token-decode + live decouple verification, and a rollback note — lives in
 | `POST` | `/api/v1/approvals/{id}/approve` | **human** operator **or** approver | Approve. Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and break-glass is off (G11.7-T1); 403 `human_principal_required` for a machine `principal_kind` (#289). |
 | `POST` | `/api/v1/approvals/{id}/decide` | **human** operator **or** approver | Decide (`approved` / `rejected`) by id alone. For an approved **direct** op (`run_id IS NULL`) re-dispatches with the **stored** params (#1503) and returns the outcome in `dispatch_*`; for an agent-run request records the decision only (the agent runtime resumes). 403 `human_principal_required` for a machine `principal_kind` (#289). |
 | `POST` | `/api/v1/approvals/{id}/reject` | **human** operator **or** approver | Reject. The op never executes. 403 `human_principal_required` for a machine `principal_kind` (#289). |
+| `POST` | `/api/v1/approvals/{id}/withdraw` | **request sender** (any role, any principal kind) | The sender takes back its own pending request (#4987). Not a decision. 403 `not_request_sender` for anyone else; 409 on a closed request. Writes an `approval.withdraw` audit row. |
 
 ### MCP (`backend/src/meho_backplane/mcp/tools/approvals.py`)
 
@@ -1848,7 +1890,9 @@ dispatcher re-checks `required_role` at `tools/call`.
 ### CLI (`cli/internal/cmd/approvals/`)
 
 `meho approvals list / show <id> / approve <id> / reject <id> [--reason]`
-verbs that hit the REST surface via the generated typed client. `list`
+verbs that hit the REST surface via the generated typed client.
+`meho approvals withdraw <id> [--reason]` lets the sender take back its own
+pending request (#4987). `list`
 has a `RUN` column and `show` / `approve` print how the run of an approved
 request ended (#3543, see "Approved, but the run failed" above).
 `list` shows only pending requests unless `--status` is set; `--status all`
@@ -1968,12 +2012,14 @@ query `audit_log` by this id.
 
 ## Audit rows
 
-Two rows per request lifecycle (the synchronous-audit invariant):
+Two rows per request lifecycle (the synchronous-audit invariant). A
+withdrawn request has a withdraw row instead of a decision row:
 
 | Row | `path` | `status_code` | Written by |
 |---|---|---|---|
 | Request | `approval.request` | `202` | `create_pending_request` |
 | Decision | `approval.decision` | `200` (approved) / `403` (rejected) / `410` (expired) | `approve_request` / `reject_request` / `expire_stale_requests` |
+| Withdraw | `approval.withdraw` | `200` | `withdraw_request` (#4987) |
 
 ### Session-replay lineage (#2086)
 

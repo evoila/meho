@@ -24,7 +24,7 @@ import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key, target_cache_key
 from meho_backplane.connectors._shared.system_operator import (
     SYSTEM_OPERATOR_SUB,
     synthesise_system_operator,
@@ -412,8 +412,8 @@ async def test_same_name_targets_in_different_tenants_get_distinct_tokens() -> N
             target_cache_key(tenant_two),
         }
         assert connector._session_tokens.keys() == {
-            target_cache_key(tenant_one),
-            target_cache_key(tenant_two),
+            credential_cache_key(tenant_one),
+            credential_cache_key(tenant_two),
         }
 
         # Same-tenant re-fetch is a cache HIT — behaviour unchanged.
@@ -562,11 +562,11 @@ async def test_invalidate_session_evicts_token_and_re_mints_on_next_call() -> No
     async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
         token_route = mock.post(_TOKEN_PATH).respond(200, json={"accessToken": "tok-abc"})
         await connector.auth_headers(_TARGET_A, operator=_make_operator())
-        assert target_cache_key(_TARGET_A) in connector._session_tokens
+        assert credential_cache_key(_TARGET_A) in connector._session_tokens
         assert token_route.call_count == 1
 
         await connector.invalidate_session(_TARGET_A)
-        assert target_cache_key(_TARGET_A) not in connector._session_tokens
+        assert credential_cache_key(_TARGET_A) not in connector._session_tokens
 
         await connector.auth_headers(_TARGET_A, operator=_make_operator())
         assert token_route.call_count == 2
@@ -804,7 +804,7 @@ async def test_aclose_clears_caches_and_pool() -> None:
         mock.post(_TOKEN_PATH).respond(200, json={"accessToken": "tok-abc"})
         await connector.auth_headers(_TARGET_A, operator=_make_operator())
     assert target_cache_key(_TARGET_A) in connector._creds_cache
-    assert target_cache_key(_TARGET_A) in connector._session_tokens
+    assert credential_cache_key(_TARGET_A) in connector._session_tokens
     await connector.aclose()
     assert connector._creds_cache == {}
     assert connector._session_tokens == {}

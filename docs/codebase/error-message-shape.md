@@ -61,8 +61,11 @@ Examples in current use:
 - `spec_label_mismatch` / `multi_spec_inconsistent` /
   `uncovered_version_label`
 - `no_connector` (dispatcher resolver miss)
-- `target_required` (dispatcher: connector-bound typed/composite op
-  invoked with no `target` — #1506)
+- `target_required` (`call_operation` and `preview_operation`: the op
+  needs a `target` and none was given — every ingested op, and a
+  connector-bound typed/composite op. Message:
+  `target_required: this operation needs a target; call list_targets and
+  pass a target name` — #1506, #4139)
 - `receipt_too_large` (`call_operation`: the receipt of a completed run
   could not fit `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`, so the call is
   refused before dispatch and nothing runs — #3641)
@@ -269,6 +272,20 @@ text from the error result, in one shared place.
 - **Retries are unchanged.** The rule works on the built result, not on
   the raised error. So the new login and one retry after HTTP 401, and
   the 403 and 429 results, work as before.
+
+**Every error result is cleaned of secrets (#5031).** For every operation,
+right after the step above, `_audit_error_and_return` runs
+`operations/_vendor_text.py::redact_error_result`. It cleans every string
+and every field of `error`, `extras` and `result`: the value of each
+secret-named field is replaced with `[REDACTED:param_name]`, then the
+Tier-1 default policy runs. This also covers the fields that come straight
+from the vendor, such as the `validation_errors` of a `connector_http_422`
+and the `permission_headers` of a `connector_http_403`, and the vendor's
+answer in `result` of an error a handler returns or of a multi-step
+operation's error envelope. If the cleaning fails, the result keeps only
+`error_code`; `result` and the result handle are dropped. Details:
+`docs/codebase/redaction.md` ("Errors, diagnostics and saved test
+captures").
 
 **Non-httpx upstream status: `ConnectorUpstreamError` (#3876).** A
 connector whose client library does not raise `httpx.HTTPStatusError`

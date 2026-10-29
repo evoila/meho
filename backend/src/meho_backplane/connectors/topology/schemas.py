@@ -86,19 +86,16 @@ ANNOTATE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "kind describes the relationship — `same-as` is the "
                 "documented convention for cross-system identity "
                 "stitching. A curated assertion of an auto-kind "
-                "lands as a §6 conflict marker *only when a competing "
+                "lands as a conflict marker *only when a competing "
                 "**auto** edge already exists for that pair* — i.e. on "
                 "a pair a probe covers (today, only the Kubernetes "
-                "connector populates auto edges; G0.18-T4 #1357). For "
+                "connector populates auto edges). For "
                 "a non-k8s pair, or any pair no probe covers, the "
                 "curated row inserts clean with "
                 "`source: curated, conflicts: []` and is the right way "
                 "to assert e.g. `runs-on` against vault / vcenter / "
                 "nsx / sddc-manager / gh targets until non-k8s "
-                "populators land. The over-cautious 'annotating "
-                "auto-kinds is noise' wording the pre-G0.18-T4 doc "
-                "carried steered operators away from this legitimate "
-                "path."
+                "populators land."
             ),
         },
         "to_name": {
@@ -186,7 +183,7 @@ ANNOTATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": (
                 "Ids of the `source='auto'` edges this assertion displaced "
-                "(§6 class 1 — same kind, different endpoint). The auto row "
+                "(same kind, different endpoint). The auto row "
                 "is stamped `properties.superseded_by=<this edge id>` and "
                 "drops out of traversal until this curated edge is removed. "
                 "Empty on a pair no probe covers. Matches the audit / "
@@ -366,7 +363,7 @@ CREATE_NODE_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": (
                 "Always `curated` after this call — a fresh seed "
                 "inserts curated, a re-seed over a probe-discovered "
-                "row promotes it (#2536)."
+                "row promotes it."
             ),
         },
         "was_created": {"type": "boolean"},

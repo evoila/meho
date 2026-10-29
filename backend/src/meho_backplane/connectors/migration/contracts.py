@@ -24,6 +24,7 @@ operations' response schemas.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Iterator, Mapping
 from datetime import date, datetime
 from typing import Annotated, Any, Final, Literal
@@ -61,6 +62,7 @@ __all__ = [
     "Utilization",
     "WorkloadVolume",
     "assessment_result_json_schema",
+    "bios_uuid_match_key",
     "find_identity_duplicates",
     "inventory_json_schema",
     "missing_reason",
@@ -173,6 +175,34 @@ class IdentityHints(_Shape):
     @classmethod
     def _lower_macs(cls, value: list[str]) -> list[str]:
         return [mac.strip().lower().replace("-", ":") for mac in value]
+
+
+_UUID_GROUPS: Final = re.compile(
+    r"^([0-9a-f]{8})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{4}-[0-9a-f]{12})$"
+)
+
+
+def _reversed_bytes(group: str) -> str:
+    return "".join(group[i : i + 2] for i in range(len(group) - 2, -1, -2))
+
+
+def bios_uuid_match_key(bios_uuid: str) -> str:
+    """One key for the two ways a machine's BIOS UUID is reported.
+
+    A hypervisor shows the UUID as it stores it. A guest OS reads it from
+    the firmware table, where newer firmware keeps the first three groups
+    in reversed byte order (a VMware VM from hardware version 13 on, for
+    example), so the same machine shows two different texts. Both texts
+    name one machine. The key is the smaller of a UUID and its twin with
+    the first three groups reversed, so both texts give one key. A text
+    that is not a UUID is its own key.
+    """
+    text = bios_uuid.strip().lower()
+    parts = _UUID_GROUPS.match(text)
+    if parts is None:
+        return text
+    twin = "-".join((*(_reversed_bytes(parts.group(i)) for i in (1, 2, 3)), parts.group(4)))
+    return min(text, twin)
 
 
 class Stat(_Shape):
@@ -349,8 +379,9 @@ class IdentityDuplicate(_Shape):
 class IdentityIndex:
     """Finds server records that look like a machine seen before.
 
-    Two records are the same machine when they share a BIOS UUID or an
-    instance UUID, directly or through other records: when C shares A's BIOS
+    Two records are the same machine when they share a BIOS UUID (in either
+    of its two byte orders, see :func:`bios_uuid_match_key`) or an instance
+    UUID, directly or through other records: when C shares A's BIOS
     UUID and B's instance UUID, A, B and C are one machine, in whatever order
     they arrive. :meth:`add` every record first, then :meth:`duplicates`
     names, for every later record of a machine, its first record. The caller
@@ -373,7 +404,7 @@ class IdentityIndex:
             self._parent[source_id] = source_id
         bios_uuid = record.identity_hints.bios_uuid
         if bios_uuid:
-            self._link(source_id, ("bios_uuid", bios_uuid.lower()))
+            self._link(source_id, ("bios_uuid", bios_uuid_match_key(bios_uuid)))
         instance_uuid = record.source_attributes.get("instance_uuid")
         if instance_uuid:
             self._link(source_id, ("instance_uuid", instance_uuid.lower()))

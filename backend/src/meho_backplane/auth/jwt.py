@@ -88,7 +88,14 @@ from authlib.jose.errors import (
 )
 from fastapi import Header, HTTPException, status
 
-from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.auth.operator import (
+    MACHINE_PRINCIPAL_KINDS,
+    Operator,
+    PrincipalKind,
+    RoleGroup,
+    TenantMembership,
+    TenantRole,
+)
 from meho_backplane.health import ProbeResult
 from meho_backplane.settings import Settings, get_settings
 
@@ -816,6 +823,70 @@ def _extract_tenant_role(claims: Any, settings: Settings) -> TenantRole:
         raise _http_401("unknown_tenant_role") from exc
 
 
+#: A tenant's short name: lowercase letters, digits and dashes
+#: (``docs/decisions/2026-10-28-several-tenants-per-person.md``).
+_TENANT_NAME_RE = re.compile(r"[a-z0-9-]+")
+
+
+def _parse_tenant_entry(entry: object) -> TenantMembership | None:
+    """Parse one ``<tenant-uuid>:<tenant>:<RoleGroup>`` entry.
+
+    Returns ``None`` for a bad entry: not a string, not three parts, a
+    bad UUID, a bad tenant name, or an unknown group kind.
+    """
+    if not isinstance(entry, str):
+        return None
+    parts = entry.split(":")
+    if len(parts) != 3:
+        return None
+    raw_id, name, raw_group = parts
+    if _TENANT_NAME_RE.fullmatch(name) is None:
+        return None
+    try:
+        return TenantMembership(tenant_id=UUID(raw_id), name=name, group=RoleGroup(raw_group))
+    except ValueError:
+        return None
+
+
+def _extract_tenants(
+    claims: Any, settings: Settings, principal_kind: PrincipalKind
+) -> tuple[TenantMembership, ...]:
+    """Read the person's tenants from the ``meho_tenants`` claim (#5236).
+
+    The claim is optional. No claim gives ``()``. A value that is not a
+    list gives ``()`` and logs ``malformed_tenants_claim``. Inside the
+    list, a bad entry is left out and logs ``malformed_tenant_entry``;
+    the other entries stay, in token order. Two entries for the same
+    tenant are both kept here: the one-group-per-tenant rule belongs to
+    the step that picks the current tenant.
+
+    A machine login (agent, service, runner) always gets ``()``, even
+    when its token carries the claim: a machine stays in its one tenant.
+
+    The entries come from the trusted issuer's signed token, so they are
+    safe to log. The result is not used yet; the current tenant still
+    comes from :func:`_extract_tenant_id` and :func:`_extract_tenant_role`.
+    """
+    if principal_kind in MACHINE_PRINCIPAL_KINDS:
+        return ()
+    claim_name = settings.jwt_tenants_claim_name
+    raw = claims.get(claim_name)
+    if raw is None:
+        return ()
+    log = structlog.get_logger(__name__)
+    if not isinstance(raw, list):
+        log.warning("malformed_tenants_claim", claim_name=claim_name, reason="not_a_list")
+        return ()
+    tenants: list[TenantMembership] = []
+    for entry in raw:
+        membership = _parse_tenant_entry(entry)
+        if membership is None:
+            log.warning("malformed_tenant_entry", claim_name=claim_name, entry=entry)
+            continue
+        tenants.append(membership)
+    return tuple(tenants)
+
+
 #: Claim the Keycloak group-membership mapper writes (the ``groups-claim``
 #: mapper of the shipped realm). Fixed here rather than in Settings: the
 #: five-group login recipe fixes the claim name.
@@ -1445,6 +1516,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
         if isinstance(raw_auth_time, int) and not isinstance(raw_auth_time, bool)
         else None
     )
+    tenants = _extract_tenants(claims, settings, principal_kind)
     if principal_kind is PrincipalKind.RUNNER and runner_id is None:
         # Fail-closed pairing (Initiative #2415, #2502): a runner-kind
         # token with no ``runner_id`` cannot be scoped by the gateway
@@ -1471,6 +1543,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             approver=approver,
             runner_id=runner_id,
             auth_time=auth_time,
+            tenants=tenants,
         )
     except pydantic.ValidationError as exc:
         raise _http_401("invalid_token") from exc

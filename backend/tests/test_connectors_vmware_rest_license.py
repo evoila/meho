@@ -971,9 +971,15 @@ async def test_flight_recorder_spans_hold_no_licence_key() -> None:
 
 
 async def test_without_the_licence_tag_the_flight_recorder_would_keep_the_key() -> None:
-    """Control: the tag is what keeps the key out, so the test above is not empty."""
+    """Control: the tag is what keeps the body out, so the test above is not empty.
+
+    Without the tag the body is recorded. The key is still masked, because
+    it sits under a secret-named field (#5031).
+    """
     spans = await _list_with_capture(("read-only", "vmware"))
-    assert _KEY_ENT in repr(spans)
+    assert all(span.attributes["body_recorded"] for span in spans)
+    assert "[REDACTED:param_name]" in repr(spans)
+    assert _KEY_ENT not in repr(spans)
 
 
 # ---------------------------------------------------------------------------

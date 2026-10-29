@@ -109,6 +109,16 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
   modelled as a :class:`PrincipalKind` value: the synthetic operator keeps
   ``principal_kind=user`` so the policy gate still auto-executes the ``safe``
   ops sensors are restricted to.
+* ``tenants`` — every tenant the person is in, with the login group
+  (and so the role) in each (#5236). Read from the ``meho_tenants`` claim
+  (``JWT_TENANTS_CLAIM_NAME``) by
+  :func:`~meho_backplane.auth.jwt._extract_tenants`. One login can list
+  several tenants (``docs/decisions/2026-10-28-several-tenants-per-person.md``).
+  Empty for a token without the claim and always empty for a machine
+  login (agent, service, runner). **Nothing reads it yet:** the current
+  tenant still comes from ``tenant_id`` / ``tenant_role``. The role and
+  flags of an entry come from :func:`group_grant`, the one table in code
+  that matches ``docs/decisions/login-role-groups.md``.
 
 Email validation uses pydantic's ``EmailStr`` (powered by
 ``email-validator``); a malformed ``email`` claim from Keycloak is a
@@ -117,15 +127,20 @@ garbage downstream.
 """
 
 from enum import StrEnum
+from typing import NamedTuple
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 __all__ = [
     "MACHINE_PRINCIPAL_KINDS",
+    "GroupGrant",
     "Operator",
     "PrincipalKind",
+    "RoleGroup",
+    "TenantMembership",
     "TenantRole",
+    "group_grant",
     "is_human_principal",
 ]
 
@@ -197,6 +212,77 @@ class PrincipalKind(StrEnum):
     RUNNER = "runner"
 
 
+class RoleGroup(StrEnum):
+    """The kind of login group a person is in, inside one tenant.
+
+    The five kinds of ``docs/decisions/login-role-groups.md``. The value is
+    the last part of a ``meho_tenants`` entry
+    (``<tenant-uuid>:<tenant>:<RoleGroup>``) and the end of the Keycloak
+    group name (``MEHO-<tenant>-<RoleGroup>``). The match is exact and
+    case-sensitive.
+    """
+
+    READERS = "Readers"
+    OPERATORS = "Operators"
+    SA_OPERATORS = "SA-Operators"
+    ADMINS = "Admins"
+    APPROVERS = "Approvers"
+
+
+class GroupGrant(NamedTuple):
+    """What one login group gives a person in its tenant.
+
+    * ``role`` — the :class:`TenantRole`.
+    * ``approver`` — the person may decide approval requests
+      (the same meaning as :attr:`Operator.approver`).
+    * ``self_approval`` — the person may approve their own change. Only
+      ``SA-Operators`` sets it. Nothing reads it yet: the rule comes with
+      the self-approval work (#3327).
+    """
+
+    role: TenantRole
+    approver: bool
+    self_approval: bool
+
+
+#: The one table from login group kind to role and flags. It must match
+#: the table in ``docs/decisions/login-role-groups.md``.
+_GROUP_GRANTS: dict[RoleGroup, GroupGrant] = {
+    RoleGroup.READERS: GroupGrant(TenantRole.READ_ONLY, approver=False, self_approval=False),
+    RoleGroup.OPERATORS: GroupGrant(TenantRole.OPERATOR, approver=False, self_approval=False),
+    RoleGroup.SA_OPERATORS: GroupGrant(TenantRole.OPERATOR, approver=False, self_approval=True),
+    RoleGroup.ADMINS: GroupGrant(TenantRole.TENANT_ADMIN, approver=False, self_approval=False),
+    RoleGroup.APPROVERS: GroupGrant(TenantRole.READ_ONLY, approver=True, self_approval=False),
+}
+
+
+def group_grant(group: RoleGroup) -> GroupGrant:
+    """Return the role and the flags that the login group *group* gives.
+
+    The single place that turns a group kind into a role, so the token
+    reader, the current-tenant choice and the self-approval rule all
+    agree.
+    """
+    return _GROUP_GRANTS[group]
+
+
+class TenantMembership(BaseModel):
+    """One tenant a person is in, read from one ``meho_tenants`` entry.
+
+    * ``tenant_id`` — the tenant's UUID.
+    * ``name`` — the tenant's short name (lowercase letters, digits and
+      dashes), as in the Keycloak group name.
+    * ``group`` — the person's login group kind in that tenant. Pass it to
+      :func:`group_grant` for the role and the flags.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    tenant_id: UUID
+    name: str
+    group: RoleGroup
+
+
 class Operator(BaseModel):
     """Validated operator identity extracted from a verified JWT.
 
@@ -239,6 +325,11 @@ class Operator(BaseModel):
     #: no such claim, which a service token never has. Read by the fresh
     #: sign-in check (:mod:`meho_backplane.auth.fresh_sign_in`).
     auth_time: int | None = None
+    #: Every tenant the person is in, with the login group in each, in
+    #: token order (#5236). Empty when the token has no ``meho_tenants``
+    #: claim, and always empty for a machine login. Not used yet: the
+    #: current tenant still comes from ``tenant_id`` / ``tenant_role``.
+    tenants: tuple[TenantMembership, ...] = ()
 
 
 #: Machine (non-human) principal kinds. A human operator authenticates as

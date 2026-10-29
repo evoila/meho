@@ -712,6 +712,8 @@ class GroupingResultModel(BaseModel):
 
     Mirrors the dataclass; rendered alongside :class:`IngestionResultModel`
     in the ingest response so the operator sees both counts.
+    ``unassigned_op_ids`` names the operations still without a group
+    (sorted, capped); ``operations_unassigned`` is the full count.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -720,6 +722,7 @@ class GroupingResultModel(BaseModel):
     groups_created: int
     operations_assigned: int
     operations_unassigned: int
+    unassigned_op_ids: list[str] = Field(default_factory=list)
     llm_call_count: int
     llm_duration_ms: float
     groups: list[GroupSummaryModel] = Field(default_factory=list)

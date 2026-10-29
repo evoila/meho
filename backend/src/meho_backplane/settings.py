@@ -322,6 +322,16 @@ class Settings(BaseModel):
         (``tid``, ``org_id``, etc.) override via env var. Read once
         per request by ``verify_jwt`` — the string itself never leaves
         :class:`Settings`.
+    jwt_tenants_claim_name:
+        Name of the JWT claim that lists every tenant the person is in
+        (#5236). Default ``meho_tenants``. Each entry is
+        ``<tenant-uuid>:<tenant>:<RoleGroup>``, for example
+        ``3f0c...:lab-a:Operators``; ``verify_jwt`` reads the list into
+        :attr:`~meho_backplane.auth.operator.Operator.tenants`. The claim
+        is optional: no claim means an empty list. Bad entries are left
+        out and logged. Nothing uses the list yet; the current tenant
+        still comes from ``jwt_tenant_claim_name``. See
+        ``docs/decisions/2026-10-28-several-tenants-per-person.md``.
     jwt_tenant_role_claim_name:
         Name of the JWT claim that carries the operator's
         :class:`~meho_backplane.auth.operator.TenantRole`. Default
@@ -1320,6 +1330,7 @@ class Settings(BaseModel):
     keycloak_jwks_cache_ttl_seconds: int = Field(default=300, gt=0)
     keycloak_jwt_leeway_seconds: int = Field(default=30, ge=0)
     jwt_tenant_claim_name: str = Field(default="tenant_id", min_length=1)
+    jwt_tenants_claim_name: str = Field(default="meho_tenants", min_length=1)
     jwt_tenant_role_claim_name: str = Field(default="tenant_role", min_length=1)
     jwt_role_groups: tuple[str, ...] = _DEFAULT_JWT_ROLE_GROUPS
     jwt_principal_kind_claim_name: str = Field(default="principal_kind", min_length=1)
@@ -2533,6 +2544,7 @@ def get_settings() -> Settings:
             os.environ.get("KEYCLOAK_JWT_LEEWAY_SECONDS", "30"),
         ),
         jwt_tenant_claim_name=os.environ.get("JWT_TENANT_CLAIM_NAME", "tenant_id"),
+        jwt_tenants_claim_name=os.environ.get("JWT_TENANTS_CLAIM_NAME", "meho_tenants"),
         jwt_tenant_role_claim_name=os.environ.get(
             "JWT_TENANT_ROLE_CLAIM_NAME",
             "tenant_role",

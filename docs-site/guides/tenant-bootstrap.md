@@ -65,8 +65,9 @@ each change is approved and stored in the audit log.
   right to write Vault identities and groups.
 - An `operator` or `tenant_admin` login in your current tenant.
 - A second person who can approve, or the agent setup from the box
-  above. Step 8 needs an approver in the new tenant too, because an
-  approval belongs to one tenant. Step 8 explains the choices.
+  above. Step 8 needs a `tenant_admin` approver in the new tenant too,
+  because an approval belongs to one tenant. Step 8 explains the
+  choices.
 - Today one person has one tenant. A person who should work in two
   tenants needs a second Keycloak user for now.
 
@@ -278,26 +279,41 @@ Then the new `tenant_admin` checks that Vault accepts the tenant. The
 test write below waits for approval, and so does its cleanup. An
 approval belongs to one tenant: the second person from your current
 tenant cannot see or approve a request made in the new tenant. So the
-new tenant needs its own approver first. Pick one:
+new tenant needs its own approver first.
+
+The approver must be a `tenant_admin` of the new tenant. An approved
+operation runs as the **approver**, not as the person who asked for it.
+The test write and its cleanup therefore use the approver's Vault
+policy. The `operator` policy writes only under `rotation/*` and cannot
+delete anything, so an `operator` approver fails with
+`permission denied`. The `tenant_admin` policy covers both: the write
+under `tenants/<tenant-uuid>/*` and the cleanup, which needs `update`
+on `secret/delete/tenants/<tenant-uuid>/*`. Check that your
+`meho-tenant-admin` policy has that `secret/delete/...` grant from
+section 2.3 of the
+[per-tenant Vault policies runbook](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md).
+A policy written before that grant was added fails the cleanup.
+
+Pick one of these two ways to get an approver:
 
 - **A second person in the new tenant.** Run Steps 4 to 6 again for a
-  second person with the `operator` or `tenant_admin` role. You make
-  these requests in your current tenant, so your current approver
-  approves them as before.
+  second person with the `tenant_admin` role. You make these requests
+  in your current tenant, so your current approver approves them as
+  before.
 - **An agent requester in the new tenant.** The new `tenant_admin` sets
   up the agent-requester pattern from
   [Approvals and break-glass](approvals-and-break-glass.md#option-1-the-agent-requester-pattern-recommended)
   in the new tenant. The agent needs a grant with
   `--verdict needs-approval` on `vault.kv.delete` for the cleanup, and
   the agent makes the test write and the delete instead of the person.
+  The `tenant_admin` approves both.
 
 The self-approval switch is not enough here. It covers the test write
 (risk level `caution`), but never the cleanup delete (risk level
 `dangerous`).
 
-Note that an approved operation runs as the **approver**, not as the
-person who asked for it. So the person who approves the write needs the
-Vault identity from Step 6 too. The write checks the approver's Vault
+The approver needs the Vault identity from Step 6 too, with the
+`tenant_admin` Vault group. The write checks the approver's Vault
 access, and the read checks the reader's.
 
 The new tenant has no targets yet, so register the Vault target in the
@@ -317,11 +333,13 @@ meho vault kv read --target vault-main secret tenants/<tenant-uuid>/smoke-test
 
 The read must return `{"ok": "yes"}`. A `permission denied` from Vault
 on the write means the identity metadata or the group from Step 6 is
-missing for the approver. The same error on the read means it is
-missing for the reader.
+missing for the approver, or the approver is not a `tenant_admin`. The
+same error on the read means the identity or group is missing for the
+reader.
 
 Delete the test secret afterwards. The delete runs at the `dangerous`
-risk level, so the same approver (or the agent setup) is needed again:
+risk level, so the same `tenant_admin` approver (or the agent setup) is
+needed again:
 
 ```bash
 meho vault kv delete --target vault-main secret tenants/<tenant-uuid>/smoke-test --versions 1
@@ -338,5 +356,6 @@ meho approvals approve <approval-id>
 | `malformed_tenant_claim` | `tenant_id` on the group is not a UUID. | Fix it with `meho keycloak group update-attributes`. |
 | `unknown_tenant_role` | `tenant_role` on the group is not `read_only`, `operator` or `tenant_admin`. | Fix it with `meho keycloak group update-attributes`. |
 | Login works, but an operation fails with `permission denied` from Vault | The person's Vault identity has no `tenant_id` metadata, or is not in the tenant's Vault group. An approved write runs as the approver, so this can be the approver's identity. | Step 6 for that person. Check with section 5 of the [per-tenant Vault policies runbook](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md). |
+| The approved test write or its cleanup fails with `permission denied` from Vault | The approver is an `operator`, not a `tenant_admin`. Or the `meho-tenant-admin` policy lacks the `secret/delete/...` grant for the cleanup. | Let a `tenant_admin` approve. Add the grant from section 2.3 of the [per-tenant Vault policies runbook](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md). |
 | `approve` answers `self_approval_forbidden` | You asked for the change and tried to approve it yourself. | A second person approves, or use the agent-requester pattern (see the box at the top). |
 | `meho approvals list` in the new tenant shows nothing, but a request is waiting | The request was made in another tenant. Approvals belong to one tenant. | Log in to the tenant where the request was made, or set up an approver in the new tenant (Step 8). |

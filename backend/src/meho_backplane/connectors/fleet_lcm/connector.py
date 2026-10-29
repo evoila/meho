@@ -64,9 +64,10 @@ comes from one of two places:
   (``credential_cache_key``: tenant, secret and the resolved login address)
   until :meth:`invalidate_session` drops it. So two fleet targets with one
   secret and one ``vcf_ops_url`` share one token, whatever their own hosts
-  and ``fqdn`` values are (the login does not send the ``fqdn``). The
-  connector remembers which login key each target used, so the
-  ``401`` path finds the token without reading the secret again.
+  and ``fqdn`` values are (the login does not send the ``fqdn``, and the
+  key does not hold it). The connector remembers which login key each
+  target used, so the ``401`` path finds the token without reading the
+  secret again.
 * **Stored token (fallback).** When the secret carries a ``token``, MEHO
   sends it as is and does not log in.
 
@@ -571,12 +572,8 @@ class _LoginEndpoint:
     comes from the target, so the login gets its own pooled client with the
     same TLS rules and the same address check. A ``tls_server_name`` set on
     the target belongs to the target's address, so it is kept only when the
-    login goes there. The login never sends the target's ``fqdn``, so the
-    endpoint has none: two targets with different ``fqdn`` values but one
-    secret and one login address share one token (#5033).
+    login goes there.
     """
-
-    fqdn: str | None = None
 
     def __init__(self, target: FleetLcmTargetLike, ops_url: str | None) -> None:
         self._target = target

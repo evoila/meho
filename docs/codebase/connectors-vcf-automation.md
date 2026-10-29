@@ -517,7 +517,8 @@ the consumer repo, validated 2026-05-17):
    `X-VMWARE-VCLOUD-ACCESS-TOKEN` (a JWT) — the connector caches it under
    the provider credential (`_plane_cache_key(target, "provider")`: the
    tenant, `provider_secret_ref` when set else `target.secret_ref`, the
-   login address, `fqdn`, and the login user from `provider_login_inputs`:
+   login address, the `fqdn` sent as the `Host` header, and the login user
+   from `provider_login_inputs`:
    `provider_username` when set, else the `domain` with `System` as the
    default), so two targets with one provider secret and one provider user
    share one provider session, whatever their tenant domains are (#5033).

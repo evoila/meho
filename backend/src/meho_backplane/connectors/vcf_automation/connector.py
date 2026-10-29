@@ -167,15 +167,19 @@ def _plane_cache_key(target: VcfAutomationTargetLike, plane: Plane) -> tuple[str
     (:func:`provider_login_inputs`), so two targets with one explicit
     provider user and different tenant domains share one provider session.
     The tenant login reads the tenant domain. Both send ``fqdn`` as the
-    ``Host`` header, which :func:`credential_cache_key` already includes.
+    ``Host`` header, and the appliance picks the organisation from it, so
+    the ``fqdn`` is a login input of both planes. Host names are
+    case-insensitive, so it is case-folded like the host.
     """
+    fqdn = str(getattr(target, "fqdn", None) or "").strip().lower()
     if plane == "provider":
         return credential_cache_key(
             target,
+            fqdn,
             *provider_login_inputs(target),
             secret_ref=getattr(target, "provider_secret_ref", None) or None,
         )
-    return credential_cache_key(target, _tenant_domain(target))
+    return credential_cache_key(target, fqdn, _tenant_domain(target))
 
 
 class VcfAutomationConnector(HttpConnector):

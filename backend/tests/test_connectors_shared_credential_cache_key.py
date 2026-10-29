@@ -72,10 +72,22 @@ def test_a_different_credential_gives_a_different_key() -> None:
         _target(secret_ref="targets/shared/other-login"),
         _target(host="other-appliance.test.invalid"),
         _target(port=8443),
-        _target(fqdn="org-a.appliance.test.invalid"),
         _target(extras={"scheme": "http"}),
     ):
         assert credential_cache_key(base) != credential_cache_key(other), other
+
+
+def test_the_fqdn_is_not_part_of_the_key() -> None:
+    """Most logins never send the fqdn, so it must not split one credential in two.
+
+    A connector whose login does send it (VCF Automation) passes it as a
+    login input.
+    """
+    vhost = "org-a.appliance.test.invalid"
+    unset = _target(fqdn=None)
+    named = _target(fqdn=vhost)
+    assert credential_cache_key(unset) == credential_cache_key(named)
+    assert credential_cache_key(unset) != credential_cache_key(named, vhost)
 
 
 def test_http_and_https_targets_never_share_a_key() -> None:

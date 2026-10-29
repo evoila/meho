@@ -121,8 +121,8 @@ def credential_cache_key(
 ) -> tuple[str, ...]:
     """Return the cache key for a login token or session of *target*.
 
-    The key is the credential: ``(tenant_id, secret_ref, scheme, host, port,
-    fqdn)`` plus *login_inputs*. Two targets in one tenant with the same
+    The key is the credential: ``(tenant_id, secret_ref, scheme, host,
+    port)`` plus *login_inputs*. Two targets in one tenant with the same
     secret and the same login address get the same key, so they share one
     token.
 
@@ -135,11 +135,13 @@ def credential_cache_key(
       the host name is case-folded; a service path carried on ``host`` keeps
       its case, because the adapter sends it as is and paths are
       case-sensitive.
-    * ``fqdn`` is part of the address because some connectors send it as the
-      ``Host`` header, and the appliance picks the organisation from it.
     * *login_inputs* are the other target values the connector's login reads
-      (for example a login domain or an auth source). Two targets that differ
-      in one of them log in differently, so they must not share a token.
+      (for example a login domain, an auth source, or the ``fqdn`` when the
+      login sends it as the ``Host`` header). Two targets that differ in one
+      of them log in differently, so they must not share a token. A target
+      value the login does not read, such as the ``fqdn`` for most
+      connectors, stays out of the key: two targets that differ only in such
+      a value log in the same way and must share one token.
     * *secret_ref* replaces ``target.secret_ref`` when the login uses another
       secret than the target's own (the VCF Automation provider plane).
 
@@ -154,13 +156,11 @@ def credential_cache_key(
     scheme = effective_scheme(target)
     host = _login_host(getattr(target, "host", None))
     port = getattr(target, "port", None) or DEFAULT_PORTS[scheme]
-    fqdn = str(getattr(target, "fqdn", None) or "").strip().lower()
     return (
         str(target.tenant_id),
         str(secret_ref),
         scheme,
         host,
         str(port),
-        fqdn,
         *("" if value is None else str(value) for value in login_inputs),
     )

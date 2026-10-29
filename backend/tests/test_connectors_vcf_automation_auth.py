@@ -741,6 +741,24 @@ def test_provider_key_reads_the_domain_only_without_provider_username() -> None:
     assert _plane_cache_key(explicit_a, "tenant") != _plane_cache_key(explicit_b, "tenant")
 
 
+def test_both_plane_keys_read_the_fqdn_the_login_sends_as_host() -> None:
+    """Two targets with different vhosts log in to different organisations.
+
+    The appliance picks the organisation from the ``Host`` header, so the
+    ``fqdn`` is part of both plane keys here, although the shared key leaves
+    it out for logins that never send it. Case does not matter in a host.
+    """
+    base: dict[str, Any] = {"host": "10.0.0.5", "port": 443, "secret_ref": "x"}
+    unset = _StubTarget(name="a", **base)
+    org_a = _StubTarget(name="b", fqdn="org-a.vcfa.test.invalid", **base)
+    org_a_upper = _StubTarget(name="c", fqdn="Org-A.VCFA.test.invalid", **base)
+    org_b = _StubTarget(name="d", fqdn="org-b.vcfa.test.invalid", **base)
+    for plane in ("provider", "tenant"):
+        assert _plane_cache_key(org_a, plane) == _plane_cache_key(org_a_upper, plane)
+        assert _plane_cache_key(org_a, plane) != _plane_cache_key(org_b, plane)
+        assert _plane_cache_key(org_a, plane) != _plane_cache_key(unset, plane)
+
+
 @pytest.mark.asyncio
 async def test_one_provider_user_with_different_domains_shares_one_provider_session() -> None:
     """Same explicit provider user, secret and address, different tenant domains: one login.

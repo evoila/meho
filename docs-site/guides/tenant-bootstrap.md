@@ -351,7 +351,7 @@ meho approvals approve <approval-id>
 
 | What you see | Cause | Fix |
 |---|---|---|
-| `missing_tenant_claim` | The person is in no role group. Or the role group has no `tenant_id` attribute, or the client has no `tenant-id` mapper. | Step 5 (add the person to one group), Step 2 (check the attributes), or [Keycloak realm setup, Step 3](../install/keycloak-realm.md#step-3-add-the-six-protocol-mappers). Then log in again. |
+| `missing_tenant_claim` | The person is in no role group. Or the role group has no `tenant_id` attribute, or the client has no `tenant-id` mapper. | Step 5 (add the person to one group), Step 2 (check the attributes), or [Keycloak realm setup, Step 3](../install/keycloak-realm.md#step-3-add-the-protocol-mappers). Then log in again. |
 | `multiple_role_groups` | The person is in two role groups. | Remove the person from one group (`meho keycloak group member remove`). |
 | `malformed_tenant_claim` | `tenant_id` on the group is not a UUID. | Fix it with `meho keycloak group update-attributes`. |
 | `unknown_tenant_role` | `tenant_role` on the group is not `read_only`, `operator` or `tenant_admin`. | Fix it with `meho keycloak group update-attributes`. |

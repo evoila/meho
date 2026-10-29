@@ -1827,6 +1827,8 @@ type AuditClassCountsRequest struct {
 //   - “id“ ← “audit_log.id“
 //   - “ts“ ← “audit_log.occurred_at“
 //   - “tenant_id“ ← “audit_log.tenant_id“
+//   - “tenant_name“ ← LEFT JOIN “tenant.name“ ON “audit_log.tenant_id“
+//     (#5238). “None“ when the tenant row is gone; show “tenant_id“ then.
 //   - “principal_sub“ ← “audit_log.operator_sub“
 //   - “target_id“ ← “audit_log.target_id“
 //   - “target_name“ ← LEFT JOIN “targets.name“ ON “audit_log.target_id“
@@ -1866,6 +1868,7 @@ type AuditEntry struct {
 	TargetId         *openapi_types.UUID    `json:"target_id"`
 	TargetName       *string                `json:"target_name"`
 	TenantId         *openapi_types.UUID    `json:"tenant_id"`
+	TenantName       *string                `json:"tenant_name"`
 	Ts               time.Time              `json:"ts"`
 	WorkRef          *string                `json:"work_ref"`
 }
@@ -3804,6 +3807,14 @@ type ConnectorListItemState string
 type ConnectorListResponse struct {
 	Items      []ConnectorListItem `json:"items"`
 	NextCursor *string             `json:"next_cursor"`
+}
+
+// ConnectorPackage One connector package named in the allowlist file.
+type ConnectorPackage struct {
+	Folders     []string `json:"folders"`
+	Name        string   `json:"name"`
+	Version     string   `json:"version"`
+	WheelDigest string   `json:"wheel_digest"`
 }
 
 // ConnectorReviewDeleteOp One stored ingested delete that sits below the “destructive“ risk level (#3827).
@@ -5822,6 +5833,10 @@ type HTTPValidationError struct {
 // OPERATOR-gated, so unlike “/ready“ no metrics token is needed.
 // “None“ / empty defaults keep older response decoders working; the
 // handler always fills them.
+//
+// “connector_packages“ (#5036) lists the connector packages this image
+// carries, the same list “GET /version“ shows. It is empty for the
+// plain public image.
 type HealthResponse struct {
 	// Approvals The approval settings in force (#4830).
 	//
@@ -5833,7 +5848,8 @@ type HealthResponse struct {
 	// someone else's instruction is allowed. The three values come from
 	// :func:`meho_backplane.features.build_features_block`; they are state
 	// words only, never a key value.
-	Approvals *ApprovalsStatus `json:"approvals,omitempty"`
+	Approvals         *ApprovalsStatus    `json:"approvals,omitempty"`
+	ConnectorPackages *[]ConnectorPackage `json:"connector_packages,omitempty"`
 
 	// Db Database migration status.
 	//
@@ -7654,6 +7670,7 @@ type ReplayNode struct {
 	TargetId         *openapi_types.UUID    `json:"target_id"`
 	TargetName       *string                `json:"target_name"`
 	TenantId         *openapi_types.UUID    `json:"tenant_id"`
+	TenantName       *string                `json:"tenant_name"`
 	Ts               time.Time              `json:"ts"`
 	WorkRef          *string                `json:"work_ref"`
 }
@@ -10345,6 +10362,14 @@ type VaultStatus struct {
 	Detail    *string `json:"detail"`
 	Reachable bool    `json:"reachable"`
 	ReadOk    bool    `json:"read_ok"`
+}
+
+// VersionResponse “GET /version“ response body.
+type VersionResponse struct {
+	BuildDate         string              `json:"build_date"`
+	ChartVersion      *string             `json:"chart_version"`
+	ConnectorPackages *[]ConnectorPackage `json:"connector_packages,omitempty"`
+	GitSha            string              `json:"git_sha"`
 }
 
 // WithdrawRequestBody POST body for “…/withdraw“ (#4987).
@@ -56214,7 +56239,7 @@ func (r VaultVersionsUiVaultVersionsGetResponse) StatusCode() int {
 type VersionVersionGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *map[string]*string
+	JSON200      *VersionResponse
 }
 
 // Status returns HTTPResponse.Status
@@ -72584,7 +72609,7 @@ func ParseVersionVersionGetResponse(rsp *http.Response) (*VersionVersionGetRespo
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest map[string]*string
+		var dest VersionResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

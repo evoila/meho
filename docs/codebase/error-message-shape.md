@@ -273,6 +273,20 @@ text from the error result, in one shared place.
   the raised error. So the new login and one retry after HTTP 401, and
   the 403 and 429 results, work as before.
 
+**Every error result is cleaned of secrets (#5031).** For every operation,
+right after the step above, `_audit_error_and_return` runs
+`operations/_vendor_text.py::redact_error_result`. It cleans every string
+and every field of `error`, `extras` and `result`: the value of each
+secret-named field is replaced with `[REDACTED:param_name]`, then the
+Tier-1 default policy runs. This also covers the fields that come straight
+from the vendor, such as the `validation_errors` of a `connector_http_422`
+and the `permission_headers` of a `connector_http_403`, and the vendor's
+answer in `result` of an error a handler returns or of a multi-step
+operation's error envelope. If the cleaning fails, the result keeps only
+`error_code`; `result` and the result handle are dropped. Details:
+`docs/codebase/redaction.md` ("Errors, diagnostics and saved test
+captures").
+
 **Non-httpx upstream status: `ConnectorUpstreamError` (#3876).** A
 connector whose client library does not raise `httpx.HTTPStatusError`
 reads the HTTP status and the upstream's message at its own boundary and
@@ -294,13 +308,13 @@ reaches the builders in one of three ways:
   `faultstring`;
 - an HTTP error whose body is a SOAP `<soapenv:Fault>` (for example a
   vCenter VI/JSON write that answers with a SOAP-shaped 500), parsed with
-  `connectors/vmware_rest/soap.py::parse_soap_fault` (the type comes from
+  `connectors/_shared/soap_fault.py::parse_soap_fault` (the type comes from
   the `detail` element's `xsi:type`, for example `InvalidLogin`);
 - a standalone ESXi host. There the connector's SOAP path (`_post_soap`,
   the SOAP login, and the storage-policy SOAP calls) parses the fault
   itself and raises a plain `RuntimeError` or a `ConnectorAuthError`, so
   no HTTP error reaches the builders. `_soap_fault_error` attaches the
-  parsed fault to that exception (`soap.py::attach_soap_fault`). The
+  parsed fault to that exception (`_shared/soap_fault.py::attach_soap_fault`). The
   sites that build their own `RuntimeError` for a fault do the same: the
   `RetrieveServiceContent` step at session establish (ESXi and PBM), and
   the PBM retry that still fails `NotAuthenticated` after a fresh login.

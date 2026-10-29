@@ -2137,8 +2137,14 @@ async def _dispatch_resume_with_bound_context(
     exception is a step marked ``after_main_effect`` (#4217): it saved where
     to continue, so it may wait again. That new request is saved for the
     requester of *request*, not for the reviewer who runs this re-run.
+
+    #3898: the requester (from the row) is bound for the run
+    (:func:`~meho_backplane.operations.secondary_target_policy.bind_approved_requester`),
+    so an op that writes to a second, caller-named target checks the
+    requester's policy there too, not only the reviewer's.
     """
     from meho_backplane.operations.dispatcher import dispatch
+    from meho_backplane.operations.secondary_target_policy import bind_approved_requester
 
     resume_parent = (
         resume_parent_override if resume_parent_override is not None else request.resume_parent
@@ -2153,6 +2159,7 @@ async def _dispatch_resume_with_bound_context(
     try:
         with (
             structlog.contextvars.bound_contextvars(**_run_audit_context(request)),
+            bind_approved_requester(request),
             composite_resume_binding(
                 subop_op_id=request.op_id,
                 subop_params_hash=request.params_hash,

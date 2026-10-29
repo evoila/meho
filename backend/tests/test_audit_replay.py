@@ -43,7 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.audit_query import AuditEntry, ReplayNode, replay_session
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditLog, Tenant
 from meho_backplane.settings import get_settings
 
 
@@ -356,6 +356,24 @@ async def test_flat_session_renders_as_root_list(session: AsyncSession) -> None:
 
     assert _ids(roots) == ids
     assert all(r.depth == 0 and r.children == [] for r in roots)
+
+
+@pytest.mark.asyncio
+async def test_replay_nodes_carry_the_tenant_name(session: AsyncSession) -> None:
+    """Every replay node, root and child, names its tenant (#5238)."""
+    tenant_id = uuid.uuid4()
+    session.add(Tenant(id=tenant_id, slug="team-a", name="Team A"))
+    sess = uuid.uuid4()
+    root = await _seed_audit_row(session, tenant_id=tenant_id, second=0, agent_session_id=sess)
+    await _seed_audit_row(
+        session, tenant_id=tenant_id, second=1, agent_session_id=sess, parent_audit_id=root
+    )
+    await session.commit()
+
+    roots = await replay_session(sess, tenant_id=tenant_id, session=session)
+
+    assert roots[0].tenant_name == "Team A"
+    assert roots[0].children[0].tenant_name == "Team A"
 
 
 @pytest.mark.asyncio

@@ -18,19 +18,21 @@ the end, then return to the trail.
 | `meho-backplane` | Confidential client | The backplane itself — the audience it validates tokens for. If your realm does not have it yet, create it first: a confidential client with ID `meho-backplane` and no login flows enabled — it exists as the resource-server identity whose client ID is the token audience (`keycloak.audience` in the chart values). |
 | `meho-cli` | **Public** client, device-code grant | `meho login` |
 | `meho-mcp` | **Public** client, authorization-code + PKCE | Browser-capable MCP clients (Claude Desktop, MCP Inspector, …) |
-| 6 protocol mappers | On both public clients | Make issued tokens carry the claims the backplane validates |
+| 8 protocol mappers | On both public clients | Make issued tokens carry the claims the backplane validates |
 | 4 default client scopes | On both public clients | Including the `basic` scope that carries the mandatory `sub` claim |
 | `mcp:read`, `mcp:execute`, `mcp:admin` | Client scopes, optional on `meho-mcp` | The scopes MEHO's MCP clients ask for at login |
 | `MEHO-Readers`, `MEHO-Operators`, `MEHO-SA-Operators`, `MEHO-Admins`, `MEHO-Approvers` | Top-level groups with attributes | Give each person their tenant and their role |
-| A user in `MEHO-Admins` | Realm user | The first admin: approves device-code logins and operates MEHO |
+| `MEHO-Platform-Admins` | Top-level group with one attribute | Rights across all tenants, for the people who run MEHO |
+| A user in `MEHO-Admins` and `MEHO-Platform-Admins` | Realm user | The first admin: approves device-code logins and operates MEHO |
 
 !!! tip "There is an automation for this"
 
     The CLI ships an idempotent helper — `meho admin keycloak
-    bootstrap-clients` — that creates the two public clients, the six
-    mappers, the four default scopes, the three `mcp:*` scopes, and the
-    five groups, and puts the first admin user in `MEHO-Admins`, in
-    one invocation. This page is the
+    bootstrap-clients` — that creates the two public clients, the eight
+    mappers, the four default scopes, the three `mcp:*` scopes, the
+    five groups and `MEHO-Platform-Admins`, and puts the first admin
+    user in `MEHO-Admins` and `MEHO-Platform-Admins`, in one
+    invocation. This page is the
     manual reference path (and what the helper encodes); use the helper
     once you have an admin credential wired up, use this page to
     understand or verify what it did.
@@ -71,11 +73,11 @@ In the realm that hosts `meho-backplane`, create a client with:
 | **OAuth 2.0 Device Authorization Grant** | **On** | This *is* `meho login` ([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)). |
 | Valid redirect URIs | (none) | Device flow does not redirect. |
 
-## Step 3 — Add the six protocol mappers
+## Step 3 — Add the protocol mappers
 
 Tokens minted by `meho-cli` must carry the same claim shape the
 backplane validates — otherwise tokens are issued cleanly and then
-rejected on every call. Add these six mappers to the client:
+rejected on every call. Add these eight mappers to the client:
 
 | Mapper name | Type | Output claim | Without it |
 |---|---|---|---|
@@ -84,12 +86,17 @@ rejected on every call. Add these six mappers to the client:
 | `tenant-id` | User Attribute (**User Attribute** = `tenant_id`, **Claim JSON Type** `String`) | `tenant_id`, from the person's group | Rejected with `missing_tenant_claim`. |
 | `tenant-role` | User Attribute (**User Attribute** = `tenant_role`, **Claim JSON Type** `String`) | `tenant_role`, from the person's group | Rejected with `missing_tenant_role_claim`. |
 | `approver` | User Attribute (**User Attribute** = `approver`, **Claim JSON Type** `boolean`) | `approver`, only for `MEHO-Approvers` | Nobody with the `read_only` role can approve. |
+| `platform-admin` | User Attribute (**User Attribute** = `platform_admin`, **Claim JSON Type** `boolean`) | `platform_admin`, only for `MEHO-Platform-Admins` | Nobody gets rights across tenants. |
+| `meho-tenants` | User Attribute (**User Attribute** = `meho_tenant`, **Token Claim Name** = `meho_tenants`, **Claim JSON Type** `String`, **Multivalued** on, **Aggregate attribute values** on) | `meho_tenants`, a list with one entry per role group of the person | The token does not list the person's tenants. One tenant still works. |
 | `groups-claim` | Group-membership mapper | `groups` | Group-gated surfaces silently return empty results. |
 
-On the three User Attribute mappers, set **Token Claim Name** to the
-same name as the attribute, **Add to access token** on, **Add to ID
-token** off, **Add to userinfo** on, and keep **Multivalued** and
-**Aggregate attribute values** off.
+On the four User Attribute mappers `tenant-id`, `tenant-role`,
+`approver` and `platform-admin`, set **Token Claim Name** to the same
+name as the attribute, **Add to access token** on, **Add to ID token**
+off, **Add to userinfo** on, and keep **Multivalued** and **Aggregate
+attribute values** off. On `meho-tenants`, set the same token switches,
+but turn **Multivalued** and **Aggregate attribute values** on: then
+Keycloak collects the `meho_tenant` value of every group of the person.
 
 These mappers hold **no fixed value**. They read the attributes of the
 person's group ([Step 5](#step-5-create-the-five-groups)): when a person
@@ -131,16 +138,24 @@ A person gets their tenant and their role from their group. Create
 these five groups at the **top level** (not inside another group), and
 give each one these **attributes** (open the group → **Attributes**):
 
-| Group | `tenant_id` | `tenant_role` | `approver` |
-|---|---|---|---|
-| `MEHO-Readers` | your tenant UUID | `read_only` | – |
-| `MEHO-Operators` | your tenant UUID | `operator` | – |
-| `MEHO-SA-Operators` | your tenant UUID | `operator` | – |
-| `MEHO-Admins` | your tenant UUID | `tenant_admin` | – |
-| `MEHO-Approvers` | your tenant UUID | `read_only` | `true` |
+| Group | `tenant_id` | `tenant_role` | `approver` | `meho_tenant` |
+|---|---|---|---|---|
+| `MEHO-Readers` | your tenant UUID | `read_only` | – | `<uuid>:<name>:Readers` |
+| `MEHO-Operators` | your tenant UUID | `operator` | – | `<uuid>:<name>:Operators` |
+| `MEHO-SA-Operators` | your tenant UUID | `operator` | – | `<uuid>:<name>:SA-Operators` |
+| `MEHO-Admins` | your tenant UUID | `tenant_admin` | – | `<uuid>:<name>:Admins` |
+| `MEHO-Approvers` | your tenant UUID | `read_only` | `true` | `<uuid>:<name>:Approvers` |
 
 All five groups carry the same tenant UUID (mint one with `uuidgen`).
-`tenant_role` uses an underscore (`read_only`), never a hyphen.
+`tenant_role` uses an underscore (`read_only`), never a hyphen. In
+`meho_tenant`, `<uuid>` is the same tenant UUID and `<name>` is the
+tenant's short name (lowercase letters, digits and dashes, for example
+`main`).
+
+Also create the group **`MEHO-Platform-Admins`** with one attribute,
+`platform_admin` = `true`. Its members get rights across all tenants.
+It is not a role group: it holds no tenant and no role, so a person in
+it is also in one of the five groups.
 
 Then put each person in **exactly one** of the five groups:
 
@@ -151,8 +166,10 @@ Then put each person in **exactly one** of the five groups:
   Keycloak would otherwise pick one of the two roles at random.
 - To change a person's role, move them to another group. The change
   applies at their next login.
-- Leave the person's own `tenant_id`, `tenant_role` and `approver`
-  attributes empty: a value on the person wins over the group. Keep
+- Leave the person's own `tenant_id`, `tenant_role`, `approver` and
+  `meho_tenant` attributes empty: a value on the person wins over the
+  group, and a `meho_tenant` value on the person is added to their
+  tenant list. Keep
   **Realm settings → General → Unmanaged Attributes** at **Disabled**
   (the default), **Admin can view** or **Admin can edit**, so people
   cannot set these values on themselves
@@ -163,6 +180,27 @@ To add another tenant later, follow [Add a tenant](../guides/tenant-bootstrap.md
 `meho admin keycloak bootstrap-clients --tenant-id <uuid>` creates the
 five groups for you. On a later run, pass the same `--tenant-id`:
 without it, the command writes the all-zero UUID to the five groups.
+`--tenant-name` sets the short name in `meho_tenant` (default `main`).
+
+### More than one tenant
+
+A person can be in role groups of several tenants, one group per
+tenant. Each extra tenant gets its own five groups,
+`MEHO-<name>-Readers`, `MEHO-<name>-Operators`,
+`MEHO-<name>-SA-Operators`, `MEHO-<name>-Admins` and
+`MEHO-<name>-Approvers`. These groups carry **only** `meho_tenant`
+(for example `<uuid>:lab-b:Operators`), with the extra tenant's own
+UUID. They carry no `tenant_id` and no `tenant_role`.
+
+`meho admin keycloak bootstrap-clients --add-tenant lab-b` creates the
+five groups of the tenant `lab-b`. Give its UUID with
+`--add-tenant-id <uuid>`. Without it, the command reuses the UUID the
+groups already carry, or makes a new one and prints it. Keep it.
+
+The token of a person in `MEHO-Readers` and `MEHO-lab-b-Operators`
+lists both tenants in `meho_tenants`. A site with one tenant gets a
+list with one entry, and nothing else changes. The design is in the
+[decision record](https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-several-tenants-per-person.md).
 
 ## Step 6 — Create an operator user
 
@@ -193,7 +231,7 @@ differences:
 | `mcp:read`, `mcp:execute`, `mcp:admin` client scopes | Create each, then assign as **Optional** | The Claude Code plugin and the Claude Desktop bundle ask for `mcp:read mcp:execute` at every login, and for `mcp:admin` when you turn on the operator tools. Keycloak does not ship these scopes. Create each one under **Client scopes → Create client scope**: protocol **OpenID Connect**, **Include in token scope** On. Then add all three to `meho-mcp` as **Optional**. If one is missing, Keycloak refuses the login with `invalid_scope`. `meho-cli` does not get them. |
 | Client Offline Session Idle (attribute `client.offline.session.idle.timeout`) | **`172800`** seconds (48 hours) | Sets how long the MCP login lasts with no use. Without it, the realm's Offline Session Idle applies (30 days by default). If you set up the client by hand, set it on the **Advanced** tab of the client, or with `kcadm.sh update clients/<client-uuid> -r <realm> -s 'attributes."client.offline.session.idle.timeout"=172800'`. |
 
-The six mappers and four default scopes apply identically. Which MCP
+The eight mappers and four default scopes apply identically. Which MCP
 client uses which flow — and everything else client-side — is the
 [Connect clients](../clients/index.md) section's territory.
 
@@ -237,7 +275,7 @@ To make a person an approver, put them in the **`MEHO-Approvers`**
 group ([Step 5](#step-5-create-the-five-groups)), and in no other of the
 five groups. That group carries `tenant_role` = `read_only` and
 `approver` = `true`, and the `approver` mapper from
-[Step 3](#step-3-add-the-six-protocol-mappers) copies it into the
+[Step 3](#step-3-add-the-protocol-mappers) copies it into the
 token. Its **Token Claim Name** must match the backplane's
 `JWT_APPROVER_CLAIM_NAME` (default `approver`). The person keeps a low
 tenant role (`read_only`), so the capability adds approval power
@@ -307,7 +345,7 @@ usually appear:
 | Symptom | Cause | Fix |
 |---|---|---|
 | `unauthorized_client` at login start | The client is confidential, or the device grant is off | Step 2 — public client, device grant **On**. |
-| Token issued, every call 401s with `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim` | Missing protocol mappers, or the person is in none of the five groups | Step 3 — add all six; Step 5 — put the person in one group. Then log out and back in. |
+| Token issued, every call 401s with `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim` | Missing protocol mappers, or the person is in none of the five groups | Step 3 — add all the mappers; Step 5 — put the person in one group. Then log out and back in. |
 | Everyone gets the same role, whatever their group | A fixed-value (Hardcoded claim) `tenant_role` mapper is still on the client | Delete it, or re-run `meho admin keycloak bootstrap-clients`, which replaces it. |
 | Token issued, every call 401s with `invalid_token` or `missing_sub`; the decoded token has no `sub` | The `basic` scope is not a default scope on the client | Step 4 — assign it, re-login (existing tokens stay broken). |
 | `meho login` times out before you can approve | An ambient wrapper timeout (CI step, IDE task) shorter than the approval wait | Run `meho login` in a real terminal, or raise the wrapper timeout. |

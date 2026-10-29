@@ -34,8 +34,8 @@ import structlog
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared import vcfa_session
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.vmware_shared import vcfa_session
 from meho_backplane.connectors.vro import (
     VRO_CONNECTOR_ID,
     VRO_IMPL_ID,

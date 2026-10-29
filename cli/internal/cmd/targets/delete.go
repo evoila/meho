@@ -133,35 +133,36 @@ func runDelete(cmd *cobra.Command, name string, force, confirm, jsonOut bool, ba
 // delete verbs. With --json, stdout carries the success envelope and
 // stderr the error envelope, so the question lands on neither: it goes
 // to the terminal when a person types the answer, and nowhere when a
-// program pipes the answer in.
+// program pipes the answer in, or when the terminal cannot be opened.
 func promptWriter(cmd *cobra.Command, jsonOut bool) (io.Writer, func()) {
 	if !jsonOut {
 		return cmd.OutOrStdout(), func() {}
 	}
-	tty := openTerminal(cmd.InOrStdin())
-	switch tty {
-	case nil:
+	if !stdinIsTerminal(cmd.InOrStdin()) {
 		return io.Discard, func() {}
-	case os.Stderr:
-		return tty, func() {}
+	}
+	tty, err := openTerminal()
+	if err != nil {
+		// Stdin is a terminal, but there is no terminal device to write
+		// to (for example a launcher that started a new session). Both
+		// JSON streams must stay one envelope each, so the question is
+		// dropped rather than put in front of either of them.
+		return io.Discard, func() {}
 	}
 	return tty, func() { _ = tty.Close() }
 }
 
-// openTerminal returns the terminal to show the y/N question on when a
-// person is at the keyboard, or nil when stdin is not a terminal. When
-// the terminal device cannot be opened it returns stderr, so the person
-// still sees the question. Tests override it to capture the question.
-var openTerminal = func(in io.Reader) *os.File {
+// stdinIsTerminal reports whether a person is at the keyboard. Tests
+// override it.
+var stdinIsTerminal = func(in io.Reader) bool {
 	f, ok := in.(*os.File)
-	if !ok || !term.IsTerminal(int(f.Fd())) {
-		return nil
-	}
-	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
-	if err != nil {
-		return os.Stderr
-	}
-	return tty
+	return ok && term.IsTerminal(int(f.Fd()))
+}
+
+// openTerminal opens the terminal device the y/N question is shown on.
+// Tests override it to capture the question or to make the open fail.
+var openTerminal = func() (*os.File, error) {
+	return os.OpenFile("/dev/tty", os.O_WRONLY, 0)
 }
 
 // deletePrompt is the question shown before the DELETE.

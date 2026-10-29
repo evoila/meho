@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -345,9 +346,7 @@ func TestDeletePromptJSONTerminalGetsQuestion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	orig := openTerminal
-	openTerminal = func(io.Reader) *os.File { return tty }
-	t.Cleanup(func() { openTerminal = orig })
+	fakeTerminal(t, func() (*os.File, error) { return tty, nil })
 
 	var f fakeDeleteServer
 	url := f.start(t, http.StatusNotFound,
@@ -370,6 +369,73 @@ func TestDeletePromptJSONTerminalGetsQuestion(t *testing.T) {
 	if jerr := json.Unmarshal(stderr.Bytes(), &env); jerr != nil {
 		t.Fatalf("stderr is not one JSON error envelope: %v\n%s", jerr, stderr.String())
 	}
+}
+
+// TestDeletePromptJSONTerminalOpenFailsKeepsStreamsClean pins that
+// with --json, when stdin is a terminal but the terminal device cannot
+// be opened, the question goes nowhere: stdout is still one success
+// envelope on "n", and stderr is still one error envelope after "y"
+// and a 404 or 409.
+func TestDeletePromptJSONTerminalOpenFailsKeepsStreamsClean(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv and the test
+	// overrides the package-level terminal seams.
+	fakeTerminal(t, func() (*os.File, error) {
+		return nil, errors.New("open /dev/tty: no such device or address")
+	})
+
+	var declined fakeDeleteServer
+	url := declined.start(t, http.StatusNoContent, "")
+	stdout, stderr, err := runDeleteCmd(t, url, "n\n", "prmo", "--json")
+	if err != nil {
+		t.Fatalf("decline: %v\nstderr=%s", err, stderr.String())
+	}
+	var got deleteResult
+	if jerr := json.Unmarshal(stdout.Bytes(), &got); jerr != nil {
+		t.Fatalf("decline: stdout is not one JSON envelope: %v\n%s", jerr, stdout.String())
+	}
+	if got.Status != "declined" || stderr.Len() != 0 || declined.calls != 0 {
+		t.Errorf("decline: envelope=%+v stderr=%q calls=%d", got, stderr.String(), declined.calls)
+	}
+
+	cases := []struct {
+		name   string
+		status int
+		reply  string
+	}{
+		{name: "404", status: http.StatusNotFound,
+			reply: `{"detail":{"error":"no_target","query":"prmo","matches":[]}}`},
+		{name: "409", status: http.StatusConflict, reply: hasReferences409},
+	}
+	for _, c := range cases {
+		var f fakeDeleteServer
+		url := f.start(t, c.status, c.reply)
+		stdout, stderr, err := runDeleteCmd(t, url, "y\n", "prmo", "--json")
+		if exitCodeOf(err) != 4 {
+			t.Fatalf("%s: should exit 4; got %v", c.name, err)
+		}
+		if f.calls != 1 {
+			t.Fatalf("%s: want 1 request after \"y\"; got %d", c.name, f.calls)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("%s: stdout should be empty; got:\n%s", c.name, stdout.String())
+		}
+		var env map[string]any
+		if jerr := json.Unmarshal(stderr.Bytes(), &env); jerr != nil {
+			t.Fatalf("%s: stderr is not one JSON error envelope: %v\n%s", c.name, jerr, stderr.String())
+		}
+	}
+}
+
+// fakeTerminal makes the command believe a person is at the keyboard
+// and replaces the terminal open with open, for the rest of the test.
+func fakeTerminal(t *testing.T, open func() (*os.File, error)) {
+	t.Helper()
+	origIsTerminal, origOpen := stdinIsTerminal, openTerminal
+	stdinIsTerminal = func(io.Reader) bool { return true }
+	openTerminal = open
+	t.Cleanup(func() {
+		stdinIsTerminal, openTerminal = origIsTerminal, origOpen
+	})
 }
 
 // TestDeletePromptHumanOnStdout pins that without --json the prompt

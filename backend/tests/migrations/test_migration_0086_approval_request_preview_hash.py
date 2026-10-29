@@ -21,7 +21,7 @@ the head on ``origin/main``): the chain is the single linear head
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -79,10 +79,12 @@ def _preview_hash_column(sync_url: str) -> dict[str, object] | None:
     return None
 
 
-def test_upgrade_adds_nullable_preview_hash(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_nullable_preview_hash(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0086`` adds ``preview_hash`` as a nullable column."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     column = _preview_hash_column(sync_url)
     assert column is not None, "preview_hash column must exist after upgrade"
@@ -90,20 +92,24 @@ def test_upgrade_adds_nullable_preview_hash(alembic_cfg: tuple[Config, str]) -> 
     assert column["nullable"] is True
 
 
-def test_downgrade_drops_preview_hash(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_drops_preview_hash(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade 0084`` drops the ``preview_hash`` column."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert _preview_hash_column(sync_url) is not None
 
     command.downgrade(cfg, _DOWN_REVISION)
     assert _preview_hash_column(sync_url) is None
 
 
-def test_upgrade_round_trips_after_clean_downgrade(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_round_trips_after_clean_downgrade(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0086`` → ``downgrade 0084`` → ``upgrade 0086`` restores the column."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     command.downgrade(cfg, _DOWN_REVISION)
     command.upgrade(cfg, _REVISION)
 

@@ -11,19 +11,23 @@
 #   2. prepare the machine: the host            lib/firewall.sh, lib/prepare.sh
 #      firewall first, then RKE2's files and
 #      meho-host
-#   3. install and start RKE2, then wait        lib/rke2.sh
+#   3. install RKE2, prepare the host for its   lib/rke2.sh, lib/cis.sh
+#      CIS profile, start RKE2, then wait
 #   4. install the MEHO core with Helm          lib/core.sh
 #   5. write the two one-time files             lib/core.sh
 #   6. install the meho command, write the
 #      install record and print the result      lib/core.sh
 #
-# --from-disk runs only the steps that need the host name: RKE2's settings,
-# the start of RKE2, and steps 4 to 6. It leaves the firewall alone. The
-# appliance's first start uses it.
+# RKE2 runs with its CIS hardening profile from the first install (ADR 0009).
 #
-# Later Tasks add their steps in main() below: the CIS host steps between
-# installing and starting RKE2 (#4636), and the first-start list to step 6
-# (#4042).
+# --from-disk runs only the steps that need the host name: RKE2's settings,
+# the start of RKE2, and steps 4 to 6. Before the start it also runs the
+# host steps of the CIS profile, which change nothing where a full install
+# ran before. It leaves the firewall alone. The appliance's first start
+# uses it.
+#
+# Later Tasks add their steps in main() below: the first-start list to
+# step 6 (#4042).
 #
 # Exit codes:
 #   0  MEHO is installed
@@ -53,6 +57,8 @@ source "$DOWNLOAD_DIR/lib/net.sh"
 source "$DOWNLOAD_DIR/lib/checks.sh"
 # shellcheck source=lib/firewall.sh
 source "$DOWNLOAD_DIR/lib/firewall.sh"
+# shellcheck source=lib/cis.sh
+source "$DOWNLOAD_DIR/lib/cis.sh"
 # shellcheck source=lib/prepare.sh
 source "$DOWNLOAD_DIR/lib/prepare.sh"
 # shellcheck source=lib/rke2.sh
@@ -83,9 +89,9 @@ usage() {
 install.sh: install MEHO on this Linux server, with no internet (form 2).
 
 It checks the machine, sets the host firewall, prepares the machine,
-installs and starts RKE2 (the built-in Kubernetes), installs the MEHO
-core, writes the first-login passwords and the unseal key to two files for
-root only, and installs the meho command.
+installs and starts RKE2 (the built-in Kubernetes) with its CIS hardening
+profile, installs the MEHO core, writes the first-login passwords and the
+unseal key to two files for root only, and installs the meho command.
 
 Run it as root from the folder of the unpacked download:
   sudo ./install.sh --hostname meho.example.com --admin-network 10.0.50.0/24
@@ -292,6 +298,7 @@ main() {
         step "Step 3: install and start RKE2"
         install_rke2 "$DOWNLOAD_DIR"
     fi
+    prepare_cis_host
     start_rke2
     wait_for_rke2
 

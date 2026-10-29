@@ -34,6 +34,7 @@ condition, and should surface as a deploy failure.
 
 import importlib
 import pkgutil
+from types import ModuleType
 
 import structlog
 
@@ -420,12 +421,27 @@ def _eager_import_connectors() -> None:
     today, but deterministic ordering keeps deploy diffs comparable and
     avoids surprises if a future connector ever takes a registration-
     time side-effect on another connector's presence.
+
+    The folders were already checked against the connector package list
+    when :mod:`meho_backplane.connectors` itself was imported (see
+    :func:`~meho_backplane.connector_packages.check_connector_folders`).
+    That import is a precondition of reaching this function, so the walk
+    only imports.
     """
     import meho_backplane.connectors as pkg
 
-    for _, name, ispkg in sorted(pkgutil.iter_modules(pkg.__path__), key=lambda m: m[1]):
-        if ispkg:
-            importlib.import_module(f"{pkg.__name__}.{name}")
+    _import_connector_subpackages(pkg)
+
+
+def _import_connector_subpackages(pkg: ModuleType) -> None:
+    """Import every subpackage of ``pkg`` in name order."""
+    names = [
+        name
+        for _, name, ispkg in sorted(pkgutil.iter_modules(pkg.__path__), key=lambda m: m[1])
+        if ispkg
+    ]
+    for name in names:
+        importlib.import_module(f"{pkg.__name__}.{name}")
 
 
 def clear_registry() -> None:

@@ -80,6 +80,9 @@ def parked(op_id: str) -> OperationResult:
 class VimFake(PagedVim):
     """Recording double for the connector's VI-JSON seam."""
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(self) -> None:
         super().__init__()
         self.objects: dict[tuple[str, str], dict[str, Any]] = {}

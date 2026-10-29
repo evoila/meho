@@ -110,6 +110,9 @@ def gate(monkeypatch: pytest.MonkeyPatch) -> _GateRecorder:
 class _RecordingConnector:
     """Recording connector double: records writes, serves / 404s the read-back."""
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(self, *, get_info: dict[str, Any] | None = None, get_404: bool = False) -> None:
         self._get_info = get_info if get_info is not None else {}
         self._get_404 = get_404

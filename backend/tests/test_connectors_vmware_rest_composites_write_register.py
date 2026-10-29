@@ -189,6 +189,8 @@ _READ_OP_IDS: tuple[str, ...] = (
     # Content-library SUBSCRIBED reads (#3495).
     "vmware.composite.content_library.subscribed.status",
     "vmware.composite.content_library.subscribed.items.list",
+    # Migration inventory read of one vCenter.
+    "vmware.migration.inventory",
 )
 
 # 2 caution + approval writes (#3495) -- the SUBSCRIBED content-library

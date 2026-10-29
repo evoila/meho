@@ -306,12 +306,31 @@ vCenter variant — owned by the profiled-dispatch wiring
    `"none"`. Each row's `EndpointDescriptor.group_id` is set to the
    matching group's UUID; sentinel and unknown-key entries leave
    `group_id=NULL`.
+3. **Extend rounds for leftovers (#4972)** — when ops are still
+   without a group after a filing pass (on a full run or a re-run),
+   the run makes another "extend" round: Pass 1 lists every group so
+   far and asks for new groups for the leftovers (`[]` is a valid
+   answer), then Pass 2 files the leftovers into the new groups only.
+   Before this, a full run stopped after one Pass 2, and a re-run
+   stopped after one extend round, so ops past the `max_groups` limit
+   (15) stayed without a group. The rounds stop when every op has a
+   group, when the model proposes no new group, when a round files
+   no op, or after `DEFAULT_MAX_EXTEND_ROUNDS` (3) rounds. The round
+   limit bounds the model calls and logs
+   `llm_grouping_extend_round_limit_reached`. An op that already has a
+   group is never moved, and no group is renamed. We chose more rounds
+   over one catch-all "other" group because the ops left over tend to
+   form real families (licences, sessions, agent manager), and a
+   catch-all group does not help an agent pick a group.
 
 The function commits exactly once at the end of both passes, in the
 same transaction as a single `meho_connector_llm_grouping` audit row
 that records `{connector_id, groups_created, operations_assigned,
-operations_unassigned, llm_call_count, batch_size,
-operations_added_by_group}`. Partial failure
+operations_unassigned, unassigned_op_ids, llm_call_count, batch_size,
+operations_added_by_group}`. `unassigned_op_ids` lists the op ids
+still without a group after the run, sorted, at most
+`UNASSIGNED_OP_IDS_LIMIT` (200); `operations_unassigned` keeps the
+full count. Partial failure
 (LLM output that fails schema validation) raises
 `LlmOutputInvalid`, rolls back the transaction, and leaves the
 connector in whatever state preceded the call — operator retries via
@@ -340,7 +359,8 @@ Idempotency:
     re-validation, #3685). Ops still left over get an "extend" Pass 1:
     the prompt lists the existing groups and asks for at most
     `max_groups` new ones, and `[]` is a valid answer. A second Pass 2
-    then files the leftovers into the new groups only.
+    then files the leftovers into the new groups only. More extend
+    rounds follow while ops are left (step 3 above).
   * Every Pass-1 proposal whose key already exists in the connector
     scope (typed keys included) is dropped, so no persisted group is
     renamed or duplicated.
@@ -349,6 +369,12 @@ Idempotency:
   composite, and ingested ops the group now holds. The ingest job result and
   `meho connector ingest` show it; the CLI prints a warning for a typed
   group that also holds ingested ops.
+* `GroupingResult.unassigned_op_ids` names the ops still without a
+  group (same list as the audit row). The ingest response and the
+  ingest job result carry it as `grouping.unassigned_op_ids`.
+  `meho connector ingest` and `meho connector ingest-status` print
+  each op id, and say how many more there are when the list was cut
+  (`meho connector review` shows them all).
 
 The LLM client is injected as a `LlmClient` `Protocol` (one async
 method, `generate_json`). Tests pass a deterministic stub from
@@ -747,8 +773,8 @@ per role in the T3 grouping run:
   validator; oversized prose rejected via bounded `max_length`.
 * `GroupingResult` — counts + timings the orchestrator returns
   (`groups_created`, `operations_assigned`, `operations_unassigned`,
-  `llm_call_count`, `llm_duration_ms`, and `groups`: one
-  `GroupSummary` per group). Surfaced in the operator-facing CLI / API
+  `unassigned_op_ids`, `llm_call_count`, `llm_duration_ms`, and
+  `groups`: one `GroupSummary` per group). Surfaced in the operator-facing CLI / API
   at T5.
 * `GroupingConfig` — tunable knobs (`batch_size`, `min_groups`,
   `max_groups`). Constructed from the keyword arguments to
@@ -2697,7 +2723,7 @@ catalog shows a permanent `state="registered"` stub with nothing to
 dispatch. The DELETE surface removes it:
 
 * **REST** — `DELETE /api/v1/connectors/{connector_id}` → `204 No
-  Content`. `tenant_admin` role. Always scoped to the calling
+  Content` (`409 connector_in_use` while something uses it). `tenant_admin` role. Always scoped to the calling
   operator's tenant (the #1699 contract: the route exposes no
   `tenant_id` parameter).
 * **CLI** — `meho connector delete <connector_id> [--confirm] [--json]`
@@ -2738,6 +2764,58 @@ All three delegate to `ReviewService.delete_connector`
 * **404 conflation.** Unknown id, cross-tenant probe, rows visible
   only under a scope the caller did not name, and repeat deletes all
   return the same 404 the other connector routes use.
+* **A connector that is still used is not deleted (#5027).** Before
+  any row goes, the delete looks for things that still use the
+  connector. If it finds any, it deletes nothing, writes no audit row,
+  and raises `ConnectorInUseError`. The things it looks for:
+  * a **sensor** whose `connector_id` is the connector;
+  * a **runbook template**, draft or published, with a step or a verify
+    call whose `op_id` is one of the connector's operations
+    (deprecated templates do not count);
+  * a **hosted agent** whose `toolset.connectors` list names the
+    connector, and an active or paused **schedule** that starts such
+    an agent;
+  * an **approval request** that waits, or that is approved and nobody
+    has started it (`resumed_at IS NULL`). This is exactly the row that
+    `claim_resume` in `operations/approval_queue.py` could still claim
+    and run. That claim has no time limit (the approval time limit
+    expires waiting requests only), so an approved request that nobody
+    ever started blocks the delete however old it is, until someone runs
+    it;
+  * an **operation run** that is queued (`pending`) or `running`.
+
+  Which tenants count: for a tenant copy, that tenant. For the
+  built-in copy, every tenant that has no copy of its own (a tenant's
+  own rows replace the built-in ones completely, #3870). The search
+  lives in `operations/ingest/connector_users.py`.
+
+  The refusal lists each user: kind, id, name and operation. REST
+  answers `409` with the detail `connector_in_use` (`connector_id`,
+  `users[]`, `other_tenant_user_count`, `message`). MCP answers
+  `-32602` with the same detail as `data`. The CLI prints one line per
+  user. The console registry shows the list in its error panel. Users
+  in another tenant are counted in `other_tenant_user_count` but not
+  named, unless the caller is a platform admin. An old tenant copy
+  under a former product name (#4889) skips the check, because nothing
+  can call it. A zero-op stub skips it too: it has no rows to use.
+
+  The check and the delete are one step. The delete takes a PostgreSQL
+  advisory lock in exclusive mode as the first statement of its
+  transaction (`db/connector_usage_lock.py`). The writers of sensors,
+  runbook templates (create and edit), hosted agents (create and
+  update) and schedules (create) take the same lock in shared mode as
+  the first statement of their write. Shared locks do not wait for each
+  other, so these writes only wait while a delete runs. A writer that
+  was first is committed before the check, so the delete sees it and is
+  refused. A sensor create that comes second reads the operation again
+  after the lock and fails with `sensor_operation_not_found`, so no
+  sensor is saved for a deleted connector. Approval requests and
+  operation runs are made by the dispatch path, which does not take the
+  lock; one made during a delete fails when it runs, because the
+  operation is gone. On SQLite (tests) the lock does nothing.
+  `tests/test_operations_ingest_delete_in_use.py` covers each kind;
+  `tests/integration/test_connector_delete_in_use_pg.py` covers the two
+  race orders on PostgreSQL.
 * **Enabled ops warn, never block.** The delete completes; the
   advisory rides the MCP response body (`warnings[]`, the `edit_op`
   #1630 discipline), the `connector_delete_enabled_ops` log event,

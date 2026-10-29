@@ -2580,7 +2580,9 @@ class VmwareRestConnector(HttpConnector):
     # service-account credentials are re-read from Vault via ``_session_loader``
     # on every ``_establish_and_cache_session``, so a restage already converges
     # on the next cold-session dispatch with no credential cache to evict.
-    async def invalidate_session(self, target: VsphereTargetLike) -> None:
+    async def invalidate_session(
+        self, target: VsphereTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Evict the cached session token + login path for *target*.
 
         The duck-typed recovery hook the generic-ingested dispatch path calls
@@ -2614,6 +2616,9 @@ class VmwareRestConnector(HttpConnector):
         harmlessly, and the cold re-login proceeds regardless. The vCenter
         path stays network-free here (its ``DELETE /api/session`` lives in
         :meth:`aclose`), so vCenter behaviour is unchanged.
+
+        The session is per target, so *rejected* (the request that got the
+        ``401``) is not needed and not read.
         """
         cache_key = target_cache_key(target)
         async with self._session_lock:

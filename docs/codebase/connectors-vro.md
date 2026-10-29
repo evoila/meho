@@ -14,7 +14,7 @@ resolves to it. The `>=8.0,<10.0` range keeps Orchestrator 8.x (on its own
 or inside Aria Automation 8.x) and the VCF 9 Operations orchestrator on one
 class: both serve the same `/vco/api` paths.
 
-Today the connector ships the login, version detection and seven reads.
+Today the connector ships three logins, version detection and seven reads.
 Changes (run a workflow, cancel a run, and more) come in a later Task.
 
 Package: `backend/src/meho_backplane/connectors/vro/`.
@@ -23,10 +23,10 @@ Package: `backend/src/meho_backplane/connectors/vro/`.
 |---|---|---|---|---|
 | `vro.about` | Version, build, build date, API version, server id, time zone and features. MEHO uses the same call to detect the version. | `GET /vco/api/about` | read (`safe`, no approval) | 8.18, 9.x |
 | `vro.health` | Server state, overall health and one row per service check. | `GET /vco/api/healthstatus?showDetails=true` | read (`safe`, no approval) | 8.18, 9.x |
-| `vro.workflow.list` | Workflows, by part of the name (`name~`) or by category name (`categoryName=`). One flat row per workflow. | `GET /vco/api/workflows` | read (`safe`, no approval) | 8.18, 9.x |
-| `vro.workflow.get` | One workflow with its declared inputs and outputs (name, type, description). No default values. | `GET /vco/api/workflows/{workflowId}`, `GET /vco/api/workflows/{workflowId}/content` | read (`safe`, no approval) | 8.18, 9.x |
-| `vro.execution.list` | The runs (executions) of one workflow: id, state, start, end, user. One flat row per run. | `GET /vco/api/workflows/{workflowId}/executions` | read (`safe`, no approval) | 8.18, 9.x |
-| `vro.execution.get` | One run: state, dates, user, error text, current step, inputs and outputs. Secret values come back replaced. | `GET /vco/api/workflows/{workflowId}/executions/{executionId}` | read (`safe`, no approval) | 8.18, 9.x |
+| `vro.workflow.list` | Workflows, by part of the name (`name~`) or by category name (`categoryName=`). One flat row per workflow; `more_rows` says whether more exist. | `GET /vco/api/workflows` | read (`safe`, no approval) | 8.18, 9.x |
+| `vro.workflow.get` | One workflow with its declared inputs and outputs (name, type, description; inputs also `secret`) and `content_sha256`, a checksum of its content. No default values. | `GET /vco/api/workflows/{workflowId}`, `GET /vco/api/workflows/{workflowId}/content` | read (`safe`, no approval) | 8.18, 9.x |
+| `vro.execution.list` | The runs (executions) of one workflow: id, state, start, end, user. One flat row per run; `more_rows` says whether more exist. | `GET /vco/api/workflows/{workflowId}/executions` | read (`safe`, no approval) | 8.18, 9.x |
+| `vro.execution.get` | One run: state, a plain `outcome`, dates, user, error text, current step, inputs and outputs. Secret values come back replaced. | `GET /vco/api/workflows/{workflowId}/executions/{executionId}` | read (`safe`, no approval) | 8.18, 9.x |
 | `vro.execution.logs` | The log lines of one run, at most `max_lines` (default 200, at most 2000); each text cut at 2000 characters. | `GET /vco/api/workflows/{workflowId}/executions/{executionId}/syslogs` | read (`safe`, no approval) | 8.18, 9.x |
 
 All seven reads exist on every covered version, so none needs a version
@@ -43,7 +43,11 @@ reads use that word. A change that runs a workflow can still be called
 ## Registering targets
 
 ```bash
-# Orchestrator with vSphere single sign-on (8.x on its own, or VCF 9):
+# VCF 9 Orchestrator (signs people in through VCF Automation):
+meho targets add <orchestrator-name> --product vro --host <orchestrator-address> \
+  --secret-ref <vault-path-of-the-login> --extra login=vcfa-session --extra org=<org-name>
+
+# Orchestrator 8.x on its own, with vSphere single sign-on:
 meho targets add <orchestrator-name> --product vro --host <orchestrator-address> \
   --secret-ref <vault-path-of-the-login>
 
@@ -59,9 +63,12 @@ raise `NotImplementedError`.
 ## Key types
 
 - `VroConnector` (`connector.py`) -- the connector class. Caches one
-  `Authorization` value per target and tenant (`target_cache_key`).
-- `VroTargetLike`, `VroCredentialsLoader`, `login_mode` (`session.py`) --
-  the target shape, the credential loader type and the login mode check.
+  `Authorization` value per credential, login mode, org and login domain
+  (`_login_cache_key`, built on `credential_cache_key`: tenant, secret and
+  login host).
+- `VroTargetLike`, `VroCredentialsLoader`, `login_mode`, `vcfa_org`
+  (`session.py`) -- the target shape, the credential loader type, the
+  login mode check and the VCF Automation org of the login user.
 - `VroServerVersion`, `parse_server_version` (`connector.py`) -- the
   version read.
 - `VroTypedOp` and the group keys (`op_types.py`), the op metadata
@@ -75,11 +82,23 @@ raise `NotImplementedError`.
 
 The login mode comes from the target's `extras["login"]`:
 
+- `vcfa-session`: the VCF 9 login. A VCF 9 Orchestrator signs people in
+  through VCF Automation. The connector uses the shared VCF Automation
+  session login (`connectors/vmware_shared/vcfa_session.py`, see
+  `connectors-vcf-auth-shared.md`): `POST /cloudapi/1.0.0/sessions` with
+  HTTP Basic `<user>@<extras.org>` (for the provider org `System`:
+  `/cloudapi/1.0.0/sessions/provider`). The token comes back in the
+  `X-VMWARE-VCLOUD-ACCESS-TOKEN` header and is sent as
+  `Authorization: Bearer <token>` to `/vco/api`. The connector logs in
+  again 60 seconds before the token ends and once after a `401`. A
+  refused login (wrong password, unknown or missing org) gives
+  `connector_auth_failed` with what to fix.
 - `basic` (default): HTTP Basic on every call. This is the login of an
-  Orchestrator that uses vSphere single sign-on. The vendor reference
-  says Basic over single sign-on works only when
-  `com.vmware.o11n.sso.basic-authentication.enabled = true` is set on the
-  Orchestrator.
+  Orchestrator 8.x that uses vSphere single sign-on. It is not proven for
+  VCF 9: there it works only when the Orchestrator's basic login over
+  single sign-on is switched on
+  (`com.vmware.o11n.sso.basic-authentication.enabled = true`). Use
+  `vcfa-session` for VCF 9.
 - `automation`: the Aria Automation token. The connector runs the Aria
   Automation login on the same address (`POST /csp/gateway/am/api/login`,
   then `POST /iaas/api/login`, the same code as the `vcfa-vra8`
@@ -88,14 +107,20 @@ The login mode comes from the target's `extras["login"]`:
 - Any other value stops the call before any request, with an error that
   names the allowed values.
 
-The `Authorization` value is cached per target and tenant. Only a caller
+The `Authorization` value (for `vcfa-session` also the time the token
+ends) is cached per credential, login mode, org and login domain
+(`_login_cache_key`, built on `credential_cache_key`: tenant, secret and
+login host). The login domain is `extras["domain"]`, which the
+`automation` login sends. Two targets with the same secret, login host,
+mode, org and domain share one login. Only a caller
 with an operator JWT, other than the synthesised system operator, reads or
 fills the cache. Any other caller (a probe, a background job) runs the
 credential loader, which checks it: the Vault loader fails closed without
 a valid JWT. Its login is not kept, so a login a real operator primed is
 never served to a system caller. A `401` reaches the dispatcher, which
-calls `invalidate_session(target)` (drops only this target's value) and
-runs the call once more; the connector logs in again.
+calls `invalidate_session(target, rejected=...)` and runs the call once
+more. The cached value is dropped only when the failed request sent it,
+so a late `401` never drops a newer login another call just made.
 
 Every call sends `Accept: application/json`. The API answers XML when no
 `Accept` header is sent.
@@ -112,9 +137,34 @@ Every call sends `Accept: application/json`. The API answers XML when no
 The Orchestrator answers a list as `link[]` objects whose fields sit in
 an `attributes` list of `{name, value}` pairs. `flat_rows` turns each link
 into one row `{<name>: <value>, ..., href}`. The list reads return
-`{items, total, start_index, count}` (logs: `{items, lines, more_lines}`).
+`{items, total, start_index, count, more_rows}` (logs: `{items, lines,
+more_lines, more_rows}`). A list read asks the server for one row more
+than `max_results`; the extra row only sets `more_rows` and is not
+returned.
 MEHO stores a long list behind a result handle; the agent reads it with
 `result_query`.
+
+### Reads for a controlled run
+
+- `vro.workflow.get` returns `content_sha256`: the SHA-256 of the
+  workflow content (`GET .../content`) in a fixed form, JSON with sorted
+  keys and no spaces. The same content always gives the same checksum; a
+  changed workflow gives a new one. An approval can be bound to it.
+- Each input of `vro.workflow.get` has `secret`: true for a `SecureString`
+  input.
+- `vro.execution.get` returns `outcome` next to the vendor `state`:
+  `completed`, `failed`, `canceled`, `running` (also `initializing`),
+  `waiting` (also `waiting-signal` and `suspended`: a suspended run waits
+  for someone to resume it). Any other state gives `unknown`; MEHO never
+  guesses. When the server does not answer (a connection or time-out
+  error after the retries), the read returns `outcome: not_reachable`
+  with the run id and `checked_at`, the time of the read. Two errors are
+  not "not reachable". A server that answers with a certificate MEHO does
+  not trust: the read returns the normal `connector_tls_verify_failed`
+  error, which names the host and how to fix the trust. A destination
+  MEHO refused before any request because it resolves to a private
+  address: the read returns the normal `connector_error` with the guard's
+  message, so the reason is not hidden behind a successful read.
 
 ### Secrets
 
@@ -149,6 +199,8 @@ MEHO stores a long list behind a result handle; the agent reads it with
 - `connectors/_shared/vault_creds.py`: the operator-context credential read.
 - `connectors/_shared/vcf_auth.py`: `basic_auth_header`,
   `is_acceptable_auth_model`.
+- `connectors/vmware_shared/vcfa_session.py`: the shared VCF Automation session
+  login (`vcfa-session`).
 - `connectors/vra8/_auth.py`: `vra8_login`, the Aria Automation login.
 - `operations/typed_register.py`: the typed-op registrar.
 
@@ -160,6 +212,12 @@ MEHO stores a long list behind a result handle; the agent reads it with
   error in the answer, ids that must stay one path segment, a long list
   behind a result handle, registration shape, version resolution and
   fingerprint.
+- `backend/tests/test_connectors_vro_vcfa_session.py` -- the
+  `vcfa-session` login (reuse, renewal before the end, a new login after
+  a `401`, `connector_auth_failed` for a wrong password or a missing org,
+  no token in a result, log line, audit row or trace),
+  `content_sha256` and `secret`, `outcome` for every run state and
+  `not_reachable`, and `more_rows` on every list read.
 - `backend/tests/test_connectors_vro_spec_reconcile.py` -- every path in
   `VENDOR_CALLS` against the pinned reference lists of Orchestrator 9.0
   and 9.1 (`vcf-operations-orchestrator-9.0/` and
@@ -172,8 +230,9 @@ MEHO stores a long list behind a result handle; the agent reads it with
 ## Known issues
 
 - No reference exists for Orchestrator 8.18 or 9.1.1, so the reconcile
-  lane checks the paths against 9.0 and 9.1 only. A lab proof checks every
-  read on 8.18, 9.0, 9.1 and 9.1.1.
+  lane checks the paths against 9.0 and 9.1 only. No lab proof has run
+  yet. Until one runs, the reads on 8.18 and 9.1.1 are checked only by
+  unit tests with hand-written vendor answers.
 - The field names inside a list row (`categoryName`, `startDate`,
   `startedBy`, ...) come from the server's `attributes` list. The vendor
   reference shows only the `{name, value}` shape, not the names, so the
@@ -184,9 +243,15 @@ MEHO stores a long list behind a result handle; the agent reads it with
   The run and log reads send no conditions; filter their rows with
   `result_query`.
 
+- Not proven: some appliances route by host name and answer 404 to a
+  bare IP address. The first live check of `vcfa-session` shows whether
+  a `Host` header is needed; then the connector can reuse `vhost_header`
+  from `connectors/vcf_automation/_routing.py`.
+
 ## References
 
-- Task #4515 (this connector); #4516 (the changes: run a workflow, cancel
+- Task #4515 (this connector); #5057 (the `vcfa-session` login and the
+  reads for a controlled run); #4516 (the changes: run a workflow, cancel
   a run, actions, configuration elements and packages).
 - `docs/codebase/connectors-vra8.md` -- the Aria Automation 8 connector
   whose login the `automation` mode uses.

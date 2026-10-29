@@ -3,10 +3,12 @@
 # Copyright (c) 2026 evoila Group
 #
 # Step 2 of install.sh: prepare the machine (form-2 design, section 5, step 2).
-# It writes the MEHO folders, RKE2's settings, the join token, the MEHO image
-# archive, the storage manifest and the settings of RKE2's Traefik, and
-# installs the meho-host command. The host firewall of step 2 is in
-# lib/firewall.sh. This file is sourced, not run.
+# It writes the MEHO folders, RKE2's settings with their pod security file,
+# the join token, the MEHO image archive, the storage manifest and the
+# settings of RKE2's Traefik, and installs the meho-host command. The host
+# firewall of step 2 is in lib/firewall.sh. RKE2's CIS profile (its pod
+# security file and its host steps) is in lib/cis.sh. This file is sourced,
+# not run.
 
 prepare_folders() {
     mkdir -p "${HOST_ROOT}${MEHO_STATE_DIR}" "${HOST_ROOT}${MEHO_CONFIG_DIR}"
@@ -17,6 +19,8 @@ prepare_folders() {
 # render_rke2_config <hostname> <cluster cidr> <service cidr> <join address or "">:
 # print RKE2's settings (https://docs.rke2.io/reference/server_config).
 # The join token is never in this file. RKE2 reads it from token-file.
+# RKE2's CIS profile is always on (ADR 0009), with the pod security file of
+# lib/cis.sh in place of RKE2's own.
 render_rke2_config() {
     local hostname=$1 cluster_cidr=$2 service_cidr=$3 join_address=$4
     cat <<EOF
@@ -27,6 +31,8 @@ tls-san:
 ingress-controller: traefik
 cluster-cidr: "${cluster_cidr}"
 service-cidr: "${service_cidr}"
+profile: ${RKE2_CIS_PROFILE}
+pod-security-admission-config-file: "${RKE2_POD_SECURITY_FILE}"
 EOF
     if [[ -n $join_address ]]; then
         cat <<EOF
@@ -37,9 +43,11 @@ EOF
 }
 
 # write_rke2_config takes the arguments of render_rke2_config. The file is
-# for root only (mode 0600), and it replaces an older file in one step.
+# for root only (mode 0600), and it replaces an older file in one step. The
+# pod security file that the settings name is written first.
 write_rke2_config() {
     local target="${HOST_ROOT}${RKE2_CONFIG_FILE}" temporary
+    write_pod_security_config
     mkdir -p "${target%/*}"
     temporary=$(mktemp "${target}.XXXXXX")
     render_rke2_config "$@" >"$temporary"

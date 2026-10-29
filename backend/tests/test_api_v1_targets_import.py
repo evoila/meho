@@ -94,6 +94,7 @@ _KNOWN_TOP_LEVEL = frozenset(
         "preferred_impl_id",
         "product",
         "secret_ref",
+        "version",
         "vpn_required",
     }
 )
@@ -303,6 +304,37 @@ def test_create_accepts_preferred_impl_id_top_level(client: TestClient) -> None:
     assert data["preferred_impl_id"] == "vault-1.x"
     # And it didn't accidentally also land in extras.
     assert data["extras"] == {}
+
+
+def test_import_entry_sets_version_column_and_keeps_extras(client: TestClient) -> None:
+    """One import entry sets the ``version`` column and keeps ``extras``.
+
+    Pins #3649: a top-level ``version`` key used to spill into
+    ``extras.version``, leaving the column empty, so a versioned,
+    profile-backed connector could not match the target. The CLI now
+    maps ``version`` to the top level; this replays that body against
+    the API and reads the target back.
+    """
+    entry = {
+        "name": "addon",
+        "product": "demo-product",
+        "version": "0.1.0",
+        "host": "addon.example.test",
+        "port": 8000,
+        "extras": {"scheme": "http"},
+    }
+    body = _entry_to_create_body(entry)
+    key = make_rsa_keypair("kid-A")
+    headers = {"Authorization": f"Bearer {_admin_token(key)}"}
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        r = client.post("/api/v1/targets", json=body, headers=headers)
+        assert r.status_code == 201, r.text
+        got = client.get("/api/v1/targets/addon", headers=headers)
+    assert got.status_code == 200, got.text
+    data = got.json()
+    assert data["version"] == "0.1.0"
+    assert data["extras"] == {"scheme": "http"}
 
 
 def test_sparse_patch_preserves_omitted_columns(client: TestClient) -> None:

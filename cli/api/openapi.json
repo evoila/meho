@@ -26745,6 +26745,16 @@
               "low"
             ],
             "title": "Confidence"
+          },
+          "secret_ref": {
+            "type": "string",
+            "nullable": true,
+            "title": "Secret Ref"
+          },
+          "extras": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Extras"
           }
         },
         "type": "object",
@@ -26755,7 +26765,7 @@
           "confidence"
         ],
         "title": "CandidateHint",
-        "description": "One candidate target a connector's :meth:`Connector.list_candidates` returns.\n\nCandidates are potentially-reachable targets the connector inferred\nfrom an existing seed (e.g. a vCenter exposing its managed ESXi\nhosts; a kubeconfig listing peer cluster contexts). The\nG9.1-T6 ``meho targets discover`` CLI verb surfaces these to the\noperator; auto-registration is intentionally out of scope per\nInitiative #363 (operator runs ``meho targets import`` after review).\n\n``evidence`` is the debugging payload \u2014 whatever made the connector\nthink this candidate exists (e.g. ``{\"source\": \"kubeconfig\",\n\"context_name\": \"cluster-2\"}``); ``confidence`` is the connector's\nself-assessment of probe-vs-curation reliability."
+        "description": "One candidate target a connector's :meth:`Connector.list_candidates` returns.\n\nCandidates are potentially-reachable targets the connector inferred\nfrom an existing seed (e.g. a vCenter exposing its managed ESXi\nhosts; a kubeconfig listing peer cluster contexts). The\nG9.1-T6 ``meho targets discover`` CLI verb surfaces these to the\noperator; auto-registration is intentionally out of scope per\nInitiative #363 (operator runs ``meho targets import`` after review).\n\n``evidence`` is the debugging payload \u2014 whatever made the connector\nthink this candidate exists (e.g. ``{\"source\": \"kubeconfig\",\n\"context_name\": \"cluster-2\"}``); ``confidence`` is the connector's\nself-assessment of probe-vs-curation reliability.\n\n``secret_ref`` and ``extras`` are set when the connector knows them:\nthe secret reference and the target extras a target for this candidate\nneeds (Azure: the seed's secret reference and ``subscription_id``,\n``tenant_id`` and ``cloud``). ``meho targets discover --import-yaml``\nwrites them into a file that ``meho targets import`` reads."
       },
       "CapabilityDeclaration": {
         "properties": {
@@ -35939,6 +35949,7 @@
               "argocd",
               "azure",
               "bind9",
+              "entra",
               "fleet",
               "gcloud",
               "gh",

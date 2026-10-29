@@ -64,6 +64,7 @@ class LayoutTests(PackagingTestCase):
         self.assertIn("LICENSES/README.txt", files)
         self.assertIn("lib/common.sh", files)
         self.assertIn("lib/firewall.sh", files)
+        self.assertIn("lib/cis.sh", files)
         self.assertEqual(len(files), len(set(files)))
 
     def test_the_layout_holds_every_file_install_sh_reads(self) -> None:

@@ -669,6 +669,7 @@ const (
 	TargetCreateProductArgocd     TargetCreateProduct = "argocd"
 	TargetCreateProductAzure      TargetCreateProduct = "azure"
 	TargetCreateProductBind9      TargetCreateProduct = "bind9"
+	TargetCreateProductEntra      TargetCreateProduct = "entra"
 	TargetCreateProductFleet      TargetCreateProduct = "fleet"
 	TargetCreateProductGcloud     TargetCreateProduct = "gcloud"
 	TargetCreateProductGh         TargetCreateProduct = "gh"
@@ -3498,12 +3499,20 @@ type CallOperationBody_Target struct {
 // think this candidate exists (e.g. “{"source": "kubeconfig",
 // "context_name": "cluster-2"}“); “confidence“ is the connector's
 // self-assessment of probe-vs-curation reliability.
+//
+// “secret_ref“ and “extras“ are set when the connector knows them:
+// the secret reference and the target extras a target for this candidate
+// needs (Azure: the seed's secret reference and “subscription_id“,
+// “tenant_id“ and “cloud“). “meho targets discover --import-yaml“
+// writes them into a file that “meho targets import“ reads.
 type CandidateHint struct {
 	Confidence CandidateHintConfidence `json:"confidence"`
 	Evidence   map[string]interface{}  `json:"evidence"`
+	Extras     *map[string]interface{} `json:"extras,omitempty"`
 	Host       string                  `json:"host"`
 	Name       string                  `json:"name"`
 	Port       *int                    `json:"port"`
+	SecretRef  *string                 `json:"secret_ref"`
 }
 
 // CandidateHintConfidence defines model for CandidateHint.Confidence.

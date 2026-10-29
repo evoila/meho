@@ -187,7 +187,9 @@ class _StableTopoConnector(Connector):
             discovered_at=datetime.now(UTC),
         )
 
-    async def list_candidates(self, seed_target: Any | None = None) -> list[CandidateHint]:
+    async def list_candidates(
+        self, seed_target: Any | None = None, operator: Any | None = None
+    ) -> list[CandidateHint]:
         return [
             CandidateHint(
                 name="discovered-host",

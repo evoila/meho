@@ -167,13 +167,16 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "in which ConfigMap?'. The list / info split is deliberate -- the "
         "agent surveys keys cheaply via list, then fetches values only "
         "for the specific ConfigMap it needs. Secrets: "
+        "``k8s.secret.list`` lists Secrets with their type and key names, "
+        "and ``k8s.secret.info`` shows one Secret's keys, value sizes, "
+        "labels, annotation names and owners; both are safe reads. "
         "``k8s.secret.create`` makes a new Secret, ``k8s.secret.update`` "
         "changes the values of an existing one (rotate a token or "
         "password), ``k8s.secret.delete`` removes one after a preview "
         "that lists the workloads using it, and ``k8s.secret.read_to_ref`` "
         "copies a Secret value into the credential store and returns only "
-        "a reference. No Secret op ever shows a value; all of them wait "
-        "for approval."
+        "a reference; these four wait for approval. No Secret op ever "
+        "shows a value."
     ),
     "events": (
         "Use for cluster-event observability and troubleshooting: "
@@ -1657,6 +1660,28 @@ class KubernetesConnector(Connector):
         )
 
         return await k8s_secret_read_to_ref(self, target, operator, params)
+
+    async def k8s_secret_list(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.secret.list`` (key names only, never a value)."""
+        from meho_backplane.connectors.kubernetes.ops_secret_list import k8s_secret_list
+
+        return await k8s_secret_list(self, target, operator, params)
+
+    async def k8s_secret_info(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.secret.info`` (key names and sizes, never a value)."""
+        from meho_backplane.connectors.kubernetes.ops_secret_list import k8s_secret_info
+
+        return await k8s_secret_info(self, target, operator, params)
 
     async def k8s_secret_update(
         self,

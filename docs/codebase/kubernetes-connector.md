@@ -67,7 +67,16 @@ copy this pattern in G3.x).
   | `k8s.logs`   | `logs` (→ `ops_logs.k8s_logs`) | pod log fetch  |
 
   G3.2-T2 / T3 / T4 add the rest of the 13-op v0.2 read surface
-  against this same tuple.
+  against this same tuple. The full, current op list is in
+  [`connectors-kubernetes.md`](connectors-kubernetes.md#shipped-op-surface).
+
+* `ops_secret_list.py` (`k8s.secret.list` / `k8s.secret.info`)
+  -- two safe reads that list Secrets and describe one Secret by
+  **names only**: type, key names, labels, annotation names, owners
+  and, for `info`, the size of each value. No value and no annotation
+  value is ever returned. They need `list` and `get` on `secrets`. See
+  [`connectors-kubernetes.md`](connectors-kubernetes.md) for the full
+  shape.
 
 * `KubernetesTargetLike` (`backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py`)
   -- Protocol the connector reads against: `name`, `host`, `port`,

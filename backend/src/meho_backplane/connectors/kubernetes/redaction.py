@@ -28,11 +28,14 @@ Where it runs
 
 Applied inside the connector's own read path, before the value reaches
 the JSONFlux reducer / result handle, the audit row, or the broadcast
-feed. Today the only shipped read that can surface a raw ``Secret`` is
-the generic dynamic read ``k8s.cr.list`` / ``k8s.cr.info`` (pointable at
-core Secrets with ``group=""``, ``version="v1"``, ``plural="secrets"``)
--- wired through ``ops_customresource.custom_resource_row``. A future
-single-object / list Secret read reuses this same helper.
+feed. It is wired into ``ops_customresource.custom_resource_row``, which
+``k8s.cr.list`` / ``k8s.cr.info`` share, for any object whose ``kind`` is
+``Secret``. Those two ops cannot read core Secrets: their ``group``
+param must not be empty, and the custom-object API builds
+``/apis/{group}/...`` paths, not the core ``/api/v1`` path. The way to
+look at core Secrets is ``k8s.secret.list`` / ``k8s.secret.info``
+(``ops_secret_list.py``). They build their answer from names only and
+run this walk over it as a second net.
 
 The flight recorder's Kubernetes transport hook (``_wire_span.py``,
 #3841) runs the same walk over every JSON request and response body

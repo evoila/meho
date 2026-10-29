@@ -1,4 +1,4 @@
-# Form-2 install script: `deploy/linux-server/install.sh` (#4733, #4635, #4735)
+# Form-2 install script: `deploy/linux-server/install.sh` (#4733, #4635, #4636, #4735, #4736)
 
 ## Overview
 
@@ -8,7 +8,9 @@ customer copies one download onto the machine and runs one script as root:
 `docs/design/2026-10-10-install-forms/form-2-linux-server.md`. Section 4
 gives the layout of the download, and section 5 gives the steps.
 
-The script runs the six steps of the design:
+Before step 1 the script finds out whether MEHO is installed already (see
+[The update](#the-update)). On a machine without MEHO it runs the six steps
+of the design:
 
 1. **Check the machine.** Each check prints `[ok]` or `[WARN]`, or stops the
    script with exactly one `[FAIL]` line. The line says what is wrong and
@@ -16,15 +18,18 @@ The script runs the six steps of the design:
 2. **Prepare the machine.** It creates `/var/lib/meho` and `/etc/meho`
    (both mode 0700). Then it turns on the MEHO host firewall and turns
    firewalld or ufw off (see [The host firewall](#the-host-firewall)).
-   Then it writes RKE2's settings, copies the join token when the join
-   options are given, copies the MEHO image archive and the storage
+   Then it writes RKE2's settings, with RKE2's CIS profile and its pod
+   security file (see [RKE2's CIS profile](#rke2s-cis-profile)), copies the
+   join token when the join options are given, copies the MEHO image archive and the storage
    manifest to the folders where RKE2 reads them, and writes the setting
    that makes RKE2's Traefik redirect port 80 to 443. It also
    installs the host command `meho-host`
    ([linux-server-meho-host.md](linux-server-meho-host.md)).
 3. **Install and start RKE2.** It runs RKE2's own installer in offline
-   mode, starts `rke2-server`, and waits until the node is Ready, until
-   `local-path` is the default storage class, and until the storage
+   mode. Then it runs the host steps of RKE2's CIS profile: the `etcd` user
+   and group, and RKE2's kernel settings, copied to `/etc/sysctl.d` and
+   loaded. Then it starts `rke2-server`, and waits until the node is Ready,
+   until `local-path` is the default storage class, and until the storage
    provisioner runs.
 4. **Install the MEHO core.** It writes the answers of this place to
    `/etc/meho/values-place.yaml` and runs the download's Helm with the
@@ -38,26 +43,27 @@ The script runs the six steps of the design:
    first-start list (not in this version yet).
 
 `--from-disk --hostname <fqdn>` runs only the steps that need the host name:
-RKE2's settings, the start of RKE2, and steps 4 to 6. It is for a machine
+RKE2's settings, the start of RKE2, and steps 4 to 6. Before the start it
+also runs the host steps of the CIS profile, which change nothing where a
+full install ran before. It is for a machine
 where RKE2's own state was removed on purpose, but its files, the chart and
 the image archives are still on the disk. The appliance's first start uses
 it (form-1 design, section 2).
 
-Exit codes: 0 when MEHO is installed, 1 when a check or a step failed, 2 for
-wrong usage (an unknown option or a bad value).
+On a machine where MEHO is installed, the same script updates it to the
+version of its download (design, section 7). There is no separate update
+command. See [The update](#the-update).
+
+Exit codes: 0 when MEHO is installed or updated, 1 when a check or a step
+failed, 2 for wrong usage (an unknown option or a bad value).
 
 The download itself, `meho-linux-<version>-amd64.tar`, is built by
 `build-download.sh` (#4734); see
 [linux-server-download.md](linux-server-download.md).
 
-Later Tasks add their steps to `main()` in `install.sh`:
-
-- #4636 adds the CIS host steps between installing and starting RKE2, and
-  `profile: cis` with the storage exception in RKE2's settings.
-- #4042 adds the first-start list to step 6, read with
-  `meho status --first-start`.
-- #4736 makes a second run an update, which reads `install.json` and
-  `values-place.yaml`.
+Later Tasks add their steps to `main()` in `install.sh`: #4042 adds the
+first-start list to step 6 of the install and to the last step of the
+update, read with `meho status --first-start`.
 
 ## Key files
 
@@ -69,7 +75,9 @@ Later Tasks add their steps to `main()` in `install.sh`:
 | `lib/checks.sh` | Step 1: one function per check. |
 | `lib/firewall.sh` | The host firewall: the checks of step 1 (`nft`, the admin network), the files and the start in step 2, `firewall_state` and `firewall_port_list`. |
 | `lib/prepare.sh` | Step 2: folders, `config.yaml`, join token, image archive, storage manifest, the Traefik redirect. |
-| `lib/rke2.sh` | Step 3: RKE2's installer, the start, and the wait with one time limit. |
+| `lib/cis.sh` | RKE2's CIS profile: the pod security file that `config.yaml` names, the host steps of step 3 (the `etcd` user and group, the kernel settings), and `cis_state`. |
+| `lib/rke2.sh` | Step 3: RKE2's installer, the start, and the wait with one time limit. For the update: the restart, and the wait for the new run of `rke2-server`. |
+| `lib/update.sh` | The update: finding the install, reading `install.json`, the refused options, the version step, the backup question, the OS packages of the appliance, the result lines. |
 | `lib/core.sh` | Steps 4 to 6: the versions of the download, the place values, the Helm call, the two one-time files, the `meho` command, the install record, the result lines. |
 | `values-single-node.yaml` | The Helm values for one node. The download ships it as `chart/values-single-node.yaml`. |
 | `meho-host` | The host command, `check` and `support-bundle`; see [linux-server-meho-host.md](linux-server-meho-host.md). |
@@ -104,6 +112,11 @@ about names that another file defines.
 | admin network | SSH stays possible for the admin after the install; see [The admin network](#the-admin-network) | `--admin-network`, `SSH_CONNECTION` |
 | join and firewall | with `--join-address`, a `[WARN]` that the rules block a join until both machines accept the other node | `--join-address` |
 
+The checks of root, of the download and of its `VERSION` file run first,
+under the header "Find the install", because finding the install needs
+them (see [The update](#the-update)). The other checks follow under
+"Step 1".
+
 The place answers are checked before any step runs, as wrong usage (exit
 code 2): `--first-tenant-id` must be a UUID, `--admin-user` and
 `--approver-user` take letters, digits and `. _ - @`, are put in lower
@@ -126,7 +139,8 @@ service.
 | `/etc/meho/firewall.nft` | 0600 | the MEHO host firewall: the table `inet meho` |
 | `/etc/systemd/system/meho-firewall.service` | 0644 | the boot unit that loads `firewall.nft` |
 | `/etc/systemd/system/rke2-server.service.d/meho-firewall.conf` | 0644 | RKE2 starts only while the table `inet meho` is loaded |
-| `/etc/rancher/rke2/config.yaml` | 0600 | `write-kubeconfig-mode: "0600"`, `tls-san`, `ingress-controller: traefik`, `cluster-cidr`, `service-cidr`; with the join options also `server` and `token-file` |
+| `/etc/rancher/rke2/meho-pss.yaml` | 0600 | the pod security file of RKE2's CIS profile, with one more exempt namespace (see [The pod security file](#the-pod-security-file)) |
+| `/etc/rancher/rke2/config.yaml` | 0600 | `write-kubeconfig-mode: "0600"`, `tls-san`, `ingress-controller: traefik`, `cluster-cidr`, `service-cidr`, `profile: cis`, `pod-security-admission-config-file`; with the join options also `server` and `token-file` |
 | `/etc/meho/join-token` | 0600 | a copy of `--join-token-file`, only with the join options |
 | `/var/lib/rancher/rke2/agent/images/meho-images.linux-amd64.tar.zst` | 0600 | the MEHO image archive |
 | `/var/lib/rancher/rke2/server/manifests/local-path-storage.yaml` | 0600 | the storage manifest |
@@ -143,6 +157,11 @@ script copies only the MEHO archive.
 ### Step 3: start and wait
 
 `install_rke2` runs `INSTALL_RKE2_ARTIFACT_PATH=<download>/rke2 sh <download>/rke2/install.sh`.
+
+`prepare_cis_host` then makes the `etcd` user and group and loads RKE2's
+kernel settings (see [The host steps](#the-host-steps)). RKE2 checks both
+when it starts with the CIS profile and stops when one is missing, so they
+must be in place before the start.
 
 `start_rke2` runs `systemctl enable --now --no-block rke2-server.service`.
 The unit sets `TimeoutStartSec=0`, so a start that waits for the service
@@ -167,8 +186,9 @@ OpenBao. Without `--first-tenant-id`, the id comes from an existing
 on a fresh machine it is a new UUID read once from
 `/proc/sys/kernel/random/uuid`. The two network-policy ranges are wiring
 until the chart derives them from its built-in parts (#4047), not a place
-answer; the update (#4736) removes them from existing place files. The
-file holds no secret.
+answer. The update writes the file again from the answers in `install.json`,
+so when #4047 drops the two keys, the next update removes them from the
+file. The file holds no secret.
 
 `install_core` runs the download's Helm:
 
@@ -220,7 +240,10 @@ and a missing one becomes a `[FAIL]`.
 
 `write_install_record` writes `/etc/meho/install.json`: the MEHO, chart
 and RKE2 versions from `VERSION`, the date, and the options used. It holds
-no secret. A later run reads it to find the install (#4736).
+no secret. A later run reads it to find the install and its answers (see
+[The update](#the-update)). The update reads the file with `awk`, one key
+per line, so the file keeps this layout. `join_address` is in the record
+because the update writes RKE2's settings again from the stored answers.
 
 ```json
 {
@@ -236,6 +259,7 @@ no secret. A later run reads it to find the install (#4736).
     "approver_user": "approver",
     "cluster_cidr": "10.42.0.0/16",
     "service_cidr": "10.43.0.0/16",
+    "join_address": "",
     "from_disk": false
   }
 }
@@ -252,11 +276,212 @@ folder of `install.sh` holds the core files: `VERSION`,
 `chart/values-single-node.yaml`, `bin/helm`, `bin/meho` and the chart file
 that `VERSION` names. The RKE2 files and the image archive are not needed:
 RKE2's installer already ran, and RKE2 imports the archives in its images
-folder at every start. Step 2 writes only RKE2's settings. Step 3 starts
-RKE2 and waits. Steps 4 to 6 run as above, and `install.json` records
+folder at every start. Step 2 writes only RKE2's settings and the pod
+security file. Step 3 runs the host steps of the CIS profile, starts RKE2
+and waits. RKE2's kernel settings file is still in RKE2's share folder,
+because RKE2's own files stay on the disk. Steps 4 to 6 run as above, and `install.json` records
 `"from_disk": true`. The DNS check does not run, so `--public-address` is
 refused as wrong usage. The firewall is not touched (form-2 design,
-section 5).
+section 5). `--from-disk` does not look for an install, and it refuses
+`--confirm-backup` and `--os-packages` as wrong usage.
+
+## The update
+
+A new MEHO version is the new download's `install.sh`, run again (form-2
+design, section 7). The customer takes a VM snapshot or a backup first.
+
+### Finding the install
+
+Before step 1, `find_install` looks for three signs of an install:
+
+| Sign | How it is read |
+| --- | --- |
+| the install record | `/etc/meho/install.json` exists |
+| RKE2 runs | `systemctl is-active --quiet rke2-server.service` |
+| the Helm release | `helm list --all --filter '^meho$' --short` in the namespace `meho`, with the download's Helm |
+
+- **None of them:** a first install. The script says "MEHO is not installed
+  on this machine" and runs the six steps above.
+- **All three:** an update. The script says, for example, "MEHO 0.36.0 is
+  installed (2026-10-23). This run updates it to 0.37.0."
+- **Only some of them:** the script stops with one `[FAIL]` line and
+  changes nothing. The line names what it found and what is missing. When
+  only the record exists, the fix is to start RKE2 and run the script
+  again. Otherwise the fix is `meho-host support-bundle`.
+
+Helm can look for the release only while RKE2 runs. So a machine where RKE2
+does not run and no record exists counts as new. When RKE2 runs but its API
+does not answer, the script stops and asks the admin to wait and try again.
+`--from-disk` does not look.
+
+`--confirm-backup` and `--os-packages` are only for an update. A first
+install with one of them stops.
+
+### The answers
+
+The update keeps the answers of the install. `read_install_record` reads
+`install.json` into the array `RECORD`, and `use_install_answers` puts the
+values into the same names as the options of a first install. A value that
+breaks the rule of its option stops the update: the file was changed by
+hand. A record of an older `install.sh` has no `join_address`; it then
+counts as empty.
+
+The options of a first install stop an update with "An update keeps the
+install's answers", even with the same value: `--hostname`,
+`--public-address`, `--admin-network`, `--first-tenant-id`, `--admin-user`,
+`--approver-user`, `--cluster-cidr`, `--service-cidr`, `--join-address` and
+`--join-token-file`. The SSH range changes only with
+`meho-host admin-network`.
+
+### The steps of an update
+
+| Step | What runs |
+| --- | --- |
+| 1. check the machine and the versions | the OS, processors, memory, disk, clock, the host name and its DNS record. Not the free ports, "no other Kubernetes", the ranges, nftables or the admin network: an installed MEHO fails them on purpose. With `--os-packages`, also the key and the format of the file. Then the version step (below). |
+| 2. confirm a backup | `confirm_backup` (below) |
+| 3. install the OS packages of the appliance | only with `--os-packages` (below) |
+| 4. update RKE2 | RKE2's settings and the pod security file again from the stored answers, the MEHO image archive, the storage manifest and the Traefik setting again, RKE2's installer again (it replaces RKE2's own image archive), the CIS host steps again, then `systemctl restart --no-block rke2-server.service` and the wait |
+| 5. update the MEHO core | `values-place.yaml` again from the stored answers, then the same `helm upgrade --install` as the install |
+| 6. the commands and the record | the new `meho` and `meho-host`, then `install.json` with the new versions and the date of the update |
+
+Without `--os-packages` the steps after step 2 move up by one, so the
+headers always count from 1 without a gap.
+
+**The wait after the restart.** `rke2-server` has `KillMode=process`, so the
+pods, the API server among them, keep running while RKE2 restarts. A check
+for "the node is Ready" right after the restart could read the answer of
+the old API server. So `wait_for_rke2` first waits until
+`systemctl show --property=InvocationID` gives a new id and the unit is
+`active`. systemd gives each run of a unit a new invocation id, and the
+unit has `Type=notify`, so `active` means that the new RKE2 said it is
+ready. Then the usual three waits follow, within the same 15 minutes.
+
+**The core.** The chart's own Jobs run the database migrations, and its
+`secrets` Job creates only the Secrets that do not exist yet. So every
+password and key stays (core design, section 3). The update does not
+depend on how the chart runs the migrations.
+
+**What the update leaves alone:** the firewall file and its units (the
+admin network changes only with `meho-host admin-network`), the two
+one-time files (the update does not write them again, also when the
+customer deleted them), the volumes in `/var/lib/meho/volumes`, OpenBao's
+data and the Secrets. It takes no etcd snapshot of its own (design,
+section 7): RKE2 takes one every 12 hours.
+
+A failed step stops the update with one `[FAIL]` line. `install.json`
+still names the old version then, so a second run is again an update. The
+same version again is allowed for that reason.
+
+### The version step
+
+`check_rke2_step` compares the RKE2 version in `install.json` with the
+download's `RKE2_VERSION`:
+
+- the same minor version (any patch) or the next minor version passes;
+- a skipped minor version stops the update and names the minor version to
+  install first, for example "so RKE2 v1.38 must come first". The release
+  notes name the RKE2 version of each MEHO release;
+- an older minor version, or another major version, stops the update.
+
+The reason: Kubernetes does not let the API server skip a minor version on
+an upgrade, also with one node (Kubernetes version-skew policy), and RKE2's
+manual upgrade page says the upgrade plan must not skip a minor version.
+
+`check_meho_step` refuses a MEHO version older than the installed one,
+because its database changes cannot be undone. The fix names the version
+to use: the installed one or newer. `version_order` compares two versions
+by the precedence rules of Semantic Versioning 2.0.0, section 11: the
+three numbers first, then a pre-release such as `-rc.1` is older than the
+release. A build of `main` is `0.1.<date>-<commit>`, so two builds of
+different days compare by the date.
+
+### The backup question
+
+`confirm_backup` asks "Did you take a VM snapshot or a backup of this
+machine? Type yes to go on:" on the terminal. Only "yes" goes on; case and
+spaces around the word do not matter. Any other answer stops the update.
+Without a terminal on standard input (`[ -t 0 ]` is false) it stops and
+names `--confirm-backup`. With `--confirm-backup` it does not ask. Runs
+without a person, such as the release test (#4742), pass the option. The
+question comes after the checks and the version step, so a refused version
+never asks.
+
+### The OS packages of the appliance (`--os-packages <file>`)
+
+Only the appliance uses this option. Its customer does not run apt; the OS
+updates come with each MEHO release in an OS-package file that the
+appliance build makes (#3958, #4814). A form-2 customer keeps the OS up to
+date with their own tools (design, section 8).
+
+**The file** is a tar of a flat apt repository, all files in its top
+folder:
+
+| File | What it is |
+| --- | --- |
+| `InRelease` | the index, signed with evoila's key: the checksum of each package list |
+| `Packages` | the package list, as `dpkg-scanpackages` writes it |
+| `Packages.gz` | optional, the same list compressed |
+| `*.deb` | the packages |
+
+The uncompressed `Packages` must be in the file and in `InRelease`. A test
+with apt 2.8.3 (Ubuntu 24.04) showed it: when `InRelease` names only
+`Packages.gz`, apt skips the repository with the warning "does not seem to
+provide it" and installs nothing. `check_os_packages` refuses a file with
+a folder, a link, a name with `..`, or a missing `InRelease`, `Packages` or
+`.deb` file, before anything changes.
+
+**The key** is `/etc/apt/keyrings/meho-os-packages.gpg`, the place for keys
+of the system operator (`sources.list(5)`). The appliance build puts it
+there (#4814). The file may hold the current key and the next one; apt
+accepts a signature of any key in it. Without the file, `--os-packages`
+stops in step 1: the machine is not the appliance.
+
+**How apt runs.** `unpack_os_packages` unpacks the file into a new folder
+`/var/tmp/meho-os-packages.XXXXXX` and writes a sources list with one line:
+
+```text
+deb [signed-by=/etc/apt/keyrings/meho-os-packages.gpg] file:/var/tmp/meho-os-packages.XXXXXX/repo ./
+```
+
+`./` is the form of a flat repository (`sources.list(5)`: the suite is an
+exact path that ends with `/`, with no components). `signed-by` makes apt
+accept only this key; `trusted=yes` is never used. apt's download helper
+runs as the user `_apt`, so the folder is readable for all.
+
+Both apt calls get these settings (`apt.conf(5)`), so apt reads only this
+repository, needs no network, and the machine's own sources lists and
+package lists stay as they are:
+
+```text
+-o Dir::Etc::SourceList=<work>/os-packages.list
+-o Dir::Etc::SourceParts=<work>/sources.list.d      (an empty folder)
+-o Dir::State::Lists=<work>/lists
+-o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache=
+```
+
+1. `apt-get update --error-on=any` reads `InRelease`, checks its signature
+   and the checksum of `Packages`. It fails on a missing signature, another
+   key or a changed file. The script then checks that apt wrote a package
+   list, which finds the case of an `InRelease` without `Packages`. The list
+   may be compressed, for example `_Packages.lz4`, when the machine's apt
+   sets `Acquire::GzipIndexes`.
+2. `DEBIAN_FRONTEND=noninteractive apt-get -y -q -o
+   Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold
+   upgrade --with-new-pkgs` installs the newer versions of the installed
+   packages. It may add a package that an update needs, and never removes
+   one. A configuration file that the hardening changed keeps its version.
+   apt's output goes to its own log, `/var/log/apt/term.log`.
+3. `apt-get -s -q dist-upgrade`, with the same settings, simulates the
+   upgrade that may also remove packages. Each `Inst` line names a package
+   of the file that is still at its old version, because its new version
+   needs the removal of another package. The script names these packages
+   in one `[WARN]` line and goes on, so the admin and support see that an
+   OS fix is missing. The release test of the appliance (#4816) compares
+   the package versions with a fresh OVA.
+
+The folder is removed after the run, also when a step fails. When
+`/run/reboot-required` exists after the upgrade, for example after a new
+kernel, the script prints a note to restart the machine after the update.
 
 ## The values files
 
@@ -473,6 +698,151 @@ permanent. The chart turns this into the Traefik arguments
 and `permanent=true` (checked with `helm template` against
 `rke2-traefik` 41.2.003).
 
+## RKE2's CIS profile
+
+ADR 0009 (closed by default) asks for RKE2's CIS profile from the first
+version. The profile is RKE2's built-in setting for the CIS Kubernetes
+Benchmark, a common hardening standard. `config.yaml` sets `profile: cis`.
+The facts below come from the source of RKE2 v1.37.1+rke2r1, the version
+the download pins.
+
+With `profile: cis`, RKE2:
+
+- stops at its start when the host is not ready: the kernel must have the
+  four values of RKE2's kernel settings file, and the `etcd` user and group
+  must exist (`pkg/cli/cmds/profile_linux.go`). It also sets
+  `protect-kernel-defaults` for the kubelet;
+- runs etcd as the `etcd` user and writes its static pod files with mode
+  0600 (`pkg/executor/staticpod/staticpod.go`);
+- applies the "restricted" Pod Security Standard in every namespace,
+  except the exempt namespaces of its pod security file (below);
+- creates network policies in the namespaces `kube-system`, `kube-public`
+  and `default` (below).
+
+### The host steps
+
+`prepare_cis_host` runs in step 3, after RKE2's installer and before RKE2
+starts. The update runs it again after RKE2's installer, so both steps
+change nothing when they ran before. A new RKE2 version may bring a new
+kernel settings file; the step then copies and loads it.
+
+1. **The `etcd` user and group.** RKE2 looks them up in `/etc/passwd` and
+   `/etc/group` only (hardening guide), so the step reads these two files,
+   not `getent`. When both are missing, it runs the hardening guide's
+   command, `useradd -r -c "etcd user" -s /sbin/nologin -M -U etcd`. When
+   only the group exists, `useradd` gets `-g etcd` instead of `-U`. When
+   only the user exists, `groupadd -r etcd` adds the group.
+2. **The kernel settings.** RKE2 ships them as `rke2-cis-sysctl.conf`.
+   RKE2's installer puts it in RKE2's share folder:
+   `/usr/local/share/rke2/` for the tarball, `/opt/rke2/share/rke2/` for the
+   tarball when `/usr/local` is read-only or a mount point, and
+   `/usr/share/rke2/` for the RPM. `install.sh` always installs the tarball
+   (`INSTALL_RKE2_ARTIFACT_PATH`), on Ubuntu and RHEL alike, but the step
+   looks in all three places. It copies the file to
+   `/etc/sysctl.d/60-rke2-cis.conf` (mode 0644), where `systemd-sysctl`
+   loads it at every start of the machine. It copies only when the content
+   differs, so a changed copy is replaced by RKE2's file. Then it reads
+   every value of the file from `/proc/sys`. Only when one differs, it runs
+   `systemctl restart systemd-sysctl.service`, as the hardening guide does,
+   and reads the values again. A value that is still wrong means a file
+   that `systemd-sysctl` reads later sets it again, for example
+   `/etc/sysctl.conf`. The step then stops with one `[FAIL]` line that names
+   the key, so RKE2 does not fail later with a less clear message. The
+   values always come from RKE2's file; `install.sh` holds none of them.
+
+### The pod security file
+
+RKE2 writes its own pod security file, `/etc/rancher/rke2/rke2-pss.yaml`,
+at every start, but only when its settings name no other file
+(`pkg/rke2/rke2_linux.go`). With the CIS profile, that file enforces, audits
+and warns at the "restricted" level, and exempts three namespaces:
+`kube-system`, `compliance-operator-system` and `tigera-operator`
+(`pkg/rke2/psa.go`).
+
+`write_pod_security_config` writes
+`/etc/rancher/rke2/meho-pss.yaml` (mode 0600), and `config.yaml`
+names it with `pod-security-admission-config-file`. It is RKE2's own file
+with one more exempt namespace: `local-path-storage`. RKE2 mounts the file
+into the API server, because its path is an argument of the API server.
+`write_rke2_config` writes it before `config.yaml`, so the settings never
+name a missing file, also with `--from-disk`. The name is the one of the
+form-2 design (section 2). The appliance's cleaning step keeps this file
+by that name (form-1 design), so the name must not change.
+
+Why the storage namespace needs the exception: the local-path provisioner
+starts a helper pod in its own namespace for each volume. The helper pod
+mounts a folder of the host (`/var/lib/meho/volumes`), which even the
+"baseline" level refuses. The provisioner itself also lacks fields that
+"restricted" asks for, such as `runAsNonRoot` and a seccomp profile. No
+MEHO namespace is exempt, and RKE2's own three
+stay as they are. `kube-system` is exempt by RKE2's default, so RKE2's
+Traefik, Canal and CoreDNS run as before.
+
+Why a file and not a namespace label: the RKE2 docs name
+`pod-security-admission-config-file` as the way to change the default. The
+exemption then lives in a root-only file on the host. A namespace label
+(`pod-security.kubernetes.io/enforce: privileged`) would also work, but
+anyone who may edit namespaces could change it, and it would be a sixth
+change to the upstream storage manifest. One difference: an exempt
+namespace is not checked at all, so the audit log and the warnings skip it
+too (Kubernetes docs, "Exemptions"). With a label, the restricted level
+would still write audit notes for the namespace.
+
+### Network policies and Traefik
+
+With the profile, RKE2 creates these network policies (`pkg/rke2/np.go`,
+`pkg/controllers/cisnetworkpolicy`). All of them limit only incoming
+traffic.
+
+| Namespace | Policy | What it lets in |
+| --- | --- | --- |
+| `kube-system`, `kube-public`, `default` | `default-network-policy` | traffic from pods of the same namespace |
+| `kube-system`, `kube-public`, `default` | `rke2-flannel-host-networking` | traffic from the flannel address of each node (the first address of its pod range) |
+| `kube-system` | `default-network-dns-policy` | TCP and UDP 53 to CoreDNS, from every address |
+| `kube-system` | `default-network-traefik-policy` | the ports named `web` and `websecure` of the pods labelled `app.kubernetes.io/name: rke2-traefik`, from every address |
+| `kube-system` | `default-network-ingress-policy`, `default-network-ingress-webhook-policy` | the same for ingress-nginx, which form 2 does not run |
+| `kube-system` | `default-network-snapshot-validation-webhook-policy`, `default-network-metrics-server-policy` | `https` to the snapshot webhook and the metrics server |
+
+RKE2's Traefik gets the console traffic on ports 80 and 443 through a host
+port. The CNI `portmap` plugin turns that into a destination NAT to the
+Traefik pod, so Calico checks the policies against the pod's ports. In
+`rke2-traefik` 41.2.003 (checked with `helm template`), the Traefik pod has
+the label `app.kubernetes.io/name: rke2-traefik` and the ports `web`
+(container port 8000, host port 80) and `websecure` (container port 8443,
+host port 443). So `default-network-traefik-policy` lets traffic from
+every address in to both ports, and the console loads. MEHO adds no
+network policy for Traefik.
+
+The policies limit only traffic into `kube-system`. Traffic from Traefik
+to the MEHO namespace is outgoing traffic of `kube-system`, which no RKE2
+policy limits. The chart's own policies let the namespace `kube-system`
+reach MEHO (`networkPolicy.ingressControllerNamespace: kube-system` in
+`values-single-node.yaml`). No RKE2 policy is in `meho` or
+`local-path-storage`.
+
+### For later Tasks
+
+`cis_state` (read-only) prints `on`, or `off: <reason>`, and returns 0 or
+1, like `firewall_state`. On means: `config.yaml` sets `profile: cis`, the
+pod security file exists, the `etcd` user and group are in `/etc/passwd`
+and `/etc/group`, `/etc/sysctl.d/60-rke2-cis.conf` exists, and the kernel
+has its values. `meho-host check` (#4638) can call it. `meho-host` sources
+nothing today, so #4638 decides how the function reaches the machine, as
+for `firewall_state`.
+
+### A newer RKE2
+
+`tests/fixtures/rke2-pod-security-cis.yaml` is RKE2's pod security file of
+`pkg/rke2/psa.go`, and `tests/fixtures/rke2-cis-sysctl.conf` is
+`bundle/share/rke2/rke2-cis-sysctl.conf`. A CI step compares both with the
+source of the RKE2 version in `packaging/common.sh`. It also checks that
+this version still has `default-network-traefik-policy` for the ports
+`web` and `websecure`, from every address. When RKE2 moves to a new
+version and the step fails, copy RKE2's new files to the fixtures, update
+their `sha256` in `tests/test_cis.py`, and write the new pod security file
+in `render_pod_security_config` with `local-path-storage` added. Check the
+labels and port names of the new `rke2-traefik` chart by hand.
+
 ## The storage manifest
 
 `storage/local-path-storage.yaml` is the upstream v0.0.37 manifest with
@@ -524,7 +894,11 @@ machine for each test:
   and logs its arguments, so a test changes one answer and reads the calls.
   The kubectl stub answers `get secret` with the decoded values the real
   kubectl would print for the script's templates, and a test greps every
-  output and record for them.
+  output and record for them. The RKE2 installer stub puts RKE2's kernel
+  settings file in RKE2's share folder, the `systemctl` stub loads the
+  files of `/etc/sysctl.d` into the fake `/proc/sys` on
+  `restart systemd-sysctl.service`, and the `useradd` and `groupadd` stubs
+  add their lines to the fake `/etc/passwd` and `/etc/group`.
 
 `tests/test_firewall.py` covers the admin network check, the three
 firewall files, the order of step 2, firewalld and ufw, the port list and
@@ -541,6 +915,41 @@ machine's own firewall stays as it is. It needs `nft`, user namespaces and
 a kernel with `nft_ct` and `nft_fib_inet`, and it is skipped without them.
 The CI job installs `nftables` and sets `MEHO_REQUIRE_NFT_CHECK=1`, which
 turns that skip into a failure.
+
+`tests/test_cis.py` covers RKE2's CIS profile: the two lines in
+`config.yaml`, the pod security file against RKE2's own file (only
+`local-path-storage` added, no MEHO namespace), the order of the host steps
+(after the installer, before the start of RKE2), each place of RKE2's
+kernel settings file, values that come from RKE2's file, a later file that
+sets a value again, the existing `etcd` user or group, a second run that
+changes nothing, `--from-disk`, and every answer of `cis_state`.
+
+`tests/test_update.py` covers finding the install (the three signs, each
+half-installed case, `--from-disk`), the refused options, the order of the
+update steps, the skipped checks, the answers from `install.json`, the new
+record, the replaced files, and what stays: the firewall files, the
+one-time files and a volume keep their checksums, and no `nft`, firewall or
+Secret command runs. `tests/test_update_checks.py` covers the backup
+question on a pseudo-terminal and without one, the version step, and
+`version_order` against the examples of Semantic Versioning, section 11.
+`tests/update_harness.py` gives them a fake machine with MEHO 0.36.0
+installed and the download of 0.37.0. `FakeMachine.mark_installed()` makes
+the fake RKE2 run and the fake Helm list the release.
+
+`tests/test_os_packages.py` covers `--os-packages` with a stub `apt-get`:
+the sources list, the apt settings, the order (after the backup, before
+RKE2), each refused file, each apt failure, the warning for packages that
+stay at their old version, and the removed folder. Its
+`RealAptTests` run the real `apt-get` and `gpg`: the test builds a small
+flat repository, signs `InRelease` with a new key, and checks that apt
+accepts it, also with `Acquire::GzipIndexes` (a compressed list), refuses
+a signature of another key, refuses a package list changed after signing
+(in both forms, with apt's default order and with the compressed list
+first, as on a machine with `Acquire::GzipIndexes`), and skips an
+`InRelease` without `Packages`. They
+need `apt-get`, `gpg` and `gpgv`, and they are skipped without them. The
+CI job sets `MEHO_REQUIRE_APT_CHECK=1`, which turns that skip into a
+failure.
 
 `tests/test_core_install.py` also renders the chart with
 `values-single-node.yaml` and the place values the script wrote. It skips
@@ -559,8 +968,11 @@ CI: `.github/workflows/linux-server-test.yml` runs on every pull request
 that changes `deploy/linux-server/` or the chart. It installs shellcheck
 v0.11.0 and Helm v3.16.4 (both pinned with a checksum) and nftables, runs
 shellcheck on every `*.sh` file and every file with a shell shebang there,
-checks the fixture against upstream, and runs the unit tests with
-`MEHO_REQUIRE_HELM=1` and `MEHO_REQUIRE_NFT_CHECK=1`. Scripts that later
+checks the local-path fixture against upstream, checks the two RKE2
+fixtures and the Traefik policy against the source of the pinned RKE2
+version (see [A newer RKE2](#a-newer-rke2)), and runs the unit tests with
+`MEHO_REQUIRE_HELM=1`, `MEHO_REQUIRE_NFT_CHECK=1` and
+`MEHO_REQUIRE_APT_CHECK=1`. Scripts that later
 Tasks add in this folder are checked by the same job.
 
 ## Dependencies
@@ -578,6 +990,25 @@ Tasks add in this folder are checked by the same job.
 - RKE2's own kubectl, for the waits and for reading the two Secrets.
 
 ## Known issues
+
+- **The update is not proven on a real machine yet.** The tests here prove
+  the order of the steps and what stays, against stub commands. The
+  release test (#4742) runs the update from the previous version on a lab
+  VM for every release. It checks that the data of every Secret, a test
+  target and a tenant secret, the firewall file and the one-time files are
+  the same before and after, and that `install.json` shows the new
+  version. `--os-packages` on a VM with no route to the internet is proven
+  with the appliance build (#3958, #4814).
+- **The appliance-only parts of the update are not here yet.** The design
+  (section 7, steps 3 and 6) also saves the CIS Ubuntu result before the OS
+  packages, compares it with `meho-host check` at the end, and builds AIDE's
+  database again. Those come with the appliance work (#3958).
+- **Two builds of `main` of the same day** compare by their commit id as
+  text, so an update between them may be refused as "older". Releases and
+  builds of different days compare correctly.
+- **The DNS check of an update** names `--public-address` in its fix, which
+  an update refuses. A machine whose DNS record changed since the install
+  is a case for support.
 
 - **Three parts of the core are not on `main` yet, so an install cannot be
   green on a real machine until they land:** the OpenBao init Job and the
@@ -598,9 +1029,19 @@ Tasks add in this folder are checked by the same job.
   reason, and `check-download.sh` checks every digest; see
   [linux-server-download.md](linux-server-download.md). A `docker save`
   archive would get new digests, and RKE2 would not find the images offline.
-- **No CIS profile yet.** Without a profile, RKE2 applies the `privileged`
-  pod security level, so the local-path helper pods run. #4636 adds the
-  profile and the exception for the `local-path-storage` namespace.
+- **The CIS profile is not proven on a real machine yet.** The tests here
+  prove the files and the order of the steps, not RKE2 itself. The week-4
+  install (#4741) checks that every pod is Ready under the profile, that no
+  MEHO namespace needs an exception, and that the console loads through
+  Traefik. An offline check of the chart, rendered with
+  `values-single-node.yaml`, found no pod of the `meho` namespace that
+  breaks the "restricted" rules, but only the API server's own check
+  proves it.
+- **A later sysctl file can undo a kernel setting.** The install stops when
+  a file that `systemd-sysctl` reads after `60-rke2-cis.conf` sets one of
+  RKE2's values again. If someone adds such a line after the install, RKE2
+  does not start at the next start of the machine, and `cis_state` says
+  `off` with the key.
 - **IPv4 only.** The DNS check reads A records, and the ranges are IPv4.
   The admin network is IPv4 too, so SSH over IPv6 gets no answer.
 - **SSH on port 22 only.** The rules open SSH on port 22. A session on
@@ -667,6 +1108,64 @@ Firewall:
   https://docs.datadoghq.com/security/default_rules/xccdf-org-ssgproject-content-rule-nftables-ensure-default-deny-policy
 - Linux `force_mld_version` (default 0: MLD version 2, with a fallback to
   version 1): https://docs.kernel.org/networking/ip-sysctl.html
+
+RKE2's CIS profile (RKE2 v1.37.1+rke2r1):
+
+- RKE2 hardening guide (the `etcd` user, the kernel settings file and its
+  places, `systemctl restart systemd-sysctl`, what the profile does):
+  https://docs.rke2.io/security/hardening_guide
+- RKE2 pod security standards (`/etc/rancher/rke2/rke2-pss.yaml`,
+  `pod-security-admission-config-file`):
+  https://docs.rke2.io/security/pod_security_standards
+- RKE2 source at the pinned tag: `pkg/rke2/psa.go` (the default pod
+  security file), `pkg/rke2/rke2_linux.go` (RKE2 writes its file only when
+  none is named), `pkg/cli/cmds/profile_linux.go` (the checks at the
+  start), `pkg/rke2/np.go` and `pkg/controllers/cisnetworkpolicy/` (the
+  network policies), `pkg/executor/staticpod/staticpod.go` (etcd as the
+  `etcd` user; the API server gets the file as an argument), `install.sh`
+  (`INSTALL_RKE2_TAR_PREFIX`, `/opt/rke2`), and
+  `bundle/share/rke2/rke2-cis-sysctl.conf`:
+  https://github.com/rancher/rke2/tree/v1.37.1%2Brke2r1
+- Kubernetes pod security admission, exemptions (an exempt namespace is
+  not checked, audited or warned about):
+  https://kubernetes.io/docs/concepts/security/pod-security-admission/#exemptions
+- `rke2-traefik` 41.2.003 (the label `app.kubernetes.io/name: rke2-traefik`,
+  the ports `web` and `websecure`):
+  https://rke2-charts.rancher.io/assets/rke2-traefik/rke2-traefik-41.2.003.tgz
+
+Update:
+
+- RKE2 manual upgrade (run the installer again, then restart
+  `rke2-server`; the plan must not skip intermediate minor versions; the
+  Kubernetes version-skew policy applies): https://docs.rke2.io/upgrades/manual
+- RKE2 air-gap upgrade (put the new image archives in `agent/images`):
+  https://docs.rke2.io/install/airgap
+- RKE2 installer at the pinned version (`install_airgap_tarball` moves the
+  RKE2 image archive into `agent/images`, replacing the old one):
+  https://github.com/rancher/rke2/blob/v1.37.1%2Brke2r1/install.sh
+- RKE2 server unit (`Type=notify`, `KillMode=process`,
+  `TimeoutStartSec=0`):
+  https://github.com/rancher/rke2/blob/v1.37.1%2Brke2r1/bundle/lib/systemd/system/rke2-server.service
+- Kubernetes version-skew policy ("require kube-apiserver to not skip minor
+  versions when upgrading, even in single-instance clusters"):
+  https://kubernetes.io/releases/version-skew-policy/
+- Semantic Versioning 2.0.0, section 11 (precedence):
+  https://semver.org/spec/v2.0.0.html
+- Helm 3.16 `helm list` (`--all`, `--filter`, `--short`; by default only
+  deployed or failed releases): `helm list --help` of the pinned v3.16.4
+- systemd invocation id (a new id for each run of a unit):
+  https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#%24INVOCATION_ID
+- `sources.list(5)` (an exact path that ends with `/` for a flat
+  repository, `Signed-By`, `/etc/apt/keyrings` for keys of the system
+  operator, `Trusted`): https://manpages.ubuntu.com/manpages/noble/man5/sources.list.5.html
+- `apt.conf(5)` (`Dir::Etc::sourcelist`, `Dir::State` lists, turning off
+  `pkgcache`): https://manpages.ubuntu.com/manpages/noble/man5/apt.conf.5.html
+- `apt-get(8)` (`upgrade --with-new-pkgs` never removes packages,
+  `--error-on=any`): https://manpages.ubuntu.com/manpages/noble/man8/apt-get.8.html
+- `dpkg(1)` (`--force-confdef`, `--force-confold`):
+  https://manpages.ubuntu.com/manpages/noble/man1/dpkg.1.html
+- `dpkg-scanpackages(1)`, the tool that writes `Packages`:
+  https://manpages.ubuntu.com/manpages/noble/man1/dpkg-scanpackages.1.html
 
 Install:
 

@@ -62,7 +62,7 @@ def place_values(
             approverUsername: "{approver}"
         # shortcut: the pod range, so MEHO may reach the built-in PostgreSQL and
         # OpenBao, until the chart derives these from its built-in parts (#4047).
-        # The update (#4736) removes the two keys.
+        # Then the next update removes the two keys.
         networkPolicy:
           postgresCIDR: "{pod_range}"
           vaultCIDR: "{pod_range}"
@@ -238,6 +238,7 @@ class CoreInstallTests(InstallTestCase):
                     "approver_user": "approver",
                     "cluster_cidr": "10.42.0.0/16",
                     "service_cidr": "10.43.0.0/16",
+                    "join_address": "",
                     "from_disk": False,
                 },
             },
@@ -267,12 +268,15 @@ class CoreInstallTests(InstallTestCase):
 
 class FromDiskTests(InstallTestCase):
     """The download folder on the disk of a cleaned machine: the RKE2 files
-    and the image archive are gone, the chart, bin/ and VERSION are there."""
+    and the image archive are gone, the chart, bin/ and VERSION are there.
+    RKE2 itself is installed, so its kernel settings file for the CIS
+    profile is in its share folder."""
 
     def setUp(self) -> None:
         super().setUp()
         shutil.rmtree(self.machine.download / "rke2")
         shutil.rmtree(self.machine.download / "images")
+        self.machine.install_rke2_files()
 
     def test_from_disk_runs_only_the_steps_that_need_the_host_name(self) -> None:
         result = self.machine.run("--from-disk", "--hostname", "new-name.example.org")

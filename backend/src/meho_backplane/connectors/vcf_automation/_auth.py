@@ -43,6 +43,7 @@ from meho_backplane.connectors.vcf_automation.session import (
 
 __all__ = [
     "load_credentials_with_override",
+    "provider_login_inputs",
     "tenant_login",
     "vcfa_provider_login",
 ]
@@ -98,6 +99,11 @@ def _require_username_password(
         ) from exc
 
 
+#: The provider org. The legacy Basic-auth user form falls back to it when
+#: the target sets no ``domain``.
+_DEFAULT_PROVIDER_DOMAIN = "System"
+
+
 def _compose_provider_basic_user(
     creds_username: str,
     provider_username: str | None,
@@ -111,7 +117,23 @@ def _compose_provider_basic_user(
     """
     if provider_username:
         return provider_username
-    return f"{creds_username}@{domain or 'System'}"
+    return f"{creds_username}@{domain or _DEFAULT_PROVIDER_DOMAIN}"
+
+
+def provider_login_inputs(target: VcfAutomationTargetLike) -> tuple[str | None, str | None]:
+    """Return the target fields the provider login reads: ``(provider_username, domain)``.
+
+    This mirrors :func:`_compose_provider_basic_user`, so the provider token
+    key (#5033) changes only when the login user changes. A set
+    ``provider_username`` is sent as is, so the domain is not read then.
+    Without it the user is ``<user>@<domain>``, and an unset domain is the
+    provider org (``System``), so a target with no domain and a target with
+    ``domain="System"`` log in the same way.
+    """
+    provider_username = getattr(target, "provider_username", None) or None
+    if provider_username:
+        return str(provider_username), None
+    return None, str(getattr(target, "domain", None) or _DEFAULT_PROVIDER_DOMAIN)
 
 
 async def vcfa_provider_login(

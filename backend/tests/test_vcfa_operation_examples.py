@@ -40,8 +40,8 @@ _OPS: list[Any] = [
 _REAL_LOOKING = re.compile(r"\b\d{1,3}(\.\d{1,3}){3}\b|\b[a-z0-9-]+\.(com|net|org|local|lan)\b")
 
 
-def test_all_38_operations_are_covered() -> None:
-    assert len({op.op_id for op in _OPS}) == 38
+def test_all_39_operations_are_covered() -> None:
+    assert len({op.op_id for op in _OPS}) == 39
 
 
 @pytest.mark.parametrize("op", _OPS, ids=lambda op: op.op_id)

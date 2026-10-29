@@ -102,7 +102,12 @@ from typing import Any, Final
 import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.tools._connector_shared import (
     _CONNECTOR_ID_DESCRIPTION,
     _OP_CLASS_READ,
@@ -114,6 +119,7 @@ from meho_backplane.mcp.tools._connector_shared import (
     _model_dump_json_safe,
     raise_invalid_params_for_ambiguous_scope,
     raise_invalid_params_for_builtin_write_forbidden,
+    raise_invalid_params_for_connector_in_use,
     raise_invalid_params_for_connector_not_found,
     raise_invalid_params_for_edit_value_error,
     raise_invalid_params_for_legacy_tenant_copy,
@@ -121,6 +127,7 @@ from meho_backplane.mcp.tools._connector_shared import (
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
     BuiltinConnectorWriteForbiddenError,
+    ConnectorInUseError,
     ConnectorListItem,
     ConnectorNotFoundError,
     ConnectorStatusFilter,
@@ -541,6 +548,9 @@ async def _delete_handler(
     service = ReviewService(operator)
     try:
         result = await service.delete_connector(connector_id, tenant_id=tenant_id)
+    except ConnectorInUseError as exc:
+        # #5027: something still uses the connector; nothing was deleted.
+        raise_invalid_params_for_connector_in_use(exc)
     except ConnectorNotFoundError as exc:
         # Unknown / cross-tenant label → -32602 connector_not_found
         # (#2481), not the dispatcher's bare -32603 class-name leak.
@@ -574,6 +584,7 @@ async def _delete_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         name=CONNECTOR_LIST_NAME,
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         feature="typed_connector_reads",
         description=(
@@ -931,7 +942,11 @@ register_mcp_tool(
             "operator's tenant — for global rows use this tool. "
             "Deleting a connector that still has enabled operations "
             "completes and returns an enabled_operations_deleted "
-            "warning (advisory, never blocks). One "
+            "warning (advisory, never blocks). A connector that a "
+            "sensor, runbook template, hosted agent, schedule, waiting "
+            "approval or queued operation run still uses is NOT "
+            "deleted: the call fails with connector_in_use and lists "
+            "each user, so remove or change them first. One "
             "meho_connector_delete audit row is written. Do NOT use "
             "this for a temporary roll-back — pair with "
             "meho_connector_disable for reversible state instead; "

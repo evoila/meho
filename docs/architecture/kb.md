@@ -70,10 +70,10 @@ There is **no kb search route**. kb-scoped search rides the G0.4-T5 `POST /api/v
 
 [`backend/src/meho_backplane/mcp/tools/knowledge.py`](../../backend/src/meho_backplane/mcp/tools/knowledge.py) — two of the ~17 agent-facing meta-tools:
 
-- **`search_knowledge(query, filters?, limit?)`** — `op_class="read"`, `operator` role. Hybrid retrieval over the tenant's kb corpus. Default limit 10, cap 50. Returns `{"hits": [...]}` with a 200-char snippet per hit.
+- **`search_knowledge(query?, slug?, filters?, limit?)`** — `op_class="read"`, `operator` role. With `query`: hybrid retrieval over the tenant's kb corpus. Default limit 10, cap 50. Returns `{"hits": [...]}` with a 200-char snippet per hit. With `slug` (#4138): returns the whole entry as `{"entry": {...}}`, through the same read as `meho://kb/{slug}`, and ignores the other arguments. Both arguments are optional in the schema; a call with neither gets `-32602`.
 - **`add_to_knowledge(slug, body, metadata?)`** — `op_class="write"`, `operator` role (deliberately **not** `tenant_admin` like the REST `POST` route: the agent surface is intentionally narrow; the audit row + broadcast event provide traceability, and the stricter REST gate is for fleet-wide bulk imports the agent surface does not perform). `InvalidKbSlugError` → JSON-RPC `-32602`.
 
-The tool descriptions are load-bearing agent UX (`search_knowledge` is one of the most-called tools across every G3-G9 flow) and teach the recipe "search → pick a slug → fetch the full body via the resource".
+The tool descriptions are load-bearing agent UX (`search_knowledge` is one of the most-called tools across every G3-G9 flow) and teach the recipe "search → pick a slug → read the full body with `search_knowledge` and `slug`, or with the `meho://kb/{slug}` resource".
 
 ### MCP resource (T3 #417)
 
@@ -101,7 +101,7 @@ The tool descriptions are load-bearing agent UX (`search_knowledge` is one of th
 Per CLAUDE.md postulate 5, the agent never sees vendor-specific tools. The kb flow is:
 
 1. When the agent needs an answer it doesn't already have, `search_knowledge` is one of its first calls (before asking the operator a factual question — the answer may already be captured).
-2. It picks a hit by slug, then `resources/read` on `meho://kb/{slug}` for the full body if the 200-char snippet is not enough.
+2. It picks a hit by slug. If the 200-char snippet is not enough, it reads the full body with `search_knowledge` and that `slug`, or with `resources/read` on `meho://kb/{slug}`.
 3. When the agent (or the operator working with it) learns something generalisable, it `search_knowledge` first to avoid duplicates, then `add_to_knowledge` — same-slug re-add merges in place via the body-hash short-circuit. Ephemeral session notes belong in `add_to_memory` (G5), not the kb.
 
 ## Decision #2 migration shape

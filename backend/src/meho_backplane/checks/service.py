@@ -62,6 +62,7 @@ from datetime import datetime
 import structlog
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.checks.repository import create_sensor, list_sensor_results
 from meho_backplane.checks.schemas import (
@@ -71,9 +72,14 @@ from meho_backplane.checks.schemas import (
     SensorResultRead,
     SensorResultsQuery,
 )
+from meho_backplane.db.connector_usage_lock import lock_connector_usage_shared
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import Sensor, SensorResult
-from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
+from meho_backplane.db.models import EndpointDescriptor, Sensor, SensorResult
+from meho_backplane.operations._lookup import (
+    lookup_descriptor,
+    parse_connector_id,
+    visible_scope_clause,
+)
 
 __all__ = [
     "SensorAdminService",
@@ -318,6 +324,44 @@ def _decode_results_cursor(cursor: str | None) -> datetime | None:
         raise SensorResultsCursorError(cursor) from exc
 
 
+async def _lock_and_require_operation(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    payload: SensorCreate,
+) -> None:
+    """Take the shared connector-usage lock, then read the sensor's op again (#5027).
+
+    Runs first in the sensor's write transaction. A connector delete holds
+    the same lock in exclusive mode from its in-use check to its commit, so
+    this waits for it; once it has committed, the op is gone and the create
+    fails cleanly with :class:`SensorOperationNotFoundError` instead of
+    saving a sensor for a deleted connector. Same scope rule as
+    :func:`lookup_descriptor`.
+    """
+    await lock_connector_usage_shared(session)
+    product, version, impl_id = parse_connector_id(payload.connector_id)
+    found = await session.scalar(
+        select(EndpointDescriptor.id)
+        .where(
+            visible_scope_clause(
+                EndpointDescriptor,
+                tenant_id=tenant_id,
+                product=product,
+                version=version,
+                impl_id=impl_id,
+            ),
+            EndpointDescriptor.product == product,
+            EndpointDescriptor.version == version,
+            EndpointDescriptor.impl_id == impl_id,
+            EndpointDescriptor.op_id == payload.op_id,
+            EndpointDescriptor.is_enabled.is_(True),
+        )
+        .limit(1)
+    )
+    if found is None:
+        raise SensorOperationNotFoundError(payload.connector_id, payload.op_id)
+
+
 class SensorAdminService:
     """Tenant-scoped CRUD over :class:`Sensor`.
 
@@ -392,6 +436,7 @@ class SensorAdminService:
             )
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
+            await _lock_and_require_operation(session, tenant_id, payload)
             try:
                 row = await create_sensor(
                     session,

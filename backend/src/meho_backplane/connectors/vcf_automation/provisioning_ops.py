@@ -17,6 +17,7 @@ op_id                                 tier       approval  wire
 ``vcfa.provider.role.list``           safe       no        GET …/globalRoles | …/roles (+org)
 ``vcfa.provider.org.create``          caution    yes       POST /cloudapi/1.0.0/orgs
 ``vcfa.provider.role.create``         caution    yes       POST …/globalRoles + rights + publish
+``vcfa.provider.role.delete``         dangerous  yes       DELETE /cloudapi/1.0.0/globalRoles/{id}
 ``vcfa.provider.user.create``         caution    yes       POST /cloudapi/1.0.0/users (+org)
 ``vcfa.provider.api_token.create``    dangerous  yes       user session, /oauth/… mint → Vault
 ``vcfa.provider.api_token.revoke``    dangerous  yes       user session, DELETE …/tokens/{id}
@@ -45,6 +46,7 @@ from meho_backplane.connectors.vcf_automation._op_schemas import (
 )
 from meho_backplane.connectors.vcf_automation._paths import (
     OAUTH_REGISTER_PATH,
+    PROVIDER_GLOBAL_ROLE_PATH,
     PROVIDER_GLOBAL_ROLES_PATH,
     PROVIDER_RIGHTS_PATH,
     PROVIDER_TOKEN_PATH,
@@ -264,8 +266,8 @@ _ROLE_LIST = VcfaTypedOp(
     description=(
         "Without 'org': lists the global roles (GET /cloudapi/1.0.0/globalRoles). "
         "With 'org': lists the roles that org can give a user (GET "
-        "/cloudapi/1.0.0/roles); a published global role shows up there. An "
-        "unknown org is an error."
+        "/cloudapi/1.0.0/roles); a published global role shows up there, and a "
+        "VM Apps org shows its own fixed roles. An unknown org is an error."
     ),
     parameter_schema={
         "type": "object",
@@ -438,7 +440,9 @@ _ORG_CREATE = VcfaTypedOp(
             "appliance makes the org in the background, org.id is null at first."
         ),
         next_step=(
-            "vcfa.provider.role.create with publish_to_org=<name>, then vcfa.provider.user.create."
+            "All Apps org: vcfa.provider.role.create with publish_to_org=<name>. VM Apps "
+            "org: pick one of its own roles with vcfa.provider.role.list org=<name>. "
+            "Then vcfa.provider.user.create."
         ),
     ),
 )
@@ -532,8 +536,10 @@ _ROLE_CREATE = VcfaTypedOp(
         ),
         preconditions=(
             "Pass base_role or rights (or both) for a new role. Look up exact right "
-            "names with vcfa.provider.right.list; the publish_to_org org must exist. "
-            "A person must approve the call."
+            "names with vcfa.provider.right.list; the publish_to_org org must exist "
+            "and be an All Apps org: a VM Apps org cannot get a global role, so the "
+            "call answers invalid_request and names that org's own roles. A person "
+            "must approve the call."
         ),
         output_shape=(
             "{status: created | updated | unchanged | invalid_request, role: {id, "
@@ -549,6 +555,69 @@ _ROLE_CREATE = VcfaTypedOp(
     ),
 )
 
+_ROLE_DELETE = VcfaTypedOp(
+    op_id="vcfa.provider.role.delete",
+    handler_attr="provider_role_delete",
+    plane="provider",
+    path=PROVIDER_GLOBAL_ROLE_PATH,
+    summary="Delete a custom VCF Automation global role by name; safe to run twice.",
+    description=(
+        "Finds the global role by its exact name (case matters) and deletes it "
+        "with DELETE /cloudapi/1.0.0/globalRoles/{id}. A role that does not exist "
+        "answers 'unchanged'. A built-in role is refused and nothing is sent. When "
+        "several roles carry exactly that name, the call is refused."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {
+            "name": {**_FIQL_NAME, "description": "The global role name to delete."},
+        },
+        "required": ["name"],
+        "additionalProperties": False,
+        "examples": [{"name": "<role-name>"}],
+    },
+    response_schema={
+        "type": "object",
+        "properties": {
+            "status": _status_field(["deleted", "unchanged", "invalid_request"]),
+            "role": {
+                **obj(
+                    "The role that was found; null when there is none.",
+                    {
+                        "id": field("string", "The role id (a URN)."),
+                        "name": field("string", "The role name."),
+                    },
+                ),
+                "type": ["object", "null"],
+            },
+            "guidance": _GUIDANCE_FIELD,
+        },
+        "required": ["status", "guidance"],
+        "additionalProperties": True,
+    },
+    group_key="vcfa-provider-writes",
+    tags=("write", "vcfa", "provider", "rbac", "delete"),
+    safety_level="dangerous",
+    requires_approval=True,
+    llm_instructions=guidance(
+        when_to_call=(
+            "Call to remove a custom global role that nobody needs, for example one "
+            "left behind by a vcfa.provider.role.create that could not publish it."
+        ),
+        preconditions=(
+            "Check the name with vcfa.provider.role.list first. Users in any org that "
+            "hold the role lose it; the appliance may refuse while users still hold "
+            "it. A second person must approve the call."
+        ),
+        output_shape=(
+            "{status: deleted | unchanged | invalid_request, role: {id, name}, "
+            "guidance}. 'unchanged' means no global role has that name. "
+            "'invalid_request' means the role is built in; nothing was sent."
+        ),
+        next_step="vcfa.provider.role.list to confirm the role is gone.",
+    ),
+)
+
 _USER_CREATE = VcfaTypedOp(
     op_id="vcfa.provider.user.create",
     handler_attr="provider_user_create",
@@ -557,8 +626,9 @@ _USER_CREATE = VcfaTypedOp(
     summary="Create a local VCF Automation org user with a role; safe to run twice.",
     description=(
         "Creates a local user in an org with POST /cloudapi/1.0.0/users, holding one "
-        "org role (a published global role). The password is read from Vault at "
-        "password_secret_ref; it is never a parameter and never returned."
+        "org role (a published global role, or a VM Apps org's own role). The "
+        "password is read from Vault at password_secret_ref; it is never a parameter "
+        "and never returned."
     ),
     parameter_schema={
         "type": "object",
@@ -614,7 +684,8 @@ _USER_CREATE = VcfaTypedOp(
     llm_instructions=guidance(
         when_to_call="Call to create the local org user that will own the tenant API token.",
         preconditions=(
-            "The org exists and the role is published to it. Store the password in "
+            "The org exists and has the role (see vcfa.provider.role.list with org). "
+            "Store the password in "
             "Vault first (vault.kv.put) and pass its path. A person must approve "
             "the call."
         ),
@@ -908,6 +979,7 @@ VCFA_PROVISIONING_OPS: Final[tuple[VcfaTypedOp, ...]] = (
     _ROLE_LIST,
     _ORG_CREATE,
     _ROLE_CREATE,
+    _ROLE_DELETE,
     _USER_CREATE,
     _API_TOKEN_CREATE,
     _API_TOKEN_REVOKE,

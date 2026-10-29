@@ -205,4 +205,7 @@ VAULT_TOKEN_CREATE_AND_STORE_LLM_INSTRUCTIONS: dict[str, Any] = {
         "Check the token with vault.token.lookup_accessor using the accessor. "
         "Revoke it with vault.token.revoke_accessor when it is no longer needed."
     ),
+    # Keep these fields in the inline answer even when a long policy list
+    # is moved behind a result handle.
+    "result_scalars": {"keys": ["accessor", "expire_time", "ttl_seconds"]},
 }

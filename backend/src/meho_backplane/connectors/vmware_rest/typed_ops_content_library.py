@@ -380,6 +380,7 @@ VMWARE_CONTENT_LIBRARY_SUBSCRIBED_PROBE_OP = VmwareTypedOp(
             "login), pass the URL and the ssl_thumbprint to "
             "vmware.composite.content_library.subscribed.create."
         ),
+        "result_scalars": {"keys": ["reachable", "status"]},
     },
 )
 

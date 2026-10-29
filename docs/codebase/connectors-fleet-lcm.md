@@ -135,6 +135,7 @@ for example `https://[fd00::10]:8443`. The login always uses its own pooled
 client (`_LoginEndpoint`). It gets the same address check (SSRF guard) and the
 same TLS rules (`verify_tls`, `tls_ca_pin`) as the target. A target's
 `tls_server_name` is used only when the login goes to the target's own host.
+The login does not send the target's `fqdn`, so the login endpoint has none.
 The token key is built from this resolved login address. The connector keeps,
 per target, the key its token sits under (`_login_keys`), so the `401` path
 (`invalidate_session`) finds the token without reading the secret again.

@@ -83,6 +83,7 @@ class _StubTarget:
     port: int | None
     secret_ref: str
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
+    fqdn: str | None = None
     id: UUID = field(default_factory=uuid4)
     tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
@@ -295,15 +296,24 @@ async def test_targets_with_one_secret_and_vcf_ops_url_share_one_login_and_renew
     """Two targets on different hosts log in once at the shared ``vcf_ops_url``.
 
     The token is keyed by the login address from the secret, not by the
-    target's own host. A renewal on one target gives both the new token, and
-    a ``401`` on the other target with the old token keeps the new one.
+    target's own name, host or ``fqdn`` (the login does not send the
+    ``fqdn``). A renewal on one target gives both the new token, and a
+    ``401`` on the other target with the old token keeps the new one.
     """
     shared_secret = "fleet-lcm/shared"
     first = _StubTarget(
-        name="fleet-lcm-a", host="fleet-lcm-a.test.invalid", port=443, secret_ref=shared_secret
+        name="fleet-lcm-a",
+        host="fleet-lcm-a.test.invalid",
+        port=443,
+        secret_ref=shared_secret,
+        fqdn="fleet-a.example.test",
     )
     second = _StubTarget(
-        name="fleet-lcm-b", host="fleet-lcm-b.test.invalid", port=None, secret_ref=shared_secret
+        name="fleet-lcm-b",
+        host="fleet-lcm-b.test.invalid/fleet-lcm",
+        port=None,
+        secret_ref=shared_secret,
+        fqdn="fleet-b.example.test",
     )
 
     async def _ops_url_loader(_target: FleetLcmTargetLike, _operator: Operator) -> dict[str, str]:

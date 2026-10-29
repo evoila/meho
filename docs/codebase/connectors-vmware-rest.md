@@ -8,8 +8,8 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 75 hand-authored composites
-that orchestrate cross-spec workflows: 17 read composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 76 hand-authored composites
+that orchestrate cross-spec workflows: 18 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
 in `#2258`; plus the four guest-operations reads `#3100` and the
@@ -17,7 +17,8 @@ Supervisor status read `#3281` + the vSphere Namespace status read
 `namespace.status` / `#3502` + the storage-policy list read `#3494` +
 the two SUBSCRIBED content-library reads `content_library.subscribed.status` +
 `content_library.subscribed.items.list` / `#3495` + the datastore
-cache-refresh read `datastore.refresh` / `#3789` + the VM limit and
+cache-refresh read `datastore.refresh` / `#3789` + the datastore file list
+read `datastore.file.list` / `#3432` + the VM limit and
 reservation read `vm.resource_allocation.show` / `#3880` + the migration
 inventory read `vmware.migration.inventory`) and 58 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
@@ -493,8 +494,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `vcenter.yaml` by `test_connectors_vmware_rest_library_reconcile.py`.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 75
-  `_CompositeSpec` rows (17 read — incl. the `#3789` datastore
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 76
+  `_CompositeSpec` rows (18 read — incl. the `#3789` datastore
   cache-refresh read `datastore.refresh` — + 46 dangerous/destructive
   writes + 12 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
@@ -1212,8 +1213,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 75 `vmware.composite.*` rows with
-   `source_kind="composite"` — 17 reads (16 with `safety_level="safe"` +
+   queued registrar and upserts: the 76 `vmware.composite.*` rows with
+   `source_kind="composite"` — 18 reads (17 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
    service principals), and 58 writes, all `requires_approval=True`
@@ -1320,8 +1321,8 @@ literal into their `RetrievePropertiesEx` path; `_post_soap` substitutes the
 ServiceContent-provided PC moid **only** when the caller's moid equals that
 literal (a guarded substitution — any other PC moid is left untouched).
 
-*vim method map (all on `POST /sdk`, SOAP 1.1, `urn:vim25`).* Ten methods
-total — three session/bootstrap + seven op methods, each with a builder +
+*vim method map (all on `POST /sdk`, SOAP 1.1, `urn:vim25`).* Twelve methods
+total — three session/bootstrap + nine op methods, each with a builder +
 parser in `soap.py`; `_post_vmomi_json`'s esxi guard routes the op methods
 through `_post_soap`, whose parsers return the same VI-JSON dict shapes the
 unchanged consumers read:
@@ -1336,6 +1337,7 @@ unchanged consumers read:
 | datastore_mount_nfs | `HostDatastoreSystem.CreateNasDatastore` | `configManager.datastoreSystem` moid | Datastore MoRef (synchronous) |
 | disk_mark_flash | `HostStorageSystem.MarkAsSsd_Task` / `MarkAsNonSsd_Task` | `configManager.storageSystem` moid | Task MoRef → poll `Task.info` |
 | datastore.refresh (`#3789`) | `Datastore.RefreshDatastore` / `RefreshDatastoreStorageInfo` | Datastore moid (`server:/export` on ESXi) | void (204 / empty) → summary read back via `RetrievePropertiesEx` |
+| datastore.file.list (`#3432`) | `HostDatastoreBrowser.SearchDatastore_Task` / `SearchDatastoreSubFolders_Task` | `Datastore.browser` moid | Task MoRef → poll `Task.info`; `info.result` is the `HostDatastoreBrowserSearchResults` |
 
 *Native primitive typing (the codec crux).* An **explicit** `xsi:type` is
 authoritative (`xsd:boolean` → `bool`, integer → `int`, float → `float`, any
@@ -1608,7 +1610,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 75 composites (17 reads + 58 writes) land as `source_kind="composite"`
+The 76 composites (18 reads + 58 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1705,7 +1707,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 75 composites are hand-authored aggregators the connector ships as
+The 76 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -3338,8 +3340,8 @@ None of the three composites registers a park-time preview builder (matching
 
 ### AI guidance of the storage and network operations
 
-The thirteen storage and network multi-step operations (`datastore.usage`,
-`datastore.refresh`, `datastore.dir.create`, `datastore.file.delete`, the three
+The fourteen storage and network multi-step operations (`datastore.usage`,
+`datastore.refresh`, `datastore.file.list`, `datastore.dir.create`, `datastore.file.delete`, the three
 `storage_policy.*` operations, `network.portgroup.audit` / `.create` /
 `.security.set` / `.vlan.set` / `.delete` and `host.standard_portgroup.delete`)
 keep their AI guidance (`llm_instructions`: `when_to_call`, `preconditions`,
@@ -3613,6 +3615,49 @@ identifier on a standalone ESXi host, where `_post_vmomi_json`'s esxi guard
 carries it in the `<_this type="Datastore">` self-reference over SOAP. The
 two POST legs are reconciled against `vi-json.yaml` by
 `test_connectors_vmware_rest_composites_read_reconcile.py`.
+
+### Datastore file list (`datastore.file.list`, #3432)
+
+`vmware.composite.datastore.file.list` is a read composite (safety `safe`, no
+approval) in `composites/_datastore_list.py`. It lists the files and folders
+in one folder of a datastore, so a check can confirm a plain datastore file
+(for example a kickstart ISO) through MEHO instead of `govc`.
+
+- **Input.** `datastore` is the datastore **name** (on vCenter a
+  `datastore-NNN` moid also works, for two datastores with one name).
+  `path` is a folder relative to the root (empty = the root). `pattern` is
+  an optional file name pattern (`*.iso`). `include_usage` adds more data
+  (below).
+- **Finding the datastore.** The target flavor comes from
+  `classify_host_target`. On vCenter the name is looked up with
+  `GET /vcenter/datastore` (`filter.names`, checked again on the client). A
+  standalone ESXi host has no such call, so the name is matched in the
+  `datastore` list of `ha-datacenter`. When that name read is partial (a
+  datastore left out, or a name the session may not read), the op raises
+  `IncompleteAnswerError` instead of answering `not_found` for a datastore
+  that may exist. Then the shared
+  `_datastore_browse.resolve_datastore` reads name, type and browser.
+- **Listing.** One `SearchDatastore_Task` on the folder (the shared
+  `_datastore_browse.search`). Each row: `name`, `path`, `kind`
+  (file / folder), `file_type`, `size_bytes` (null for a folder) and
+  `modified`. A missing folder (`FileNotFound`) is `status=not_found`.
+- **`include_usage`.** One `SearchDatastoreSubFolders_Task` below the
+  folder sums each folder row: `size_bytes` (all files below it),
+  `file_count`, `latest_modified`. Then `_datastore_claims.vm_users` names
+  the registered VMs that use each row, with the same rules as the
+  `datastore.file.delete` check. On vSAN / vVol that check cannot be
+  trusted (VM files are named by folder UUID), so it is skipped:
+  `vm_check="not_supported"`, `vms=null`.
+- **ESXi.** The browse and its task poll go through `_post_vmomi_json`,
+  so on ESXi they are SOAP (`soap.build_search_datastore_envelope`, fields
+  in WSDL order). The SOAP answer has a single `file` entry as an object,
+  not a list, and sizes as text; the handler reads both.
+- **Answer.** `status` is `ok`, `not_found`, `ambiguous`,
+  `invalid_request` or `unsupported_host_target` (a target that is neither
+  vCenter nor ESXi; a typed answer, not `connector_error`). A large
+  `entries` list becomes a result handle; `llm_instructions.result_scalars`
+  keeps `status`, the datastore fields, `path`, `count`, `vm_check` and
+  `guidance` next to the handle.
 
 ### AI guidance of the guest, event, performance and typed reads
 

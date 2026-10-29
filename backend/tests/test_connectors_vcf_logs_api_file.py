@@ -1094,6 +1094,66 @@ _SECRET_PAGES: list[Any] = [
         id="yaml-with-a-comment-in-a-highlighted-block",
     ),
     pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        "<pre>sessionId: example-session-id-0123456789</pre>",
+        "example-session-id-0123456789",
+        id="yaml-session-id-in-a-text-only-block",
+    ),
+    pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        "<code>licenseKey: example-licence-key-value-0123456789</code>",
+        "example-licence-key-value-0123456789",
+        id="yaml-licence-key-in-a-text-only-code-block",
+    ),
+    pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        "<pre># login\nuser: admin\nsessionId: example-session-id-0123456789\n</pre>",
+        "example-session-id-0123456789",
+        id="yaml-with-a-comment-in-a-text-only-block",
+    ),
+    pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        "<pre>x:\n  sessionId: example-session-id-0123456789\n"
+        "x:\n  sessionId: example-session-id-0123456789\n</pre>",
+        "example-session-id-0123456789",
+        id="yaml-with-a-repeated-key-in-a-text-only-block",
+    ),
+    pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        '<pre>{"example":"POST /sessions\\n{\\"password\\":'
+        '\\"example-secret-value-0123456789\\"}"}</pre>',
+        "example-secret-value-0123456789",
+        id="json-after-a-request-line-inside-an-example-string",
+    ),
+    pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        '<pre>{<span>"example"</span>:"POST /sessions\\n{\\"password\\":'
+        '\\"example-secret-value-0123456789\\"}"}</pre>',
+        "example-secret-value-0123456789",
+        id="json-after-a-request-line-inside-an-example-string-in-a-highlighted-block",
+    ),
+    pytest.param(
+        "application/json",
+        _API_DOCS,
+        '{"example":"POST /sessions\\n{\\"password\\":\\"example-secret-value-0123456789\\"}"}',
+        "example-secret-value-0123456789",
+        id="json-after-a-request-line-inside-an-example-string-in-a-json-file",
+    ),
+    pytest.param(
+        "application/json",
+        _API_DOCS,
+        '{"example":"POST /sessions\\n{\\"x\\":{\\"password\\":'
+        '\\"example-secret-value-0123456789\\"},\\"x\\":1}"}',
+        "example-secret-value-0123456789",
+        id="json-with-a-repeated-key-after-a-request-line-inside-an-example-string",
+    ),
+    pytest.param(
         "application/json",
         _API_DOCS,
         '{"username": "admin", "password": "it\'s-a-secret-0123456789"}',

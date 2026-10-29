@@ -705,6 +705,153 @@ def test_html_example_with_brackets_that_open_no_json_is_unchanged() -> None:
 
 
 @pytest.mark.parametrize(
+    ("content_type", "document", "expected"),
+    [
+        (
+            _JSON,
+            '{"example":"POST /sessions\\n{\\"password\\":\\"' + _SECRET + '\\"}"}',
+            '{"example":"POST /sessions\\n{\\"password\\":\\"' + REDACTED + '\\"}"}',
+        ),
+        (
+            _XML,
+            f'<doc><example>POST /sessions\n{{"password": "{_SECRET}"}}</example></doc>',
+            f'<doc><example>POST /sessions\n{{"password":"{REDACTED}"}}</example></doc>',
+        ),
+        (
+            _HTML,
+            f'<p>Send POST /sessions with {{"password": "{_SECRET}"}} as the body</p>',
+            f'<p>Send POST /sessions with {{"password":"{REDACTED}"}} as the body</p>',
+        ),
+        (
+            _HTML,
+            f'<pre>{{"example":"POST /sessions\\n{{\\"password\\":\\"{_SECRET}\\"}}"}}</pre>',
+            f'<pre>{{"example":"POST /sessions\\n{{\\"password\\":\\"{REDACTED}\\"}}"}}</pre>',
+        ),
+    ],
+    ids=["json-value", "xml-text", "html-prose", "html-pre-json-value"],
+)
+def test_json_after_a_request_line_inside_a_text_value_is_checked(
+    content_type: str, document: str, expected: str
+) -> None:
+    """A request line before the body does not hide the body from the parser, in any text value."""
+    text, count = _check(document, content_type)
+    assert text == expected
+    assert count == 1
+
+
+def test_json_after_a_request_line_inside_a_yaml_block_value_is_checked() -> None:
+    document = f'example: |\n  POST /sessions\n  {{"password": "{_SECRET}"}}\n'
+    text, count = _check(document, _YAML)
+    assert yaml.safe_load(text) == {"example": f'POST /sessions\n{{"password":"{REDACTED}"}}\n'}
+    assert count == 1
+
+
+@pytest.mark.parametrize(
+    ("content_type", "document", "expected"),
+    [
+        (
+            _JSON,
+            '{"example":"POST /sessions\\n{\\"x\\":{\\"password\\":\\"'
+            + _SECRET
+            + '\\"},\\"x\\":1}"}',
+            f'{{"example":"{REDACTED}"}}',
+        ),
+        (
+            _HTML,
+            '<pre>{<span>"example"</span>:"POST /sessions\\n{\\"password\\":\\"'
+            + _SECRET
+            + '\\"}"}</pre>',
+            f"<pre>{REDACTED}</pre>",
+        ),
+        (
+            _HTML,
+            '<pre>{<span>"example"</span>:"POST /sessions\\n{\\"x\\":{\\"password\\":\\"'
+            + _SECRET
+            + '\\"},\\"x\\":1}"}</pre>',
+            f"<pre>{REDACTED}</pre>",
+        ),
+    ],
+    ids=[
+        "repeated-key-after-a-request-line",
+        "highlighted-block",
+        "highlighted-block-repeated-key",
+    ],
+)
+def test_json_after_a_request_line_that_cannot_come_back_is_withheld(
+    content_type: str, document: str, expected: str
+) -> None:
+    text, count = _check(document, content_type)
+    assert text == expected
+    assert count == 1
+
+
+@pytest.mark.parametrize("tag", ["pre", "code"])
+@pytest.mark.parametrize(
+    ("example", "expected", "replaced"),
+    [
+        (f"sessionId: {_SECRET}", f"sessionId: '{REDACTED}'", 1),
+        (f"licenseKey: {_SECRET}", f"licenseKey: '{REDACTED}'", 1),
+        (f"user: admin\npassword: {_SECRET}\n", f"user: admin\npassword: '{REDACTED}'\n", 1),
+        (f"# login\nsessionId: {_SECRET}\n", f"sessionId: '{REDACTED}'\n", 1),
+        (f"x:\n  sessionId: {_SECRET}\nx: 1", "x: 1", 1),
+        (f"sessionId: &s {_SECRET}\nother: *s", f"sessionId: '{REDACTED}'\nother: '{REDACTED}'", 2),
+        (
+            f'user: admin\nbody: {{"sessionId": "{_SECRET}"}}',
+            f"user: admin\nbody:\n  sessionId: '{REDACTED}'",
+            1,
+        ),
+        (f"- user: admin\n  password: {_SECRET}", f"- user: admin\n  password: '{REDACTED}'", 1),
+    ],
+    ids=[
+        "session-id",
+        "licence-key",
+        "two-keys",
+        "comment",
+        "repeated-key",
+        "alias",
+        "flow-mapping-value",
+        "list",
+    ],
+)
+def test_html_example_in_yaml_is_checked_like_a_yaml_file(
+    tag: str, example: str, expected: str, replaced: int
+) -> None:
+    """A text-only block that is a YAML mapping or list comes back from the parsed copy.
+
+    A comment is not in the copy. A key named twice keeps the last value;
+    the dropped value was marked on the node graph and is counted, and it
+    does not come back. An alias to a secret value is replaced too.
+    """
+    text, count = _check(f"<{tag}>{example}</{tag}>", _HTML)
+    assert text == f"<{tag}>{expected}</{tag}>"
+    assert count == replaced
+
+
+def test_html_example_in_yaml_without_a_secret_comes_back_from_the_parsed_copy() -> None:
+    text, count = _check("<pre>user: admin\nroles: [reader]\n</pre>", _HTML)
+    assert text == "<pre>user: admin\nroles:\n- reader\n</pre>"
+    assert count == 0
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "<pre>GET /api/v2/hosts\nAccept: application/json</pre>",
+        "<pre>$ meho connector list</pre>",
+        "<code>true</code>",
+        "<span>user: admin</span>",
+        "<p>sessionTimeout: 1800</p>",
+    ],
+    ids=["request-with-a-header", "shell-line", "scalar", "span-is-page-text", "prose"],
+)
+def test_html_text_that_is_no_yaml_example_stays_as_written(document: str) -> None:
+    """Only a ``<pre>`` or ``<code>`` block that is a YAML mapping or list is an example in YAML."""
+    text, count = _check(document, _HTML)
+    assert text == document
+    assert count == 0
+
+
+@pytest.mark.parametrize(
     "document",
     [
         f'<pre><span id="password">{_SECRET}</span>{{"ok": true}}</pre>',

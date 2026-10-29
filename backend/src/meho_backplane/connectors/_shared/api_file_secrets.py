@@ -48,9 +48,13 @@ What the helper does, in order:
    * HTML ``<script>`` blocks: JSON content is checked like a JSON file.
      Any other script content becomes the placeholder; the helper cannot
      parse JavaScript, so it does not return it.
-   * A text value that is itself a JSON object or list (a sample request
-     in a description, a ``<pre>`` block) is parsed and checked the same
-     way.
+   * Every JSON object in a text value (a sample request in a
+     description, the body after a request line in a ``<pre>`` block) is
+     parsed and checked the same way, and written back from the parsed
+     copy. A text value whose JSON names a key twice is withheld whole.
+   * An HTML ``<pre>`` or ``<code>`` block that holds text alone and is
+     a YAML mapping or list is checked like a YAML file; one split by
+     child elements fails closed (:mod:`.api_file_markup`).
    * A text value that holds a private key in PEM form, under any name.
 
 4. Runs the caller's text rule, when one is given, on every text value
@@ -77,8 +81,6 @@ from dataclasses import dataclass
 from typing import Final
 from urllib.parse import parse_qsl, urlencode
 
-import yaml
-
 from meho_backplane.connectors._shared.api_file_markup import check_html, check_xml
 from meho_backplane.connectors._shared.api_file_values import (
     REDACTED,
@@ -88,6 +90,7 @@ from meho_backplane.connectors._shared.api_file_values import (
     dump_json,
     is_secret_name,
 )
+from meho_backplane.connectors._shared.api_file_yaml import check_yaml
 
 __all__ = [
     "REDACTED",
@@ -126,10 +129,6 @@ _ENDINGS: Final[dict[str, str]] = {
     ".html": "html",
     ".htm": "html",
 }
-
-_YAML_STR_TAG: Final[str] = "tag:yaml.org,2002:str"
-_YAML_LOADER: Final[type[yaml.SafeLoader]] = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
-_YAML_DUMPER: Final[type[yaml.SafeDumper]] = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,7 +210,7 @@ def scrub_query_string(path: str) -> tuple[str, int]:
 
 
 # ---------------------------------------------------------------------------
-# The walk over parsed values (JSON, YAML, and text that holds JSON)
+# JSON: parsed with the stdlib, written back compact
 # ---------------------------------------------------------------------------
 
 
@@ -228,137 +227,9 @@ def _check_json(text: str, path: str, text_rule: TextRule | None) -> tuple[str, 
     return dump_json(copy), scrubber.count
 
 
-# ---------------------------------------------------------------------------
-# YAML: aliases are handled on the node graph, before the values exist
-# ---------------------------------------------------------------------------
-
-
-def _check_yaml(text: str, path: str, text_rule: TextRule | None) -> tuple[str, int]:
-    loader = _YAML_LOADER(text)
-    try:
-        try:
-            root = loader.get_single_node()
-            if root is None:
-                return "", 0
-            count = _redact_yaml_nodes(root)
-            data = loader.construct_document(root)
-        except RecursionError:
-            raise
-        except Exception as exc:
-            raise ApiFileFormatError(
-                f"{path} is not well-formed YAML ({_yaml_reason(exc)}); the file is not returned"
-            ) from None
-    finally:
-        loader.dispose()
-    scrubber = Scrubber(count, text_rule=text_rule)
-    copy = scrubber.tree(data, {})
-    try:
-        text_out = yaml.dump(copy, Dumper=_YAML_DUMPER, sort_keys=False, allow_unicode=True)
-    except yaml.YAMLError as exc:
-        raise ApiFileFormatError(
-            f"{path} cannot be written back as YAML ({type(exc).__name__}); not returned"
-        ) from None
-    return text_out, scrubber.count
-
-
-def _yaml_reason(exc: Exception) -> str:
-    """The kind of YAML error and where it is, never what the file says there.
-
-    PyYAML's ``problem`` text can quote the file (an unknown tag names the
-    tag), so only the error class and the position are returned. Building
-    the values can fail outside PyYAML's own errors too: a tagged scalar
-    that does not fit its tag (``!!int made-up``, ``!!float``,
-    ``!!timestamp``, ``!!bool``) raises the error of the stdlib call that
-    read it, and that error quotes the value. Such an error has no
-    position, so only its class is returned.
-    """
-    kind = type(exc).__name__
-    if isinstance(exc, yaml.MarkedYAMLError):
-        mark = exc.problem_mark or exc.context_mark
-        if mark is not None:
-            return f"{kind} at line {mark.line + 1}, column {mark.column + 1}"
-    return kind
-
-
-def _redact_yaml_nodes(root: yaml.Node) -> int:
-    """Replace the value nodes of secret-named keys in the node graph.
-
-    An alias points at the same node object as its anchor, so marking
-    the node (and every node inside it) and replacing each place that
-    refers to a marked node covers the anchor and every alias at once.
-    """
-    secret: set[int] = set()
-    _collect_secret_nodes(root, secret, set())
-    if not secret:
-        return 0
-    return _replace_marked_nodes(root, secret, set())
-
-
-def _collect_secret_nodes(node: yaml.Node, secret: set[int], seen: set[int]) -> None:
-    if id(node) in seen:
-        return
-    seen.add(id(node))
-    if isinstance(node, yaml.MappingNode):
-        for key, value in node.value:
-            if isinstance(key, yaml.ScalarNode) and is_secret_name(str(key.value)):
-                _mark_subtree(value, secret)
-            else:
-                _collect_secret_nodes(value, secret, seen)
-    elif isinstance(node, yaml.SequenceNode):
-        for item in node.value:
-            _collect_secret_nodes(item, secret, seen)
-
-
-def _mark_subtree(node: yaml.Node, secret: set[int]) -> None:
-    if id(node) in secret:
-        return
-    secret.add(id(node))
-    if isinstance(node, yaml.MappingNode):
-        for key, value in node.value:
-            _mark_subtree(key, secret)
-            _mark_subtree(value, secret)
-    elif isinstance(node, yaml.SequenceNode):
-        for item in node.value:
-            _mark_subtree(item, secret)
-
-
-def _replace_marked_nodes(node: yaml.Node, secret: set[int], seen: set[int]) -> int:
-    if id(node) in seen:
-        return 0
-    seen.add(id(node))
-    count = 0
-    if isinstance(node, yaml.MappingNode):
-        pairs: list[tuple[yaml.Node, yaml.Node]] = []
-        for key, value in node.value:
-            if id(key) in secret:
-                key, count = _redacted_node(), count + 1
-            else:
-                count += _replace_marked_nodes(key, secret, seen)
-            if id(value) in secret:
-                value, count = _redacted_node(), count + 1
-            else:
-                count += _replace_marked_nodes(value, secret, seen)
-            pairs.append((key, value))
-        node.value = pairs
-    elif isinstance(node, yaml.SequenceNode):
-        items: list[yaml.Node] = []
-        for item in node.value:
-            if id(item) in secret:
-                item, count = _redacted_node(), count + 1
-            else:
-                count += _replace_marked_nodes(item, secret, seen)
-            items.append(item)
-        node.value = items
-    return count
-
-
-def _redacted_node() -> yaml.ScalarNode:
-    return yaml.ScalarNode(_YAML_STR_TAG, REDACTED)
-
-
 _CHECKERS: Final[dict[str, Callable[[str, str, TextRule | None], tuple[str, int]]]] = {
     "json": _check_json,
-    "yaml": _check_yaml,
+    "yaml": check_yaml,
     "xml": check_xml,
     "html": check_html,
 }

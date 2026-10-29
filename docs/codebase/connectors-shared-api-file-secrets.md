@@ -51,9 +51,11 @@ copy keeps its format and every value keeps its type.
 - `ApiFileFormatError` (a `ValueError`) — the message names the reason
   (format, line, column), never the text.
 
-The two sibling modules hold the parts: `api_file_values.py` has the
-`Scrubber` walk over parsed values and the placeholder;
-`api_file_markup.py` has the XML and HTML parsers and writers.
+The three sibling modules hold the parts: `api_file_values.py` has the
+`Scrubber` walk over parsed values, the placeholder and the search for
+JSON documents inside a text value; `api_file_yaml.py` has the YAML
+check on the node graph, for a YAML file and for a YAML example in an
+HTML page; `api_file_markup.py` has the XML and HTML parsers and writers.
 
 ## What counts as a secret name
 
@@ -118,13 +120,21 @@ is how `{"credentials": {"default": "..."}}` got through a text scan.
      Any other script content becomes the placeholder; the helper cannot
      parse JavaScript, so it does not return it. `<style>` content is
      free text.
-   - HTML `<pre>`, `<code>` and `<span>` blocks that hold text alone are
-     examples. Every JSON object in the text (or list that holds one) is
-     checked like a JSON file and written back from the parsed copy: a
-     request line followed by its JSON body is the usual shape. The text
-     around the JSON goes through the general rules. A block the parser
-     cannot finish within a bounded amount of work (brackets that open
-     over and over and never close) comes back as the placeholder.
+   - An HTML `<pre>` or `<code>` block that holds text alone is an
+     example. When its text is not JSON but a YAML mapping or list
+     (`sessionId: ...`, a YAML request body), it is checked like a YAML
+     file and written back from the parsed copy: a comment or a repeated
+     key is not in the copy, so a secret the parser dropped does not come
+     back either, and the dropped value is counted. YAML is tried before
+     the JSON documents in the text, so a YAML example with a flow
+     mapping in it (`body: {"sessionId": "..."}`) is checked whole. The
+     copy comes from the safe dumper, so the text can change its look
+     (`roles: [reader]` comes back as a block list; an unquoted `12:30`
+     is a number in YAML 1.1). Any other text in such a block (a request
+     line and its JSON body, a shell command, prose) is checked like any
+     text value: every JSON document in it is checked, the rest goes
+     through the general rules. A `<span>` is ordinary page text and is
+     not an example in YAML.
    - An HTML `<pre>` or `<code>` block with child elements (a page
      colours its example with `<span>`) fails closed. Two checks run:
      every child element gets the check it would get on its own (a
@@ -145,15 +155,22 @@ is how `{"credentials": {"default": "..."}}` got through a text scan.
      check withholds and counts it (next point), so the block is
      withheld too. A `<span>` with child elements is ordinary page text
      and gets the element check.
-   - Any text value that is itself a JSON object or list (a sample
-     request in a description, a `<pre>` block) is parsed and checked
-     the same way, and written back from the parsed copy, also when
-     nothing was replaced. Such a value that names a key twice in one
-     object, at any depth, is withheld whole and counted once: the
-     parser would keep one value and drop the other, so neither the
-     parsed copy nor the count would say anything about the dropped
-     one. The rule holds at every depth of nesting, also for JSON text
-     inside a text value inside JSON text.
+   - Every JSON object in a text value (or list that holds one) is
+     parsed and checked the same way, and written back from the parsed
+     copy, also when nothing was replaced. This holds for every text
+     value in every format: a sample request in a description, a `<pre>`
+     block, prose in a `<p>`, an attribute value. A request line before
+     the body (`"example": "POST /sessions\n{...}"`) does not hide the
+     body: each `{` or `[` in the text is tried as the start of a
+     document, so a document inside other text is found. The text around
+     the documents goes through the general rules. A text value whose
+     JSON names a key twice in one object, at any depth, is withheld
+     whole and counted once: the parser would keep one value and drop
+     the other, so neither the parsed copy nor the count would say
+     anything about the dropped one. The rule holds at every depth of
+     nesting, also for JSON text inside a text value inside JSON text.
+     So is a text value the parser cannot finish within a bounded amount
+     of work (brackets that open over and over and never close).
    - Any text value that holds a private key in PEM form
      (`-----BEGIN ... PRIVATE KEY-----`), under any name.
 4. Write the copy in the same format from the parsed file. JSON is
@@ -194,7 +211,13 @@ it off.
 - Inline JavaScript does not come back. JavaScript, CSS and plain text
   files are refused.
 - Free text that is not JSON, such as "the password is abc", cannot be
-  parsed; MEHO's general redaction rules check it, as before.
+  parsed; MEHO's general redaction rules check it, as before. A YAML
+  example is parsed only in a `<pre>` or `<code>` block that holds text
+  alone; `sessionId: ...` in a `<p>` or a `<span>` is free text.
+- A YAML example in a `<pre>` or `<code>` block comes back from the safe
+  dumper, like a YAML file: comments gone, keys in order, flow lists as
+  block lists, the YAML 1.1 reading of an unquoted value (`yes` is
+  `true`).
 
 ## Dependencies
 

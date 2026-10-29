@@ -96,6 +96,7 @@ from meho_backplane.connectors._shared.api_file_read import (
 )
 from meho_backplane.connectors._shared.api_file_secrets import (
     ApiFileFormatError,
+    TextRule,
     check_api_file,
     scrub_query_string,
 )
@@ -228,6 +229,8 @@ async def vrli_api_file_get_impl(
     max_bytes = get_settings().result_handle_max_record_bytes
     client = await connector._http_client(target)
     headers = await connector.auth_headers(target, operator)
+    connector_id = f"{connector.impl_id}-{connector.version}"
+    text_rule = text_redactor(operator, connector_id=connector_id, op_id=_OP_ID)
     span = flight_recorder_capture.span_start()
     try:
         response = await fetch_without_redirects(
@@ -241,18 +244,14 @@ async def vrli_api_file_get_impl(
         flight_recorder_capture.record_vendor_call_error(span, method="GET", exc=exc)
         raise
     if response.status_code in _SESSION_EXPIRED_STATUSES:
-        expired = _session_expired_response(response, path)
+        expired = _session_expired_response(response, path, text_rule)
         _record(span, headers, expired, expired.content)
         expired.raise_for_status()
 
     content_type = response.headers.get("content-type")
-    connector_id = f"{connector.impl_id}-{connector.version}"
     try:
         checked = check_api_file(
-            decode_text(response, path),
-            content_type=content_type,
-            path=path,
-            text_rule=text_redactor(operator, connector_id=connector_id, op_id=_OP_ID),
+            decode_text(response, path), content_type=content_type, path=path, text_rule=text_rule
         )
     except (ApiFileNotTextError, ApiFileFormatError):
         _record(span, headers, response, b"")
@@ -296,22 +295,26 @@ def _record(
     )
 
 
-def _session_expired_response(response: httpx.Response, path: str) -> httpx.Response:
+def _session_expired_response(
+    response: httpx.Response, path: str, text_rule: TextRule
+) -> httpx.Response:
     """The ``401`` or ``440`` answer to raise: the same status, with a checked body.
 
     The dispatcher drops the cached session and asks once more. When that
     fails too, it copies the body of the second answer into the error
-    result. So the body goes through the same file check as a page first:
-    a secret-named value comes back as the placeholder, and a body that is
-    not text or does not parse is withheld. The status and the headers
-    stay, so the dispatcher still sees the session as expired and the
-    login retry still runs.
+    result. So the body goes through the same file check as a page first,
+    with the same text rule: a secret-named value comes back as the
+    placeholder, text the general rules match too, and a body that is not
+    text or does not parse is withheld. The status and the headers stay,
+    so the dispatcher still sees the session as expired and the login
+    retry still runs.
     """
     try:
         content = check_api_file(
             decode_text(response, path),
             content_type=response.headers.get("content-type"),
             path=path,
+            text_rule=text_rule,
         ).text.encode("utf-8")
     except (ApiFileNotTextError, ApiFileFormatError):
         content = b""

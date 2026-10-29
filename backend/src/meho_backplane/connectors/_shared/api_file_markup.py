@@ -14,12 +14,15 @@ rule for names whose case is lost. In both, a secret-named element loses
 its content, a secret-named attribute loses its value, and an element
 that a ``name``, ``id``, ``key`` or ``type`` attribute marks as secret
 loses its content and every attribute value except the label that marks
-it. A ``<script>`` block comes back only when its content is JSON. A
-``<pre>``, ``<code>`` or ``<span>`` block that holds text alone is an
-example block: every JSON object in its text (the body after a request
-line, for example; also a list that holds an object) is checked like a
-JSON file and written back from the parsed copy. A ``<pre>`` or
-``<code>`` block with child elements (syntax highlighting with
+it. A ``<script>`` block comes back only when its content is JSON. Every
+JSON object in a text or attribute value (the body after a request line
+in a ``<pre>`` block, for example; also a list that holds an object) is
+checked like a JSON file and written back from the parsed copy
+(:meth:`Scrubber.text`). A ``<pre>`` or ``<code>`` block that holds text
+alone and is a YAML mapping or list (not JSON) is an example in YAML: it
+is checked like a YAML file and written back from the parsed copy, so a
+comment or a repeated key does not come back. A ``<pre>`` or ``<code>``
+block with child elements (syntax highlighting with
 ``<span>``) fails closed: it comes back as it was only when every child
 passes its own check unchanged and the text joined over the children is
 one JSON or YAML object or list that the structured check leaves
@@ -37,7 +40,6 @@ from __future__ import annotations
 import html
 import io
 import json
-import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -56,8 +58,10 @@ from meho_backplane.connectors._shared.api_file_values import (
     dump_json,
     is_secret_name,
     is_secret_name_lowercased,
+    json_documents,
     load_json,
 )
+from meho_backplane.connectors._shared.api_file_yaml import check_yaml_text
 
 __all__ = ["check_html", "check_xml"]
 
@@ -88,27 +92,14 @@ _HTML_VOID: Final[frozenset[str]] = frozenset(
 
 _XML_NAMESPACE: Final[str] = "http://www.w3.org/XML/1998/namespace"
 
-#: HTML blocks that hold an example (a request with its body) as text
-#: alone. Every JSON document in the text is checked.
-_HTML_EXAMPLE_BLOCKS: Final[frozenset[str]] = frozenset({"pre", "code", "span"})
-
-#: HTML blocks that fail closed when child elements split their text
-#: (syntax highlighting). A ``<span>`` is not one: it is an inline
-#: element of ordinary page text, which the element check covers.
-_HTML_FAIL_CLOSED_BLOCKS: Final[frozenset[str]] = frozenset({"pre", "code"})
+#: HTML blocks that hold a whole example: a YAML document in one, as text
+#: alone, is checked like a YAML file; one split by child elements
+#: (syntax highlighting) fails closed. A ``<span>`` is neither: it is an
+#: inline element of ordinary page text, which the element check covers
+#: (every JSON document in its text is checked like in any other text).
+_HTML_DOCUMENT_BLOCKS: Final[frozenset[str]] = frozenset({"pre", "code"})
 
 _YAML_LOADER: Final[type[yaml.SafeLoader]] = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
-
-_JSON_DECODER: Final[json.JSONDecoder] = json.JSONDecoder()
-_JSON_START: Final[re.Pattern[str]] = re.compile(r"[{\[]")
-
-#: How much text the JSON parser may read for one example block: this
-#: many times the block's length, plus a floor for small blocks. Text
-#: that is JSON is read once; a bracket that opens no document costs a
-#: few characters. A block that needs more (text that opens brackets
-#: over and over and never closes them) is withheld.
-_JSON_WORK_FACTOR: Final[int] = 4
-_JSON_WORK_FLOOR: Final[int] = 4096
 
 #: One namespace declaration: ``(prefix, uri)``; the default namespace
 #: has the empty prefix, ``xmlns=""`` has the empty uri too.
@@ -419,14 +410,10 @@ def _html_element(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
         out.append(REDACTED)
     elif node.tag == "script":
         out.append(_html_script(node, scrubber))
-    elif node.tag in _HTML_FAIL_CLOSED_BLOCKS and _has_elements(node):
+    elif node.tag in _HTML_DOCUMENT_BLOCKS and _has_elements(node):
         out.append(_html_block(node, scrubber))
-    elif (
-        node.tag in _HTML_EXAMPLE_BLOCKS
-        and not _has_elements(node)
-        and (document := _html_example(node, scrubber))
-    ):
-        out.append(html.escape(document, quote=False))
+    elif node.tag in _HTML_DOCUMENT_BLOCKS:
+        out.append(_html_example(node, scrubber))
     elif node.tag == "style":
         out.extend(scrubber.text(c) for c in node.children if isinstance(c, str))
     else:
@@ -546,82 +533,53 @@ def _yaml_mapping_repeats_a_key(loader: Any, node: Any, seen: set[int]) -> bool:
     return False
 
 
-def _html_example(node: _HtmlNode, scrubber: Scrubber) -> str | None:
-    """The text of an example block that holds text alone, with every JSON document checked.
+def _html_example(node: _HtmlNode, scrubber: Scrubber) -> str:
+    """A ``<pre>`` or ``<code>`` block that holds text alone, checked and escaped.
 
     A page writes an example as one text, often with the request line
-    before the body (``POST /sessions`` and then the JSON). That is not a
-    text value that is JSON on its own, so :meth:`Scrubber.text` would
-    pass the body through. Here every JSON object in the text (or list
-    that holds one) is checked like a JSON file and written back from the
-    parsed copy, and the text between them goes through the text rule.
-    ``None`` when the text holds no such JSON: the block is checked as
-    any other element. A block the parser cannot finish within its work
-    budget comes back as the placeholder.
+    before the body (``POST /sessions`` and then the JSON). Every JSON
+    document in the text is checked like a JSON file and written back
+    from the parsed copy, and the text around them goes through the text
+    rule (:meth:`Scrubber.text`). A block whose text is not JSON but a
+    YAML mapping or list (``sessionId: ...``) is checked like a YAML file
+    and written back from the parsed copy (:func:`check_yaml_text`): a
+    comment or a repeated key is not in the copy, so a secret the parser
+    dropped does not come back. YAML is tried before the JSON documents
+    in the text, so a YAML example with a flow mapping in it is checked
+    whole. A block the check cannot finish (JSON that names a key twice,
+    brackets that open over and over, a copy the dumper cannot write)
+    comes back as the placeholder. Any other text (a request line, a
+    shell command, prose) goes through the text rule.
     """
     text = "".join(_html_text(node))
-    documents = _json_documents(text)
-    if documents is None:
+    if json_documents(text) is None:
         scrubber.count += 1
         return REDACTED
-    if not documents:
-        return None
-    out: list[str] = []
-    position = 0
-    for start, end, parsed in documents:
-        if start > position:
-            out.append(scrubber.text(text[position:start]))
-        out.append(dump_json(scrubber.tree(parsed, {})))
-        position = end
-    if position < len(text):
-        out.append(scrubber.text(text[position:]))
-    return "".join(out)
-
-
-_JsonDocument = tuple[int, int, dict[str, Any] | list[Any]]
-
-
-def _json_documents(text: str) -> list[_JsonDocument] | None:
-    """Every JSON document in *text*, as ``(start, end, parsed)``, in order.
-
-    A document is an object, or a list that holds an object: only a name
-    marks a value as secret, so a list of scalars (``[1]``, a footnote)
-    is text. Each ``{`` or ``[`` is tried as the start of a document. One
-    that does not start a document is skipped by one character, so a
-    document inside text that is not JSON as a whole (``{"a": {"password":
-    "x"} and``) is still found. A document that is too deep for the
-    parser is skipped the same way. ``None`` when the parser read more
-    text than the work budget allows: the caller withholds the block.
-    """
-    documents: list[_JsonDocument] = []
-    budget = _JSON_WORK_FACTOR * len(text) + _JSON_WORK_FLOOR
-    position = 0
-    while (match := _JSON_START.search(text, position)) is not None:
-        start = match.start()
+    if not _is_json(text):
+        probe = scrubber.fresh()
         try:
-            parsed, end = _JSON_DECODER.raw_decode(text, start)
-        except json.JSONDecodeError as exc:
-            budget -= max(exc.pos - start, 1)
-            position = start + 1
-        except RecursionError:
-            budget -= len(text) - start
-            position = start + 1
-        else:
-            budget -= end - start
-            if _holds_object(parsed):
-                documents.append((start, end, parsed))
-                position = end
-            else:
-                position = start + 1
-        if budget < 0:
-            return None
-    return documents
+            document = check_yaml_text(text, probe)
+        except yaml.YAMLError:
+            scrubber.count += 1
+            return REDACTED
+        if document is not None:
+            scrubber.count += probe.count
+            if not text.endswith("\n"):
+                document = document.rstrip("\n")
+            return html.escape(document, quote=False)
+    return html.escape(scrubber.text(text), quote=False)
 
 
-def _holds_object(value: Any) -> bool:
-    if isinstance(value, dict):
-        return True
-    return isinstance(value, list) and any(_holds_object(item) for item in value)
+def _is_json(text: str) -> bool:
+    """True when *text* is one JSON value, whole (surrounding whitespace aside)."""
+    stripped = text.strip()
+    if not stripped or stripped[0] not in "{[":
+        return False
+    try:
+        load_json(stripped)
+    except ValueError:
+        return False
+    return True
 
 
 def _html_text(node: _HtmlNode) -> Iterable[str]:

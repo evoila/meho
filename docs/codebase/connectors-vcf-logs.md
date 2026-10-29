@@ -476,13 +476,16 @@ External: `httpx>=0.27` (Bearer header + `AsyncClient`), `structlog`
   `/rest-api/` as `GET`, marked "documentation path, not in the API
   file", and keeps them out of the served check.
 - `vrli.api_file.get` replaces values by their name. Free text in a page
-  (prose, a `<pre>` block that is not JSON) has no names; only MEHO's
-  general redaction rules check it, and they replace only what they
-  match. A `<pre>` or `<code>` block that a page colours with child
-  elements comes back only when its text is one JSON or YAML document
-  with nothing to replace; any other such block is withheld whole. A
-  licence key under a name that is not a secret name (the Logs licence
-  API calls it `key`) is not replaced.
+  (prose, a `<pre>` block that is neither JSON nor YAML) has no names;
+  only MEHO's general redaction rules check it, and they replace only
+  what they match. Every JSON document in a text is checked, also after
+  a request line. A `<pre>` or `<code>` block that holds text alone and
+  is a YAML document is checked like a YAML file and comes back from
+  the parsed copy. A `<pre>` or `<code>` block that a page colours with
+  child elements comes back only when its text is one JSON or YAML
+  document with nothing to replace; any other such block is withheld
+  whole. A licence key under a name that is not a secret name (the Logs
+  licence API calls it `key`) is not replaced.
 - No DELETE-revoke on `aclose()` — a per-target network call during
   lifespan shutdown is more risk than benefit (same posture NSX
   takes). Revoke-on-close is v0.2.next.

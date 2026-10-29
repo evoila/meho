@@ -6,8 +6,16 @@
 :class:`Scrubber` replaces secret values in parsed data (what JSON and
 YAML give, and what a text value that holds JSON gives) and keeps the
 count of replacements. The markup writers in :mod:`.api_file_markup` use
-it for text and attribute values; :mod:`.api_file_secrets` uses it for
-whole JSON and YAML files.
+it for text and attribute values; :mod:`.api_file_secrets` and
+:mod:`.api_file_yaml` use it for whole JSON and YAML files.
+
+A text value can hold JSON: a sample request in a description, often
+with the request line before the body (``POST /sessions`` and then the
+JSON). :func:`json_documents` finds every JSON object in a text (or list
+that holds one), and :meth:`Scrubber.text` checks each one like a JSON
+file and writes it back from the parsed copy. JSON that names a key
+twice in one object is never written back: the parser would keep one
+value and drop the other, so the whole text value is withheld.
 
 A caller can give the scrubber one more rule for text values
 (``text_rule``): a function that takes one text value and returns the
@@ -33,12 +41,14 @@ from meho_backplane.broadcast.events import (
 __all__ = [
     "REDACTED",
     "ApiFileFormatError",
+    "JsonDocument",
     "RepeatedKeyError",
     "Scrubber",
     "TextRule",
     "dump_json",
     "is_secret_name",
     "is_secret_name_lowercased",
+    "json_documents",
     "load_json",
 ]
 
@@ -118,6 +128,69 @@ def _object_without_repeats(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return mapping
 
 
+#: One JSON document found in a text: ``(start, end, parsed)``.
+JsonDocument = tuple[int, int, dict[str, Any] | list[Any]]
+
+_JSON_DECODER: Final[json.JSONDecoder] = json.JSONDecoder(object_pairs_hook=_object_without_repeats)
+_JSON_START: Final[re.Pattern[str]] = re.compile(r"[{\[]")
+
+#: How much text the JSON parser may read for one text value: this many
+#: times the text's length, plus a floor for short texts. Text that is
+#: JSON is read once; a bracket that opens no document costs a few
+#: characters. A text that needs more (brackets that open over and over
+#: and never close) is withheld.
+_JSON_WORK_FACTOR: Final[int] = 4
+_JSON_WORK_FLOOR: Final[int] = 4096
+
+
+def json_documents(text: str) -> list[JsonDocument] | None:
+    """Every JSON document in *text*, as ``(start, end, parsed)``, in order.
+
+    A document is an object, or a list that holds an object: only a name
+    marks a value as secret, so a list of scalars (``[1]``, a footnote)
+    is text. Each ``{`` or ``[`` is tried as the start of a document. One
+    that does not start a document is skipped by one character, so a
+    document after a request line (``POST /sessions`` and then the body)
+    or inside text that is not JSON as a whole (``{"a": {"password":
+    "x"} and``) is still found. A document that is too deep for the
+    parser is skipped the same way. ``None`` when the text cannot be
+    checked and must be withheld whole: a document names a key twice in
+    one object (:func:`load_json` says why), or the parser read more text
+    than the work budget allows.
+    """
+    documents: list[JsonDocument] = []
+    budget = _JSON_WORK_FACTOR * len(text) + _JSON_WORK_FLOOR
+    position = 0
+    while (match := _JSON_START.search(text, position)) is not None:
+        start = match.start()
+        try:
+            parsed, end = _JSON_DECODER.raw_decode(text, start)
+        except RepeatedKeyError:
+            return None
+        except json.JSONDecodeError as exc:
+            budget -= max(exc.pos - start, 1)
+            position = start + 1
+        except RecursionError:
+            budget -= len(text) - start
+            position = start + 1
+        else:
+            budget -= end - start
+            if _holds_object(parsed):
+                documents.append((start, end, parsed))
+                position = end
+            else:
+                position = start + 1
+        if budget < 0:
+            return None
+    return documents
+
+
+def _holds_object(value: Any) -> bool:
+    if isinstance(value, dict):
+        return True
+    return isinstance(value, list) and any(_holds_object(item) for item in value)
+
+
 class Scrubber:
     """Replace secret values in parsed data; keep the count of replacements."""
 
@@ -161,32 +234,40 @@ class Scrubber:
         return node
 
     def text(self, value: str) -> str:
-        """Check one text value: a PEM private key, JSON inside the text, the text rule.
+        """Check one text value: a PEM private key, every JSON document in the text, the text rule.
 
-        JSON inside the text comes back written from the parsed copy,
-        also when nothing was replaced. JSON that names a key twice in
-        one object, at any depth, is withheld whole and counted once:
-        the parser would keep one value and drop the other, so neither
-        the parsed copy nor the count would say anything about the
-        dropped one, and a caller that keeps the original text (the
-        fail-closed HTML block) would keep it unseen. The text rule runs
-        on the values inside such JSON, not on the written JSON text, so
-        the text stays JSON.
+        Each JSON document in the text (:func:`json_documents`: the body
+        after a request line, a document inside other text) comes back
+        written from the parsed copy, also when nothing was replaced; the
+        text around the documents goes through the text rule. A text
+        whose JSON names a key twice in one object, at any depth, is
+        withheld whole and counted once: the parser would keep one value
+        and drop the other, so neither the parsed copy nor the count
+        would say anything about the dropped one, and a caller that
+        keeps the original text (the fail-closed HTML block) would keep
+        it unseen. So is a text the parser cannot finish within its work
+        budget. The text rule runs on the values inside the JSON, not on
+        the written JSON text, so the text stays JSON.
         """
         if _PEM_PRIVATE_KEY.search(value):
             self.count += 1
             return REDACTED
-        stripped = value.strip()
-        if stripped and stripped[0] in "{[":
-            try:
-                parsed = load_json(stripped)
-            except RepeatedKeyError:
-                self.count += 1
-                return REDACTED
-            except ValueError:
-                parsed = None
-            if isinstance(parsed, (dict, list)):
-                return dump_json(self.tree(parsed, {}))
+        documents = json_documents(value)
+        if documents is None:
+            self.count += 1
+            return REDACTED
+        out: list[str] = []
+        position = 0
+        for start, end, parsed in documents:
+            if start > position:
+                out.append(self._rule(value[position:start]))
+            out.append(dump_json(self.tree(parsed, {})))
+            position = end
+        if position < len(value):
+            out.append(self._rule(value[position:]))
+        return "".join(out)
+
+    def _rule(self, value: str) -> str:
         if self._text_rule is None:
             return value
         changed, count = self._text_rule(value)

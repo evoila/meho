@@ -9,7 +9,8 @@
 
 * ``unknown_connector`` -- the connector id matches no connector the
   caller can see (no operation rows, no registered class). Same test the
-  ``list_operation_groups`` / ``search_operations`` meta-tools use.
+  ``list_operation_groups`` / ``search_operations`` meta-tools use. The
+  error names up to 5 close ids (``extras.did_you_mean``, #4136).
 * ``unknown_op`` -- the connector exists but has no such enabled op. The
   error names the other caller-visible connectors that have the op
   (``extras.connectors_with_op``), or points at ``search_operations``
@@ -27,6 +28,7 @@ from uuid import UUID
 from meho_backplane.connectors import OperationResult
 from meho_backplane.operations._errors import result_unknown_connector, result_unknown_op
 from meho_backplane.operations._lookup import (
+    close_connector_ids,
     connector_class_registered,
     connector_exists,
     count_known_ops,
@@ -61,7 +63,10 @@ async def op_miss_result(
         )
         and not connector_class_registered(product=product, version=version, impl_id=impl_id)
     ):
-        return result_unknown_connector(connector_id, op_id, _elapsed_ms(started))
+        did_you_mean = await close_connector_ids(tenant_id=tenant_id, connector_id=connector_id)
+        return result_unknown_connector(
+            connector_id, op_id, _elapsed_ms(started), did_you_mean=did_you_mean
+        )
     others = await find_connectors_with_op(tenant_id=tenant_id, op_id=op_id, exclude=triple)
     return result_unknown_op(
         op_id,

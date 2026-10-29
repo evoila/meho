@@ -40,6 +40,8 @@ func TestVersionCommandRendersAllFields(t *testing.T) {
 	version.Version = "v9.9.9-test"
 	version.Commit = "deadbeef"
 	version.Date = "2026-05-10T00:00:00Z"
+	// No stored backplane: the command stays offline.
+	withTempXDG(t)
 
 	var stdout, stderr bytes.Buffer
 	root := newRootCmd()
@@ -87,6 +89,8 @@ func TestVersionCommandWritesToRealStdoutNotStderr(t *testing.T) {
 	version.Version = "v9.9.9-test"
 	version.Commit = "deadbeef"
 	version.Date = "2026-05-10T00:00:00Z"
+	// No stored backplane: the command stays offline.
+	withTempXDG(t)
 
 	// Redirect the real OS-level stdout/stderr. We restore both in
 	// the cleanup hook regardless of test outcome — a leaked

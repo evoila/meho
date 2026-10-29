@@ -148,24 +148,26 @@ func runTraceList(cmd *cobra.Command, opts traceListOptions) error {
 
 // printTraceListTable renders one line per operation run with a stored
 // trace. The audit id comes first so an operator can paste it into
-// `meho audit trace show`. It is not `printQueryTable` because this
-// table drops the PRINCIPAL and CLASS columns, which say nothing about
-// whether a trace exists.
+// `meho audit trace show`. TENANT is the tenant name, or the tenant id
+// when the backend has no name for it (#5238). It is not
+// `printQueryTable` because this table drops the PRINCIPAL and CLASS
+// columns, which say nothing about whether a trace exists.
 func printTraceListTable(w io.Writer, r *api.AuditQueryResult) {
 	if r == nil || len(r.Rows) == 0 {
 		fmt.Fprintln(w, "no stored traces matched the filter")
 		return
 	}
-	fmt.Fprintf(w, "%-36s  %-22s %-18s %-32s %s\n",
-		"AUDIT ID", "TIME", "TARGET", "OP_ID", "STATUS")
+	fmt.Fprintf(w, "%-36s  %-22s %-18s %-18s %-32s %s\n",
+		"AUDIT ID", "TIME", "TENANT", "TARGET", "OP_ID", "STATUS")
 	for _, row := range r.Rows {
 		target := strDeref(row.TargetName)
 		if target == "" {
 			target = "-"
 		}
-		fmt.Fprintf(w, "%-36s  %-22s %-18s %-32s %s\n",
+		fmt.Fprintf(w, "%-36s  %-22s %-18s %-18s %-32s %s\n",
 			row.Id.String(),
 			truncate(formatTS(row.Ts), 22),
+			truncate(tenantLabel(row.TenantName, row.TenantId), 18),
 			truncate(target, 18),
 			truncate(row.OpId, 32),
 			truncate(row.ResultStatus, 8),

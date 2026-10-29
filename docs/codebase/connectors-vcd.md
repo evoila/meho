@@ -205,7 +205,7 @@ tests. The full evidence + activation trigger live in the `vcd` entry of
 - `meho_backplane.connectors._shared.vcf_auth` — `is_acceptable_auth_model`,
   `session_establish_auth_error`, `ConnectorAuthError`, the `VcfTargetLike` /
   `VcfCredentialsLoader` aliases, `load_credentials_from_vault`.
-- `meho_backplane.connectors._shared.cache_key.target_cache_key`,
+- `meho_backplane.connectors._shared.cache_key.credential_cache_key`,
   `meho_backplane.connectors._shared.vault_creds.VaultCredentialsReadError`.
 - `meho_backplane.connectors.schemas` — `AuthModel`, `FingerprintResult`,
   `ProbeResult`, `OperationResult`.

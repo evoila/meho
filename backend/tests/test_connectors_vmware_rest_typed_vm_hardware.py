@@ -133,6 +133,9 @@ def _status_error(method: str, path: str, status: int, body: dict[str, Any]) -> 
 class _RestFake:
     """Recording double for the connector's REST session."""
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(self, responses: dict[str, Any] | None = None) -> None:
         self.responses = _saved_responses() if responses is None else responses
         self.get_errors: dict[str, int] = {}

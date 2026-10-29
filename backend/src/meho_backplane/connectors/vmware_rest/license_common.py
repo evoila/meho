@@ -14,7 +14,7 @@ A licence key is a secret. The vCenter answers these reads get hold every
 key in clear, so:
 
 * no row built here holds a full key. The shared
-  :func:`~meho_backplane.connectors._shared.license_key.mask_license_key`
+  :func:`~meho_backplane.connectors.vmware_shared.license_key.mask_license_key`
   keeps the last five characters and hides every other letter and digit;
 * nothing here logs a key;
 * the three operations carry the tag :data:`LICENSE_KEY_TAG`. Its ``key``
@@ -36,12 +36,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
-from meho_backplane.connectors._shared.license_key import mask_license_key
 from meho_backplane.connectors.vmware_rest.vim_body import (
     fault_type_name,
     retrieve_properties_body,
     unwrap_vim_value,
 )
+from meho_backplane.connectors.vmware_shared.license_key import mask_license_key
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator

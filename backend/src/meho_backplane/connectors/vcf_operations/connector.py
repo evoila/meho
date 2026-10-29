@@ -32,8 +32,8 @@ and presents it on every request:
   product-native). Neither ``Basic`` nor ``Bearer`` is accepted by the
   appliance.
 
-The token is cached per target under the tenant-unique
-``(tenant_id, target.id)`` key and reused until it is evicted by
+The token is cached per credential and ``authSource``
+(:func:`_session_cache_key`) and reused until it is evicted by
 :meth:`invalidate_session` (the dispatcher's #2067 seam) — the appliance
 extends the token's six-hour validity on each call, so a re-acquire happens
 only after an idle expiry or a rotation.
@@ -118,8 +118,8 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
-from meho_backplane.connectors._shared.license_key import mask_license_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key
+from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import (
@@ -141,6 +141,7 @@ from meho_backplane.connectors.vcf_operations.session import (
     VcfOperationsTargetLike,
     load_credentials_from_vault,
 )
+from meho_backplane.connectors.vmware_shared.license_key import mask_license_key
 
 # Re-export ``SessionLoginError`` so callers that catch the helper's
 # structured failure don't have to reach into the shared module.
@@ -215,10 +216,16 @@ def _extract_ops_token(resp: httpx.Response) -> str | None:
     return value
 
 
+def _session_cache_key(target: Any) -> tuple[str, ...]:
+    """Key the session token on the credential plus the login ``authSource``."""
+    return credential_cache_key(target, getattr(target, "auth_source", None) or None)
+
+
 class VcfOperationsConnector(VropsLicensingHandlers, HttpConnector):
     """vROps 9.0 REST connector with acquired-token (``OpsToken``) auth.
 
-    Per-target session token cached in :attr:`_session_tokens`; per-target
+    Session token cached in :attr:`_session_tokens` per credential and
+    ``authSource`` (:func:`_session_cache_key`); per-target
     credentials cached in :attr:`_creds` (the shared :class:`CredentialsCache`
     instance). The :attr:`priority` is set to ``1`` so a future
     ``GenericRestConnector`` auto-shim that somehow registers for the same
@@ -240,7 +247,7 @@ class VcfOperationsConnector(VropsLicensingHandlers, HttpConnector):
         credentials_loader: VcfOperationsCredentialsLoader | None = None,
     ) -> None:
         super().__init__()
-        self._session_tokens: dict[tuple[str, str], str] = {}
+        self._session_tokens: dict[tuple[str, ...], str] = {}
         self._session_lock = asyncio.Lock()
         self._creds = CredentialsCache(
             credentials_loader if credentials_loader is not None else load_credentials_from_vault,
@@ -314,7 +321,7 @@ class VcfOperationsConnector(VropsLicensingHandlers, HttpConnector):
                 f"target={target.name!r} has no operator JWT (system-initiated calls "
                 "cannot read per-target vendor credentials)"
             )
-        cache_key = target_cache_key(target)
+        cache_key = _session_cache_key(target)
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None:
@@ -345,7 +352,9 @@ class VcfOperationsConnector(VropsLicensingHandlers, HttpConnector):
             )
             return token
 
-    async def invalidate_session(self, target: VcfOperationsTargetLike) -> None:
+    async def invalidate_session(
+        self, target: VcfOperationsTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Public duck-typed session-eviction hook for the dispatch path.
 
         The seam the generic-ingested dispatch path calls on an auth-class
@@ -355,9 +364,11 @@ class VcfOperationsConnector(VropsLicensingHandlers, HttpConnector):
         session state would expose no such hook and never be retried; vROps
         now does, so an idle-expired token re-acquires there.
         """
-        await self._invalidate_session(target)
+        await self._invalidate_session(target, rejected=rejected)
 
-    async def _invalidate_session(self, target: VcfOperationsTargetLike) -> None:
+    async def _invalidate_session(
+        self, target: VcfOperationsTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Drop the cached session token for *target*.
 
         Called by the public :meth:`invalidate_session` dispatch-path hook
@@ -366,9 +377,17 @@ class VcfOperationsConnector(VropsLicensingHandlers, HttpConnector):
         the lock so a concurrent re-acquire doesn't race the invalidation.
         The credentials cache is left intact — a 401 means the *session token*
         expired or was rejected, not that the credentials are wrong.
+
+        With *rejected*, the token is dropped only when that request sent it;
+        a newer token another call just logged in for stays (#5033).
         """
         async with self._session_lock:
-            self._session_tokens.pop(target_cache_key(target), None)
+            drop_rejected_token(
+                self._session_tokens,
+                _session_cache_key(target),
+                rejected,
+                lambda token: {"Authorization": f"{_OPS_TOKEN_SCHEME} {token}"},
+            )
 
     async def fingerprint(
         self,

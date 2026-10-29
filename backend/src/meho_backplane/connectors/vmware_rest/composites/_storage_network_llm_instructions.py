@@ -64,6 +64,49 @@ STORAGE_NETWORK_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
             "the NFS server or the storage network first."
         ),
     },
+    _P + "datastore.file.list": {
+        "when_to_call": (
+            "Call to see the files and folders in one folder of a datastore: to check that "
+            "an ISO or kickstart file is there and has the right size, or, with "
+            "include_usage, to see how big each folder is and which VMs use it before a "
+            "clean-up. Works on vCenter and on a standalone ESXi host. Read-only."
+        ),
+        "parameter_hints": {
+            "datastore": "Datastore name, e.g. 'datastore1' (from datastore.usage).",
+            "path": "Folder relative to the datastore root, e.g. 'iso'. Empty = the root.",
+            "pattern": "File name pattern, e.g. '*.iso'.",
+            "include_usage": "true adds folder sizes and the VMs that use each entry (slower).",
+        },
+        "output_shape": (
+            "{status: ok|not_found|ambiguous|invalid_request|unsupported_host_target, "
+            "datastore, datastore_moid, datastore_type, path, datastore_path, pattern, "
+            "count, entries: [{name, path, kind: file|folder, file_type, size_bytes, "
+            "modified}], vm_check, guidance}. With include_usage a folder also has "
+            "size_bytes (all files below it), file_count and latest_modified, and every "
+            "entry has vms. A long list comes back as a link to the stored result; read "
+            "it with result_query."
+        ),
+        "next_step": (
+            "To check a file, compare its size_bytes and modified with what you expect. "
+            "Before you delete a folder, make sure vms is empty and vm_check is complete; "
+            "the delete is datastore.file.delete (it needs the datastore_moid). On "
+            "not_found, check the name with datastore.usage or list the parent folder."
+        ),
+        "result_scalars": {
+            "keys": [
+                "status",
+                "datastore",
+                "datastore_moid",
+                "datastore_type",
+                "path",
+                "datastore_path",
+                "pattern",
+                "count",
+                "vm_check",
+                "guidance",
+            ]
+        },
+    },
     _P + "datastore.vsan.folder.list": {
         "when_to_call": (
             "Call to see the folders of a vSAN datastore, or the files in one of them. Use "

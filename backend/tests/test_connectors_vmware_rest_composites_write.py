@@ -112,6 +112,13 @@ from tests._vmware_cluster_config_fake import (
 # ---------------------------------------------------------------------------
 
 
+_ITEM_1 = "aaaaaaaa-0000-0000-0000-000000000001"
+_ITEM_3 = "aaaaaaaa-0000-0000-0000-000000000003"
+_ITEM_7 = "aaaaaaaa-0000-0000-0000-000000000007"
+_ITEM_OVF = "aaaaaaaa-0000-0000-0000-00000000000f"
+_ITEM_RESOLVED = "aaaaaaaa-0000-0000-0000-0000000000e0"
+
+
 def _make_operator() -> Operator:
     """Synthetic operator for composite-handler unit tests."""
     return Operator(
@@ -136,6 +143,9 @@ class _RecordingConnector:
     value that is an :class:`Exception` is raised -- how the transport-fault
     partial-failure paths are exercised.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     def __init__(
         self,
@@ -2326,7 +2336,7 @@ async def test_vm_clone_happy_path_synchronous_deploy(gate: _GateRecorder) -> No
     conn = _RecordingConnector(
         {
             "/api/vcenter/vm/vm-src": {"name": "src"},
-            "/api/vcenter/vm-template/library-items/li-7?action=deploy": "vm-clone-1",
+            f"/api/vcenter/vm-template/library-items/{_ITEM_7}?action=deploy": "vm-clone-1",
         }
     )
     out = await vm_clone_composite(
@@ -2335,7 +2345,7 @@ async def test_vm_clone_happy_path_synchronous_deploy(gate: _GateRecorder) -> No
         params={
             "source_vm": "vm-src",
             "target_name": "vm-clone-1",
-            "library_item": "li-7",
+            "library_item": _ITEM_7,
         },
         connector=conn,  # type: ignore[arg-type]
     )
@@ -2344,7 +2354,7 @@ async def test_vm_clone_happy_path_synchronous_deploy(gate: _GateRecorder) -> No
     assert out["vm_id"] == "vm-clone-1"
     assert [(c["method"], c["path"]) for c in conn.calls] == [
         ("GET", "/api/vcenter/vm/vm-src"),
-        ("POST", "/api/vcenter/vm-template/library-items/li-7?action=deploy"),
+        ("POST", f"/api/vcenter/vm-template/library-items/{_ITEM_7}?action=deploy"),
     ]
     # The template item rides the path (#2970); the body is only the DeploySpec.
     assert conn.calls[1]["body"] == {"spec": {"name": "vm-clone-1"}}
@@ -2365,13 +2375,13 @@ async def test_vm_clone_deploy_issued_with_long_timeout(gate: _GateRecorder) -> 
     conn = _RecordingConnector(
         {
             "/api/vcenter/vm/vm-src": {"name": "src"},
-            "/api/vcenter/vm-template/library-items/li-7?action=deploy": "vm-clone-1",
+            f"/api/vcenter/vm-template/library-items/{_ITEM_7}?action=deploy": "vm-clone-1",
         }
     )
     out = await vm_clone_composite(
         operator=_make_operator(),
         target=object(),
-        params={"source_vm": "vm-src", "target_name": "vm-clone-1", "library_item": "li-7"},
+        params={"source_vm": "vm-src", "target_name": "vm-clone-1", "library_item": _ITEM_7},
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "completed"
@@ -2388,13 +2398,13 @@ async def test_vm_clone_legacy_value_envelope_unwraps(gate: _GateRecorder) -> No
     conn = _RecordingConnector(
         {
             "/api/vcenter/vm/vm-src": {"name": "src"},
-            "/api/vcenter/vm-template/library-items/li-3?action=deploy": {"value": "vm-88"},
+            f"/api/vcenter/vm-template/library-items/{_ITEM_3}?action=deploy": {"value": "vm-88"},
         }
     )
     out = await vm_clone_composite(
         operator=_make_operator(),
         target=object(),
-        params={"source_vm": "vm-src", "target_name": "tgt", "library_item": "li-3"},
+        params={"source_vm": "vm-src", "target_name": "tgt", "library_item": _ITEM_3},
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "completed"
@@ -2408,14 +2418,14 @@ async def test_vm_clone_non_string_deploy_payload_raises(gate: _GateRecorder) ->
     conn = _RecordingConnector(
         {
             "/api/vcenter/vm/vm-src": {},
-            "/api/vcenter/vm-template/library-items/li-1?action=deploy": {"task": "task-bad"},
+            f"/api/vcenter/vm-template/library-items/{_ITEM_1}?action=deploy": {"task": "task-bad"},
         }
     )
     with pytest.raises(RuntimeError, match="no VM id"):
         await vm_clone_composite(
             operator=_make_operator(),
             target=object(),
-            params={"source_vm": "vm-src", "target_name": "tgt", "library_item": "li-1"},
+            params={"source_vm": "vm-src", "target_name": "tgt", "library_item": _ITEM_1},
             connector=conn,  # type: ignore[arg-type]
         )
 
@@ -2430,8 +2440,8 @@ _RENAME_VAPP_OP = "POST:/VirtualApp/{moId}/Rename_Task"
 _DELETE_VM_OP = "DELETE:/vcenter/vm/{vm}"
 _FIND_LIBRARY_PATH = "/api/content/library?action=find"
 _FIND_ITEM_PATH = "/api/content/library/item?action=find"
-_DEPLOY_PATH = "/api/vcenter/ovf/library-item/li-ovf?action=deploy"
-_FILTER_PATH = "/api/vcenter/ovf/library-item/li-ovf?action=filter"
+_DEPLOY_PATH = f"/api/vcenter/ovf/library-item/{_ITEM_OVF}?action=deploy"
+_FILTER_PATH = f"/api/vcenter/ovf/library-item/{_ITEM_OVF}?action=filter"
 _LIST_VMS_PATH = "/api/vcenter/vm"
 # The deploy token every #3697 test pins, and the unique deploy names it yields.
 _DEPLOY_TOKEN = "0123456789"
@@ -2544,13 +2554,13 @@ async def test_deploy_from_library_id_passthrough_deployed(
     out = await vm_deploy_from_library_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        params={"library_item": _ITEM_OVF, "resource_pool": "resgroup-8"},
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "deployed"
     assert out["vm_id"] == "vm-ovf-1"
     assert out["resource_type"] == "VirtualMachine"
-    assert out["library_item_id"] == "li-ovf"
+    assert out["library_item_id"] == _ITEM_OVF
     assert out["powered_on"] is False
     assert out["issues"] == []
     # No name-resolution reads on the id path; the summary is an un-gated
@@ -2618,7 +2628,7 @@ async def test_deploy_from_library_read_timeout_names_exception_type(gate: _Gate
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "deploy_error"
-    assert out["library_item_id"] == "li-ovf"
+    assert out["library_item_id"] == _ITEM_OVF
     assert len(out["issues"]) == 1
     message = out["issues"][0]["message"]
     assert "transport fault (ReadTimeout)" in message
@@ -2644,7 +2654,7 @@ async def test_deploy_from_library_deploy_body_shape(
         operator=_make_operator(),
         target=object(),
         params={
-            "library_item": "li-ovf",
+            "library_item": _ITEM_OVF,
             "name": "router-01",
             "resource_pool": "resgroup-8",
             "host": "host-19",
@@ -2729,9 +2739,9 @@ async def test_deploy_from_library_name_resolution_scoped_by_library(gate: _Gate
     conn = _RecordingConnector(
         {
             _FIND_LIBRARY_PATH: ["lib-7"],
-            _FIND_ITEM_PATH: ["li-resolved"],
-            "/api/vcenter/ovf/library-item/li-resolved?action=filter": _OVF_SUMMARY,
-            "/api/vcenter/ovf/library-item/li-resolved?action=deploy": _deployment_result(
+            _FIND_ITEM_PATH: [_ITEM_RESOLVED],
+            f"/api/vcenter/ovf/library-item/{_ITEM_RESOLVED}?action=filter": _OVF_SUMMARY,
+            f"/api/vcenter/ovf/library-item/{_ITEM_RESOLVED}?action=deploy": _deployment_result(
                 succeeded=True, vm_id="vm-ovf-2"
             ),
         },
@@ -2748,14 +2758,14 @@ async def test_deploy_from_library_name_resolution_scoped_by_library(gate: _Gate
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "deployed"
-    assert out["library_item_id"] == "li-resolved"
+    assert out["library_item_id"] == _ITEM_RESOLVED
     # Library find, then item find (scoped + type=ovf), the OVF summary for the
     # default name (no ``name`` given), then the deploy.
     assert [(c["method"], c["path"]) for c in conn.calls] == [
         ("POST", _FIND_LIBRARY_PATH),
         ("POST", _FIND_ITEM_PATH),
-        ("POST", "/api/vcenter/ovf/library-item/li-resolved?action=filter"),
-        ("POST", "/api/vcenter/ovf/library-item/li-resolved?action=deploy"),
+        ("POST", f"/api/vcenter/ovf/library-item/{_ITEM_RESOLVED}?action=filter"),
+        ("POST", f"/api/vcenter/ovf/library-item/{_ITEM_RESOLVED}?action=deploy"),
     ]
     # The find bodies are the FindSpec at the top level of the /api body (#3071),
     # NOT the legacy /rest {"spec": {...}} envelope vCenter 8.x 400s.
@@ -2870,7 +2880,7 @@ async def test_deploy_from_library_deploy_failed_surfaces_report_issues(
     )
     assert out["status"] == "deploy_failed"
     assert out["vm_id"] is None
-    assert out["library_item_id"] == "li-ovf"
+    assert out["library_item_id"] == _ITEM_OVF
     assert out["issues"] == [
         {"category": "INPUT", "severity": "error", "message": "network 'nat' not mapped"},
         {"category": "SERVER", "severity": "error", "message": "host busy"},
@@ -2884,7 +2894,7 @@ async def test_deploy_from_library_deploy_error_on_http_fault(gate: _GateRecorde
     fault = httpx.HTTPStatusError(
         "not found",
         request=httpx.Request(
-            "POST", "https://vc/api/vcenter/ovf/library-item/li-ovf?action=deploy"
+            "POST", f"https://vc/api/vcenter/ovf/library-item/{_ITEM_OVF}?action=deploy"
         ),
         response=httpx.Response(
             404,
@@ -2902,7 +2912,7 @@ async def test_deploy_from_library_deploy_error_on_http_fault(gate: _GateRecorde
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "deploy_error"
-    assert out["library_item_id"] == "li-ovf"
+    assert out["library_item_id"] == _ITEM_OVF
     assert len(out["issues"]) == 1
     assert out["issues"][0]["category"] == "placement"
     # The structured message carries the HTTP status, the vAPI error_type, and
@@ -2913,7 +2923,7 @@ async def test_deploy_from_library_deploy_error_on_http_fault(gate: _GateRecorde
 
 
 _DEPLOY_PARAMS_NAMED = {
-    "library_item": "li-ovf",
+    "library_item": _ITEM_OVF,
     "name": "router-01",
     "resource_pool": "resgroup-8",
 }
@@ -3199,7 +3209,7 @@ async def test_deploy_from_library_rename_not_authorized_stays_deployed(
         "deployed": {
             "vm_id": "vm-ovf-1",
             "resource_type": "VirtualMachine",
-            "library_item_id": "li-ovf",
+            "library_item_id": _ITEM_OVF,
             "name": "router-01",
             "step": "rename",
             "issues": [],
@@ -3316,11 +3326,11 @@ async def test_deploy_from_library_without_name_summary_fault_refuses_before_dep
     out = await vm_deploy_from_library_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        params={"library_item": _ITEM_OVF, "resource_pool": "resgroup-8"},
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "resolve_error"
-    assert out["library_item_id"] == "li-ovf"
+    assert out["library_item_id"] == _ITEM_OVF
     assert out["issues"][0]["category"] == "resolve"
     assert "404" in out["issues"][0]["message"]
     assert [(c["method"], c["path"]) for c in conn.calls] == [("POST", _FILTER_PATH)]
@@ -3336,11 +3346,11 @@ async def test_deploy_from_library_without_name_and_no_ovf_name_refuses(
     out = await vm_deploy_from_library_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        params={"library_item": _ITEM_OVF, "resource_pool": "resgroup-8"},
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "invalid_reference"
-    assert out["library_item_id"] == "li-ovf"
+    assert out["library_item_id"] == _ITEM_OVF
     assert out["issues"][0]["category"] == "input"
     assert "set name" in out["issues"][0]["message"]
     assert [(c["method"], c["path"]) for c in conn.calls] == [("POST", _FILTER_PATH)]
@@ -3384,7 +3394,7 @@ async def test_deploy_from_library_deployment_option_sent_as_selected_key(
         operator=_make_operator(),
         target=object(),
         params={
-            "library_item": "li-ovf",
+            "library_item": _ITEM_OVF,
             "name": "router-01",
             "resource_pool": "resgroup-8",
             "ovf_properties": {"guestinfo.hostname": "router-01"},
@@ -3425,7 +3435,7 @@ async def test_deploy_from_library_deployment_option_without_name_uses_one_summa
         operator=_make_operator(),
         target=object(),
         params={
-            "library_item": "li-ovf",
+            "library_item": _ITEM_OVF,
             "resource_pool": "resgroup-8",
             "deployment_option": "large",
         },
@@ -3458,7 +3468,7 @@ async def test_deploy_from_library_unknown_deployment_option_refused(
         operator=_make_operator(),
         target=object(),
         params={
-            "library_item": "li-ovf",
+            "library_item": _ITEM_OVF,
             "name": "router-01",
             "resource_pool": "resgroup-8",
             "deployment_option": "huge",
@@ -3466,7 +3476,7 @@ async def test_deploy_from_library_unknown_deployment_option_refused(
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "invalid_reference"
-    assert out["library_item_id"] == "li-ovf"
+    assert out["library_item_id"] == _ITEM_OVF
     assert out["vm_id"] is None
     assert out["candidates"] == offered
     assert out["issues"][0]["category"] == "input"
@@ -3485,7 +3495,7 @@ async def test_deploy_from_library_deployment_option_summary_fault_is_resolve_er
         operator=_make_operator(),
         target=object(),
         params={
-            "library_item": "li-ovf",
+            "library_item": _ITEM_OVF,
             "name": "router-01",
             "resource_pool": "resgroup-8",
             "deployment_option": "small",
@@ -3508,7 +3518,7 @@ async def test_deploy_from_library_without_name_cleans_up_by_deploy_name(
     out = await vm_deploy_from_library_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        params={"library_item": _ITEM_OVF, "resource_pool": "resgroup-8"},
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "deploy_error"
@@ -4619,7 +4629,7 @@ def _deployed_state(step: str, *, issues: list[dict[str, Any]] | None = None) ->
         "deployed": {
             "vm_id": "vm-ovf-1",
             "resource_type": "VirtualMachine",
-            "library_item_id": "li-ovf",
+            "library_item_id": _ITEM_OVF,
             "name": "router-01",
             "step": step,
             "issues": issues or [],
@@ -4690,7 +4700,7 @@ async def test_deploy_from_library_resume_of_a_cleanup_deletes_and_deploys_nothi
         "deploy_name": _SAVED_DEPLOY_NAME,
         "failed": {
             "status": "deploy_error",
-            "library_item_id": "li-ovf",
+            "library_item_id": _ITEM_OVF,
             "reported": None,
             "issues": first_issues,
             "removal": ["vm-partial", "VirtualMachine"],
@@ -4705,7 +4715,7 @@ async def test_deploy_from_library_resume_of_a_cleanup_deletes_and_deploys_nothi
             connector=conn,  # type: ignore[arg-type]
         )
     assert out["status"] == "deploy_error"
-    assert out["library_item_id"] == "li-ovf"
+    assert out["library_item_id"] == _ITEM_OVF
     assert out["issues"] == [
         *first_issues,
         _write.issue("cleanup", "info", "removed VM vm-partial left by the failed deploy"),
@@ -4729,7 +4739,7 @@ async def test_deploy_from_library_resume_of_a_vapp_destroy_destroys_only_the_sa
         "deploy_name": _SAVED_DEPLOY_NAME,
         "failed": {
             "status": "deploy_failed",
-            "library_item_id": "li-ovf",
+            "library_item_id": _ITEM_OVF,
             "reported": ["resgroup-v9", _VAPP_TYPE],
             "issues": [],
             "removal": ["resgroup-v9", _VAPP_TYPE],
@@ -4768,7 +4778,7 @@ async def test_deploy_from_library_resume_of_a_vapp_destroy_destroys_only_the_sa
                 "deploy_name": _SAVED_DEPLOY_NAME,
                 "failed": {
                     "status": "deploy_error",
-                    "library_item_id": "li-ovf",
+                    "library_item_id": _ITEM_OVF,
                     "reported": None,
                     "issues": [],
                 },
@@ -4823,7 +4833,7 @@ async def test_deploy_from_library_deploy_park_saves_its_resolved_parameters(
     assert out["status"] == "deployed"
     deploy_call = gate.calls[0]
     assert deploy_call["op_id"] == _DEPLOY_OVF_OP
-    assert deploy_call["params"]["ovfLibraryItemId"] == "li-ovf"
+    assert deploy_call["params"]["ovfLibraryItemId"] == _ITEM_OVF
     assert deploy_call["params"]["deployment_spec"]["name"] == _DEPLOY_NAME
     assert deploy_call["resume_state"] == {
         "deploy_name": _DEPLOY_NAME,
@@ -4846,7 +4856,7 @@ async def test_deploy_from_library_resumed_deploy_reuses_its_resolved_parameters
     saved item is served here; a find or an OVF summary read would fail.
     """
     deploy_params = {
-        "ovfLibraryItemId": "li-ovf",
+        "ovfLibraryItemId": _ITEM_OVF,
         "deployment_spec": {"accept_all_EULA": True, "name": _SAVED_DEPLOY_NAME},
         "target": {"resource_pool_id": "resgroup-8"},
     }
@@ -4877,7 +4887,7 @@ async def test_deploy_from_library_resumed_deploy_reuses_its_resolved_parameters
         composite_resume_state_var.reset(state_token)
         composite_resume_scope_var.reset(scope_token)
     assert out["status"] == "deployed"
-    assert out["library_item_id"] == "li-ovf"
+    assert out["library_item_id"] == _ITEM_OVF
     assert [(c["method"], c["path"]) for c in conn.calls] == [("POST", _DEPLOY_PATH)]
     assert conn.calls[0]["body"] == {
         "deployment_spec": deploy_params["deployment_spec"],
@@ -5868,6 +5878,9 @@ class _MaintenanceExitConnector:
     ``ExitMaintenanceMode_Task`` POST is recorded so a refused call is
     provably off the wire.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     def __init__(
         self,
@@ -7247,6 +7260,9 @@ class _DiskGrowConnector:
     keys them by.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(
         self,
         *,
@@ -7618,6 +7634,9 @@ class _DiskAttachConnector:
     every ``ReconfigVM_Task`` add so a parked/refused write is provably off
     the wire.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     def __init__(
         self,
@@ -8087,6 +8106,9 @@ class _CloneFromTemplateConnector:
     ``RetrievePropertiesEx`` reads are keyed apart by the request body's
     ``specSet`` object type — exactly the seam a real vCenter keys them by.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     _MOUNT = "/api"
 
@@ -8620,6 +8642,9 @@ class _DrsRuleConnector:
     works, a path into it fails with HTTP 500 ``InvalidProperty``.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     _MOUNT = "/api"
 
     def __init__(
@@ -8986,6 +9011,9 @@ class _FolderCreateConnector:
     Folder MoRef directly, so **no** ``RetrievePropertiesEx`` poll ever fires.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     _MOUNT = "/api"
 
     def __init__(
@@ -9264,6 +9292,9 @@ class _ResourcePoolConnector:
     serves the ``ClusterComputeResource.resourcePool`` root-pool read.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     _MOUNT = "/api"
 
     def __init__(
@@ -9359,6 +9390,9 @@ class _VmHostRuleConnector:
     The cluster read answers like vCenter 8.0.x: the whole ``configurationEx``
     works, a path into it fails with HTTP 500 ``InvalidProperty``.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     _MOUNT = "/api"
 

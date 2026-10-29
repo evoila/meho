@@ -76,6 +76,10 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     "AKS_NODE_POOLS_PATH": (("GET",), "AKS_API_VERSION"),
     "AKS_KUBERNETES_VERSIONS_PATH": (("GET",), "AKS_API_VERSION"),
     # arc (Task #5084)
+    "ARC_MACHINES_PATH": (("GET",), "ARC_API_VERSION"),
+    "ARC_MACHINE_PATH": (("GET",), "ARC_API_VERSION"),
+    "ARC_ASSESS_PATCHES_PATH": (("POST",), "ARC_API_VERSION"),
+    "VM_ASSESS_PATCHES_PATH": (("POST",), "VM_ASSESS_API_VERSION"),
     # automation (Task #5092)
     "AUTOMATION_ACCOUNTS_PATH": (("GET",), "AUTOMATION_API_VERSION"),
     "AUTOMATION_RUNBOOKS_PATH": (("GET",), "AUTOMATION_API_VERSION"),
@@ -83,6 +87,10 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     "AUTOMATION_SCHEDULES_PATH": (("GET",), "AUTOMATION_API_VERSION"),
     "AUTOMATION_JOB_SCHEDULES_PATH": (("GET",), "AUTOMATION_API_VERSION"),
     # avs (Task #5091)
+    "AVS_PRIVATE_CLOUDS_PATH": (("GET",), "AVS_API_VERSION"),
+    "AVS_CLUSTERS_PATH": (("GET",), "AVS_API_VERSION"),
+    "AVS_HOSTS_PATH": (("GET",), "AVS_API_VERSION"),
+    "AVS_QUOTA_PATH": (("POST",), "AVS_API_VERSION"),
     # compute (Task #5083)
     "VIRTUAL_MACHINES_PATH": (("GET",), "COMPUTE_API_VERSION"),
     "RESOURCE_GROUP_VIRTUAL_MACHINES_PATH": (("GET",), "COMPUTE_API_VERSION"),
@@ -108,6 +116,17 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     "TAGS_AT_SCOPE_PATH": (("GET", "PATCH"), "RESOURCES_API_VERSION"),
     "LOCKS_PATH": (("GET",), "LOCKS_API_VERSION"),
     # migrate (Task #5093)
+    "MIGRATE_PROJECTS_PATH": (("GET",), "MIGRATE_API_VERSION"),
+    "MIGRATE_MACHINES_PATH": (("GET",), "MIGRATE_API_VERSION"),
+    "MIGRATE_GROUPS_PATH": (("GET",), "MIGRATE_API_VERSION"),
+    "MIGRATE_ASSESSMENTS_PATH": (("GET",), "MIGRATE_API_VERSION"),
+    "MIGRATE_ASSESSMENT_PATH": (("GET",), "MIGRATE_API_VERSION"),
+    "MIGRATE_ASSESSED_MACHINES_PATH": (("GET",), "MIGRATE_API_VERSION"),
+    "OFFAZURE_VMWARE_SITES_PATH": (("GET",), "OFFAZURE_API_VERSION"),
+    "OFFAZURE_HYPERV_SITES_PATH": (("GET",), "OFFAZURE_API_VERSION"),
+    "OFFAZURE_SERVER_SITES_PATH": (("GET",), "OFFAZURE_API_VERSION"),
+    "OFFAZURE_IMPORT_SITES_PATH": (("GET",), "OFFAZURE_API_VERSION"),
+    "OFFAZURE_MASTER_SITES_PATH": (("GET",), "OFFAZURE_API_VERSION"),
     # monitor (Task #5090)
     # network (Task #5085)
     # security (Task #5089)
@@ -221,6 +240,10 @@ def test_the_checked_paths_are_pinned() -> None:
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.containerservice/managedclusters/{}/upgradeprofiles/default@2026-08-01",
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.containerservice/managedclusters/{}@2026-08-01",
         "# arc (Task #5084)",
+        "GET:/subscriptions/{}/providers/microsoft.hybridcompute/machines@2026-09-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.hybridcompute/machines/{}@2026-09-01",
+        "POST:/subscriptions/{}/resourcegroups/{}/providers/microsoft.compute/virtualmachines/{}/assesspatches@2026-04-01",
+        "POST:/subscriptions/{}/resourcegroups/{}/providers/microsoft.hybridcompute/machines/{}/assesspatches@2026-09-01",
         "# automation (Task #5092)",
         "GET:/subscriptions/{}/providers/microsoft.automation/automationaccounts@2024-10-23",
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.automation/automationaccounts/{}/jobs@2024-10-23",
@@ -228,6 +251,10 @@ def test_the_checked_paths_are_pinned() -> None:
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.automation/automationaccounts/{}/runbooks@2024-10-23",
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.automation/automationaccounts/{}/schedules@2024-10-23",
         "# avs (Task #5091)",
+        "GET:/subscriptions/{}/providers/microsoft.avs/privateclouds@2026-03-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.avs/privateclouds/{}/clusters/{}/hosts@2026-03-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.avs/privateclouds/{}/clusters@2026-03-01",
+        "POST:/subscriptions/{}/providers/microsoft.avs/locations/{}/checkquotaavailability@2026-03-01",
         "# compute (Task #5083)",
         "GET:/subscriptions/{}/providers/microsoft.compute/disks@2026-03-02",
         "GET:/subscriptions/{}/providers/microsoft.compute/images@2026-04-01",
@@ -254,6 +281,27 @@ def test_the_checked_paths_are_pinned() -> None:
         "GET:/{}/providers/microsoft.resources/tags/default@2021-04-01",
         "PATCH:/{}/providers/microsoft.resources/tags/default@2021-04-01",
         "# migrate (Task #5093)",
+        "GET:/subscriptions/{}/providers/microsoft.migrate/assessmentprojects@2024-01-15",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.migrate/"
+        + "assessmentprojects/{}/groups/{}/assessments/{}/assessedmachines@2024-01-15",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.migrate/"
+        + "assessmentprojects/{}/groups/{}/assessments/{}@2024-01-15",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.migrate/"
+        + "assessmentprojects/{}/groups/{}/assessments@2024-01-15",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.migrate/"
+        + "assessmentprojects/{}/groups@2024-01-15",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.migrate/"
+        + "assessmentprojects/{}/machines@2024-01-15",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
+        + "hypervsites@2023-06-06",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
+        + "importsites@2023-06-06",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
+        + "mastersites@2023-06-06",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
+        + "serversites@2023-06-06",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
+        + "vmwaresites@2023-06-06",
         "# monitor (Task #5090)",
         "# network (Task #5085)",
         "# security (Task #5089)",

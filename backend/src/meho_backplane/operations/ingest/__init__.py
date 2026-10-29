@@ -84,8 +84,10 @@ from meho_backplane.operations.ingest.error_envelopes import (
 from meho_backplane.operations.ingest.exceptions import (
     AmbiguousConnectorScopeError,
     BuiltinConnectorWriteForbiddenError,
+    ConnectorInUseError,
     ConnectorNotFoundError,
     ConnectorScopeCandidate,
+    ConnectorUser,
     InvalidSchemaError,
     InvalidSpecError,
     InvalidStateTransitionError,
@@ -97,6 +99,9 @@ from meho_backplane.operations.ingest.exceptions import (
     UnsupportedSpecError,
     UpstreamNotSpecError,
     VersionMismatchError,
+)
+from meho_backplane.operations.ingest.ingest_auth_store import (
+    restore_ingested_profiled_connectors,
 )
 from meho_backplane.operations.ingest.jobs import (
     IngestJob,
@@ -163,6 +168,7 @@ __all__ = [
     "BuiltinConnectorWriteForbiddenError",
     "CatalogError",
     "CatalogListResponse",
+    "ConnectorInUseError",
     "ConnectorListItem",
     "ConnectorListResponse",
     "ConnectorNotFoundError",
@@ -175,6 +181,7 @@ __all__ = [
     "ConnectorSpecCatalog",
     "ConnectorSpecEntry",
     "ConnectorStatusFilter",
+    "ConnectorUser",
     "DeleteConnectorResult",
     "DeleteConnectorWarning",
     "EditGroupBody",
@@ -254,6 +261,7 @@ __all__ = [
     "read_spec_info_version",
     "register_ingested_operations",
     "reset_job_registry_for_tests",
+    "restore_ingested_profiled_connectors",
     "run_ingest_job",
     "run_llm_grouping",
     "stamp_catalog_profiled_connectors",

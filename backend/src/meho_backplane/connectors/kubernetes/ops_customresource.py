@@ -31,10 +31,12 @@ capped excerpt of ``.spec`` (:data:`CR_SPEC_EXCERPT_MAX_BYTES`). A large
 Argo ``Application`` or cert-manager ``Certificate`` spec cannot blow
 the result envelope; when the excerpt is truncated, ``spec_truncated``
 is ``true`` and the excerpt is a preview (not parseable JSON). The
-truncation rule is documented in each op's ``llm_instructions``. The
-verbose ``metadata.managedFields`` / ``metadata.annotations`` blocks
-(server-side-apply carries huge ones) are dropped from the projection
-entirely.
+truncation rule is documented in each op's ``llm_instructions``.
+``.status`` gets the same capped excerpt, and annotations are kept with
+capped values minus the last-applied copy of the manifest (#3878); on a
+``Secret`` every annotation value is the redacted placeholder. The
+verbose ``metadata.managedFields`` block (server-side-apply carries huge
+ones) is dropped from the projection entirely.
 
 Helpers (:func:`crd_row`, :func:`crd_version_row`,
 :func:`custom_resource_row`) are pure functions so the unit tests pin
@@ -62,6 +64,7 @@ from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.kubernetes.ops import KubernetesOp
 from meho_backplane.connectors.kubernetes.redaction import (
+    LAST_APPLIED_ANNOTATION,
     SECRET_KIND,
     redact_kubernetes_payload,
 )
@@ -73,6 +76,7 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
+    "CR_ANNOTATION_VALUE_MAX_BYTES",
     "CR_SPEC_EXCERPT_MAX_BYTES",
     "CUSTOM_RESOURCE_OPS",
     "K8S_CRD_LIST_LLM_INSTRUCTIONS",
@@ -96,6 +100,10 @@ __all__ = [
 #: envelope. A pre-flight ``IPAddressPool`` spec is well under this, so
 #: the target sizing use case never truncates.
 CR_SPEC_EXCERPT_MAX_BYTES = 2048
+
+#: Byte cap for each annotation value on a CR row (#3878). Short marker
+#: annotations fit whole; a longer value is cut (``annotations_truncated``).
+CR_ANNOTATION_VALUE_MAX_BYTES = 256
 
 
 # ---------------------------------------------------------------------------
@@ -141,27 +149,48 @@ def crd_row(crd: V1CustomResourceDefinition) -> dict[str, Any]:
     }
 
 
-def _bounded_spec_excerpt(spec: Any) -> tuple[str | None, bool]:
-    """Return ``(excerpt, truncated)`` for a CR's ``.spec`` block.
+def _cap_utf8(text: str, max_bytes: int) -> tuple[str, bool]:
+    """Return ``(text, truncated)`` with *text* cut to *max_bytes* of valid UTF-8."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text, False
+    return encoded[:max_bytes].decode("utf-8", errors="ignore"), True
 
-    ``spec`` is the raw value CustomObjectsApi hands back (typically a
+
+def _bounded_json_excerpt(value: Any) -> tuple[str | None, bool]:
+    """Return ``(excerpt, truncated)`` for a CR's ``.spec`` or ``.status`` block.
+
+    ``value`` is the raw value CustomObjectsApi hands back (typically a
     dict, but any JSON value is possible). It is serialised
     deterministically (``sort_keys``) and capped at
     :data:`CR_SPEC_EXCERPT_MAX_BYTES`. When the serialised form fits, the
-    full spec round-trips as JSON; when it does not, the excerpt is
+    full block round-trips as JSON; when it does not, the excerpt is
     truncated on a UTF-8 byte boundary and ``truncated`` is ``True`` (the
     excerpt is then a preview, not parseable JSON). ``(None, False)``
-    when the object has no ``spec`` (e.g. a status-only CR).
+    when the object has no such block.
     """
-    if spec is None:
+    if value is None:
         return None, False
-    serialised = json.dumps(spec, sort_keys=True, default=str)
-    encoded = serialised.encode("utf-8")
-    if len(encoded) <= CR_SPEC_EXCERPT_MAX_BYTES:
-        return serialised, False
-    # ``errors="ignore"`` drops a partial multi-byte sequence at the cut
-    # point so the preview is always valid UTF-8.
-    return encoded[:CR_SPEC_EXCERPT_MAX_BYTES].decode("utf-8", errors="ignore"), True
+    return _cap_utf8(json.dumps(value, sort_keys=True, default=str), CR_SPEC_EXCERPT_MAX_BYTES)
+
+
+def _bounded_annotations(annotations: Any) -> tuple[dict[str, str], bool]:
+    """Return ``(annotations, truncated)`` for a CR's ``metadata.annotations``.
+
+    Each value is capped at :data:`CR_ANNOTATION_VALUE_MAX_BYTES`;
+    ``truncated`` is ``True`` when a value was cut. ``LAST_APPLIED_ANNOTATION``
+    is left out: it repeats the whole manifest (on a Secret, every value).
+    """
+    if not isinstance(annotations, dict):
+        return {}, False
+    out: dict[str, str] = {}
+    truncated = False
+    for key, value in annotations.items():
+        if key == LAST_APPLIED_ANNOTATION:
+            continue
+        out[key], cut = _cap_utf8(str(value), CR_ANNOTATION_VALUE_MAX_BYTES)
+        truncated = truncated or cut
+    return out, truncated
 
 
 def custom_resource_row(obj: dict[str, Any]) -> dict[str, Any]:
@@ -170,9 +199,11 @@ def custom_resource_row(obj: dict[str, Any]) -> dict[str, Any]:
     Custom resources have no generated typed model, so *obj* is the
     plain dict CustomObjectsApi returns. The projection keeps the
     operator-relevant identifiers (name / namespace / apiVersion / kind /
-    creationTimestamp / labels) and a bounded ``.spec`` excerpt (see
-    :func:`_bounded_spec_excerpt`); the verbose ``managedFields`` /
-    ``annotations`` metadata blocks are dropped to keep result sizes
+    creationTimestamp / resourceVersion / uid / labels), the annotations
+    with capped values and no last-applied copy (see
+    :func:`_bounded_annotations`), and bounded ``.spec`` / ``.status``
+    excerpts (see :func:`_bounded_json_excerpt`); the verbose
+    ``managedFields`` metadata block is dropped to keep result sizes
     sane. ``namespace`` is ``None`` for a cluster-scoped CR.
 
     Read-side Secret redaction (#3501): a dynamic CR read can be pointed
@@ -184,8 +215,9 @@ def custom_resource_row(obj: dict[str, Any]) -> dict[str, Any]:
     credential pattern). For a ``Secret`` the projection then surfaces
     the **redacted** ``data`` / ``string_data`` key inventory -- so the
     read answers "which keys does this Secret carry?" with a per-value
-    digest, never the bytes. A non-Secret CR gets neither field and is
-    otherwise untouched by the walk.
+    digest, never the bytes. The same walk replaces every annotation
+    value of a Secret with the placeholder (keys kept). A non-Secret CR
+    gets neither field and is otherwise untouched by the walk.
     """
     is_secret = obj.get("kind") == SECRET_KIND
     if is_secret:
@@ -193,16 +225,24 @@ def custom_resource_row(obj: dict[str, Any]) -> dict[str, Any]:
         # (never the caller's dict) keeps the walk off every other CR.
         obj = redact_kubernetes_payload(obj)
     metadata = obj.get("metadata") or {}
-    excerpt, truncated = _bounded_spec_excerpt(obj.get("spec"))
+    excerpt, truncated = _bounded_json_excerpt(obj.get("spec"))
+    status_excerpt, status_truncated = _bounded_json_excerpt(obj.get("status"))
+    annotations, annotations_truncated = _bounded_annotations(metadata.get("annotations"))
     row: dict[str, Any] = {
         "name": metadata.get("name"),
         "namespace": metadata.get("namespace"),
         "api_version": obj.get("apiVersion"),
         "kind": obj.get("kind"),
         "creation_timestamp": metadata.get("creationTimestamp"),
+        "resource_version": metadata.get("resourceVersion"),
+        "uid": metadata.get("uid"),
         "labels": metadata.get("labels") or {},
+        "annotations": annotations,
+        "annotations_truncated": annotations_truncated,
         "spec_excerpt": excerpt,
         "spec_truncated": truncated,
+        "status_excerpt": status_excerpt,
+        "status_truncated": status_truncated,
     }
     if is_secret:
         row["data"] = obj.get("data") or {}
@@ -217,11 +257,12 @@ def custom_resource_row(obj: dict[str, Any]) -> dict[str, Any]:
 
 _GROUP_PARAM: dict[str, Any] = {
     "type": "string",
-    "minLength": 1,
     "description": (
-        "API group of the custom resource (e.g. "
-        "``metallb.io``, ``cert-manager.io``). From ``k8s.crd.list``'s "
-        "``group`` column."
+        "API group of the resource (e.g. ``metallb.io``, "
+        "``cert-manager.io``, ``admissionregistration.k8s.io``). From "
+        "``k8s.crd.list``'s ``group`` column for a custom resource. Pass "
+        "an empty string for the core group (``namespaces``, ``pods``, "
+        "``services`` -- version ``v1``)."
     ),
 }
 
@@ -249,8 +290,8 @@ _CR_NAMESPACE_PARAM: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
     "description": (
-        "Namespace to scope to. Omit for a cluster-scoped CRD, or to "
-        "list a namespaced CRD across every namespace."
+        "Namespace to scope to. Omit for a cluster-scoped resource, or "
+        "to list a namespaced resource across every namespace."
     ),
 }
 
@@ -345,9 +386,15 @@ _CR_ROW_ITEM_SCHEMA: dict[str, Any] = {
         "api_version": {"type": ["string", "null"]},
         "kind": {"type": ["string", "null"]},
         "creation_timestamp": {"type": ["string", "null"]},
+        "resource_version": {"type": ["string", "null"]},
+        "uid": {"type": ["string", "null"]},
         "labels": {"type": "object"},
+        "annotations": {"type": "object", "additionalProperties": {"type": "string"}},
+        "annotations_truncated": {"type": "boolean"},
         "spec_excerpt": {"type": ["string", "null"]},
         "spec_truncated": {"type": "boolean"},
+        "status_excerpt": {"type": ["string", "null"]},
+        "status_truncated": {"type": "boolean"},
         # Present only for a ``kind: Secret`` object (#3501): the redacted
         # ``data`` / ``stringData`` key inventory -- key names kept, every
         # value replaced with a placeholder + SHA-256 digest.
@@ -360,9 +407,15 @@ _CR_ROW_ITEM_SCHEMA: dict[str, Any] = {
         "api_version",
         "kind",
         "creation_timestamp",
+        "resource_version",
+        "uid",
         "labels",
+        "annotations",
+        "annotations_truncated",
         "spec_excerpt",
         "spec_truncated",
+        "status_excerpt",
+        "status_truncated",
     ],
     "additionalProperties": False,
 }
@@ -379,6 +432,24 @@ K8S_CR_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
 }
 
 
+_CR_ROW_SHAPE = (
+    "{name, namespace, api_version, kind, creation_timestamp, "
+    "resource_version, uid, labels, annotations, annotations_truncated, "
+    "spec_excerpt, spec_truncated, status_excerpt, status_truncated}"
+)
+
+_CR_ROW_NOTES = (
+    "``spec_excerpt`` / ``status_excerpt`` are the JSON .spec / .status, "
+    f"each capped at {CR_SPEC_EXCERPT_MAX_BYTES} bytes; when the matching "
+    "``*_truncated`` flag is true the excerpt is a preview (not parseable "
+    "JSON). ``annotations`` values are cut at "
+    f"{CR_ANNOTATION_VALUE_MAX_BYTES} bytes (``annotations_truncated``) "
+    "and ``kubectl.kubernetes.io/last-applied-configuration`` is left "
+    "out. On a Secret every annotation value is a redacted placeholder "
+    "(keys kept). A changed ``resource_version`` means the object changed."
+)
+
+
 K8S_CR_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_use": (
         "Call to read custom-resource objects generically: 'which "
@@ -386,23 +457,19 @@ K8S_CR_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
         "Certificates exist?'. Get ``group`` / ``version`` / ``plural`` "
         "from ``k8s.crd.list`` first. Omit ``namespace`` to list a "
         "namespaced CRD across every namespace (or for a cluster-scoped "
-        "CRD); pass ``namespace`` to scope. Read-only."
+        "CRD); pass ``namespace`` to scope. Also reads built-in kinds "
+        "no dedicated op covers: ``group: ''`` / ``version: 'v1'`` for "
+        "the core group (e.g. ``namespaces``), or a built-in group such "
+        "as ``apiregistration.k8s.io`` / ``v1`` / ``apiservices``. "
+        "Read-only."
     ),
     "parameter_hints": {
-        "group": "API group, e.g. ``metallb.io``. From k8s.crd.list.",
+        "group": "API group, e.g. ``metallb.io``. From k8s.crd.list. '' for the core group.",
         "version": "Served version, e.g. ``v1beta1``. From k8s.crd.list.",
         "plural": "Plural name, e.g. ``ipaddresspools``. NOT the kind.",
         "namespace": "Optional; omit for cluster-scoped or all-namespaces listing.",
     },
-    "output_shape": (
-        "{'rows': [{name, namespace, api_version, kind, "
-        "creation_timestamp, labels, spec_excerpt, spec_truncated}], "
-        "'total': <int>}. ``spec_excerpt`` is a JSON string of the CR's "
-        f".spec capped at {CR_SPEC_EXCERPT_MAX_BYTES} bytes; when "
-        "``spec_truncated`` is true the excerpt is a preview (not "
-        "parseable JSON) -- narrow to one object via ``k8s.cr.info`` for "
-        "that name."
-    ),
+    "output_shape": (f"{{'rows': [{_CR_ROW_SHAPE}], 'total': <int>}}. {_CR_ROW_NOTES}"),
 }
 
 
@@ -429,21 +496,19 @@ K8S_CR_INFO_LLM_INSTRUCTIONS: dict[str, Any] = {
         "address range on the metallb-system default IPAddressPool?'. "
         "Get ``group`` / ``version`` / ``plural`` from ``k8s.crd.list``; "
         "pass ``namespace`` for a namespaced CRD, omit it for a "
-        "cluster-scoped one. Read-only."
+        "cluster-scoped one. Pass ``group: ''`` / ``version: 'v1'`` "
+        "to read a core-group object (e.g. one ``namespaces`` entry). "
+        "Read-only."
     ),
     "parameter_hints": {
-        "group": "API group, e.g. ``metallb.io``. From k8s.crd.list.",
+        "group": "API group, e.g. ``metallb.io``. From k8s.crd.list. '' for the core group.",
         "version": "Served version, e.g. ``v1beta1``. From k8s.crd.list.",
         "plural": "Plural name, e.g. ``ipaddresspools``. NOT the kind.",
         "name": "The object's metadata.name.",
         "namespace": "Required for a namespaced CRD; omit for cluster-scoped.",
     },
     "output_shape": (
-        "Single object (not a rows/total envelope): {name, namespace, "
-        "api_version, kind, creation_timestamp, labels, spec_excerpt, "
-        f"spec_truncated}}. ``spec_excerpt`` is the JSON .spec capped at "
-        f"{CR_SPEC_EXCERPT_MAX_BYTES} bytes; ``spec_truncated`` flags a "
-        "preview-only excerpt for a spec over the cap."
+        f"Single object (not a rows/total envelope): {_CR_ROW_SHAPE}. {_CR_ROW_NOTES}"
     ),
 }
 
@@ -482,12 +547,10 @@ CUSTOM_RESOURCE_OPS: tuple[KubernetesOp, ...] = (
             "``list_cluster_custom_object(group, version, plural)`` "
             "(which lists a namespaced CRD across all namespaces, or a "
             "cluster-scoped CRD's objects). Each object projects to "
-            "{name, namespace, api_version, kind, creation_timestamp, "
-            "labels, spec_excerpt, spec_truncated}. ``spec_excerpt`` is "
-            "a JSON string of .spec capped at "
-            f"{CR_SPEC_EXCERPT_MAX_BYTES} bytes; ``spec_truncated`` "
-            "flags an over-cap preview. Read-only. Get group / version "
-            "/ plural from ``k8s.crd.list``."
+            f"{_CR_ROW_SHAPE}. {_CR_ROW_NOTES} Read-only. Get group / version "
+            "/ plural from ``k8s.crd.list``. ``group: ''`` reads the "
+            "core group under ``/api/{version}`` instead (e.g. "
+            "``namespaces``)."
         ),
         parameter_schema=K8S_CR_LIST_PARAMETER_SCHEMA,
         response_schema=K8S_CR_LIST_RESPONSE_SCHEMA,
@@ -507,12 +570,11 @@ CUSTOM_RESOURCE_OPS: tuple[KubernetesOp, ...] = (
             "``get_namespaced_custom_object(group, version, namespace, "
             "plural, name)`` when a namespace is supplied, else "
             "``get_cluster_custom_object(group, version, plural, name)``. "
-            "Returns the single-object projection {name, namespace, "
-            "api_version, kind, creation_timestamp, labels, "
-            "spec_excerpt, spec_truncated} (not a rows/total envelope). "
-            "``spec_excerpt`` is the JSON .spec capped at "
-            f"{CR_SPEC_EXCERPT_MAX_BYTES} bytes. Read-only; the "
-            "counterpart drill-in for a ``k8s.cr.list`` row."
+            f"Returns the single-object projection {_CR_ROW_SHAPE} (not a "
+            f"rows/total envelope). {_CR_ROW_NOTES} Read-only; the "
+            "counterpart drill-in for a ``k8s.cr.list`` row. "
+            "``group: ''`` reads a core-group object under "
+            "``/api/{version}`` instead."
         ),
         parameter_schema=K8S_CR_INFO_PARAMETER_SCHEMA,
         response_schema=K8S_CR_INFO_RESPONSE_SCHEMA,

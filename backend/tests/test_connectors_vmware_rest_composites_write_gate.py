@@ -61,6 +61,8 @@ from meho_backplane.db.models import (
 from meho_backplane.settings import get_settings
 from tests._vmware_cluster_config_fake import cluster_config_ex, reject_config_ex_member_paths
 
+_ITEM_OVF = "aaaaaaaa-0000-0000-0000-00000000000f"
+
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000025a6")
 
 
@@ -124,6 +126,9 @@ class _RecordingConnector:
     serves the VI-JSON reads the #2970 vim-switched steps issue (keyed by
     the ``RetrievePropertiesEx`` object type).
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     def __init__(self, reads: dict[str, Any], *, vmomi: dict[str, Any] | None = None) -> None:
         self._reads = reads
@@ -310,6 +315,9 @@ class _DiskGrowRecordingConnector:
     the gate parks / denies.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(self, *, capacity_bytes: int = 10 * 1024**3) -> None:
         self._capacity_bytes = capacity_bytes
         self.reconfig_writes: list[Any] = []
@@ -445,6 +453,9 @@ class _DiskAttachRecordingConnector:
     never fired when the gate parks / denies.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(self) -> None:
         self.reconfig_writes: list[Any] = []
 
@@ -569,6 +580,9 @@ class _CloneRecordingConnector:
     object type) and records every ``CloneVM_Task`` write, so the tests can
     assert the mutating vmomi POST never fired when the gate parks / denies.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     def __init__(self) -> None:
         self.clone_writes: list[Any] = []
@@ -726,6 +740,9 @@ class _DeployRecordingConnector:
     id-passthrough params → no content-library find reads are needed.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(self) -> None:
         self.deploy_writes: list[Any] = []
 
@@ -791,7 +808,7 @@ class _DeployRecordingConnector:
 
 
 def _deploy_gate_params() -> dict[str, Any]:
-    return {"library_item": "li-ovf", "resource_pool": "resgroup-8"}
+    return {"library_item": _ITEM_OVF, "resource_pool": "resgroup-8"}
 
 
 @pytest.mark.asyncio
@@ -894,6 +911,9 @@ class _DrsRuleRecordingConnector:
     mutating vmomi POST never fired when the gate parks / denies. The cluster
     read answers like vCenter 8.0.x: a path into ``configurationEx`` fails.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     _MOUNT = "/api"
 
@@ -1023,6 +1043,9 @@ class _FolderRecordingConnector:
     returns the new Folder MoRef directly with no ``RetrievePropertiesEx`` poll.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     _MOUNT = "/api"
 
     def __init__(self) -> None:
@@ -1129,6 +1152,9 @@ _GUEST_FILE_WRITE_OP_ID = "POST:/GuestFileManager/{moId}/InitiateFileTransferToG
 
 class _GuestWriteRecordingConnector:
     """Records vmomi calls + PUTs so the gate tests can assert nothing fired."""
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     def __init__(self) -> None:
         self.vmomi_calls: list[str] = []

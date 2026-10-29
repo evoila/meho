@@ -846,7 +846,11 @@ def test_missing_tenant_id_claim_returns_401_and_logs(
         )
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "missing_tenant_claim"}
+    detail = response.json()["detail"]
+    # The code stays the prefix; the text names the cause and the guide (#3872).
+    assert detail.startswith("missing_tenant_claim: ")
+    assert "role group" in detail
+    assert "guides/tenant-bootstrap/" in detail
     _assert_event_logged(log_buffer, "missing_tenant_claim", claim_name="tenant_id")
 
 
@@ -1340,7 +1344,9 @@ def test_existing_tenant_claim_paths_unchanged_by_decode_stage_codes() -> None:
                 headers={"Authorization": f"Bearer {token}"},
             )
         assert response.status_code == 401
-        assert response.json() == {"detail": expected_detail}
+        detail = response.json()["detail"]
+        # missing_tenant_claim carries an explanation after the code (#3872).
+        assert detail == expected_detail or detail.startswith(f"{expected_detail}: ")
 
 
 # ---------------------------------------------------------------------------

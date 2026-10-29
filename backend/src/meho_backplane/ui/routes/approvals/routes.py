@@ -191,7 +191,7 @@ _MAX_WORK_REF_LENGTH: Final[int] = 512
 
 #: The status-tab vocabulary the full-page console exposes. Each entry maps
 #: a tab key the template renders to the ``list_pending`` ``status``
-#: argument: the four closed ``ApprovalRequestStatus`` values plus an "all"
+#: argument: the five closed ``ApprovalRequestStatus`` values plus an "all"
 #: tab that passes ``status=None`` (every state). A query value outside this
 #: set is rejected as an unknown tab (422) rather than silently coerced, so
 #: a typo'd URL fails loud instead of returning a misleading filtered view.
@@ -200,6 +200,7 @@ _HISTORY_TABS: Final[dict[str, str | None]] = {
     "approved": "approved",
     "rejected": "rejected",
     "expired": "expired",
+    "withdrawn": "withdrawn",
     "all": None,
 }
 

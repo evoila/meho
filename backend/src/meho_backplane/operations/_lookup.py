@@ -16,6 +16,11 @@ form ``"<impl_id>-<version>"`` and resolves it into the
 * :func:`visible_scope_clause` -- the one tenant-scope predicate that
   dispatch, preview, ``list_operation_groups`` and ``search_operations``
   share, so they always agree on which rows a tenant can use.
+* :func:`enabled_for_tenant_clause` -- the one "is this operation on for
+  this tenant" predicate the same callers share: the tenant's own setting
+  for a built-in operation first, then the install default (#5029).
+* :func:`group_visible_for_tenant_clause` -- which operation groups
+  ``list_operation_groups`` and a group-scoped ``search_operations`` show.
 * :func:`descriptor_exists_any_state` -- ``is_enabled``-agnostic
   presence probe. Used only to classify a non-dispatchable sub-op as
   *present-but-disabled* versus *truly absent*; never used to dispatch.
@@ -27,6 +32,9 @@ form ``"<impl_id>-<version>"`` and resolves it into the
   see that have the same ``op_id`` enabled. Named in the ``unknown_op``
   error so a caller who picked the wrong connector version learns where
   the op lives (#4031).
+* :func:`close_connector_ids` / :func:`connector_product_known` -- the
+  "did you mean" ids and the product check behind every
+  unknown-connector error (#4136).
 
 The split lets the dispatcher's :func:`dispatch` body keep step 2's
 descriptor resolution one helper call instead of three.
@@ -34,23 +42,30 @@ descriptor resolution one helper call instead of three.
 
 from __future__ import annotations
 
+import difflib
 import re
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, SQLColumnExpression, and_, select
+import sqlalchemy as sa
+from sqlalchemy import ColumnElement, SQLColumnExpression, and_, or_, select
 from sqlalchemy.orm import aliased
 
+from meho_backplane.connectors.base import shim_kind
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor, OperationGroup
+from meho_backplane.db.models import EndpointDescriptor, OperationGroup, TenantOperationSetting
 
 __all__ = [
+    "close_connector_ids",
     "connector_class_registered",
     "connector_exists",
+    "connector_product_known",
     "count_known_ops",
     "descriptor_exists_any_state",
+    "enabled_for_tenant_clause",
     "find_connectors_with_op",
+    "group_visible_for_tenant_clause",
     "lookup_descriptor",
     "parse_connector_id",
     "visible_scope_clause",
@@ -159,6 +174,90 @@ def visible_scope_clause(
     )
 
 
+def enabled_for_tenant_clause(*, tenant_id: UUID | None) -> ColumnElement[bool]:
+    """Return the predicate "this ``endpoint_descriptor`` row is on for *tenant_id*".
+
+    A built-in row (``tenant_id IS NULL``) is shared by every tenant, so its
+    ``is_enabled`` flag is only the install default. A tenant may turn a
+    built-in operation on or off for itself with a
+    :class:`~meho_backplane.db.models.TenantOperationSetting` row (#5029).
+    For a built-in row the tenant's setting wins; without a setting the
+    install default applies. A tenant's own row (a connector it imported
+    for itself) uses its own ``is_enabled`` flag, as before.
+
+    ``tenant_id=None`` is the operator-less chassis path: only the install
+    default counts.
+
+    The setting is looked up by the row's own natural key columns, so the
+    predicate works in any query over :class:`EndpointDescriptor`, also one
+    that spans many connectors, and inside a correlated ``EXISTS``.
+    """
+    if tenant_id is None:
+        return EndpointDescriptor.is_enabled.is_(True)
+    tenant_setting = (
+        select(TenantOperationSetting.enabled)
+        .where(
+            TenantOperationSetting.tenant_id == tenant_id,
+            TenantOperationSetting.product == EndpointDescriptor.product,
+            TenantOperationSetting.version == EndpointDescriptor.version,
+            TenantOperationSetting.impl_id == EndpointDescriptor.impl_id,
+            TenantOperationSetting.op_id == EndpointDescriptor.op_id,
+        )
+        .scalar_subquery()
+    )
+    builtin_enabled = sa.func.coalesce(
+        tenant_setting, EndpointDescriptor.is_enabled, type_=sa.Boolean
+    )
+    return or_(
+        and_(EndpointDescriptor.tenant_id.is_not(None), EndpointDescriptor.is_enabled.is_(True)),
+        and_(EndpointDescriptor.tenant_id.is_(None), builtin_enabled.is_(True)),
+    )
+
+
+def group_visible_for_tenant_clause(*, tenant_id: UUID | None) -> ColumnElement[bool]:
+    """Return the predicate "this ``operation_group`` row is shown to *tenant_id*".
+
+    A group shows when it is fully enabled (``review_status='enabled'``) or
+    when at least one of its operations is on for the tenant
+    (:func:`enabled_for_tenant_clause`).
+
+    A fully enabled group is hidden when the tenant turned operations in it
+    off for itself and none of its operations is still on for the tenant
+    (#5029). Without that, turning a whole group off would leave an empty
+    group in the list.
+    """
+    has_enabled_op = (
+        select(EndpointDescriptor.id)
+        .where(
+            EndpointDescriptor.group_id == OperationGroup.id,
+            enabled_for_tenant_clause(tenant_id=tenant_id),
+        )
+        .exists()
+    )
+    if tenant_id is None:
+        return (OperationGroup.review_status == "enabled") | has_enabled_op
+    tenant_turned_op_off = (
+        select(EndpointDescriptor.id)
+        .join(
+            TenantOperationSetting,
+            and_(
+                TenantOperationSetting.tenant_id == tenant_id,
+                TenantOperationSetting.product == EndpointDescriptor.product,
+                TenantOperationSetting.version == EndpointDescriptor.version,
+                TenantOperationSetting.impl_id == EndpointDescriptor.impl_id,
+                TenantOperationSetting.op_id == EndpointDescriptor.op_id,
+                TenantOperationSetting.enabled.is_(False),
+            ),
+        )
+        .where(
+            EndpointDescriptor.group_id == OperationGroup.id,
+            EndpointDescriptor.tenant_id.is_(None),
+        )
+        .exists()
+    )
+    return ((OperationGroup.review_status == "enabled") & ~tenant_turned_op_off) | has_enabled_op
+
+
 async def lookup_descriptor(
     *,
     tenant_id: UUID,
@@ -174,6 +273,9 @@ async def lookup_descriptor(
     or absent op there resolves to ``None``. There is no fallback to the
     built-in row (#3870). Otherwise the built-in row is used. Because
     only one bucket is ever visible, one SELECT finds at most one row.
+
+    "Enabled" is :func:`enabled_for_tenant_clause`: for a built-in row the
+    tenant's own on/off setting wins over the install default (#5029).
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -190,7 +292,7 @@ async def lookup_descriptor(
                 EndpointDescriptor.version == version,
                 EndpointDescriptor.impl_id == impl_id,
                 EndpointDescriptor.op_id == op_id,
-                EndpointDescriptor.is_enabled.is_(True),
+                enabled_for_tenant_clause(tenant_id=tenant_id),
             )
         )
         return result.scalar_one_or_none()
@@ -284,7 +386,7 @@ async def count_known_ops(
                 EndpointDescriptor.product == product,
                 EndpointDescriptor.version == version,
                 EndpointDescriptor.impl_id == impl_id,
-                EndpointDescriptor.is_enabled.is_(True),
+                enabled_for_tenant_clause(tenant_id=tenant_id),
             )
         )
         return len(result.all())
@@ -337,18 +439,156 @@ async def find_connectors_with_op(
                     impl_id=EndpointDescriptor.impl_id,
                 ),
                 EndpointDescriptor.op_id == op_id,
-                EndpointDescriptor.is_enabled.is_(True),
+                enabled_for_tenant_clause(tenant_id=tenant_id),
             )
             .distinct()
         )
         triples = {(row.product, row.version, row.impl_id) for row in result}
     triples.discard(exclude)
-    connector_ids: set[str] = set()
-    for product, version, impl_id in triples:
-        connector_id = f"{impl_id}-{version}" if impl_id and version else product
-        if parse_connector_id(connector_id) == (product, version, impl_id):
-            connector_ids.add(connector_id)
-    return sorted(connector_ids)[:_CONNECTORS_WITH_OP_CAP]
+    rendered = {_render_connector_id(*triple) for triple in triples}
+    return sorted(cid for cid in rendered if cid is not None)[:_CONNECTORS_WITH_OP_CAP]
+
+
+def _render_connector_id(product: str, version: str, impl_id: str) -> str | None:
+    """Render a row's triple as a connector id, or ``None`` if it does not parse back.
+
+    ``<impl_id>-<version>``, or ``<product>`` for a v1-style row with no
+    version. Only an id that :func:`parse_connector_id` maps back to the
+    same triple is returned, so every rendered id can be passed to
+    dispatch as is.
+    """
+    connector_id = f"{impl_id}-{version}" if impl_id and version else product
+    if parse_connector_id(connector_id) == (product, version, impl_id):
+        return connector_id
+    return None
+
+
+async def _visible_connector_triples(tenant_id: UUID) -> set[tuple[str, str, str]]:
+    """Return the *(product, version, impl_id)* of every connector the caller can see.
+
+    Same tenant rule as :func:`connector_exists`: built-in rows plus the
+    caller's own tenant rows, from ``endpoint_descriptor`` and
+    ``operation_group``. A connector of another tenant is never returned.
+    """
+    sessionmaker = get_sessionmaker()
+    triples: set[tuple[str, str, str]] = set()
+    async with sessionmaker() as session:
+        for model in (EndpointDescriptor, OperationGroup):
+            result = await session.execute(
+                select(model.product, model.version, model.impl_id)
+                .where((model.tenant_id.is_(None)) | (model.tenant_id == tenant_id))
+                .distinct()
+            )
+            triples.update((row.product, row.version, row.impl_id) for row in result)
+    return triples
+
+
+def _shipped_profile_triples() -> set[tuple[str, str, str]]:
+    """Return the parsed triple of every catalog row shipped with an execution profile.
+
+    Startup stamps a profiled connector class for each such row under
+    the built-in scope
+    (:func:`~meho_backplane.operations.ingest.boot_stamp.stamp_catalog_profiled_connectors`).
+    The triple is derived the way that stamp derives it: from the row's
+    ``<impl_id>-<version>`` id, so a catalog product that does not round
+    trip (``_fixture`` -> ``fixture``) still matches the registry entry.
+    """
+    # Local import: the ingest package imports this module at load time.
+    from meho_backplane.operations.ingest.catalog import load_catalog
+
+    return {
+        parse_connector_id(f"{entry.impl_id}-{entry.version}")
+        for entry in load_catalog().entries
+        if entry.profile_resource is not None
+    }
+
+
+def _builtin_registered_triples() -> set[tuple[str, str, str]]:
+    """Return the parsed *(product, version, impl_id)* of every built-in connector class.
+
+    Two kinds of registered class are built-in: a hand-coded class
+    (``shim_kind == "none"``), and the profiled class startup stamps for
+    a catalog row shipped with a profile (``mehoauto-rest-0.1.0``; see
+    :func:`_shipped_profile_triples`). Before its first ingest such a
+    connector has no operation rows, yet ``meho_connector_list`` shows
+    it, so its id is named here too.
+
+    Ingest also registers a class, a bare auto-shim or a profiled class
+    for a triple the catalog does not ship a profile for, and it does so
+    for a tenant-scoped ingest too. Such a connector is known only through
+    its rows, which :func:`_visible_connector_triples` filters by tenant.
+    Naming it from the registry would tell a caller of another tenant
+    that it exists. The v1-compat ``(product, "", "")`` entries are
+    skipped, and each entry is rendered and parsed back, the same round
+    trip :func:`connector_class_registered` uses.
+    """
+    shipped_profiles = _shipped_profile_triples()
+    triples: set[tuple[str, str, str]] = set()
+    for (_product, version, impl_id), cls in all_connectors_v2().items():
+        if not version or not impl_id:
+            continue
+        kind = shim_kind(cls)
+        if kind == "bare":
+            continue
+        parsed = parse_connector_id(f"{impl_id}-{version}")
+        if kind == "none" or parsed in shipped_profiles:
+            triples.add(parsed)
+    return triples
+
+
+#: Most ids one "did you mean" answer names (#4136).
+_DID_YOU_MEAN_CAP: int = 5
+
+#: Lowest :class:`difflib.SequenceMatcher` ratio that counts as a close spelling.
+_DID_YOU_MEAN_CUTOFF: float = 0.6
+
+
+async def close_connector_ids(*, tenant_id: UUID, connector_id: str) -> list[str]:
+    """Return up to 5 caller-visible connector ids close to *connector_id* (#4136).
+
+    Runs only on the unknown-connector error path. A close id is one that
+    starts with the given text (``vmware-rest`` -> ``vmware-rest-9.0``) or
+    has a close spelling (``linux-ssh-1.0`` -> ``linux-ssh-1.x``). The
+    match ignores case. Closest ids come first.
+
+    Only ids the caller can see are named: built-in connectors and the
+    caller's own tenant, the same rule as :func:`connector_exists`. A
+    built-in connector class with no rows yet, hand-coded or stamped at
+    startup from a shipped profile, is named too
+    (:func:`_builtin_registered_triples`).
+    """
+    needle = connector_id.strip().lower()
+    if not needle:
+        return []
+    triples = await _visible_connector_triples(tenant_id) | _builtin_registered_triples()
+    rendered = {_render_connector_id(*t) for t in triples}
+    known = {cid.lower(): cid for cid in rendered if cid is not None}
+    candidates = {key for key in known if key.startswith(needle)}
+    candidates.update(
+        difflib.get_close_matches(
+            needle, list(known), n=_DID_YOU_MEAN_CAP, cutoff=_DID_YOU_MEAN_CUTOFF
+        )
+    )
+    ranked = sorted(
+        candidates,
+        key=lambda key: (-difflib.SequenceMatcher(None, needle, key).ratio(), key),
+    )
+    return [known[key] for key in ranked[:_DID_YOU_MEAN_CAP]]
+
+
+async def connector_product_known(*, tenant_id: UUID, product: str) -> bool:
+    """Return whether any connector the caller can see has *product*.
+
+    ``list_targets`` uses this when its ``connector_id`` filter finds no
+    target (#4136): a product no connector has means the id is wrong, not
+    that the tenant has no targets of that kind. A built-in connector
+    class with no rows yet, hand-coded or stamped at startup from a
+    shipped profile, also counts. A class that ingest registered counts
+    only through its rows, so a connector of another tenant stays
+    unknown (:func:`_builtin_registered_triples`).
+    """
+    triples = await _visible_connector_triples(tenant_id) | _builtin_registered_triples()
+    return any(row_product == product for row_product, _version, _impl_id in triples)
 
 
 async def connector_exists(

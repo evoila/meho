@@ -58,7 +58,8 @@ covers, so none stops early with a version message.
 ## Key types
 
 - `HcxConnector` (`connector.py`) -- the connector class. Caches one
-  session token per target and tenant (`target_cache_key`).
+  session token per credential (`credential_cache_key`: tenant, secret
+  and login host).
 - `HcxTargetLike` (`session.py`) -- the minimum target shape: `id`,
   `tenant_id`, `name`, `host`, `port`, `secret_ref`, `auth_model`.
 - `HcxSessionLoader` (`session.py`) -- an async callable

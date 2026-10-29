@@ -169,6 +169,33 @@ async def test_k8s_secret_create_shows_key_names_and_refs_not_values() -> None:
 
 
 @pytest.mark.asyncio
+async def test_k8s_secret_create_shows_labels_and_annotations() -> None:
+    _, preview = await _preview(
+        "k8s.secret.create",
+        {
+            "name": "repo-creds",
+            "namespace": "argocd",
+            "labels": {"argocd.argoproj.io/secret-type": "repository"},
+            "annotations": {"managed-by": "meho"},
+            "string_data_secret_ref": {"sshPrivateKey": "vault:argocd/repo#key"},
+        },
+    )
+    assert preview["labels"] == {"argocd.argoproj.io/secret-type": "repository"}
+    assert preview["annotations"] == {"managed-by": "meho"}
+    assert preview["key_names"] == ["sshPrivateKey"]
+
+
+@pytest.mark.asyncio
+async def test_k8s_secret_create_without_labels_omits_them_from_preview() -> None:
+    _, preview = await _preview(
+        "k8s.secret.create",
+        {"name": "s", "namespace": "apps", "string_data": {"password": _SECRET}},
+    )
+    assert "labels" not in preview
+    assert "annotations" not in preview
+
+
+@pytest.mark.asyncio
 async def test_k8s_job_create_shows_containers_not_env_values_or_command() -> None:
     command = ["/bin/sh", "-c", f"curl -H 'Authorization: {_SECRET}' https://example.invalid"]
     _, preview = await _preview(

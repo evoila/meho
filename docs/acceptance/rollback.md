@@ -164,7 +164,7 @@ and the MCP tool `meho_status` show it as `operation_catalog`:
 | `state` | Meaning |
 | --- | --- |
 | `same_release` | This pod's release wrote the rows. All is well. |
-| `other_release` | Another release wrote the rows. This pod serves settings that were not made for its code. The pod logs `operation_catalog_written_by_other_release`, and `meho status` prints one line. |
+| `other_release` | Another release wrote the rows. This pod serves settings that were not made for its code. When the health status is read (`GET /api/v1/health`, `meho_status`), the pod logs `operation_catalog_written_by_other_release`, and `meho status` prints one line. Nothing checks it on its own, so no log line appears until someone reads the health status. |
 | `not_recorded` | No start since this check shipped has written the rows yet. |
 | `unknown` | The database could not be read. The `db` field says more. |
 

@@ -14,8 +14,10 @@ release that started last, and the other pods serve them.
 ``operation_catalog_state``, inside the same transaction as the
 operation rows. :func:`catalog_release_status` compares the stored
 release with the release of this pod. ``GET /api/v1/health`` reports
-the result, and a pod that serves rows from another release logs
-``operation_catalog_written_by_other_release``.
+the result. When the health status is read (``GET /api/v1/health``,
+``meho_status``), a pod that serves rows from another release logs
+``operation_catalog_written_by_other_release``. Nothing checks it on its
+own, so no log line appears until someone reads the health status.
 
 The release is the commit hash of the build (``GIT_SHA``, the
 ``git_sha`` field of ``GET /version``).

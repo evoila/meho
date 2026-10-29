@@ -399,7 +399,8 @@ def test_happy_path_returns_full_federation_response(
     # never ran the lifespan, so no start has written them yet.
     from meho_backplane.version import build_git_sha
 
-    assert body.pop("operation_catalog") == {
+    catalog = body.pop("operation_catalog")
+    assert catalog == {
         "state": "not_recorded",
         "this_release": build_git_sha(),
         "written_by_release": None,

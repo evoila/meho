@@ -62,7 +62,7 @@ build.sh: build the MEHO appliance OVA on the lab's vSphere cluster.
 Usage:
   build.sh [--from-step <1-5>] <version> <out-dir>
 
-  <version>      The MEHO version without the leading "v", for example 0.36.0.
+  <version>      The MEHO version without the leading "v", for example 0.38.0.
   <out-dir>      The folder for meho-appliance-<version>.ova and SHA256SUMS.
   --from-step N  Go on from step N with the build VM that exists: 2 the
                  form-2 install, 3 the appliance pieces, 4 the clean,

@@ -27,12 +27,15 @@ export MEHO_BUILD_HOSTNAME=meho-build.example.lab
 export MEHO_BUILD_ADDRESS=10.0.0.10/24 MEHO_BUILD_GATEWAY=10.0.0.1 MEHO_BUILD_DNS=10.0.0.2
 ssh-keygen -t ed25519 -N '' -f /tmp/build-key
 export MEHO_BUILD_SSH_KEY=/tmp/build-key
-export MEHO_DOWNLOAD=/path/to/meho-linux-0.36.0-amd64.tar
-deploy/appliance/build.sh 0.36.0 /tmp/ova
+export MEHO_DOWNLOAD=/path/to/meho-linux-0.38.0-amd64.tar
+deploy/appliance/build.sh 0.38.0 /tmp/ova
 ```
 
 The form-2 download is the one of the release, checked as
-`docs/RELEASING.md` says. `MEHO_BUILD_HOSTNAME` needs a DNS record in the
+`docs/RELEASING.md` says. Use v0.38.0 or later: the first release with
+`meho-host admin-network none` (#4739) and the pod security file of the
+CIS profile (#4636). The clean of an older download fails after SSH is
+closed. `MEHO_BUILD_HOSTNAME` needs a DNS record in the
 lab that points to `MEHO_BUILD_ADDRESS`, because the form-2 install checks
 it. Make a new SSH key for every build.
 

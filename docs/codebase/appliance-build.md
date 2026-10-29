@@ -118,10 +118,9 @@ the tests set it, as `install.sh` does.
    RKE2's own uninstall script does. **Kept:** `server/manifests/` (the
    storage manifest of the form-2 install), `agent/images/` (the image
    archives), `/etc/rancher/rke2/config.yaml` and the pod security file
-   `/etc/rancher/rke2/meho-pss.yaml` of the CIS profile. RKE2
-   makes new certificate
-   authorities, a new Secrets key and a new token at first start, and
-   imports the archives again.
+   `/etc/rancher/rke2/meho-pss.yaml` of the CIS profile. RKE2 makes new
+   certificate authorities, a new Secrets key and a new token at first
+   start, and imports the archives again.
 3. **MEHO's data**, now that no pod writes to it. Everything under
    `/var/lib/meho/`: the data volumes (PostgreSQL, OpenBao with its init,
    Valkey), the two one-time files, support bundles. The folder itself
@@ -209,8 +208,10 @@ test (#4816).
 - The Ubuntu 24.04 cloud image OVA, serial `release-20261017`, pinned with
   its sha256 in `build.sh`. Its properties and its cloud-init are used
   only at the build; the appliance has cloud-init off.
-- The form-2 download of the same version, with `install.sh --hostname`
-  and `--from-disk`, and `meho-host admin-network none`.
+- The form-2 download of the same version, v0.38.0 or later: the first
+  release with `meho-host admin-network none` (#4739) and the pod security
+  file of the CIS profile (#4636). The clean of an older download fails
+  after SSH is closed. `install.sh --hostname` and `--from-disk` are used.
 - On the runner: `ssh`, `scp`, `ssh-keygen`, `curl`, `tar`, `sha256sum`,
   GNU `base64`. No `ovftool`: `govc export.ovf` plus our own manifest and
   `tar` make the OVA.

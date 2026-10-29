@@ -46,6 +46,7 @@ KEPT = (
     f"{RKE2}/agent/images/meho-images.linux-amd64.tar.zst",
     f"{RKE2}/agent/images/rke2-images.linux-amd64.tar.zst",
     "/etc/rancher/rke2/config.yaml",
+    "/etc/rancher/rke2/meho-pss.yaml",
     "/etc/systemd/system-preset/10-meho-appliance.preset",
     "/etc/ssh/sshd_config",
     "/etc/cloud/cloud-init.disabled",
@@ -317,23 +318,24 @@ class CheckTests(CleanTestCase):
         self.assert_fails_once(result)
         self.assertEqual(
             [
-                f"[LEFT] the Kubernetes database {RKE2}/server/db, and kubectl cannot list its Secrets",
+                f"[LEFT] the Kubernetes database {RKE2}/server/db,"
+                " and kubectl cannot list its Secrets",
                 f"[LEFT] {RKE2}/server/db is still there",
             ],
             self.left_lines(result),
         )
 
     def test_what_must_stay_is_checked_too(self) -> None:
-        must_stay = {
-            f"{RKE2}/agent/images": f"{RKE2}/agent/images is missing; it must stay",
-            f"{RKE2}/server/manifests": f"{RKE2}/server/manifests is missing; it must stay",
-            "/etc/systemd/system-preset/10-meho-appliance.preset": "/etc/systemd/system-preset/10-meho-appliance.preset is missing; it must stay",
-            "/etc/rancher/rke2/config.yaml": "/etc/rancher/rke2/config.yaml is missing; it must stay",
-            "/etc/rancher/rke2/meho-pss.yaml": "/etc/rancher/rke2/meho-pss.yaml is missing; it must stay",
-            "/opt/meho/appliance/download/install.sh": "/opt/meho/appliance/download/install.sh is missing; it must stay",
-            "/etc/cloud/cloud-init.disabled": "/etc/cloud/cloud-init.disabled is missing; it must stay",
-        }
-        for path, line in must_stay.items():
+        must_stay = (
+            f"{RKE2}/agent/images",
+            f"{RKE2}/server/manifests",
+            "/etc/systemd/system-preset/10-meho-appliance.preset",
+            "/etc/rancher/rke2/config.yaml",
+            "/etc/rancher/rke2/meho-pss.yaml",
+            "/opt/meho/appliance/download/install.sh",
+            "/etc/cloud/cloud-init.disabled",
+        )
+        for path in must_stay:
             with self.subTest(path=path):
                 target = self.vm.host_path(path)
                 moved = self.vm.root / "moved"
@@ -342,7 +344,9 @@ class CheckTests(CleanTestCase):
                     result = self.vm.run("--check")
 
                     self.assert_fails_once(result)
-                    self.assertEqual([f"[LEFT] {line}"], self.left_lines(result))
+                    self.assertEqual(
+                        [f"[LEFT] {path} is missing; it must stay"], self.left_lines(result)
+                    )
                 finally:
                     moved.rename(target)
 

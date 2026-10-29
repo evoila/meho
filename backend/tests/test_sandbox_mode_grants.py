@@ -781,6 +781,8 @@ def test_console_shows_the_expiry_error(monkeypatch: pytest.MonkeyPatch, expires
     assert response.status_code == 422
     assert "delete grant" in response.text
     assert "30 days" in response.text
+    # The refusal shows at the top of the form, not only in the sandbox note.
+    assert '<div class="alert alert-error" role="alert">' in response.text
     assert asyncio.run(rows_in(SandboxDeleteGrant)) == 0
 
 

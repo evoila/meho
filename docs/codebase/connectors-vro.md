@@ -84,7 +84,7 @@ The login mode comes from the target's `extras["login"]`:
 
 - `vcfa-session`: the VCF 9 login. A VCF 9 Orchestrator signs people in
   through VCF Automation. The connector uses the shared VCF Automation
-  session login (`connectors/_shared/vcfa_session.py`, see
+  session login (`connectors/vmware_shared/vcfa_session.py`, see
   `connectors-vcf-auth-shared.md`): `POST /cloudapi/1.0.0/sessions` with
   HTTP Basic `<user>@<extras.org>` (for the provider org `System`:
   `/cloudapi/1.0.0/sessions/provider`). The token comes back in the
@@ -199,7 +199,7 @@ MEHO stores a long list behind a result handle; the agent reads it with
 - `connectors/_shared/vault_creds.py`: the operator-context credential read.
 - `connectors/_shared/vcf_auth.py`: `basic_auth_header`,
   `is_acceptable_auth_model`.
-- `connectors/_shared/vcfa_session.py`: the shared VCF Automation session
+- `connectors/vmware_shared/vcfa_session.py`: the shared VCF Automation session
   login (`vcfa-session`).
 - `connectors/vra8/_auth.py`: `vra8_login`, the Aria Automation login.
 - `operations/typed_register.py`: the typed-op registrar.

@@ -54,9 +54,11 @@ reads the two keys (product-gated to `product == "vault"`; a blank /
 whitespace / non-string value normalises to "no override"), and
 `vault_client_for_target(operator, target)` forwards them to
 `auth.vault.vault_client_for_operator(operator, role=…, mount_path=…)`.
-Every KV handler (`ops.py`) and auth handler (`ops_auth.py`,
-`ops_auth_write.py`) opens its client through that one helper, so a target
-naming a role governs its whole KV/auth dispatch. Role selection
+Every KV handler (`ops.py`), auth handler (`ops_auth.py`,
+`ops_auth_write.py`), identity handler (`ops_identity.py`) and token
+handler (`ops_token.py`, `ops_token_role.py`) opens its client through that
+one helper, so a target naming a role governs its whole KV, auth, identity
+and token dispatch (#4970). Role selection
 precedence at the login site (`auth.vault._resolve_login_role`) is:
 **per-target override (#3274) → check-runner role (#2757) → per-tenant role
 (#3852) → deployment-global `vault_oidc_role`**.

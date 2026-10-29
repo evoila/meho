@@ -506,6 +506,11 @@ role the token logs in under is picked in this order (first match wins):
    step;
 4. the deployment-global `VAULT_OIDC_ROLE` (usually `meho-mcp`).
 
+The same order picks the role for the identity operations
+(`vault.identity.*`) and the token operations (`vault.token.*`)
+(evoila/meho#4970). So a vault target whose `vault_role` may change
+identities or tokens also covers those operations.
+
 So the write identity is the operator's JWT together with the role this
 chain selects. When you diagnose a denied write on a target without a
 `vault_role`, check steps 2–4 for the acting operator before you edit a

@@ -19,8 +19,11 @@ Handler shape mirrors :mod:`meho_backplane.connectors.vault.ops_auth`
 verbatim: each is a module-level ``async def`` with the ``(operator,
 target, params) -> dict`` typed-op contract, raises on failure (the
 dispatcher's ``connector_error`` branch records the class name in
-``extras["exception_class"]``), forwards the operator JWT via
-``vault_client_for_operator``, and offloads the blocking hvac call with
+``extras["exception_class"]``), opens its Vault client through
+:func:`~meho_backplane.connectors.vault.target_auth.vault_client_for_target`
+(the operator JWT, logged in under the target's ``extras["vault_role"]``
+when set, else the deployment-wide role; a refused target role fails the
+call with no fallback), and offloads the blocking hvac call with
 ``asyncio.to_thread``. The ``identity/`` engine is core (always
 mounted), so there is no backend-not-mounted reclassification -- a
 ``404`` here means a missing entity/group and surfaces as the underlying
@@ -37,7 +40,6 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vault.ops_auth import _extract_data, _extract_keys
 from meho_backplane.connectors.vault.ops_identity_schemas import (
@@ -63,6 +65,7 @@ from meho_backplane.connectors.vault.ops_identity_schemas import (
     VAULT_IDENTITY_LIST_PARAMETER_SCHEMA,
     VAULT_IDENTITY_LIST_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vault.target_auth import vault_client_for_target
 
 __all__ = [
     "IDENTITY_OP_SPECS",
@@ -127,7 +130,7 @@ async def vault_identity_entity_write(
         if field in params and params[field] is not None:
             kwargs[field] = params[field]
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         payload = await asyncio.to_thread(client.secrets.identity.create_or_update_entity, **kwargs)
 
     return {"name": name, "entity_id": _maybe_id(payload, "id"), "written": True}
@@ -154,7 +157,7 @@ async def vault_identity_entity_alias_write(
     if params.get("alias_id") is not None:
         kwargs["alias_id"] = str(params["alias_id"]).strip()
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         payload = await asyncio.to_thread(
             client.secrets.identity.create_or_update_entity_alias, **kwargs
         )
@@ -197,7 +200,7 @@ async def vault_identity_group_write(
         if field in params and params[field] is not None:
             kwargs[field] = params[field]
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         payload = await asyncio.to_thread(client.secrets.identity.create_or_update_group, **kwargs)
 
     return {"name": name, "group_id": _maybe_id(payload, "id"), "written": True}
@@ -216,7 +219,7 @@ async def vault_identity_group_delete(
     """
     name: str = str(params["name"]).strip()
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         await asyncio.to_thread(client.secrets.identity.delete_group_by_name, name=name)
 
     return {"name": name, "deleted": True}
@@ -238,7 +241,7 @@ async def vault_identity_entity_read(
     """
     entity_id: str = str(params["entity_id"]).strip()
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         payload = await asyncio.to_thread(client.secrets.identity.read_entity, entity_id=entity_id)
 
     return _extract_data(payload)
@@ -257,7 +260,7 @@ async def vault_identity_group_read(
     """
     name: str = str(params["name"]).strip()
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         payload = await asyncio.to_thread(client.secrets.identity.read_group_by_name, name=name)
 
     return _extract_data(payload)
@@ -277,7 +280,7 @@ async def vault_identity_list(
     """
     kind: str = str(params.get("kind", "groups")).strip()
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         list_fn = (
             client.secrets.identity.list_entities
             if kind == "entities"

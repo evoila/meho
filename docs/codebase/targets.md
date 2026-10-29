@@ -134,7 +134,7 @@ does not change and does not know the map exists.
 
 | Piece | Where |
 |---|---|
-| Column `targets.secret_field_map` (JSON, nullable, `NULL` = no map) | `db/models.py`, migration `0118` |
+| Column `targets.secret_field_map` (JSON, nullable, `NULL` = no map) | `db/models.py`, migration `0120` |
 | `secret_field_map` on `Target`, `TargetSummary`, `TargetCreate`, `TargetUpdate` | `targets/schemas.py` |
 | Applying the map when a secret is read | `connectors/_shared/vault_creds.py` (`secret_field_map_of`, `_apply_secret_field_map`) |
 | PATCH merge rules and the probe check | `targets/secret_field_map.py` |
@@ -205,6 +205,40 @@ As a shortcut for the most common case, the SSH connector
 `private_key` when `ssh_private_key` is absent. A secret written by an
 automation pack therefore works for SSH key login with no map at all. When
 both fields are present, `ssh_private_key` wins.
+
+## Removing a target (`targets.remove`)
+
+An agent or a person removes a target with
+`call_operation(connector_id="targets-registry-1.x", op_id="targets.remove",
+params={"target_id": "<target-uuid>"})`. It is the opposite of
+`targets.register` (#4623).
+
+- **One delete service.** The op and `DELETE /api/v1/targets/{name}` both
+  call `soft_delete_target` in `api/v1/targets.py`. It counts the
+  `graph_node` rows that point at the target and refuses when the count is
+  not zero, unless `force` is true. Then it stamps `deleted_at`. The REST
+  route looks the target up by name; the op looks it up by id
+  (`resolve_target_by_id`), in the caller's tenant only.
+- **Result.** `{status, target_id, name}`. `status` is `removed`, or
+  `unchanged` when no live target with that id exists in the caller's
+  tenant (also for a target of another tenant). A second run gives
+  `unchanged`.
+- **What stays.** Only MEHO's record goes. The system, its Vault secret and
+  its checks stay.
+- **Role.** Only a login with the `tenant_admin` role can remove a target,
+  the same rule as the REST route. Any other role gets an error and the
+  target stays. A call that waits for approval runs, once approved, under
+  the login of the person who approved it, so that person's role counts.
+- **Approval.** `dangerous` with `requires_approval=True`; the name ends in
+  `.remove`, so the delete rules apply. A second person must approve every
+  call. See [`mcp.md`](mcp.md#admin-registry-writes-route-through-the-dispatcher).
+- **Preview.** `preview_operation` shows the target (id, name, host), its
+  product and the `graph_node` count, and says whether the call would
+  remove the target, fail, or return `unchanged`.
+- **Audit.** Every call writes an audit row with op id `targets.remove`.
+  The REST route keeps its own op id, `targets.delete`.
+- Code: `connectors/targets/ops.py` (handler, preview, registration) and
+  `connectors/targets/schemas.py`. Tests: `tests/test_targets_remove_op.py`.
 
 ## Dependencies
 

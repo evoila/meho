@@ -16,6 +16,19 @@ VCF Automation (#832) is **not** a consumer — its dual-plane auth
 → `{token: ...}` + vhost routing via `--fqdn`) is bespoke and stays in
 the Automation connector module.
 
+`connectors/vmware_shared/vcfa_session.py` (Task #5057) is the shared VCF
+Automation session login for VCF 9 products that sign people in through
+VCF Automation. See "VCF Automation session login" below. The
+Orchestrator connector (`extras.login: vcfa-session`) is its first user;
+other VCF 9 connectors can switch to it in their own Tasks.
+
+`connectors/vmware_shared/` holds the shared code that only VMware
+connectors use: `vcfa_session.py`, the `srm` and `vr` base code
+(`dr_rest.py`, `dr_api_file.py`, `dr_rest_schemas.py`) and the licence
+key mask (`license_key.py`). It is not a connector and registers nothing.
+Shared code that other connectors also use stays in `connectors/_shared/`,
+and `_shared/` does not import `vmware_shared/`.
+
 The recorded-fixture refresh tool at
 `backend/tests/fixtures/vcf/refresh.py` is documented separately in
 `docs/cross-repo/vcf-fixture-refresh.md` (the operator-facing recipe).
@@ -60,7 +73,52 @@ The recorded-fixture refresh tool at
   *downstream* calls stays in the consuming connector — only the login
   round-trip is shared.
 
+- **`vcfa_session_login(client, *, username, password, org, target,
+  request_extensions)`** (`vcfa_session.py`) — logs in to VCF Automation
+  and returns a `VcfaSessionToken`.
+- **`VcfaSessionToken`** — the token (`value`, left out of `repr`), the
+  time it ends (`expires_at`, seconds since 1970), the `authorization`
+  header value (`Bearer <token>`) and `needs_renewal(now)`.
+- **`session_path(org)`**, **`token_expiry(token, now=...)`**,
+  **`LOGIN_VCFA_SESSION`** (`"vcfa-session"`),
+  **`RENEW_BEFORE_SECONDS`** (60), **`DEFAULT_LIFETIME_SECONDS`** (30
+  minutes).
+
 ## Control flow
+
+### VCF Automation session login (`vcfa_session.py`)
+
+1. `POST /cloudapi/1.0.0/sessions` with HTTP Basic `<user>@<org>`. For
+   the provider org `System` the path is
+   `/cloudapi/1.0.0/sessions/provider`. With no org, the user name is
+   sent as it is (it may already end with `@<org>`). The paths and the
+   header name are the ones in `connectors/vcf_automation/_paths.py` and
+   `_routing.py`.
+2. The token comes back in the `X-VMWARE-VCLOUD-ACCESS-TOKEN` header. The
+   caller sends it as `Authorization: Bearer <token>` to the product API.
+3. The token is a JWT. The `exp` claim is read without checking the
+   signature, only to plan the next login. No usable `exp`: the token is
+   treated as ending after 30 minutes (the VCF Automation default for an
+   idle session).
+4. `needs_renewal()` is true 60 seconds before the end. The caller logs
+   in again then, and once after a `401` (the dispatcher's
+   `invalidate_session` hook).
+5. HTTP 401 or 403 raises `ConnectorAuthError`, which the dispatcher
+   turns into `connector_auth_failed`. The remediation says what to fix:
+   the user, the org (`extras.org`, or that it is missing) and the
+   secret that holds the password. Any other error status, or an answer
+   without the token header, raises `SessionLoginError`.
+
+Safety rules:
+
+- The caller passes its pooled client for the target, so the password
+  goes only to the target's host.
+- The login goes straight to the client, not through the traced request
+  path, so no flight-recorder trace holds the token. No log line, error
+  or `repr` holds the token or the password.
+- No cache and no retry in the helper. The connector keeps the token per
+  credential and org (`credential_cache_key`).
+
 
 ### A vROps / Fleet consumer (HTTP Basic on every request)
 
@@ -114,9 +172,15 @@ The recorded-fixture refresh tool at
   helper grows an optional `retries=` parameter rather than a global
   decorator (different consumers have different idempotency expectations).
 
+- Not proven: some appliances route by host name and answer 404 to a
+  bare IP address. The first live check of the VCF Automation session
+  login shows whether a `Host` header is needed (then reuse
+  `vhost_header` from `connectors/vcf_automation/_routing.py`).
+
 ## References
 
 - Task: https://github.com/evoila/meho/issues/841
+- Task #5057: the VCF Automation session login (`vcfa_session.py`).
 - Parent Initiative: https://github.com/evoila/meho/issues/369
 - Parent Goal: https://github.com/evoila/meho/issues/214
 - Recorded-fixture refresh: `docs/cross-repo/vcf-fixture-refresh.md`.

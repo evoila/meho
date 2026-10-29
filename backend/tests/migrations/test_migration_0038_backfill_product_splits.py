@@ -48,7 +48,7 @@ and the dispatch-probe test wraps its async probe in its own
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Final
 from uuid import UUID, uuid4
@@ -242,6 +242,7 @@ def _count_by_product(sync_url: str, table: str, product: str) -> int:
 
 def test_long_product_rows_reconciled_to_dispatch_spelling(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Built-in long-spelling rows carry the short product after upgrade.
 
@@ -250,7 +251,7 @@ def test_long_product_rows_reconciled_to_dispatch_spelling(
     bumped so operator tooling driven off the column sees the change.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0037")
+    copy_migrated_db(cfg, "0037")
 
     descriptor_id = _insert_descriptor_row(
         sync_url,
@@ -280,6 +281,7 @@ def test_long_product_rows_reconciled_to_dispatch_spelling(
 
 def test_all_six_splits_reconcile_to_expected_counts(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """SQL-level validation: post-migration counts match the reconciled state.
 
@@ -289,7 +291,7 @@ def test_all_six_splits_reconcile_to_expected_counts(
     criterion).
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0037")
+    copy_migrated_db(cfg, "0037")
 
     for long_product, impl_id, _ in _SPLITS:
         _insert_descriptor_row(
@@ -321,6 +323,7 @@ def test_all_six_splits_reconcile_to_expected_counts(
 
 def test_tenant_scoped_rows_preserved(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``tenant_id IS NOT NULL`` rows are operator-owned and never rewritten.
 
@@ -330,7 +333,7 @@ def test_tenant_scoped_rows_preserved(
     note).
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0037")
+    copy_migrated_db(cfg, "0037")
 
     tenant_id = uuid4()
     descriptor_id = _insert_descriptor_row(
@@ -361,6 +364,7 @@ def test_tenant_scoped_rows_preserved(
 
 def test_short_twin_collision_is_skipped_not_crashed(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A pre-existing short-spelling twin parks the long row instead of crashing.
 
@@ -372,7 +376,7 @@ def test_short_twin_collision_is_skipped_not_crashed(
     skipped row stays exactly as orphaned as it already was.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0037")
+    copy_migrated_db(cfg, "0037")
 
     long_descriptor = _insert_descriptor_row(
         sync_url,
@@ -426,6 +430,7 @@ def test_short_twin_collision_is_skipped_not_crashed(
 
 def test_foreign_impl_id_rows_preserved(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """The rewrite follows ``parse_connector_id``, not a blanket product rename.
 
@@ -436,7 +441,7 @@ def test_foreign_impl_id_rows_preserved(
     untouched.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0037")
+    copy_migrated_db(cfg, "0037")
 
     foreign_impl = _insert_descriptor_row(
         sync_url,
@@ -467,6 +472,7 @@ def test_foreign_impl_id_rows_preserved(
 
 def test_re_running_migration_is_idempotent(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Replaying ``upgrade()`` on a reconciled DB changes nothing.
 
@@ -478,7 +484,7 @@ def test_re_running_migration_is_idempotent(
     leak into the replay.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0037")
+    copy_migrated_db(cfg, "0037")
 
     descriptor_id = _insert_descriptor_row(
         sync_url,
@@ -505,6 +511,7 @@ def test_re_running_migration_is_idempotent(
 
 def test_dispatch_probes_resolve_reconciled_connector(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``connector_exists`` / ``count_known_ops`` flip from miss to hit.
 
@@ -515,7 +522,7 @@ def test_dispatch_probes_resolve_reconciled_connector(
     probes resolve the connector and count its enabled ops.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0037")
+    copy_migrated_db(cfg, "0037")
 
     for op_id in ("GET:/api/v2/version", "GET:/api/v2/events"):
         _insert_descriptor_row(

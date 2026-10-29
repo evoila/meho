@@ -19,6 +19,12 @@ With both settings empty the render must not change; the existing
 ``test_chart_bring_your_own_render.py`` and ``test_chart_core_*.py`` guard
 that.
 
+``deploy/charts/meho/images.txt`` is the list the customer copies: every
+image of the chart except MEHO's own (its tag is set per install). Each
+line holds the image as the chart renders it and its path in the
+customer's registry, with a tag. The last test fails when the list and the
+chart differ.
+
 Skips where ``helm`` is absent unless ``MEHO_REQUIRE_HELM=1``.
 """
 
@@ -35,6 +41,8 @@ import yaml
 
 _CHART_DIR = Path(__file__).resolve().parents[2] / "deploy" / "charts" / "meho"
 
+_IMAGES_TXT = _CHART_DIR / "images.txt"
+_MEHO_REPOSITORY = "ghcr.io/evoila/meho"
 _REGISTRY = "registry.example.com"
 _DIGEST = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
@@ -203,8 +211,10 @@ def test_every_pod_gets_the_pull_secret() -> None:
         (_REGISTRY, "localhost/x", f"{_REGISTRY}/x"),
         # No host: a Docker Hub image, the registry goes in front.
         (_REGISTRY, "team/app", f"{_REGISTRY}/team/app"),
-        # One word: Docker Hub's `library/` too.
+        # One word: Docker Hub's `library/` too, also with Docker Hub's host written out.
         (_REGISTRY, "busybox", f"{_REGISTRY}/library/busybox"),
+        (_REGISTRY, "docker.io/busybox", f"{_REGISTRY}/library/busybox"),
+        (_REGISTRY, "docker.io/team/app", f"{_REGISTRY}/team/app"),
         # The registry may hold a path.
         ("harbor.example.com/meho", "quay.io/team/app", "harbor.example.com/meho/team/app"),
     ],
@@ -228,3 +238,24 @@ def test_registry_with_a_trailing_slash_is_schema_rejected() -> None:
     result = _helm_template("--set", f"global.imageRegistry={_REGISTRY}/")
     assert result.returncode != 0
     assert "imageRegistry" in result.stderr
+
+
+def test_images_txt_lists_every_image_of_the_chart() -> None:
+    before = _images(_pods(*_ALL_ON))
+    after = _images(_pods(*_ALL_ON, "--set", f"global.imageRegistry={_REGISTRY}"))
+    # Each image as the chart renders it -> its path in the customer's registry.
+    expected = {
+        image: after[key].removeprefix(f"{_REGISTRY}/").split("@")[0]
+        for key, image in before.items()
+        if image.split("@")[0] != _MEHO_REPOSITORY
+    }
+    listed = dict(line.split() for line in _IMAGES_TXT.read_text().splitlines())
+    want = "\n".join(f"{source} {path}:<tag>" for source, path in sorted(expected.items()))
+    assert set(listed) == set(expected), f"images.txt is out of date. The chart's images:\n{want}"
+    for source, destination in listed.items():
+        assert "@sha256:" in source, f"{source}: pin it by digest in the chart"
+        # The chart renders by digest only, so the tag is not checked: it is a
+        # label in the customer's registry. Pods always pull by digest.
+        path, _, tag = destination.partition(":")
+        assert path == expected[source], f"{source}: the path must be {expected[source]}"
+        assert tag, f"{source}: {destination} needs a tag"

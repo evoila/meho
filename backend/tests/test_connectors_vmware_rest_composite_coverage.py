@@ -89,6 +89,8 @@ _CLASSIFIER_OTHER = frozenset(
         # ``other``, like ``host.service_control``.
         "vmware.composite.alarm.acknowledge",
         "vmware.composite.alarm.reset",
+        # ``.inventory`` is not a classifier suffix -> ``other``; a read.
+        "vmware.migration.inventory",
     }
 )
 

@@ -8,9 +8,10 @@ so the wire ``connector_id`` is ``migration-assess-1.x``. No connector class
 backs it (the ``audit-integrity-1.x`` mould): the handler is a module-level
 function the dispatcher calls with ``target=None``.
 
-The operation only reads stored results of the caller and builds text, so
-it is ``safe`` and sets ``requires_approval=False``. It is a typed
-operation, not a multi-step one: it runs no other operation.
+The operation only reads stored results of the caller (or inventories given
+in the call) and builds text, so it is ``safe`` and sets
+``requires_approval=False``. It is a typed operation, not a multi-step one:
+it runs no other operation.
 """
 
 from __future__ import annotations
@@ -59,8 +60,19 @@ MIGRATION_INVENTORY_CSV_PARAMETER_SCHEMA: dict[str, Any] = {
                 "Several handles are merged in the given order."
             ),
         },
+        "inventories": {
+            "type": "array",
+            "items": {"type": "object"},
+            "minItems": 1,
+            "maxItems": MAX_INVENTORY_HANDLES,
+            "description": (
+                "Inventories given inline: each one is a whole inventory as an "
+                "inventory read returns it (schema_version '1'). They are checked "
+                "like stored ones and merged after the stored ones, in the given order."
+            ),
+        },
     },
-    "required": ["inventory_handles"],
+    "anyOf": [{"required": ["inventory_handles"]}, {"required": ["inventories"]}],
     "additionalProperties": False,
     "examples": [{"inventory_handles": [_EXAMPLE_HANDLE]}],
 }
@@ -71,10 +83,14 @@ def _response_schema() -> dict[str, Any]:
     properties = schema["properties"]
     properties["sources"] = {
         "type": "array",
-        "description": "The inventories read: handle id, connector, target and time.",
+        "description": (
+            "The inventories read: where each came from ('stored' with its handle id, "
+            "or 'inline'), connector, target and time."
+        ),
         "items": {
             "type": "object",
             "properties": {
+                "origin": {"type": "string", "enum": ["stored", "inline"]},
                 "handle_id": {"type": "string"},
                 "connector_id": {"type": "string"},
                 "target": {"type": "string"},
@@ -95,24 +111,29 @@ _GROUP_WHEN_TO_USE: Final[str] = (
     "here calls a source system or changes anything."
 )
 
-_SUMMARY: Final[str] = "Turn stored inventories into an Azure Migrate CSV import file."
+_SUMMARY: Final[str] = "Turn inventories into an Azure Migrate CSV import file."
 
 _DESCRIPTION: Final[str] = (
-    "Reads one or more stored inventories, merges them and returns the CSV text in "
-    "the column format of Azure Migrate's import template, the row count, and the "
-    "servers left out or renamed. Read-only."
+    "Reads one or more inventories, stored or given inline, merges them and returns "
+    "the CSV text in the column format of Azure Migrate's import template, the row "
+    "count, and the servers left out or renamed. Read-only."
 )
 
 _LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_call": (
-        "You have inventory handles and need a file for Azure Migrate's CSV "
+        "You have inventory handles or inventories and need a file for Azure Migrate's CSV "
         "import, or want to see which servers lack the values Azure Migrate "
         "needs (name, cores, memory, OS name)."
     ),
     "parameter_hints": {
         "inventory_handles": (
-            f"Required. 1 to {MAX_INVENTORY_HANDLES} handle ids. A stored result "
+            f"1 to {MAX_INVENTORY_HANDLES} handle ids. A stored result "
             "lasts one hour; an expired handle fails with a clear message."
+        ),
+        "inventories": (
+            "Whole inventories given inline, for example a small one you already "
+            "have. Give inventory_handles, inventories, or both; at most "
+            f"{MAX_INVENTORY_HANDLES} together."
         ),
     },
     "output_shape": (
@@ -134,24 +155,20 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
 async def migration_inventory_csv(
     operator: Operator, target: Any, params: dict[str, Any]
 ) -> dict[str, Any]:
-    """Build the Azure Migrate CSV file from the caller's stored inventories.
+    """Build the Azure Migrate CSV file from the caller's stored and inline inventories.
 
     Targetless; *target* is always ``None``. The tenant and the caller come
     from *operator*, never from *params*.
     """
     del target
-    loaded = await load_inventories(operator, list(params["inventory_handles"]))
+    loaded = await load_inventories(
+        operator,
+        list(params.get("inventory_handles") or []),
+        inventories=list(params.get("inventories") or []),
+    )
     export = inventory_to_csv(loaded.records, loaded.duplicates)
     result = export.model_dump(mode="json")
-    result["sources"] = [
-        {
-            "handle_id": handle_id,
-            "connector_id": envelope.source.connector_id,
-            "target": envelope.source.target,
-            "collected_at": envelope.source.collected_at.isoformat(),
-        }
-        for handle_id, envelope in zip(loaded.handle_ids, loaded.envelopes, strict=True)
-    ]
+    result["sources"] = loaded.sources()
     return result
 
 

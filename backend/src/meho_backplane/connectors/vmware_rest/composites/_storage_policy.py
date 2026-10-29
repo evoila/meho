@@ -55,10 +55,10 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest.composite_issues import issue
 from meho_backplane.connectors.vmware_rest.composites._write import (
-    _CONNECTOR_ID,
     _WRITE_REQUIRES_APPROVAL,
     _WRITE_SAFETY_LEVEL,
     _read_sub_op,
+    _step_connector_id,
     _write_sub_op,
 )
 from meho_backplane.connectors.vmware_rest.soap_pbm import pbm_tag_property_id
@@ -115,7 +115,7 @@ async def _gate_pbm_sub_op(
     """
     return await enforce_subop_policy(
         operator=operator,
-        connector_id=_CONNECTOR_ID,
+        connector_id=_step_connector_id(connector),
         op_id=op_id,
         safety_level=_WRITE_SAFETY_LEVEL,
         requires_approval=_WRITE_REQUIRES_APPROVAL,

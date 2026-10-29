@@ -14,18 +14,27 @@ Chosen per target with ``extras["login"]`` (see
 :func:`meho_backplane.connectors.vro.session.login_mode`):
 
 * ``basic`` (default): ``Authorization: Basic`` on every call.
+* ``vcfa-session`` (VCF 9): a VCF Automation session token for
+  ``<user>@<extras.org>`` from the shared login
+  (:mod:`meho_backplane.connectors.vmware_shared.vcfa_session`), sent as
+  ``Authorization: Bearer <token>``. The connector logs in again 60
+  seconds before the token ends.
 * ``automation``: the Aria Automation token, minted with the Aria
   Automation login (``POST /csp/gateway/am/api/login?access_token``, then
   ``POST /iaas/api/login``) on the same address; sent as
   ``Authorization: Bearer <token>``.
 
-The ``Authorization`` value is cached per target and tenant
-(``target_cache_key``). Only a caller with an operator JWT, other than the
-synthesised system operator, reads or fills the cache; any other caller
-runs the credential loader, which checks it, and its login is not kept.
-On ``401`` the dispatcher calls :meth:`invalidate_session`, which drops
-only this target's value, and dispatches once more; the next call logs in
-again.
+The ``Authorization`` value (and, for ``vcfa-session``, the time the
+token ends) is cached per credential, login mode, org and login domain
+(``credential_cache_key``: tenant, secret and login host; see
+:func:`_login_cache_key`). Only a caller
+with an operator JWT, other than the synthesised system operator, reads or
+fills the cache; any other caller runs the credential loader, which checks
+it, and its login is not kept.
+On ``401`` the dispatcher calls :meth:`invalidate_session` with the
+rejected request. The cached value is dropped only when that request sent
+it, so a late ``401`` never drops a newer login. The dispatcher then runs
+the call once more.
 
 Version
 -------
@@ -58,8 +67,9 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
+from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
@@ -72,12 +82,18 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.vmware_shared.vcfa_session import (
+    LOGIN_VCFA_SESSION,
+    VcfaSessionToken,
+    vcfa_session_login,
+)
 from meho_backplane.connectors.vro.session import (
     LOGIN_AUTOMATION,
     VroCredentialsLoader,
     VroTargetLike,
     load_credentials_from_vault,
     login_mode,
+    vcfa_org,
 )
 from meho_backplane.connectors.vro.typed_reads import ABOUT_PATH, redact_secrets
 
@@ -113,8 +129,32 @@ def parse_server_version(payload: Any) -> VroServerVersion:
     return VroServerVersion(version=version, build=build, error=None)
 
 
+def _login_cache_key(target: VroTargetLike) -> tuple[str, ...]:
+    """Key the cached login on the credential plus every target value the login reads.
+
+    That is the login mode, the VCF Automation org (``vcfa-session``) and
+    ``extras["domain"]``, which the ``automation`` login sends. Two targets
+    that differ in one of them log in as different users.
+    """
+    extras = getattr(target, "extras", None)
+    domain = extras.get("domain") if isinstance(extras, dict) else None
+    return credential_cache_key(target, login_mode(target), vcfa_org(target), domain)
+
+
+def _username_password(creds: dict[str, str], target: VroTargetLike) -> tuple[str, str]:
+    """``(username, password)`` from *creds*; a ``RuntimeError`` names a missing key."""
+    try:
+        return creds["username"], creds["password"]
+    except KeyError as exc:
+        raise RuntimeError(
+            f"vro credentials loader for target {target.name!r} returned a "
+            f"dict missing required key {exc.args[0]!r}; need "
+            "{'username': str, 'password': str}"
+        ) from exc
+
+
 class VroConnector(HttpConnector):
-    """Orchestrator REST API connector (``/vco/api``), Basic or Aria Automation login."""
+    """Orchestrator REST API connector (``/vco/api``) with three logins (see the module doc)."""
 
     product = "vro"
     version = "9.0"
@@ -124,7 +164,9 @@ class VroConnector(HttpConnector):
 
     def __init__(self, *, credentials_loader: VroCredentialsLoader | None = None) -> None:
         super().__init__()
-        self._authorizations: dict[tuple[str, str], str] = {}
+        #: Per credential: the ``Authorization`` value, and the session
+        #: token when it ends (``vcfa-session``); ``None`` for the other logins.
+        self._authorizations: dict[tuple[str, ...], tuple[str, VcfaSessionToken | None]] = {}
         self._auth_lock = asyncio.Lock()
         self._credentials_loader: VroCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
@@ -156,13 +198,16 @@ class VroConnector(HttpConnector):
         unauthenticated caller, and such a caller never primes it.
         """
         mode = login_mode(target)
-        cache_key = target_cache_key(target)
+        cache_key = _login_cache_key(target)
         checked = bool(operator.raw_jwt) and not is_system_operator(operator)
         async with self._auth_lock:
             cached = self._authorizations.get(cache_key)
             if cached is not None and checked:
-                return cached
+                value, session = cached
+                if session is None or not session.needs_renewal():
+                    return value
             creds = await self._credentials_loader(target, operator)
+            session = None
             if mode == LOGIN_AUTOMATION:
                 from meho_backplane.connectors.vra8._auth import vra8_login
 
@@ -171,25 +216,40 @@ class VroConnector(HttpConnector):
                     client, creds, target, request_extensions=self._request_extensions(target)
                 )
                 value = f"Bearer {token}"
+            elif mode == LOGIN_VCFA_SESSION:
+                username, password = _username_password(creds, target)
+                session = await vcfa_session_login(
+                    await self._http_client(target),
+                    username=username,
+                    password=password,
+                    org=vcfa_org(target),
+                    target=target,
+                    request_extensions=self._request_extensions(target),
+                )
+                value = session.authorization
             else:
-                try:
-                    value = basic_auth_header(creds["username"], creds["password"])
-                except KeyError as exc:
-                    raise RuntimeError(
-                        f"vro credentials loader for target {target.name!r} returned a "
-                        f"dict missing required key {exc.args[0]!r}; need "
-                        "{'username': str, 'password': str}"
-                    ) from exc
+                value = basic_auth_header(*_username_password(creds, target))
             if checked:
-                self._authorizations[cache_key] = value
+                self._authorizations[cache_key] = (value, session)
             _log.info("vro_login_ready", target=target.name, host=target.host, login=mode)
             return value
 
-    async def invalidate_session(self, target: VroTargetLike) -> None:
-        """Drop the cached login of *target* only (the dispatcher's 401 hook)."""
-        cache_key = target_cache_key(target)
+    async def invalidate_session(
+        self, target: VroTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
+        """Drop the cached login of *target*'s credential (the dispatcher's 401 hook).
+
+        With *rejected*, the login is dropped only when that request sent
+        it; a newer login stays.
+        """
+        cache_key = _login_cache_key(target)
         async with self._auth_lock:
-            self._authorizations.pop(cache_key, None)
+            drop_rejected_token(
+                self._authorizations,
+                cache_key,
+                rejected,
+                lambda cached: {"Authorization": cached[0]},
+            )
 
     async def _vro_get(
         self,
@@ -212,13 +272,13 @@ class VroConnector(HttpConnector):
     async def server_version(self, target: VroTargetLike, operator: Operator) -> VroServerVersion:
         """Read the Orchestrator version and build. Never raises: a failure is named in ``error``.
 
-        A ``401`` drops this target's cached login, so the next call logs in again.
+        A ``401`` drops the cached login, so the next call logs in again.
         """
         try:
             payload = await self._vro_get(target, ABOUT_PATH, operator=operator)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == httpx.codes.UNAUTHORIZED:
-                await self.invalidate_session(target)
+                await self.invalidate_session(target, rejected=exc.request)
             return VroServerVersion(version=None, build=None, error=f"{type(exc).__name__}: {exc}")
         except (
             httpx.HTTPError,

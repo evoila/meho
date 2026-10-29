@@ -252,7 +252,6 @@ func TestWorkRefMalformedEnvSkippedForLocalCommands(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"version", []string{"version"}},
 		{"doctor", []string{"doctor", "--no-network"}},
 		{"help", []string{"help", "targets"}},
 		{"completion", []string{"completion", "bash"}},
@@ -273,6 +272,22 @@ func TestWorkRefMalformedEnvSkippedForLocalCommands(t *testing.T) {
 			}
 		})
 	}
+
+	// `meho version` reads the public GET /version route (#5036). That
+	// route is not audited, so a bad work reference does not stop it,
+	// and it is the only request that leaves.
+	t.Run("version", func(t *testing.T) {
+		_, rec := newWorkRefBackplane(t)
+		t.Setenv(api.WorkRefEnv, "bad")
+		if stderr, err := runRoot(t, "version"); err != nil {
+			t.Fatalf("want success with a bad %s; err=%v stderr=%s", api.WorkRefEnv, err, stderr)
+		}
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		if len(rec.seen) != 1 || rec.seen["GET /version"] != "" {
+			t.Errorf("want only GET /version with no work reference; backplane saw %v", rec.seen)
+		}
+	})
 
 	refused := []struct {
 		name string

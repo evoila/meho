@@ -24,6 +24,9 @@
       when ``replay_enabled`` (admin + session present); a plain operator sees
       it disabled with a tooltip.
 
+  Each row also names its tenant (``tenant_label``: the tenant name, or the
+  tenant id when the tenant row is gone; #5238).
+
   Context variables:
     rows -- list[dict]: projected rows (see ``_results.html``)
 -#}
@@ -49,6 +52,8 @@
         {% endif %}
       </div>
       <p class="truncate text-xs text-base-content/55">
+        <span data-tenant title="Tenant">{{ row.tenant_label }}</span>
+        <span aria-hidden="true">&middot;</span>
         <span>{{ row.principal_name or row.principal_sub }}</span>
         {% if row.target_name %}
           <span aria-hidden="true">&middot;</span>

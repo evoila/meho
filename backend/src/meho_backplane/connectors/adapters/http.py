@@ -92,7 +92,11 @@ import structlog
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import (
+    DEFAULT_PORTS,
+    effective_scheme,
+    target_cache_key,
+)
 from meho_backplane.connectors._shared.pinned_transport import build_pinned_async_transport
 from meho_backplane.connectors.base import Connector
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
@@ -479,40 +483,10 @@ async def _read_capped_json_response(
 _MAX_SAME_ORIGIN_REDIRECTS = 5
 
 
-_DEFAULT_PORTS = {"http": 80, "https": 443}
-_ALLOWED_SCHEMES = frozenset(_DEFAULT_PORTS)
-
-
-def _effective_scheme(target: Target) -> str:
-    """Return the transport scheme for *target* — ``https`` unless opted out.
-
-    Reads an optional ``scheme`` key from :attr:`Target.extras`. Absent (the
-    default for every existing target — ``extras`` is ``{}`` by default) →
-    ``https``, so behaviour stays byte-identical to before. Present → must be
-    exactly ``http`` or ``https``; anything else raises :exc:`ValueError` at
-    dispatch rather than being silently coerced, so a typo like ``htp`` fails
-    loud instead of falling back to https and masking the misconfiguration.
-
-    Honouring an explicit ``http`` is what lets an :class:`HttpConnector`
-    reach a plain-HTTP management API — RabbitMQ's Management API is HTTP on
-    ``15672`` (HTTPS only on ``15671`` when the mgmt TLS listener is enabled)
-    (evoila/meho#2587). The scheme is deliberately opt-in and is **never**
-    derived from ``verify_tls``: certificate trust and transport selection
-    are orthogonal, and deriving one from the other would silently change the
-    transport of every existing ``verify_tls=false`` target.
-    """
-    extras = getattr(target, "extras", None)
-    if not isinstance(extras, dict):
-        return "https"
-    scheme = extras.get("scheme", "https")
-    if scheme not in _ALLOWED_SCHEMES:
-        raise ValueError(
-            f"target {getattr(target, 'name', '?')!r} has an invalid "
-            f"extras.scheme {scheme!r}; expected one of {sorted(_ALLOWED_SCHEMES)}"
-        )
-    # Membership above guarantees a literal "http"/"https"; str() narrows the
-    # ``Any`` that flows in from the free-form ``extras`` dict for the typer.
-    return str(scheme)
+# The scheme rule and the default ports live next to the credential cache
+# key, which needs the same answer for the login host (#5033).
+_DEFAULT_PORTS = DEFAULT_PORTS
+_effective_scheme = effective_scheme
 
 
 def _effective_port(url: httpx.URL) -> int | None:

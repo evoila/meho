@@ -127,6 +127,9 @@ def _fault(type_name: str) -> httpx.HTTPStatusError:
 class _FakeConnector:
     """Answers the VM read, the task read and AnswerVM; records every call."""
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(
         self,
         *,

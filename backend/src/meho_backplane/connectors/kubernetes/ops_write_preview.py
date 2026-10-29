@@ -16,6 +16,7 @@ nothing about what will run: the builder reads the CronJob and shows it.
 op_id                  preview
 =====================  ========================================================
 ``k8s.secret.create``  ``{name, namespace, type, key_names, inline_key_names,
+                       labels?, annotations?,
                        string_data_secret_ref?, data_secret_ref?,
                        string_data_secret_mount?, data_secret_mount?}``
 ``k8s.job.create``     ``{name, namespace, service_account_name?,
@@ -36,7 +37,8 @@ What is never shown
   because it holds a store path per key (``vault:<path>#<field>``), not a
   value. The value is read from the store only when the approved call runs.
   The ``*_secret_mount`` names are shown too: they say which store mount the
-  paths are read from.
+  paths are read from. The Secret's ``labels`` and ``annotations`` are
+  metadata, not values, so they are shown in full.
 * A Job ``env`` value: only the variable names. ``env_from`` shows the names
   of the Secrets and ConfigMaps the pod loads, not their content.
 * A Job ``command`` / ``args``: only their size in bytes, because a command
@@ -62,7 +64,7 @@ def _sorted_keys(value: Any) -> list[str]:
 
 
 def _ref_map(value: Any) -> dict[str, str] | None:
-    """A ``{secret-key: store-ref}`` map as plain strings, or ``None`` when absent."""
+    """A string map (store refs per key, labels, annotations) sorted, or ``None`` when absent."""
     if not isinstance(value, dict) or not value:
         return None
     return {str(key): str(ref) for key, ref in sorted(value.items())}
@@ -85,6 +87,10 @@ async def _secret_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "key_names": sorted(all_keys),
         "inline_key_names": sorted(inline_keys),
     }
+    for meta_field in ("labels", "annotations"):
+        meta = _ref_map(params.get(meta_field))
+        if meta is not None:
+            preview[meta_field] = meta
     if string_refs is not None:
         preview["string_data_secret_ref"] = string_refs
     if data_refs is not None:

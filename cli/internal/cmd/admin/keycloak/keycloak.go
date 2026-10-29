@@ -6,14 +6,17 @@
 // provisioning. The first verb (G0.9.1-T11 / #791) is
 // `bootstrap-clients`, which idempotently provisions:
 //
-//  1. The public `meho-cli` device-code client + 6 protocol mappers
+//  1. The public `meho-cli` device-code client + 8 protocol mappers
 //     + 4 default client scopes (`basic`, `roles`, `web-origins`,
 //     `acr`).
 //  2. The public `meho-mcp` authorization-code+PKCE client +
-//     the same 6 mappers + 4 default scopes.
+//     the same 8 mappers + 4 default scopes.
 //  3. The five MEHO role groups. Their attributes give each person
 //     their tenant and role (docs/decisions/login-role-groups.md).
-//  4. An admin user in `MEHO-Admins` with a password.
+//     Also `MEHO-Platform-Admins`, and on request the five groups of
+//     one more tenant (`--add-tenant`).
+//  4. An admin user in `MEHO-Admins` and `MEHO-Platform-Admins` with a
+//     password.
 //
 // The verb encodes the 5-step recipe documented in
 // deploy/values-examples/README.md § Auth onramp recipe. It does NOT
@@ -60,9 +63,9 @@ func NewRootCmd() *cobra.Command {
 			"talk to a Keycloak admin REST API directly. The first " +
 			"verb is `bootstrap-clients`, which idempotently " +
 			"provisions the public device-code client, the public " +
-			"MCP browser-flow client, their 6 protocol mappers, " +
+			"MCP browser-flow client, their 8 protocol mappers, " +
 			"their 4 default client scopes, the five MEHO role " +
-			"groups, and an admin user — the realm-side prerequisites " +
+			"groups, MEHO-Platform-Admins, and an admin user — the realm-side prerequisites " +
 			"for `meho login` and the MCP onramp.",
 		SilenceUsage: true,
 	}
@@ -94,6 +97,9 @@ func newBootstrapClientsCmd() *cobra.Command {
 		backplaneAudience     string
 		mcpResourceURI        string
 		tenantID              string
+		tenantName            string
+		addTenantName         string
+		addTenantID           string
 		adminUserUsername     string
 		adminUserEmail        string
 		skipUserProvisioning  bool
@@ -113,18 +119,28 @@ func newBootstrapClientsCmd() *cobra.Command {
 			"`meho login` and the MCP browser-flow onramp need:\n\n" +
 			"  * the public device-code client (default name `meho-cli`)\n" +
 			"  * the public authorization-code+PKCE MCP client (default name `meho-mcp`)\n" +
-			"  * 6 protocol mappers on each client (audience-meho-backplane, meho-mcp-audience, groups-claim, and the User Attribute mappers tenant-id, tenant-role, approver)\n" +
+			"  * 8 protocol mappers on each client (audience-meho-backplane, meho-mcp-audience, groups-claim, and the User Attribute mappers tenant-id, tenant-role, approver, platform-admin and meho-tenants)\n" +
 			"  * 4 default client scopes on each client (basic, roles, web-origins, acr) — including the load-bearing `basic` scope that carries the `sub` claim in Keycloak 25+\n" +
 			"  * the `mcp:read`, `mcp:execute` and `mcp:admin` client scopes, plus `offline_access`, as optional scopes on the MCP client — MEHO's MCP clients ask for them at login, and Keycloak refuses a login that asks for a scope the client does not offer\n" +
-			"  * the five MEHO role groups, each with a `tenant_id` and a `tenant_role` attribute:\n" +
+			"  * the five MEHO role groups, each with a `tenant_id`, a `tenant_role` and a `meho_tenant` attribute:\n" +
 			"      MEHO-Readers (read_only), MEHO-Operators (operator), MEHO-SA-Operators (operator),\n" +
 			"      MEHO-Admins (tenant_admin), MEHO-Approvers (read_only, plus approver=true)\n" +
-			"  * an admin user in MEHO-Admins with a password\n\n" +
+			"  * the group MEHO-Platform-Admins (platform_admin=true): rights across all tenants\n" +
+			"  * an admin user in MEHO-Admins and MEHO-Platform-Admins with a password\n\n" +
 			"A person gets their tenant and role from their group. Put each " +
 			"person in exactly one of the five groups. A person in no group " +
 			"gets no tenant, and MEHO refuses the login (401 " +
 			"missing_tenant_claim). `--tenant-id` sets the `tenant_id` " +
 			"attribute on all five groups.\n\n" +
+			"More tenants: `--add-tenant <name>` makes the five groups " +
+			"MEHO-<name>-Readers, -Operators, -SA-Operators, -Admins and " +
+			"-Approvers. They carry only `meho_tenant` " +
+			"(`<tenant-uuid>:<name>:<Role>`). Give the tenant's UUID with " +
+			"`--add-tenant-id`; without it the command reuses the UUID the " +
+			"groups already carry, or makes a new one and prints it. A person " +
+			"may be in one role group per tenant. The `meho-tenants` mapper " +
+			"lists all of a person's tenants in the `meho_tenants` claim. Never " +
+			"set `meho_tenant` on a person.\n\n" +
 			"Idempotent: re-runs detect existing resources, " +
 			"reconcile drift via PUT, and never duplicate. " +
 			"Confidential clients (e.g. `meho-backplane`) are " +
@@ -183,6 +199,9 @@ func newBootstrapClientsCmd() *cobra.Command {
 				BackplaneAudience:            backplaneAudience,
 				MCPResourceURI:               mcpResourceURI,
 				TenantID:                     tenantID,
+				TenantName:                   tenantName,
+				AddTenantName:                addTenantName,
+				AddTenantID:                  addTenantID,
 				AdminUserUsername:            adminUserUsername,
 				AdminUserEmail:               adminUserEmail,
 				AdminUserPassword:            adminUserPassword,
@@ -263,8 +282,17 @@ func newBootstrapClientsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&tenantID, "tenant-id", "",
 		"tenant UUID written as the `tenant_id` attribute on the five MEHO role groups "+
 			"(default: the all-zero UUID). Changing it later moves everyone to a new tenant")
+	cmd.Flags().StringVar(&tenantName, "tenant-name", defaultTenantName,
+		"the first tenant's short name (lowercase letters, digits, dashes), written into "+
+			"the `meho_tenant` attribute of the five MEHO role groups")
+	cmd.Flags().StringVar(&addTenantName, "add-tenant", "",
+		"also make the five groups `MEHO-<name>-<Role>` of one more tenant with this short name")
+	cmd.Flags().StringVar(&addTenantID, "add-tenant-id", "",
+		"the UUID of the `--add-tenant` tenant (default: the UUID its groups already carry, "+
+			"else a new one, printed at the end)")
 	cmd.Flags().StringVar(&adminUserUsername, "admin-user-username", "",
-		"username of the admin user to provision in MEHO-Admins (required unless --skip-user-provisioning)")
+		"username of the admin user to provision in MEHO-Admins and MEHO-Platform-Admins "+
+			"(required unless --skip-user-provisioning)")
 	cmd.Flags().StringVar(&adminUserEmail, "admin-user-email", "",
 		"optional email for the new admin user")
 	cmd.Flags().BoolVar(&skipUserProvisioning, "skip-user-provisioning", false,
@@ -406,15 +434,23 @@ func printSummary(out io.Writer, opts BootstrapOptions, res *Result) {
 	if !opts.SkipUserProvisioning {
 		switch {
 		case res.AdminUserCreated:
-			fmt.Fprintf(out, "    [created] user %s (joined %s)\n",
-				opts.AdminUserUsername, adminGroupName)
+			fmt.Fprintf(out, "    [created] user %s (joined %s and %s)\n",
+				opts.AdminUserUsername, adminGroupName, platformAdminGroupName)
 		case res.AdminUserJoined:
-			fmt.Fprintf(out, "    [updated] user %s (joined %s; password not reset)\n",
-				opts.AdminUserUsername, adminGroupName)
+			fmt.Fprintf(out, "    [updated] user %s (joined %s and %s; password not reset)\n",
+				opts.AdminUserUsername, adminGroupName, platformAdminGroupName)
 		default:
 			fmt.Fprintf(out, "    [skip]    user %s (already exists; password not reset)\n",
 				opts.AdminUserUsername)
 		}
+	}
+	if opts.AddTenantName != "" && res.AddedTenantID != "" {
+		note := ""
+		if res.AddedTenantIDNew {
+			note = " (new; keep it)"
+		}
+		fmt.Fprintf(out, "\n==> tenant %s: id %s%s\n",
+			opts.AddTenantName, res.AddedTenantID, note)
 	}
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "==> set these on the chart side to match the realm:")

@@ -39,6 +39,7 @@ MCP arguments into the canonical service-layer call shape correctly".
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Iterator
 from typing import Any, ClassVar
 
@@ -50,11 +51,13 @@ from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
     BuiltinConnectorWriteForbiddenError,
+    ConnectorInUseError,
     ConnectorListItem,
     ConnectorNotFoundError,
     ConnectorReviewGroup,
     ConnectorReviewPayload,
     ConnectorScopeCandidate,
+    ConnectorUser,
     DeleteConnectorResult,
     DeleteConnectorWarning,
     EditOpWarning,
@@ -499,7 +502,10 @@ def test_call_meho_connector_list_dispatches_to_list_ingested_connectors(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     stubbed_services: dict[str, Any],
 ) -> None:
-    """``tools/call meho_connector_list`` returns the stubbed connector list."""
+    """``tools/call meho_connector_list`` returns the stubbed connector list.
+
+    ``detail="full"`` keeps every ``ConnectorListItem`` field (#4121).
+    """
     client, op = client_with_operator
     response = post_mcp(
         client,
@@ -509,7 +515,7 @@ def test_call_meho_connector_list_dispatches_to_list_ingested_connectors(
             "method": "tools/call",
             "params": {
                 "name": "meho_connector_list",
-                "arguments": {"status": "staged"},
+                "arguments": {"status": "staged", "detail": "full"},
             },
         },
     )
@@ -541,9 +547,9 @@ def test_call_meho_connector_list_surfaces_scope_twin_fields(
 ) -> None:
     """``meho_connector_list`` passes ``scope`` + ``shadowed_by_tenant_scope`` through.
 
-    #2474: the tool serialises each row via ``model_dump(mode="json")``,
-    so the two additive scope-twin fields ride the MCP surface identically
-    to REST. Seeds a built-in + tenant twin pair (same ``connector_id``)
+    #2474: with ``detail="full"`` the tool serialises each row via
+    ``model_dump(mode="json")``, so the two additive scope-twin fields ride
+    the MCP surface identically to REST. Seeds a built-in + tenant twin pair (same ``connector_id``)
     where the built-in copy is shadowed by the tenant-scoped one that
     dispatch resolves first.
     """
@@ -592,7 +598,7 @@ def test_call_meho_connector_list_surfaces_scope_twin_fields(
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": {"name": "meho_connector_list", "arguments": {}},
+            "params": {"name": "meho_connector_list", "arguments": {"detail": "full"}},
         },
     )
     assert response.status_code == 200
@@ -1654,6 +1660,52 @@ def test_call_delete_not_found_returns_invalid_params_over_the_wire(
     assert body["error"]["message"] == "connector_not_found"
     assert body["error"].get("data") is None
     assert "ConnectorNotFoundError" not in json.dumps(body)
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.TENANT_ADMIN],
+    indirect=True,
+)
+def test_call_delete_in_use_returns_invalid_params_listing_users(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stubbed_services: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#5027: a refused delete answers -32602 with the connector_in_use envelope."""
+    client, op = client_with_operator
+    user = ConnectorUser(
+        kind="sensor",
+        id=str(uuid.uuid4()),
+        name="disk-free",
+        op_id="GET:/disks",
+        tenant_id=op.tenant_id,
+    )
+    monkeypatch.setattr(
+        _FakeReviewService,
+        "raise_not_found",
+        ConnectorInUseError(connector_id="vmware-rest-9.0", users=[user]),
+    )
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "meho_connector_delete",
+                "arguments": {"connector_id": "vmware-rest-9.0"},
+            },
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"]["code"] == -32602
+    assert "sensor 'disk-free'" in body["error"]["message"]
+    data = body["error"]["data"]
+    assert data["detail"] == "connector_in_use"
+    assert data["users"] == [user.as_dict()]
+    assert "ConnectorInUseError" not in json.dumps(body)
 
 
 # ---------------------------------------------------------------------------

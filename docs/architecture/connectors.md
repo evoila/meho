@@ -57,7 +57,7 @@ class Connector(ABC):
     async def discover_topology(self, target: Target) -> TopologyHints: ...
 
     async def list_candidates(
-        self, seed_target: Target | None = None
+        self, seed_target: Target | None = None, operator: Operator | None = None
     ) -> list[CandidateHint]: ...
 ```
 
@@ -65,7 +65,7 @@ Three required methods (`fingerprint` / `probe` / `execute`) plus two **non-abst
 
 **Op-id namespace** depends on source kind: typed ops use `<product>.<resource>.<verb>` (e.g., `vault.kv.read`, `bind9.zone.create`), while ingested ops use `<METHOD>:<path>` (e.g., `GET:/api/vcenter/cluster`). The `Connector.execute` docstring at [`base.py`](../../backend/src/meho_backplane/connectors/base.py) is the source-of-truth contract.
 
-The G9.1-T3 refresh service calls `discover_topology(target)` on demand + on schedule and diffs the returned `TopologyHints` against `graph_node` + `graph_edge` rows for the same `(tenant_id, target_id)`. The G9.1-T6 `meho targets discover` verb calls `list_candidates(seed_target)` and surfaces candidates to the operator — auto-registration is intentionally out of scope.
+The G9.1-T3 refresh service calls `discover_topology(target)` on demand + on schedule and diffs the returned `TopologyHints` against `graph_node` + `graph_edge` rows for the same `(tenant_id, target_id)`. The G9.1-T6 `meho targets discover` verb calls `list_candidates(seed_target, operator=...)` with the caller, so a connector can read the seed's secret as the caller, and surfaces candidates to the operator — auto-registration is intentionally out of scope; `--import-yaml` prints them as a file for `meho targets import`.
 
 ## Result models
 
@@ -164,6 +164,8 @@ class CandidateHint(BaseModel):
     port: int | None
     evidence: Mapping[str, Any]   # debugging payload — what made the connector think this candidate exists
     confidence: Literal["high", "medium", "low"]
+    secret_ref: str | None        # the secret a target for it would use, when the connector knows it
+    extras: Mapping[str, Any]     # the target extras it would need (empty when unknown)
 ```
 
 `NodeKind` is the v0.2 auto-discoverable vocabulary; per-connector kinds (e.g. `"vault-role"`, `"vault-mount"`) are extensible per Initiative #363 via a migration. `EdgeKind` is intentionally narrow — the four high-confidence probe-derived edges. Probe-derived edges have to be high-confidence because a wrong edge in `topology dependents` output misleads the operator on the very op the verb is supposed to make safer.

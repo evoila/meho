@@ -753,7 +753,111 @@ result holds a kubeconfig, a token or a certificate.
 
 ## arc
 
-Not built yet (Task #5084).
+The arc family reads the Azure Arc machines of the target's subscription
+(servers outside Azure, in a data center or another cloud, that are
+connected to Azure) and the patching results Azure Update Manager stores.
+It can also check one machine for missing updates, after a person approves.
+All five operations are in group `arc`.
+
+| Operation | Risk level | What it does | Parameters |
+|---|---|---|---|
+| `azure.arc.machine.list` | `safe` | every Arc machine: name, OS, connection status, agent version, last status change, location, tags; plus counts by status | none |
+| `azure.arc.machine.show` | `safe` | one Arc machine: the list fields plus host name, domain, OS edition, update settings (`assessment_mode`, `patch_mode`), the agent's services and its errors | `resource_group`, `name` |
+| `azure.patching.assessment.list` | `safe` | the last stored update check of each Azure VM and Arc machine: OS, time of the check, missing updates by class (critical, security, other), reboot pending | none |
+| `azure.patching.installation.list` | `safe` | past update installation runs: machine, time, status, installed, failed and pending counts, reboot status | `days` (1 to 30, default 30) |
+| `azure.patching.assessment.start` | `caution`, waits for approval | checks one Azure VM or Arc machine for missing updates now and returns the counts by class and the time of the check | `machine_id` |
+
+The ids say "patching", not "patch": `patch` is a write word
+(`WRITE_WORDS` in `delete_names.py`), and a `safe` id has none.
+
+**API versions.** The Arc calls use `2026-09-01` (`ARC_API_VERSION`), the
+check of an Azure VM `2026-04-01` (`VM_ASSESS_API_VERSION`), and the two
+patching lists use Resource Graph (`2024-04-01`). Every path is a `*_PATH`
+constant in the `arc` section of `_paths.py`, and the spec path check finds
+each of them, with its API version, in the pinned spec files
+(`hybridcompute` and `compute`).
+
+**Files.** `arc.py` holds the group text, the guidance for the AI, the
+operation table (`OPS`) and the mixin `ArcOps`. `arc_reads.py` holds the
+bodies of the four reads, `arc_assess.py` the body of the check,
+`arc_rows.py` builds the rows and counts, `arc_schemas.py` holds the schemas.
+
+**Stored patching results.** Azure Update Manager keeps its results in two
+Azure Resource Graph tables: `patchassessmentresources` (the last check of
+each machine, kept about 7 days) and `patchinstallationresources`
+(installation runs, kept 30 days). Both lists send one fixed query with
+`query_resource_graph`, with `subscriptions` set to the target's own
+subscription only, and follow `$skipToken`. The queries leave out the rows
+of single updates (`softwarepatches`) and use no `limit`, `take` or
+`sample`, so every page can be read. The only value MEHO puts into a query
+is the start of the installation window, a time it computes itself from the
+checked `days`. A result whose ID names another subscription is left out.
+The machine of a result is read from the result's ID: the part before
+`/patchAssessmentResults/` or `/patchInstallationResults/`.
+
+**Counts.** `critical` and `security` are Azure's counts of those classes;
+`other` adds up every other class (definitions, rollups, tools, ...). When
+Azure reports no counts, all three are `null`, never `0`. The check of an
+Azure VM answers with two totals (`criticalAndSecurityPatchCount`,
+`otherPatchCount`) and a list of the missing updates; MEHO counts
+`critical`, `security` and `by_class` from that list. An Arc machine answers
+with counts per class (`availablePatchCountByClassification`).
+
+**Result shapes.** Each list returns its rows under `value`, a `summary`
+object with counts over every row read, and the paging fields (`truncated`,
+`omission`, `omission_kind`, `pages_read`). The installation list also
+returns `window: {days, from, to}`. More than 50 rows come back as a link to
+the stored result; the `llm_instructions` of each list carry a
+`result_objects` hint for `summary` (and `window`), so these objects stay
+inline next to the link.
+
+**The check (`azure.patching.assessment.start`).**
+
+1. `machine_id` must be the ID of one Azure VM
+   (`Microsoft.Compute/virtualMachines`) or one Arc machine
+   (`Microsoft.HybridCompute/machines`) in the target's subscription, in any
+   letter case. Another subscription, another type, a longer or shorter ID,
+   or a name with `..`, `?`, `#` or `%` is refused before any call.
+2. MEHO sends one `POST .../assessPatches` with no body. Like every write it
+   is sent again only after a 429 or a 401, never after a timeout or a 5xx.
+3. Azure answers 202. Both API descriptions put the result at the `Location`
+   URL (`final-state-via: location`), so MEHO polls that URL with
+   `wait_for_operation` (202 while the check runs, 200 with the result), at
+   most 5 minutes. `operation_reference` would prefer `Azure-AsyncOperation`,
+   so the family builds the reference itself; it falls back to
+   `operation_reference` when there is no `Location`.
+4. The answer is `{machine_id, machine_type, status, done, assessment, error,
+   retry_after_seconds, operation}`. When the wait runs out, or a poll fails,
+   `done` is `false` and `operation` is the reference:
+   `azure.operation.status` reads the outcome later, also after a restart,
+   without sending the check again.
+
+A check installs no updates. The first check on a machine makes Azure add
+its update extension to the machine. A second check is a new check: it
+changes nothing on the machine and only gives fresh counts. The login needs
+a role that allows `assessPatches` on the machine, for example Virtual
+Machine Contributor for a VM.
+
+**Secrets and untrusted text.** Every row is built from a fixed list of
+fields. An Arc machine's answer also holds the agent's settings (for
+example its proxy URL), a public key and a TPM certificate; none of them
+reaches a result. Error codes and messages from Azure are filtered with
+`clean_azure_text`. Names, tags and other text from Azure are data; the
+guidance for the AI says so.
+
+**Tests.** `backend/tests/test_connectors_azure_arc.py` runs every operation
+through the real dispatcher with mocked HTTP: the row shapes, paging with
+`nextLink` and `$skipToken`, the Resource Graph request body, 60 rows per
+list through the real result reduction and `result_query` (the `summary`
+and `window` objects stay inline), refused names, days and machine IDs,
+`not_found`, the wait for approval, the check of a VM and of an Arc machine,
+a wait that runs out followed by `azure.operation.status`, a failed poll, a
+failed check and no second `POST` after a 5xx.
+
+**Proven live:** nothing yet. The lab login does not exist yet, so the live
+proof (a check on the lab test VM after approval, the same counts in
+`azure.patching.assessment.list`, and one lab Linux VM connected to Azure
+Arc) is still open.
 
 ## automation
 
@@ -929,7 +1033,112 @@ API description file. Open points for the lab proof:
 
 ## avs
 
-Not built yet (Task #5091).
+The `avs` family reads Azure VMware Solution: VMware vSphere, vSAN and NSX
+on dedicated Azure hosts. A customer's environment there is a private cloud
+with a management cluster and maybe more clusters; a cluster starts at three
+hosts. All four operations are in group `avs`, are `safe` and need no
+approval: they only read, and nothing changes in Azure.
+
+| Operation | Reads | Parameters |
+|---|---|---|
+| `azure.avs.privatecloud.list` | every private cloud of the subscription: host type (SKU), state, management cluster size and host names, network block and extra blocks, internet access, availability (single zone or stretched over two zones), managed identity type, VMware Cloud Foundation license kind | none |
+| `azure.avs.cluster.list` | the clusters of one private cloud: host type (SKU), size, host names, state | `resource_group`, `private_cloud` |
+| `azure.avs.host.list` | the hosts of one cluster: name, name and ID in vCenter (`display_name`, `mo_ref_id`), kind, state, maintenance, fault domain, host type (SKU), zones | `resource_group`, `private_cloud`, `cluster` |
+| `azure.avs.quota.show` | the host quota of the subscription in one region: whether quota is on, and the hosts left per host type | `location` (a region name such as `westeurope`) |
+
+**Group key.** The Task named the group `vmware-solution`. Each family module
+has one group key named after the family, so the group is `avs`.
+
+**API version.** Every call uses `2026-03-01` (`AVS_API_VERSION`). Every path
+is a `*_PATH` constant in the `avs` section of `_paths.py`, and the spec path
+check (see above) finds each of them, with its API version, in the pinned
+`Microsoft.AVS` spec file. `checkQuotaAvailability` is a POST that only
+reads: it has no body and is sent as a repeatable call, so it is tried again
+after a 5xx like a GET.
+
+**Files.** `avs.py` holds the group text, the guidance for the AI, the
+operation table (`OPS`) and the mixin `AvsOps`, whose thin methods
+`AzureConnector` inherits. `avs_reads.py` holds the bodies, the row builders
+and the name checks; `avs_schemas.py` holds the schemas and the name rules.
+
+**Names in a URL path.** `resource_group`, `private_cloud`, `cluster` and
+`location` go into the URL path, so they are checked twice: by the parameter
+schema (the dispatcher answers `invalid_params`) and again in the body. A
+resource group has 1 to 90 letters, digits, `_`, `-`, `.`, `(` or `)` and
+does not end with `.`. A private cloud or cluster name has 1 to 80 letters,
+digits, `_`, `-` and `.` (the characters Azure's API description allows) and
+is not only dots. A region name has letters and digits only. So a `/`, a `?`
+or a name such as `..` is refused before any request and can never move the
+call to another path or another subscription. A checked name is then
+percent-encoded: a special character such as `(` is written as `%28`.
+
+**Result shapes.**
+
+- A list has its rows under `value`, plus `truncated`, `omission`,
+  `omission_kind` and `pages_read` from the paging helper. The cluster and
+  host lists also repeat the names they were asked for (`resource_group`,
+  `private_cloud`, `cluster`). More than 50 rows (or more than 4 KB) come
+  back as a link to the stored result. All these extra fields are plain
+  values, so the result reduction keeps them next to the link without a
+  `result_objects` hint; the tests prove it with the real reduction.
+- Azure leaves the management cluster out of the cluster list (Microsoft's
+  own CLI says the same). Its size and host names are in the private cloud
+  row (`management_cluster_size`, `management_cluster_hosts`). The total host
+  count of a private cloud is the management cluster size plus the sizes of
+  the other clusters.
+- Azure reports no vSphere, vSAN or NSX version for a private cloud. The
+  version information in the row is `vcf_license_kind`: the VMware Cloud
+  Foundation license the customer brought, for example `vcf5` (VCF 5.0), or
+  null when none is attached. Azure VMware Solution needs such a license for
+  new deployments.
+- `azure.avs.quota.show` answers `{location, quota_enabled, hosts_remaining}`.
+  `hosts_remaining` maps each host type to the hosts left, for example
+  `{"AV36P": 3}`; an entry whose count is not a whole number is left out.
+  Quota comes from a support request to Microsoft; the guidance tells the AI
+  so.
+
+**Provider not registered.** When the `Microsoft.AVS` provider is not
+registered on the subscription, Azure answers `MissingSubscriptionRegistration`.
+The caller gets `connector_error` with `exception_class`
+`AzureProviderNotRegisteredError` and a hint to ask an administrator to
+register it. MEHO never registers a provider, because that is a change to the
+subscription.
+
+**Secrets.** MEHO never calls the private cloud's `listAdminCredentials`
+action (it returns the vCenter and NSX passwords), nor `getVcfLicense` or a
+license's `getProperties` (they return license keys). A test fails when a
+path to one of them is added to `_paths.py`. The private cloud's other secret
+fields (`vcenterPassword`, `nsxtPassword`, an identity source's `password`
+and the license key) are write-only in Azure's API description, so Azure's
+answers to these reads do not hold them. Every row is also built from a fixed
+list of fields, so even an answer that held them would not pass them on: a
+test proves that they reach neither the result nor the stored rows. Names are
+text from Azure; the guidance tells the AI to treat them as data.
+
+**Tests.** `backend/tests/test_connectors_azure_avs.py` runs every operation
+through the real dispatcher with mocked HTTP. Its Azure answers have the
+shape of the examples next to the pinned API description, with made-up
+values, and fill every field of every row. It covers the row shapes, a list
+of 60 rows per list operation through the real result reduction and
+`result_query`, a stopped list with its omission, the quota POST and its
+retry after a 5xx, the provider-not-registered message, refused names,
+`not_found`, and the secrets above.
+
+**Proven live:** nothing yet. The lab login does not exist yet. The lab has
+no private cloud (one needs at least three dedicated hosts), so the live
+proof is an empty list or the clear "provider not registered" message from
+`azure.avs.privatecloud.list`, and an answer or the same message from
+`azure.avs.quota.show` for the lab region.
+
+**References.**
+
+- Azure VMware Solution REST API: <https://learn.microsoft.com/en-us/rest/api/avs/>
+- Clusters of a private cloud, without the management cluster (`az vmware cluster`):
+  <https://learn.microsoft.com/en-us/cli/azure/vmware/cluster>
+- Host quota and the three-host minimum:
+  <https://learn.microsoft.com/en-us/azure/azure-vmware/request-host-quota-azure-vmware-solution>
+- Naming rules of private clouds and resource groups:
+  <https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/resource-name-rules>
 
 ## compute
 
@@ -1508,7 +1717,176 @@ meho targets import subscriptions.yaml
 
 ## migrate
 
-Not built yet (Task #5093).
+The `migrate` group reads what Azure Migrate knows about the servers a team
+plans to move to Azure. Every operation is a read (`safe`, no approval) and
+changes nothing in Azure.
+
+Azure Migrate keeps its data with two providers, each with its own pinned
+API version:
+
+- `Microsoft.Migrate` (`2024-01-15`): assessment projects, the machines a
+  project knows, groups of machines, assessments and the assessed machines
+  of an assessment.
+- `Microsoft.OffAzure` (`2023-06-06`): discovery sites. The Azure Migrate
+  appliance puts the machines it finds into VMware, Hyper-V or physical
+  server sites. A CSV import puts them into an import site. A master site
+  links the other sites of a project.
+
+Files: `migrate.py` (group text, guidance for the AI, operation table, and
+`MigrateOps`, a class whose methods `AzureConnector` takes over as one of its
+base classes), `migrate_reads.py` (the operation
+bodies), `migrate_rows.py` (row shapes, name checks, counts; no calls to
+Azure), `migrate_schemas.py` (parameter and response schemas). The paths
+and API versions are in the `migrate` section of `_paths.py`.
+
+### Operations
+
+| Operation | Parameters | Reads |
+|---|---|---|
+| `azure.migrate.project.list` | none | `GET /subscriptions/{s}/providers/Microsoft.Migrate/assessmentProjects` |
+| `azure.migrate.site.list` | `resource_group` | the five site lists of the resource group: `vmwareSites`, `hypervSites`, `serverSites`, `importSites`, `masterSites` |
+| `azure.migrate.machine.list` | `resource_group`, `project` | `.../assessmentProjects/{project}/machines` |
+| `azure.migrate.group.list` | `resource_group`, `project` | `.../assessmentProjects/{project}/groups` |
+| `azure.migrate.assessment.list` | `resource_group`, `project`, optional `group` | `.../groups/{group}/assessments`, for one group or for every group |
+| `azure.migrate.assessment.machine.list` | `resource_group`, `project`, `group`, `assessment` | `.../groups/{group}/assessments/{assessment}`, then `.../assessedMachines` |
+
+`project` is the assessment project name and `resource_group` its resource
+group, both from `azure.migrate.project.list`. Azure's paths hold the
+resource group, so every project read needs it. `migrate_project` in a
+project row is the Azure Migrate project name the portal shows; it is read
+from the project's `assessmentSolutionId` and can differ from the assessment
+project name.
+
+Every list follows `nextLink` with `list_all_pages` and its limits (see
+Paging above).
+
+### Appliance or CSV import
+
+Results from a CSV import and from the appliance stay apart. Every machine
+row (`azure.migrate.machine.list`) and every assessed machine row
+(`azure.migrate.assessment.machine.list`) has:
+
+| Field | Value |
+|---|---|
+| `source` | `appliance`, `import` or `unknown` |
+| `site_kind` | `vmware`, `hyperv`, `server` or `import` (or `null`) |
+| `site` | the name of the discovery site |
+| `discovery_machine_id` | the resource ID of the discovered machine |
+
+`machine_origin` (`migrate_rows.py`) reads them from the ID of the
+discovered machine (`discoveryMachineArmId` of a machine,
+`datacenterMachineArmId` of an assessed machine):
+`.../providers/Microsoft.OffAzure/<site type>/<site>/machines/<machine>`. A
+VMware, Hyper-V or physical server site means `appliance`, an import site
+means `import`. Any other ID gives `unknown`; MEHO never guesses. The ID is
+read by position after `/providers/Microsoft.OffAzure/`, so a resource group
+called like a site type does not confuse it. Machine lists are sorted by
+source (appliance, import, unknown), then by name. Groups and assessments
+also carry Azure's own `type` / `group_type` (`Default` or `Import`).
+
+An imported machine has only the numbers of its CSV file: no measured
+history, and it cannot be migrated. The guidance tells the AI to report the
+two sources apart.
+
+### Result shape and result handles
+
+Every read returns:
+
+```json
+{"value": [...], "truncated": false,
+ "omissions": {"count": 0, "items": [{"what": "...", "reason": "...", "detail": "..."}]},
+ "...": "count blocks"}
+```
+
+`truncated` is true when rows are missing; `omissions` says what is missing
+and why. `reason` is a paging limit (`page_limit`, `time_limit`,
+`row_limit`), an error of one part (`no_permission`, `not_found`,
+`provider_not_registered`, `throttled`, `read_failed`), `name_not_usable`
+(Azure returned a group name MEHO does not put into a path) or
+`group_limit`. `detail` is MEHO's own text; Azure's free text is never
+copied into it.
+
+Count blocks:
+
+| Operation | Blocks |
+|---|---|
+| `azure.migrate.site.list` | `kind_counts`: sites per kind; `null` for a kind that could not be read |
+| `azure.migrate.machine.list` | `source_counts`: machines per source |
+| `azure.migrate.assessment.machine.list` | `assessment` (the assessment with its currency, sizing criterion, region and status), `source_counts`, `readiness_counts` (Azure's readiness values plus `Other`) |
+
+A list over 50 rows or 4 KB comes back as a link to the stored result. The
+reducer keeps scalar values such as `truncated` next to the link, but not
+objects. So each operation's `llm_instructions` carries a `result_objects`
+hint that names `omissions` and its count blocks; the reducer keeps their
+fields inline and stores the whole objects with the rows (a `path` read on
+the handle returns them). `test_connectors_azure_migrate.py` proves this for
+each operation with 60 rows, through the real dispatcher, the real reducer
+and the real result store.
+
+### Reads made of several parts
+
+- `azure.migrate.site.list` reads five lists. A kind that cannot be read
+  (for example a 403 on one site type) becomes an omission and its count is
+  `null`; the other kinds still count. When no kind can be read, the first
+  error is returned as it is (a missing resource group comes back as
+  `not_found`).
+- `azure.migrate.assessment.list` without `group` lists the groups first,
+  because Azure lists assessments per group only, and then reads each group,
+  at most 50 (`MAX_GROUPS`; more groups give a `group_limit` omission). A
+  group that cannot be read becomes an omission; when no group can be read,
+  the first error is returned. With `group`, it reads that group only.
+- A login error always stops the whole read.
+
+### Names in paths
+
+`resource_group` must match Azure's rule for resource group names.
+`project`, `group` and `assessment` must match Azure's rule for Azure Migrate
+names, without `%`, `\`, control characters, `.` or `..`. The dispatcher
+checks the parameter schemas first; the bodies check again with a full match
+(a schema `$` also matches before a line end). Group names that come from
+Azure are checked the same way before MEHO puts them into a path. So no name
+can change the path.
+
+### Roles and providers
+
+Reads need the Reader role on the resource group (or the subscription) of
+the Azure Migrate project. Azure Migrate has no read-only role of its own.
+`Microsoft.Migrate` and `Microsoft.OffAzure` must be registered on the
+subscription; when they are not, the call fails with
+`AzureProviderNotRegisteredError`, and MEHO never registers them.
+
+### Not in this group yet
+
+- `azure.migrate.report.link` (a short-lived download link for an assessment
+  report, `dangerous`, after approval) is not built yet. The link is a
+  secret: it must reach only the caller, never the audit row, a trace or the
+  stored result.
+- The writes (CSV import, groups, assessments) come later. They can reuse the
+  name checks and rows in `migrate_rows.py` and `read_assessment` in
+  `migrate_reads.py`.
+
+### Proven live
+
+Nothing yet. The lab login does not exist yet, so every read is proven with
+mocked HTTP only, with answers shaped like the examples in Azure's pinned
+API description files. Open points for the lab proof:
+
+- that the ID of an imported machine points at its import site, as the API
+  description implies;
+- Azure's page size for machine lists, which is not documented; MEHO reads
+  at most 50 pages and 10,000 rows and names the cut in `omissions`.
+
+### References
+
+- Machines - List By Assessment Project (2024-01-15):
+  <https://learn.microsoft.com/en-us/rest/api/migrate/assessment/machines-operations/list-by-assessment-project?view=rest-migrate-assessment-2024-01-15>
+- Azure Migrate built-in roles:
+  <https://learn.microsoft.com/en-us/azure/migrate/prepare-azure-accounts>
+- Assess servers from an imported CSV file:
+  <https://learn.microsoft.com/en-us/azure/migrate/tutorial-discover-import>
+- Pinned API description files: `Microsoft.Migrate/AssessmentProjects/stable/2024-01-15/migrate.json`
+  and `Microsoft.OffAzure/OffAzure/stable/2023-06-06/migrate.json` in
+  <https://github.com/Azure/azure-rest-api-specs>.
 
 ## monitor
 

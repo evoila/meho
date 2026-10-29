@@ -239,7 +239,8 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
     "vcfa-provider-writes": (
         "Changes on the VCF Automation provider plane that set up a tenant: "
         "create an org (vcfa.provider.org.create), a custom role "
-        "(vcfa.provider.role.create) and a local user "
+        "(vcfa.provider.role.create; delete one with vcfa.provider.role.delete) "
+        "and a local user "
         "(vcfa.provider.user.create), then create that user's API token and "
         "store it in Vault (vcfa.provider.api_token.create), or revoke it "
         "(vcfa.provider.api_token.revoke). A person must approve each call. A "

@@ -29,7 +29,7 @@ Test matrix
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -125,11 +125,12 @@ def _index_names(sync_url: str) -> set[str]:
 
 def test_upgrade_lands_tables_columns_and_indexes(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``upgrade head`` creates all three runbook tables, both audit columns,
     and all four new indexes."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     tables = _table_names(sync_url)
     assert "runbook_templates" in tables
@@ -201,12 +202,13 @@ def test_upgrade_lands_tables_columns_and_indexes(
 
 def test_downgrade_to_0033_then_upgrade_round_trips(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Downgrade to ``0033`` drops tables / columns / indexes;
     upgrade head restores them all."""
     cfg, sync_url = alembic_cfg
 
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     assert "runbook_templates" in _table_names(sync_url)
 
     command.downgrade(cfg, "0033")
@@ -252,11 +254,12 @@ def test_downgrade_to_0033_then_upgrade_round_trips(
 
 def test_audit_log_insert_without_run_id_step_id(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """An ``audit_log`` row inserted without ``run_id`` / ``step_id``
     succeeds and carries NULL on both columns (no regression)."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     row_id = str(uuid.uuid4()).replace("-", "")
     eng = sa_create_engine(sync_url)
@@ -289,6 +292,7 @@ def test_audit_log_insert_without_run_id_step_id(
 
 def test_runbook_run_step_states_fk_rejects_orphan_run_id(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Inserting a ``runbook_run_step_states`` row referencing a
     nonexistent ``run_id`` raises :exc:`IntegrityError` — the FK is real.
@@ -300,7 +304,7 @@ def test_runbook_run_step_states_fk_rejects_orphan_run_id(
     what PostgreSQL production always enforces unconditionally.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     nonexistent_run_id = str(uuid.uuid4()).replace("-", "")
     eng = sa_create_engine(sync_url)

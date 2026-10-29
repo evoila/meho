@@ -61,6 +61,7 @@ from fastapi.templating import Jinja2Templates
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 from starlette.requests import Request
 
+from meho_backplane.connector_packages import installed_connector_packages
 from meho_backplane.sandbox_mode import sandbox_mode_active
 from meho_backplane.ui.maturity import surface_maturity
 from meho_backplane.ui.paths import templates_dir
@@ -122,6 +123,9 @@ def get_jinja_env() -> Environment:
         # every page shows the banner when the mode is on and nothing when
         # it is off. No per-route context threading.
         _ENV.globals["sandbox_mode_active"] = sandbox_mode_active
+        # Installed connector packages (#5036): the same list GET /version
+        # shows, rendered next to the deployed version on the dashboard.
+        _ENV.globals["connector_packages"] = installed_connector_packages
     return _ENV
 
 

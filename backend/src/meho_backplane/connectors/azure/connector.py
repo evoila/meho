@@ -81,11 +81,13 @@ from meho_backplane.connectors.schemas import (
 from meho_backplane.connectors.azure.aks import AksOps
 
 # arc (Task #5084)
+from meho_backplane.connectors.azure.arc import ArcOps
 
 # automation (Task #5092)
 from meho_backplane.connectors.azure.automation import AutomationOps
 
 # avs (Task #5091)
+from meho_backplane.connectors.azure.avs import AvsOps
 
 # compute (Task #5083)
 from meho_backplane.connectors.azure.compute import ComputeOps
@@ -97,6 +99,7 @@ from meho_backplane.connectors.azure.cost import CostOps
 from meho_backplane.connectors.azure.inventory import InventoryOps
 
 # migrate (Task #5093)
+from meho_backplane.connectors.azure.migrate import MigrateOps
 
 # monitor (Task #5090)
 
@@ -163,9 +166,11 @@ class AzureConnector(
     # aks (Task #5087)
     AksOps,
     # arc (Task #5084)
+    ArcOps,
     # automation (Task #5092)
     AutomationOps,
     # avs (Task #5091)
+    AvsOps,
     # compute (Task #5083)
     ComputeOps,
     # cost (Task #5088)
@@ -173,6 +178,7 @@ class AzureConnector(
     # inventory (Task #5082)
     InventoryOps,
     # migrate (Task #5093)
+    MigrateOps,
     # monitor (Task #5090)
     # network (Task #5085)
     # security (Task #5089)
@@ -302,13 +308,18 @@ class AzureConnector(
             self._credentials[key] = credentials
             return credentials
 
-    async def invalidate_session(self, target: AzureTargetLike) -> None:
+    async def invalidate_session(
+        self, target: AzureTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Drop the target's cached tokens (the dispatcher's 401 hook).
 
         After Azure answers 401 the dispatcher calls this and tries the call
         once more. The retry then logs in again. The cached secret stays: a
         401 means the token is no longer accepted, not that the secret is
         wrong.
+
+        The token is per target, so *rejected* (the request that got the
+        ``401``) is not needed and not read.
         """
         self._drop_tokens(target)
 

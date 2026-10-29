@@ -513,6 +513,40 @@ func TestStatus_BackplaneRejects401_ExitsAuthExpired(t *testing.T) {
 	}
 }
 
+func TestStatus_NoTenantClaim_NamesRoleGroupAndGuide(t *testing.T) {
+	cases := map[string]string{
+		"bare code from an older backplane": `{"detail":"missing_tenant_claim"}`,
+		"code with explanation":             `{"detail":"missing_tenant_claim: this login has no tenant."}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			xdg := withTempXDG(t)
+			url, _ := fakeBackplane(t, []byte(body), http.StatusUnauthorized)
+			seedCreds(t, xdg, url, auth.StoredToken{
+				BackplaneURL: url,
+				AccessToken:  jwtMarker,
+				Expiry:       time.Now().Add(time.Hour),
+			})
+			_, stderr, err := runStatus(t)
+			var coder output.ExitCoder
+			if !errors.As(err, &coder) {
+				t.Fatalf("expected ExitCoder, got %T (%v)", err, err)
+			}
+			if coder.ExitCode() != output.ExitAuthExpired {
+				t.Errorf("expected exit %d, got %d", output.ExitAuthExpired, coder.ExitCode())
+			}
+			for _, want := range []string{"missing_tenant_claim", "role group", tenantBootstrapGuideURL} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("expected %q in stderr, got: %q", want, stderr.String())
+				}
+			}
+			if strings.Contains(stderr.String(), "no refresh_token present") {
+				t.Errorf("no-tenant 401 must not be reported as an expired session: %q", stderr.String())
+			}
+		})
+	}
+}
+
 func TestStatus_RedactsLeakedBearer(t *testing.T) {
 	// Simulate a transport-layer error whose .Error() embeds the
 	// bearer string. The CLI's unreachable-path wrapper must scrub

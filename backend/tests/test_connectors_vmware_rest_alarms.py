@@ -164,6 +164,9 @@ _VENDOR_ENTITY_TYPES = {"entityTypeHost": "HostSystem", "entityTypeVm": "Virtual
 class _AlarmVim(PagedVim):
     """Recording fake of the connector's VI-JSON seam, with alarm state."""
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(self) -> None:
         super().__init__()
         self.calls: list[tuple[str, Any, bool]] = []

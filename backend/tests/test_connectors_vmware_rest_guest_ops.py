@@ -232,6 +232,9 @@ class _GuestRecordingConnector:
     ``Content-Length`` header value, replacing the real body length.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     vmomi: dict[str, Any] = field(default_factory=dict)
     put_status: int = 200
     get_status: int = 200
@@ -1237,6 +1240,9 @@ class _ProgramRunConnector:
     the next entry of ``list_responses`` (clamping to the last once the queue
     is drained, so a still-running loop keeps polling the same state).
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     start_pid: Any = 4321
     list_responses: list[Any] = field(default_factory=list)

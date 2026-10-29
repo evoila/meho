@@ -33,7 +33,7 @@ import respx
 from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.profile_auth import ProfileAuthError
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
@@ -231,7 +231,7 @@ async def test_session_login_does_not_proactively_expire_on_ttl() -> None:
         mock.post("/api/v2/sessions").respond(200, json={"sessionId": "s", "ttl": 5})
         await connector.auth_headers(target, operator=_operator())
 
-    cached = connector._session_tokens[target_cache_key(target)]
+    cached = connector._session_tokens[credential_cache_key(target)]
     assert cached.expires_at is None
     assert cached.is_fresh(time.monotonic() + 10_000) is True
     await connector.aclose()
@@ -316,7 +316,7 @@ async def test_session_login_token_does_not_proactively_expire_on_ttl() -> None:
         mock.post("/v1/tokens").respond(200, json={"accessToken": "acc-1"})
         await connector.auth_headers(target, operator=_operator())
 
-    cached = connector._session_tokens[target_cache_key(target)]
+    cached = connector._session_tokens[credential_cache_key(target)]
     assert cached.expires_at is None
     assert cached.is_fresh(time.monotonic() + 10_000) is True
     await connector.aclose()
@@ -347,7 +347,7 @@ async def test_session_login_token_invalidate_then_relogin_round_trip() -> None:
     """
     connector = _connector("session_login_token", {"username": "svc", "password": "pw"})
     target = _StubTarget(name="sddc", host="sddc.invalid")
-    key = target_cache_key(target)
+    key = credential_cache_key(target)
 
     async with respx.mock(base_url="https://sddc.invalid") as mock:
         route = mock.post("/v1/tokens").respond(200, json={"accessToken": "acc-fresh"})
@@ -460,7 +460,7 @@ async def test_session_login_basic_does_not_proactively_expire_on_ttl() -> None:
         mock.post("/api/session").respond(200, json="s")
         await connector.auth_headers(target, operator=_operator())
 
-    cached = connector._session_tokens[target_cache_key(target)]
+    cached = connector._session_tokens[credential_cache_key(target)]
     assert cached.expires_at is None
     assert cached.is_fresh(time.monotonic() + 10_000) is True
     await connector.aclose()
@@ -580,7 +580,7 @@ async def test_session_login_basic_uses_modern_path_when_served() -> None:
     assert headers == {"vmware-api-session-id": "modern-tok"}
     assert modern.call_count == 1
     assert legacy.call_count == 0
-    assert connector._session_login_paths[target_cache_key(target)] == "/api/session"
+    assert connector._session_login_paths[credential_cache_key(target)] == "/api/session"
     await connector.aclose()
 
 
@@ -602,7 +602,7 @@ async def test_session_login_basic_falls_back_to_legacy_on_404() -> None:
     expected_basic = base64.b64encode(b"svc:pw").decode()
     assert legacy.calls[0].request.headers.get("authorization") == f"Basic {expected_basic}"
     assert legacy.calls[0].request.read() == b""
-    assert connector._session_login_paths[target_cache_key(target)] == (
+    assert connector._session_login_paths[credential_cache_key(target)] == (
         "/rest/com/vmware/cis/session"
     )
     await connector.aclose()
@@ -640,7 +640,7 @@ async def test_session_login_basic_does_not_fall_back_on_non_404(
     assert modern.call_count == 1
     assert legacy.call_count == 0
     # No session recorded — the establish failed.
-    assert target_cache_key(target) not in connector._session_login_paths
+    assert credential_cache_key(target) not in connector._session_login_paths
     await connector.aclose()
 
 
@@ -677,7 +677,7 @@ async def test_session_login_post_auth_status_raises_connector_auth_error(status
     # The underlying transport error is chained for the upstream-body read.
     assert isinstance(err.__cause__, httpx.HTTPStatusError)
     # No session cached — the establish failed before a token was minted.
-    assert target_cache_key(target) not in connector._session_tokens
+    assert credential_cache_key(target) not in connector._session_tokens
     await connector.aclose()
 
 
@@ -781,9 +781,9 @@ async def test_invalidate_session_drops_recorded_login_path() -> None:
         mock.post("/rest/com/vmware/cis/session").respond(200, json="legacy-tok")
         await connector.auth_headers(target, operator=_operator())
 
-    assert target_cache_key(target) in connector._session_login_paths
+    assert credential_cache_key(target) in connector._session_login_paths
     await connector._invalidate_session(target)
-    assert target_cache_key(target) not in connector._session_login_paths
+    assert credential_cache_key(target) not in connector._session_login_paths
     await connector.aclose()
 
 
@@ -804,7 +804,7 @@ async def test_public_invalidate_session_delegates_to_private_eviction() -> None
         mock.post("/rest/com/vmware/cis/session").respond(200, json="legacy-tok")
         await connector.auth_headers(target, operator=_operator())
 
-    key = target_cache_key(target)
+    key = credential_cache_key(target)
     assert key in connector._session_tokens
     assert key in connector._session_login_paths
 
@@ -1191,8 +1191,8 @@ async def test_per_target_isolation_keeps_tokens_separate() -> None:
 
     assert h_a == {"Authorization": "Bearer tok-a"}
     assert h_b == {"Authorization": "Bearer tok-b"}
-    assert connector._session_tokens[target_cache_key(target_a)].token == "tok-a"
-    assert connector._session_tokens[target_cache_key(target_b)].token == "tok-b"
+    assert connector._session_tokens[credential_cache_key(target_a)].token == "tok-a"
+    assert connector._session_tokens[credential_cache_key(target_b)].token == "tok-b"
     await connector.aclose()
 
 
@@ -1251,7 +1251,7 @@ async def test_empty_jwt_fails_closed_before_session_cache_lookup() -> None:
     async with respx.mock(base_url="https://vrli.invalid") as mock:
         mock.post("/api/v2/sessions").respond(200, json={"sessionId": "warm"})
         await connector.auth_headers(target, operator=_operator())
-    assert target_cache_key(target) in connector._session_tokens
+    assert credential_cache_key(target) in connector._session_tokens
 
     # An empty-JWT caller must NOT be served the warm token.
     with pytest.raises(VaultCredentialsReadError, match=r"vrli"):

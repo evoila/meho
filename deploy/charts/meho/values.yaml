@@ -1283,6 +1283,8 @@ broadcast:
     repository: valkey/valkey
     tag: "9.0-alpine"
     # -- Digest of the `9.0-alpine` image index; the digest wins over the tag.
+    # To change the tag or the repository, set `digest` too, or set
+    # `digest: ""` to use the tag.
     digest: "sha256:2d04268dfa26ab31cfa3fdc538866e76438b2d00e41db41b8cb86d780ac5a416"
     pullPolicy: IfNotPresent
   # -- Replica count. Hard-capped at 1 in v0.1 (no Sentinel, ephemeral
@@ -1345,6 +1347,8 @@ resultCache:
     repository: valkey/valkey
     tag: "9.0-alpine"
     # -- Digest of the `9.0-alpine` image index; the digest wins over the tag.
+    # To change the tag or the repository, set `digest` too, or set
+    # `digest: ""` to use the tag.
     digest: "sha256:2d04268dfa26ab31cfa3fdc538866e76438b2d00e41db41b8cb86d780ac5a416"
     pullPolicy: IfNotPresent
   # -- Replica count. Capped at 1 (no persistence, no Sentinel).

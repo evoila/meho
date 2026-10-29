@@ -22,7 +22,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-import meho_backplane.connectors.holodeck  # noqa: F401 -- registry side-effects
 from meho_backplane.connectors._shared.pwsh import PwshRunError
 from meho_backplane.connectors.holodeck import HOLODECK_OPS, HolodeckConnector
 from meho_backplane.connectors.holodeck.connector import _WHEN_TO_USE_BY_GROUP
@@ -869,7 +868,8 @@ async def test_status_script_tells_not_listed_from_a_failed_read() -> None:
         mock_cmd.return_value = _proc(exit_status=1)
         result = await connector.instance_status(_StubTarget(), {"instance_id": "lab01"})
     script = mock_pwsh.call_args.args[2]
-    assert "Get-HoloDeckInstance -InstanceID 'lab01' -ErrorAction Stop" in script
+    assert "try { $r = @(Get-HoloDeckInstance -InstanceID 'lab01' -ErrorAction Stop) }" in script
+    assert "catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }" in script
     assert "{ 'null' }" in script
     assert result["status"] == "unknown"
     assert "error" not in result

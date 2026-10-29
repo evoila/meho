@@ -398,9 +398,13 @@ async def holodeck_instance_status(
     if instance_id:
         # A real failure stops the script (non-zero exit -> PwshRunError);
         # an instance that is not listed answers "null" (status unknown, no error).
+        # The catch also covers errors that stop only one statement (for example
+        # "command not found"), which -ErrorAction Stop alone lets through.
         script = (
+            "try { "
             f"$r = @(Get-HoloDeckInstance -InstanceID {ps_single_quote(str(instance_id))} "
-            "-ErrorAction Stop); "
+            "-ErrorAction Stop) "
+            "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }; "
             "if ($r.Count -eq 0) { 'null' } else { $r | ConvertTo-Json -Depth 6 -Compress }"
         )
     else:

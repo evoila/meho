@@ -367,7 +367,11 @@ from meho_backplane.operations._validate import (
     policy_gate,
     validate_params,
 )
-from meho_backplane.operations._vendor_text import withhold_vendor_text
+from meho_backplane.operations._vendor_text import (
+    redact_error_payload,
+    redact_error_result,
+    withhold_vendor_text,
+)
 from meho_backplane.operations.composite import (
     COMPOSITE_DEPTH_TOP_LEVEL,
     CompositeRecursionLimitExceeded,
@@ -1072,6 +1076,49 @@ def _composite_error_summary(error_code: str, envelope: dict[str, Any]) -> str:
     return error_code
 
 
+async def _reduce_composite_error_envelope(
+    full_envelope: dict[str, Any],
+    *,
+    op_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    audit_id: uuid.UUID,
+) -> tuple[dict[str, Any] | None, ResultHandle | None, Literal["unavailable"] | None]:
+    """Run the reducer over a cleaned terminal-error envelope.
+
+    Returns the inline envelope, the handle and the delivery: the envelope
+    itself when it is small, the bounded summary with the failure fields
+    copied over it (#3813) when the reducer minted a handle, and ``None`` /
+    ``"unavailable"`` when the reducer failed.
+    """
+    try:
+        summary, handle = await _DEFAULT_REDUCER.reduce(
+            full_envelope,
+            descriptor.response_schema,
+            _build_reducer_context(
+                op_id=op_id,
+                descriptor=descriptor,
+                operator=operator,
+                target=target,
+                audit_id=audit_id,
+            ),
+        )
+    except Exception as exc:
+        _log.warning(
+            "result_delivery_unavailable",
+            op_id=op_id,
+            audit_id=str(audit_id),
+            exception_class=type(exc).__name__,
+        )
+        return None, None, "unavailable"
+    if handle is None:
+        return full_envelope, None, None
+    envelope = dict(summary) if isinstance(summary, dict) else {"value": summary}
+    envelope.update(_terminal_error_inline_fields(full_envelope))
+    return envelope, handle, None
+
+
 async def _reduce_and_audit_composite_error(
     *,
     op_id: str,
@@ -1111,36 +1158,42 @@ async def _reduce_and_audit_composite_error(
     summary kept. A reducer failure keeps the operation an error and drops the
     inline envelope (``delivery="unavailable"``) instead of leaking it; the
     audit row still records the raw payload and the redaction manifest.
+
+    #5031: the full error cleanup (the secret-field walk, then the pinned
+    Tier-1 default policy) runs over the envelope **before** the reduce, the
+    same cleanup every error result gets in :func:`_audit_error_and_return`.
+    ``redaction.redacted`` went through the operator's policy only, and a
+    shadow-mode policy leaves a ``Bearer`` token in place; the reducer would
+    then store that token behind the handle, where the later cleanup of the
+    inline result cannot reach it. If the cleanup fails, the envelope is
+    withheld like a reducer failure, and the ``error`` line is the code alone.
     """
-    error_summary = _composite_error_summary(error_code, redaction.redacted)
     serialised_manifest = manifest_to_audit_payload(redaction.manifest)
-    envelope: dict[str, Any] | None = redaction.redacted
+    envelope: dict[str, Any] | None
     handle: ResultHandle | None = None
     delivery: Literal["complete", "partial", "unavailable"] | None = None
     try:
-        summary, handle = await _DEFAULT_REDUCER.reduce(
-            redaction.redacted,
-            descriptor.response_schema,
-            _build_reducer_context(
-                op_id=op_id,
-                descriptor=descriptor,
-                operator=operator,
-                target=target,
-                audit_id=audit_id,
-            ),
-        )
+        full_envelope: dict[str, Any] = redact_error_payload(redaction.redacted)
     except Exception as exc:
         _log.warning(
             "result_delivery_unavailable",
             op_id=op_id,
             audit_id=str(audit_id),
             exception_class=type(exc).__name__,
+            reason="error_redaction_failed",
         )
-        envelope, handle, delivery = None, None, "unavailable"
+        error_summary = error_code
+        envelope, delivery = None, "unavailable"
     else:
-        if handle is not None:
-            envelope = dict(summary) if isinstance(summary, dict) else {"value": summary}
-            envelope.update(_terminal_error_inline_fields(redaction.redacted))
+        error_summary = _composite_error_summary(error_code, full_envelope)
+        envelope, handle, delivery = await _reduce_composite_error_envelope(
+            full_envelope,
+            op_id=op_id,
+            descriptor=descriptor,
+            operator=operator,
+            target=target,
+            audit_id=audit_id,
+        )
     duration_ms = _elapsed_ms(started)
     return await _audit_error_and_return(
         result_composite_terminal_error(
@@ -1846,8 +1899,14 @@ async def _audit_error_and_return(
     first (:func:`~meho_backplane.operations._vendor_text.withhold_vendor_text`).
     Every error result passes here, so the caller's answer, the audit row and
     the stored approval result all hold the same text.
+
+    #5031: then, for every operation, secrets are removed from the whole
+    result (:func:`~meho_backplane.operations._vendor_text.redact_error_result`):
+    secret-named fields and Tier-1 shapes in every string of ``error``,
+    ``extras`` and ``result``.
     """
     result = withhold_vendor_text(result, op_id=descriptor.op_id, tags=descriptor.tags)
+    result = redact_error_result(result)
     receipt = await audit_safe(
         audit_id=audit_id,
         event_class=AuditEventClass.OPERATION_EXECUTION,

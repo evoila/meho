@@ -42,6 +42,9 @@ _BAD_IDS = [
 class _RestFake:
     """Records every request; finds answer from canned id lists."""
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(self, *, library_ids: list[str] | None = None, item_ids: list[str] | None = None):
         self.library_ids = library_ids or []
         self.item_ids = item_ids or []

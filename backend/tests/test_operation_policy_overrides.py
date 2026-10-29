@@ -8,7 +8,11 @@ What these tests prove:
 * A tenant admin raises a typed operation and requires approval; after a
   restart (typed registration runs again) the operation is still stricter.
   The same holds for an ingested operation after its spec is read again.
-* A tenant admin's change does not reach another tenant.
+* A tenant admin's change does not reach another tenant, and it is kept
+  on its own: it stays when an install-wide override that said the same
+  goes away.
+* A platform admin can remove a tenant's override; ending approval that
+  way passes the same checks as turning it off.
 * An edit can never go below the classification, on any surface.
 * Turning approval off needs ``platform_admin``, a reason and a fresh
   sign-in, and is never allowed for a destructive operation.
@@ -44,11 +48,13 @@ from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationPoli
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations._lookup import lookup_descriptor
 from meho_backplane.operations.ingest import (
+    BuiltinConnectorWriteForbiddenError,
+    ConnectorNotFoundError,
     EndpointDescriptorProto,
     ReviewService,
     register_ingested_operations,
 )
-from meho_backplane.operations.op_policy import OpPolicyEditError
+from meho_backplane.operations.op_policy import OpPolicyEditError, OverrideNotFoundError
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.settings import get_settings
 
@@ -347,6 +353,66 @@ async def test_removing_an_override_brings_back_the_code_value(embedding: AsyncM
     assert payload["changes"]["safety_level"] == {"old": "dangerous", "new": "caution"}
 
 
+@pytest.mark.asyncio
+async def test_tenant_risk_choice_stays_when_install_override_goes_away(
+    embedding: AsyncMock,
+) -> None:
+    """A tenant's level is kept even when the install-wide override already meets it."""
+    tenant_id = uuid.uuid4()
+    await _register_typed(embedding)
+    tenant = ReviewService(_operator(tenant_id))
+    admin = ReviewService(_operator(uuid.uuid4(), platform_admin=True))
+    await tenant.edit_op(
+        _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=tenant_id, safety_level="dangerous"
+    )
+    await admin.edit_op(
+        _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=None, safety_level="destructive"
+    )
+    await tenant.edit_op(
+        _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=tenant_id, safety_level="destructive"
+    )
+    assert await _effective(tenant_id) == ("destructive", True)
+
+    # Setting the install-wide level back ends the approval destructive brought.
+    await admin.edit_op(
+        _TYPED_CONNECTOR,
+        "typedpets.pet.update",
+        tenant_id=None,
+        safety_level="caution",
+        reason="too strict",
+        person_present=True,
+    )
+    assert await _effective(uuid.uuid4()) == ("caution", False)
+    assert await _effective(tenant_id) == ("destructive", True)
+
+
+@pytest.mark.asyncio
+async def test_tenant_approval_choice_stays_when_install_override_goes_away(
+    embedding: AsyncMock,
+) -> None:
+    """A tenant's approval is kept even when the install-wide override already requires it."""
+    tenant_id = uuid.uuid4()
+    await _register_typed(embedding)
+    tenant = ReviewService(_operator(tenant_id))
+    admin = ReviewService(_operator(uuid.uuid4(), platform_admin=True))
+    await admin.edit_op(
+        _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=None, requires_approval=True
+    )
+    await tenant.edit_op(
+        _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=tenant_id, requires_approval=True
+    )
+    await admin.edit_op(
+        _TYPED_CONNECTOR,
+        "typedpets.pet.update",
+        tenant_id=None,
+        requires_approval=False,
+        reason="no longer needed",
+        person_present=True,
+    )
+    assert await _effective(uuid.uuid4()) == ("caution", False)
+    assert await _effective(tenant_id) == ("caution", True)
+
+
 # ---------------------------------------------------------------------------
 # Turning approval off
 # ---------------------------------------------------------------------------
@@ -506,6 +572,74 @@ async def test_removing_an_approval_override_needs_the_approval_off_rules(
             .all()
         )
     assert list(left) == []
+
+
+async def _remove(operator: Operator, override_tenant_id: uuid.UUID | None, **kwargs: Any) -> None:
+    await ReviewService(operator).remove_op_override(
+        _TYPED_CONNECTOR,
+        "typedpets.pet.update",
+        override_tenant_id=override_tenant_id,
+        reason=kwargs.get("reason"),
+        person_present=kwargs.get("person_present", False),
+    )
+
+
+@pytest.mark.asyncio
+async def test_platform_admin_removes_a_tenant_approval_override(embedding: AsyncMock) -> None:
+    """A platform admin can remove the override a tenant set on a built-in op."""
+    tenant_id = uuid.uuid4()
+    await _register_typed(embedding)  # the code does not require approval
+    await ReviewService(_operator(tenant_id)).edit_op(
+        _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=tenant_id, requires_approval=True
+    )
+    admin = _operator(uuid.uuid4(), platform_admin=True)
+
+    # Who may not: the tenant admin (it ends approval), another tenant, a
+    # tenant admin on the install-wide scope.
+    with pytest.raises(OpPolicyEditError) as caught:
+        await _remove(_operator(tenant_id), tenant_id, reason="x", person_present=True)
+    assert caught.value.code == "approval_off_needs_platform_admin"
+    with pytest.raises(ConnectorNotFoundError):
+        await _remove(_operator(uuid.uuid4()), tenant_id, reason="x", person_present=True)
+    with pytest.raises(BuiltinConnectorWriteForbiddenError):
+        await _remove(_operator(tenant_id), None, reason="x", person_present=True)
+    with pytest.raises(OverrideNotFoundError):
+        await _remove(admin, uuid.uuid4(), reason="x", person_present=True)
+
+    # The platform admin needs a reason and a person present, like turning approval off.
+    for kwargs, code in (
+        ({"reason": "x"}, "approval_off_needs_fresh_sign_in"),
+        ({"person_present": True}, "approval_off_needs_reason"),
+    ):
+        with pytest.raises(OpPolicyEditError) as caught:
+            await _remove(admin, tenant_id, **kwargs)
+        assert caught.value.code == code
+    assert await _effective(tenant_id) == ("caution", True)
+
+    await _remove(admin, tenant_id, reason="not needed", person_present=True)
+    assert await _effective(tenant_id) == ("caution", False)
+    async with get_sessionmaker()() as session:
+        assert (await session.execute(select(OperationPolicyOverride))).scalars().all() == []
+    payload = await _last_edit_audit()
+    assert payload["changes"] == {"requires_approval": {"old": True, "new": False}}
+    assert payload["scope"] == "tenant"
+    assert payload["override_removed"] is True
+    assert payload["override_tenant_id"] == str(tenant_id)
+    assert payload["reason"] == "not needed"
+
+
+@pytest.mark.asyncio
+async def test_tenant_admin_removes_own_risk_override(embedding: AsyncMock) -> None:
+    """Removing an override that only raised the level needs no approval-off checks."""
+    tenant_id = uuid.uuid4()
+    await _register_typed(embedding)
+    await ReviewService(_operator(tenant_id)).edit_op(
+        _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=tenant_id, safety_level="dangerous"
+    )
+    await _remove(_operator(tenant_id), tenant_id)
+    assert await _effective(tenant_id) == ("caution", False)
+    payload = await _last_edit_audit()
+    assert payload["changes"] == {"safety_level": {"old": "dangerous", "new": "caution"}}
 
 
 @pytest.mark.asyncio
@@ -754,6 +888,63 @@ async def test_rest_tenant_admin_cannot_remove_own_approval_override(
     assert off.status_code == 403, off.text
     assert "approval_off_needs_platform_admin" in off.json()["detail"]
     assert await _effective(tenant_id) == ("caution", True)
+
+
+def _delete_override(
+    token_kwargs: dict[str, Any], *, override_tenant_id: uuid.UUID | None, reason: str | None
+) -> Any:
+    clear_jwks_cache()
+    key = _make_rsa_keypair(f"kid-{uuid.uuid4()}")
+    token = _mint_token(
+        key,
+        sub="admin-sub",
+        tenant_role=TenantRole.TENANT_ADMIN.value,
+        tenant_id=str(uuid.uuid4()),
+        **token_kwargs,
+    )
+    params: dict[str, str] = {}
+    if override_tenant_id is not None:
+        params["tenant_id"] = str(override_tenant_id)
+    if reason is not None:
+        params["reason"] = reason
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        return _client().delete(
+            f"/api/v1/connectors/{_TYPED_CONNECTOR}/operation-overrides/typedpets.pet.update",
+            params=params,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_rest_platform_admin_removes_a_tenant_override(embedding: AsyncMock) -> None:
+    """DELETE removes the named tenant's override; ending approval needs a fresh sign-in."""
+    tenant_id = uuid.uuid4()
+    await _register_typed(embedding)
+    await ReviewService(_operator(tenant_id)).edit_op(
+        _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=tenant_id, requires_approval=True
+    )
+    old = {"platform_admin": True, "extra_claims": {"auth_time": int(time.time()) - 3600}}
+    stale = _delete_override(old, override_tenant_id=tenant_id, reason="not needed")
+    assert stale.status_code == 401, stale.text
+    assert "approval_off_needs_fresh_sign_in" in stale.json()["detail"]
+
+    fresh = {"platform_admin": True, "extra_claims": {"auth_time": int(time.time()) - 5}}
+    tenant_admin = _delete_override(
+        {"extra_claims": {"auth_time": int(time.time())}},
+        override_tenant_id=tenant_id,
+        reason="not needed",
+    )
+    assert tenant_admin.status_code == 404, tenant_admin.text
+    no_reason = _delete_override(fresh, override_tenant_id=tenant_id, reason=None)
+    assert no_reason.status_code == 400, no_reason.text
+    assert await _effective(tenant_id) == ("caution", True)
+
+    removed = _delete_override(fresh, override_tenant_id=tenant_id, reason="not needed")
+    assert removed.status_code == 204, removed.text
+    assert await _effective(tenant_id) == ("caution", False)
+    gone = _delete_override(fresh, override_tenant_id=tenant_id, reason="not needed")
+    assert gone.status_code == 404, gone.text
 
 
 @pytest.mark.asyncio

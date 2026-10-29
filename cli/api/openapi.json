@@ -4796,6 +4796,89 @@
         "x-maturity": "experimental"
       }
     },
+    "/api/v1/connectors/{connector_id}/operation-overrides/{op_id}": {
+      "delete": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Remove Op Override Endpoint",
+        "description": "Remove one operator override of a risk level or approval flag.\n\nThe override is the one ``GET /api/v1/connectors/operation-overrides``\nlists for ``connector_id``, ``op_id`` and ``tenant_id`` (none for the\ninstall-wide one). A platform admin can remove any tenant's override;\na tenant admin only their own tenant's (``403`` for the install-wide\none, ``404`` for another tenant's). When the removal ends approval in\nthat scope it needs ``platform_admin`` (``403``), a ``reason``\n(``400``) and a fresh sign-in (``401``), like turning approval off.\n``404`` when there is no such override. Writes one\n``meho_connector_edit_op`` audit row. Returns 204 on success.",
+        "operationId": "remove_op_override_endpoint_api_v1_connectors__connector_id__operation_overrides__op_id__delete",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "op_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Op Id"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "description": "The tenant whose override to remove. Leave it out for the install-wide override. A tenant admin can name only their own tenant.",
+              "title": "Tenant Id"
+            },
+            "description": "The tenant whose override to remove. Leave it out for the install-wide override. A tenant admin can name only their own tenant."
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024,
+              "nullable": true,
+              "description": "Why you remove it; written to the audit row. Required when the removal ends approval.",
+              "title": "Reason"
+            },
+            "description": "Why you remove it; written to the audit row. Required when the removal ends approval."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-maturity": "experimental"
+      }
+    },
     "/api/v1/connectors/{connector_id}/enable": {
       "post": {
         "tags": [

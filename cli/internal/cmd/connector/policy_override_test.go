@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/evoila/meho/cli/internal/api"
 )
 
@@ -85,6 +87,7 @@ func TestPrintOverridesTable(t *testing.T) {
 	off := false
 	reason := "read-only in practice"
 	level := "dangerous"
+	tenant := uuid.MustParse("2f1c6b0e-4f2c-4b7e-9a0e-1c2d3e4f5a6b")
 	rows := []api.OperationOverrideRow{
 		{
 			ConnectorId: "vault-1.x", OpId: "vault.kv.write", Scope: "install",
@@ -92,7 +95,7 @@ func TestPrintOverridesTable(t *testing.T) {
 			SetAt: time.Date(2026, 10, 28, 9, 30, 0, 0, time.UTC),
 		},
 		{
-			ConnectorId: "vault-1.x", OpId: "vault.kv.read", Scope: "tenant",
+			ConnectorId: "vault-1.x", OpId: "vault.kv.read", Scope: "tenant", TenantId: &tenant,
 			SafetyLevel: &level, SetBySub: "ops",
 			SetAt: time.Date(2026, 10, 28, 9, 31, 0, 0, time.UTC),
 		},
@@ -100,7 +103,8 @@ func TestPrintOverridesTable(t *testing.T) {
 	var buf bytes.Buffer
 	printOverridesTable(&buf, false, rows)
 	out := buf.String()
-	for _, want := range []string{"2 operation override(s)", "no", "read-only in practice", "dangerous", "(code)", "2026-10-28 09:30"} {
+	// The scope column shows the tenant id, so the operator can pass it to remove-override.
+	for _, want := range []string{"2 operation override(s)", "no", "read-only in practice", "dangerous", "(code)", "2026-10-28 09:30", "install", tenant.String()} {
 		if !strings.Contains(out, want) {
 			t.Errorf("table misses %q:\n%s", want, out)
 		}
@@ -135,5 +139,83 @@ func TestGetOverridesSendsReducedApproval(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "1 operation(s) running with reduced approval") {
 		t.Errorf("unexpected output:\n%s", stdout.String())
+	}
+}
+
+// TestRunRemoveOverrideSendsTenantAndReason pins #4711: --tenant and
+// --reason ride the DELETE query string, and the summary names the scope.
+func TestRunRemoveOverrideSendsTenantAndReason(t *testing.T) {
+	var got map[string]string
+	srv := mockBackplane(t, map[string]mockHandler{
+		"DELETE /api/v1/connectors/vault-1.x/operation-overrides/vault.kv.delete": func(w http.ResponseWriter, r *http.Request) {
+			got = map[string]string{
+				"tenant_id": r.URL.Query().Get("tenant_id"),
+				"reason":    r.URL.Query().Get("reason"),
+			}
+			w.WriteHeader(http.StatusNoContent)
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	cmd, stdout, _ := newIngestStatusTestCmd()
+	err := runRemoveOverride(cmd, removeOverrideOptions{
+		ConnectorID:       "vault-1.x",
+		OpID:              "vault.kv.delete",
+		Tenant:            "2f1c6b0e-4f2c-4b7e-9a0e-1c2d3e4f5a6b",
+		Reason:            "not needed",
+		BackplaneOverride: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("runRemoveOverride: %v", err)
+	}
+	if got["tenant_id"] != "2f1c6b0e-4f2c-4b7e-9a0e-1c2d3e4f5a6b" {
+		t.Errorf("tenant_id = %q", got["tenant_id"])
+	}
+	if got["reason"] != "not needed" {
+		t.Errorf("reason = %q", got["reason"])
+	}
+	if !strings.Contains(stdout.String(), "tenant 2f1c6b0e-4f2c-4b7e-9a0e-1c2d3e4f5a6b") {
+		t.Errorf("summary misses the scope:\n%s", stdout.String())
+	}
+}
+
+// TestRunRemoveOverrideFreshSignIn maps the fresh sign-in 401 to the
+// "sign in again" message, like edit-op does.
+func TestRunRemoveOverrideFreshSignIn(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"DELETE /api/v1/connectors/vault-1.x/operation-overrides/vault.kv.delete": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, http.StatusUnauthorized, map[string]any{
+				"detail": "approval_off_needs_fresh_sign_in: sign in again",
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	cmd, _, stderr := newIngestStatusTestCmd()
+	err := runRemoveOverride(cmd, removeOverrideOptions{
+		ConnectorID:       "vault-1.x",
+		OpID:              "vault.kv.delete",
+		Reason:            "not needed",
+		BackplaneOverride: srv.URL,
+	})
+	if err == nil {
+		t.Fatal("a 401 must fail")
+	}
+	if !strings.Contains(stderr.String(), "meho login") {
+		t.Errorf("message must say to sign in again:\n%s", stderr.String())
+	}
+}
+
+// TestRunRemoveOverrideRejectsBadTenant keeps the UUID check client-side.
+func TestRunRemoveOverrideRejectsBadTenant(t *testing.T) {
+	cmd, _, stderr := newIngestStatusTestCmd()
+	err := runRemoveOverride(cmd, removeOverrideOptions{ConnectorID: "x-1", OpID: "y", Tenant: "acme"})
+	if err == nil {
+		t.Fatal("a tenant that is not a UUID must fail")
+	}
+	if !strings.Contains(stderr.String(), "not a UUID") {
+		t.Errorf("message must name the problem:\n%s", stderr.String())
 	}
 }

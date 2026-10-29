@@ -1114,6 +1114,7 @@ review payload also carries `classified_safety_level` /
 | raise the risk level | platform admin, built-in operation | whole install | override |
 | require approval | tenant admin / platform admin | as above | override |
 | set the level back to the classification | same scope | same scope | override field removed, value from code applies |
+| remove an override (`remove_override`, `ReviewService.remove_op_override`) | platform admin: any scope; tenant admin: own tenant only | the named scope | override row deleted; when that ends approval in the scope, the approval-off checks apply |
 | a level below the classification | anyone | - | refused, `risk_level_below_classification`: open a pull request |
 | `requires_approval=false` where the classification requires it | platform admin, with a non-empty `reason` and a person present | whole install (built-in) or the row's tenant | override `false`; listed in the reduced-approval report |
 | `requires_approval=false` on a destructive operation | anyone | - | always refused, `approval_off_destructive` |
@@ -1127,6 +1128,29 @@ override that required approval, and setting a level back from
 `destructive` (which ends the approval that `destructive` brings). A
 tenant admin who lowers their own `destructive` override can keep
 approval by also sending `requires_approval=true`.
+
+**Each scope's override stands on its own.** The stored value is
+measured against the classification, not against the other scopes'
+overrides. A tenant that selects `destructive` while the install-wide
+override already says `destructive` still gets its own row, so the
+tenant's choice holds when the install-wide override is removed. The
+same holds for approval: a tenant's `requires_approval=true` is stored
+unless the classification itself requires approval and no override turns
+it off.
+
+**Removing a tenant's override.** A platform admin's edit of a built-in
+operation targets the install-wide override, so it cannot reach a row a
+tenant stored. `DELETE
+/api/v1/connectors/{id}/operation-overrides/{op_id}?tenant_id=<uuid>`
+(`meho connector remove-override <id> <op_id> --tenant <uuid> --reason
+<text>`) removes the named tenant's override; without `tenant_id` it
+removes the install-wide one. A platform admin can remove any tenant's;
+a tenant admin only their own (`404` for another tenant's, `403` for the
+install-wide one). When the removal ends approval in that scope, the
+approval-off checks apply (`403` / `400` / `401` as for an edit). `404`
+when the scope has no override. The audit row is a
+`meho_connector_edit_op` row with `override_removed=true` and
+`override_tenant_id`.
 
 "A person present" is the fresh sign-in check on REST
 (`auth/fresh_sign_in.py`, see `approvals.md`) and the web session in the
@@ -1160,6 +1184,8 @@ effect is recorded too, for example approval when a raise to
 approval), `meho connector overrides [--reduced-approval]`, and the
 console page `/ui/connectors/overrides`. A tenant admin sees the
 install-wide rows and their own tenant's; a platform admin sees all.
+The CLI table shows the tenant id in the scope column, so a platform
+admin can pass it to `remove-override --tenant`.
 Each row shows the risk level and approval that apply in the row's scope
 (the classification with every override there), not the stored override
 fields. The reduced-approval view lists an override only while approval

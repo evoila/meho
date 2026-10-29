@@ -145,6 +145,7 @@ from meho_backplane.operations.op_policy import (
     PolicyEditResult,
     apply_policy_edit,
     effective_policy_map,
+    remove_override,
 )
 from meho_backplane.settings import get_settings
 
@@ -1136,6 +1137,68 @@ class ReviewService:
             tighten_only=tighten_only,
             max_age_seconds=get_settings().fresh_sign_in_max_age_seconds,
         )
+
+    async def remove_op_override(
+        self,
+        connector_id: str,
+        op_id: str,
+        *,
+        override_tenant_id: UUID | None,
+        reason: str | None,
+        person_present: bool,
+    ) -> None:
+        """Remove one stored risk level / approval override (#4711).
+
+        *override_tenant_id* names the override: a tenant UUID or ``None``
+        for the install-wide one. A platform admin can remove any of them.
+        A tenant admin can remove only their own tenant's; another tenant's
+        is :class:`ConnectorNotFoundError` (the usual cross-tenant answer)
+        and the install-wide one is
+        :class:`BuiltinConnectorWriteForbiddenError`.
+
+        When the removal ends approval in that scope, it passes the same
+        checks as turning approval off: ``platform_admin``, a reason and
+        *person_present* (:class:`OpPolicyEditError` otherwise). A scope
+        without an override raises
+        :class:`~meho_backplane.operations.op_policy.OverrideNotFoundError`.
+
+        Writes one ``meho_connector_edit_op`` audit row with
+        ``override_removed=True`` and ``override_tenant_id``.
+        """
+        scope = self._resolve_scope(
+            connector_id, override_tenant_id, allow_platform_admin_cross_tenant=True
+        )
+        self._require_platform_admin_for_builtin(connector_id, scope)
+        key = OpKey(scope.product, scope.version, scope.impl_id, op_id)
+        async with self._sessionmaker()() as session:
+            result = await remove_override(
+                session,
+                key=key,
+                scope_tenant_id=override_tenant_id,
+                operator=self._operator,
+                reason=reason,
+                person_present=person_present,
+                max_age_seconds=get_settings().fresh_sign_in_max_age_seconds,
+            )
+            await write_audit_row(
+                session,
+                operator_sub=self._operator.sub,
+                operator_tenant_id=self._operator.tenant_id,
+                op_id=OP_EDIT_OP,
+                payload={
+                    "connector_id": connector_id,
+                    "op_id": op_id,
+                    "fields_updated": [*result.changes],
+                    "changes": result.changes,
+                    "scope": result.scope,
+                    "reason": reason,
+                    "override_removed": True,
+                    "override_tenant_id": (
+                        None if override_tenant_id is None else str(override_tenant_id)
+                    ),
+                },
+            )
+            await session.commit()
 
     # -- public write API: profile stamping -------------------------------
 

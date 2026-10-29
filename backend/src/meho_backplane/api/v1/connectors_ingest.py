@@ -271,7 +271,7 @@ from meho_backplane.operations.ingest.list_connectors import (
     next_step_for_registered_connector,
 )
 from meho_backplane.operations.meta_tools import ConnectorNotIngestedError
-from meho_backplane.operations.op_policy import OpPolicyEditError
+from meho_backplane.operations.op_policy import OpPolicyEditError, OverrideNotFoundError
 
 __all__ = [
     "apply_op_edit",
@@ -1601,6 +1601,71 @@ def _policy_edit_http_error(exc: OpPolicyEditError) -> HTTPException:
     if exc.code == "approval_off_needs_platform_admin":
         return HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail=detail)
     return HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail=detail)
+
+
+_override_tenant_query = Query(
+    default=None,
+    description=(
+        "The tenant whose override to remove. Leave it out for the install-wide "
+        "override. A tenant admin can name only their own tenant."
+    ),
+)
+_override_reason_query = Query(
+    default=None,
+    min_length=1,
+    max_length=1024,
+    description=(
+        "Why you remove it; written to the audit row. Required when the removal ends approval."
+    ),
+)
+
+
+@router.delete(
+    "/{connector_id}/operation-overrides/{op_id:path}",
+    status_code=http_status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def remove_op_override_endpoint(
+    connector_id: str,
+    op_id: str,
+    tenant_id: UUID | None = _override_tenant_query,
+    reason: str | None = _override_reason_query,
+    operator: Operator = _require_admin,
+) -> Response:
+    """Remove one operator override of a risk level or approval flag.
+
+    The override is the one ``GET /api/v1/connectors/operation-overrides``
+    lists for ``connector_id``, ``op_id`` and ``tenant_id`` (none for the
+    install-wide one). A platform admin can remove any tenant's override;
+    a tenant admin only their own tenant's (``403`` for the install-wide
+    one, ``404`` for another tenant's). When the removal ends approval in
+    that scope it needs ``platform_admin`` (``403``), a ``reason``
+    (``400``) and a fresh sign-in (``401``), like turning approval off.
+    ``404`` when there is no such override. Writes one
+    ``meho_connector_edit_op`` audit row. Returns 204 on success.
+    """
+    service = ReviewService(operator)
+    try:
+        await service.remove_op_override(
+            connector_id,
+            op_id,
+            override_tenant_id=tenant_id,
+            reason=reason,
+            person_present=has_fresh_sign_in(operator),
+        )
+    except BuiltinConnectorWriteForbiddenError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=exc.detail,
+        ) from exc
+    except (ConnectorNotFoundError, OverrideNotFoundError) as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except OpPolicyEditError as exc:
+        raise _policy_edit_http_error(exc) from exc
+    return Response(status_code=http_status.HTTP_204_NO_CONTENT)
 
 
 @router.post(

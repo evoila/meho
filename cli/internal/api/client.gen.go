@@ -10987,6 +10987,16 @@ type EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams struct
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams defines parameters for RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDelete.
+type RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams struct {
+	// TenantId The tenant whose override to remove. Leave it out for the install-wide override. A tenant admin can name only their own tenant.
+	TenantId *openapi_types.UUID `form:"tenant_id,omitempty" json:"tenant_id,omitempty"`
+
+	// Reason Why you remove it; written to the audit row. Required when the removal ends approval.
+	Reason        *string `form:"reason,omitempty" json:"reason,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams defines parameters for EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatch.
 type EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -14490,6 +14500,9 @@ type ClientInterface interface {
 
 	EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatch(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, body EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDelete request
+	RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDelete(ctx context.Context, connectorId string, opId string, params *RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBody request with any body
 	EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBody(ctx context.Context, connectorId string, opId string, params *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -16897,6 +16910,18 @@ func (c *Client) EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchW
 
 func (c *Client) EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatch(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, body EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchRequest(c.Server, connectorId, groupKey, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDelete(ctx context.Context, connectorId string, opId string, params *RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteRequest(c.Server, connectorId, opId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -27191,6 +27216,100 @@ func NewEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchRequestWit
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteRequest generates requests for RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDelete
+func NewRemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteRequest(server string, connectorId string, opId string, params *RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "op_id", runtime.ParamLocationPath, opId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/%s/operation-overrides/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_id", runtime.ParamLocationQuery, *params.TenantId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Reason != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "reason", runtime.ParamLocationQuery, *params.Reason); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -46065,6 +46184,9 @@ type ClientWithResponsesInterface interface {
 
 	EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithResponse(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, body EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse, error)
 
+	// RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteWithResponse request
+	RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteWithResponse(ctx context.Context, connectorId string, opId string, params *RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams, reqEditors ...RequestEditorFn) (*RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse, error)
+
 	// EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBodyWithResponse request with any body
 	EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBodyWithResponse(ctx context.Context, connectorId string, opId string, params *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse, error)
 
@@ -48962,6 +49084,28 @@ func (r EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse) 
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -57158,6 +57302,15 @@ func (c *ClientWithResponses) EditGroupEndpointApiV1ConnectorsConnectorIdGroupsG
 	return ParseEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse(rsp)
 }
 
+// RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteWithResponse request returning *RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse
+func (c *ClientWithResponses) RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteWithResponse(ctx context.Context, connectorId string, opId string, params *RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams, reqEditors ...RequestEditorFn) (*RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse, error) {
+	rsp, err := c.RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDelete(ctx, connectorId, opId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse(rsp)
+}
+
 // EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBodyWithResponse request with arbitrary body returning *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse
 func (c *ClientWithResponses) EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBodyWithResponse(ctx context.Context, connectorId string, opId string, params *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse, error) {
 	rsp, err := c.EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBody(ctx, connectorId, opId, params, contentType, body, reqEditors...)
@@ -63655,6 +63808,32 @@ func ParseEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse
 	}
 
 	response := &EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse parses an HTTP response from a RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteWithResponse call
+func ParseRemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse(rsp *http.Response) (*RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

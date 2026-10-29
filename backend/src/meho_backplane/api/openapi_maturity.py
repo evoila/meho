@@ -123,6 +123,7 @@ PATH_FEATURE_OVERRIDES: Final[dict[str, str]] = {
     "/api/v1/connectors/{connector_id}/groups/{group_key}": "connector_ingest",
     "/api/v1/connectors/{connector_id}/operations/{op_id}": "connector_ingest",
     "/api/v1/connectors/operation-overrides": "connector_ingest",
+    "/api/v1/connectors/{connector_id}/operation-overrides/{op_id}": "connector_ingest",
 }
 
 

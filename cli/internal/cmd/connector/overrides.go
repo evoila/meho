@@ -38,8 +38,9 @@ func newOverridesCmd() *cobra.Command {
 			"flag (with `meho connector edit-op`, the console or the MCP edit tool).\n\n" +
 			"Each row shows the connector, the operation, the risk level and\n" +
 			"approval that apply in the row's scope (the value in code with every\n" +
-			"change there), the scope (one tenant or the whole install), who made\n" +
-			"the change, when, and the reason.\n\n" +
+			"change there), the scope (a tenant's id, or `install` for the whole\n" +
+			"install), who made the change, when, and the reason. Remove a row\n" +
+			"with `meho connector remove-override`.\n\n" +
 			"--reduced-approval lists only the operations a platform admin turned\n" +
 			"approval off for, where approval is still off: the report\n" +
 			"\"operations running with reduced\n" +
@@ -120,7 +121,7 @@ func printOverridesTable(w io.Writer, reducedApproval bool, rows []api.Operation
 	if len(rows) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "%-24s %-36s %-11s %-9s %-8s %-20s %-16s %s\n",
+	fmt.Fprintf(w, "%-24s %-36s %-11s %-9s %-36s %-20s %-16s %s\n",
 		"connector_id", "op_id", "risk", "approval", "scope", "who", "when", "reason")
 	for _, row := range rows {
 		risk := "(code)"
@@ -138,12 +139,17 @@ func printOverridesTable(w io.Writer, reducedApproval bool, rows []api.Operation
 		if row.Reason != nil {
 			reason = *row.Reason
 		}
-		fmt.Fprintf(w, "%-24s %-36s %-11s %-9s %-8s %-20s %-16s %s\n",
+		// The tenant id is what `remove-override --tenant` takes.
+		scope := string(row.Scope)
+		if row.TenantId != nil {
+			scope = row.TenantId.String()
+		}
+		fmt.Fprintf(w, "%-24s %-36s %-11s %-9s %-36s %-20s %-16s %s\n",
 			truncate(row.ConnectorId, 24),
 			truncate(row.OpId, 36),
 			risk,
 			approval,
-			string(row.Scope),
+			scope,
 			truncate(row.SetBySub, 20),
 			row.SetAt.UTC().Format("2006-01-02 15:04"),
 			reason,

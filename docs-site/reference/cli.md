@@ -1267,6 +1267,19 @@ meho connector overrides [flags]
 - `--json` — emit machine-readable JSON to stdout instead of the human table
 - `--reduced-approval` — list only the operations a platform admin turned approval off for
 
+### `meho connector remove-override`
+
+Remove one operator change to an operation's risk level or approval
+
+```
+meho connector remove-override <connector_id> <op_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit machine-readable JSON to stdout instead of the human summary
+- `--reason` — why you remove it; written to the audit row and required when the removal ends approval
+- `--tenant` — the tenant whose change to remove (a UUID); leave it out for the install-wide change
+
 ### `meho connector review`
 
 Show the per-group + per-op review payload for one connector

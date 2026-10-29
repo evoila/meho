@@ -100,6 +100,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newEditGroupCmd())
 	cmd.AddCommand(newEditOpCmd())
 	cmd.AddCommand(newOverridesCmd())
+	cmd.AddCommand(newRemoveOverrideCmd())
 	cmd.AddCommand(newEnableCmd())
 	cmd.AddCommand(newEnableReadsCmd())
 	cmd.AddCommand(newDisableCmd())

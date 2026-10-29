@@ -507,6 +507,7 @@ def test_all_routes_mounted_on_main_app() -> None:
         "/api/v1/connectors/{connector_id}/groups/{group_key}",
         # FastAPI 0.137 strips the `:path` converter in OpenAPI path keys
         "/api/v1/connectors/{connector_id}/operations/{op_id}",
+        "/api/v1/connectors/{connector_id}/operation-overrides/{op_id}",
         "/api/v1/connectors/{connector_id}/enable",
         "/api/v1/connectors/{connector_id}/disable",
     }

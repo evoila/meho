@@ -685,10 +685,12 @@ func applyWorkRef(cmd *cobra.Command, _ []string) error {
 	}
 	if !api.ValidWorkRef(ref) {
 		// On a read command that filters by reference, the old
-		// --work-ref spelling still filters for one release, and a
-		// filter value need not have the tag shape. Skip the tag and
-		// let workref.Filter filter and warn.
-		if source == "--work-ref" && cmd.Flags().Lookup(workref.FilterFlag) != nil {
+		// --work-ref spelling still filters for one release when
+		// --filter-work-ref is not given, and a filter value need not
+		// have the tag shape. Skip the tag and let workref.Filter
+		// filter and warn. With --filter-work-ref given, --work-ref
+		// only tags, so a bad value is an error like everywhere else.
+		if source == "--work-ref" && workref.OldFlagFilters(cmd) {
 			return nil
 		}
 		jsonOut := false

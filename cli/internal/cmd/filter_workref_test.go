@@ -168,6 +168,32 @@ func TestFilterWorkRefOnReadCommands(t *testing.T) {
 			t.Run("old spelling with a non-tag value filters and warns", func(t *testing.T) {
 				check(t, "", with(nil, "--work-ref", "CHG-123"), "", "CHG-123", true)
 			})
+			// An empty --filter-work-ref means "no filter". The old
+			// spelling then only tags, with no warning.
+			t.Run("empty filter flag clears the filter; global flag tags", func(t *testing.T) {
+				check(t, "", with([]string{"--work-ref", tag}, "--"+workref.FilterFlag+"="), tag, "", false)
+			})
+			// With --filter-work-ref given, --work-ref only tags, so a
+			// value that is not a tag is an error before any request.
+			t.Run("non-tag value with the filter flag is rejected", func(t *testing.T) {
+				t.Setenv(api.WorkRefEnv, "")
+				rec := newFilterBackplane(t)
+				stdout, stderr := runRootOutErr(t, with([]string{"--work-ref", "CHG-123"}, "--"+workref.FilterFlag, filter)...)
+				if !strings.Contains(stderr, "--work-ref must match") {
+					t.Errorf("stderr = %q; want the shape error", stderr)
+				}
+				if strings.Contains(stderr, "--"+workref.FilterFlag+" to filter") {
+					t.Errorf("stderr = %q; want no fallback warning", stderr)
+				}
+				if stdout != "" {
+					t.Errorf("stdout = %q; want nothing", stdout)
+				}
+				rec.mu.Lock()
+				defer rec.mu.Unlock()
+				if len(rec.seen) != 0 {
+					t.Errorf("the backplane saw %d request(s); want none", len(rec.seen))
+				}
+			})
 		})
 	}
 }

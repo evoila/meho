@@ -334,11 +334,12 @@ the reducer keeps it **whole** as a document record under a handle:
 - An op may declare `llm_instructions.result_document: {"always": true}`
   (the dispatcher forwards it as `context["result_document"]`). Then the
   reducer skips collection detection and keeps the payload as a document
-  record whatever its size, so a small result gets a handle too. The
-  migration inventory reads use it: other operations load the inventory
-  by its handle. When the store did not keep a small payload, it passes
-  through inline as without the hint. A malformed hint is logged and
-  ignored.
+  record whatever its size, so a small result gets a handle too, but the
+  caller sees only the summary. An operation whose small result should
+  come back whole declares `result_handle` instead (next section); the
+  migration inventory reads do. When the store did not keep a small
+  payload, it passes through inline as without the hint. A malformed hint
+  is logged and ignored. `result_document` wins when an op declares both.
 - A multi-step operation's failure envelope (an `issues[]` entry with
   `severity: "error"`, #3809) takes the same reducer path as a success
   payload (#4223). An oversized refusal — `folder.create`'s

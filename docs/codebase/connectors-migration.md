@@ -119,11 +119,11 @@ two shapes as JSON Schema for the operations' response schemas.
 An inventory read returns one envelope. The envelope has two lists
 (`records` and `omissions`), so when it is over the inline size limit the
 JSONFlux reducer stores it **whole** as a document record and the caller
-gets a handle id (see `jsonflux.md`). An inventory read should also
-declare the `result_handle` hint (`llm_instructions["result_handle"] =
+gets a handle id (see `jsonflux.md`). An inventory read also declares the
+`result_handle` hint (`llm_instructions["result_handle"] =
 {"always": true}`, #5143): then a small inventory (one VM is about
 1.7 KB) comes back whole **and** with a handle, so it can be exported and
-assessed too.
+assessed too. The vCenter read (`vmware.migration.inventory`) declares it.
 
 An inventory can also be given inline in the call, for example one the
 caller already has. `load_inventories(operator, handle_ids,
@@ -339,12 +339,13 @@ A read-only multi-step operation of the vCenter connector
 (`connectors/vmware_rest/composites/_migration_inventory*.py`), registered
 on both vCenter catalogs (`vmware-rest-8.0` and `vmware-rest-9.0`), group
 `migration`, `safe`, no approval. It returns one inventory envelope, always
-as a stored result: the operation's `result_document: {"always": true}`
-hint makes the reducer keep the inventory whole under a handle whatever its
-size, so even a one-VM inventory has a handle for `migration.inventory.csv`.
-The caller sees the reducer's document summary (`result_record`,
-`top_level_fields`, the small scalars) and reads the rest with
-`result_query` and a path (for example `/counts` or `/records`).
+with a handle: the operation's `result_handle: {"always": true}` hint
+(#5143) makes the reducer store a small inventory too, so even a one-VM
+inventory has a handle for `migration.inventory.csv`. A small inventory
+comes back whole next to its handle. A large one comes back as the
+reducer's document summary (`result_record`, `top_level_fields`, the small
+scalars), and the caller reads the rest with `result_query` and a path
+(for example `/counts` or `/records`).
 
 Parameters: `vcf_operations_target` (optional), `utilization_days` (1 to
 365, default 30), and `cluster` or `folder` (an id) to narrow the scope.

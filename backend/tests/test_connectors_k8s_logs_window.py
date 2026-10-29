@@ -5,16 +5,16 @@
 
 The cluster side is a small stand-in for the node's log reader: it
 keeps lines at or after ``sinceTime`` (whole seconds, as the API server
-passes it on), applies ``tailLines``, writes the RFC 3339 nanosecond
-timestamp in front of every line, and stops after ``limitBytes`` even
-in the middle of a line or of a multi-byte character. It answers with
-raw bytes, as the real ``/log`` call does with ``_preload_content=False``.
-The tests drive ``k8s_logs`` against those recorded answers.
+passes it on), applies ``tailLines``, and writes the RFC 3339 nanosecond
+timestamp in front of every line. It answers with a streamed body of
+raw bytes, chunk by chunk, as the real ``/log`` call does with
+``_preload_content=False``, and counts how many bytes were read. The
+tests drive ``k8s_logs`` against those recorded answers.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -28,14 +28,15 @@ from meho_backplane.connectors.kubernetes.ops_logs import (
     K8S_LOGS_PARAMETER_SCHEMA,
     MAX_BODY_BYTES,
     MAX_TAIL_LINES,
-    WINDOW_LIMIT_BYTES,
+    LogLineTooLargeError,
     LogWindowError,
     k8s_logs,
     parse_rfc3339,
 )
 from meho_backplane.connectors.kubernetes.ops_logs_window import (
+    WINDOW_CHUNK_BYTES,
     LogWindow,
-    decode_window_body,
+    collect_window,
     read_pod_log_window,
     window_query,
 )
@@ -59,36 +60,71 @@ def _stamp(second: int, nanos: int = 0) -> str:
     return f"2026-08-01T{hours:02d}:{minutes:02d}:{seconds:02d}.{nanos:09d}Z"
 
 
-def _raw_response(raw: bytes, status: int = 200) -> MagicMock:
-    """A stand-in for the ``aiohttp`` response ``call_api`` returns unread."""
-    return MagicMock(
+def _raw_response(raw: bytes, status: int = 200, chunk_bytes: int | None = None) -> MagicMock:
+    """A stand-in for the ``aiohttp`` response ``call_api`` returns unread.
+
+    ``content.iter_chunked`` streams ``raw`` in pieces of ``chunk_bytes``
+    (the size the reader asks for, unless set here) and records how
+    many bytes were handed out in ``bytes_read``.
+    """
+    response = MagicMock(
         status=status,
         reason="OK" if status == 200 else "Not Found",
         headers={"Content-Type": "text/plain"},
         read=AsyncMock(return_value=raw),
         release=MagicMock(),
+        bytes_read=0,
+        body_bytes=len(raw),
     )
 
+    def _iter_chunked(size: int) -> AsyncIterator[bytes]:
+        step = chunk_bytes or size
 
-def _kubelet_answer(entries: list[tuple[str, str]]) -> Callable[..., Any]:
-    """Build a ``call_api`` stand-in that answers like the node's log reader."""
+        async def _chunks() -> AsyncIterator[bytes]:
+            for start in range(0, len(raw), step):
+                piece = raw[start : start + step]
+                response.bytes_read += len(piece)
+                yield piece
+
+        return _chunks()
+
+    response.content.iter_chunked = _iter_chunked
+    return response
+
+
+def _kubelet_answer(
+    entries: list[tuple[str, str]], api_client_mock: MagicMock, chunk_bytes: int | None
+) -> Callable[..., Any]:
+    """Build a ``call_api`` stand-in that answers like the node's log reader.
+
+    The streamed response it hands out is kept as
+    ``api_client_mock.last_response`` so a test can check how much of
+    the body was read.
+    """
 
     async def _answer(*_args: Any, **kwargs: Any) -> MagicMock:
         assert kwargs["_preload_content"] is False
         query = dict(kwargs["query_params"])
         assert query["timestamps"] is True
+        assert "limitBytes" not in query
         since = query["sinceTime"].replace("Z", ".000000000Z")
         selected = [f"{ts} {text}\n" for ts, text in entries if ts >= since]
         if "tailLines" in query:
             selected = selected[-query["tailLines"] :]
-        return _raw_response("".join(selected).encode("utf-8")[: query["limitBytes"]])
+        response = _raw_response("".join(selected).encode("utf-8"), chunk_bytes=chunk_bytes)
+        api_client_mock.last_response = response
+        return response
 
     return _answer
 
 
-def _patch_cluster(entries: list[tuple[str, str]]) -> tuple[Any, Any, MagicMock, MagicMock]:
+def _patch_cluster(
+    entries: list[tuple[str, str]], chunk_bytes: int | None = None
+) -> tuple[Any, Any, MagicMock, MagicMock]:
     api_client_mock = MagicMock(close=AsyncMock())
-    api_client_mock.call_api = AsyncMock(side_effect=_kubelet_answer(entries))
+    api_client_mock.call_api = AsyncMock(
+        side_effect=_kubelet_answer(entries, api_client_mock, chunk_bytes)
+    )
     core_v1 = MagicMock()
     core_v1.list_namespaced_pod = AsyncMock(
         return_value=_pod_list([_pod_obj("argocd-server-7c4b8d-x7r2k", ["argocd-server"])])
@@ -106,8 +142,10 @@ def _patch_cluster(entries: list[tuple[str, str]]) -> tuple[Any, Any, MagicMock,
     return config_patch, core_v1_patch, core_v1, api_client_mock
 
 
-async def _call(entries: list[tuple[str, str]], **params: Any) -> tuple[dict[str, Any], MagicMock]:
-    config_patch, core_v1_patch, _core_v1, api_client_mock = _patch_cluster(entries)
+async def _call(
+    entries: list[tuple[str, str]], chunk_bytes: int | None = None, **params: Any
+) -> tuple[dict[str, Any], MagicMock]:
+    config_patch, core_v1_patch, _core_v1, api_client_mock = _patch_cluster(entries, chunk_bytes)
     with config_patch, core_v1_patch:
         result = await k8s_logs(_make_connector(), _TARGET, _make_operator(), {**_POD, **params})
     return result, api_client_mock
@@ -129,6 +167,35 @@ def _big_log() -> list[tuple[str, str]]:
 
 def _kept_bytes(lines: list[str]) -> int:
     return sum(len(line.encode("utf-8")) for line in lines) + max(len(lines) - 1, 0)
+
+
+def _texts(lines: list[str]) -> list[str]:
+    return [line.split(" ", 1)[1] for line in lines]
+
+
+async def _page_through(
+    entries: list[tuple[str, str]], since_time: str, *, pages: int = 20
+) -> list[str]:
+    """Page with ``since_time = last_line_time`` until ``truncated`` is false.
+
+    Checks on the way that each next page starts again with exactly the
+    lines of the last kept time, and drops those repeats.
+    """
+    collected: list[str] = []
+    for _ in range(pages):
+        result, _ = await _call(entries, since_time=since_time)
+        page = result["lines"]
+        if collected:
+            repeated = [line for line in collected if line.startswith(since_time + " ")]
+            assert repeated
+            assert page[: len(repeated)] == repeated
+            page = page[len(repeated) :]
+        collected.extend(page)
+        if not result["truncated"]:
+            return collected
+        assert result["truncated_end"] == "end"
+        since_time = result["last_line_time"]
+    pytest.fail("paging did not reach the end of the log")
 
 
 # ---------------------------------------------------------------------------
@@ -162,8 +229,8 @@ def test_guidance_names_the_limits() -> None:
     assert str(MAX_TAIL_LINES) in limits
     assert "1 MiB" in limits
     assert "rotates" in limits
-    assert "1.06 MiB is written within one second" in limits
-    assert "Stop paging when 'last_line_time' does not change" in limits
+    assert "paging goes on with no gap" in limits
+    assert "larger than 1 MiB cannot be returned" in limits
     assert "since_time" in K8S_LOGS_LLM_INSTRUCTIONS["parameter_hints"]
     assert "until_time" in K8S_LOGS_LLM_INSTRUCTIONS["parameter_hints"]
 
@@ -196,7 +263,7 @@ async def test_since_and_until_return_only_the_window() -> None:
     assert kwargs["path_params"] == {"name": "argocd-server-7c4b8d-x7r2k", "namespace": "argocd"}
     assert query["sinceTime"] == "2026-08-01T00:00:10Z"
     assert query["timestamps"] is True
-    assert query["limitBytes"] == WINDOW_LIMIT_BYTES
+    assert "limitBytes" not in query
     assert query["container"] == "argocd-server"
     # Forward read: no tail unless the caller set one.
     assert "tailLines" not in query
@@ -235,71 +302,74 @@ async def test_large_window_keeps_the_oldest_lines_and_says_where_it_was_cut() -
     assert result["truncated"] is True
     assert result["truncated_end"] == "end"
     assert result["lines"][0] == f"{entries[0][0]} {entries[0][1]}"
-    assert _kept_bytes(result["lines"]) <= MAX_BODY_BYTES
+    # The lines at the start time are free; the rest fits in the cap.
+    start_lines = [line for line in result["lines"] if line.startswith(_stamp(0) + " ")]
+    assert len(start_lines) == 2
+    assert _kept_bytes(result["lines"][len(start_lines) :]) <= MAX_BODY_BYTES
+    assert _kept_bytes(result["lines"]) <= MAX_BODY_BYTES + _kept_bytes(start_lines) + 1
     assert result["line_count"] == len(result["lines"])
     last = result["lines"][-1]
     assert result["last_line_time"] == last.split(" ", 1)[0]
-    # Every kept line is whole: no line cut in the middle by limitBytes.
     assert all(line.endswith("x" * 1000) for line in result["lines"])
 
 
 @pytest.mark.asyncio
 async def test_paging_from_last_line_time_has_no_gap() -> None:
     entries = _big_log()
-    expected = [f"{ts} {text}" for ts, text in entries]
-
-    collected: list[str] = []
-    since_time = "2026-08-01T00:00:00Z"
-    for _ in range(10):
-        result, _ = await _call(entries, since_time=since_time)
-        page = result["lines"]
-        if collected:
-            # The next page starts again at the last kept time: the
-            # lines it repeats are exactly the kept lines with that time.
-            repeated = [line for line in collected if line.startswith(since_time + " ")]
-            assert repeated
-            assert page[: len(repeated)] == repeated
-            page = page[len(repeated) :]
-        collected.extend(page)
-        if not result["truncated"]:
-            break
-        since_time = result["last_line_time"]
-    else:
-        pytest.fail("paging did not reach the end of the log")
-
-    assert collected == expected
+    collected = await _page_through(entries, "2026-08-01T00:00:00Z")
+    assert collected == [f"{ts} {text}" for ts, text in entries]
 
 
 @pytest.mark.asyncio
-async def test_paging_stops_moving_when_one_second_holds_more_than_the_byte_limit() -> None:
-    """Known limit: ``sinceTime`` goes out in whole seconds.
+async def test_paging_reaches_every_line_when_one_second_holds_more_than_the_cap() -> None:
+    """``sinceTime`` goes out in whole seconds; paging still moves on.
 
-    Each page asks Kubernetes for the log from the start of the second of
-    ``last_line_time``. When that one second holds more than
-    ``WINDOW_LIMIT_BYTES`` (about 1.06 MiB), every page gets the same
-    first bytes of that second, and ``last_line_time`` stops changing
-    even though every line has its own time. The caller must stop then.
+    Each page asks Kubernetes for the log from the start of the second
+    of ``last_line_time``. When that second holds more than one page,
+    the lines before ``last_line_time`` are read and thrown away as they
+    arrive, so every page carries new lines and the read reaches the
+    end. About 2 MiB are written within one second here.
     """
     entries = [
-        (_stamp(0, index * 1000), f"line {index:05d} " + "x" * 1000) for index in range(2000)
+        (_stamp(0, index * 1000), f"line {index:05d} " + "x" * 1000) for index in range(2200)
     ]
-    assert sum(len(f"{ts} {text}\n") for ts, text in entries) > WINDOW_LIMIT_BYTES
+    assert sum(len(f"{ts} {text}\n") for ts, text in entries) > 2 * MAX_BODY_BYTES
 
-    times: list[str] = []
-    sizes: list[int] = []
-    since_time = "2026-08-01T00:00:00Z"
-    for _ in range(4):
-        result, _ = await _call(entries, since_time=since_time)
-        assert result["truncated"] is True
-        sizes.append(len(result["lines"]))
-        times.append(result["last_line_time"])
-        since_time = result["last_line_time"]
+    collected = await _page_through(entries, "2026-08-01T00:00:00Z", pages=4)
+    assert collected == [f"{ts} {text}" for ts, text in entries]
 
-    assert times[0] != times[1]
-    assert times[1] == times[2] == times[3]
-    assert sizes[2:] == [1, 1]
-    # The rest of that second is never reached.
-    assert times[-1] < entries[-1][0]
+
+@pytest.mark.asyncio
+async def test_a_full_page_stops_reading_the_body() -> None:
+    """The read stops soon after the page is full; the rest is never loaded."""
+    _result, api_client_mock = await _call(_big_log(), since_time="2026-08-01T00:00:00Z")
+    response = api_client_mock.last_response
+    assert response.body_bytes > 2 * MAX_BODY_BYTES
+    assert response.bytes_read <= MAX_BODY_BYTES + 2 * WINDOW_CHUNK_BYTES
+    response.release.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_a_line_that_does_not_fit_opens_the_next_page() -> None:
+    """A big line that does not fit behind the earlier lines is not lost.
+
+    The next page starts again with the line at ``last_line_time``.
+    That repeated line does not count toward the cap, so the big line
+    fits on the next page and paging moves forward.
+    """
+    half = "h" * (MAX_BODY_BYTES // 2)
+    entries = [(_stamp(1), half), (_stamp(2), half), (_stamp(3), "tail")]
+    first, _ = await _call(entries, since_time="2026-08-01T00:00:00Z")
+    assert _texts(first["lines"]) == [half]
+    assert first["truncated"] is True
+    assert first["last_line_time"] == _stamp(1)
+
+    second, _ = await _call(entries, since_time=_stamp(1))
+    assert _texts(second["lines"]) == [half, half, "tail"]
+    assert second["truncated"] is False
+
+    collected = await _page_through(entries, "2026-08-01T00:00:00Z")
+    assert collected == [f"{ts} {text}" for ts, text in entries]
 
 
 @pytest.mark.asyncio
@@ -387,8 +457,10 @@ async def test_without_window_params_the_newest_lines_path_is_unchanged() -> Non
 # Wire shape through the real kubernetes_asyncio ApiClient
 # ---------------------------------------------------------------------------
 
+_FROM_START = LogWindow(since=(1785542400, 5), until=None)
 
-async def _read_through_real_api_client(response: MagicMock) -> tuple[bytes, AsyncMock]:
+
+async def _read_through_real_api_client(response: MagicMock) -> tuple[Any, AsyncMock]:
     """Run :func:`read_pod_log_window` through a real ``ApiClient``.
 
     Only the HTTP layer (``ApiClient.request``) is replaced, so the SDK's
@@ -399,30 +471,30 @@ async def _read_through_real_api_client(response: MagicMock) -> tuple[bytes, Asy
     try:
         with patch.object(api_client, "request", AsyncMock(return_value=response)) as request:
             query = window_query(
-                LogWindow(since=(1785542400, 5), until=None),
-                container="argocd-server",
-                previous=False,
-                tail_lines=None,
-                limit_bytes=WINDOW_LIMIT_BYTES,
+                _FROM_START, container="argocd-server", previous=False, tail_lines=None
             )
-            body = await read_pod_log_window(
+            page = await read_pod_log_window(
                 api_client,
                 name="argocd-server-7c4b8d-x7r2k",
                 namespace="argocd",
                 query=query,
+                window=_FROM_START,
+                cap_bytes=MAX_BODY_BYTES,
             )
     finally:
         await api_client.close()
-    return body, request
+    return page, request
 
 
 @pytest.mark.asyncio
 async def test_window_request_on_the_wire() -> None:
-    """The real ``ApiClient`` builds the URL and query and returns the raw body."""
+    """The real ``ApiClient`` builds the URL and query and streams the body."""
     response = _raw_response(f"{_stamp(1)} hello\n".encode())
-    body, request = await _read_through_real_api_client(response)
+    page, request = await _read_through_real_api_client(response)
 
-    assert body == f"{_stamp(1)} hello\n".encode()
+    assert page.lines == [f"{_stamp(1)} hello"]
+    assert page.stamps == [_stamp(1)]
+    assert page.truncated is False
     response.release.assert_called_once()
     args = request.call_args
     assert args.args == (
@@ -435,33 +507,7 @@ async def test_window_request_on_the_wire() -> None:
         ("previous", False),
         ("sinceTime", "2026-08-01T00:00:00Z"),
         ("timestamps", True),
-        ("limitBytes", WINDOW_LIMIT_BYTES),
     ]
-
-
-@pytest.mark.asyncio
-async def test_body_cut_inside_a_multi_byte_character_is_read() -> None:
-    """``limitBytes`` can cut a UTF-8 character in half; the read still works.
-
-    The SDK's own decode is strict UTF-8 and fails on such a body, so the
-    window read must take the raw bytes and decode them itself.
-    """
-    line = f"{_stamp(1)} grüße ".encode() + "ü".encode() * 600 + b"\n"
-    raw = (line * (WINDOW_LIMIT_BYTES // len(line) + 2))[:WINDOW_LIMIT_BYTES]
-    # The cut lands inside a two-byte character.
-    assert raw.endswith("ü".encode()[:1])
-    with pytest.raises(UnicodeDecodeError):
-        raw.decode("utf-8")
-
-    body, _ = await _read_through_real_api_client(_raw_response(raw))
-    text, stopped_early = decode_window_body(body, WINDOW_LIMIT_BYTES)
-
-    assert stopped_early is True
-    lines = text.split("\n")
-    last = lines.pop()
-    assert last == ""
-    assert lines
-    assert all(kept == line[:-1].decode() for kept in lines)
 
 
 @pytest.mark.asyncio
@@ -475,12 +521,89 @@ async def test_window_read_raises_api_exception_on_an_error_status() -> None:
     response.release.assert_called_once()
 
 
+# ---------------------------------------------------------------------------
+# Chunk boundaries and oversized lines
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
-async def test_page_cut_inside_a_multi_byte_character_keeps_whole_lines() -> None:
-    """Through ``k8s_logs``: a cut character never fails the call or shows up."""
+async def test_lines_and_characters_split_across_chunks_are_whole() -> None:
+    """Through ``k8s_logs``: odd chunk sizes never cut a line or a character."""
     entries = [(_stamp(index // 10, index % 10), "ü" * 1000) for index in range(1000)]
-    result, _ = await _call(entries, since_time="2026-08-01T00:00:00Z")
+    result, _ = await _call(entries, chunk_bytes=777, since_time="2026-08-01T00:00:00Z")
     assert result["truncated"] is True
     assert result["lines"]
     assert all(line.endswith("ü" * 1000) for line in result["lines"])
     assert not any("\ufffd" in line for line in result["lines"])
+    assert result["lines"] == [f"{ts} {text}" for ts, text in entries[: len(result["lines"])]]
+
+
+@pytest.mark.asyncio
+async def test_last_line_without_a_newline_is_kept() -> None:
+    async def _chunks() -> AsyncIterator[bytes]:
+        yield f"{_stamp(1)} first\n{_stamp(2)} sec".encode()
+        yield b"ond"
+
+    page = await collect_window(_chunks(), _FROM_START, cap_bytes=MAX_BODY_BYTES)
+    assert page.lines == [f"{_stamp(1)} first", f"{_stamp(2)} second"]
+    assert page.truncated is False
+
+
+@pytest.mark.asyncio
+async def test_oversized_line_inside_the_window_is_a_plain_error() -> None:
+    """A line over the cap can never be returned, so the call says so and stops."""
+    entries = [
+        (_stamp(1), "before"),
+        (_stamp(2), "o" * (MAX_BODY_BYTES + 10)),
+        (_stamp(3), "after"),
+    ]
+    with pytest.raises(LogLineTooLargeError) as caught:
+        await _call(entries, since_time="2026-08-01T00:00:00Z")
+    assert caught.value.line_time == _stamp(2)
+    assert _stamp(2) in str(caught.value)
+    assert "larger than 1 MiB" in str(caught.value)
+    assert "since_time" in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_oversized_line_error_stops_the_read_early() -> None:
+    entries = [(_stamp(2), "o" * (4 * MAX_BODY_BYTES)), (_stamp(3), "after")]
+    config_patch, core_v1_patch, _core_v1, api_client_mock = _patch_cluster(entries)
+    with config_patch, core_v1_patch, pytest.raises(LogLineTooLargeError):
+        await k8s_logs(
+            _make_connector(),
+            _TARGET,
+            _make_operator(),
+            {**_POD, "since_time": "2026-08-01T00:00:00Z"},
+        )
+    response = api_client_mock.last_response
+    assert response.bytes_read <= MAX_BODY_BYTES + 2 * WINDOW_CHUNK_BYTES
+    response.release.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_oversized_line_before_the_window_is_skipped_without_being_stored() -> None:
+    """The caller continues behind an oversized line with a later ``since_time``."""
+    entries = [
+        (_stamp(2, 100), "o" * (3 * MAX_BODY_BYTES)),
+        (_stamp(2, 200), "after"),
+        (_stamp(3), "later"),
+    ]
+    result, _ = await _call(entries, since_time=_stamp(2, 101))
+    assert _texts(result["lines"]) == ["after", "later"]
+    assert result["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_oversized_line_behind_the_window_ends_the_read() -> None:
+    entries = [
+        (_stamp(1), "inside"),
+        (_stamp(5), "o" * (3 * MAX_BODY_BYTES)),
+    ]
+    result, api_client_mock = await _call(
+        entries, since_time="2026-08-01T00:00:00Z", until_time=_stamp(2)
+    )
+    assert _texts(result["lines"]) == ["inside"]
+    assert result["truncated"] is False
+    response = api_client_mock.last_response
+    assert response.bytes_read < response.body_bytes

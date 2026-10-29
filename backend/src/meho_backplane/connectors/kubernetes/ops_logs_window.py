@@ -17,30 +17,34 @@ depend on the op's schemas or caps:
   ``sinceTime``. ``kubernetes_asyncio`` 36 does not accept
   ``since_time`` on ``read_namespaced_pod_log`` (the generated method
   has no such parameter), so the request goes through
-  :meth:`ApiClient.call_api` on the same path. It reads the raw bytes,
-  because the SDK's strict UTF-8 decode fails when ``limitBytes`` cuts a
-  multi-byte character.
-* :func:`decode_window_body` -- drops a cut last line and decodes.
-* :func:`select_window` -- keeps the lines inside the window.
+  :meth:`ApiClient.call_api` on the same path. The body is read as a
+  stream, chunk by chunk, and the read stops as soon as the page is
+  full or the window has ended.
+* :func:`collect_window` -- turns that stream into one page: skips the
+  lines before the start, keeps the lines inside the window until the
+  byte cap is reached, and never holds more than the page plus one
+  line in memory.
 
 Kubernetes behaviour this relies on (``k8s.io/cri-client`` log reader
 and the API server's pod log location):
 
 * ``sinceTime`` is inclusive (a line at exactly that time is kept).
 * The API server passes ``sinceTime`` to the node in whole seconds, so
-  :func:`select_window` drops the extra lines from the start of that
-  second itself.
+  :func:`collect_window` drops the extra lines from the start of that
+  second itself. Those lines are read and thrown away as they arrive,
+  so a page can move past them however many there are.
 * ``timestamps=true`` puts the time in front of each line in fixed
   nanosecond RFC 3339 form, followed by one space.
-* ``limitBytes`` stops after that many bytes, even inside a line, and
-  the timestamp prefix counts toward it.
+* The log is sent as a stream, so closing the connection early ends
+  the read on the server side as well.
 """
 
 from __future__ import annotations
 
 import calendar
 import re
-from dataclasses import dataclass
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -49,12 +53,14 @@ from kubernetes_asyncio.client.exceptions import ApiException
 
 __all__ = [
     "RFC3339_PATTERN",
+    "WINDOW_CHUNK_BYTES",
+    "LogLineTooLargeError",
     "LogWindow",
     "LogWindowError",
-    "decode_window_body",
+    "WindowPage",
+    "collect_window",
     "parse_rfc3339",
     "read_pod_log_window",
-    "select_window",
     "window_from_params",
     "window_query",
 ]
@@ -66,6 +72,11 @@ RFC3339_PATTERN = (
     r"^(\d{4}-\d{2}-\d{2})[Tt](\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?([Zz]|[+-]\d{2}:\d{2})$"
 )
 _RFC3339_RE = re.compile(RFC3339_PATTERN)
+
+#: How many bytes of the log body are read from the connection at a
+#: time. Small enough to stop soon after a page is full, large enough
+#: to keep the number of reads low.
+WINDOW_CHUNK_BYTES = 64 * 1024
 
 #: Exact time key: ``(epoch_seconds, nanoseconds)``.
 TimeKey = tuple[int, int]
@@ -80,12 +91,44 @@ class LogWindowError(ValueError):
     """
 
 
+class LogLineTooLargeError(ValueError):
+    """One log line inside the window is larger than one answer may hold.
+
+    The byte cap works on whole lines, so such a line can never be
+    returned, on this page or on a later one. The message names the
+    line's time so the caller can continue after it.
+    """
+
+    def __init__(self, line_time: str, cap_bytes: int) -> None:
+        self.line_time = line_time
+        super().__init__(
+            f"the log line at {line_time} is larger than {cap_bytes // (1024 * 1024)} MiB, "
+            "the most one answer may hold, so it cannot be returned; set since_time "
+            f"to a time after {line_time} to continue behind it, or until_time to a "
+            "time before it"
+        )
+
+
 @dataclass(frozen=True)
 class LogWindow:
     """A checked time window: inclusive start, optional inclusive end."""
 
     since: TimeKey
     until: TimeKey | None
+
+
+@dataclass
+class WindowPage:
+    """The lines of one window read.
+
+    ``stamps`` holds the raw timestamp of each kept line, in step with
+    ``lines``. ``truncated`` is true when a line inside the window did
+    not fit in the byte cap, so the window goes on after this page.
+    """
+
+    lines: list[str] = field(default_factory=list)
+    stamps: list[str] = field(default_factory=list)
+    truncated: bool = False
 
 
 def parse_rfc3339(value: str) -> TimeKey:
@@ -143,15 +186,18 @@ async def read_pod_log_window(
     name: str,
     namespace: str,
     query: dict[str, Any],
-) -> bytes:
+    window: LogWindow,
+    cap_bytes: int,
+) -> WindowPage:
     """``GET /api/v1/namespaces/{ns}/pods/{name}/log`` with extra query params.
 
     Builds the same request the generated ``read_namespaced_pod_log``
     does, but with the query params given here, so ``sinceTime`` can be
-    sent. Returns the raw body bytes. The body is not decoded here:
-    ``limitBytes`` can cut a multi-byte UTF-8 character in half, and the
-    SDK's own decode is strict, so it would fail on such a body. Use
-    :func:`decode_window_body` to decode it.
+    sent. The body is not loaded at once: it is read in chunks of
+    :data:`WINDOW_CHUNK_BYTES` and handed to :func:`collect_window`,
+    which stops reading once the page is full. ``aiohttp`` closes a
+    connection whose body was not read to the end instead of reusing
+    it, so an early stop is safe.
     """
     response = await api_client.call_api(
         "/api/v1/namespaces/{namespace}/pods/{name}/log",
@@ -165,34 +211,21 @@ async def read_pod_log_window(
         _preload_content=False,
     )
     try:
-        raw: bytes = await response.read()
+        if not 200 <= response.status <= 299:
+            # With ``_preload_content=False`` the SDK does not check the
+            # status, so raise the same error it raises for the other
+            # calls. The SDK turns the body into text there as well; its
+            # type hints say bytes.
+            raw: bytes = await response.read()
+            error = ApiException(status=response.status, reason=response.reason)
+            error.headers = response.headers
+            error.body = raw.decode("utf-8", errors="replace")  # type: ignore[assignment]
+            raise error
+        return await collect_window(
+            response.content.iter_chunked(WINDOW_CHUNK_BYTES), window, cap_bytes=cap_bytes
+        )
     finally:
         response.release()
-    if not 200 <= response.status <= 299:
-        # With ``_preload_content=False`` the SDK does not check the
-        # status, so raise the same error it raises for the other calls.
-        # The SDK turns the body into text there as well; its type
-        # hints say bytes.
-        error = ApiException(status=response.status, reason=response.reason)
-        error.headers = response.headers
-        error.body = raw.decode("utf-8", errors="replace")  # type: ignore[assignment]
-        raise error
-    return raw
-
-
-def decode_window_body(raw: bytes, limit_bytes: int) -> tuple[str, bool]:
-    """Decode a window body; also say whether Kubernetes stopped early.
-
-    When the body reached ``limit_bytes``, Kubernetes stopped early and
-    may have cut the last line, even inside a multi-byte character. That
-    last part line is dropped before decoding, so only whole lines are
-    kept. Bytes that are still not valid UTF-8 become U+FFFD instead of
-    failing the read.
-    """
-    stopped_early = len(raw) >= limit_bytes
-    if stopped_early:
-        raw = raw[: raw.rfind(b"\n") + 1]
-    return raw.decode("utf-8", errors="replace"), stopped_early
 
 
 def window_query(
@@ -201,7 +234,6 @@ def window_query(
     container: str,
     previous: bool,
     tail_lines: int | None,
-    limit_bytes: int,
 ) -> dict[str, Any]:
     """Query params for a window read: ``sinceTime`` in whole seconds, UTC."""
     query: dict[str, Any] = {
@@ -209,7 +241,6 @@ def window_query(
         "previous": previous,
         "sinceTime": datetime.fromtimestamp(window.since[0], tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "timestamps": True,
-        "limitBytes": limit_bytes,
     }
     if tail_lines is not None:
         query["tailLines"] = tail_lines
@@ -225,28 +256,127 @@ def _line_time(line: str) -> tuple[str, TimeKey] | None:
         return None
 
 
-def select_window(lines: list[str], window: LogWindow) -> tuple[list[str], list[str], bool]:
-    """Keep the lines whose time is inside ``window``.
+async def collect_window(
+    chunks: AsyncIterator[bytes], window: LogWindow, *, cap_bytes: int
+) -> WindowPage:
+    """Build one page from a streamed log body.
 
-    Returns the kept lines, the raw timestamp of each kept line (in
-    step with them), and whether a line after ``window.until`` was
-    seen. A line without a timestamp (should not happen with
-    ``timestamps=true``) takes the time of the line before it. Lines
-    are in time order, so the scan stops at the first line after the
-    end.
+    Lines arrive in time order. Lines before ``window.since`` are
+    thrown away as they arrive; a line after ``window.until`` ends the
+    read. Lines inside the window are kept, oldest first, until the
+    next one would push the page past ``cap_bytes`` (counted as the
+    lines joined by newlines, the same way the newest-lines read
+    counts). Then the read stops and the page is marked ``truncated``.
+
+    Lines at exactly ``window.since`` do not count toward the cap. A
+    caller pages with ``since_time`` set to the last kept time, so
+    those lines are the ones the page before already had. Keeping them
+    free means every page carries at least one new line, so paging
+    always moves forward, also when the next line is close to the cap.
+
+    Memory stays bounded: at most the kept page plus the line being
+    read. A line that is still unfinished at ``cap_bytes`` is decided
+    by its timestamp alone: before the window it is skipped without
+    being stored, after the window it ends the read, and inside the
+    window it raises :class:`LogLineTooLargeError`, because such a line
+    could never be returned.
+
+    A line without a timestamp (should not happen with
+    ``timestamps=true``) takes the time of the line before it.
     """
-    kept: list[str] = []
-    kept_stamps: list[str] = []
-    stamp = ""
-    key: TimeKey | None = None
-    for line in lines:
+    scanner = _WindowScanner(window, cap_bytes)
+    async for chunk in chunks:
+        if not scanner.feed(chunk):
+            break
+    scanner.finish()
+    return scanner.page
+
+
+class _WindowScanner:
+    """Line-by-line state for :func:`collect_window`."""
+
+    def __init__(self, window: LogWindow, cap_bytes: int) -> None:
+        self._window = window
+        self._cap_bytes = cap_bytes
+        self._pending = bytearray()
+        self._skipping = False
+        self._done = False
+        self._stamp = ""
+        self._key: TimeKey | None = None
+        self._kept_bytes = 0
+        self.page = WindowPage()
+
+    def feed(self, chunk: bytes) -> bool:
+        """Take the next bytes; return ``False`` once the page is complete."""
+        start = 0
+        while start < len(chunk) and not self._done:
+            newline = chunk.find(b"\n", start)
+            if self._skipping:
+                if newline < 0:
+                    return True
+                self._skipping = False
+                start = newline + 1
+                continue
+            if newline < 0:
+                self._pending += chunk[start:]
+                if len(self._pending) > self._cap_bytes:
+                    self._settle_unfinished_line()
+                return not self._done
+            self._pending += chunk[start:newline]
+            start = newline + 1
+            self._take_line(bytes(self._pending))
+            self._pending.clear()
+        return not self._done
+
+    def finish(self) -> None:
+        """Handle a last line that had no newline behind it."""
+        if self._pending and not self._skipping and not self._done:
+            self._take_line(bytes(self._pending))
+        self._pending.clear()
+
+    def _place(self, line: str) -> int:
+        """-1 before the window, 0 inside it, 1 behind it."""
         parsed = _line_time(line)
         if parsed is not None:
-            stamp, key = parsed
-        if key is None or key < window.since:
-            continue
-        if window.until is not None and key > window.until:
-            return kept, kept_stamps, True
-        kept.append(line)
-        kept_stamps.append(stamp)
-    return kept, kept_stamps, False
+            self._stamp, self._key = parsed
+        if self._key is None or self._key < self._window.since:
+            return -1
+        if self._window.until is not None and self._key > self._window.until:
+            return 1
+        return 0
+
+    def _take_line(self, raw: bytes) -> None:
+        line = raw.decode("utf-8", errors="replace")
+        place = self._place(line)
+        if place < 0:
+            return
+        if place > 0:
+            self._done = True
+            return
+        if len(raw) > self._cap_bytes:
+            raise LogLineTooLargeError(self._stamp, self._cap_bytes)
+        size = 0 if self._key == self._window.since else len(raw) + (1 if self.page.lines else 0)
+        if self._kept_bytes + size > self._cap_bytes:
+            self.page.truncated = True
+            self._done = True
+            return
+        self.page.lines.append(line)
+        self.page.stamps.append(self._stamp)
+        self._kept_bytes += size
+
+    def _settle_unfinished_line(self) -> None:
+        """Decide a line that is already too long to be returned.
+
+        Only its timestamp is needed for that, so the bytes stored so
+        far are dropped and the rest of the line is skipped as it
+        arrives.
+        """
+        head = bytes(self._pending[:64]).decode("utf-8", errors="replace")
+        place = self._place(head)
+        self._pending.clear()
+        if place < 0:
+            self._skipping = True
+            return
+        self._done = True
+        if place == 0:
+            raise LogLineTooLargeError(self._stamp, self._cap_bytes)

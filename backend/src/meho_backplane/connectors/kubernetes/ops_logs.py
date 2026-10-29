@@ -41,7 +41,8 @@ the *oldest* lines that fit in the cap, and reports ``last_line_time``
 so the next call can start there. ``kubernetes_asyncio`` 36 does not
 expose the API's ``sinceTime`` query parameter on
 ``read_namespaced_pod_log``, so this mode calls the same ``/log`` path
-through :meth:`ApiClient.call_api` (see :mod:`.ops_logs_window`).
+through :meth:`ApiClient.call_api` and reads the body as a stream,
+stopping once the page is full (see :mod:`.ops_logs_window`).
 
 References
 ----------
@@ -61,12 +62,11 @@ from kubernetes_asyncio import client
 
 from meho_backplane.connectors.kubernetes.ops_logs_window import (
     RFC3339_PATTERN,
-    LogWindow,
+    LogLineTooLargeError,
     LogWindowError,
-    decode_window_body,
+    WindowPage,
     parse_rfc3339,
     read_pod_log_window,
-    select_window,
     window_from_params,
     window_query,
 )
@@ -82,6 +82,7 @@ __all__ = [
     "K8S_LOGS_RESPONSE_SCHEMA",
     "MAX_BODY_BYTES",
     "MAX_TAIL_LINES",
+    "LogLineTooLargeError",
     "LogWindowError",
     "MultiContainerAmbiguityError",
     "PodNotFoundError",
@@ -109,15 +110,6 @@ MAX_TAIL_LINES = 5000
 #: terminal scrollback and the MCP envelope's practical payload
 #: ceiling (no hard limit, but >1 MB choices stall clients).
 MAX_BODY_BYTES = 1024 * 1024
-
-#: Server-side ``limitBytes`` for a time-window read. Without ``tail``,
-#: a window read goes forward from ``since_time`` to the end of the log,
-#: which can be many MiB on a long-running pod. Kubernetes stops after
-#: this many bytes (it may cut the last line in half), so the handler
-#: never holds more than this in memory. The headroom above
-#: ``MAX_BODY_BYTES`` covers the lines Kubernetes sends from the start
-#: of the ``since_time`` second, which the handler drops itself.
-WINDOW_LIMIT_BYTES = MAX_BODY_BYTES + 64 * 1024
 
 
 #: JSON Schema 2020-12 for ``k8s.logs`` ``params``. The dispatcher
@@ -283,9 +275,9 @@ K8S_LOGS_LLM_INSTRUCTIONS: dict[str, Any] = {
             "'end' and 'last_line_time' is the time of the last line "
             "kept: call again with since_time set to that value to get "
             "the next lines. The next call starts again with the "
-            "line(s) at that exact time, so nothing is skipped. Stop "
-            "when 'last_line_time' is the same as in the call before "
-            "(see 'limits')."
+            "line(s) at that exact time, so nothing is skipped; those "
+            "lines do not count toward the cap, so every call moves "
+            "forward. Repeat until 'truncated' is false."
         ),
         "until_time": (
             "RFC 3339 end time; needs 'since_time'. Lines after it are "
@@ -300,13 +292,12 @@ K8S_LOGS_LLM_INSTRUCTIONS: dict[str, Any] = {
         "until_time). Kubernetes keeps only part of a log: the node "
         "rotates old log files away, and MEHO cannot read what "
         "Kubernetes no longer serves. Kubernetes takes since_time in "
-        "whole seconds only, so a page always starts at the start of "
-        "a second. If more than about "
-        f"{WINDOW_LIMIT_BYTES / (1024 * 1024):.2f} MiB is written "
-        "within one second, paging stops moving forward: "
-        "'last_line_time' stays the same and the next call returns "
-        "the same lines. Stop paging when 'last_line_time' does not "
-        "change; the rest of that second cannot be read this way."
+        "whole seconds only; MEHO drops the lines before since_time "
+        "itself, so paging goes on with no gap, also when a lot is "
+        "written within one second. One log line larger than "
+        f"{MAX_BODY_BYTES // (1024 * 1024)} MiB cannot be returned: "
+        "the call fails with a plain error that names the line's "
+        "time. Set since_time to a later time to continue behind it."
     ),
     "output_shape": (
         "Flat dict: {'pod': <resolved-name>, 'namespace', 'container', "
@@ -467,14 +458,8 @@ async def resolve_pod_and_container(
     raise MultiContainerAmbiguityError(pod.metadata.name, container_names)
 
 
-def truncate_lines_to_byte_cap(
-    lines: list[str], cap_bytes: int, *, keep_oldest: bool = False
-) -> tuple[list[str], int]:
+def truncate_lines_to_byte_cap(lines: list[str], cap_bytes: int) -> tuple[list[str], int]:
     """Keep the most-recent lines that fit in ``cap_bytes`` UTF-8 bytes.
-
-    With ``keep_oldest=True`` the cut runs the other way: the oldest
-    lines are kept and the newest are dropped (time-window reads go
-    forward from ``since_time``).
 
     Returns ``(kept_lines, dropped_byte_count)``. The cap accounts for
     the joining newline between lines (one byte per join, no trailing
@@ -485,9 +470,6 @@ def truncate_lines_to_byte_cap(
     """
     if not lines:
         return [], 0
-    if keep_oldest:
-        kept_newest_first, dropped = truncate_lines_to_byte_cap(lines[::-1], cap_bytes)
-        return kept_newest_first[::-1], dropped
 
     kept_reversed: list[str] = []
     running_bytes = 0
@@ -538,6 +520,8 @@ async def k8s_logs(
       missing ``--container``.
     * :class:`LogWindowError` -- unusable ``since_time`` /
       ``until_time`` (bad time, or combined with ``since``).
+    * :class:`LogLineTooLargeError` -- one line inside the window is
+      larger than :data:`MAX_BODY_BYTES`, so it can never be returned.
     * :class:`kubernetes_asyncio.client.ApiException` -- API errors
       (RBAC, missing namespace, container not running yet for
       ``previous=true``).
@@ -571,12 +555,16 @@ async def k8s_logs(
             container=container_name,
             previous=previous,
             tail_lines=tail if "tail" in params else None,
-            limit_bytes=WINDOW_LIMIT_BYTES,
         )
-        raw = await read_pod_log_window(
-            api_client, name=exact_name, namespace=namespace, query=query
+        page = await read_pod_log_window(
+            api_client,
+            name=exact_name,
+            namespace=namespace,
+            query=query,
+            window=window,
+            cap_bytes=MAX_BODY_BYTES,
         )
-        return _window_result(exact_name, namespace, container_name, raw, window)
+        return _window_result(exact_name, namespace, container_name, page)
 
     # ``kubernetes_asyncio`` accepts every parameter as a kwarg; pass
     # only the ones with non-default values so the wire request stays
@@ -630,38 +618,24 @@ def _newest_result(pod: str, namespace: str, container: str, body: str) -> dict[
     return result
 
 
-def _window_result(
-    pod: str,
-    namespace: str,
-    container: str,
-    raw: bytes,
-    window: LogWindow,
-) -> dict[str, Any]:
+def _window_result(pod: str, namespace: str, container: str, page: WindowPage) -> dict[str, Any]:
     """Build the ``k8s.logs`` answer for a ``since_time`` read.
 
-    Keeps the oldest lines that fit in :data:`MAX_BODY_BYTES`. When the
-    body reached :data:`WINDOW_LIMIT_BYTES`, Kubernetes stopped early:
-    the cut last line is dropped (see :func:`decode_window_body`) and
-    the window counts as cut at the end.
+    The page holds the oldest lines of the window that fit in
+    :data:`MAX_BODY_BYTES`. When a line did not fit, the window goes on
+    after this page: the answer says where it was cut and the time of
+    the last line kept, so the next call can start there.
     """
-    body, stopped_early = decode_window_body(raw, WINDOW_LIMIT_BYTES)
-    lines = body.split("\n")
-    if lines and lines[-1] == "":
-        lines.pop()
-    selected, stamps, reached_until = select_window(lines, window)
-    kept, _ = truncate_lines_to_byte_cap(selected, MAX_BODY_BYTES, keep_oldest=True)
-    cut = len(kept) < len(selected) or (stopped_early and not reached_until)
-
     result: dict[str, Any] = {
         "pod": pod,
         "namespace": namespace,
         "container": container,
-        "lines": kept,
-        "truncated": cut,
+        "lines": page.lines,
+        "truncated": page.truncated,
     }
-    if cut:
+    if page.truncated:
         result["truncated_end"] = "end"
-        result["line_count"] = len(kept)
-        if kept:
-            result["last_line_time"] = stamps[len(kept) - 1]
+        result["line_count"] = len(page.lines)
+        if page.stamps:
+            result["last_line_time"] = page.stamps[-1]
     return result

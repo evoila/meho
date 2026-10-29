@@ -153,6 +153,19 @@ from meho_backplane.connectors.vmware_rest.composites._license import (
     LICENSE_ASSIGN_RESPONSE_SCHEMA,
     license_assign_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._migration_inventory import (
+    migration_inventory_composite,
+    register_migration_inventory_dispatch_surface,
+)
+from meho_backplane.connectors.vmware_rest.composites._migration_inventory_schemas import (
+    MIGRATION_GROUP_WHEN_TO_USE,
+    MIGRATION_INVENTORY_DESCRIPTION,
+    MIGRATION_INVENTORY_LLM_INSTRUCTIONS,
+    MIGRATION_INVENTORY_OP_ID,
+    MIGRATION_INVENTORY_PARAMETER_SCHEMA,
+    MIGRATION_INVENTORY_RESPONSE_SCHEMA,
+    MIGRATION_INVENTORY_SUMMARY,
+)
 from meho_backplane.connectors.vmware_rest.composites._namespace import (
     namespace_create_composite,
     namespace_delete_composite,
@@ -209,6 +222,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     guest_customization_spec_create_composite,
     host_detach_from_vds_composite,
     host_evacuate_composite,
+    host_maintenance_exit_composite,
     network_portgroup_create_composite,
     network_portgroup_security_set_composite,
     network_portgroup_vlan_set_composite,
@@ -290,6 +304,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     HOST_DISK_MARK_FLASH_RESPONSE_SCHEMA,
     HOST_EVACUATE_PARAMETER_SCHEMA,
     HOST_EVACUATE_RESPONSE_SCHEMA,
+    HOST_MAINTENANCE_EXIT_PARAMETER_SCHEMA,
+    HOST_MAINTENANCE_EXIT_RESPONSE_SCHEMA,
     HOST_SERVICE_CONTROL_PARAMETER_SCHEMA,
     HOST_SERVICE_CONTROL_RESPONSE_SCHEMA,
     HOST_STANDARD_PORTGROUP_DELETE_PARAMETER_SCHEMA,
@@ -478,7 +494,7 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "right group for 'where is this VM stored?', 'which datastores are "
         "running low?', 'how many VMs live on this datastore?', or 'the "
         "export grew but the datastore still shows the old free space'. "
-        "Also file writes on a datastore (#3339): delete a file or folder "
+        "Also file writes on a datastore: delete a file or folder "
         "(datastore.file.delete -- destructive, always needs approval; refused "
         "for files of registered VMs and for system or content-library folders; "
         "use it for VM folders left behind after vm.destroy) and create a folder "
@@ -497,7 +513,7 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "'what's connected to this portgroup?' / 'which DVS does "
         "this VM live on?' and 'create the trunk portgroup my nested "
         "ESXi attaches to'. The audit read surfaces the DVS / "
-        "portgroup moids the two writes take. Teardown (#3339; destructive, always "
+        "portgroup moids the two writes take. Teardown (destructive, always "
         "needs approval, refused while anything still uses the port group): delete "
         "a distributed portgroup (network.portgroup.delete) or a port group on one "
         "host's standard switch (host.standard_portgroup.delete). Pair with 'vm' "
@@ -539,7 +555,7 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "vm.migrate) then enter maintenance, or detach a host from a "
         "DVS after migrating its VM NICs off; the host_evacuate "
         "composite is the first production composite that calls "
-        "another composite. Plus the host-domain writes (#3182), each "
+        "another composite. Plus the host-domain writes, each "
         "vCenter-mediated through the governed VI-JSON seam: mount an "
         "NFS export as a datastore on a host "
         "(datastore_mount_nfs), mark host disks as flash/HDD for "
@@ -622,7 +638,7 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "the Tanzu Kubernetes release (TKr / VKr) image source a vSphere "
         "Supervisor needs: pre-create a SUBSCRIBED library pointed at the "
         "upstream VMware repo (subscribed.create, approval-gated, returns the "
-        "library id #3281's Supervisor enable spec consumes as "
+        "library id the Supervisor enable spec consumes as "
         "default_kubernetes_service_content_library), trigger a sync "
         "(subscribed.sync, approval-gated, asynchronous), and read readiness "
         "back -- subscribed.status (last_sync_time) and subscribed.items.list "
@@ -631,8 +647,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "library', or 'which TKr images are available?'. Distinct from the "
         "content-library *item* deploy/import (the 'vm' group's "
         "deploy_from_library / import_from_library) -- this group is the "
-        "library-container lifecycle, not the VM deploy. Teardown (#3339 / "
-        "#3331; destructive, always needs approval): delete a whole local or "
+        "library-container lifecycle, not the VM deploy. Teardown "
+        "(destructive, always needs approval): delete a whole local or "
         "subscribed library (content_library.delete -- refused while another "
         "library subscribes to it; a library with items needs "
         "delete_items=true) or one item of a local library "
@@ -643,6 +659,7 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # #4383: shared with the typed read vmware.alarm.triggered.list, which
     # registers under the same group key with the same text.
     ALARMS_GROUP_KEY: ALARMS_WHEN_TO_USE,
+    "migration": MIGRATION_GROUP_WHEN_TO_USE,
 }
 
 
@@ -686,6 +703,19 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     # ----------------------------------------------------------------
     # Read composites (T5 / #508) -- safe / no approval
     # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id=MIGRATION_INVENTORY_OP_ID,
+        handler=migration_inventory_composite,
+        summary=MIGRATION_INVENTORY_SUMMARY,
+        description=MIGRATION_INVENTORY_DESCRIPTION,
+        parameter_schema=MIGRATION_INVENTORY_PARAMETER_SCHEMA,
+        response_schema=MIGRATION_INVENTORY_RESPONSE_SCHEMA,
+        group_key="migration",
+        tags=["composite", "read-only", "migration", "inventory", "vi-json"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=MIGRATION_INVENTORY_LLM_INSTRUCTIONS,
+    ),
     _CompositeSpec(
         op_id="vmware.composite.cluster.drs_recommendations",
         handler=cluster_drs_recommendations_composite,
@@ -1057,6 +1087,24 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.evacuate"],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.host.maintenance.exit",
+        handler=host_maintenance_exit_composite,
+        summary="Take a host out of maintenance mode, after a second person approves.",
+        description=(
+            "Reads the host first: a host that is not connected is refused, and a host that "
+            "is not in maintenance mode answers unchanged with nothing sent. Then sends the "
+            "exit request and waits for its task. Returns the host's maintenance state, "
+            "connection state and vSphere HA state afterwards."
+        ),
+        parameter_schema=HOST_MAINTENANCE_EXIT_PARAMETER_SCHEMA,
+        response_schema=HOST_MAINTENANCE_EXIT_RESPONSE_SCHEMA,
+        group_key="host",
+        tags=["composite", "write", "host", "maintenance", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.maintenance.exit"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.host.detach_from_vds",
@@ -2117,6 +2165,7 @@ async def register_vmware_composite_operations(
     singleton.
     """
     await _register_specs(_COMPOSITES, version=_VERSION, embedding_service=embedding_service)
+    register_migration_inventory_dispatch_surface()
 
     # #3349: publish each write composite's governed child-op set into the
     # discovery registry the GET /api/v1/operations/governed-subops surface
@@ -2136,14 +2185,14 @@ async def register_vmware_composite_operations_8_0(
     handlers and policy as the 9.0 catalog, minus
     :data:`COMPOSITES_NOT_ON_8_0`.
 
-    The governed child ops of a composite keep their ``vmware-rest-9.0``
-    keys on both catalogs (``_CONNECTOR_ID`` in ``_write.py`` /
-    ``_guest.py``). One grant set covers a composite on either catalog, and
-    the approval resume of a parked child op re-runs the composite on the
-    9.0 catalog, where it is also registered.
+    The write steps of a composite are checked under the connector the
+    target resolves to (``_step_connector_id`` in ``_write.py``, #4991), so
+    on an 8.0.x target a step grant names ``vmware-rest-8.0`` and the
+    approval resume of a parked step re-runs the composite on this catalog.
     """
     specs = tuple(spec for spec in _COMPOSITES if spec.op_id not in COMPOSITES_NOT_ON_8_0)
     await _register_specs(specs, version=_VERSION_8_0, embedding_service=embedding_service)
+    register_migration_inventory_dispatch_surface()
 
 
 async def _register_specs(

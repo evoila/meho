@@ -37,20 +37,16 @@ spec:
       restartPolicy: Never
       serviceAccountName: {{ include "meho.core.hookName" . }}
       automountServiceAccountToken: true
-      {{- with .Values.imagePullSecrets }}
+      {{- with include "meho.core.imagePullSecrets" . }}
       imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
+        {{- . | nindent 8 }}
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: bootstrap
           # The backplane image, with the same digest pin as the Deployment.
-          {{- if .Values.image.digest }}
-          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
-          {{- else }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          {{- end }}
+          image: {{ include "meho.core.image" (dict "image" .Values.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["python", "-m", "meho_backplane.core.bootstrap", "keycloak"]
           terminationMessagePolicy: FallbackToLogsOnError
@@ -68,6 +64,8 @@ spec:
               value: {{ printf "https://%s" .Values.coreKeycloak.hostname | quote }}
             - name: MEHO_REALM_TENANT_ID
               value: {{ .Values.coreKeycloak.firstTenantId | quote }}
+            - name: MEHO_REALM_TENANT_NAME
+              value: {{ .Values.coreKeycloak.tenantName | quote }}
             - name: MEHO_REALM_ADMIN_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:

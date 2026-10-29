@@ -12,15 +12,20 @@ What is covered, with a respx-mocked appliance and no ingested catalog:
 * two targets on one address: an ``srm`` target and a target of another
   product resolve to two connector classes, and each uses its own login;
 * a ``401`` on one SRM target makes a new SRM login for that target only;
-  the session of a second SRM target on the same address and of the other
-  product's target stay as they were;
+  the session of a second SRM target on the same address with its own
+  credential and of the other product's target stay as they were;
+* two SRM targets that share one credential share one session: parallel
+  calls and a renewal on one target do not end the other target's
+  session; calls on both targets at once after expiry all work with one
+  renewal, even when ``401`` answers arrive late; different credentials
+  and different tenants keep their own;
 * ``srm.api_file.get`` for both files: status, size, SHA-256, version,
   parts; an unknown file name sends no HTTP request; a 404 and a redirect
   reach the answer; a failed version read still returns the file; a
   secret-named value, an ``Authorization`` example and a secret-named
   redirect query value come back replaced and counted; the replaced copy
   still parses and every value keeps its type; a ``401`` on the version
-  read ends only that target's session; a file that does not parse
+  read ends only that credential's session; a file that does not parse
   stops; a file too big stops;
 * no password or session id in a result; registration shape; fingerprint.
 
@@ -29,6 +34,7 @@ Fixture values are made up; no real host, user or id appears here.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import uuid
@@ -45,7 +51,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.dr_rest import parse_server_version
+from meho_backplane.connectors._shared.api_file_secrets import REDACTED
 from meho_backplane.connectors.hcx import (
     HCX_CONNECTOR_ID,
     HCX_IMPL_ID,
@@ -70,8 +76,10 @@ from meho_backplane.connectors.srm import (
     register_srm_typed_operations,
 )
 from meho_backplane.connectors.srm.api_file import API_FILES
+from meho_backplane.connectors.vmware_shared.dr_rest import parse_server_version
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import AuditLog, EndpointDescriptor
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
@@ -170,19 +178,33 @@ async def session() -> AsyncIterator[AsyncSession]:
         yield s
 
 
+_TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000000d0")
+_OTHER_SECRET = "targets/op-reads/srm-typed-second"
+
+
 class _Target:
     """Target satisfying the connector Protocols and the resolver shape."""
 
-    def __init__(self, *, product: str = SRM_PRODUCT, version: str = SRM_VERSION) -> None:
+    def __init__(
+        self,
+        *,
+        product: str = SRM_PRODUCT,
+        version: str = SRM_VERSION,
+        secret_ref: str = "targets/op-reads/srm-typed",
+        tenant_id: UUID = _TENANT_ID,
+        port: int | None = 443,
+        fqdn: str | None = None,
+    ) -> None:
         self.product = product
         self.fingerprint = type("_FP", (), {"version": version})()
         self.preferred_impl_id: str | None = None
         self.id: UUID = uuid.uuid4()
-        self.tenant_id: UUID = uuid.UUID("00000000-0000-0000-0000-0000000000d0")
+        self.tenant_id: UUID = tenant_id
         self.name = f"{product}-typed-{self.id.hex[:6]}"
         self.host = _HOST
-        self.port = 443
-        self.secret_ref = "targets/op-reads/srm-typed"
+        self.port = port
+        self.fqdn = fqdn
+        self.secret_ref = secret_ref
         self.auth_model = "shared_service_account"
 
 
@@ -383,7 +405,7 @@ async def test_401_on_one_srm_target_logs_in_again_and_leaves_other_sessions_alo
     await register_hcx_typed_operations()
     _hcx_instance()
     first = _Target()
-    second = _Target()
+    second = _Target(secret_ref=_OTHER_SECRET)
     other = _Target(product=HCX_PRODUCT, version=HCX_VERSION)
     rejected: set[str] = set()
 
@@ -414,6 +436,202 @@ async def test_401_on_one_srm_target_logs_in_again_and_leaves_other_sessions_alo
     assert hcx_login.call_count == 1
     sent = [call.request.headers["x-dr-session"] for call in info.calls]
     assert sent == ["srm-a-1", "srm-b-1", "srm-a-1", "srm-a-2", "srm-b-1"]
+
+
+class _OneSessionPerUser:
+    """Appliance that keeps one active session per user: a login ends the one before."""
+
+    def __init__(self) -> None:
+        self.logins = 0
+        self.active: dict[str, str] = {}
+        self.rejected = 0
+
+    def login(self, request: httpx.Request) -> httpx.Response:
+        self.logins += 1
+        user = request.headers["authorization"]
+        session_id = f"srm-session-{self.logins}"
+        self.active[user] = session_id
+        return _login(session_id)
+
+    def info(self, request: httpx.Request) -> httpx.Response:
+        if request.headers["x-dr-session"] in self.active.values():
+            return httpx.Response(200, json=_INFO_PAYLOAD)
+        self.rejected += 1
+        return httpx.Response(401)
+
+    def expire_all(self) -> None:
+        self.active.clear()
+
+
+@pytest.mark.asyncio
+async def test_two_targets_with_one_credential_share_one_session_and_one_renewal(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """Parallel calls and a renewal on one target do not end the other target's session."""
+    await _register_and_resolve(_stub_embedding)
+    first = _Target()
+    second = _Target()
+    appliance = _OneSessionPerUser()
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.post(_SESSION).mock(side_effect=appliance.login)
+        info = mock.get(_INFO).mock(side_effect=appliance.info)
+
+        warm = await asyncio.gather(
+            *(_dispatch("srm.about", {}, target) for target in (first, second) * 3)
+        )
+        appliance.expire_all()
+        renewed = await _dispatch("srm.about", {}, first)
+        after = await asyncio.gather(
+            *(_dispatch("srm.about", {}, target) for target in (second, first) * 3)
+        )
+
+    for outcome in (*warm, renewed, *after):
+        assert outcome.status == "ok", outcome.error
+    assert appliance.logins == 2
+    assert appliance.rejected == 1
+    sent = {call.request.headers["x-dr-session"] for call in info.calls}
+    assert sent == {"srm-session-1", "srm-session-2"}
+
+
+@pytest.mark.asyncio
+async def test_late_401s_after_a_renewal_do_not_end_the_new_shared_session(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """Calls on both targets at once after expiry: every call works, one renewal.
+
+    The appliance waits a little before it checks the session, so many calls
+    send the expired session, and their ``401`` answers arrive after the
+    first renewal. Such a late ``401`` must keep the new session.
+    """
+    await _register_and_resolve(_stub_embedding)
+    first = _Target()
+    second = _Target()
+    appliance = _OneSessionPerUser()
+
+    async def _slow_info(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.02)
+        return appliance.info(request)
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.post(_SESSION).mock(side_effect=appliance.login)
+        mock.get(_INFO).mock(side_effect=_slow_info)
+
+        warm = await asyncio.gather(
+            *(_dispatch("srm.about", {}, target) for target in (first, second))
+        )
+        appliance.expire_all()
+        after = await asyncio.gather(
+            *(_dispatch("srm.about", {}, target) for target in (first, second) * 10)
+        )
+
+    for outcome in (*warm, *after):
+        assert outcome.status == "ok", outcome.error
+    assert appliance.logins == 2
+    # More than one call got a 401, so late 401s did happen.
+    assert appliance.rejected > 1
+
+
+@pytest.mark.asyncio
+async def test_unset_port_and_explicit_default_port_share_one_session_and_one_renewal(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """A target with no port and one with port 443 reach the same login address."""
+    await _register_and_resolve(_stub_embedding)
+    unset = _Target(port=None)
+    explicit = _Target(port=443)
+    appliance = _OneSessionPerUser()
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.post(_SESSION).mock(side_effect=appliance.login)
+        info = mock.get(_INFO).mock(side_effect=appliance.info)
+
+        warm = await asyncio.gather(
+            *(_dispatch("srm.about", {}, target) for target in (unset, explicit) * 3)
+        )
+        appliance.expire_all()
+        renewed = await _dispatch("srm.about", {}, explicit)
+        after = await asyncio.gather(
+            *(_dispatch("srm.about", {}, target) for target in (unset, explicit) * 3)
+        )
+
+    for outcome in (*warm, renewed, *after):
+        assert outcome.status == "ok", outcome.error
+    assert appliance.logins == 2
+    assert appliance.rejected == 1
+    sent = {call.request.headers["x-dr-session"] for call in info.calls}
+    assert sent == {"srm-session-1", "srm-session-2"}
+
+
+@pytest.mark.asyncio
+async def test_different_fqdn_settings_share_one_session_and_one_renewal(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """The SRM login does not send the fqdn, so it must not split one credential in two."""
+    await _register_and_resolve(_stub_embedding)
+    unset = _Target(fqdn=None)
+    named = _Target(fqdn="srm-named.example.test")
+    appliance = _OneSessionPerUser()
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.post(_SESSION).mock(side_effect=appliance.login)
+        info = mock.get(_INFO).mock(side_effect=appliance.info)
+
+        warm = await asyncio.gather(
+            *(_dispatch("srm.about", {}, target) for target in (unset, named) * 3)
+        )
+        appliance.expire_all()
+        renewed = await _dispatch("srm.about", {}, named)
+        after = await asyncio.gather(
+            *(_dispatch("srm.about", {}, target) for target in (unset, named) * 3)
+        )
+
+    for outcome in (*warm, renewed, *after):
+        assert outcome.status == "ok", outcome.error
+    assert appliance.logins == 2
+    assert appliance.rejected == 1
+    sent = {call.request.headers["x-dr-session"] for call in info.calls}
+    assert sent == {"srm-session-1", "srm-session-2"}
+
+
+@pytest.mark.asyncio
+async def test_two_targets_with_different_credentials_keep_their_own_sessions(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await _register_and_resolve(_stub_embedding)
+    first = _Target()
+    second = _Target(secret_ref=_OTHER_SECRET)
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        login = mock.post(_SESSION)
+        login.side_effect = [_login("srm-a-1"), _login("srm-b-1")]
+        info = mock.get(_INFO).respond(200, json=_INFO_PAYLOAD)
+        for target in (first, second, first, second):
+            assert (await _dispatch("srm.about", {}, target)).status == "ok"
+
+    assert login.call_count == 2
+    sent = [call.request.headers["x-dr-session"] for call in info.calls]
+    assert sent == ["srm-a-1", "srm-b-1", "srm-a-1", "srm-b-1"]
+
+
+@pytest.mark.asyncio
+async def test_two_tenants_with_the_same_secret_reference_keep_their_own_sessions(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await _register_and_resolve(_stub_embedding)
+    in_tenant = _Target()
+    in_other_tenant = _Target(tenant_id=uuid.UUID("00000000-0000-0000-0000-0000000000d9"))
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        login = mock.post(_SESSION)
+        login.side_effect = [_login("srm-t1-1"), _login("srm-t2-1")]
+        info = mock.get(_INFO).respond(200, json=_INFO_PAYLOAD)
+        for target in (in_tenant, in_other_tenant, in_tenant, in_other_tenant):
+            assert (await _dispatch("srm.about", {}, target)).status == "ok"
+
+    assert login.call_count == 2
+    sent = [call.request.headers["x-dr-session"] for call in info.calls]
+    assert sent == ["srm-t1-1", "srm-t2-1", "srm-t1-1", "srm-t2-1"]
 
 
 # ---------------------------------------------------------------------------
@@ -629,19 +847,19 @@ async def test_replaced_copy_still_parses_and_every_value_keeps_its_type(
 
 
 @pytest.mark.asyncio
-async def test_401_on_the_version_read_ends_only_that_targets_session(
+async def test_401_on_the_version_read_ends_only_that_credentials_session(
     _stub_embedding: AsyncMock, session: AsyncSession
 ) -> None:
     """The file comes back, but ``server/info`` rejects the session.
 
     The version read never raises, so the dispatcher's own ``401`` retry
     does not run. The connector drops the rejected session itself: the
-    next read of that target logs in again, and the other target keeps
-    its session.
+    next read of that target logs in again, and the other target, with its
+    own credential, keeps its session.
     """
     await _register_and_resolve(_stub_embedding)
     first = _Target()
-    second = _Target()
+    second = _Target(secret_ref=_OTHER_SECRET)
 
     def _info(request: httpx.Request) -> httpx.Response:
         if request.headers["x-dr-session"] == "srm-a-1":
@@ -881,3 +1099,121 @@ async def test_auth_headers_rejects_other_auth_models() -> None:
     target.auth_model = "per_user"
     with pytest.raises(NotImplementedError, match="per_user"):
         await connector.auth_headers(target, _make_operator())
+
+
+# ---------------------------------------------------------------------------
+# The flight recorder and the 401 body: only the checked copy leaves the read
+# ---------------------------------------------------------------------------
+
+_RECORDER_SECRET = "made-up-recorder-secret"
+_SECRET_YAML = (
+    "openapi: 3.0.1\ninfo:\n  title: made-up API\n  version: 2.0.0\n"
+    f"  x-example:\n    password: {_RECORDER_SECRET}\npaths: {{}}\n"
+)
+
+
+def _recorded_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Catch what the read hands the flight recorder."""
+    recorded: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        flight_recorder_capture,
+        "record_vendor_call",
+        lambda _span, **kwargs: recorded.append(kwargs),
+    )
+    return recorded
+
+
+def _file_calls(recorded: list[dict[str, Any]], path: str) -> list[dict[str, Any]]:
+    return [call for call in recorded if call["response"].url.path == path]
+
+
+async def _audit_payloads(op_id: str) -> list[str]:
+    async with get_sessionmaker()() as fresh:
+        rows = (await fresh.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
+    return [json.dumps(row.payload, default=str) for row in rows]
+
+
+@pytest.mark.asyncio
+async def test_flight_recorder_gets_the_checked_file_not_the_password(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded = _recorded_calls(monkeypatch)
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_info(mock)
+        mock.get(_SRM_FILE).respond(200, text=_SECRET_YAML)
+        result = await _dispatch("srm.api_file.get", {"file": "srm"})
+
+    assert result.status == "ok", result.error
+    (call,) = _file_calls(recorded, _SRM_FILE)
+    assert REDACTED.encode() in call["response_body"]
+    assert _RECORDER_SECRET.encode() not in call["response_body"]
+
+
+@pytest.mark.asyncio
+async def test_flight_recorder_gets_no_body_when_the_file_is_refused(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded = _recorded_calls(monkeypatch)
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_info(mock)
+        mock.get(_SRM_FILE).respond(200, text="info: {password: " + _RECORDER_SECRET)
+        result = await _dispatch("srm.api_file.get", {"file": "srm"})
+
+    assert result.status == "error"
+    (call,) = _file_calls(recorded, _SRM_FILE)
+    assert call["response_body"] == b""
+
+
+@pytest.mark.asyncio
+async def test_flight_recorder_gets_no_body_when_the_stored_record_does_not_fit(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file fits the download limit, but its stored record does not: no body is recorded."""
+    recorded = _recorded_calls(monkeypatch)
+    monkeypatch.setenv("RESULT_HANDLE_MAX_RECORD_BYTES", "1000")
+    get_settings.cache_clear()
+    await _register_and_resolve(_stub_embedding)
+    data = b'"' + b'\\"' * 494 + b'"'
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_info(mock)
+        mock.get(_SRM_FILE).respond(200, content=data)
+        result = await _dispatch("srm.api_file.get", {"file": "srm"})
+
+    assert result.status == "error"
+    assert "does not fit in one result handle" in result.extras["exception_message"]
+    (call,) = _file_calls(recorded, _SRM_FILE)
+    assert call["response"].status_code == 200
+    assert call["response_body"] == b""
+
+
+@pytest.mark.asyncio
+async def test_401_body_is_checked_before_it_is_raised_and_the_retry_still_runs(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded = _recorded_calls(monkeypatch)
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        login = mock.post(_SESSION)
+        login.side_effect = [_login("srm-session-1"), _login("srm-session-2")]
+        mock.get(_INFO).respond(200, json=_INFO_PAYLOAD)
+        route = mock.get(_SRM_FILE).respond(401, text=_SECRET_YAML)
+        result = await _dispatch("srm.api_file.get", {"file": "srm"})
+
+    assert result.status == "error"
+    assert "401" in (result.error or "")
+    assert login.call_count == 2
+    assert route.call_count == 2
+    rendered = (
+        (result.error or "") + json.dumps(result.result) + json.dumps(result.extras, default=str)
+    )
+    assert _RECORDER_SECRET not in rendered
+    calls = _file_calls(recorded, _SRM_FILE)
+    assert len(calls) == 2
+    for call in calls:
+        assert REDACTED.encode() in call["response_body"]
+        assert _RECORDER_SECRET.encode() not in call["response_body"]
+    payloads = await _audit_payloads("srm.api_file.get")
+    assert payloads
+    assert all(_RECORDER_SECRET not in payload for payload in payloads)

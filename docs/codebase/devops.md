@@ -193,6 +193,23 @@ deployment path. Consumers mirroring through a private registry override
 `image.repository` to point at their mirror and (if needed) populate
 `imagePullSecrets`.
 
+For an install with no internet, two global settings reach every pod of
+the chart and its subcharts, the `helm test` pods too (#4100):
+`global.imageRegistry` replaces the registry host of every image, and
+`global.imagePullSecrets` is added to every pod (with the parent's own
+`imagePullSecrets`). Every image line uses the helper `meho.core.image`
+and every pod uses `meho.core.imagePullSecrets` (both in
+`templates/_core-postgres-helpers.tpl`); a new pod must use both, or
+`backend/tests/test_chart_image_registry.py` fails. The recipe is in
+[`../deploying.md`](../deploying.md#install-with-no-internet).
+
+`deploy/charts/meho/images.txt` is the list the customer copies: every
+image of the chart except MEHO's own, one per line, as `<image@digest>
+<path in your registry>:<tag>`. Every image must be pinned by digest. The
+same test fails when the list and a render with every part on differ, and
+prints the lines the chart now wants. A new image, or a new digest, means
+a new line in `images.txt`.
+
 ### Probes
 
 The Deployment renders `startupProbe`, `livenessProbe`, and
@@ -752,6 +769,7 @@ The file holds **no secret and no host name**. Keycloak fills every
 | --- | --- |
 | `MEHO_REALM_PUBLIC_URL` | `https://<coreKeycloak.hostname>` |
 | `MEHO_REALM_TENANT_ID` | `coreKeycloak.firstTenantId` (a UUID; pick one per install and keep it for a move) |
+| `MEHO_REALM_TENANT_NAME` | `coreKeycloak.tenantName` (the first tenant's short name, default `main`; goes into `meho_tenant`) |
 | `MEHO_REALM_ADMIN_CLIENT_SECRET`, `MEHO_REALM_WEB_CLIENT_SECRET`, `MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET` | the three client Secrets above |
 
 **Groups.** Each group carries the first tenant id and a role:
@@ -783,12 +801,14 @@ on a person directly: the claim always comes from the group.
 
 The three clients people log in with (`meho-cli`, `meho-mcp`, `meho-web`)
 have the default scopes `basic`, `roles`, `web-origins`, `acr`,
-`profile`, `email` and the six mappers `meho admin keycloak
-bootstrap-clients` sets: `tenant_id`, `tenant_role` and `approver` with the
-stock User Attribute mapper (`aggregate.attrs` and `multivalued` false; into
-the access token and userinfo; `approver` as a boolean), the audience
-mappers for `meho-backplane` and `https://<host>/mcp`, and the `groups`
-claim. No client has a fixed-value tenant or role mapper. The group model is
+`profile`, `email` and the eight mappers `meho admin keycloak
+bootstrap-clients` sets: `tenant_id`, `tenant_role`, `approver` and
+`platform_admin` with the stock User Attribute mapper (`aggregate.attrs`
+and `multivalued` false; into the access token and userinfo; `approver`
+and `platform_admin` as booleans), `meho-tenants` (the `meho_tenant`
+values of all the person's groups as the list `meho_tenants`;
+`aggregate.attrs` and `multivalued` true), the audience mappers for
+`meho-backplane` and `https://<host>/mcp`, and the `groups` claim. No client has a fixed-value tenant or role mapper. The group model is
 the decision in `docs/decisions/login-role-groups.md`.
 
 **Realm settings.** Offline sessions end after 7 days at most
@@ -1553,6 +1573,22 @@ these workflows:
   cancelled queue check fails the merge attempt and drops the PR out of
   the queue, so `merge_group` runs are never cancelled; `pull_request` /
   `push` runs still cancel their own predecessors as before.
+- **The runs of a dropped group are cancelled.** GitHub does not stop the
+  runs of a group that leaves the queue. Two helpers do it, so the runs
+  stop using our runners:
+  - The `merge-queue-watchdog` job in `ci.yml` (#4732) stops its own CI
+    run about a minute after the drop.
+  - `merge-queue-cleanup.yml` (#5292) runs
+    `scripts/ci/merge_queue_cleanup.sh` every 5 minutes on a GitHub-hosted
+    runner and covers every workflow. It cancels an open merge-queue run
+    only when the run's commit is not in the queue (GraphQL `mergeQueue`),
+    its queue branch is gone, and its commit is not on `main` (the merge
+    base of the commit and `main` is not the commit itself). Right before
+    each cancel it reads the queue and the run's branch once more, in case
+    a new group took the same commit or branch. A failed read stops the
+    sweep. The reads and the cancel are separate calls, so a wrong cancel
+    is very unlikely, not impossible. Only the sweep job may cancel; the
+    dry run on a pull request has a read-only token.
 - **Third-party actions that derive their own scan range must be told
   the `merge_group` range explicitly.** A `merge_group` trigger makes the
   workflow *run*, but an action that computes its diff from the event

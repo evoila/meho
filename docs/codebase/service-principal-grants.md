@@ -96,6 +96,37 @@ Parking is not refusal: a service principal can still propose a
 destructive op and read its result after a human approves. The steps are in
 [`approvals.md`](approvals.md#an-add-on-proposes-a-governed-destroy-3478).
 
+**A multi-step operation is checked twice (#5063).** A composite (for
+example `vmware.composite.vm.create`) has its own `safety_level` and
+`requires_approval`; the vCenter write composites ship as `dangerous` with
+`requires_approval=True`, or as `caution`. The dispatcher's policy gate
+checks the composite's **own** op id first, before the handler runs. Then
+`enforce_subop_policy` (`operations/composite.py`) checks each **write
+step** on the step's op id. Neither check reads the other's grants: a grant
+on the composite does not cover a step, and grants on the steps do not
+cover the composite. So a service principal that runs a composite
+unattended needs **both**:
+
+- a grant on the composite op id, naming the connector of the call, and
+- a grant on each write step, naming the connector the step check uses.
+  For the vCenter composites that is the connector the target resolves to:
+  `vmware-rest-8.0` for a vCenter 8.0.x target, `vmware-rest-9.0` for a
+  9.x target (#4991). Before #4991 every step was checked under
+  `vmware-rest-9.0`; a step grant for a vCenter 8 target that names
+  `vmware-rest-9.0` no longer matches and must be written again with
+  `vmware-rest-8.0`.
+
+What happens when one kind is missing:
+
+| Missing grant | What happens |
+|---|---|
+| on the composite | The whole call answers `awaiting_approval` before any step runs. The step grants are not read. After a human approves, the resume runs as that person, so the step grants are still not used. |
+| on a write step | The composite runs up to that step. That step waits for approval; the result names the approval request. The steps before it are done. |
+| on a read step | Nothing. Read steps (`GET` / `HEAD`, or a `safe` typed step) are not gated and need no grant. |
+
+The write steps of a composite are listed by the governed-subop route
+(see [Governed-subop discovery](#governed-subop-discovery-3349)).
+
 ### The grant (`db/models.py::ServicePrincipalGrant`, `operations/service_grants.py`)
 
 One row authorises exactly one `(principal_sub, op_id, connector_id,
@@ -257,7 +288,9 @@ delete-shaped ops:
   `POST:/vswitch/*`),
 - **by vendor action name** (#4632): an ingested op id whose last path part
   starts with `Destroy`, `Delete`, `Remove` or `Unregister`, for example
-  `POST:/VirtualMachine/{moId}/Destroy_Task`. VI-JSON (the JSON form of
+  `POST:/VirtualMachine/{moId}/Destroy_Task`. The word may also follow a
+  vSAN prefix (`VsanClusterRemoveShare`), and a query with the part
+  `action=delete` counts too (#4973). VI-JSON (the JSON form of
   vCenter's older object API) sends every method as a `POST`, so neither
   the HTTP method nor a pattern sees these deletes. The word list and the
   rule are the ingest parser's, in `meho_backplane/delete_names.py`; the
@@ -311,6 +344,58 @@ session; NULL for a plain REST call) and `parent_audit_id` (the multi-step
 parent's audit id when a child step was cleared). Details:
 [`approvals.md`](approvals.md#service-principal-standing-grants--safety_level-gate-3151--3152).
 
+## Read scope: limit a service principal's reads to named targets (#4992)
+
+A standing grant can only let a service principal do more. The read scope
+is the one thing that lets a person narrow its reads. Without a scope a
+service principal runs every `safe` operation at once on every target of
+its tenant, as the gate table above says. With a scope it may read only
+the targets in the list.
+
+**The scope** (`db/models.py::ServicePrincipalReadScope`,
+`operations/service_read_scopes.py`). One row per `(tenant, principal_sub)`
+with a JSON list of entries. Each entry is exactly one of:
+
+| Entry | Meaning |
+|---|---|
+| `target_id` | reads on exactly that target |
+| `target_product` and/or `target_name_pattern` | a selector, the same shapes a standing grant uses: `product` exact, `name` an `fnmatch` glob. It is checked at call time, so a target registered after the scope was set can match. |
+| `no_target: true` | `safe` calls that have no target may run |
+
+Setting the scope replaces the whole list. Clearing it deletes the row; the
+principal then reads every target again.
+
+**The check** (`_validate.py::_non_agent_verdict`, via
+`service_read_scopes.read_scope_denial`). It runs for a service principal
+on a call that would run at once: a `safe` operation, or a read-only
+`caution` operation (`GET` / `HEAD`). When the principal has a scope and
+no entry covers the call's target, the verdict is `deny`. The result has
+`status=denied` and the stable error code `read_scope_denied`; the reason
+names the target and the principal and says how a person changes the
+scope. The dispatcher writes one `denied` audit row, as for every deny. A
+call without a target is refused unless the scope has the "no target"
+entry. The check reads one row and writes nothing, so `preview_operation`
+reports the same verdict (`policy_verdict=deny`).
+
+What the scope does not change:
+
+- A change (a mutating `caution`, `dangerous` or `destructive` operation,
+  or any `requires_approval` operation) keeps today's rules: it waits for
+  approval unless a standing grant covers it. The scope never turns a
+  "waits for approval" into a refusal.
+- A principal without a scope gets exactly today's verdicts.
+- A person (`principal_kind=user`) and an agent login are never limited by
+  a scope row. Agent logins already have `deny` grants.
+- Read steps inside a multi-step operation run as today. The gate checks
+  the multi-step operation itself, with its own target; the steps inside
+  it do not go through the gate again.
+
+**Who writes it.** Only a person, like a grant: set and clear carry
+`require_human_principal`; a token of an agent, a service principal or a
+runner gets 403 `human_principal_required`. Every set and clear writes an
+audit row (`service_read_scope.set` with the stored entries,
+`service_read_scope.clear`).
+
 ## Sandbox mode (#4622)
 
 Decision record: [`docs/decisions/sandbox-mode.md`](../decisions/sandbox-mode.md).
@@ -350,7 +435,19 @@ What the code does:
   (no request field, header or token claim can set it; otherwise
   `DeleteGrantConsoleOnlyError`, HTTP 403 `delete_grant_console_only` on
   REST), and an expiry within 30 days (`SANDBOX_DELETE_GRANT_MAX_DAYS`).
-  The CLI refuses a delete op before it calls the server. The console
+  **The REST setting (#5251).** With `MEHO_SANDBOX_DELETE_GRANTS_FROM_API`
+  on (a `Settings` field, read at boot only, default `false`; chart value
+  `sandboxMode.deleteGrantsFromApi`), REST and the CLI may create a delete
+  grant too: `POST /api/v1/service-principals/grants` passes
+  `by_tenant_admin`, and an `operator` without `tenant_admin` gets
+  `DeleteGrantNeedsTenantAdminError`, HTTP 403
+  `grants_require_tenant_admin`. A machine token still gets 403 before the
+  route runs. The checks are the console's (`_review`). The mode check
+  runs first, so outside sandbox mode the setting changes nothing. The
+  CLI sends a delete op to the server and shows its answer, because only
+  the server knows the setting. The audit row of `service_grant.create`
+  carries `payload.created_via` (`console` or `api`). Renewal stays in
+  the console; a script renews by revoking and creating again. The console
   route itself runs only for a tenant admin who is a person
   (`is_human_principal`): a console session that holds an agent, service
   or runner token gets 403 `human_principal_required`, as on REST.
@@ -396,7 +493,8 @@ What the code does:
 - **The audit mark.** `audit_log.sandbox_mode` (boolean, not null,
   database default `false`). One model default reads the process flag, so
   every writer stamps it.
-- **Chart.** `sandboxMode.enabled` and `sandboxMode.confirmHost`; the
+- **Chart.** `sandboxMode.enabled`, `sandboxMode.confirmHost` and
+  `sandboxMode.deleteGrantsFromApi` (rendered only with `enabled`); the
   render fails when the host is not `ingress.host`; the notes warn.
 
 Tests: `test_sandbox_mode_boot.py`, `test_sandbox_mode_grants.py`,
@@ -409,15 +507,25 @@ the checked-in mode-off table `tests/data/sandbox_mode_verdict_table_off.json`),
 
 A composite fans out to child ops, and child gating consults the grant plane
 on the **child** op id with **no parent→child inheritance** (by design —
-`docs/architecture/operations-substrate.md`), so a service principal running
-a composite unattended needs a standing grant for **each** governed child. To
-assemble that grant set an operator previously had to read the connector's
-`_SUB_OPS_*` / `_VIM_SUB_OPS_*` manifests in source. The supported
-alternative:
+`docs/architecture/operations-substrate.md`). So a service principal running
+a composite unattended needs a standing grant on the composite op id
+**and** a standing grant for **each** governed write child; the composite's
+own gate runs first and a missing composite grant parks the whole call
+before any child is reached (see [The gate](#the-gate-operations_validatepy_non_agent_verdict)).
+To assemble the child grant set an operator previously had to read the
+connector's `_SUB_OPS_*` / `_VIM_SUB_OPS_*` manifests in source. The
+supported alternative:
 
 | Verb | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/v1/operations/governed-subops?op_id=<composite>&connector_id=<id>` | List the governed child ops a composite may dispatch (role: `operator`). |
+
+**Which connector id a step grant names.** Ask the route with the
+`connector_id` of the target's connector, and write each step grant with the
+`connector_id` the answer carries. A vCenter write step is checked under the
+connector the target resolves to (#4991): ask with `vmware-rest-8.0` for a
+vCenter 8.0.x target and with `vmware-rest-9.0` for a 9.x target. Without
+`connector_id` the route answers for `vmware-rest-9.0`.
 
 Each entry carries the child `op_id`, a best-effort `safety_level`
 (descriptor-resolved; `null` for a code-shipped vim sub-op with no
@@ -457,7 +565,16 @@ show keep the role check alone.
 | `POST` | `/api/v1/service-principals/grants` | Create (the review; `reason` required). 422 on wildcard / delete-shaped / past expiry / duplicate / `target_id`+selector. |
 | `DELETE` | `/api/v1/service-principals/grants/{id}` | Revoke (soft-delete). Optional `reason` query parameter (1–2048 chars, same limit as create), stored as `revoked_reason` and on the audit row. 404 when absent / already revoked / cross-tenant. |
 
-The route surface (grants + `GET /api/v1/operations/governed-subops`) enters
+The read scope (#4992) has its own router, `api/v1/service_read_scopes.py`,
+with the same role and people-only rules (set and clear need a person):
+
+| Verb | Path | Purpose |
+|---|---|---|
+| `PUT` | `/api/v1/service-principals/read-scopes/{principal_sub}` | Set (replace) the scope. Body `{"entries": [...]}`, at least one entry, at most 200. 422 on a wildcard in `principal_sub` or an entry that is not exactly one shape. |
+| `GET` | `/api/v1/service-principals/read-scopes/{principal_sub}` | Show the scope. 404 `read_scope_not_found` when none is set or cross-tenant. |
+| `DELETE` | `/api/v1/service-principals/read-scopes/{principal_sub}` | Clear the scope. 204; 404 when none is set. |
+
+The route surface (grants, read scopes, and `GET /api/v1/operations/governed-subops`) enters
 `cli/api/openapi.json` and the generated Go client (regenerate with `cd cli
 && make snapshot-openapi && make generate` after any signature change).
 
@@ -471,13 +588,23 @@ audit, and error rules as REST. There is no MCP tool for this plane.
 |---|---|---|
 | `meho service-principals grants list` | `GET /api/v1/service-principals/grants` | `--principal`, `--include-revoked`, `--include-expired`, `--limit`, `--offset`, `--json`. Shows only active grants unless you pass `--include-expired` (REST includes expired grants by default). |
 | `meho service-principals grants show <grant-id>` | `GET /api/v1/service-principals/grants/{id}` | `--json`. |
-| `meho service-principals grants create` | `POST /api/v1/service-principals/grants` | `--principal`, `--op-id`, `--connector-id`, `--reason` (all required); either `--target`, or `--target-product` and/or `--target-name-pattern`, or none (targetless); `--expires`; `--json`. A 422 from the server is shown as a one-line error. |
+| `meho service-principals grants create` | `POST /api/v1/service-principals/grants` | `--principal`, `--op-id`, `--connector-id`, `--reason` (all required); either `--target`, or `--target-product` and/or `--target-name-pattern`, or none (targetless); `--expires`; `--json`. A 422 from the server is shown as a one-line error. A grant on a multi-step operation (an op id with `.composite.`) is accepted; the CLI then prints a note that each write step needs its own grant and names the governed-subop route that lists them (with `--json` the note goes to stderr). Globs and delete-shaped op ids are still refused. |
 | `meho service-principals grants revoke <grant-id>` | `DELETE /api/v1/service-principals/grants/{id}` | Asks before it revokes; `--confirm` skips the question. `--json`. |
+
+The read scope (#4992) has one `meho service-principals read-scope` verb
+per route:
+
+| CLI verb | REST route | Notes |
+|---|---|---|
+| `meho service-principals read-scope set <principal-sub>` | `PUT .../read-scopes/{principal_sub}` | `--target <uuid>` (repeatable), `--selector product=<product>[,name=<glob>]` (repeatable), `--no-target`; at least one of them. `--json`. |
+| `meho service-principals read-scope show <principal-sub>` | `GET .../read-scopes/{principal_sub}` | Prints the entries, or "no read scope" when none is set. `--json`. |
+| `meho service-principals read-scope clear <principal-sub>` | `DELETE .../read-scopes/{principal_sub}` | Asks before it clears; `--confirm` skips the question. `--json`. |
 
 The full flag list is in the generated CLI reference
 (`docs-site/reference/cli.md`). `test_service_grants_rest_plane_has_cli_parity`
-in `backend/tests/test_mcp_surface_conformance.py` fails CI when a REST
-route on this router has no matching CLI verb in that reference.
+and `test_service_read_scopes_rest_plane_has_cli_parity` in
+`backend/tests/test_mcp_surface_conformance.py` fail CI when a REST route
+on one of these routers has no matching CLI verb in that reference.
 
 ## Scope boundaries (this PR)
 
@@ -522,6 +649,12 @@ route on this router has no matching CLI verb in that reference.
 
 ## Known limitations
 
+- **A read scope limits only calls that run at once.** A `safe` call that
+  waits for a person's approval (for example inside a direct hosted-agent
+  run whose agent needs approval) is not checked against the scope; the
+  person who approves it decides. A scope also does not limit by
+  parameters (for example one folder inside a vCenter); the target's own
+  permissions do that.
 - There is **no server-side service-principal registry** to validate
   `principal_sub` against (a service principal is any Keycloak
   client-credentials client classified `principal_kind=service` — by an

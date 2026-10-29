@@ -53,6 +53,12 @@ names.
   first) and `trace show <audit-id>` (one trace over
   `GET /api/v1/audit/{audit_id}/trace`; headers and bodies only in
   `--json`).
+  #5238 shows the tenant: the `query` / `recent` / `who-touched` /
+  `my-recent` and `trace list` tables have a `TENANT` column (the
+  tenant name, else the tenant id), each `replay` tree line ends with
+  `tenant=<name or id>`, `show` prints a `tenant_name:` line under
+  `tenant_id:`, and `--json` carries `tenant_id` and `tenant_name` as
+  the backend sends them.
 - `meho kb ...` (G4.1-T4 #418) — knowledge-base operator surface
   (`ingest`, `search`, `list`, `show`, `add`, `delete`) wrapping
   the five `/api/v1/kb*` routes shipped by G4.1-T2 (#416) plus the
@@ -170,6 +176,7 @@ cli/
     ├── api/
     │   ├── client.gen.go      # generated typed client (oapi-codegen v2.5).
     │   ├── client.go          # auth-aware wrapper; NewAuthedClient + GetHealth.
+    │   ├── validation_error.go # HTTPValidationError.UnmarshalJSON: a 422 `detail` may be a string or a list (#5134).
     │   ├── workref.go         # Meho-Work-Ref header + MEHO_WORK_REF env names, work-ref shape check, context helpers (#3804).
     │   └── refresh.go         # lazy 401-retry refresh via x/oauth2.
     ├── auth/
@@ -969,7 +976,11 @@ treatment: `dispatch.UnknownStatusError` (used by `dispatch.Render`,
 probably newer than the CLI, that the operation may have run or be
 waiting for approval, and points at `meho status`. The exit code stays
 `4` (`unexpected_response`) because the CLI cannot tell whether the
-operation worked.
+operation worked. The known statuses are `ok`, `error`, `denied`,
+`rate_limited`, `not_found` and `awaiting_approval`; the last three
+are the shared constants `dispatch.StatusRateLimited`,
+`dispatch.StatusNotFound` and `dispatch.StatusAwaitingApproval`, and
+all three lists name them so a new status is added in one place.
 
 ## Global work-ref (`--work-ref`, `MEHO_WORK_REF`, #3804)
 
@@ -1413,11 +1424,19 @@ narrow-waist contract.
   `""` is the whole document, `/a/0/b` goes one step per `/`. It reads
   one value of a document handle, or a top-level field a rows handle
   left out of its inline summary (`omitted_scalar_count`). An array
-  value pages with `--offset` / `--limit`. The CLI refuses `--path`
+  value pages with `--offset` / `--limit`. A text value comes back in
+  parts (#4994): `--offset` and `--limit` count characters, and without
+  `--limit` a part is as much text as fits the output budget. The CLI
+  sends `limit` only when `--limit` was given, so the backplane picks
+  the default for what is read. The CLI refuses `--path`
   together with any query flag before the call. The reply carries
-  `path`, `value_type` and `value` (raw JSON) next to the paging fields;
-  the human render is one header line (handle, path, type) and the
-  pretty-printed value, or the item lines with the window for an array.
+  `path`, `value_type` and `value` (raw JSON) next to the paging fields,
+  plus `returned_chars` and `total_chars` for a text value; the human
+  render is one header line (handle, path, type) and the pretty-printed
+  value, the item lines with the window for an array, or, for a text
+  part, a header with the character window and the total, a note with
+  the `--offset` to continue with when more follows, and the part as
+  plain text.
   Paging a document handle without `--path` is a server 422; the CLI
   shows the server's message and adds the `--path` form that works
   (`resultquery_path.go`).
@@ -1502,10 +1521,13 @@ scenarios.
 
 - `0` — verb ran cleanly; for `call`, `status == "ok"`.
 - `1` — `call` only: dispatcher returned `status == "error"`,
-  `status == "denied"` or `status == "rate_limited"` (connector raised,
-  schema validation rejected, policy denied, or the caller is over its
-  rate or concurrency limit). The envelope is printed first; a
-  `rate_limited` one shows `extras.retry_after_seconds`. When the
+  `status == "denied"`, `status == "rate_limited"` or
+  `status == "not_found"` (connector raised, schema validation
+  rejected, policy denied, the caller is over its rate or concurrency
+  limit, or the connector confirmed the object does not exist). The
+  envelope is printed first; a `rate_limited` one shows
+  `extras.retry_after_seconds`; a `not_found` one adds a
+  `not found: <id>` line from `extras.resource_ids` (#4986). When the
   backplane committed an audit row, the text output ends with
   `audit receipt: <id>` on every status, not only on `ok` (#4833) —
   a failed call's row is the one that says why it failed; read it
@@ -1799,7 +1821,7 @@ unqualified names. After G0.12-T16 #1274 the 15 vendor dirs (`vault`,
 `vcf-logs`, `vcf-operations`) share **one** transport implementation
 instead of byte-near-identical `doAuthedRequest` / `sendRequest` /
 `httpError` trios. Exit codes: `0` status=ok, `1`
-status=error/denied/rate_limited (via the `errOpError` sentinel re-exported from
+status=error/denied/rate_limited/not_found (via the `errOpError` sentinel re-exported from
 `dispatch.ErrOpError`), `2` auth_expired, `3` unreachable,
 `4` unexpected_response.
 
@@ -2418,8 +2440,9 @@ have to trust to run `meho login` against their secrets.
 `cli/internal/cmd/admin/keycloak/` registers the install-time
 realm-provisioning verb that closes the v0.3.1 dogfood's deepest
 deployer friction: a working `meho-cli` device-code client + the
-public MCP browser-flow client + the **6 protocol mappers + 4 default
-client scopes + five MEHO role groups + admin user** that together let
+public MCP browser-flow client + the **8 protocol mappers + 4 default
+client scopes + five MEHO role groups + `MEHO-Platform-Admins` + admin
+user** that together let
 `meho login` and the MCP onramp authenticate without 4 sequential
 walls of opaque `invalid_token` / `unauthorized_client` errors. The
 verb encodes the 5-step recipe documented in
@@ -2447,14 +2470,17 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      loopback callbacks `http://localhost:*` + `http://127.0.0.1:*`
      that `mcp-remote` and Claude Code listen on — Keycloak matches
      redirect hosts literally, so both loopback forms are listed).
-  3. 6 protocol mappers, installed on **both** public clients:
+  3. 8 protocol mappers, installed on **both** public clients:
      `audience-meho-backplane`, `meho-mcp-audience`, `groups-claim`,
-     and three stock User Attribute mappers
-     (`oidc-usermodel-attribute-mapper`) — `tenant-id`, `tenant-role`
-     and `approver` — that read the `tenant_id`, `tenant_role` and
-     `approver` attributes of the person's group
-     (`aggregate.attrs=false`, `multivalued=false`; `approver` is a
-     `boolean` claim). No mapper carries a fixed value
+     four stock User Attribute mappers
+     (`oidc-usermodel-attribute-mapper`) — `tenant-id`, `tenant-role`,
+     `approver` and `platform-admin` — that read the `tenant_id`,
+     `tenant_role`, `approver` and `platform_admin` attributes of the
+     person's group (`aggregate.attrs=false`, `multivalued=false`;
+     `approver` and `platform_admin` are `boolean` claims), and
+     `meho-tenants` (`tenantsMapper` in `tenants.go`), which lists the
+     `meho_tenant` value of every group of the person in the
+     `meho_tenants` claim (`aggregate.attrs=true`, `multivalued=true`). No mapper carries a fixed value
      ([`docs/decisions/login-role-groups.md`](../decisions/login-role-groups.md),
      #4590). The names `tenant-id` / `tenant-role` are the names the
      older fixed-value mappers had, so a run on an older realm updates
@@ -2476,10 +2502,26 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      `MEHO-Readers` (`read_only`), `MEHO-Operators` (`operator`),
      `MEHO-SA-Operators` (`operator`), `MEHO-Admins` (`tenant_admin`),
      `MEHO-Approvers` (`read_only` + `approver=true`). Each carries
-     `tenant_id` from `--tenant-id` (default the all-zero UUID). The
+     `tenant_id` from `--tenant-id` (default the all-zero UUID) and
+     `meho_tenant` = `<tenant-id>:<tenant-name>:<Role>` (`--tenant-name`,
+     default `main`). Also `MEHO-Platform-Admins` (`platform_admin=true`)
+     and, with `--add-tenant <name>`, the five groups
+     `MEHO-<name>-<Role>` of one more tenant, which carry only
+     `meho_tenant` (`extraTenantGroups` in `tenants.go`). The tenant's
+     UUID comes from `--add-tenant-id`, else from the `meho_tenant` value
+     its groups already carry, else a new one that the summary prints.
+     The UUID is stored in its standard form (lowercase, with dashes)
+     whatever form the flag used, so the `meho_tenant` value keeps its
+     three colon-separated parts. The first tenant's `meho_tenant` uses
+     the standard form of `--tenant-id` in the same way, while its
+     `tenant_id` attribute keeps the flag's text as given.
+     Names are checked before any Keycloak call: lowercase letters,
+     digits and dashes, not `sa` / `platform` / `ci`, and not the first
+     tenant's name or id. Each group spec names the keys the command owns
+     (`groupSpec.Owned`); only those are set or removed. The
      groups are created even with `--skip-user-provisioning`, because
      they carry the tenant and the role. Then an admin user joined to
-     `MEHO-Admins`, with a password set via
+     `MEHO-Admins` and `MEHO-Platform-Admins`, with a password set via
      `/users/{id}/reset-password` (skipped with
      `--skip-user-provisioning`). `--tenant-role` and
      `--admin-group-name` were removed in #4590; passing either fails
@@ -2616,8 +2658,13 @@ the CA cert is available.
 in-memory state maps) through these scenarios, among others:
 
 - Fresh realm: every resource created, mapper + scope counts match
-  the recipe (6 mappers, 4 default scopes, 2 clients, 5 groups with
-  their attributes, 1 user in `MEHO-Admins` only).
+  the recipe (8 mappers, 4 default scopes, 2 clients, 5 groups with
+  their attributes plus `MEHO-Platform-Admins`, 1 user in `MEHO-Admins`
+  and `MEHO-Platform-Admins`).
+- `tenants_test.go`: `--add-tenant` makes five groups with only
+  `meho_tenant`, a second run changes nothing, a missing id is made once
+  and read back, a one-tenant realm gains `meho_tenant`, and bad tenant
+  flags stop before any Keycloak call.
 - Idempotent re-run: zero new POSTs and zero mapper / group /
   membership PUTs against the same realm; password reset called
   exactly once across two runs.
@@ -2657,11 +2704,17 @@ fixed-value mappers is upgraded, with a second run changing nothing.
 
 ## Known issues / forward-compat scaffolding
 
-* `meho version` prints CLI metadata only. The Goal #11 contract
-  also calls for a backplane-version line; this is now feasible
-  (the AuthedClient can call `GET /version`) but deferred until
-  Initiative G2.7 wires its CI seam so the format choice doesn't
-  thrash. Filed as a follow-up adjacent to T3.
+* `meho version` prints the CLI line first. When a backplane is
+  known (`--backplane`, or the URL the last `meho login` stored), it
+  also reads the public `GET /version` (3-second cap, no login, no
+  work reference because the route is not audited) and prints a
+  `backplane <release> (commit …, built …) at <url>` line and the
+  connector packages the image carries (#5036): `Connector packages:
+  none`, or one line per package with its version and wheel digest.
+  If the backplane cannot be reached, one warning line goes to stderr
+  and the command still exits 0. With no known backplane the output is
+  the single CLI line, as before. `meho status` prints the same list
+  from `GET /api/v1/health` (`output.FormatConnectorPackages`).
 * Persistent `--config` and `-v/--verbose` flags are registered on
   the root command but not yet consumed; reserved for v0.2.
 * The auth-config endpoint at `/api/v1/auth-config` shipped in v0.3.1
@@ -2712,8 +2765,8 @@ output), `--backplane` (override the configured backplane URL).
 - **Known top-level columns** map 1:1 to the API's `TargetCreate` /
   `TargetUpdate` body fields: `name`, `aliases`, `product`, `host`,
   `port`, `fqdn`, `secret_ref`, `auth_model`, `vpn_required`,
-  `notes`, `preferred_impl_id`, `verify_tls`, `tls_ca_pin`,
-  `tls_server_name`. The list in
+  `notes`, `version`, `preferred_impl_id`, `verify_tls`, `tls_ca_pin`,
+  `tls_server_name`, `flight_recorder_capture`. The list in
   `knownTopLevel` is the canonical reference; the
   Python-side mirror lives in
   `backend/tests/test_api_v1_targets_import.py:_KNOWN_TOP_LEVEL`,
@@ -2739,9 +2792,22 @@ output), `--backplane` (override the configured backplane URL).
   specifically surfaces as `connector_tls_verify_failed` /
   "IP address mismatch" on an appliance reached by IP whose leaf cert
   carries an FQDN-only SAN (#2643).
-- **Every other key** spills into the `extras` JSONB column.
-  Explicit `extras:` blocks in the YAML merge with spilled keys
-  rather than overwriting them.
+- **`version`** is the operator-asserted product version, the same
+  column `meho targets add --version` writes (#3649). It goes at the
+  body root on CREATE and PATCH. The resolver reads it before the
+  first probe, and a versioned, profile-backed connector registers no
+  wildcard entry, so a target without it can neither run an operation
+  nor be probed. `parseTargetsYAML` rejects a non-string value
+  (YAML reads an unquoted `8.0` as the number 8), so the file must
+  quote it.
+- **Every other key** spills into the `extras` JSONB column, and
+  the import prints a warning for each one (`unknown field "<key>":
+  not a target column, stored in extras`). Warnings show in the
+  dry-run plan, in the `--json` plan's `warnings` list, and on stderr
+  before a human-mode apply. Explicit `extras:` blocks in the YAML
+  merge with spilled keys rather than overwriting them, and keys
+  inside them get no warning — that is the way to store a free-form
+  field on purpose.
 
 **Idempotency.** The plan-build phase fetches
 `GET /api/v1/targets` (paginated) and partitions every YAML entry

@@ -271,7 +271,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: broadcast
-          image: "valkey/valkey:9.0-alpine"
+          image: "valkey/valkey@sha256:2d04268dfa26ab31cfa3fdc538866e76438b2d00e41db41b8cb86d780ac5a416"
           imagePullPolicy: IfNotPresent
           # With auth on, the Secret-sourced password must reach Valkey
           # without landing in the ConfigMap OR on the process command line

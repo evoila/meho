@@ -180,6 +180,9 @@ class RunnerPrincipalRead(BaseModel):
     #: responses carry it and the ``/ui/runners`` fleet page derives liveness
     #: from it (#2589).
     last_seen_at: datetime | None
+    #: The wire version the runner sent on its last call (#5020); ``None``
+    #: until it has called since this field existed.
+    wire_version: str | None = None
 
 
 class RunnerPrincipalService:

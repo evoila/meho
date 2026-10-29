@@ -196,6 +196,8 @@ def test_result_query_invalid_uuid_is_invalid_params(
     body = response.json()
     assert body["error"]["code"] == INVALID_PARAMS
     assert body["error"]["data"]["reason"] == "invalid_handle_id"
+    # A model that passes a knowledge slug learns how to read the entry (#4138).
+    assert "`search_knowledge` with `slug`" in body["error"]["message"]
 
 
 def test_result_query_rejects_extra_argument(
@@ -467,3 +469,96 @@ def test_path_read_over_wire_ceiling_is_output_too_large(
     assert body["error"]["data"] == {"reason": "output_too_large", "delivery": "unavailable"}
     assert "256-byte delivery limit" in body["error"]["message"]
     assert "Point `path` at a smaller part" in body["error"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# A text value is read in parts (#4994)
+# ---------------------------------------------------------------------------
+
+
+def test_path_mode_reads_a_large_text_value_in_parts(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    fake_store: MemoryResultStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A string over the output budget comes back part by part over MCP."""
+    client, op = client_with_operator
+    handle = uuid4()
+    text = "".join(f"line {i}\n" for i in range(400))
+    fake_store.seed_document(
+        tenant_id=OPERATOR_TENANT_ID,
+        operator_sub=op.sub,
+        handle_id=handle,
+        document={"config_xml": text},
+    )
+    monkeypatch.setattr(
+        result_query_core,
+        "get_settings",
+        lambda: SimpleNamespace(
+            result_query_max_output_bytes=1024,
+            result_query_response_wire_max_bytes=1 << 20,
+            result_query_timeout_seconds=10,
+        ),
+    )
+
+    parts: list[str] = []
+    offset = 0
+    for _ in range(100):
+        response = _call(
+            client, {"handle_id": str(handle), "query": {"path": "/config_xml"}, "offset": offset}
+        )
+        assert response.status_code == 200
+        payload = _structured(response.json()["result"])
+        assert payload["value_type"] == "string"
+        assert payload["total_chars"] == len(text)
+        assert payload["returned_chars"] == len(payload["value"]) <= 1024
+        parts.append(payload["value"])
+        offset += payload["returned_chars"]
+        if not payload["truncated"]:
+            break
+
+    assert len(parts) > 1
+    assert "".join(parts) == text
+
+
+def test_path_mode_text_limit_above_the_row_cap_is_accepted(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    fake_store: MemoryResultStore,
+) -> None:
+    """`limit` counts characters for a text value, so it may exceed 500."""
+    client, op = client_with_operator
+    handle = uuid4()
+    fake_store.seed_document(
+        tenant_id=OPERATOR_TENANT_ID,
+        operator_sub=op.sub,
+        handle_id=handle,
+        document={"text": "t" * 3000},
+    )
+    response = _call(
+        client,
+        {"handle_id": str(handle), "query": {"path": "/text"}, "offset": 1000, "limit": 1500},
+    )
+    payload = _structured(response.json()["result"])
+    assert payload["returned_chars"] == 1500
+    assert payload["offset"] == 1000
+    assert payload["truncated"] is True
+
+
+def test_paging_limit_above_the_row_cap_is_invalid_params(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    fake_store: MemoryResultStore,
+) -> None:
+    """The 500-row cap still holds for rows; it is checked by the core now."""
+    client, op = client_with_operator
+    handle = uuid4()
+    fake_store.seed(
+        tenant_id=OPERATOR_TENANT_ID,
+        operator_sub=op.sub,
+        handle_id=handle,
+        rows=[{"i": i} for i in range(3)],
+    )
+    response = _call(client, {"handle_id": str(handle), "limit": 501})
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert body["error"]["data"]["reason"] == "invalid_query"
+    assert "500-row page cap" in body["error"]["message"]

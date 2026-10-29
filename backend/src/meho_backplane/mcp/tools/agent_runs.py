@@ -72,7 +72,7 @@ _RUN_ID_PROPERTY: Final[dict[str, Any]] = {
     "format": "uuid",
     "minLength": 1,
     "description": (
-        "Run UUID. Canonical name (G0.32 #2471) — the `run_id` key "
+        "Run UUID. Canonical name — the `run_id` key "
         "`meho_agents_run` and `meho_agents_list_runs` return, matching "
         "the `<noun>_id` convention used by every other MCP tool that "
         "names a resource UUID."
@@ -85,7 +85,7 @@ _RUN_STATUS_LEGACY_HANDLE_PROPERTY: Final[dict[str, Any]] = {
     "type": "string",
     "minLength": 1,
     "description": (
-        "DEPRECATED alias for `run_id` (pre-#2471 wire shape). Accepted "
+        "DEPRECATED alias for `run_id` (older wire shape). Accepted "
         "for backward compatibility; new callers SHOULD use `run_id`. "
         "Mutually exclusive with `run_id`; passing both rejects with "
         "-32602."
@@ -200,7 +200,7 @@ register_mcp_tool(
         name="meho_agents_run",
         surface=ToolSurface.OPERATOR,
         description=(
-            "Run a named agent for the operator's tenant (Initiative #802). "
+            "Run a named agent for the operator's tenant. "
             "Operator-level. Sync (default) blocks up to the server-side "
             "timeout and returns {run_id, status, output, error}; set "
             "async=true (or let a long sync run convert) to get a handle "
@@ -235,7 +235,7 @@ register_mcp_tool(
                     "type": "string",
                     "description": (
                         "Optional external change-ticket reference to bind the run "
-                        "to (work_ref I3-T2 #1662), e.g. 'gh:evoila/meho#11'. "
+                        "to, e.g. 'gh:evoila/meho#11'. "
                         "Stamped on the run row and filterable via "
                         "meho_agents_list_runs."
                     ),
@@ -293,8 +293,8 @@ register_mcp_tool(
         name="meho_agents_run_status",
         surface=ToolSurface.OPERATOR,
         description=(
-            "Poll an agent run's durable status by run_id (Initiative "
-            "#802). Operator-level. Returns {run_id, status, turns, "
+            "Poll an agent run's durable status by run_id. "
+            "Operator-level. Returns {run_id, status, turns, "
             "provider, model, output, error, agent_definition_id, "
             "agent_name, identity_sub, identity_act}; identity_sub is who "
             "the run acts for and identity_act is the agent acting for "
@@ -303,15 +303,15 @@ register_mcp_tool(
             "terminal state. `turns` is the number of model-request turns "
             "the loop made; it is recorded only on success, so a succeeded "
             "run always reports `turns >= 1` while any non-succeeded run "
-            "reports `0` regardless of how many requests it made (the "
-            "#2644 model-init failure, which never reaches the model, is "
-            "one such case) (#2743). "
+            "reports `0` regardless of how many requests it made (a "
+            "model-init failure, which never reaches the model, is "
+            "one such case). "
             "agent_definition_id / agent_name are null for "
-            "an ad-hoc run or a definition deleted after the run (#2472). "
+            "an ad-hoc run or a definition deleted after the run. "
             "Reads the durable run record, so it works after the call that "
             "started the run returned. Pass the `run_id` a `meho_agents_run` "
-            "/ `meho_agents_list_runs` row returned (canonical name; G0.32 "
-            "#2471) or the deprecated `handle` alias. An unknown / "
+            "/ `meho_agents_list_runs` row returned (canonical name) "
+            "or the deprecated `handle` alias. An unknown / "
             "cross-tenant run_id returns 'agent_run_not_found'."
         ),
         inputSchema={
@@ -405,14 +405,14 @@ register_mcp_tool(
         name="meho_agents_list_runs",
         surface=ToolSurface.OPERATOR,
         description=(
-            "List the operator's tenant's agent runs, newest first "
-            "(Initiative #802; work_ref I3-T2 #1662). Operator-level. "
+            "List the operator's tenant's agent runs, newest first. "
+            "Operator-level. "
             "Returns {runs: [{run_id, status, trigger, model_tier, "
             "provider, model, turns, work_ref, agent_definition_id, "
             "agent_name, identity_sub, identity_act, created_at, "
             "started_at, ended_at}]}; "
             "agent_definition_id / agent_name are null for an ad-hoc run "
-            "or a definition deleted after the run (#2472). Filter by "
+            "or a definition deleted after the run. Filter by "
             "work_ref (exact-match external change-ticket reference, e.g. "
             "'gh:evoila/meho#11'), status, and/or agent_name (exact-match "
             "agent definition name — an unknown name returns an empty "

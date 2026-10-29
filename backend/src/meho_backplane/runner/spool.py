@@ -33,6 +33,7 @@ import os
 import time
 import uuid
 from pathlib import Path
+from typing import cast
 
 import structlog
 
@@ -40,7 +41,16 @@ from meho_backplane.runner.wire import RunnerResult, RunnerResultBatch
 
 __all__ = ["ExecutedCommandStore", "ResultSpool"]
 
-_log = structlog.get_logger(__name__)
+
+def _log() -> structlog.typing.FilteringBoundLogger:
+    """Get the logger on each call, not once at import.
+
+    A module-level logger keeps an old log setup, and ``capture_logs`` in a
+    later test then misses its lines. See ``_log`` in
+    :mod:`meho_backplane.runner.loop` for the full reason.
+    """
+    return cast("structlog.typing.FilteringBoundLogger", structlog.get_logger(__name__))
+
 
 _TMP_SUFFIX = ".tmp"
 
@@ -68,7 +78,7 @@ class ResultSpool:
         tmp = self._dir / (name + _TMP_SUFFIX)
         tmp.write_text(batch.model_dump_json(), encoding="utf-8")
         os.replace(tmp, final)
-        _log.info("runner_spool_write", path=str(final), results=len(batch.results))
+        _log().info("runner_spool_write", path=str(final), results=len(batch.results))
         return final
 
     def load_oldest_first(self) -> list[tuple[Path, RunnerResultBatch]]:
@@ -83,7 +93,7 @@ class ResultSpool:
             try:
                 batch = RunnerResultBatch.model_validate_json(path.read_text(encoding="utf-8"))
             except (OSError, ValueError) as exc:
-                _log.warning("runner_spool_unreadable", path=str(path), error=str(exc))
+                _log().warning("runner_spool_unreadable", path=str(path), error=str(exc))
                 continue
             out.append((path, batch))
         return out
@@ -100,7 +110,7 @@ class ResultSpool:
             oldest = files.pop(0)
             with contextlib.suppress(FileNotFoundError):
                 oldest.unlink()
-            _log.warning(
+            _log().warning(
                 "runner_spool_overflow_drop",
                 path=str(oldest),
                 max_files=self._max_files,
@@ -181,5 +191,5 @@ class ExecutedCommandStore:
         try:
             return RunnerResult.model_validate_json(raw)
         except ValueError as exc:
-            _log.warning("runner_executed_store_unreadable", path=str(path), error=str(exc))
+            _log().warning("runner_executed_store_unreadable", path=str(path), error=str(exc))
             return None

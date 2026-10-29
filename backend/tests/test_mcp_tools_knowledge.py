@@ -43,6 +43,7 @@ from meho_backplane.kb.service import KbService
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.mcp.tools.knowledge import _MAX_BODY_CHARS, _MAX_QUERY_CHARS
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RetrievalHit
+from meho_backplane.untrusted_text import BLOCK_END, BLOCK_START
 from tests._kb_embedding_stub import fake_embedding_service
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -101,7 +102,10 @@ def test_tools_list_exposes_kb_tools_with_strict_input_schema(
     assert "search_knowledge" in tools_by_name
     search = tools_by_name["search_knowledge"]
     assert search["inputSchema"]["type"] == "object"
-    assert search["inputSchema"]["required"] == ["query"]
+    # #4138: neither ``query`` nor ``slug`` is required by the schema;
+    # the handler refuses a call that has neither.
+    assert "required" not in search["inputSchema"]
+    assert "slug" in search["inputSchema"]["properties"]
     assert search["inputSchema"]["additionalProperties"] is False
     assert "query" in search["inputSchema"]["properties"]
     assert "filters" in search["inputSchema"]["properties"]
@@ -149,6 +153,8 @@ def test_tool_descriptions_satisfy_ai_engineering_anchor(
     assert "BEFORE writing" in search_desc or "before writing" in search_desc.lower()
     # Pointer to the companion resource for the full body.
     assert "meho://kb/" in search_desc
+    # #4138: a tool-only client can read the full text with `slug`.
+    assert "call this tool again with `slug`" in search_desc
     # #2486: cross-reference the kb REST/CLI surface so a caller that
     # hits the non-existent `/api/v1/knowledge` learns the real path.
     assert "/api/v1/kb" in search_desc
@@ -483,7 +489,7 @@ def test_search_knowledge_tool_description_drops_currently_ignored_disclaimer(
 def test_tools_call_search_knowledge_rejects_missing_query(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """AC #2: missing required ``query`` fails JSON-Schema validation → -32602."""
+    """A call with neither ``query`` nor ``slug`` is refused with -32602 (#4138)."""
     client, _op = client_with_operator
     response = post_mcp(
         client,
@@ -870,3 +876,80 @@ async def test_search_knowledge_binds_operator_tenant_to_retrieve(
     # Operator's tenant_id, never a caller-supplied one — the input
     # schema has no tenant_id field by design.
     assert captured["tenant_id"] == op.tenant_id
+
+
+# ---------------------------------------------------------------------------
+# search_knowledge with ``slug`` — full-entry read (#4138)
+# ---------------------------------------------------------------------------
+
+
+def _call_search(client: TestClient, arguments: dict[str, object]) -> dict[str, object]:
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "search_knowledge", "arguments": arguments},
+        },
+    )
+    assert response.status_code == 200
+    body: dict[str, object] = response.json()
+    return body
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_search_knowledge_slug_returns_full_entry_text(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """With ``slug`` the tool returns the whole entry, inside the untrusted wrapper."""
+    client, op = client_with_operator
+    long_body = "# Restart HA\n\n" + "Step text that goes on. " * 40
+    assert len(long_body) > 200
+    await KbService().create_entry(
+        tenant_id=op.tenant_id, slug="vsphere-ha-restart", body=long_body
+    )
+
+    body = _call_search(client, {"slug": "vsphere-ha-restart"})
+    result = body["result"]
+    assert isinstance(result, dict)
+    assert result["isError"] is False
+    payload = json.loads(result["content"][0]["text"])
+    entry = payload["entry"]
+    assert entry["slug"] == "vsphere-ha-restart"
+    assert entry["body"].startswith(BLOCK_START)
+    assert entry["body"].endswith(BLOCK_END)
+    assert long_body in entry["body"]
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_search_knowledge_slug_of_other_tenant_reads_as_not_found(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """Another tenant's slug gets the same answer as a slug that does not exist."""
+    client, _op = client_with_operator
+    await KbService().create_entry(
+        tenant_id=uuid.uuid4(), slug="foreign-only-runbook", body="Foreign body."
+    )
+
+    foreign = _call_search(client, {"slug": "foreign-only-runbook"})["error"]
+    unknown = _call_search(client, {"slug": "does-not-exist"})["error"]
+    assert isinstance(foreign, dict)
+    assert isinstance(unknown, dict)
+    assert foreign["code"] == unknown["code"] == INVALID_PARAMS
+    assert foreign["message"] == unknown["message"].replace(
+        "does-not-exist", "foreign-only-runbook"
+    )
+    assert "not found" in foreign["message"]

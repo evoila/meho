@@ -41,6 +41,7 @@ import structlog
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.connectors.vmware_rest.appliance_local_account_password import (
     PASSWORD_SET_OP_ID,
+    LocalAccountRefusedError,
     change_error,
     read_new_password,
     safe_vendor_text,
@@ -87,6 +88,19 @@ _ACCOUNT_PATH: Final = "/appliance/local-accounts/{username}"
 VENDOR_OP_IDS: Final[frozenset[str]] = frozenset(
     {f"GET:{_LIST_PATH}", f"GET:{_ACCOUNT_PATH}", f"PATCH:{_ACCOUNT_PATH}"}
 )
+
+#: The vendor message id of the HTTP 500 that one account read can get when
+#: the caller is not allowed to read local accounts.
+_FAILED_FETCH_USER_ID: Final = "com.vmware.appliance.failed_fetch_user"
+_GROUP_TEXT: Final = (
+    "the appliance super administrator level: membership in the SSO group "
+    "SystemConfiguration.BashShellAdministrators. After a group change, MEHO's next login "
+    "to vCenter (by default within 20 minutes) carries the new group."
+)
+#: Added to a read error for HTTP 403.
+_REFUSED_HINT: Final = f"vCenter refused the read. The service account needs {_GROUP_TEXT}"
+#: Added to a read error for the HTTP 500 with :data:`_FAILED_FETCH_USER_ID`.
+_MAY_LACK_HINT: Final = f"The service account may lack {_GROUP_TEXT}"
 
 #: Letters, digits, ``.``, ``@`` and ``-``, starting and ending with a letter or
 #: a digit: the rule vCenter uses for local user names. It also keeps ``.`` and
@@ -207,14 +221,79 @@ async def _vendor_call(
     raise error
 
 
-def _read_error(username: str) -> Callable[[httpx.HTTPStatusError], Exception]:
-    """The read rule: a 404 is ``not_found``; any other error answer is raised as it is."""
+def _message_ids(response: httpx.Response) -> set[str]:
+    """The vendor message ids of an error answer, in the ``/api`` or the legacy ``/rest`` shape."""
+    try:
+        body = response.json()
+    except (ValueError, httpx.StreamError):
+        return set()
+    if not isinstance(body, dict):
+        return set()
+    value = body.get("value")
+    messages = (value if isinstance(value, dict) else body).get("messages")
+    return {
+        message["id"]
+        for message in (messages if isinstance(messages, list) else [])
+        if isinstance(message, dict) and isinstance(message.get("id"), str)
+    }
+
+
+def _group_hint(response: httpx.Response) -> str | None:
+    """The SSO group hint for a refused read, or None when the answer is not a refusal.
+
+    A 403 is a refusal. A 500 with :data:`_FAILED_FETCH_USER_ID` is what one
+    account read gets without the group, so its hint says "may".
+    """
+    status = response.status_code
+    if status == 403:
+        return _REFUSED_HINT
+    if status == 500 and _FAILED_FETCH_USER_ID in _message_ids(response):
+        return _MAY_LACK_HINT
+    return None
+
+
+def _refused_read_error(
+    exc: httpx.HTTPStatusError, *, op_id: str, action: str
+) -> LocalAccountRefusedError | None:
+    """A read error that names the SSO group, or None when the answer is not a refusal.
+
+    Keeps the HTTP status and the vAPI error type and messages.
+    """
+    hint = _group_hint(exc.response)
+    if hint is None:
+        return None
+    status = exc.response.status_code
+    error_type, messages = safe_vendor_text(exc.response)
+    detail = "; ".join(part for part in (error_type, *messages) if part) or None
+    return LocalAccountRefusedError(
+        f"{op_id}: vCenter answered HTTP {status} when MEHO tried to {action}. {hint}",
+        http_status=status,
+        upstream_message=detail,
+        remediation=hint,
+    )
+
+
+def _read_error(
+    username: str, *, op_id: str | None = None
+) -> Callable[[httpx.HTTPStatusError], Exception]:
+    """The read rule: a 404 is ``not_found``.
+
+    With *op_id*, a refusal (see :func:`_group_hint`) becomes an error that
+    names the SSO group. Any other error answer, a 401 too, is raised as it
+    is, so the dispatcher still logs in again on a 401.
+    """
 
     def convert(exc: httpx.HTTPStatusError) -> Exception:
         if exc.response.status_code == 404:
             return ConnectorResourceNotFoundError(
                 [username], f"vCenter has no local account named {username!r}"
             )
+        if op_id is not None:
+            refused = _refused_read_error(
+                exc, op_id=op_id, action=f"read the local account {username!r}"
+            )
+            if refused is not None:
+                return refused
         return exc
 
     return convert
@@ -351,12 +430,20 @@ async def local_account_list_impl(
 
     ``GET /appliance/local-accounts`` gives the user names only, so each name
     is read with ``GET /appliance/local-accounts/{username}``. A failed list
-    read raises (a 403 means the service account lacks the appliance role). A
-    failed account read gives a row with null fields and a ``read_note``.
+    read raises; a 403 raises an error that names the SSO group. A failed
+    account read gives a row with null fields and a ``read_note`` (with the
+    SSO group hint for a refusal).
     """
     del params  # the list takes no parameters
     path = await connector.mount_op_path(target, _LIST_PATH, operator)
-    names = _unwrap(await connector._get_json(target, path, operator=operator))
+    names = _unwrap(
+        await _vendor_call(
+            connector._get_json(target, path, operator=operator),
+            lambda exc: (
+                _refused_read_error(exc, op_id=LIST_OP_ID, action="list the local accounts") or exc
+            ),
+        )
+    )
     if not isinstance(names, list):
         raise RuntimeError(
             f"{LIST_OP_ID}: expected a list of user names from GET {_LIST_PATH}, "
@@ -367,7 +454,9 @@ async def local_account_list_impl(
         try:
             row = await _read_account(connector, operator, target, username)
         except (httpx.HTTPError, ConnectorResourceNotFoundError) as exc:
-            accounts.append(_unread_row(username, f"the read failed: {_failure_text(exc)}"))
+            note = f"the read failed: {_failure_text(exc)}"
+            hint = _group_hint(exc.response) if isinstance(exc, httpx.HTTPStatusError) else None
+            accounts.append(_unread_row(username, f"{note}. {hint}" if hint else note))
             continue
         row["read_note"] = None
         accounts.append(row)
@@ -381,8 +470,14 @@ async def local_account_get_impl(
     target: VsphereTargetLike,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    """``vmware.appliance.local_account.get``: one account row; a missing account is not_found."""
-    return await _read_account(connector, operator, target, _checked_username(params))
+    """``vmware.appliance.local_account.get``: one account row; a missing account is not_found.
+
+    A refusal raises an error that names the SSO group (see :func:`_read_error`).
+    """
+    username = _checked_username(params)
+    return await _read_account(
+        connector, operator, target, username, on_error=_read_error(username, op_id=GET_OP_ID)
+    )
 
 
 # ---------------------------------------------------------------------------

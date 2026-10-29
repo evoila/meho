@@ -52,7 +52,7 @@ from pathlib import Path
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
-from meho_backplane.api.v1 import service_grants
+from meho_backplane.api.v1 import service_grants, service_read_scopes
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.main import app
 from meho_backplane.mcp import registry as mcp_registry
@@ -116,6 +116,22 @@ _SERVICE_GRANTS_CLI_VERBS: dict[tuple[str, str], str] = {
     ("GET", _SERVICE_GRANTS_PREFIX + "/{grant_id}"): "meho service-principals grants show",
     ("POST", _SERVICE_GRANTS_PREFIX): "meho service-principals grants create",
     ("DELETE", _SERVICE_GRANTS_PREFIX + "/{grant_id}"): "meho service-principals grants revoke",
+}
+
+_SERVICE_READ_SCOPES_PREFIX = "/api/v1/service-principals/read-scopes"
+
+#: The read-scope routes (#4992) and their ``meho`` verbs, same contract as
+#: the grants table above.
+_SERVICE_READ_SCOPES_CLI_VERBS: dict[tuple[str, str], str] = {
+    ("PUT", _SERVICE_READ_SCOPES_PREFIX + "/{principal_sub}"): (
+        "meho service-principals read-scope set"
+    ),
+    ("GET", _SERVICE_READ_SCOPES_PREFIX + "/{principal_sub}"): (
+        "meho service-principals read-scope show"
+    ),
+    ("DELETE", _SERVICE_READ_SCOPES_PREFIX + "/{principal_sub}"): (
+        "meho service-principals read-scope clear"
+    ),
 }
 
 # backend/tests/<this> -> parents[2] == repo root
@@ -298,6 +314,20 @@ def test_service_grants_rest_plane_has_cli_parity() -> None:
     assert routes == set(_SERVICE_GRANTS_CLI_VERBS)
     cli_reference = _CLI_REFERENCE.read_text(encoding="utf-8")
     for verb in _SERVICE_GRANTS_CLI_VERBS.values():
+        assert f"#### `{verb}`" in cli_reference, f"{verb} is missing from the CLI reference"
+
+
+def test_service_read_scopes_rest_plane_has_cli_parity() -> None:
+    """Every service-principal read-scope REST route has its `meho` CLI verb (#4992)."""
+    routes = {
+        (method, route.path)
+        for route in service_read_scopes.router.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods or ()
+    }
+    assert routes == set(_SERVICE_READ_SCOPES_CLI_VERBS)
+    cli_reference = _CLI_REFERENCE.read_text(encoding="utf-8")
+    for verb in _SERVICE_READ_SCOPES_CLI_VERBS.values():
         assert f"#### `{verb}`" in cli_reference, f"{verb} is missing from the CLI reference"
 
 

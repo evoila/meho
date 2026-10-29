@@ -42,15 +42,18 @@ from uuid import UUID
 import httpx
 
 from meho_backplane.connectors import OperationResult, ResultHandle
+from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
+from meho_backplane.redaction.secret_fields import scrub_secret_fields_in_text
 
 if TYPE_CHECKING:
     from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
 
 __all__ = [
+    "READ_SCOPE_DENIED_CODE",
     "UPSTREAM_SAID",
     "VAULT_SAID",
     "result_already_resumed",
@@ -89,6 +92,7 @@ __all__ = [
     "result_vault_credentials_read_error",
     "result_write_capability_denied",
     "status_code_for_result",
+    "unknown_connector_message",
     "wrap_ok_result",
 ]
 
@@ -145,9 +149,14 @@ def _sanitize_free_text(text: str, *, cap: int = _EXC_MESSAGE_CAP) -> str:
 
     *cap* defaults to :data:`_EXC_MESSAGE_CAP`; upstream body text passes
     the larger :data:`_UPSTREAM_MESSAGE_CAP` (#3567).
+
+    Before the Tier-1 pass, the value of each quoted secret-named pair is
+    replaced (``"password": "..."`` in a vendor's JSON error body, #5031):
+    the Tier-1 patterns need the name right before the ``:`` and do not see
+    it behind a quote.
     """
     try:
-        redacted = redact(text, get_default_policy()).redacted
+        redacted = redact(scrub_secret_fields_in_text(text), get_default_policy()).redacted
     except Exception:  # fail-closed: never leak, never raise on the error path
         return _TEXT_WITHHELD
     if not isinstance(redacted, str):  # pragma: no cover -- str in, str out
@@ -207,26 +216,50 @@ def result_unknown_op(
     )
 
 
-def result_unknown_connector(connector_id: str, op_id: str, duration_ms: float) -> OperationResult:
+def unknown_connector_message(connector_id: str, did_you_mean: list[str]) -> str:
+    """Return the text of every unknown-connector error (#4136).
+
+    Names the close ids from
+    :func:`~meho_backplane.operations._lookup.close_connector_ids` when
+    there are any, so the caller can fix the call at once. With none, it
+    points at ``meho_connector_list``.
+    """
+    text = (
+        f"unknown connector_id {connector_id!r}. Expected <impl_id>-<version> "
+        "(e.g. 'vmware-rest-9.0', 'vault-1.x')."
+    )
+    if did_you_mean:
+        return f"{text} Did you mean: {', '.join(did_you_mean)}?"
+    return f"{text} Call `meho_connector_list` to see the ids."
+
+
+def result_unknown_connector(
+    connector_id: str,
+    op_id: str,
+    duration_ms: float,
+    *,
+    did_you_mean: list[str] | None = None,
+) -> OperationResult:
     """The *connector_id* matches no connector the caller can see (#4031).
 
     Same meaning as the ``unknown_connector`` answer of
     ``list_operation_groups`` / ``search_operations``: no operation rows
     and no registered connector class for the parsed id. Before #4031 this
     case surfaced as ``unknown_op`` with ``known_op_count: 0``, which
-    hid that the connector id itself was wrong.
+    hid that the connector id itself was wrong. *did_you_mean* is the
+    list of close ids (#4136), also in ``extras.did_you_mean``.
     """
+    found = did_you_mean or []
     return OperationResult(
         status="error",
         op_id=op_id,
-        error=(
-            f"unknown_connector: unknown connector_id {connector_id!r}. Expected "
-            "<impl_id>-<version> (e.g. 'vmware-rest-9.0', 'vault-1.x'). The id is "
-            "mistyped or the connector is not registered on this deploy. Use "
-            "meho_connector_list to see the connector ids."
-        ),
+        error=f"unknown_connector: {unknown_connector_message(connector_id, found)}",
         duration_ms=duration_ms,
-        extras={"error_code": "unknown_connector", "connector_id": connector_id},
+        extras={
+            "error_code": "unknown_connector",
+            "connector_id": connector_id,
+            "did_you_mean": found,
+        },
     )
 
 
@@ -321,18 +354,25 @@ def result_target_required(op_id: str, duration_ms: float) -> OperationResult:
     :exc:`RuntimeError` in
     :func:`~meho_backplane.operations._branches.dispatch_typed` (which
     stayed a loud internal signal for genuine instance-cache faults).
+    ``dispatch`` and ``preview_dispatch`` also return it up front for
+    any op that needs a target (``descriptor_requires_target``, which
+    covers every ``ingested`` op) when none was given (#4139).
 
-    Invalid-params-style shape — ``status="error"``,
-    ``error="target_required: <op> requires a target"``, ``error_code``
-    in ``extras`` — so callers that already branch on
-    ``result.extras["error_code"]`` for ``invalid_params`` extend the
-    same pattern. The op id rides in ``extras`` so an agent can name the
-    op it must re-call with a target.
+    Invalid-params-style shape — ``status="error"``, ``error`` naming
+    the missing target, ``error_code`` in ``extras`` — so
+    callers that already branch on ``result.extras["error_code"]`` for
+    ``invalid_params`` extend the same pattern. The message names
+    ``list_targets`` so a model knows where a target name comes from
+    (#4139). The op id rides in ``extras`` so an agent can name the op it
+    must re-call with a target.
     """
     return OperationResult(
         status="error",
         op_id=op_id,
-        error=f"target_required: {op_id!r} requires a target; none was supplied",
+        error=(
+            "target_required: this operation needs a target; "
+            "call list_targets and pass a target name"
+        ),
         duration_ms=duration_ms,
         extras={"error_code": "target_required", "op_id": op_id},
     )
@@ -581,6 +621,12 @@ def result_handler_unreachable(
     )
 
 
+#: Stable error code for a service-principal read refused by its read
+#: scope (#4992). The policy gate starts the deny reason with this code
+#: and a colon; :func:`result_denied` then reports it as ``error_code``.
+READ_SCOPE_DENIED_CODE: Final[str] = "read_scope_denied"
+
+
 def result_denied(op_id: str, reason: str, duration_ms: float) -> OperationResult:
     """Policy gate denied the call.
 
@@ -589,19 +635,24 @@ def result_denied(op_id: str, reason: str, duration_ms: float) -> OperationResul
     because the op is ``dangerous`` and no explicit grant overrides it,
     or because an explicit ``deny`` row was found, or because the
     principal's role ceiling forced the verdict to ``deny`` (for an
-    agent principal), or because a human/service principal hit a
-    ``requires_approval`` op (which is hard-denied for non-agents).
+    agent principal), or because a service principal's read scope does
+    not cover the call's target (#4992).
 
     The ``reason`` string is agent-readable: it names the verdict
     source and any ceilings that were applied so an agent can diagnose
-    the refusal without human intervention.
+    the refusal without human intervention. ``error_code`` is ``denied``,
+    or :data:`READ_SCOPE_DENIED_CODE` when the reason starts with that
+    code (the gate's stable marker for a read-scope refusal).
     """
+    error_code = "denied"
+    if reason.startswith(f"{READ_SCOPE_DENIED_CODE}:"):
+        error_code = READ_SCOPE_DENIED_CODE
     return OperationResult(
         status="denied",
         op_id=op_id,
         error=f"denied: {reason}",
         duration_ms=duration_ms,
-        extras={"error_code": "denied", "reason": reason},
+        extras={"error_code": error_code, "reason": reason},
     )
 
 
@@ -1622,10 +1673,6 @@ def _vi_json_fault(response: httpx.Response) -> tuple[str, str | None] | None:
 
 def _soap_fault(text: str) -> tuple[str | None, str | None] | None:
     """``(fault_type, faultstring)`` of a SOAP ``<soapenv:Fault>`` body, else ``None``."""
-    # Imported here, not at module top: the vmware_rest package imports the
-    # operations package, so a top-level import would be circular.
-    from meho_backplane.connectors.vmware_rest.soap import parse_soap_fault
-
     try:
         fault = parse_soap_fault(text)
     except Exception:  # never raise on the error path (e.g. a defusedxml refusal)
@@ -1641,7 +1688,7 @@ def _http_upstream_fault(response: httpx.Response) -> dict[str, str | None] | No
     Two body shapes are recognised: a VI/JSON fault from vCenter
     (``{"_typeName": ..., "faultstring": ...}``) and a SOAP
     ``<soapenv:Fault>`` from the ESXi / vim25 SOAP path (parsed by
-    :func:`~meho_backplane.connectors.vmware_rest.soap.parse_soap_fault`).
+    :func:`~meho_backplane.connectors._shared.soap_fault.parse_soap_fault`).
     Any other body yields ``None``. The fault type is the most useful field
     for triage (``NotAuthenticated`` vs ``InvalidLogin`` vs
     ``InvalidArgument``), so it gets its own field instead of being buried in
@@ -1690,16 +1737,13 @@ def _add_attached_upstream_fault(extras: dict[str, Any], exc: BaseException) -> 
 
     On the ESXi SOAP path the connector parses the fault itself and raises a
     plain :exc:`RuntimeError` or a ``ConnectorAuthError`` with the parsed fault
-    attached (:func:`~meho_backplane.connectors.vmware_rest.soap.attach_soap_fault`).
+    attached (:func:`~meho_backplane.connectors._shared.soap_fault.attach_soap_fault`).
     No :exc:`httpx.HTTPStatusError` reaches the builders there, so this reads the
     attached fault instead. Same redact-then-cap steps as the HTTP case. Does
     nothing when no fault is attached, or when the key is already set.
     """
     if "upstream_fault" in extras:
         return
-    # Imported here for the same reason as in :func:`_soap_fault`.
-    from meho_backplane.connectors.vmware_rest.soap import soap_fault_of
-
     fault = soap_fault_of(exc)
     if fault is None or (fault.fault_type is None and fault.faultstring is None):
         return

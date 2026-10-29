@@ -173,6 +173,104 @@ policy cannot disable it), followed by the length cap (256 chars, or
 2 KB for upstream body text, #3567). Redaction
 runs **before** the cap so a secret straddling the cap boundary
 cannot survive truncation as an unmatchable cleartext fragment.
+Since #5031 the same sanitizer first replaces the value of each quoted
+secret-named pair in the text (see "Errors, diagnostics and saved test
+captures" below).
+
+## Errors, diagnostics and saved test captures (#5031)
+
+The secret removal also covers what is not a normal result: error texts,
+HTTP diagnostics, traces and the test captures saved in the repository.
+
+**One name rule for secret fields.** The Tier-1 patterns find a secret by
+a label inside one string (`password=...`). A vendor answer often holds a
+secret as a field: `{"password": "..."}`, or the same pair as JSON text in
+an error body, where a quote sits between the name and the `:`.
+`redaction/secret_fields.py` closes both cases:
+
+- `scrub_secret_fields(node)` walks a dict / list / str. An entry whose key
+  is a secret name gets `[REDACTED:param_name]` in place of its value
+  (a whole sub-tree, too). Each string goes through the text step.
+- `scrub_secret_fields_in_text(text)` replaces the value of each quoted
+  name-value pair whose name is a secret name. The name and the value may
+  each use `"` or `'` (JSON `"name": "value"`, Python `'name': 'value'`,
+  and Python's `'name': "it's"` for a value that holds a single quote), and
+  the pair may be escaped JSON inside a JSON string (`\"name\": \"value\"`).
+  A small scanner reads the value from the opening quote to the closing
+  quote and steps over each escape, so a quote inside the value does not
+  end it, and there is no length limit. The value may also be an object or
+  a list (`"credentials": {"value": "..."}`, `"password": ["..."]`): the
+  scanner walks it to its closing bracket (a bracket inside a quoted string
+  does not count) and replaces the whole object or list with the quoted
+  marker, as the walk does for data. A value with no closing quote or
+  bracket (a diagnostic cut by a length cap) is replaced up to the end of
+  the text. `iter_quoted_secret_fields(text)` lists the same pairs; the
+  capture check uses it.
+
+The name rule is the shared `broadcast.events.is_secret_param_name`
+(`password`, `encryptedPassword`, `sessionToken`, `client_secret`,
+`licenseKey`, ...), the one the broadcast scrub and the approval echo use.
+Numbers, booleans and `null` stay. A value an earlier step already masked
+(`[REDACTED:...]`, a trace marker, `***`) stays, so its label is kept.
+
+**Where it runs.**
+
+| Place | What runs |
+| --- | --- |
+| Error free text (`operations/_errors.py::_sanitize_free_text`) | the text step, then Tier-1, then the length cap |
+| Every error result (`dispatcher._audit_error_and_return` → `operations/_vendor_text.py::redact_error_result`) | the walk, then Tier-1 (default policy, pinned), over every string and field of `error`, `extras` and `result`; this covers the fields copied straight from the vendor (`validation_errors` of an HTTP 422, `permission_headers` of an HTTP 403), any field a connector adds, and the vendor's answer in `result` of an error a handler returns or of a multi-step operation's error envelope. If redaction fails, the result keeps only `error_code` and a fixed text: `result` and the result handle are dropped and `delivery` is `unavailable`. The audit row and the stored approval result get the cleaned copy. |
+| Multi-step error envelope (`dispatcher._reduce_and_audit_composite_error` → `redact_error_payload`) | the walk, then Tier-1 (default policy, pinned), **before** the reducer stores the full envelope behind a result handle, so the stored rows, the handle's sample rows and the inline summary are all clean. The envelope went through the operator's own policy first, and a shadow-mode policy leaves every secret in place; the cleanup of the inline result runs later and cannot reach the stored copy. If this cleanup fails, the envelope is withheld like a reducer failure (`delivery` is `unavailable`) and nothing is stored. |
+| Trace bodies and header values (`flight_recorder/_content.py::scrub_content`) | the walk, then the trace's credential-shape policy, for every recorded request and answer body |
+
+**What does not change.** The normal result path: a secret-named field in a
+normal answer is removed only for a credential read (see "credential_read
+response scrub" above), and the audit row's `raw_payload` keeps the raw
+answer for replay. The row of a multi-step error envelope keeps its
+`raw_payload` for the same reason: the handler returned the envelope like a
+normal answer. A connector's own trace mask
+(`HttpConnector.trace_response_body`) still runs first.
+
+**The shared test.** `backend/tests/test_redaction_planted_secrets.py`
+plants a token, a password field and an encrypted password field. For
+every registered connector it runs one made-up operation through the real
+dispatcher: once with a normal answer and once for each error kind (HTTP
+500, 422, 403 and 401 with a JSON body, a refused session login, a raised
+error whose text holds the vendor's JSON or a Python dict, an error result
+the handler returns with the vendor's answer in `result`, and a multi-step
+operation's error envelope with the vendor's answer inside). It checks the
+caller's result, the committed audit row and every MEHO log line. A second
+test hands a normal answer and error answers, with an `Authorization`
+header and a password in the request body, to the trace redaction
+(`redact_span`) for every connector and checks the recorded span. The
+normal answer holds only labelled secrets, for the reason above. A new
+connector is covered as soon as it is registered.
+
+`backend/tests/test_operations_composite_error_redaction.py` drives the
+multi-step error envelope through the real JSONFlux reducer under a
+shadow-mode policy and checks the inline result, the handle's sample rows,
+the stored rows and the audit row.
+
+**The capture check.** `backend/tests/test_capture_secret_scan.py` scans
+every saved test capture: each file under `backend/tests/fixtures/` and
+`backend/tests/data/` that is not Python. It fails on:
+
+- the marker of the planted values (`planted-secret-`), so a value planted
+  by a test never ends up in a saved capture;
+- common secret shapes: the Tier-1 credential patterns (not `kubeconfig`,
+  which also matches any rendered `ConfigMap`), a private key block, an AWS
+  access key id, GitHub and Slack tokens;
+- a secret-named field with a value, as a quoted pair (JSON, Python with
+  either quote, escaped JSON; found by `iter_quoted_secret_fields`), as an
+  object or a list under a secret name (it counts when a string value
+  inside looks like a secret), as YAML or as XML.
+
+It skips values that are clearly not secrets: a `<placeholder>`, a masked
+value, a `${...}` or `{{ ... }}` reference, a URL with no user part, a
+value that names a secret field, and values shorter than 8 characters.
+The redaction fixtures (`backend/tests/redaction_fixtures/`) are not
+scanned: they hold made-up secret shapes on purpose. The check runs in the
+required unit test job, and its own tests prove that it fails on a planted
+capture.
 
 ## Action semantics
 
@@ -870,7 +968,7 @@ exhaust; under-exclusion leaks.
 | --- | --- | --- |
 | secret-bearing (credential-read / -mint / -write) | **single-sourced** with `broadcast.events.classify_op` (`_CREDENTIAL_*_OPS`) | never |
 | secret-bearing (generic / tag-declared) | broadening `SECRET_FAMILY_PATTERNS` globs + token-split `SECRET_FAMILY_TAGS` | never |
-| destructive / delete-shaped | **single-sourced** with the grant guard's `Settings.service_grant_delete_shaped_patterns` + HTTP `DELETE` + `destructive` tag + a vendor delete action name (`Destroy`, `Delete`, `Remove`, `Unregister`; the ingest parser's word list in `meho_backplane/delete_names.py`, #4632) | never |
+| destructive / delete-shaped | **single-sourced** with the grant guard's `Settings.service_grant_delete_shaped_patterns` + HTTP `DELETE` + `destructive` tag + a vendor delete action name (`Destroy`, `Delete`, `Remove`, `Unregister`, also after a vSAN prefix, or an `action=delete` query; the ingest parser's word list in `meho_backplane/delete_names.py`, #4632) | never |
 | everything else | — | yes (subject to F2.2) |
 
 The destructive family is **single-sourced** with the delete-shaped

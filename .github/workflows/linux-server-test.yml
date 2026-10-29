@@ -2,9 +2,10 @@
 # Copyright (c) 2026 evoila Group
 
 # Tests of the form-2 scripts in deploy/linux-server/: the install script
-# (#4733), its host firewall (#4635), and the scripts that build and check
-# the download (#4734). Also of the appliance build scripts in
-# deploy/appliance/ (#4811): the clean script and the OVF rewrite.
+# (#4733), its host firewall (#4635), RKE2's CIS profile (#4636), and the
+# scripts that build and check the download (#4734). Also of the appliance
+# build scripts in deploy/appliance/ (#4811): the clean script and the OVF
+# rewrite.
 #
 # shellcheck checks every shell script there: the *.sh files and any file
 # that starts with a shell shebang, so a script without an extension (for
@@ -14,6 +15,9 @@
 # stub registry tools and small image archives built in Python. They need
 # no root, no RKE2 and no network. One step checks that the upstream
 # local-path manifest the tests compare against is the real v0.0.37 file.
+# Another checks the copies of RKE2's CIS files against the source of the
+# pinned RKE2 version, and that this version lets traffic in to Traefik
+# under the CIS profile.
 #
 # The firewall tests also check the MEHO nftables file with the real nft
 # and kernel, in a new user and network namespace, so the runner's own
@@ -118,6 +122,44 @@ jobs:
           curl -fsSL \
             https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.37/deploy/local-path-storage.yaml \
             | cmp - deploy/linux-server/tests/fixtures/local-path-storage-v0.0.37.yaml
+
+      - name: Check the CIS fixtures and the Traefik rule of the pinned RKE2
+        # The install's pod security file is RKE2's own file for its CIS
+        # profile plus one namespace, and its kernel settings file is RKE2's
+        # own (#4636). The tests compare against copies in tests/fixtures/.
+        # RKE2 keeps the pod security file in Go source (pkg/rke2/psa.go),
+        # so this step cuts it out of the source of the RKE2 version that
+        # packaging/common.sh pins. It also checks that this version still
+        # creates the network policy that lets traffic from every address
+        # in to Traefik's ports web and websecure under the profile
+        # (pkg/rke2/np.go). Without it the console does not load.
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^readonly RKE2_VERSION=//p' deploy/linux-server/packaging/common.sh)
+          base="https://raw.githubusercontent.com/rancher/rke2/${version//+/%2B}"
+          fixtures=deploy/linux-server/tests/fixtures
+          work=$(mktemp -d)
+          for file in pkg/rke2/psa.go pkg/rke2/np.go bundle/share/rke2/rke2-cis-sysctl.conf; do
+            curl -fsSL -o "${work}/${file##*/}" "${base}/${file}"
+          done
+          awk '/psRestrictedConfig := `/ { on = 1; sub(/.*`/, ""); print; next }
+               on && /`/ { sub(/`.*/, ""); print; exit }
+               on { print }' "${work}/psa.go" \
+            | cmp - "${fixtures}/rke2-pod-security-cis.yaml"
+          cmp "${work}/rke2-cis-sysctl.conf" "${fixtures}/rke2-cis-sysctl.conf"
+          policy=$(awk '/name: *"default-network-traefik-policy"/ { on = 1 }
+                        on && /name: *"/ && !/traefik-policy/ { exit }
+                        on { print }' "${work}/np.go")
+          for fact in '"app.kubernetes.io/name": "rke2-traefik"' 'StrVal: "web"' 'StrVal: "websecure"'; do
+            if ! grep -qF -- "${fact}" <<<"${policy}"; then
+              echo "::error::RKE2 ${version} has no CIS network policy for Traefik with ${fact} (pkg/rke2/np.go)"
+              exit 1
+            fi
+          done
+          if grep -qF 'From:' <<<"${policy}"; then
+            echo "::error::RKE2 ${version} lets only some sources reach Traefik under the CIS profile (pkg/rke2/np.go)"
+            exit 1
+          fi
 
       - name: Install nftables for the firewall file check
         # Same `sudo -n apt-get` pattern as the php-cli step in ci.yml. A

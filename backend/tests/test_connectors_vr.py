@@ -23,7 +23,7 @@ What is covered, with a respx-mocked appliance and no ingested catalog:
 * no password or session id in a result; registration shape; fingerprint.
 
 The login, session cache and API file read are shared with the SRM
-connector (``connectors/_shared/dr_rest.py``, ``dr_api_file.py``); their
+connector (``connectors/vmware_shared/dr_rest.py``, ``dr_api_file.py``); their
 edge cases are tested in ``test_connectors_srm.py``.
 
 Fixture values are made up; no real host, user or id appears here.
@@ -46,6 +46,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.api_file_secrets import REDACTED
 from meho_backplane.connectors.registry import (
     all_connectors_v2,
     clear_registry,
@@ -71,7 +72,8 @@ from meho_backplane.connectors.vr import (
 )
 from meho_backplane.connectors.vr.connector import API_FILES
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import AuditLog, EndpointDescriptor
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
@@ -681,3 +683,121 @@ async def test_auth_headers_rejects_other_auth_models() -> None:
     target.auth_model = "per_user"
     with pytest.raises(NotImplementedError, match="per_user"):
         await connector.auth_headers(target, _make_operator())
+
+
+# ---------------------------------------------------------------------------
+# The flight recorder and the 401 body: only the checked copy leaves the read
+# ---------------------------------------------------------------------------
+
+_RECORDER_SECRET = "made-up-recorder-secret"
+_SECRET_YAML = (
+    "openapi: 3.0.1\ninfo:\n  title: made-up API\n  version: 2.0.0\n"
+    f"  x-example:\n    password: {_RECORDER_SECRET}\npaths: {{}}\n"
+)
+
+
+def _recorded_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Catch what the read hands the flight recorder."""
+    recorded: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        flight_recorder_capture,
+        "record_vendor_call",
+        lambda _span, **kwargs: recorded.append(kwargs),
+    )
+    return recorded
+
+
+def _file_calls(recorded: list[dict[str, Any]], path: str) -> list[dict[str, Any]]:
+    return [call for call in recorded if call["response"].url.path == path]
+
+
+async def _audit_payloads(op_id: str) -> list[str]:
+    async with get_sessionmaker()() as fresh:
+        rows = (await fresh.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
+    return [json.dumps(row.payload, default=str) for row in rows]
+
+
+@pytest.mark.asyncio
+async def test_flight_recorder_gets_the_checked_file_not_the_password(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded = _recorded_calls(monkeypatch)
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_info(mock)
+        mock.get(_VR_FILE).respond(200, text=_SECRET_YAML)
+        result = await _dispatch("vr.api_file.get", {"file": "vr"})
+
+    assert result.status == "ok", result.error
+    (call,) = _file_calls(recorded, _VR_FILE)
+    assert REDACTED.encode() in call["response_body"]
+    assert _RECORDER_SECRET.encode() not in call["response_body"]
+
+
+@pytest.mark.asyncio
+async def test_flight_recorder_gets_no_body_when_the_file_is_refused(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded = _recorded_calls(monkeypatch)
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_info(mock)
+        mock.get(_VR_FILE).respond(200, text="info: {password: " + _RECORDER_SECRET)
+        result = await _dispatch("vr.api_file.get", {"file": "vr"})
+
+    assert result.status == "error"
+    (call,) = _file_calls(recorded, _VR_FILE)
+    assert call["response_body"] == b""
+
+
+@pytest.mark.asyncio
+async def test_flight_recorder_gets_no_body_when_the_stored_record_does_not_fit(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file fits the download limit, but its stored record does not: no body is recorded."""
+    recorded = _recorded_calls(monkeypatch)
+    monkeypatch.setenv("RESULT_HANDLE_MAX_RECORD_BYTES", "1000")
+    get_settings.cache_clear()
+    await _register_and_resolve(_stub_embedding)
+    data = b'"' + b'\\"' * 494 + b'"'
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_info(mock)
+        mock.get(_VR_FILE).respond(200, content=data)
+        result = await _dispatch("vr.api_file.get", {"file": "vr"})
+
+    assert result.status == "error"
+    assert "does not fit in one result handle" in result.extras["exception_message"]
+    (call,) = _file_calls(recorded, _VR_FILE)
+    assert call["response"].status_code == 200
+    assert call["response_body"] == b""
+
+
+@pytest.mark.asyncio
+async def test_401_body_is_checked_before_it_is_raised_and_the_retry_still_runs(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded = _recorded_calls(monkeypatch)
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        login = mock.post(_SESSION)
+        login.side_effect = [_login("vr-session-1"), _login("vr-session-2")]
+        mock.get(_INFO).respond(200, json=_INFO_PAYLOAD)
+        route = mock.get(_VR_FILE).respond(401, text=_SECRET_YAML)
+        result = await _dispatch("vr.api_file.get", {"file": "vr"})
+
+    assert result.status == "error"
+    assert "401" in (result.error or "")
+    assert login.call_count == 2
+    assert route.call_count == 2
+    rendered = (
+        (result.error or "") + json.dumps(result.result) + json.dumps(result.extras, default=str)
+    )
+    assert _RECORDER_SECRET not in rendered
+    calls = _file_calls(recorded, _VR_FILE)
+    assert len(calls) == 2
+    for call in calls:
+        assert REDACTED.encode() in call["response_body"]
+        assert _RECORDER_SECRET.encode() not in call["response_body"]
+    payloads = await _audit_payloads("vr.api_file.get")
+    assert payloads
+    assert all(_RECORDER_SECRET not in payload for payload in payloads)

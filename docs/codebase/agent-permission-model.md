@@ -31,8 +31,8 @@ This is what happens today when no grant matches. In this table:
 
 | Safety level | Agent login, no grant | Person | Service account |
 |---|---|---|---|
-| `safe` | runs at once | runs at once | runs at once |
-| `caution` | waits for approval | runs at once | a change waits for approval unless a standing grant covers it; a read runs at once |
+| `safe` | runs at once | runs at once | runs at once; a person can limit it to named targets with a read scope (#4992, see below) |
+| `caution` | waits for approval | runs at once | a change waits for approval unless a standing grant covers it; a read runs at once (inside the read scope, when one is set) |
 | `dangerous` | refused (a grant can change this to "waits for approval") | runs at once | waits for approval unless a standing grant covers it |
 | `destructive` | always refused | waits for approval | always waits for approval |
 
@@ -60,6 +60,16 @@ never a `destructive` one.
 
 An agent with the `read_only` role never runs anything at once: its best
 result is "waits for approval" (see step 5 below).
+
+**Read scope for a service account (#4992).** A service account reads every
+target of its tenant. A person can narrow that: a read scope is a list of
+targets (ids or selectors) and, if wanted, a "no target" entry. When a scope
+is set, a call that would run at once (a `safe` op, or a read-only
+`caution` op) on a target outside the list is refused with the error code
+`read_scope_denied` and one audit row. A call without a target is refused
+unless the scope has the "no target" entry. Changes keep the rules above
+(grants or approval). Without a scope nothing changes. See
+[service-principal-grants.md](service-principal-grants.md#read-scope-limit-a-service-principals-reads-to-named-targets-4992).
 
 ## Key types
 
@@ -107,8 +117,11 @@ One row = one permission grant for a principal.
 G11.2-T1):
 
 - **Every kind that is not `agent`** (`user`, `service`, `runner`) —
-  `_non_agent_verdict` (`_validate.py`). It never returns `deny`. It returns
-  `needs-approval` in these cases, in this order:
+  `_non_agent_verdict` (`_validate.py`). It returns `deny` in one case
+  only: a service account with a read scope, on a read that would run at
+  once but whose target is outside the scope (#4992,
+  `_service_read_scope_denial`). It returns `needs-approval` in these
+  cases, in this order (`_non_agent_park_reason`):
   1. `safety_level=destructive` — for every person and every service
      account, even when `requires_approval` is false (#3198). No standing
      grant can clear it.
@@ -143,8 +156,10 @@ G11.2-T1):
   stricter one wins. The caller's verdict is skipped when it cannot change
   the outcome: a hosted-agent `deny` returns at once, and a hosted-agent
   `needs-approval` returns at once for a person or service caller, because
-  the non-agent branch never returns `deny`. This also means a standing
-  grant is recorded as used only when the call runs. An `agent`-kind caller
+  the non-agent branch denies only a read that would run at once (a call
+  that waits for a person's approval is not limited by a read scope). This
+  also means a standing grant is recorded as used only when the call runs.
+  An `agent`-kind caller
   is still checked in that case, so its own `deny` grant refuses the call
   instead of parking it. The rule in one line: a direct run may do only
   what both the caller and the hosted agent may do. See `agent-runtime.md`
@@ -311,7 +326,10 @@ a `result_status="pending"` filter, so a waiting call is not counted as `ok`.
 - `backend/src/meho_backplane/auth/permissions.py`
 - `backend/src/meho_backplane/auth/jwt.py` — `_extract_client_id` (surfaces the agent clientId)
 - `backend/src/meho_backplane/operations/_validate.py` — `policy_gate`,
-  `_non_agent_verdict`, `_service_safety_gate_reason`
+  `_non_agent_verdict`, `_service_safety_gate_reason`,
+  `_service_read_scope_denial` (#4992)
+- `backend/src/meho_backplane/operations/service_read_scopes.py` — the
+  read scope store and its call-time check
 - `backend/src/meho_backplane/operations/dispatcher.py` — `_handle_needs_approval`
 - [agent-permission-grants.md](agent-permission-grants.md) — how to list,
   create and revoke grants (REST, CLI, and the operator-plane MCP tools

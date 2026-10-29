@@ -31,11 +31,11 @@ from typing import Any, Final
 
 from defusedxml.ElementTree import fromstring
 
+from meho_backplane.connectors._shared.soap_fault import find_body as _find_body
+from meho_backplane.connectors._shared.soap_fault import find_child as _find_child
+from meho_backplane.connectors._shared.soap_fault import local_name as _local
 from meho_backplane.connectors.vmware_rest.soap import (
     _envelope,
-    _find_body,
-    _find_child,
-    _local,
     _parse_returnval,
     _soap_val_to_json,
     _this,

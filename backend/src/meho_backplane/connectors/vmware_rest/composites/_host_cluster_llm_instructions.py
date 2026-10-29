@@ -268,6 +268,35 @@ HOST_CLUSTER_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
             "the host. On not_in_cluster, move the VMs with vm.migrate and a target_host."
         ),
     },
+    _P + "host.maintenance.exit": {
+        "when_to_call": (
+            "Call to end maintenance mode on one ESXi host, for example after hardware "
+            "work or after host.evacuate, so the host can run VMs again. A second person "
+            "must approve the call."
+        ),
+        "preconditions": (
+            "The host must be connected to vCenter (else not_connected, no change). The "
+            "VMs that must run on the host must be powered on elsewhere or stay off until "
+            "the host is back. A host that is not in maintenance mode answers unchanged "
+            "and sends nothing, so the call is safe to run twice."
+        ),
+        "parameter_hints": {
+            "host": "Host moid, e.g. 'host-21'.",
+        },
+        "output_shape": (
+            "{status: exited|unchanged|not_connected|timeout, host, name, "
+            "connection_state, in_maintenance_mode, ha_state, maintenance_task, guidance, "
+            "issues}. On exited the host left maintenance mode and in_maintenance_mode is "
+            "false. On timeout the exit task still runs under maintenance_task; the call "
+            "did not fail. A faulted exit task makes the call fail, with the fault text."
+        ),
+        "next_step": (
+            "On exited, read the vSAN object health (vmware.host.vsan_health) until it is green "
+            "before you move VMs onto the host; vSAN copies back the data that changed "
+            "while the host was away. On timeout, check the task with vmware.tasks.recent "
+            "and read the host again. On not_connected, reconnect the host first."
+        ),
+    },
     _P + "host.service_control": {
         "when_to_call": (
             "Call to start, stop or restart one ESXi host service, and optionally set "

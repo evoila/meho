@@ -31,11 +31,15 @@ spec:
         {{- end }}
     spec:
       automountServiceAccountToken: false
+      {{- with include "meho.core.imagePullSecrets" . }}
+      imagePullSecrets:
+        {{- . | nindent 8 }}
+      {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: broadcast
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "meho.core.image" (dict "image" .Values.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- if .Values.auth.enabled }}
           # With auth on, the Secret-sourced password must reach Valkey

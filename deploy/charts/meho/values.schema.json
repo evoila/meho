@@ -468,6 +468,23 @@
         "openshift": {
           "type": "boolean",
           "description": "Set to true on OpenShift. The built-in core parts then leave out `runAsUser`, `runAsGroup` and `fsGroup`, so OpenShift can pick the user id from the project's range. Default false: the pods run with fixed, non-root user ids."
+        },
+        "imageRegistry": {
+          "type": "string",
+          "pattern": "^([^/\\s]+(/[^/\\s]+)*)?$",
+          "description": "Your own image registry, for an install with no internet. It replaces the registry host of every image; the path, the tag and the digest stay. An image with no host counts as Docker Hub (`busybox` becomes `<registry>/library/busybox`). May hold a path, with no `/` at the start or the end. Empty = images are pulled from where they are published."
+        },
+        "imagePullSecrets": {
+          "type": "array",
+          "description": "Pull secrets for every pod of the chart and its subcharts. The parent chart's own `imagePullSecrets` are added too.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 }
+            }
+          }
         }
       }
     },
@@ -684,7 +701,8 @@
       "description": "Sandbox mode (#4622, `docs/decisions/sandbox-mode.md`): only for an instance that holds disposable test systems. When `enabled`, a tenant admin may give a service principal a standing grant that also covers deletes (made in the web console, expiring within 30 days). Rendered into `MEHO_SANDBOX_MODE` and `MEHO_SANDBOX_MODE_CONFIRM` only when enabled; the default renders no sandbox setting. `confirmHost` must equal `ingress.host` (the render fails otherwise), and the backplane refuses to start unless that host has a dot-separated part that is exactly `sandbox`. The mode is fixed for the life of the database.",
       "properties": {
         "enabled": { "type": "boolean" },
-        "confirmHost": { "type": "string", "description": "The instance's public host name, equal to `ingress.host`. Required when enabled." }
+        "confirmHost": { "type": "string", "description": "The instance's public host name, equal to `ingress.host`. Required when enabled." },
+        "deleteGrantsFromApi": { "type": "boolean", "description": "Lets a tenant admin create a delete grant through REST and the CLI too, not only in the web console (#5251). Rendered into `MEHO_SANDBOX_DELETE_GRANTS_FROM_API` only when `enabled` is true as well. Default false." }
       }
     },
     "uiConsole": {
@@ -879,6 +897,8 @@
         "enabled": { "type": "boolean" },
         "hostname": { "type": "string", "description": "MEHO's public DNS name, equal to `ingress.host`. Keycloak's public address is `https://<hostname>/auth`. Required when enabled." },
         "firstTenantId": { "type": "string", "description": "The first tenant's id (a UUID). Every realm group carries it as `tenant_id`. Required when enabled." },
+        "tenantName": { "type": "string", "description": "The first tenant's short name. The five role groups carry it in `meho_tenant`." },
+        "tenants": { "type": "array", "description": "More tenants, as `{name, id}`. The bootstrap Job makes the five groups `MEHO-<name>-<Role>` for each one." },
         "ingress": { "type": "object", "description": "`exposeAdmin`: also route the admin console on the MEHO host." },
         "image": { "type": "object" },
         "waitForDatabase": { "type": "object" },
@@ -1065,6 +1085,7 @@
               "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*$"
             },
             "tag": { "type": "string", "minLength": 1 },
+            "digest": { "type": "string", "pattern": "^(sha256:[0-9a-f]{64})?$", "description": "Image index digest. When set, the pod uses `repository@digest` and the tag is only a label. Empty string = use the tag." },
             "pullPolicy": {
               "type": "string",
               "enum": ["Always", "IfNotPresent", "Never"]
@@ -1179,6 +1200,7 @@
               "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*$"
             },
             "tag": { "type": "string", "minLength": 1 },
+            "digest": { "type": "string", "pattern": "^(sha256:[0-9a-f]{64})?$", "description": "Image index digest. When set, the pod uses `repository@digest` and the tag is only a label. Empty string = use the tag." },
             "pullPolicy": {
               "type": "string",
               "enum": ["Always", "IfNotPresent", "Never"]

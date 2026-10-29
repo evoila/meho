@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import httpx
@@ -87,6 +88,9 @@ class _PutClient:
 
 class _EngineConnector:
     """Recording stand-in for VmwareRestConnector on the engine path."""
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     def __init__(
         self,
@@ -471,7 +475,7 @@ async def _call_handler(
         operator=_Operator(),
         target=_Target(),
         params=params,
-        connector=object(),  # type: ignore[arg-type]
+        connector=SimpleNamespace(impl_id="vmware-rest", version="9.0"),  # type: ignore[arg-type]
     )
 
 
@@ -542,6 +546,9 @@ async def test_handler_returns_resolution_error(monkeypatch: pytest.MonkeyPatch)
 
 class _PowerConnector:
     """Records the direct write sub-calls of the power-on step."""
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []

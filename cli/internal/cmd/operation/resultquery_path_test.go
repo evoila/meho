@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -22,11 +23,32 @@ import (
 const pathTestHandle = "22222222-2222-2222-2222-222222222222"
 
 // pathReadResponse is the server's answer to a path read whose value is not
-// an array: the value rides whole in `value` (_read_document_path).
+// an array: the value rides whole in `value` (_read_document_path). A string
+// value also carries its character counts (#4994): the whole text fits here.
 func pathReadResponse(path, valueType, value string) []byte {
+	counts := ""
+	if valueType == "string" {
+		var text string
+		if err := json.Unmarshal([]byte(value), &text); err != nil {
+			panic(err)
+		}
+		n := strconv.Itoa(len([]rune(text)))
+		counts = `,"returned_chars":` + n + `,"total_chars":` + n
+	}
 	return []byte(`{"handle_id":"` + pathTestHandle + `","path":"` + path + `","value_type":"` + valueType +
-		`","value":` + value + `,"rows":[],"offset":0,"limit":50,"returned_rows":1,"total_rows":1,` +
+		`","value":` + value + counts + `,"rows":[],"offset":0,"limit":50,"returned_rows":1,"total_rows":1,` +
 		`"stored_rows":1,"truncated":false,"coverage":"complete","coverage_note":null}`)
+}
+
+// textPartResponse is the server's answer to a path read of a text value
+// that comes back in parts (#4994).
+func textPartResponse(path, part string, offset, totalChars int, truncated bool) []byte {
+	value, _ := json.Marshal(part)
+	return []byte(`{"handle_id":"` + pathTestHandle + `","path":"` + path + `","value_type":"string",` +
+		`"value":` + string(value) + `,"rows":[],"offset":` + strconv.Itoa(offset) + `,"limit":262144,` +
+		`"returned_rows":1,"total_rows":1,"stored_rows":1,"truncated":` + strconv.FormatBool(truncated) + `,` +
+		`"returned_chars":` + strconv.Itoa(len([]rune(part))) + `,"total_chars":` + strconv.Itoa(totalChars) + `,` +
+		`"coverage":"complete","coverage_note":null}`)
 }
 
 func executeResultQuery(t *testing.T, f *fakeOperationsClient, args ...string) (stdout, stderr string, err error) {
@@ -62,10 +84,10 @@ func TestResultQueryPathSendsPointerAndRendersOneValue(t *testing.T) {
 	if body.Query.Filter != nil || body.Query.Select != nil || body.Query.Limit != nil {
 		t.Fatalf("a path read must carry no relational field; got %+v", body.Query)
 	}
-	if body.Offset == nil || *body.Offset != 0 || body.Limit == nil || *body.Limit != 50 {
-		t.Fatalf("offset / limit must still be sent for array paging; got %+v", body)
+	if body.Offset == nil || *body.Offset != 0 || body.Limit != nil {
+		t.Fatalf("offset is sent; limit only when --limit was given; got %+v", body)
 	}
-	for _, want := range []string{pathTestHandle + ` — path "/name" (string)`, `"vm-01"`} {
+	for _, want := range []string{pathTestHandle + ` — path "/name" (string) — chars 0..5 of 5, returned 5`, "\nvm-01\n"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("render missing %q: %q", want, out)
 		}
@@ -293,5 +315,67 @@ func TestDocumentHandleMessageMatchesOnlyTheDocumentRefusal(t *testing.T) {
 		Body: `{"detail":{"message":"handle x cannot be read this way: it holds one document, not rows.","reason":"invalid_query"}}`}
 	if msg, ok := documentHandleMessage(doc); !ok || !strings.Contains(msg, "holds one document") {
 		t.Fatalf("document refusal not recognised: ok=%v msg=%q", ok, msg)
+	}
+}
+
+func TestResultQueryPathTextPartRendersWindowAndContinuation(t *testing.T) {
+	part := "<pfsense>\n  <system>\n"
+	f := fakeWithResultQueryResponse(http.StatusOK, textPartResponse("/config_xml", part, 100, 500617, true))
+	out, errOut, err := executeResultQuery(t, f, "--path", "/config_xml", "--offset", "100", "--limit", "70000")
+	if err != nil {
+		t.Fatalf("execute: %v (stderr %q)", err, errOut)
+	}
+	body := f.lastResultQueryBody
+	if body.Offset == nil || *body.Offset != 100 || body.Limit == nil || *body.Limit != 70000 {
+		t.Fatalf("a text read sends --offset and the given --limit as they are; got %+v", body)
+	}
+	for _, want := range []string{
+		pathTestHandle + ` — path "/config_xml" (string) — chars 100..121 of 500617, returned 21`,
+		"note: more follows — continue with --offset 121",
+		"\n<pfsense>\n  <system>\n\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render missing %q: %q", want, out)
+		}
+	}
+	if strings.Contains(out, `"<pfsense>`) {
+		t.Errorf("a text part must print as plain text, not JSON: %q", out)
+	}
+}
+
+func TestResultQueryPathTextLastPartHasNoContinuation(t *testing.T) {
+	f := fakeWithResultQueryResponse(http.StatusOK, textPartResponse("/log", "tail", 996, 1000, false))
+	out, _, err := executeResultQuery(t, f, "--path", "/log", "--offset", "996")
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !strings.Contains(out, "chars 996..1000 of 1000, returned 4") || strings.Contains(out, "more follows") {
+		t.Fatalf("last part render wrong: %q", out)
+	}
+}
+
+func TestResultQueryPathTextEmptyPartPastTheEnd(t *testing.T) {
+	f := fakeWithResultQueryResponse(http.StatusOK, textPartResponse("/log", "", 5000, 1000, false))
+	out, _, err := executeResultQuery(t, f, "--path", "/log", "--offset", "5000")
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !strings.Contains(out, "(empty part — the offset is past the end of the text)") {
+		t.Fatalf("empty part render wrong: %q", out)
+	}
+}
+
+func TestResultQueryPathTextJSONCarriesTheCounts(t *testing.T) {
+	f := fakeWithResultQueryResponse(http.StatusOK, textPartResponse("/log", "abc", 0, 10, true))
+	out, _, err := executeResultQuery(t, f, "--path", "/log", "--json")
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("--json output is not JSON: %v\n%s", err, out)
+	}
+	if got["returned_chars"] != float64(3) || got["total_chars"] != float64(10) || got["truncated"] != true {
+		t.Fatalf("--json must carry returned_chars, total_chars and truncated; got %v", got)
 	}
 }

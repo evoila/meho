@@ -61,6 +61,8 @@ each change is approved and stored in the audit log.
 ## Before you start
 
 - A Keycloak target registered in MEHO (here called `keycloak-main`).
+- A Vault target registered in MEHO (here called `vault-main`), and the
+  right to write Vault identities and groups.
 - An `operator` or `tenant_admin` login in your current tenant.
 - A second person who can approve, or the agent setup from the box
   above.
@@ -99,13 +101,17 @@ meho approvals list
 meho approvals approve <approval-id>
 ```
 
-Check the groups and their attributes:
+Check the groups and their attributes. The plain table shows only the
+name, the path and the id, so ask for JSON:
 
 ```bash
-meho keycloak group list --target keycloak-main --search MEHO-acme --attributes
+meho keycloak group list --target keycloak-main --search MEHO-acme --attributes --json \
+  | jq '.result.rows[] | {name, attributes}'
 ```
 
-`tenant_role` uses an underscore (`read_only`), never a hyphen.
+Each group must show the new UUID under `tenant_id` and its role under
+`tenant_role`. `tenant_role` uses an underscore (`read_only`), never a
+hyphen.
 
 ## Step 3: Tell MEHO the new group names
 
@@ -156,23 +162,102 @@ The second person approves it. Check the members:
 meho keycloak group member list --target keycloak-main --id <group-id>
 ```
 
-## Step 6 (optional): Give the tenant its own Vault login role
+## Step 6: Give each person access to the tenant's secrets in Vault
+
+MEHO keeps a tenant's passwords in Vault under
+`secret/tenants/<tenant-uuid>/<target>`. Vault lets a person read that
+path only when the person's **Vault identity** has two things:
+
+- the metadata `tenant_id=<tenant-uuid>`, and
+- membership in a Vault group that carries the policy for the person's
+  role.
+
+Keycloak groups do not create either. Without this step, the person
+can log in, but every operation that needs a password fails with a
+Vault permission error.
+
+The policy bodies and the full recipe are in the runbook
+[per-tenant Vault policies](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md).
+The steps below run that recipe through MEHO's Vault operations, so each
+write is approved and stored in the audit log. `vault-main` is your
+Vault target. Every identity write runs at the **dangerous** risk level,
+so the second person approves each one.
+
+1. **Check that the three shared policies exist.** They are written
+   once per site and shared by every tenant:
+
+   ```bash
+   meho operation call vault-1.x vault.sys.policy.list --target vault-main
+   ```
+
+   The list must contain `meho-tenant-read-only`,
+   `meho-tenant-operator` and `meho-tenant-admin`. If one is missing,
+   write it from section 2 of the runbook with `vault.sys.policy.write`.
+
+2. **Create the person's Vault identity with the tenant metadata.** The
+   identity name is the person's Keycloak user id (the `sub` claim):
+
+   ```bash
+   meho keycloak user list --target keycloak-main --username alice@acme.example --json \
+     | jq -r '.result.rows[0].id'
+   meho operation call vault-1.x vault.identity.entity.write --target vault-main \
+     --params '{"name": "<keycloak-user-id>", "metadata": {"tenant_id": "<tenant-uuid>"}}'
+   ```
+
+   Write down the `entity_id` from the result.
+
+3. **Link the person's login to that identity.** Vault needs an alias
+   on the JWT auth mount that MEHO logs in with (`jwt` by default; the
+   setting is `VAULT_OIDC_MOUNT_PATH`). Without the alias, Vault makes a
+   second, empty identity on the first login, and the metadata from
+   step 2 is not used.
+
+   ```bash
+   meho vault sys auth-list --target vault-main --json \
+     | jq -r '.result.auth_methods["jwt/"].accessor'
+   meho operation call vault-1.x vault.identity.entity_alias.write --target vault-main \
+     --params '{"name": "<keycloak-user-id>", "canonical_id": "<entity-id>", "mount_accessor": "<accessor>"}'
+   ```
+
+4. **Put the identity in the tenant's role group.** One group per
+   tenant and role, named `meho-tenant-<tenant-uuid>-<role>`. The group
+   carries the policy for that role:
+
+   | Keycloak `tenant_role` | Vault group | Policy |
+   |---|---|---|
+   | `read_only` | `meho-tenant-<tenant-uuid>-read_only` | `meho-tenant-read-only` |
+   | `operator` | `meho-tenant-<tenant-uuid>-operator` | `meho-tenant-operator` |
+   | `tenant_admin` | `meho-tenant-<tenant-uuid>-tenant_admin` | `meho-tenant-admin` |
+
+   ```bash
+   meho operation call vault-1.x vault.identity.group.write --target vault-main \
+     --params '{"name": "meho-tenant-<tenant-uuid>-tenant_admin", "policies": ["meho-tenant-admin"], "member_entity_ids": ["<entity-id>"]}'
+   ```
+
+   The member list replaces the old one. When you add a second person
+   to a group that exists, list every member again.
+
+Repeat steps 2 to 4 for each person. The Vault group must match the
+`tenant_role` of the person's Keycloak group from Step 5.
+
+## Step 7 (optional): Give the tenant its own Vault login role
 
 By default every tenant logs in to Vault with the same role
-(`VAULT_OIDC_ROLE`, usually `meho-mcp`). To keep the new tenant's
-passwords apart from the other tenants:
+(`VAULT_OIDC_ROLE`, usually `meho-mcp`). Step 6 already keeps each
+tenant's passwords apart. A separate login role adds a second fence,
+for example a different token lifetime per tenant:
 
 1. In Vault, create a JWT login role for the tenant. Bind it to the
-   tenant with `bound_claims` on `tenant_id`, and give it a policy for
-   the tenant's secret paths.
+   tenant with `bound_claims` on `tenant_id`, and give it the same
+   policies as the shared role.
 2. Add `<tenant-uuid>=<vault-role>` to `VAULT_OIDC_ROLE_BY_TENANT`
    (comma-separated, through `extraEnv`), then restart MEHO.
 
 A wrong entry stops MEHO from starting, so check the value before you
-roll it out. The full policy recipe is in the
+roll it out. The login-role recipe is in the
 [connector Vault policy runbook](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-policy.md).
 
-## Step 7: Check the first login
+## Step 8: Check the first login and the secret access
 
 The new person logs in and checks the tenant:
 
@@ -184,6 +269,22 @@ meho status --json | jq .operator
 The output must show the new `tenant_id` and the expected
 `tenant_role`.
 
+Then the new `tenant_admin` checks that Vault accepts the tenant. The
+new tenant has no targets yet, so register the Vault target in the new
+tenant first. It needs no password, because MEHO logs in to Vault with
+the person's own token. Then write one test secret and read it back:
+
+```bash
+meho targets add vault-main --product vault --host vault.example.com --no-secret-ref
+meho vault kv put --target vault-main secret tenants/<tenant-uuid>/smoke-test --data '{"ok": "yes"}'
+meho vault kv read --target vault-main secret tenants/<tenant-uuid>/smoke-test
+```
+
+The write waits for approval (risk level `caution`). The read must
+return `{"ok": "yes"}`. A `permission denied` from Vault means the
+identity metadata or the group from Step 6 is missing for this person.
+Delete the test secret afterwards with `meho vault kv delete`.
+
 ## If the login fails
 
 | What you see | Cause | Fix |
@@ -192,4 +293,5 @@ The output must show the new `tenant_id` and the expected
 | `multiple_role_groups` | The person is in two role groups. | Remove the person from one group (`meho keycloak group member remove`). |
 | `malformed_tenant_claim` | `tenant_id` on the group is not a UUID. | Fix it with `meho keycloak group update-attributes`. |
 | `unknown_tenant_role` | `tenant_role` on the group is not `read_only`, `operator` or `tenant_admin`. | Fix it with `meho keycloak group update-attributes`. |
+| Login works, but an operation fails with `permission denied` from Vault | The person's Vault identity has no `tenant_id` metadata, or is not in the tenant's Vault group. | Step 6. Check with section 5 of the [per-tenant Vault policies runbook](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md). |
 | `approve` answers `self_approval_forbidden` | You asked for the change and tried to approve it yourself. | A second person approves, or use the agent-requester pattern (see the box at the top). |

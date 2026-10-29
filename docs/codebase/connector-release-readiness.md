@@ -337,12 +337,21 @@ How it works
 - When MEHO writes a code text, it also stores the SHA-256 of that text
   in `operation_group.code_text_hash`.
 - At start-up, for each group:
+  - The row has a hash, and the hash does not match the row's text: an
+    operator wrote this text with `meho connector edit-group`. MEHO keeps
+    the row as it is. This also holds when a later code text happens to
+    be the same as the operator's text. MEHO does not store that hash,
+    because the row would then look like a text MEHO wrote, and the next
+    code text would overwrite the operator's choice.
   - The row already holds the code text: MEHO only stores its hash.
   - The row's text still matches its stored hash: no one changed it, so
     MEHO writes the new code text and its hash.
-  - Otherwise MEHO keeps the row as it is. This is a text an operator
-    wrote with `meho connector edit-group` (the hash no longer matches),
-    or a text MEHO cannot prove it wrote (no hash).
+  - Otherwise MEHO keeps the row as it is. This is a text MEHO cannot
+    prove it wrote (no hash).
+- The write only lands when the row still holds the text and hash MEHO
+  read a moment before. During a rolling update, an operator can save an
+  edit through another instance in between. That edit is kept, and the
+  start-up logs `operation_group_text_refresh_skipped`.
 - Some connectors give one group different texts from different
   operations. Only the first text of a start-up counts, the same text a
   fresh install writes. So the row does not change back and forth.

@@ -135,8 +135,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
@@ -904,7 +905,11 @@ async def _resolve_or_create_group(
     the row's text still matches that hash, no operator changed it, so a
     new code text replaces it. When an operator edited the text
     (``meho connector edit-group``), the hash no longer matches and the
-    row stays as the operator wrote it. See :func:`_refresh_code_text`.
+    row stays as the operator wrote it, also when a later code text
+    happens to equal the operator's text. The write is a conditional
+    ``UPDATE``: it only lands when the row still holds the text and hash
+    read above, so an operator edit saved through another instance in
+    between is kept. See :func:`_refresh_code_text`.
 
     Concurrency note: two concurrent connectors registering against
     the same ``group_key`` race here. The partial unique index
@@ -933,7 +938,7 @@ async def _resolve_or_create_group(
         seen.add(key)
     if existing is not None:
         if first_in_pass:
-            _refresh_code_text(existing, when_to_use, now)
+            await _refresh_code_text(session, existing, when_to_use, now)
         return existing.id
 
     # Title-case the dotted key for the default name -- ``"vm-lifecycle"``
@@ -961,33 +966,72 @@ async def _resolve_or_create_group(
     return group.id
 
 
-def _refresh_code_text(group: OperationGroup, code_text: str, now: datetime) -> None:
+async def _refresh_code_text(
+    session: AsyncSession, group: OperationGroup, code_text: str, now: datetime
+) -> None:
     """Bring an existing group row up to the current code text, unless an operator edited it.
 
+    * The row's hash is set and does not match its text: an operator
+      edited the text. Leave the row alone, also when ``code_text`` now
+      equals the operator's text. Storing that hash would make the row
+      look like MEHO wrote it, and the next code text would overwrite
+      the operator's choice.
     * The row already holds ``code_text``: only store its hash, so a later
       code change can refresh the row.
     * The row's text matches its stored hash: MEHO wrote it and no
       operator changed it. Write ``code_text`` and its hash.
-    * Otherwise (an operator edited the text, or the row has no hash and
-      a text MEHO cannot prove it shipped): leave the row alone.
+    * Otherwise (no hash and a text MEHO cannot prove it shipped): leave
+      the row alone.
+
+    The write is a conditional ``UPDATE`` on the text and hash the row
+    held when it was read. During a rolling update an operator can save
+    an edit through another instance between that read and this write.
+    The ``UPDATE`` then matches no row, and the edit is kept.
     """
+    old_text = group.when_to_use
+    old_hash = group.code_text_hash
     new_hash = code_text_hash(code_text)
-    if group.when_to_use == code_text:
-        if group.code_text_hash != new_hash:
-            group.code_text_hash = new_hash
+    if old_hash is not None and old_hash != code_text_hash(old_text):
         return
-    if group.code_text_hash is None or group.code_text_hash != code_text_hash(group.when_to_use):
+    if old_text == code_text:
+        if old_hash == new_hash:
+            return
+        values: dict[str, Any] = {"code_text_hash": new_hash}
+    elif old_hash is None:
         return
-    group.when_to_use = code_text
-    group.code_text_hash = new_hash
-    group.updated_at = now
-    structlog.get_logger(__name__).info(
-        "operation_group_text_refreshed",
+    else:
+        values = {"when_to_use": code_text, "code_text_hash": new_hash, "updated_at": now}
+    unchanged_hash = (
+        OperationGroup.code_text_hash.is_(None)
+        if old_hash is None
+        else OperationGroup.code_text_hash == old_hash
+    )
+    result = await session.execute(
+        update(OperationGroup)
+        .where(
+            OperationGroup.id == group.id,
+            OperationGroup.when_to_use == old_text,
+            unchanged_hash,
+        )
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    )
+    log = structlog.get_logger(__name__).bind(
         product=group.product,
         version=group.version,
         impl_id=group.impl_id,
         group_key=group.group_key,
     )
+    # ``rowcount`` is typed only on the concrete ``CursorResult`` the
+    # runtime returns, as in ``checks/repository.py``.
+    rowcount: int = result.rowcount  # type: ignore[attr-defined]
+    if rowcount != 1:
+        log.info("operation_group_text_refresh_skipped", reason="row changed since read")
+        return
+    for column, value in values.items():
+        set_committed_value(group, column, value)
+    if "when_to_use" in values:
+        log.info("operation_group_text_refreshed")
 
 
 # Pre-existing G0.6-T4 #395 public-API helper; G0.9-T4a #731 adds only the

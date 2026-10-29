@@ -192,3 +192,58 @@ async def test_first_text_of_a_registrar_pass_wins(
     group = await _group()
     assert group.when_to_use == _NEW_TEXT
     assert group.code_text_hash == code_text_hash(_NEW_TEXT)
+
+
+@pytest.mark.asyncio
+async def test_operator_text_that_a_later_release_also_uses_is_kept(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """Code writes A, the operator writes B, a release ships B, the next ships C: B stays.
+
+    The release that ships B must not store B's hash. The row would then
+    look like MEHO wrote it, and C would overwrite the operator's text.
+    """
+    await _register(_OLD_TEXT, stub_embedding_service)
+    await _set_row(session, when_to_use=_OPERATOR_TEXT)
+
+    await _register(_OPERATOR_TEXT, stub_embedding_service)
+    group = await _group()
+    assert group.when_to_use == _OPERATOR_TEXT
+    assert group.code_text_hash == code_text_hash(_OLD_TEXT)
+
+    await _register(_NEW_TEXT, stub_embedding_service)
+    group = await _group()
+    assert group.when_to_use == _OPERATOR_TEXT
+    assert group.code_text_hash == code_text_hash(_OLD_TEXT)
+
+
+@pytest.mark.asyncio
+async def test_operator_edit_saved_after_the_read_is_kept(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An edit saved through a second session between the read and the write is kept.
+
+    This is the rolling-update case: a new pod reads the row, an operator
+    saves an edit through an old pod, and the new pod then writes. The
+    write is conditional on the row still holding what was read, so the
+    operator's text wins.
+    """
+    await _register(_OLD_TEXT, stub_embedding_service)
+    original = typed_register._refresh_code_text
+
+    async def refresh_after_operator_edit(
+        registration_session: AsyncSession, group: OperationGroup, code_text: str, now: Any
+    ) -> None:
+        assert group.when_to_use == _OLD_TEXT
+        await _set_row(session, when_to_use=_OPERATOR_TEXT)
+        await original(registration_session, group, code_text, now)
+
+    monkeypatch.setattr(typed_register, "_refresh_code_text", refresh_after_operator_edit)
+    await _register(_NEW_TEXT, stub_embedding_service)
+
+    group = await _group()
+    assert group.when_to_use == _OPERATOR_TEXT
+    assert group.code_text_hash == code_text_hash(_OLD_TEXT)

@@ -283,6 +283,35 @@ def test_bind_key_secret_unquoted_value_may_have_a_comment_before_the_semicolon(
 
 
 @pytest.mark.parametrize(
+    ("keyword", "value"),
+    [("secret", _FAKE_BIND_SECRET), ("cookie-secret", _FAKE_COOKIE_SECRET)],
+    ids=["secret", "cookie-secret"],
+)
+def test_bind_key_secret_unquoted_value_right_before_a_hash_comment(
+    keyword: str, value: str
+) -> None:
+    """``#`` starts a comment in BIND even with no space before it."""
+    line = keyword + " " + value + "# note\n;"
+    result = redact(line, _BIND_KEY_SECRET_ONLY_POLICY)
+    assert result.redacted == keyword + " [REDACTED:bind_key_secret]# note\n;"
+    assert value not in result.redacted
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ["secret x" + "//secret x" * 50000, "secret x " + "/*secret x*/" * 50000],
+    ids=["line-comments", "block-comments"],
+)
+def test_bind_key_secret_stays_fast_on_long_text(payload: str) -> None:
+    """Long text full of ``secret`` words and comments is redacted quickly."""
+    policy = load_policy_yaml(DEFAULT_POLICY_PACKAGE, DEFAULT_POLICY_RESOURCE)
+    started = time.perf_counter()
+    redact(payload, policy)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 1.0, f"redaction took {elapsed:.2f}s"
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "the secret is in the vault;",

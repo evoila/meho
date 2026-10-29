@@ -209,7 +209,13 @@ _KUBECONFIG = re.compile(
 # (BIND lets whitespace split it). The text from a name's closing quote
 # to the real value's opening quote holds ``{`` and ``;``, so it never
 # passes as a value. A value without quotes must follow white space or
-# a comment, so the opening quote of a name never starts one.
+# a comment, so the opening quote of a name never starts one. It must
+# be followed by ``;`` or the start of a comment (white space may sit
+# in between). The check looks only at the first characters after the
+# value, so it stays fast on long text. ``#`` starts a comment anywhere
+# outside quotes in BIND, so it ends a value without quotes. A real
+# value is base64 or hex, so it never holds ``*``; leaving ``*`` out
+# keeps the end of a block comment (``*/``) out of a value.
 #
 # The gap between the keyword and the value is matched once and never
 # re-tried (possessive ``*+``). A line comment runs to the end of its
@@ -225,11 +231,9 @@ _BIND_KEY_SECRET = re.compile(
     + r')*+(?P<value>"[A-Za-z0-9+/=\s]{1,'
     + str(_VALUE_MAX)
     + r'}"'
-    + r'|(?<=[\s/])[^\s;{}/"!]{1,'
+    + r'|(?<=[\s/])[^\s;{}/*"!#]{1,'
     + str(_VALUE_MAX)
-    + r"}+(?=(?:\s|"
-    + _BIND_COMMENT
-    + r")*+;))",
+    + r"}+(?=\s*+(?:;|/[*/]|#)))",
     re.IGNORECASE,
 )
 

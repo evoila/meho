@@ -458,7 +458,8 @@ async def test_body_cut_inside_a_multi_byte_character_is_read() -> None:
 
     assert stopped_early is True
     lines = text.split("\n")
-    assert lines.pop() == ""
+    last = lines.pop()
+    assert last == ""
     assert lines
     assert all(kept == line[:-1].decode() for kept in lines)
 

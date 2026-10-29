@@ -19,8 +19,8 @@ first people log in.
       agent-requester pattern in
       [Approvals and break-glass](approvals-and-break-glass.md#option-1-the-agent-requester-pattern-recommended).
       The agent needs a grant with `--verdict needs-approval` on the
-      `keycloak.group.*` operations, because agents are refused
-      dangerous operations by default.
+      `keycloak.group.*` and `vault.identity.*` operations, because
+      agents are refused dangerous operations by default.
 
     This is a decision of 28 October 2026. It stays like this until the
     rules for people who may approve their own changes are done. The
@@ -303,18 +303,69 @@ Pick one of these two ways to get an approver:
 - **An agent requester in the new tenant.** The new `tenant_admin` sets
   up the agent-requester pattern from
   [Approvals and break-glass](approvals-and-break-glass.md#option-1-the-agent-requester-pattern-recommended)
-  in the new tenant. The agent needs a grant with
-  `--verdict needs-approval` on `vault.kv.delete` for the cleanup, and
-  the agent makes the test write and the delete instead of the person.
-  The `tenant_admin` approves both.
+  in the new tenant. A scheduled run of the agent makes the test write
+  and, later, the delete instead of the person. The `tenant_admin`
+  approves both. The agent needs the setup below first. MEHO checks the
+  **requester's** own Vault access when it stores an approval request.
+  Without this setup the agent's request is refused with
+  `write_capability_denied`, and there is nothing to approve.
 
 The self-approval switch is not enough here. It covers the test write
 (risk level `caution`), but never the cleanup delete (risk level
 `dangerous`).
 
-The approver needs the Vault identity from Step 6 too, with the
-`tenant_admin` Vault group. The write checks the approver's Vault
-access, and the read checks the reader's.
+Both sides need Vault access. The approver needs the Vault identity
+from Step 6, with the `tenant_admin` Vault group. The approved write
+and the cleanup run under the approver's Vault policy. The requester
+needs a Vault identity too, because MEHO checks the requester's access
+before it stores the request. The read checks the reader's.
+
+### Set up the agent requester
+
+Skip this part if you chose a second person. The agent is registered in
+the new tenant, but its Vault identity is written through your current
+tenant's Vault target, like every identity in Step 6. So the Vault
+writes below wait for your current approver, as before.
+
+1. **Register the agent and grant it the delete.** The new
+   `tenant_admin`, logged in to the new tenant, registers the agent
+   principal. Agents are refused `dangerous` operations by default, so
+   the cleanup (`vault.kv.delete`) needs a grant with
+   `--verdict needs-approval`. The test write (`vault.kv.put`, risk
+   level `caution`) waits for approval without a grant.
+
+   ```bash
+   meho agent-principal register tenant-check
+   meho agent grant create --principal agent:tenant-check \
+     --op vault.kv.delete --verdict needs-approval
+   ```
+
+2. **Find the agent's login id.** The agent logs in to Vault with its own
+   Keycloak token. Its `sub` claim is the id of the Keycloak
+   service-account user, named `service-account-agent:<name>` in lower
+   case. The `jq` filter keeps only the exact username:
+
+   ```bash
+   meho keycloak user list --target keycloak-main --username service-account-agent:tenant-check --json \
+     | jq -r '[.result.rows[] | select(.username == "service-account-agent:tenant-check")]
+              | if length == 1 then .[0].id else error("expected one user, found \(length)") end'
+   ```
+
+3. **Give the agent a Vault identity with the tenant_admin group.** Run
+   Step 6, parts 2 to 4, with that id in place of the person's user id:
+   the identity with the `tenant_id=<tenant-uuid>` metadata, the alias
+   on the JWT mount, and membership in
+   `meho-tenant-<tenant-uuid>-tenant_admin`. The agent's token carries
+   `tenant_role=tenant_admin`, and only the `meho-tenant-admin` policy
+   covers both the write under `tenants/<tenant-uuid>/*` and the
+   `secret/delete/...` grant for the cleanup. Remember that the group's
+   member list replaces the old one: list the approver's entity id and
+   the agent's entity id together.
+
+4. **Create the agent definition and schedule the run.** Follow the
+   four steps of the agent-requester pattern. The run must be a
+   scheduled one. An agent you start by hand acts for you, and the
+   request then carries your `sub`, so you could not approve it.
 
 The new tenant has no targets yet, so register the Vault target in the
 new tenant first. It needs no password, because MEHO logs in to Vault
@@ -357,5 +408,6 @@ meho approvals approve <approval-id>
 | `unknown_tenant_role` | `tenant_role` on the group is not `read_only`, `operator` or `tenant_admin`. | Fix it with `meho keycloak group update-attributes`. |
 | Login works, but an operation fails with `permission denied` from Vault | The person's Vault identity has no `tenant_id` metadata, or is not in the tenant's Vault group. An approved write runs as the approver, so this can be the approver's identity. | Step 6 for that person. Check with section 5 of the [per-tenant Vault policies runbook](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md). |
 | The approved test write or its cleanup fails with `permission denied` from Vault | The approver is an `operator`, not a `tenant_admin`. Or the `meho-tenant-admin` policy lacks the `secret/delete/...` grant for the cleanup. | Let a `tenant_admin` approve. Add the grant from section 2.3 of the [per-tenant Vault policies runbook](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md). |
+| The test write or the cleanup answers `write_capability_denied`, and no approval request appears | The requester's Vault identity has no `tenant_id` metadata, or is not in the tenant's `tenant_admin` Vault group. MEHO checks the requester's access before it stores the request. | Step 6 for the requester. For an agent requester, the agent setup in Step 8. |
 | `approve` answers `self_approval_forbidden` | You asked for the change and tried to approve it yourself. | A second person approves, or use the agent-requester pattern (see the box at the top). |
 | `meho approvals list` in the new tenant shows nothing, but a request is waiting | The request was made in another tenant. Approvals belong to one tenant. | Log in to the tenant where the request was made, or set up an approver in the new tenant (Step 8). |

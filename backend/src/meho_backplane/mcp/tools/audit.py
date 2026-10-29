@@ -139,7 +139,7 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
             "type": ["string", "null"],
             "description": (
                 "Glob pattern matched against the op_id (e.g. "
-                '"vsphere.vm.*"). Translates to SQL LIKE with `*` as the '
+                '"k8s.pod.*"). Translates to SQL LIKE with `*` as the '
                 "wildcard."
             ),
             "maxLength": 256,

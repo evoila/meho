@@ -81,7 +81,7 @@ class AuditQueryFilters(BaseModel):
     injects it from the validated JWT.
 
     Glob semantics: ``op_id`` accepts shell-style ``*`` wildcards
-    (``"vsphere.vm.*"``), which the query handler translates to SQL ``LIKE``
+    (``"k8s.pod.*"``), which the query handler translates to SQL ``LIKE``
     with ``%`` substitution. ``?`` and bracket expressions are not supported
     in v0.2 — the consumer use case is prefix matching, not arbitrary glob.
 

@@ -98,7 +98,7 @@ __all__ = [
 _log = structlog.get_logger(__name__)
 
 #: Infix marking a composite-to-composite recursion sub-op
-#: (``gh.composite.*`` / ``vmware.composite.*``). Skipped by the walk for
+#: (``gh.composite.*``). Skipped by the walk for
 #: the same reason the connector preflights and the backing-listing marker
 #: skipped it: such sub-ops resolve to registrar-guaranteed
 #: ``source_kind='composite'`` rows, never ingested primitives, so they can

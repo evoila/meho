@@ -943,8 +943,10 @@ stay at their old version, and the removed folder. Its
 `RealAptTests` run the real `apt-get` and `gpg`: the test builds a small
 flat repository, signs `InRelease` with a new key, and checks that apt
 accepts it, also with `Acquire::GzipIndexes` (a compressed list), refuses
-a signature of another key, refuses a package list changed after signing,
-and skips an `InRelease` without `Packages`. They
+a signature of another key, refuses a package list changed after signing
+(in both forms, with apt's default order and with the compressed list
+first, as on a machine with `Acquire::GzipIndexes`), and skips an
+`InRelease` without `Packages`. They
 need `apt-get`, `gpg` and `gpgv`, and they are skipped without them. The
 CI job sets `MEHO_REQUIRE_APT_CHECK=1`, which turns that skip into a
 failure.

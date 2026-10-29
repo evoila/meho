@@ -372,7 +372,12 @@ class RealAptTests(UpdateTestCase):
         files = {name: files[name] for name in lists}
         signed = self.gpg(signer, "--clearsign", stdin=self.release(files))
         if changed:
-            files["Packages"] = packages.replace(b"1.0", b"9.9")
+            # apt reads one form of the list, which one depends on its
+            # settings, so every form changes after the signature.
+            changed_packages = packages.replace(b"1.0", b"9.9")
+            changed_forms = {"Packages": changed_packages}
+            changed_forms["Packages.gz"] = gzip.compress(changed_packages)
+            files = {name: changed_forms[name] for name in files}
         members = {f"./{name}": content for name, content in files.items()}
         members.update({"./InRelease": signed, f"./{DEB}": deb})
         self.package_file.write_bytes(tar_bytes(members))
@@ -419,11 +424,18 @@ class RealAptTests(UpdateTestCase):
 
     def test_a_package_list_changed_after_signing_is_refused(self) -> None:
         self.write_repository("evoila", ("Packages", "Packages.gz"), changed=True)
+        settings = {
+            "the default order": "",
+            "the compressed list first": (
+                'Acquire::GzipIndexes "true";\nAcquire::CompressionTypes::Order:: "gz";\n'
+            ),
+        }
+        for case, apt_config in settings.items():
+            with self.subTest(case=case):
+                result = self.read_index(apt_config)
 
-        result = self.read_index()
-
-        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
-        self.assertIn("[FAIL] apt could not read the OS-package file", result.stderr)
+                self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+                self.assertIn("[FAIL] apt could not read the OS-package file", result.stderr)
 
     def test_an_index_with_only_a_compressed_package_list_is_refused(self) -> None:
         self.write_repository("evoila", ("Packages.gz",))

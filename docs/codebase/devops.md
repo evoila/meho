@@ -1599,7 +1599,7 @@ hangs the queue forever:
 | `Python License Check` | `dependency-license-check.yml` | yes — `changes` + job-level `if:` |
 | `NPM License Check` | `dependency-license-check.yml` | yes — same shape |
 | `helm install + helm test (pgvector preflight)` | `chart.yml` | **yes (#3253)** — the `helm-test-gate` aggregator (`if: always()`) is the required context and fails closed |
-| `Migration chain (single head)` | `migration-heads.yml` | yes (#4204) — no path filter; when a migration lands on `main`, the push run also posts a fresh check run under this name on every open PR that adds a migration (`scripts/ci/recheck_migration_prs.py`). **Operator registers the context after #4204 lands.** |
+| `Migration chain (single head)` | `migration-heads.yml` | yes (#4204) — no path filter; when a migration lands on `main`, the push run also posts a fresh check run under this name on every open PR that adds a migration (`scripts/ci/recheck_migration_prs.py`). The operator registered the context after #4204 landed. |
 | `DCO` | **external GitHub App** (`app_id 1861`), not a workflow | **operator must verify** — see caveat below |
 
 Two shapes are load-bearing for queue compatibility and appear across

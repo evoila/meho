@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0120_add_operation_group_code_text_hash`` (#4332).
+"""Tests for Alembic migration ``0123_add_operation_group_code_text_hash`` (#4332).
 
 The migration adds ``operation_group.code_text_hash`` and fills it for
 built-in rows that hold a group text MEHO shipped before. Every step
@@ -27,8 +27,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0120"
-_DOWN_REVISION = "0119"
+_REVISION = "0123"
+_DOWN_REVISION = "0122"
 _VERSIONS = Path(__file__).resolve().parent.parent.parent / "alembic" / "versions"
 #: A text the first versions shipped for the vault ``kv`` group.
 _SHIPPED_TEXT = "Operations grouped under 'kv' for vault vault."
@@ -39,7 +39,7 @@ _TENANT = "00000000-0000-0000-0000-000000004332"
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0120.db"
+    db_path = tmp_path / "migration_0123.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
@@ -111,7 +111,7 @@ def _columns(sync_url: str) -> set[str]:
 
 def test_every_text_of_migration_0011_counts_as_shipped() -> None:
     old = _load("0011_backfill_operation_group_when_to_use.py")
-    new = _load("0120_add_operation_group_code_text_hash.py")
+    new = _load("0123_add_operation_group_code_text_hash.py")
     texts = set(old._CURATED_WHEN_TO_USE.values())
     assert texts
     assert {_sha(text) for text in texts} <= new._SHIPPED_TEXT_HASHES

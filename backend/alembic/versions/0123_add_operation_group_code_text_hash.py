@@ -3,8 +3,8 @@
 
 """Store the hash of the code-written group text on each group row (#4332).
 
-Revision ID: 0120
-Revises: 0119
+Revision ID: 0123
+Revises: 0122
 Create Date: 2026-10-29
 
 A group text (``operation_group.when_to_use``) of a typed connector is
@@ -53,8 +53,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0120"
-down_revision: str | None = "0119"
+revision: str = "0123"
+down_revision: str | None = "0122"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

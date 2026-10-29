@@ -359,7 +359,7 @@ How it works
   start-up.
 
 Migration
-[`0120`](../../backend/alembic/versions/0120_add_operation_group_code_text_hash.py)
+[`0123`](../../backend/alembic/versions/0123_add_operation_group_code_text_hash.py)
 adds the column. It also stores the hash for rows that still hold a text
 MEHO shipped in an earlier version (every release from v0.2.0, including
 the texts of migration `0011`). Those rows then refresh like any other.

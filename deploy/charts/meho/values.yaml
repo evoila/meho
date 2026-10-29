@@ -1031,6 +1031,11 @@ sandboxMode:
   # otherwise. Rendered into `MEHO_SANDBOX_MODE_CONFIRM`, which the
   # backplane checks against the host of its MCP resource URI at boot.
   confirmHost: ""
+  # -- Lets a tenant admin create a delete grant through REST and the CLI
+  # too, not only in the web console (#5251). Rendered into
+  # `MEHO_SANDBOX_DELETE_GRANTS_FROM_API` only when `enabled` is true as
+  # well. Default false: delete grants are made only in the web console.
+  deleteGrantsFromApi: false
 
 # Operator-console (`/ui/*`) OAuth confidential credentials (#2594,
 # Goal #336). The browser BFF login flow served at `/ui/auth/*` needs two
@@ -1216,6 +1221,16 @@ coreKeycloak:
   hostname: ""
   # -- The first tenant's id (a UUID). Pick one per install and keep it.
   firstTenantId: ""
+  # -- The first tenant's short name (lowercase letters, digits, dashes).
+  # The five role groups carry it in the `meho_tenant` attribute.
+  tenantName: main
+  # -- More tenants, as a list of `{name, id}` (`id` is a UUID you pick and
+  # keep). The bootstrap Job makes five groups for each one:
+  # `MEHO-<name>-Readers`, `-Operators`, `-SA-Operators`, `-Admins` and
+  # `-Approvers`. Empty by default: a site with one tenant needs nothing
+  # here. Putting people in these groups waits for a second person's
+  # approval when done through MEHO.
+  tenants: []
   ingress:
     # -- Also route the admin console (`/auth/admin`, `/auth/realms/master`)
     # on the MEHO host. Default false: the admin console is then not
@@ -1335,6 +1350,10 @@ broadcast:
   image:
     repository: valkey/valkey
     tag: "9.0-alpine"
+    # -- Digest of the `9.0-alpine` image index; the digest wins over the tag.
+    # To change the tag or the repository, set `digest` too, or set
+    # `digest: ""` to use the tag.
+    digest: "sha256:2d04268dfa26ab31cfa3fdc538866e76438b2d00e41db41b8cb86d780ac5a416"
     pullPolicy: IfNotPresent
   # -- Replica count. Hard-capped at 1 in v0.1 (no Sentinel, ephemeral
   # streams); the schema rejects any higher value.
@@ -1395,6 +1414,10 @@ resultCache:
   image:
     repository: valkey/valkey
     tag: "9.0-alpine"
+    # -- Digest of the `9.0-alpine` image index; the digest wins over the tag.
+    # To change the tag or the repository, set `digest` too, or set
+    # `digest: ""` to use the tag.
+    digest: "sha256:2d04268dfa26ab31cfa3fdc538866e76438b2d00e41db41b8cb86d780ac5a416"
     pullPolicy: IfNotPresent
   # -- Replica count. Capped at 1 (no persistence, no Sentinel).
   replicas: 1

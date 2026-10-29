@@ -37,6 +37,22 @@ hostname: ""
 # when `enabled: true`.
 firstTenantId: ""
 
+# -- The first tenant's short name: lowercase letters, digits and dashes.
+# The five role groups carry it in the `meho_tenant` attribute
+# (`<tenant-uuid>:<name>:<Role>`), which the `meho-tenants` mapper copies
+# into the `meho_tenants` claim. See
+# docs/decisions/2026-10-28-several-tenants-per-person.md.
+tenantName: main
+
+# -- More tenants. The parent chart's bootstrap Job makes five groups for
+# each one: `MEHO-<name>-Readers`, `-Operators`, `-SA-Operators`, `-Admins`
+# and `-Approvers`. They carry only `meho_tenant`, so an older MEHO refuses
+# a person who is only in these groups. Each entry is `{name, id}`: `name`
+# is a short name like `tenantName`, `id` a UUID you pick and keep. Empty
+# by default: a site with one tenant needs nothing here. The subchart only
+# carries these values; set them under the parent's `coreKeycloak:` block.
+tenants: []
+
 image:
   # -- Official Keycloak image (built to run with any user id in group 0).
   repository: quay.io/keycloak/keycloak

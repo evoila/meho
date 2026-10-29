@@ -68,10 +68,10 @@ import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.profiled import ProfiledRestConnector
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vcf_logs import VRLI_EXECUTION_PROFILE, VcfLogsConnector
+from meho_backplane.connectors.vcf_logs.connector import _session_cache_key
 
 _BASE_URL = "https://vrli-parity.test.invalid"
 _HOST = "vrli-parity.test.invalid"
@@ -354,7 +354,7 @@ async def test_session_expiry_recovery_parity(expiry_status: int) -> None:
     assert result == {"events": [{"id": "ev-1"}]}
     assert session_route.call_count == 2  # initial + post-expiry re-login
     assert events_route.call_count == 2  # expiry + retry
-    assert typed._session_tokens[target_cache_key(target)] == _SESSION_REFRESH_ID
+    assert typed._session_tokens[_session_cache_key(target)] == _SESSION_REFRESH_ID
 
     await typed.aclose()
 

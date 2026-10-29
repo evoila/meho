@@ -60,8 +60,14 @@ comes from one of two places:
   The login goes to ``vcf_ops_url`` from the secret when it is set, else to
   the target's own host and port. The login paths start at the root of the
   host, so a service path carried on the target's ``host`` (for example
-  ``/fleet-lcm``) is not used for the login. The token is kept per target
-  (``(tenant_id, target.id)``) until :meth:`invalidate_session` drops it.
+  ``/fleet-lcm``) is not used for the login. The token is kept per credential
+  (``credential_cache_key``: tenant, secret and the resolved login address)
+  until :meth:`invalidate_session` drops it. So two fleet targets with one
+  secret and one ``vcf_ops_url`` share one token, whatever their own hosts
+  and ``fqdn`` values are (the login does not send the ``fqdn``, and the
+  key does not hold it). The connector remembers which login key each
+  target used, so the ``401`` path finds the token without reading the
+  secret again.
 * **Stored token (fallback).** When the secret carries a ``token``, MEHO
   sends it as is and does not log in.
 
@@ -131,7 +137,8 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key, target_cache_key
+from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vcf_auth import (
     CredentialsCache,
@@ -207,7 +214,10 @@ class FleetLcmConnector(HttpConnector):
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
         )
         self._creds: CredentialsCache = CredentialsCache(loader, product_label="fleet-lcm")
-        self._session_tokens: dict[tuple[str, str], str] = {}
+        self._session_tokens: dict[tuple[str, ...], str] = {}
+        # Per target: the login key its token sits under. The key needs the
+        # login address from the secret, which the 401 path does not have.
+        self._login_keys: dict[tuple[str, str], tuple[str, ...]] = {}
         self._session_lock = asyncio.Lock()
 
     async def auth_headers(self, target: FleetLcmTargetLike, operator: Operator) -> dict[str, str]:
@@ -239,13 +249,16 @@ class FleetLcmConnector(HttpConnector):
         """Return the kept Bearer token for *target*, logging in on first use.
 
         The lock makes concurrent first callers for a target share one login.
+        The token is keyed by the resolved login address (``vcf_ops_url`` from
+        the secret, else the target's own host), not the target's address.
         """
-        cache_key = target_cache_key(target)
+        login_target: Any = _LoginEndpoint(target, creds.get("vcf_ops_url"))
+        cache_key = credential_cache_key(login_target)
         async with self._session_lock:
+            self._login_keys[target_cache_key(target)] = cache_key
             cached = self._session_tokens.get(cache_key)
             if cached is not None:
                 return cached
-            login_target: Any = _LoginEndpoint(target, creds.get("vcf_ops_url"))
             client = await self._http_client(login_target)
             token = await mint_fleet_lcm_token(
                 client,
@@ -504,16 +517,27 @@ class FleetLcmConnector(HttpConnector):
 
         return await fleet_lcm_release_version_list_impl(self, operator, target, params)
 
-    async def invalidate_session(self, target: FleetLcmTargetLike) -> None:
+    async def invalidate_session(
+        self, target: FleetLcmTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Drop the kept token and credentials for *target* (the #2067 seam).
 
         The dispatcher calls this on a ``401`` from a fleet call and then
         runs the call once more. The next call reads Vault again and logs in
         again, so both an expired login token and a replaced stored token
-        are picked up.
+        are picked up. With *rejected*, the token is dropped only when that
+        request sent it; a newer token another call just logged in for
+        stays (#5033).
         """
         async with self._session_lock:
-            self._session_tokens.pop(target_cache_key(target), None)
+            cache_key = self._login_keys.get(target_cache_key(target))
+            if cache_key is not None:
+                drop_rejected_token(
+                    self._session_tokens,
+                    cache_key,
+                    rejected,
+                    lambda token: {"Authorization": f"Bearer {token}"},
+                )
         await self._creds.invalidate(target)
 
     async def invalidate_credentials(self, target: FleetLcmTargetLike) -> None:
@@ -528,6 +552,7 @@ class FleetLcmConnector(HttpConnector):
         """Clear kept tokens and credentials, then close the httpx pool."""
         async with self._session_lock:
             self._session_tokens.clear()
+            self._login_keys.clear()
         await self._creds.clear()
         await super().aclose()
 

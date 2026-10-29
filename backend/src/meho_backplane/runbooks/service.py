@@ -55,6 +55,8 @@ side; G12.3's run service is the durable owner of that table.
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -62,6 +64,7 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.db.connector_usage_lock import lock_connector_usage_shared
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import RunbookRun, RunbookTemplate
 from meho_backplane.kb.schemas import validate_slug
@@ -167,8 +170,7 @@ class RunbookTemplateService:
         """
         validate_slug(request.slug)
 
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
+        async with _template_write_session() as session:
             latest = await _resolve_latest_version(session, tenant_id, request.slug)
             if latest is not None:
                 raise DuplicateDraftError(
@@ -202,6 +204,9 @@ class RunbookTemplateService:
         )
         return DraftTemplateResponse(slug=request.slug, version=1, status="draft")
 
+    # code-quality-allow: this body was already 108 lines before #5027;
+    # #5027 only swaps the session opener (one line shorter). Splitting the
+    # edit / fork paths is out of scope for that change.
     async def update_or_fork(
         self,
         tenant_id: uuid.UUID,
@@ -223,8 +228,7 @@ class RunbookTemplateService:
         Raises :class:`TemplateNotFoundError` when the slug has no rows at
         all (nothing to edit or fork from).
         """
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
+        async with _template_write_session() as session:
             draft = await self._load_draft(session, tenant_id, request.slug)
             now = datetime.now(UTC)
 
@@ -613,6 +617,19 @@ class RunbookTemplateService:
             )
         )
         return result.scalar_one_or_none()
+
+
+@asynccontextmanager
+async def _template_write_session() -> AsyncIterator[AsyncSession]:
+    """Open a session that saves template steps, holding the shared connector-usage lock.
+
+    #5027: a connector delete checks which runbook templates call its
+    operations and then deletes the rows. The lock keeps a template save
+    out of the gap between the two (see ``db/connector_usage_lock.py``).
+    """
+    async with get_sessionmaker()() as session:
+        await lock_connector_usage_shared(session)
+        yield session
 
 
 async def _resolve_latest_version(

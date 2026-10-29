@@ -149,6 +149,7 @@ def test_plan_names_keycloak_the_realm_file_and_the_first_login_secret() -> None
     assert (plan.admin_username, plan.approver_username) == ("admin", "approver")
     assert plan.ci.enabled is False
     assert plan.ci.secret_name == f"{_RELEASE}-core-ci-login"
+    assert plan.tenants == ()
 
     custom = _job(
         _render(
@@ -168,6 +169,26 @@ def test_plan_names_keycloak_the_realm_file_and_the_first_login_secret() -> None
     assert (plan.admin_username, plan.approver_username) == ("root-person", "second")
     assert plan.ci.enabled is True
     assert plan.ci.tenant_id == _TENANT
+
+
+def test_extra_tenants_reach_the_plan_and_the_first_tenant_name_the_env() -> None:
+    lab_b = "5d0f7a3e-1c2b-4e8d-9f6a-7b3c2d1e0f9a"
+    job = _job(
+        _render(
+            *_CORE_ON,
+            "--set",
+            "coreKeycloak.tenantName=lab-a",
+            "--set",
+            "coreKeycloak.tenants[0].name=lab-b",
+            "--set",
+            f"coreKeycloak.tenants[0].id={lab_b}",
+        )
+    )
+    assert job is not None
+    env = _env(job)
+    assert env["MEHO_REALM_TENANT_NAME"]["value"] == "lab-a"
+    plan = Plan.model_validate_json(env["MEHO_CORE_KEYCLOAK_PLAN"]["value"])
+    assert [(t.name, str(t.id)) for t in plan.tenants] == [("lab-b", lab_b)]
 
 
 def test_secrets_come_by_reference_and_the_placeholders_have_values() -> None:
@@ -204,6 +225,7 @@ def test_secrets_come_by_reference_and_the_placeholders_have_values() -> None:
     }
     assert env["MEHO_REALM_PUBLIC_URL"]["value"] == "https://meho.test"
     assert env["MEHO_REALM_TENANT_ID"]["value"] == _TENANT
+    assert env["MEHO_REALM_TENANT_NAME"]["value"] == "main"
     assert env["POD_NAMESPACE"]["valueFrom"] == {"fieldRef": {"fieldPath": "metadata.namespace"}}
     placeholders = set(re.findall(r"\$\{([^}]*)\}", _REALM_FILE.read_text()))
     assert placeholders

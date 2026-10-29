@@ -17,7 +17,7 @@ generic DDL + one JSONB variant so PG parity holds.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -117,10 +117,12 @@ def _table_names(sync_url: str) -> set[str]:
     return {str(row[0]) for row in rows}
 
 
-def test_upgrade_creates_trace_tables_with_full_shape(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_creates_trace_tables_with_full_shape(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0085`` creates the header + span tables with their columns/indexes."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     assert _columns(sync_url, _TRACE_TABLE) == _TRACE_COLUMNS
     assert _columns(sync_url, _SPAN_TABLE) == _SPAN_COLUMNS
@@ -128,19 +130,23 @@ def test_upgrade_creates_trace_tables_with_full_shape(alembic_cfg: tuple[Config,
     assert _index_names(sync_url, _SPAN_TABLE) >= _SPAN_INDEXES
 
 
-def test_upgrade_adds_capture_config_columns(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_capture_config_columns(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0085`` adds the per-tenant + per-target capture-config columns."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     assert _columns(sync_url, "tenant") >= _TENANT_NEW_COLUMNS
     assert _TARGET_NEW_COLUMN in _columns(sync_url, "targets")
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade 0084`` drops the tables + columns; ``upgrade 0085`` restores them."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert _TRACE_TABLE in _table_names(sync_url)
     assert _SPAN_TABLE in _table_names(sync_url)
 

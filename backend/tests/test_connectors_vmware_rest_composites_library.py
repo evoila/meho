@@ -79,6 +79,9 @@ def _make_operator() -> Operator:
 class _RecordingConnector:
     """Stub connector session: records sub-calls, serves canned JSON by path."""
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(self, responses: dict[str, Any]) -> None:
         self._responses = responses
         self.calls: list[dict[str, Any]] = []

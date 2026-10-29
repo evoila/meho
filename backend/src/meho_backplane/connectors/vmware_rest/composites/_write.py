@@ -164,10 +164,18 @@ __all__ = [
 _log = structlog.get_logger(__name__)
 
 
-# Connector_id every write composite governs its sub-ops against (fed to
-# :func:`enforce_subop_policy` for the in-memory descriptor + the
-# ``vmware.composite.vm.migrate`` recursion routed through ``dispatch_child``).
-_CONNECTOR_ID = "vmware-rest-9.0"
+def _step_connector_id(connector: VmwareRestConnector) -> str:
+    """The connector id a write step is checked under (#4991).
+
+    *connector* is the instance the resolver picked for the target, so this
+    is the target's own connector: ``vmware-rest-8.0`` for a vCenter 8.0.x
+    target, ``vmware-rest-9.0`` for 9.x. A step grant must name this id.
+    Used by :func:`enforce_subop_policy` and by the
+    ``vmware.composite.vm.migrate`` call ``host.evacuate`` makes through
+    ``dispatch_child``.
+    """
+    return f"{connector.impl_id}-{connector.version}"
+
 
 # Declared governance for every raw-REST *write* sub-op. ``dangerous`` is
 # the intrinsic-risk label; ``requires_approval=False`` keeps the top-level
@@ -1361,7 +1369,7 @@ async def _write_sub_op(
     """
     gate = await enforce_subop_policy(
         operator=operator,
-        connector_id=_CONNECTOR_ID,
+        connector_id=_step_connector_id(connector),
         op_id=op_id,
         safety_level=_WRITE_SAFETY_LEVEL,
         requires_approval=_WRITE_REQUIRES_APPROVAL,
@@ -1429,7 +1437,7 @@ async def _write_vmomi_sub_op(
     """
     gate = await enforce_subop_policy(
         operator=operator,
-        connector_id=_CONNECTOR_ID,
+        connector_id=_step_connector_id(connector),
         op_id=op_id,
         safety_level=_WRITE_SAFETY_LEVEL,
         requires_approval=_WRITE_REQUIRES_APPROVAL,
@@ -4489,7 +4497,7 @@ def _import_vapp_gate(
     async def _gate(params: dict[str, Any]) -> OperationResult | None:
         return await enforce_subop_policy(
             operator=operator,
-            connector_id=_CONNECTOR_ID,
+            connector_id=_step_connector_id(connector),
             op_id=_OP_IMPORT_VAPP_GOVERNANCE,
             safety_level=_WRITE_SAFETY_LEVEL,
             requires_approval=_WRITE_REQUIRES_APPROVAL,
@@ -5773,7 +5781,7 @@ async def host_evacuate_composite(
             if vm_entry.get("power_state") != _VM_POWER_STATE_ON:
                 continue
             migrate_result = await dispatch_child(
-                connector_id=_CONNECTOR_ID,
+                connector_id=_step_connector_id(connector),
                 op_id=_OP_COMPOSITE_VM_MIGRATE,
                 params={"vm": vm_moid, "cluster": cluster_moid},
             )

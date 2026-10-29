@@ -120,6 +120,8 @@ spec:
               value: {{ printf "https://%s" .Values.hostname | quote }}
             - name: MEHO_REALM_TENANT_ID
               value: {{ .Values.firstTenantId | quote }}
+            - name: MEHO_REALM_TENANT_NAME
+              value: {{ .Values.tenantName | quote }}
             - name: MEHO_REALM_ADMIN_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:

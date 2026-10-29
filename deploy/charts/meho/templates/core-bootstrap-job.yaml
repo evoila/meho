@@ -64,6 +64,8 @@ spec:
               value: {{ printf "https://%s" .Values.coreKeycloak.hostname | quote }}
             - name: MEHO_REALM_TENANT_ID
               value: {{ .Values.coreKeycloak.firstTenantId | quote }}
+            - name: MEHO_REALM_TENANT_NAME
+              value: {{ .Values.coreKeycloak.tenantName | quote }}
             - name: MEHO_REALM_ADMIN_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:

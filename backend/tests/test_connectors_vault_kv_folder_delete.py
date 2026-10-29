@@ -10,12 +10,14 @@ approval. These tests prove:
   sub-folders, and refuses a folder bigger than the limit.
 * **The handler** soft-deletes the live versions of every listed key, skips
   keys that are already deleted or gone, reports a failed key without
-  stopping, and leaves secrets that are not listed alone.
+  stopping, and leaves secrets that are not listed alone. A version whose
+  deletion Vault has only scheduled for later is still live and is deleted.
 * **The guards**: the mount root, an empty path, bad keys and a list longer
   than the limit are refused before the call waits for approval.
 * **The approval card** lists every key path and the count, never a value.
-* **The permission check** runs before the call waits for approval, and a
-  call Vault would refuse is not parked.
+* **The permission check** runs before the call waits for approval, covers
+  every listed key and every sub-folder in one Vault call, and a call Vault
+  would refuse on any of them is not parked.
 * **The full flow**: preview, wait for approval, a second person approves,
   only the listed keys are deleted, a key added after the approval is left
   alone.
@@ -28,6 +30,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
@@ -67,6 +70,9 @@ _TENANT_ID = UUID("00000000-0000-0000-0000-000000003939")
 _FOLDER = f"tenants/{_TENANT_ID}/lab-old"
 #: An obvious fake value. It must never show up in a result, preview or row.
 _FAKE_SECRET_VALUE = "fake-value-do-not-echo"
+#: A deletion that happened long ago, and one Vault has only scheduled.
+_PAST_DELETION = "2000-01-01T00:00:00.123456789Z"
+_FUTURE_DELETION = "2999-01-01T00:00:00.123456789Z"
 
 
 # ---------------------------------------------------------------------------
@@ -83,11 +89,23 @@ class _Tree:
         self.delete_calls: list[dict[str, Any]] = []
         self.delete_exc_for: dict[str, Exception] = {}
 
-    def add(self, full_path: str, *, versions: int = 2, deleted: tuple[int, ...] = ()) -> None:
+    def add(
+        self,
+        full_path: str,
+        *,
+        versions: int = 2,
+        deleted: tuple[int, ...] = (),
+        scheduled: tuple[int, ...] = (),
+    ) -> None:
+        """Add a secret. *deleted* versions are gone; *scheduled* ones are deleted later."""
         self.secrets[full_path] = {
             str(n): {
                 "created_time": "2026-01-01T00:00:00Z",
-                "deletion_time": "2026-02-01T00:00:00Z" if n in deleted else "",
+                "deletion_time": _PAST_DELETION
+                if n in deleted
+                else _FUTURE_DELETION
+                if n in scheduled
+                else "",
                 "destroyed": False,
             }
             for n in range(1, versions + 1)
@@ -317,6 +335,82 @@ async def test_only_live_versions_are_deleted(
 
     assert result.status == "ok", result.error
     assert tree.delete_calls == [{"path": f"{_FOLDER}/admin", "versions": [2, 3]}]
+
+
+async def test_version_with_a_scheduled_deletion_is_still_live(
+    monkeypatch: pytest.MonkeyPatch, _registered_ops: None
+) -> None:
+    """Vault also puts a time in ``deletion_time`` for ``delete_version_after``."""
+    _fake, tree = _install_tree(monkeypatch)
+    tree.add(f"secret/{_FOLDER}/admin", versions=3, deleted=(1,), scheduled=(2,))
+
+    result = await _run({"path": _FOLDER, "keys": ["admin"]})
+
+    assert result.status == "ok", result.error
+    assert result.result is not None
+    assert result.result["results"] == [{"key": "admin", "status": "deleted", "versions": [2, 3]}]
+    assert tree.delete_calls == [{"path": f"{_FOLDER}/admin", "versions": [2, 3]}]
+
+
+async def test_only_scheduled_versions_left_are_deleted_not_skipped(
+    monkeypatch: pytest.MonkeyPatch, _registered_ops: None
+) -> None:
+    _fake, tree = _install_tree(monkeypatch)
+    tree.add(f"secret/{_FOLDER}/admin", versions=2, scheduled=(1, 2))
+
+    result = await _run({"path": _FOLDER, "keys": ["admin"]})
+
+    assert result.status == "ok", result.error
+    assert result.result is not None
+    assert result.result["already_deleted"] == 0
+    assert result.result["deleted"] == 1
+    assert tree.delete_calls == [{"path": f"{_FOLDER}/admin", "versions": [1, 2]}]
+
+
+async def test_past_deletions_count_as_already_deleted(
+    monkeypatch: pytest.MonkeyPatch, _registered_ops: None
+) -> None:
+    _fake, tree = _install_tree(monkeypatch)
+    tree.add(f"secret/{_FOLDER}/admin", versions=2, deleted=(1, 2))
+
+    result = await _run({"path": _FOLDER, "keys": ["admin"]})
+
+    assert result.status == "ok", result.error
+    assert result.result is not None
+    assert result.result["results"] == [{"key": "admin", "status": "already_deleted"}]
+    assert tree.delete_calls == []
+
+
+@pytest.mark.parametrize(
+    ("meta", "deleted"),
+    [
+        ({"deletion_time": "", "destroyed": False}, False),
+        ({"deletion_time": _PAST_DELETION, "destroyed": False}, True),
+        ({"deletion_time": _FUTURE_DELETION, "destroyed": False}, False),
+        ({"deletion_time": "2026-10-29T11:59:59Z", "destroyed": False}, True),
+        ({"deletion_time": "2026-10-29T12:00:00Z", "destroyed": False}, True),
+        ({"deletion_time": "2026-10-29T12:00:01Z", "destroyed": False}, False),
+        ({"deletion_time": "2026-10-29T12:00:01", "destroyed": False}, False),
+        ({"deletion_time": "", "destroyed": True}, True),
+        ({"deletion_time": "not-a-time", "destroyed": False}, True),
+        ({}, False),
+    ],
+    ids=[
+        "live",
+        "past",
+        "future",
+        "one-second-ago",
+        "right-now",
+        "in-one-second",
+        "naive-is-utc",
+        "destroyed",
+        "unparseable-is-deleted",
+        "no-fields",
+    ],
+)
+def test_deleted_at_compares_with_the_current_time(meta: dict[str, Any], deleted: bool) -> None:
+    now = datetime(2026, 10, 29, 12, 0, 0, tzinfo=UTC)
+    assert folder_module._deleted_at(meta, now) is deleted
 
 
 async def test_safe_to_run_twice(monkeypatch: pytest.MonkeyPatch, _registered_ops: None) -> None:
@@ -580,12 +674,34 @@ async def test_preview_lists_every_key_path_and_the_count() -> None:
 # ===========================================================================
 
 
+_SUB_FOLDERS = ["run1", "run2", "run2/deep"]
+
+
 def _caps(granted_update: list[str]) -> dict[str, list[str]]:
-    return {
-        f"secret/metadata/{_FOLDER}": ["list"],
-        f"secret/metadata/{_FOLDER}/admin": ["read"],
-        f"secret/delete/{_FOLDER}/admin": granted_update,
-    }
+    """Every right the lab tree needs; the ``admin`` delete path gets *granted_update*."""
+    caps: dict[str, list[str]] = {f"secret/metadata/{_FOLDER}": ["list"]}
+    for sub in _SUB_FOLDERS:
+        caps[f"secret/metadata/{_FOLDER}/{sub}"] = ["list"]
+    for key in _ALL_KEYS:
+        caps[f"secret/metadata/{_FOLDER}/{key}"] = ["read"]
+        caps[f"secret/delete/{_FOLDER}/{key}"] = ["update"]
+    caps[f"secret/delete/{_FOLDER}/admin"] = granted_update
+    return caps
+
+
+def test_checks_cover_every_key_and_every_sub_folder() -> None:
+    checks = folder_module._folder_delete_checks("secret", _FOLDER, _ALL_KEYS)
+
+    assert checks == [
+        (f"secret/metadata/{_FOLDER}", frozenset({"list"})),
+        *[(f"secret/metadata/{_FOLDER}/{sub}", frozenset({"list"})) for sub in _SUB_FOLDERS],
+        (f"secret/metadata/{_FOLDER}/admin", frozenset({"read"})),
+        (f"secret/delete/{_FOLDER}/admin", frozenset({"update"})),
+        (f"secret/metadata/{_FOLDER}/run1/token", frozenset({"read"})),
+        (f"secret/delete/{_FOLDER}/run1/token", frozenset({"update"})),
+        (f"secret/metadata/{_FOLDER}/run2/deep/token", frozenset({"read"})),
+        (f"secret/delete/{_FOLDER}/run2/deep/token", frozenset({"update"})),
+    ]
 
 
 async def test_call_vault_would_refuse_is_not_parked(
@@ -614,6 +730,78 @@ async def test_missing_list_right_is_reported(
     assert result.status == "denied"
     assert result.extras["path"] == f"secret/metadata/{_FOLDER}"
     assert result.extras["required"] == ["list"]
+
+
+async def test_missing_right_on_a_later_key_is_reported(
+    monkeypatch: pytest.MonkeyPatch, _registered_ops: None
+) -> None:
+    """The first key is allowed; a key further down the list is not."""
+    fake, tree = _lab_tree(monkeypatch)
+    denied = f"secret/delete/{_FOLDER}/run2/deep/token"
+    fake.sys.capabilities_by_path = {**_caps(["update"]), denied: ["read"]}
+
+    result = await _run({"path": _FOLDER, "keys": _ALL_KEYS}, approved=False)
+
+    assert result.status == "denied"
+    assert result.extras["error_code"] == "write_capability_denied"
+    assert result.extras["path"] == denied
+    assert result.extras["required"] == ["update"]
+    assert await _pending_count() == 0
+    assert tree.delete_calls == []
+
+
+async def test_missing_read_right_on_a_later_key_is_reported(
+    monkeypatch: pytest.MonkeyPatch, _registered_ops: None
+) -> None:
+    fake, _tree = _lab_tree(monkeypatch)
+    denied = f"secret/metadata/{_FOLDER}/run1/token"
+    fake.sys.capabilities_by_path = {**_caps(["update"]), denied: ["deny"]}
+
+    result = await _run({"path": _FOLDER, "keys": _ALL_KEYS}, approved=False)
+
+    assert result.status == "denied"
+    assert result.extras["path"] == denied
+    assert result.extras["required"] == ["read"]
+
+
+async def test_missing_list_right_on_a_sub_folder_is_reported(
+    monkeypatch: pytest.MonkeyPatch, _registered_ops: None
+) -> None:
+    """The top folder is allowed; a sub-folder the walk visits is not."""
+    fake, tree = _lab_tree(monkeypatch)
+    denied = f"secret/metadata/{_FOLDER}/run2/deep"
+    fake.sys.capabilities_by_path = {**_caps(["update"]), denied: []}
+
+    result = await _run({"path": _FOLDER, "keys": _ALL_KEYS}, approved=False)
+
+    assert result.status == "denied"
+    assert result.extras["path"] == denied
+    assert result.extras["required"] == ["list"]
+    assert await _pending_count() == 0
+    assert tree.delete_calls == []
+
+
+async def test_preflight_probes_every_path_in_one_vault_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake, _tree = _lab_tree(monkeypatch)
+    fake.sys.capabilities_by_path = _caps(["update"])
+    ctx = PreviewContext(
+        descriptor=MagicMock(op_id=_OP_ID),
+        connector_instance=None,
+        operator=_operator(),
+        target=None,
+        params={"path": _FOLDER, "keys": list(reversed(_ALL_KEYS))},
+        connector_id=_CONNECTOR_ID,
+    )
+
+    result = await folder_module._folder_delete_preflight(ctx)
+
+    assert result is not None
+    assert result["will_be_denied"] is False
+    assert result["checked_paths"] == 10
+    assert len(fake.sys.get_capabilities_calls) == 1
+    assert set(fake.sys.get_capabilities_calls[0]["paths"]) == set(_caps(["update"]))
 
 
 async def test_agent_principal_cannot_run_it(

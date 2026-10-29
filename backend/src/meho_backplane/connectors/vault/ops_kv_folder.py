@@ -22,6 +22,10 @@ How it works
   that is not yet deleted or destroyed is marked deleted. Vault keeps the
   data, so an undelete brings it back. Safe to run twice: a secret with no
   live version left is reported as ``already_deleted``.
+* A version is live until its ``deletion_time`` has passed. Vault also puts
+  a time in that field for a deletion it has only scheduled
+  (``delete_version_after``); such a version is still live, so this op
+  deletes it now (:func:`_live_versions`).
 
 Guards
 ======
@@ -34,9 +38,12 @@ Guards
   holds more secrets than the limit is refused and nothing is deleted.
 * A permission check runs before the call waits for approval
   (:func:`_folder_delete_preflight`): the identity needs ``list`` on the
-  folder's metadata path, ``read`` on a secret's metadata path and
-  ``update`` on its delete path. When Vault would refuse, MEHO refuses the
-  call and asks no one to approve it.
+  metadata path of the folder and of every sub-folder a listed key is in,
+  and, for every listed key, ``read`` on its metadata path and ``update``
+  on its delete path. Vault rights can differ per key and per sub-folder,
+  so every path is checked, in one ``sys/capabilities-self`` call. When
+  Vault would refuse one of them, MEHO refuses the call and asks no one to
+  approve it.
 
 The result and the approval card carry key paths only, never a secret value.
 """
@@ -44,6 +51,7 @@ The result and the approval card carry key paths only, never a secret value.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Any
 
 import hvac.exceptions
@@ -58,7 +66,7 @@ from meho_backplane.connectors.vault.ops import (
     _DEFAULT_KV_MOUNT,
     _MOUNT_PROPERTY,
     _extract_mount_and_path,
-    vault_capability_preflight,
+    vault_capabilities_preflight,
 )
 from meho_backplane.connectors.vault.target_auth import vault_client_for_target
 from meho_backplane.connectors.vault.tenant_scope import enforce_tenant_scope
@@ -140,7 +148,10 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         "deleted": {"type": "integer", "description": "Keys soft-deleted by this call."},
         "already_deleted": {
             "type": "integer",
-            "description": "Listed keys that had no live version left. Nothing was sent.",
+            "description": (
+                "Listed keys that had no live version left. Nothing was sent. A "
+                "version whose deletion is only scheduled still counts as live."
+            ),
         },
         "not_found": {
             "type": "integer",
@@ -207,9 +218,9 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
         "returned keys as 'keys'. A second person must approve; the approval card "
         "shows every key path and the count. The Vault role needs 'list' and "
         "'read' on <mount>/metadata/<folder>/... and 'update' on "
-        "<mount>/delete/<folder>/...; MEHO checks this before it asks for "
-        "approval and refuses with error_code 'write_capability_denied' when a "
-        "right is missing."
+        "<mount>/delete/<folder>/...; MEHO checks this for every listed key and "
+        "sub-folder before it asks for approval and refuses with error_code "
+        "'write_capability_denied' when a right is missing on one of them."
     ),
     "parameter_hints": {
         "mount": "Optional. KV v2 mount point; defaults to 'secret'.",
@@ -263,8 +274,33 @@ def _folder_and_keys(params: dict[str, Any]) -> tuple[str, str, list[str]]:
     return mount, folder, keys
 
 
-async def _live_versions(client: Any, *, mount: str, path: str) -> list[int] | None:
-    """Return the versions not yet deleted or destroyed, or ``None`` when no secret exists."""
+def _deleted_at(meta: dict[str, Any], now: datetime) -> bool:
+    """Say whether one version's metadata marks it deleted at *now*.
+
+    Vault writes ``deletion_time`` both when a version is deleted and when a
+    deletion is only scheduled (``delete_version_after``). Only a time that
+    has passed means the version is gone. A ``deletion_time`` that cannot be
+    parsed is treated as deleted, which only makes the op skip a version.
+    """
+    if meta.get("destroyed"):
+        return True
+    raw = meta.get("deletion_time")
+    if not raw:
+        return False
+    try:
+        deletion_time = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return True
+    if deletion_time.tzinfo is None:
+        deletion_time = deletion_time.replace(tzinfo=UTC)
+    return deletion_time <= now
+
+
+async def _live_versions(client: Any, *, mount: str, path: str, now: datetime) -> list[int] | None:
+    """Return the versions not deleted or destroyed at *now*, or ``None`` when no secret exists.
+
+    A version whose deletion is scheduled for later is still live.
+    """
     try:
         payload = await asyncio.to_thread(
             client.secrets.kv.v2.read_secret_metadata,
@@ -274,17 +310,13 @@ async def _live_versions(client: Any, *, mount: str, path: str) -> list[int] | N
     except hvac.exceptions.InvalidPath:
         return None
     versions: dict[str, Any] = payload["data"]["versions"]
-    return sorted(
-        int(number)
-        for number, meta in versions.items()
-        if not meta.get("deletion_time") and not meta.get("destroyed")
-    )
+    return sorted(int(number) for number, meta in versions.items() if not _deleted_at(meta, now))
 
 
-async def _delete_one(client: Any, *, mount: str, path: str) -> dict[str, Any]:
-    """Soft-delete the live versions of one secret and say what happened."""
+async def _delete_one(client: Any, *, mount: str, path: str, now: datetime) -> dict[str, Any]:
+    """Soft-delete the versions of one secret that are live at *now* and say what happened."""
     try:
-        live = await _live_versions(client, mount=mount, path=path)
+        live = await _live_versions(client, mount=mount, path=path, now=now)
         if live is None:
             return {"status": "not_found"}
         if not live:
@@ -317,6 +349,7 @@ async def vault_kv_folder_delete(
     enforce_tenant_scope(operator, mount=mount, path=folder, read_only=False)
 
     rows: list[dict[str, Any]] = []
+    now = datetime.now(UTC)
     async with vault_client_for_target(operator, target) as client:
         present = set(
             await list_kv_tree(client, mount=mount, path=folder, max_keys=folder_max_keys())
@@ -325,7 +358,7 @@ async def vault_kv_folder_delete(
             if key not in present:
                 rows.append({"key": key, "status": "not_found"})
                 continue
-            outcome = await _delete_one(client, mount=mount, path=f"{folder}/{key}")
+            outcome = await _delete_one(client, mount=mount, path=f"{folder}/{key}", now=now)
             rows.append({"key": key, **outcome})
 
     rows.extend({"key": key, "status": "not_on_list"} for key in sorted(present - set(keys)))
@@ -362,36 +395,46 @@ async def _folder_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
-async def _folder_delete_preflight(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Check, before the call waits for approval, that Vault will allow the delete.
+def _folder_delete_checks(
+    mount: str, folder: str, keys: list[str]
+) -> list[tuple[str, frozenset[str]]]:
+    """The ``(path, rights)`` pairs the delete needs, as ``sys/capabilities-self`` names them.
 
-    Probes three paths with ``sys/capabilities-self``: ``list`` on the folder's
-    metadata path (the walk), and, for the first listed key, ``read`` on its
-    metadata path and ``update`` on its delete path. Returns the first check
-    that fails, else the delete-path check with the other paths named. Returns
-    ``None`` when a probe itself fails (fail-soft, like the other KV writes).
+    ``list`` on the folder's metadata path and on every sub-folder a listed
+    key is in (the paths the walk lists), then ``read`` on each key's
+    metadata path and ``update`` on each key's delete path.
+    """
+    folders: set[str] = {folder}
+    for key in keys:
+        parts = key.split("/")
+        for depth in range(1, len(parts)):
+            folders.add(f"{folder}/{'/'.join(parts[:depth])}")
+    checks: list[tuple[str, frozenset[str]]] = [
+        (f"{mount}/metadata/{sub}", frozenset({"list"})) for sub in sorted(folders)
+    ]
+    for key in keys:
+        checks.append((f"{mount}/metadata/{folder}/{key}", frozenset({"read"})))
+        checks.append((f"{mount}/delete/{folder}/{key}", frozenset({"update"})))
+    return checks
+
+
+async def _folder_delete_preflight(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Check, before the call waits for approval, that Vault will allow the whole delete.
+
+    Builds the paths with :func:`_folder_delete_checks` and probes them all in
+    one ``sys/capabilities-self`` call. Returns the first check that fails,
+    else the last check with the number of paths checked. Returns ``None``
+    when the probe itself fails (fail-soft, like the other KV writes).
     """
     mount = str(ctx.params.get("mount", _DEFAULT_KV_MOUNT)).strip()
     folder = str(ctx.params.get("path", "")).strip().strip("/")
     raw_keys = ctx.params.get("keys")
     if not isinstance(raw_keys, list) or not raw_keys:
         return None
-    first = sorted(str(key) for key in raw_keys)[0]
-    checks = (
-        (f"{mount}/metadata/{folder}", frozenset({"list"})),
-        (f"{mount}/metadata/{folder}/{first}", frozenset({"read"})),
-        (f"{mount}/delete/{folder}/{first}", frozenset({"update"})),
+    keys = sorted({str(key) for key in raw_keys})
+    return await vault_capabilities_preflight(
+        ctx.operator, FOLDER_DELETE_OP_ID, _folder_delete_checks(mount, folder, keys), ctx.target
     )
-    result: dict[str, Any] | None = None
-    for auth_path, required in checks:
-        result = await vault_capability_preflight(
-            ctx.operator, FOLDER_DELETE_OP_ID, auth_path, required, ctx.target
-        )
-        if result is None or result["will_be_denied"]:
-            return result
-    if result is not None:
-        result["also_checked"] = [path for path, _ in checks[:-1]]
-    return result
 
 
 register_preview_builder(FOLDER_DELETE_OP_ID, _folder_delete_preview)

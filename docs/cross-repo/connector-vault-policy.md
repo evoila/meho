@@ -433,9 +433,11 @@ Notes:
   and the second stanza above). `list` lets the op walk the folder.
   `read` lets it see which versions are still live. `update` on
   `/delete/` is the same soft delete as `vault.kv.delete`. Before the
-  call waits for approval, MEHO checks all three rights and refuses with
-  `write_capability_denied` when one is missing. When you grant this
-  and permanent removal, use one block with all three rights.
+  call waits for approval, MEHO checks these rights for every listed
+  key and every sub-folder the walk visits, and refuses with
+  `write_capability_denied` when one is missing on any of them. When
+  you grant this and permanent removal, use one block with all three
+  rights.
 - The **same per-operator templating constraints** from §2 apply: no
   glob inside the rendered `{{identity...}}` segment; the trailing `/*`
   is a literal glob in the static path portion.

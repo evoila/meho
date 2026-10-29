@@ -453,7 +453,10 @@ needed its own `vault.kv.delete` call and its own approval.
 - When it runs, the handler lists the folder again. For each listed key that
   is still there it reads the version metadata and soft-deletes every
   version that is not yet deleted or destroyed (the same soft delete as
-  `vault.kv.delete`; Vault can undelete). Each key gets a status:
+  `vault.kv.delete`; Vault can undelete). A version counts as deleted only
+  when its `deletion_time` has passed: Vault also fills that field for a
+  deletion it has only scheduled (`delete_version_after`), and such a
+  version is still live, so the op deletes it now. Each key gets a status:
   `deleted` (with `versions`), `already_deleted` (no live version left, so
   it is safe to run twice), `not_found`, or `failed` (with the error type;
   one failure does not stop the others). A secret in the folder that is not
@@ -468,9 +471,12 @@ needed its own `vault.kv.delete` call and its own approval.
   recursive list and the walk when the call runs
   (`VaultFolderTooLargeError`; nothing is deleted then).
 - Permission check before approval (`_folder_delete_preflight`): `list` on
-  `<mount>/metadata/<folder>`, and for the first listed key `read` on its
-  metadata path and `update` on its delete path. When one is missing the
-  call is refused with `write_capability_denied` and no approval is
+  `<mount>/metadata/<folder>` and on every sub-folder a listed key is in,
+  and for every listed key `read` on its metadata path and `update` on its
+  delete path. Vault rights can differ per key and per sub-folder, so all
+  paths are probed, in one `sys/capabilities-self` call
+  (`vault_capabilities_preflight`). When one is missing the call is refused
+  with `write_capability_denied` naming that path, and no approval is
   requested.
 
 **Permanent delete (`vault.kv.metadata.delete`, #3424).** `kv.delete` is a
@@ -761,7 +767,11 @@ integration coverage in `test_connectors_vault.py`,
 The probe itself is the shared `vault_capability_preflight(operator,
 op_id, auth_path, required, target)` in `ops.py`;
 `vault_kv_write_capability_preflight` only picks the KV path and
-requirement and calls it. **`vault.token.role.write`** registers a second
+requirement and calls it. It is a one-path wrapper around
+`vault_capabilities_preflight(operator, op_id, checks, target)`, which
+probes a list of `(path, required)` pairs in one `sys/capabilities-self`
+call and returns the first denied path (`vault.kv.folder.delete` uses it
+for every listed key). **`vault.token.role.write`** registers a second
 preflight on the same hook (`ops_token_role.py`, wired at import time
 like the KV preview builders): it probes `auth/token/roles/<role_name>`
 under the target's role for `create` + `update` (Vault asks for `create`

@@ -90,6 +90,7 @@ __all__ = [
     "VAULT_KV_WRITE_CAPABILITIES",
     "VaultPathShapeError",
     "register_vault_typed_operations",
+    "vault_capabilities_preflight",
     "vault_capability_preflight",
     "vault_kv_delete",
     "vault_kv_list",
@@ -1250,12 +1251,36 @@ async def vault_capability_preflight(
     turns that failure into an explicit ``will_be_denied`` block with a
     ``probe_failed:<ExceptionClass>`` reason instead.
     """
+    return await vault_capabilities_preflight(
+        operator,
+        op_id,
+        [(auth_path, required)],
+        target,
+        report_probe_failure=report_probe_failure,
+    )
+
+
+async def vault_capabilities_preflight(
+    operator: Operator,
+    op_id: str,
+    checks: list[tuple[str, frozenset[str]]],
+    target: Any = None,
+    *,
+    report_probe_failure: bool = False,
+) -> dict[str, Any] | None:
+    """Ask Vault, in one ``sys/capabilities-self`` call, whether any of *checks* will be denied.
+
+    *checks* holds ``(auth_path, required)`` pairs. Returns the block for the
+    first path Vault would deny, else the block for the last path. When more
+    than one path was probed, the block also carries ``checked_paths``, the
+    number of paths probed. The same fail-soft rule as
+    :func:`vault_capability_preflight` applies: ``None`` when the probe
+    itself fails, unless ``report_probe_failure=True``.
+    """
+    paths = [auth_path for auth_path, _ in checks]
     try:
         async with vault_client_for_target(operator, target) as client:
-            response = await asyncio.to_thread(
-                client.sys.get_capabilities,
-                paths=[auth_path],
-            )
+            response = await asyncio.to_thread(client.sys.get_capabilities, paths=paths)
     except Exception as exc:
         # Fail-soft: the park is the safety-relevant action; a probe that
         # cannot reach Vault (or whose role login transiently fails) must
@@ -1266,7 +1291,7 @@ async def vault_capability_preflight(
         _structlog.get_logger(__name__).warning(
             "vault_capability_preflight_failed",
             op_id=op_id,
-            path=auth_path,
+            path=paths[0],
             operator_sub=operator.sub,
             exc_info=True,
         )
@@ -1274,31 +1299,36 @@ async def vault_capability_preflight(
             return None
         return {
             "check": "vault.capabilities-self",
-            "path": auth_path,
-            "required": sorted(required),
+            "path": paths[0],
+            "required": sorted(checks[0][1]),
             "granted": [],
             "will_be_denied": True,
             "reason": f"probe_failed:{type(exc).__name__}",
             "principal_sub": operator.sub,
         }
 
-    # ``sys/capabilities-self`` returns the per-path capability list under
-    # the path key, with a top-level ``capabilities`` mirror for a single
-    # path. Prefer the path key; fall back to the mirror.
-    granted_raw = response.get(auth_path)
-    if granted_raw is None:
-        granted_raw = response.get("capabilities")
-    granted = [str(c) for c in granted_raw] if isinstance(granted_raw, list) else []
-
-    will_be_denied = not _capabilities_grant_write(granted, required)
-    return {
-        "check": "vault.capabilities-self",
-        "path": auth_path,
-        "required": sorted(required),
-        "granted": sorted(granted),
-        "will_be_denied": will_be_denied,
-        "principal_sub": operator.sub,
-    }
+    result: dict[str, Any] = {}
+    for auth_path, required in checks:
+        # ``sys/capabilities-self`` returns the per-path capability list under
+        # the path key, with a top-level ``capabilities`` mirror for a single
+        # path. Prefer the path key; fall back to the mirror.
+        granted_raw = response.get(auth_path)
+        if granted_raw is None and len(paths) == 1:
+            granted_raw = response.get("capabilities")
+        granted = [str(c) for c in granted_raw] if isinstance(granted_raw, list) else []
+        result = {
+            "check": "vault.capabilities-self",
+            "path": auth_path,
+            "required": sorted(required),
+            "granted": sorted(granted),
+            "will_be_denied": not _capabilities_grant_write(granted, required),
+            "principal_sub": operator.sub,
+        }
+        if result["will_be_denied"]:
+            break
+    if len(checks) > 1:
+        result["checked_paths"] = len(checks)
+    return result
 
 
 async def vault_kv_write_capability_preflight(

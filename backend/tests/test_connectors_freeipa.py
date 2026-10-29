@@ -15,13 +15,14 @@ What is covered, with a respx-mocked IPA server and no ingested catalog:
 * a call as MEHO's system identity never uses a cached session;
 * the fingerprint and the probe; the registration shape;
 * no password and no session cookie in a result or a stored trace;
-* the wire helpers: request body, answer unwrapping, value decoding, ``ping``.
+* the wire helpers are tested in ``test_connectors_freeipa_rpc.py``.
 
 Fixture values are made up; no real host, user or id appears here.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
@@ -46,11 +47,6 @@ from meho_backplane.connectors.freeipa import (
 )
 from meho_backplane.connectors.freeipa.rpc import (
     API_VERSION,
-    FreeipaCommandError,
-    build_request,
-    decode_values,
-    parse_ping_summary,
-    unwrap_answer,
 )
 from meho_backplane.connectors.registry import (
     all_connectors_v2,
@@ -258,6 +254,32 @@ async def test_system_operator_never_uses_a_cached_session() -> None:
         await connector.auth_headers(target, make_operator())
         await connector.auth_headers(target, make_operator())
         await connector.auth_headers(target, synthesise_system_operator())
+    assert login.call_count == 2
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_hanging_login_does_not_hold_up_another_credential() -> None:
+    release = asyncio.Event()
+    slow = Target(secret_ref="targets/op-reads/freeipa-slow")
+    fast = Target()
+
+    async def _loader(target: object, _operator: object) -> dict[str, str]:
+        if target is slow:
+            await release.wait()
+        return {"username": USERNAME, "password": PASSWORD}
+
+    connector = FreeipaConnector(credentials_loader=_loader)
+    async with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        login = mock.post(LOGIN).mock(return_value=login_response())
+        await connector.auth_headers(fast, make_operator())
+        hanging = asyncio.create_task(connector.auth_headers(slow, make_operator()))
+        await asyncio.sleep(0)
+        headers = await asyncio.wait_for(connector.auth_headers(fast, make_operator()), 1)
+        assert headers["Cookie"] == f"ipa_session={SESSION_COOKIE}"
+        assert not hanging.done()
+        release.set()
+        await hanging
     assert login.call_count == 2
     await connector.aclose()
 
@@ -516,76 +538,3 @@ def test_package_registers_versioned_connector_and_wildcard() -> None:
 @pytest.mark.parametrize("version", ["4.9.8", "4.10.2", "4.12.2", "4.13.4"])
 def test_each_covered_version_resolves_to_the_connector(version: str) -> None:
     assert resolve_connector(Target(version=version)) is FreeipaConnector
-
-
-# ---------------------------------------------------------------------------
-# Wire helpers
-# ---------------------------------------------------------------------------
-
-
-def test_build_request_adds_the_api_version_and_drops_empty_options() -> None:
-    assert build_request("host_find", ["web"], {"sizelimit": 5, "in_hostgroup": None}) == {
-        "method": "host_find",
-        "params": [["web"], {"sizelimit": 5, "version": API_VERSION}],
-        "id": 0,
-    }
-
-
-@pytest.mark.parametrize(
-    ("payload", "message"),
-    [
-        ([], "not a JSON object"),
-        ({"error": None}, "has no result"),
-        ({"error": "plain text"}, "Error: plain text"),
-        (
-            {"result": None, "error": {"code": 4001, "name": "NotFound", "message": "gone"}},
-            "NotFound 4001: gone",
-        ),
-    ],
-)
-def test_unwrap_answer_errors(payload: Any, message: str) -> None:
-    with pytest.raises(FreeipaCommandError, match=message):
-        unwrap_answer(payload, "user_show")
-
-
-def test_unwrap_answer_returns_result_principal_and_version() -> None:
-    answer = unwrap_answer(
-        {"result": {"value": "x"}, "error": None, "principal": PRINCIPAL, "version": "4.13.4"},
-        "user_show",
-    )
-    assert (answer.result, answer.principal, answer.server_version) == (
-        {"value": "x"},
-        PRINCIPAL,
-        "4.13.4",
-    )
-
-
-def test_decode_values_turns_tagged_values_into_text() -> None:
-    assert decode_values(
-        {
-            "when": [{"__datetime__": "20261029120000Z"}],
-            "zone": {"__dns_name__": "example.test."},
-            "blob": {"__base64__": "AAE="},
-            "bad": {"__datetime__": "not-a-date"},
-            "plain": ["a", 1, True, None],
-        }
-    ) == {
-        "when": ["2026-10-29T12:00:00Z"],
-        "zone": "example.test.",
-        "blob": {"__base64__": "AAE="},
-        "bad": "not-a-date",
-        "plain": ["a", 1, True, None],
-    }
-
-
-@pytest.mark.parametrize(
-    ("summary", "expected"),
-    [
-        ("IPA server version 4.13.4. API version 2.257", ("4.13.4", "2.257")),
-        ("IPA server version 4.12.2-1.el9. API version 2.254", ("4.12.2-1.el9", "2.254")),
-        ("something else", (None, None)),
-        (None, (None, None)),
-    ],
-)
-def test_parse_ping_summary(summary: Any, expected: tuple[str | None, str | None]) -> None:
-    assert parse_ping_summary(summary) == expected

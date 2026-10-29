@@ -69,8 +69,10 @@ registrar stores every operation of `FREEIPA_TYPED_OPS` with
 3. The answer sets the session cookies. The connector keeps them and sends
    them as one `Cookie` header, with the `Referer`, on every call.
 4. The session is cached per credential (`credential_cache_key`: tenant,
-   secret and host). A call as MEHO's system identity never reads a cached
-   session.
+   secret and host). The cache is read without a lock. A login takes the
+   lock of its own credential only, so a login that hangs for one IPA server
+   never holds up a call for another credential or another tenant. A call as
+   MEHO's system identity never reads a cached session.
 5. A refused login answers 401 and names the reason in
    `X-IPA-Rejection-Reason` (for example `invalid-password`,
    `password-expired`, `user-locked`). The error message carries the reason.
@@ -149,9 +151,11 @@ renamed, so they cannot be mistaken for a failed call.
 ## Tests
 
 - `backend/tests/test_connectors_freeipa.py`: login, headers, session reuse,
-  re-login after 401, error messages, system identity, fingerprint, probe,
-  registration, no password or session cookie in results and traces, wire
-  helpers.
+  re-login after 401, one lock per credential, error messages, system
+  identity, fingerprint, probe, registration, no password or session cookie
+  in results and traces.
+- `backend/tests/test_connectors_freeipa_rpc.py`: the wire helpers (request
+  body, answer, value decoding, `ping` summary).
 - `backend/tests/test_connectors_freeipa_reads.py`: every read's command,
   arguments, options and answer shape; invalid parameters are refused before
   any call.

@@ -21,8 +21,9 @@ Login
    own host name with ``400``. The name is ``tls_server_name`` when the
    target sets it, else ``host``.
 4. The session is cached per credential (``credential_cache_key``: tenant,
-   secret and login host). A call that runs as MEHO's system identity never
-   reads a cached session.
+   secret and login host), with one lock per credential, so a login that
+   hangs never holds up another credential. A call that runs as MEHO's
+   system identity never reads a cached session.
 5. An expired session answers ``401``. The dispatcher then calls
    :meth:`FreeipaConnector.invalidate_session` with the rejected request and
    runs the call once more; the next call logs in again.
@@ -144,7 +145,9 @@ class FreeipaConnector(HttpConnector):
     def __init__(self, *, credentials_loader: FreeipaCredentialsLoader | None = None) -> None:
         super().__init__()
         self._sessions: dict[tuple[str, ...], _FreeipaSession] = {}
-        self._session_lock = asyncio.Lock()
+        # One lock per credential: a login that hangs for one IPA server never
+        # holds up a call for another credential, or another tenant.
+        self._session_locks: dict[tuple[str, ...], asyncio.Lock] = {}
         self._credentials_loader: FreeipaCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
         )
@@ -170,11 +173,20 @@ class FreeipaConnector(HttpConnector):
         return session.headers()
 
     async def _session(self, target: FreeipaTargetLike, operator: Operator) -> _FreeipaSession:
-        """Return the cached session for *target*, logging in on first use."""
+        """Return the cached session for *target*, logging in on first use.
+
+        The cache is read without a lock. Only a login takes the lock of its
+        credential, and checks the cache again inside it, so many calls at
+        the same moment start one login.
+        """
         cache_key = credential_cache_key(target)
-        async with self._session_lock:
+        use_cache = not is_system_operator(operator)
+        cached = self._sessions.get(cache_key)
+        if use_cache and cached is not None:
+            return cached
+        async with self._session_locks.setdefault(cache_key, asyncio.Lock()):
             cached = self._sessions.get(cache_key)
-            if cached is not None and not is_system_operator(operator):
+            if use_cache and cached is not None:
                 return cached
             creds = await self._credentials_loader(target, operator)
             try:
@@ -242,7 +254,7 @@ class FreeipaConnector(HttpConnector):
         again with credentials read again through the loader.
         """
         cache_key = credential_cache_key(target)
-        async with self._session_lock:
+        async with self._session_locks.setdefault(cache_key, asyncio.Lock()):
             dropped = drop_rejected_token(
                 self._sessions, cache_key, rejected, lambda session: session.headers()
             )
@@ -519,6 +531,6 @@ class FreeipaConnector(HttpConnector):
 
     async def aclose(self) -> None:
         """Forget every cached session, then close the HTTP clients."""
-        async with self._session_lock:
-            self._sessions.clear()
+        self._sessions.clear()
+        self._session_locks.clear()
         await super().aclose()

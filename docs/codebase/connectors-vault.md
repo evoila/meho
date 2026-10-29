@@ -496,8 +496,61 @@ target registration) is documented in
 | `vault.kv.patch` | `patch` | caution | `credential_write` |
 | `vault.kv.delete` | `delete_secret_versions` | dangerous | `write` |
 | `vault.kv.metadata.delete` | `delete_metadata_and_all_versions` | destructive | `write` |
+| `vault.kv.folder.delete` | `list_secrets` + `read_secret_metadata` + `delete_secret_versions` | dangerous | `write` |
 
-All seven register into operation group `kv`.
+All eight register into operation group `kv`.
+
+**Folder delete (`vault.kv.folder.delete`, `ops_kv_folder.py`).** Soft-deletes
+many secrets under one folder with one approval. Before it, each secret
+needed its own `vault.kv.delete` call and its own approval.
+
+- The caller first runs `vault.kv.list` with `recursive=true`. That walks
+  every sub-folder (`kv_tree.list_kv_tree`) and returns the secret paths
+  relative to the folder (`run1/token`), without folder entries.
+- The caller passes the folder (`mount`, `path`) and that list (`keys`).
+  The list is part of the params, so the approval is bound to it: the call
+  can only delete what the approver saw. The preview builder
+  (`_folder_delete_preview`) reads only the params, so `preview_operation`
+  and the approval card show the same block: every key path and the count
+  (`key_paths`, `key_count`). Never a value.
+- When it runs, the handler lists the folder again. For each listed key that
+  is still there it reads the version metadata and soft-deletes every
+  version that is not yet deleted or destroyed (the same soft delete as
+  `vault.kv.delete`; Vault can undelete). A version counts as deleted only
+  when its `deletion_time` has passed: Vault also fills that field for a
+  deletion it has only scheduled (`delete_version_after`), and such a
+  version is still live, so the op deletes it now. Each key gets a status:
+  `deleted` (with `versions`), `already_deleted` (no live version left, so
+  it is safe to run twice), `not_found`, or `failed` (with the error type;
+  one failure does not stop the others). A secret in the folder that is not
+  listed (for example one added after the approval) is left alone and
+  reported as `not_on_list`. The result carries the counts plus one row
+  per key under `results`, so a long result comes back as a result handle.
+- Guards: the mount root and an empty path fail the param check. Keys must
+  be relative paths without empty, `.` or `..` parts. The setting
+  `vault_kv_folder_max_keys` (`VAULT_KV_FOLDER_MAX_KEYS`, default 500) caps
+  the `keys` list in the param schema (read at start-up), so a longer list
+  is refused before the call waits for approval. The same limit stops the
+  recursive list and the walk when the call runs
+  (`VaultFolderTooLargeError`; nothing is deleted then).
+- Permission check before approval (`_folder_delete_preflight`): it first
+  runs the folder, key and tenant checks the delete itself runs
+  (`_folder_and_keys`, `enforce_tenant_scope`), before it opens a Vault
+  client. A folder outside the caller's tenant, or a bad folder or key, is
+  refused right there with `write_capability_denied` (the `reason` names
+  the error), with no Vault call and no approval request. So the walk below
+  never lists a folder of another tenant. Then it walks the folder
+  (`kv_tree.list_kv_folders`, the same walk the delete does) to find every
+  sub-folder the delete will list, also one no listed key is in. A
+  sub-folder Vault refuses to list is kept and not entered. Then it needs
+  `list` on `<mount>/metadata/<folder>` and on every one of
+  these sub-folders (plus every sub-folder a listed key is in), and for
+  every listed key `read` on its metadata path and `update` on its delete
+  path. Vault rights can differ per key and per sub-folder, so all paths
+  are probed, in one `sys/capabilities-self` call
+  (`vault_capabilities_preflight`). When one is missing the call is refused
+  with `write_capability_denied` naming that path, and no approval is
+  requested.
 
 **Permanent delete (`vault.kv.metadata.delete`, #3424).** `kv.delete` is a
 soft delete: Vault keeps the data and an undelete brings it back.
@@ -658,7 +711,7 @@ broadcast is the consistent, safe direction (same rationale as the
 
 The mutating KV ops — `vault.kv.put` (`caution`), `vault.kv.patch`
 (`caution`), `vault.kv.delete` (`dangerous`), `vault.kv.metadata.delete`
-(`destructive`, #3424) — register `requires_approval=True` (G3.15-T1
+(`destructive`, #3424), `vault.kv.folder.delete` (`dangerous`) — register `requires_approval=True` (G3.15-T1
 #1409). The flag became meaningful
 once G11.7-T1 (#1401) routed human principals hitting a
 `requires_approval` op to the **approval queue** (park for review)
@@ -787,7 +840,11 @@ integration coverage in `test_connectors_vault.py`,
 The probe itself is the shared `vault_capability_preflight(operator,
 op_id, auth_path, required, target)` in `ops.py`;
 `vault_kv_write_capability_preflight` only picks the KV path and
-requirement and calls it. **`vault.token.role.write`** registers a second
+requirement and calls it. It is a one-path wrapper around
+`vault_capabilities_preflight(operator, op_id, checks, target)`, which
+probes a list of `(path, required)` pairs in one `sys/capabilities-self`
+call and returns the first denied path (`vault.kv.folder.delete` uses it
+for every listed key). **`vault.token.role.write`** registers a second
 preflight on the same hook (`ops_token_role.py`, wired at import time
 like the KV preview builders): it probes `auth/token/roles/<role_name>`
 under the target's role for `create` + `update` (Vault asks for `create`
@@ -820,6 +877,9 @@ reducer is the threshold-aware
 `ResultHandle`. The `result_query` meta-tool reads a handle back — it
 pages the spilled rows by `offset` / `limit` (#1507 / #3179); server-side
 filtering / aggregation over a handle is not available.
+
+`vault.kv.list` with `recursive=true` and `vault.kv.folder.delete` (its
+`results` rows) take the same path, so a big folder comes back as a handle.
 
 `tests/test_vault_kv_list_jsonflux.py` (G3.3-T4) pins both halves of
 the contract: ≤50 keys stays inline with no handle, and >50 keys

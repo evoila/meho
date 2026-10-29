@@ -47,7 +47,7 @@ the testcontainers replay suite in :mod:`tests.test_migration_rollback`.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
@@ -323,6 +323,7 @@ def _insert_history_row(
 
 def test_seed_lands_tenant_and_eight_conventions(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``upgrade head`` from clean DB lands tenant + 8 conventions + 8 history rows.
 
@@ -338,7 +339,7 @@ def test_seed_lands_tenant_and_eight_conventions(
       the convention's body.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0018")
+    copy_migrated_db(cfg, "0018")
 
     tenant_id = _fetch_tenant_id(sync_url, _TENANT_SLUG)
     assert tenant_id is not None, "seed must create the rdc-internal tenant"
@@ -374,6 +375,7 @@ def test_seed_lands_tenant_and_eight_conventions(
 
 def test_priority_tiers_match_documented_assignment(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """The three documented priority tiers are applied to the expected slugs.
 
@@ -392,7 +394,7 @@ def test_priority_tiers_match_documented_assignment(
     surfaces here.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0018")
+    copy_migrated_db(cfg, "0018")
 
     tenant_id = _fetch_tenant_id(sync_url, _TENANT_SLUG)
     assert tenant_id is not None
@@ -430,6 +432,7 @@ def test_priority_tiers_match_documented_assignment(
 
 def test_re_running_migration_is_idempotent(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Re-running ``upgrade()`` against a seeded DB is a no-op.
 
@@ -441,7 +444,7 @@ def test_re_running_migration_is_idempotent(
     not change, and no duplicate history rows must land.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0018")
+    copy_migrated_db(cfg, "0018")
 
     tenant_id = _fetch_tenant_id(sync_url, _TENANT_SLUG)
     assert tenant_id is not None
@@ -476,6 +479,7 @@ def test_re_running_migration_is_idempotent(
 
 def test_pre_existing_tenant_is_upserted_not_recreated(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A tenant row authored manually pre-seed keeps its id; only name refreshes.
 
@@ -486,7 +490,7 @@ def test_pre_existing_tenant_is_upserted_not_recreated(
     against that pre-existing id.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0017")  # all tables created, no seed yet
+    copy_migrated_db(cfg, "0017")  # all tables created, no seed yet
 
     pre_existing_id = uuid.uuid4()
     _insert_tenant_row(
@@ -511,6 +515,7 @@ def test_pre_existing_tenant_is_upserted_not_recreated(
 
 def test_operator_curated_convention_survives_seed(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A convention an operator authored pre-seed under a seeded slug is preserved.
 
@@ -522,7 +527,7 @@ def test_operator_curated_convention_survives_seed(
     the RETURNING-id gate yields nothing on the skipped insert.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0017")
+    copy_migrated_db(cfg, "0017")
 
     operator_tenant_id = uuid.uuid4()
     _insert_tenant_row(
@@ -576,6 +581,7 @@ def test_operator_curated_convention_survives_seed(
 
 def test_downgrade_removes_seed_keeps_tenant_and_operator_history(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``downgrade "0017"`` removes seeded rows; tenant + operator edits survive.
 
@@ -591,7 +597,7 @@ def test_downgrade_removes_seed_keeps_tenant_and_operator_history(
       history untouched.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0018")
+    copy_migrated_db(cfg, "0018")
 
     tenant_id_str = _fetch_tenant_id(sync_url, _TENANT_SLUG)
     assert tenant_id_str is not None
@@ -651,6 +657,7 @@ def test_downgrade_removes_seed_keeps_tenant_and_operator_history(
 
 def test_seed_conventions_fit_individual_token_budget(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Each seeded body fits the individual 600-token write-time gate.
 
@@ -664,7 +671,7 @@ def test_seed_conventions_fit_individual_token_budget(
     on the seed prose.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0018")
+    copy_migrated_db(cfg, "0018")
 
     from meho_backplane.conventions.schemas import (
         DEFAULT_MAX_PREAMBLE_TOKENS,

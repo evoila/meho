@@ -146,6 +146,7 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     "k8s.deployment.info",
     "k8s.job.list",
     "k8s.job.info",
+    "k8s.workload.list",
     "k8s.service.list",
     "k8s.ingress.list",
     "k8s.configmap.list",

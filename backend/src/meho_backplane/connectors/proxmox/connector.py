@@ -51,7 +51,10 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import (
+    credential_cache_key,
+    target_cache_key,
+)
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
@@ -114,9 +117,11 @@ def _is_acceptable_auth_model(value: Any) -> bool:
 class ProxmoxConnector(HttpConnector):
     """Proxmox VE 8.x REST connector — token/ticket auth, approval-gated writes.
 
-    Per-target credential material and (for ticket auth) the minted session
-    are cached under the tenant-unique ``(tenant_id, target.id)`` key so two
-    same-named targets in different tenants never share a token or ticket.
+    Per-target credential material is cached under the tenant-unique
+    ``(tenant_id, target.id)`` key. The minted ticket (ticket auth) is cached
+    per credential (``credential_cache_key``: tenant, secret and login host),
+    so two targets that share one credential share one ticket. The tenant in
+    both keys keeps tenants apart.
     """
 
     product = "proxmox"
@@ -133,7 +138,7 @@ class ProxmoxConnector(HttpConnector):
         super().__init__()
         self._creds_cache: dict[tuple[str, str], ProxmoxCredentials] = {}
         #: Ticket-auth session cache: ``{"ticket": ..., "csrf": ...}`` per target.
-        self._ticket_cache: dict[tuple[str, str], dict[str, str]] = {}
+        self._ticket_cache: dict[tuple[str, ...], dict[str, str]] = {}
         self._creds_lock = asyncio.Lock()
         self._ticket_lock = asyncio.Lock()
         self._credentials_loader: ProxmoxCredentialsLoader = (
@@ -209,7 +214,7 @@ class ProxmoxConnector(HttpConnector):
         itself sends no auth header. The system-operator fast-path carve-out
         mirrors :meth:`_resolve_creds`.
         """
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target)
         async with self._ticket_lock:
             cached = self._ticket_cache.get(cache_key)
             if cached is not None and not is_system_operator(operator):

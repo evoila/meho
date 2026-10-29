@@ -51,6 +51,7 @@ from meho_backplane.gateway.queue import (
     record_result,
 )
 from meho_backplane.middleware import RequestContextMiddleware
+from meho_backplane.runner import wire
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -410,6 +411,48 @@ async def test_next_runner_scope_mismatch_forbidden(client: httpx.AsyncClient) -
 
     assert resp.status_code == 403
     assert resp.json()["detail"] == "runner_scope_violation"
+
+
+@pytest.mark.asyncio
+async def test_result_other_wire_version_is_refused_before_the_body_is_read(
+    client: httpx.AsyncClient,
+) -> None:
+    """A runner on another wire version gets the 409 even with an unreadable result body (#5020)."""
+    await _seed()
+    key = make_rsa_keypair("kid-A")
+    jwks = public_jwks(key)
+    token = _runner_token(key, runner_id=_RUNNER_A_ID)
+    unreadable = {"outcome": "succeeded"}  # no command_id
+
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, jwks)
+        refused = await client.post(
+            f"/api/v1/gateway/{_RUNNER_A_NAME}/result",
+            headers={"Authorization": f"Bearer {token}", wire.WIRE_VERSION_HEADER: "2"},
+            json=unreadable,
+        )
+        same_version = await client.post(
+            f"/api/v1/gateway/{_RUNNER_A_NAME}/result",
+            headers={"Authorization": f"Bearer {token}"},
+            json=unreadable,
+        )
+        polled = await client.get(
+            f"/api/v1/gateway/{_RUNNER_A_NAME}/next?wait=0",
+            headers={"Authorization": f"Bearer {token}", wire.WIRE_VERSION_HEADER: "2"},
+        )
+
+    assert refused.status_code == 409
+    assert refused.json()["detail"] == (
+        "runner_wire_version_mismatch: runner wire version 2, "
+        "central MEHO needs 1: update the central MEHO"
+    )
+    assert same_version.status_code == 422
+    assert polled.status_code == 409
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await session.get(RunnerPrincipal, _RUNNER_A_ID)
+    assert row is not None
+    assert row.wire_version == "2"
 
 
 # ---------------------------------------------------------------------------

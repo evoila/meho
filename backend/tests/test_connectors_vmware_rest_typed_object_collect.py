@@ -312,11 +312,11 @@ async def test_object_collect_surfaces_missingset_fault_types_never_text() -> No
     field unchanged, and yields an empty summary for an empty missingSet."""
     # Realistic VI-JSON RetrieveResult (9.x LocalizedMethodFault wrapper shape,
     # ``_typeName``-annotated as on the wire): one readable boxed property, two
-    # NoPermission faults + one InvalidProperty fault, and one genuinely-unset
-    # property (no ``fault``). The InvalidProperty fault carries a message
-    # string and a nested faultMessage payload; the NoPermission faults carry
-    # a localized message and a nested privilege payload — none of which may
-    # appear in the returned envelope.
+    # NoPermission faults + one InvalidProperty fault, and one property that is
+    # not set. vCenter leaves that one out of both lists (#5131). The
+    # InvalidProperty fault carries a message string and a nested faultMessage
+    # payload; the NoPermission faults carry a localized message and a nested
+    # privilege payload — none of which may appear in the returned envelope.
     recorded = {
         "objects": [
             {
@@ -382,8 +382,6 @@ async def test_object_collect_surfaces_missingset_fault_types_never_text() -> No
                             "localizedMessage": "An invalid property was specified.",
                         },
                     },
-                    # No ``fault`` — property genuinely unset, not faulted.
-                    {"_typeName": "MissingProperty", "path": "config.product.build"},
                 ],
             }
         ]
@@ -413,7 +411,7 @@ async def test_object_collect_surfaces_missingset_fault_types_never_text() -> No
         {"path": "config.storageDevice", "fault_type": "NoPermission"},
         {"path": "config.network.dnsConfig", "fault_type": "NoPermission"},
         {"path": "hardware.systemInfo.serialNumber", "fault_type": "InvalidProperty"},
-        # Genuinely-unset property: reported with no fault_type ("absent" vs "faulted").
+        # Left out of both lists: reported with no fault_type (#5131).
         {"path": "config.product.build"},
     ]
 
@@ -458,6 +456,104 @@ async def test_object_collect_surfaces_missingset_fault_types_never_text() -> No
     assert out_empty["missing"] == []
     assert out_empty["missing_properties"] == []
     assert out_empty["missing_fault_summary"] == {}
+
+
+@pytest.mark.asyncio
+async def test_object_collect_reports_a_requested_path_left_out_of_both_lists() -> None:
+    """A path that is in neither ``propSet`` nor ``missingSet`` lands in
+    ``missing`` without a ``fault_type`` (#5131).
+
+    vCenter does this when the value is a link to an object the login may not
+    see: here a port group whose switch is hidden. The recorded answer has a
+    value for ``name``, a ``NoPermission`` fault for ``config.description``,
+    and nothing at all for ``config.distributedVirtualSwitch``.
+    """
+    recorded = {
+        "objects": [
+            {
+                "_typeName": "ObjectContent",
+                "obj": {
+                    "_typeName": "ManagedObjectReference",
+                    "type": "DistributedVirtualPortgroup",
+                    "value": "dvportgroup-7",
+                },
+                "propSet": [
+                    {"_typeName": "DynamicProperty", "name": "name", "val": "pg-app"},
+                ],
+                "missingSet": [
+                    {
+                        "_typeName": "MissingProperty",
+                        "path": "config.description",
+                        "fault": {
+                            "_typeName": "LocalizedMethodFault",
+                            "fault": {"_typeName": "NoPermission", "privilegeId": "System.Read"},
+                            "localizedMessage": "Permission to perform this operation was denied.",
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+    conn = _FakeConnector(props_result=recorded)
+
+    out = await object_collect_impl(
+        conn,
+        _make_operator(),
+        _Target(),
+        {
+            "type": "DistributedVirtualPortgroup",
+            "moid": "dvportgroup-7",
+            "properties": ["config.distributedVirtualSwitch", "name", "config.description"],
+        },
+    )
+
+    assert out["properties"] == {"name": "pg-app"}
+    assert out["missing"] == ["config.description", "config.distributedVirtualSwitch"]
+    assert out["missing_properties"] == [
+        {"path": "config.description", "fault_type": "NoPermission"},
+        {"path": "config.distributedVirtualSwitch"},
+    ]
+    # Only the real fault is counted.
+    assert out["missing_fault_summary"] == {"NoPermission": 1}
+    # Every requested path is accounted for, once.
+    assert sorted([*out["properties"], *out["missing"]]) == sorted(
+        ["config.distributedVirtualSwitch", "name", "config.description"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_object_collect_missing_stays_empty_when_every_path_comes_back() -> None:
+    """Every requested path has a value: ``missing`` stays empty (#5131)."""
+    conn = _FakeConnector(
+        props_result=_object_content(
+            "DistributedVirtualPortgroup",
+            "dvportgroup-7",
+            {
+                "name": "pg-app",
+                "key": "dvportgroup-7",
+                "config.distributedVirtualSwitch": {
+                    "type": "VmwareDistributedVirtualSwitch",
+                    "value": "dvs-3",
+                },
+            },
+            [],
+        )
+    )
+
+    out = await object_collect_impl(
+        conn,
+        _make_operator(),
+        _Target(),
+        {
+            "type": "DistributedVirtualPortgroup",
+            "moid": "dvportgroup-7",
+            "properties": ["name", "config.distributedVirtualSwitch", "key"],
+        },
+    )
+
+    assert out["missing"] == []
+    assert out["missing_properties"] == []
+    assert out["missing_fault_summary"] == {}
 
 
 # A recorded standalone-ESXi RetrievePropertiesEx SOAP response with exactly

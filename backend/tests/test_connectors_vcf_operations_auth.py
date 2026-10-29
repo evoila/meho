@@ -47,6 +47,7 @@ from meho_backplane.connectors.vcf_operations import (
     VcfOperationsConnector,
     VcfOperationsTargetLike,
 )
+from meho_backplane.connectors.vcf_operations.connector import _session_cache_key
 
 # ---------------------------------------------------------------------------
 # OpsToken session-establish path + canned acquire response (#2395).
@@ -305,8 +306,8 @@ async def test_per_target_isolation_keeps_session_tokens_separate() -> None:
     assert h_a == {"Authorization": "OpsToken token-a"}
     assert h_b == {"Authorization": "OpsToken token-b"}
     assert connector._session_tokens == {
-        target_cache_key(_TARGET_A): "token-a",
-        target_cache_key(_TARGET_B): "token-b",
+        _session_cache_key(_TARGET_A): "token-a",
+        _session_cache_key(_TARGET_B): "token-b",
     }
     await connector.aclose()
 
@@ -320,8 +321,8 @@ async def test_public_invalidate_session_evicts_only_the_targets_slot() -> None:
     op preserves per-``(tenant_id, target.id)`` isolation.
     """
     connector = _make_connector()
-    key_a = target_cache_key(_TARGET_A)
-    key_b = target_cache_key(_TARGET_B)
+    key_a = _session_cache_key(_TARGET_A)
+    key_b = _session_cache_key(_TARGET_B)
     connector._session_tokens[key_a] = "token-a"
     connector._session_tokens[key_b] = "token-b"
 
@@ -681,7 +682,7 @@ async def test_aclose_clears_session_and_credential_caches_and_pool() -> None:
         mock.post(_ACQUIRE_PATH).respond(200, json=_acquire_response())
         await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
-    assert connector._session_tokens == {target_cache_key(_TARGET_A): _OPS_TOKEN}
+    assert connector._session_tokens == {_session_cache_key(_TARGET_A): _OPS_TOKEN}
     assert target_cache_key(_TARGET_A) in connector._creds.cached_targets
     await connector.aclose()
     assert connector._session_tokens == {}

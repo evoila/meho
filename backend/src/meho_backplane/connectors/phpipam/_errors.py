@@ -10,7 +10,8 @@ out of it and cuts it), never into MEHO's own message.
 
 * :class:`PhpipamApiError` -- every error answer MEHO does not handle itself.
 * :class:`PhpipamAddressTakenError` -- ``phpipam.address.reserve`` found the
-  address reserved for another host name. Nothing was changed.
+  address reserved for another host name. Nothing was changed. That host name
+  is phpIPAM data too, so it is the ``upstream_message``.
 * A refused login or token (401, 403) becomes
   :class:`~meho_backplane.connectors._shared.vcf_auth.ConnectorAuthError`, so
   the dispatcher answers ``connector_auth_failed`` and drops the cached secret.
@@ -65,13 +66,12 @@ class PhpipamAddressTakenError(ConnectorUpstreamError):
     """The address is reserved for another host name. Nothing was changed."""
 
     def __init__(self, *, ip: str, subnet: str, held_by: str | None) -> None:
-        holder = (
-            f"the host name {held_by[:HOSTNAME_CAP]!r}" if held_by else "an entry with no host name"
-        )
+        # The host name is phpIPAM data, so it goes only into upstream_message.
+        holder = "another host name" if held_by else "an entry with no host name"
         super().__init__(
             f"{ip} in subnet {subnet} is already reserved for {holder}. Nothing was changed.",
             http_status=409,
-            upstream_message=None,
+            upstream_message=held_by[:HOSTNAME_CAP] if held_by else None,
         )
         self.held_by = held_by
         self.remediation = (

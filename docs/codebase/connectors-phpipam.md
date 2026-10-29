@@ -145,7 +145,9 @@ however large the subnet is.
    count)? Then nothing is written: `status: nothing_to_do`. With
    `first_free`, any address of the subnet with this host name counts.
 4. Reserved for another host name? The call fails with
-   `PhpipamAddressTakenError`, which names that host name. Nothing is written.
+   `PhpipamAddressTakenError`. Nothing is written. The error message is MEHO's
+   own fixed text; the other host name comes from phpIPAM, so it is only in
+   the upstream field of the error (`upstream_message`).
 5. Sends `POST /api/{app_id}/addresses/` (`subnetId`, `ip`, `hostname`,
    `description`, `note`), or `POST /api/{app_id}/addresses/first_free/{subnet_id}/`.
    A 409 (someone reserved it a moment before) is handled like steps 3 and 4.
@@ -188,7 +190,7 @@ them. phpIPAM's error messages go only into `upstream_message` of the error
 | Error | When |
 |---|---|
 | `PhpipamRefusedError` | MEHO refused the call before any change (bad input, folder, subnet with child subnets). |
-| `PhpipamAddressTakenError` | Reserve: another host name holds the address. Names the holder. |
+| `PhpipamAddressTakenError` | Reserve: another host name holds the address. That host name is in `upstream_message`. |
 | `PhpipamApiError` | phpIPAM answered with an error MEHO does not handle itself. `http_status` and `upstream_message` say what. |
 | `PhpipamConfigError` | `extras.app_id`, `extras.base_path` or the secret shape is wrong. |
 | `connector_auth_failed` | phpIPAM refused the login or the token. |

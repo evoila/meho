@@ -167,7 +167,8 @@ PHPIPAM_TYPED_OPS: Final[tuple[PhpipamTypedOp, ...]] = (
                 "unknown: the answer was lost and MEHO did not try again. verification is "
                 "verified, not_verified or unknown (the read-back after the write). When "
                 "another host name holds the address, the call fails with "
-                f"PhpipamAddressTakenError naming it. {_UNTRUSTED}"
+                "PhpipamAddressTakenError; that host name is in extras.upstream_message. "
+                f"{_UNTRUSTED}"
             ),
             "next_step": (
                 "Use the address only when status is reserved or nothing_to_do and "

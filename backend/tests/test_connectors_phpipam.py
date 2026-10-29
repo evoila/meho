@@ -238,7 +238,9 @@ async def test_reserve_of_a_taken_address_fails_and_names_the_holder() -> None:
         await _run(
             fake, "address_reserve", {"subnet_id": 7, "ip": "192.0.2.1", "hostname": "web-02"}
         )
-    assert "gw.example.test" in str(info.value)
+    assert "gw.example.test" not in str(info.value)
+    assert "another host name" in str(info.value)
+    assert info.value.upstream_message == "gw.example.test"
     assert info.value.held_by == "gw.example.test"
     assert fake.calls_of("POST") == []
 
@@ -254,8 +256,9 @@ async def test_reserve_race_409_reads_the_holder() -> None:
         return httpx.Response(404, json={"code": 404, "success": False, "message": "none"})
 
     fake._subnet_address = _address_hidden_once  # type: ignore[method-assign]
-    with pytest.raises(PhpipamAddressTakenError, match=r"other\.example\.test"):
+    with pytest.raises(PhpipamAddressTakenError) as info:
         await _run(fake, "address_reserve", {"subnet_id": 7, "ip": "192.0.2.10", "hostname": "w"})
+    assert info.value.upstream_message == "other.example.test"
 
 
 async def test_address_that_is_not_the_first_of_its_subnet_is_found() -> None:

@@ -278,7 +278,7 @@ meho agent run <name> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--input` — the user prompt to run the agent on (required; at most 65536 characters)
 - `--json` — emit the raw run response JSON instead of the human summary
-- `--work-ref` — external change-ticket reference to bind the run to; filterable via `meho agent run-list --work-ref`
+- `--work-ref` — external change-ticket reference to bind the run to; filterable via `meho agent run-list --filter-work-ref`
 
 ### `meho agent run-cancel`
 
@@ -305,7 +305,7 @@ meho agent run-events <name> [flags]
 
 ### `meho agent run-list`
 
-List agent runs (filter by --work-ref / --status)
+List agent runs (filter by --filter-work-ref / --status)
 
 ```
 meho agent run-list [flags]
@@ -313,11 +313,11 @@ meho agent run-list [flags]
 
 - `--agent-name` — filter by agent definition name (exact match); an unknown name returns an empty list
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--filter-work-ref` — filter by external change-ticket reference
 - `--json` — emit the raw []AgentRunSummaryResponse JSON instead of the table
 - `--limit` — max runs per page (1..500, server default 100 when omitted)
 - `--offset` — rows to skip for paging into the result set (default 0)
 - `--status` — filter by lifecycle status: pending, running, awaiting_approval, succeeded, failed, or cancelled
-- `--work-ref` — filter by external change-ticket reference
 
 ### `meho agent run-status`
 
@@ -413,11 +413,11 @@ meho approvals list [flags]
 ```
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--filter-work-ref` — filter by external change-ticket reference, exact match
 - `--json` — emit raw JSON array instead of the human table
 - `--limit` — max requests to return (1..500; no limit when omitted)
 - `--offset` — skip this many requests first (default 0)
 - `--status` — filter by status: pending, approved, rejected, expired, withdrawn, all (default: pending)
-- `--work-ref` — filter by external change-ticket reference, exact match
 
 ### `meho approvals reject`
 
@@ -703,6 +703,7 @@ meho audit query [flags]
 - `--audit-id` — exact audit-id lookup (UUID)
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--cursor` — opaque forward-pagination cursor from a prior page's NEXT line
+- `--filter-work-ref` — narrow to one external change-ticket reference — "show every write authorised by ticket X"
 - `--json` — emit raw AuditQueryResult JSON instead of the human table
 - `--limit` — max rows per page (1..1000, server default 100 when omitted)
 - `--op-class` — narrow to one op-class (read|write|credential_read|audit_query|other)
@@ -714,7 +715,6 @@ meho audit query [flags]
 - `--since` — earliest occurred_at; accepts 24h / 7d / 30m / 2w shorthand or ISO-8601
 - `--target` — narrow to one target (name or alias; server-side resolution)
 - `--until` — latest occurred_at; accepts the same shorthand as --since
-- `--work-ref` — narrow to one external change-ticket reference — "show every write authorised by ticket X"
 
 ### `meho audit recent`
 
@@ -1093,12 +1093,12 @@ meho broadcast recent [flags]
 - `--actor-sub` — exact delegated-agent filter
 - `--backplane` — backplane URL
 - `--cursor` — ISO-8601 window start, or next_cursor from a previous page
+- `--filter-work-ref` — exact work-reference filter
 - `--json` — emit JSON
 - `--limit` — maximum events (1-1000)
 - `--op-class` — exact op class filter
 - `--principal` — exact principal filter
 - `--target` — exact target filter
-- `--work-ref` — exact work-reference filter
 
 ### `meho broadcast watch`
 
@@ -4014,11 +4014,11 @@ meho runbook runs [flags]
 
 - `--assignee` — filter by assignee subject (tenant_admin only; operators see own regardless)
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--filter-work-ref` — filter by external change-ticket reference
 - `--json` — emit raw RunbookListRunsResponse JSON instead of the human table
 - `--limit` — max runs per page (1..500, server default 100 when omitted)
 - `--status` — filter by run state: in_progress, completed, or abandoned
 - `--template-slug` — filter by template slug
-- `--work-ref` — filter by external change-ticket reference
 
 ### `meho runbook show-template`
 
@@ -4151,13 +4151,13 @@ meho scheduler list [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--filter-work-ref` — filter by external change-ticket reference
 - `--json` — emit raw ListResponse JSON instead of the human table
 - `--kind` — filter by trigger kind: cron | one_off | event
 - `--limit` — max triggers per page (1..500, server default 100 when omitted)
 - `--offset` — offset into the result set (default 0)
 - `--status` — filter by trigger status: active | paused | cancelled | fired
 - `--tenant` — target tenant UUID (tenant_admin only; operator role is locked to its own tenant)
-- `--work-ref` — filter by external change-ticket reference
 
 ## `meho sddc-manager`
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/cmd/workref"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -38,7 +39,7 @@ func newListCmd() *cobra.Command {
 			"default it shows only pending requests: the ones that " +
 			"wait for a decision. Use --status all to see requests in " +
 			"every state, or --status approved|rejected|expired for " +
-			"one state. --work-ref filters to the requests " +
+			"one state. --filter-work-ref filters to the requests " +
 			"authorised by an external change ticket (exact match, " +
 			"e.g. gh:evoila/meho#1). --limit caps how many requests " +
 			"come back (1..500; no limit when omitted). --offset " +
@@ -50,7 +51,7 @@ func newListCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runList(cmd, listOpts{
 				StatusFilter:      statusFilter,
-				WorkRef:           workRef,
+				WorkRef:           workref.Filter(cmd, workRef),
 				Limit:             limit,
 				Offset:            offset,
 				JSONOut:           jsonOut,
@@ -60,7 +61,7 @@ func newListCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&statusFilter, "status", "",
 		"filter by status: pending, approved, rejected, expired, withdrawn, all (default: pending)")
-	cmd.Flags().StringVar(&workRef, "work-ref", "",
+	cmd.Flags().StringVar(&workRef, workref.FilterFlag, "",
 		"filter by external change-ticket reference, exact match (e.g. gh:evoila/meho#1)")
 	// 0 means "not set": the flag is then left off the request and the
 	// server applies no limit / no offset.
@@ -197,7 +198,7 @@ func fetchList(
 // Columns: ID, STATUS, RUN, CONNECTOR, OP, PRINCIPAL, CREATED. RUN (#3543)
 // says whether an approved request ran and how it ended, so a run that
 // failed after the approval does not look like a plain "approved".
-// statusFilter, workRef and offset are the --status, --work-ref and
+// statusFilter, workRef and offset are the --status, --filter-work-ref and
 // --offset values; an empty list names them, so an empty default
 // (pending-only) list, an empty match for one change ticket, or an empty
 // page past the end is not read as "no requests at all".
@@ -224,7 +225,7 @@ func printListTable(w io.Writer, items []api.ApprovalRequestView, statusFilter, 
 
 // emptyListMessage says which state filter, change ticket and offset
 // gave the empty list and how to see more. The server lists only pending
-// requests when --status is not set. With --work-ref, only requests for
+// requests when --status is not set. With --filter-work-ref, only requests for
 // that change ticket count, so the hint is to drop the filter. With an
 // offset, the page is empty because the offset skipped every match, so
 // the hint is a smaller --offset.
@@ -248,10 +249,10 @@ func emptyListMessage(statusFilter, workRef string, offset int) string {
 	}
 	if workRef != "" {
 		if statusFilter == "all" {
-			return fmt.Sprintf("no approval requests%s (remove --work-ref to see every request)", ticket)
+			return fmt.Sprintf("no approval requests%s (remove --filter-work-ref to see every request)", ticket)
 		}
 		return fmt.Sprintf(
-			"no %sapproval requests%s (use --status all or remove --work-ref to see more)",
+			"no %sapproval requests%s (use --status all or remove --filter-work-ref to see more)",
 			state, ticket,
 		)
 	}

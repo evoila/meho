@@ -1010,7 +1010,7 @@ that header from one place, so every verb gets it without its own flag.
   the HTTP request row. So the rows the connector service writes
   inside the request (`meho_connector_edit_op`,
   `meho_connector_llm_grouping` for an ingest, enable / disable, ...)
-  carry the same work-ref, and `meho audit query --work-ref` finds
+  carry the same work-ref, and `meho audit query --filter-work-ref` finds
   them together with the request row. `backend/tests/
   test_audit_work_ref_control_plane.py` proves this round trip for
   `targets add`, `agent grant create`, `connector ingest` (sync and
@@ -1020,11 +1020,26 @@ that header from one place, so every verb gets it without its own flag.
   header first. So the MCP row and the dispatch row of each tool call
   carry it. A `work_ref` argument on `call_operation` still wins over the
   header. `backend/tests/test_mcp_work_ref_header.py` proves this.
-- Some commands have their own local `--work-ref` (`operation call`,
-  `scheduler create`, `runbook start`, `agent run`, and the filters on
-  `audit query`, `approvals list`, `broadcast recent`, ...). Cobra lets a local
-  flag hide the parent's persistent flag, so on those commands the flag
-  keeps its own meaning. Only `MEHO_WORK_REF` reaches the header there.
+- Some commands have their own local `--work-ref`: `operation call`,
+  `scheduler create`, `runbook start`, `agent run` and
+  `broadcast announce`. There it has the same meaning as the global
+  flag: it tags the run with the reference. Cobra lets a local flag hide
+  the parent's persistent flag, so only `MEHO_WORK_REF` reaches the
+  header there.
+- The six read commands that filter by reference (`audit query`,
+  `approvals list`, `scheduler list`, `runbook runs`, `agent run-list`,
+  `broadcast recent`) use `--filter-work-ref` for the filter (#4988).
+  They have no local `--work-ref`, so the global flag tags their request
+  like on every other command. Before #4988 their own `--work-ref`
+  filtered the answer and hid the global flag, so
+  `meho --work-ref X audit query ...` silently showed only the rows of
+  ticket X. For one release, a `--work-ref` on these commands still
+  filters too, and `workref.Filter` (`cli/internal/cmd/workref/`)
+  prints one warning line on stderr that names `--filter-work-ref`.
+  `MEHO_WORK_REF` never filters. `TestWorkRefFlagHasOneMeaning` walks
+  the command tree and fails when a command adds its own `--work-ref`
+  that is not a tag; `TestFilterWorkRefOnReadCommands` checks the
+  header and the filter on the wire for all six commands.
 - No PersistentPreRun hooks exist below the root. If one is added, it
   must call `applyWorkRef` too (cobra runs only the nearest hook).
 

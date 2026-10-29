@@ -666,8 +666,8 @@ func TestPrintDetailRendersOptionalFields(t *testing.T) {
 }
 
 // TestPrintListTableEmpty — an empty list names the state filter that
-// produced it and how to see more; only --status all with no --work-ref
-// and no offset says "none at all". With --work-ref, the message names
+// produced it and how to see more; only --status all with no --filter-work-ref
+// and no offset says "none at all". With --filter-work-ref, the message names
 // the change ticket and points to removing the filter, so an empty match
 // for one ticket is not read as an empty tenant. With an --offset, the
 // page is empty because the offset skipped every match, so the message
@@ -687,9 +687,9 @@ func TestPrintListTableEmpty(t *testing.T) {
 		{"", "", 15, "no pending approval requests after skipping 15 (this page is empty; use a smaller --offset)"},
 		{"pending", "", 3, "no pending approval requests after skipping 3 (this page is empty; use a smaller --offset)"},
 		{"rejected", "", 1, "no rejected approval requests after skipping 1 (this page is empty; use a smaller --offset)"},
-		{"all", "gh:evoila/meho#1", 0, `no approval requests for change ticket "gh:evoila/meho#1" (remove --work-ref to see every request)`},
-		{"", "gh:evoila/meho#1", 0, `no pending approval requests for change ticket "gh:evoila/meho#1" (use --status all or remove --work-ref to see more)`},
-		{"approved", "gh:evoila/meho#1", 0, `no approved approval requests for change ticket "gh:evoila/meho#1" (use --status all or remove --work-ref to see more)`},
+		{"all", "gh:evoila/meho#1", 0, `no approval requests for change ticket "gh:evoila/meho#1" (remove --filter-work-ref to see every request)`},
+		{"", "gh:evoila/meho#1", 0, `no pending approval requests for change ticket "gh:evoila/meho#1" (use --status all or remove --filter-work-ref to see more)`},
+		{"approved", "gh:evoila/meho#1", 0, `no approved approval requests for change ticket "gh:evoila/meho#1" (use --status all or remove --filter-work-ref to see more)`},
 		{"all", "gh:evoila/meho#1", 2, `no approval requests for change ticket "gh:evoila/meho#1" after skipping 2 (this page is empty; use a smaller --offset)`},
 	}
 	for _, tc := range cases {
@@ -706,7 +706,7 @@ func TestPrintListTableEmpty(t *testing.T) {
 	}
 }
 
-// TestListSendsWorkRef confirms --work-ref reaches the wire as
+// TestListSendsWorkRef confirms --filter-work-ref reaches the wire as
 // work_ref, so the server does the exact-match filter the empty message
 // then names.
 func TestListSendsWorkRef(t *testing.T) {

@@ -657,8 +657,12 @@ func newRootCmdFor(args []string) *cobra.Command {
 // request built from that context then sends the Meho-Work-Ref header.
 //
 // A subcommand that defines its own local --work-ref (operation call,
-// audit query, ...) hides the global flag; for those commands only the
-// environment variable reaches the header.
+// scheduler create, runbook start, agent run, broadcast announce) hides
+// the global flag; for those commands only the environment variable
+// reaches the header. Their local flag has the same meaning: it tags
+// the run with the reference. The read commands that filter by
+// reference use --filter-work-ref instead (TestWorkRefFlagHasOneMeaning
+// keeps it that way).
 //
 // Commands that send no backplane request skip the check, so a bad
 // MEHO_WORK_REF does not break help, shell completion, version or

@@ -82,6 +82,7 @@ __all__ = [
     "VMWARE_HOST_VSAN_HEALTH_OP",
     "VMWARE_LICENSE_ASSIGNED_LIST_OP",
     "VMWARE_LICENSE_LIST_OP",
+    "VMWARE_NETWORK_PORTGROUP_SHOW_OP",
     "VMWARE_OBJECT_COLLECT_OP",
     "VMWARE_SNAPSHOT_LIST_OP",
     "VMWARE_TASKS_HISTORY_OP",
@@ -414,6 +415,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_object_collect import (  # 
     OBJECT_COLLECT_WHEN_TO_USE,
     VMWARE_OBJECT_COLLECT_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_portgroup_show import (  # noqa: E402
+    PORTGROUP_SHOW_GROUP_KEY,
+    PORTGROUP_SHOW_WHEN_TO_USE,
+    VMWARE_NETWORK_PORTGROUP_SHOW_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_snapshot_list import (  # noqa: E402
     SNAPSHOT_LIST_GROUP_KEY,
     SNAPSHOT_LIST_WHEN_TO_USE,
@@ -481,6 +487,7 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     LICENSE_GROUP_KEY: LICENSE_WHEN_TO_USE,
     APPLIANCE_LOCAL_ACCOUNTS_GROUP_KEY: APPLIANCE_LOCAL_ACCOUNTS_WHEN_TO_USE,
     ALARM_TRIGGERED_GROUP_KEY: ALARM_TRIGGERED_WHEN_TO_USE,
+    PORTGROUP_SHOW_GROUP_KEY: PORTGROUP_SHOW_WHEN_TO_USE,
 }
 
 VMWARE_HOST_USAGE_OP = VmwareTypedOp(
@@ -552,8 +559,9 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 #: that wait for approval); the triggered-alarm list
 #: ``alarm.triggered.list`` (#4383); and the VM question read and answer
 #: ``vm.question.get`` / ``vm.question.answer`` (the answer waits for
-#: approval). The tuple shape lets future typed ops join without touching
-#: the registrar.
+#: approval); and the settings of one distributed port group
+#: ``network.portgroup.show``. The tuple shape lets future typed ops join
+#: without touching the registrar.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
     VMWARE_HOST_NETWORK_UPLINKS_OP,
@@ -572,6 +580,7 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_ALARM_TRIGGERED_LIST_OP,
     VMWARE_VM_QUESTION_GET_OP,
     VMWARE_VM_QUESTION_ANSWER_OP,
+    VMWARE_NETWORK_PORTGROUP_SHOW_OP,
 )
 
 

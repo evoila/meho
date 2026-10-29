@@ -788,6 +788,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `snapshot_list`) — the snapshots of one VM (by `vm` moid) as a flat list in
   tree order. `safe`, in its own group `vmware-snapshot-list`, on both
   catalogs. See **VM snapshot operations** under Control flow.
+- **`vmware.network.list`** (`typed_ops_network_list.py`, handler
+  `network_list`) — every network of a vCenter (standard port groups,
+  distributed port groups, NSX segments) with its datacenter and, for a
+  distributed port group, its switch and VLAN. `safe`, in its own group
+  `vmware-networks`, on both catalogs. See **Network list** under Control
+  flow.
 - **`vcenter.sso_admin.api_file.get`** (`typed_ops_sso_admin_api_file.py`,
   handler `sso_admin_api_file_get`) — reads one SSO Admin API description
   file (the WSDL or one of its XSD files) that a vCenter serves. No vendor
@@ -4346,6 +4352,56 @@ a key; flight-recorder spans, with a control case without the tag),
 `tests/test_connectors_vmware_rest_license_reconcile.py` (the pinned 9.0
 `vi-json.yaml`) and the source scan in
 `tests/test_connectors_vmware_rest_8_0_spec_reconcile.py` (8.0 U1, U2, U3).
+
+### Network list (`vmware.network.list`)
+
+A typed read that lists every network of a vCenter that a VM can use. It is
+written by hand, so it has a clear summary, field descriptions and a risk
+level. It replaces the raw ingested `GET:/vcenter/network` operation for this
+common task.
+
+| Operation | What it does | Vendor calls | Risk |
+|---|---|---|---|
+| `vmware.network.list` | One row per network: `id` (moid), `name`, `type` (`STANDARD_PORTGROUP`, `DISTRIBUTED_PORTGROUP` or `OPAQUE_NETWORK`, which is a network managed outside vSphere such as an NSX segment), `datacenter` and `datacenter_name`, and for a distributed port group `switch_id`, `switch_name`, `vlan_mode` (`access` or `trunk`), `vlan_id`, `vlan_trunk_ranges` (for example `100-200,300`); `read_note`. Optional filters `type`, `datacenter`, `folder` (sent to vCenter) and a `name` pattern (`*` and `?`, letter case does not matter, applied in MEHO). | `GET /vcenter/datacenter`; `GET /vcenter/network` once per datacenter; for the distributed port groups one `RetrievePropertiesEx` of `config.distributedVirtualSwitch` and `config.defaultPortConfig`, then one for the switch names | `safe`; runs at once |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 and its updates | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+- **How it finds the datacenter.** The REST network summary has only
+  `network`, `name` and `type`. So MEHO lists the datacenters and asks for
+  the networks of each one with the `datacenters` filter. A `datacenter`
+  filter asks for that one only.
+- **Switch and VLAN.** Only a distributed port group has them. MEHO reads
+  them with the same code as `vmware.composite.network.portgroup.audit`
+  (`read_portgroup_switch_and_vlan` in `composites/_read.py`): the whole
+  `config.defaultPortConfig` is read and `vlan` is picked in code, because
+  vCenter 8.0.x fails on the deep `config.defaultPortConfig.vlan` path. A
+  private VLAN, or a shape MEHO does not know, gives `vlan_mode` `null`. The
+  VLAN of a standard port group is set on each host, so it is not shown.
+- **How it calls vCenter.** The REST calls go through the REST mount
+  (`mount_op_path`, `/api` or the legacy `/rest`) on the connector's own
+  session, so it needs no spec ingest. Filters are written as
+  `filter.types`, `filter.folders` and `filter.datacenters`;
+  `adapt_op_query` sends the bare names on `/api`. The vim read goes to the
+  VI/JSON base like the other vim reads.
+- **Errors.** A failed datacenter or network list fails the operation. A
+  failed vim read keeps every row; the switch and VLAN of each distributed
+  port group are `null` and its `read_note` says why.
+- **Cost.** One datacenter list, one network list per datacenter, and two vim
+  reads (in chunks of 50 port groups) when a distributed port group is in the
+  answer.
+- **Large lists.** The rows are flat, so a long list comes back as a link to
+  the stored result (a result handle) that the caller reads with
+  `result_query`.
+
+Code: `typed_ops_network_list.py`. Tests:
+`tests/test_connectors_vmware_rest_typed_network_list.py` (saved answers, no
+live vCenter) and `tests/test_connectors_vmware_rest_network_list_reconcile.py`
+(the paths, the filters, the fields and the type enum against the pinned
+vCenter 8.0 U3 and 9.0 `vcenter.yaml`; the vim read against the pinned
+VI/JSON files).
 
 ## Dependencies
 

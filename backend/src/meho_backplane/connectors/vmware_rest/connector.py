@@ -3467,6 +3467,25 @@ class VmwareRestConnector(HttpConnector):
 
         return await license_assigned_list_impl(self, operator, target, params)
 
+    async def network_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.network.list`` -- every network, with datacenter, switch and VLAN.
+
+        A ``source_kind="typed"`` read on the REST API (plus one vim read for
+        the distributed port groups). Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_network_list.network_list_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_network_list import (
+            network_list_impl,
+        )
+
+        return await network_list_impl(self, operator, target, params)
+
     # The four ``vmware.appliance.local_account.*`` typed ops. Each delegates to
     # :mod:`.appliance_local_accounts` (imported lazily, like the other typed ops).
 

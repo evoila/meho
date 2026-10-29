@@ -95,6 +95,8 @@ _VMWARE_COMPOSITE_GROUPS: Final[frozenset[str]] = frozenset(
         # Shared with the two typed licence reads.
         "vmware-licensing",
         "alarms",
+        # The migration inventory read.
+        "migration",
     }
 )
 _BIND9_GROUPS: Final[frozenset[str]] = frozenset({"identity", "zone", "record", "config"})

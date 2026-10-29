@@ -342,13 +342,14 @@ real operator through the same loader.
 | `k8s.about`            | safe   | Product / version / platform via `VersionApi.get_code`.           |
 | `k8s.ls`               | safe   | Synthetic walker: root / namespace / namespace+kind.              |
 | `k8s.namespace.list`   | safe   | `CoreV1Api.list_namespace()` -- name / status / age.              |
-| `k8s.node.list`        | safe   | `CoreV1Api.list_node()` -- status / roles / version.              |
+| `k8s.node.list`        | safe   | `CoreV1Api.list_node()` -- status / roles / version, plus `system_uuid` (the node's BIOS UUID), `os_image`, `architecture`, `cpu_capacity`, `memory_capacity` (`_node_identity.py`). |
 | `k8s.pod.list`         | safe   | Pods with selectors + server-side pagination.                     |
 | `k8s.pod.info`         | safe   | Full pod detail; exact name or unique prefix.                     |
 | `k8s.deployment.list`  | safe   | Deployments with live replica counts + image + strategy.          |
 | `k8s.deployment.info`  | safe   | Full deployment detail; exact name or unique prefix.              |
 | `k8s.job.list`         | safe   | `BatchV1Api.list_namespaced_job()` / `list_job_for_all_namespaces()` -- one row per Job with a one-word `state`, pod counts, `completions`, start / completion times. Same selectors + paging as `k8s.pod.list`. (`ops_job.py`) |
 | `k8s.job.info`         | safe   | One Job by exact name or unique prefix: the row fields plus conditions (reason + message), `backoff_limit`, `active_deadline_seconds`, template containers, `pod_selector` and up to 50 of its pods, newest first. (`ops_job.py`) |
+| `k8s.workload.list`    | safe   | `AppsV1Api` list for one `kind` (Deployment / StatefulSet / DaemonSet): desired `replicas` (DaemonSet: pods it should run), per-container `requests` / `limits` as API quantities, images, `volumes` with `claim_name`, StatefulSet `volume_claim_templates`, and `pod_selector`. `containers` holds the app containers and the sidecars (init containers with `restartPolicy: Always`); plain init containers are left out. Same selectors + paging as `k8s.deployment.list`. (`ops_workload_set.py`) |
 | `k8s.service.list`     | safe   | `CoreV1Api.list_namespaced_service()` / `list_service_for_all_namespaces()` -- type / cluster_ip / ports / selector / lb_ingress (LoadBalancer VIP from `status.loadBalancer.ingress`, `[]` otherwise) + `label_selector`. |
 | `k8s.ingress.list`     | safe   | `NetworkingV1Api.list_namespaced_ingress()` / `list_ingress_for_all_namespaces()` -- class / hosts / TLS / rules + `label_selector`. |
 | `k8s.configmap.list`   | safe   | `CoreV1Api.list_namespaced_config_map()` / `list_config_map_for_all_namespaces()` -- **keys only, NO values** + `label_selector`. |
@@ -366,6 +367,11 @@ real operator through the same loader.
 | `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap. |
 | `k8s.exec`             | **dangerous** (`requires_approval=True`) | `CoreV1Api.connect_get_namespaced_pod_exec()` over the `WsApiClient` websocket transport -- bounded argv command-and-capture: stdout / stderr demuxed from the `v4.channel.k8s.io` channels + exit code parsed from the channel-3 status frame, per-stream 1 MiB cap, bounded timeout. Interactive `-it` deferred. |
 | `k8s.secret.read_to_ref` | **caution** (`requires_approval=True`) | `CoreV1Api.read_namespaced_secret()` -- reads one Secret's `data[data_key]` (default `value`), decodes it, and stages the value to a **tenant-scoped Vault `secret_ref`** via `vault.kv.put`; returns **only** the ref + provenance (SHA-256 / byte length), never the value. Classified `credential_read` (audit + broadcast aggregate-only). The governed VKS guest-kubeconfig read (`ops_secret_read.py`, #3496). |
+
+The multi-step read `k8s.migration.inventory` (group `migration`, `safe`)
+collects the cluster's nodes and workloads in the common migration inventory
+shape. It lives in `connectors/migration/source_k8s.py`; see
+`connectors-migration.md`.
 
 ### `k8s.exec` -- websocket command-and-capture (`ops_exec.py`)
 
@@ -451,7 +457,7 @@ the same pattern `ops_workload.py` / `ops_logs.py` use. Every op is
 | `k8s.cordon`           | caution   | `CoreV1Api.patch_node(spec.unschedulable)`; `uncordon=true` reverses. Eviction-free. |
 | `k8s.apply`            | dangerous | Server-side apply over `DynamicClient.server_side_apply` (`field_manager="meho"`), GVK resolved per manifest doc from discovery. `dry_run="server"` -> API `?dryRun=All` (mutates nothing, returns the would-be object). |
 | `k8s.delete`           | dangerous | Kind dispatch **scoped to pod/job/replicaset in v1** (namespace/PVC/PV rejected); explicit `propagation_policy` / `grace_period_seconds`. |
-| `k8s.secret.create`    | dangerous | `CoreV1Api.create_namespaced_secret`; values written but never echoed (response is key-names only). Values may be inline (`string_data` / `data`) or ref-sourced (`string_data_secret_ref` / `data_secret_ref`, resolved server-side through the credential-backend seam). |
+| `k8s.secret.create`    | dangerous | `CoreV1Api.create_namespaced_secret`; values written but never echoed (response is key-names only). Values may be inline (`string_data` / `data`) or ref-sourced (`string_data_secret_ref` / `data_secret_ref`, resolved server-side through the credential-backend seam). Optional `labels` / `annotations` maps go on the Secret's metadata. |
 | `k8s.job.create`       | dangerous | `BatchV1Api.create_namespaced_job` from a spec body; response is identity only. |
 | `k8s.cronjob.run`      | caution   | `BatchV1Api.read_namespaced_cron_job`, then `BatchV1Api.create_namespaced_job`: one Job from the CronJob's job template, now (`ops_cronjob.py`). |
 | `k8s.secret.update`    | dangerous | `CoreV1Api.patch_namespaced_secret` (mode `patch`, keeps other keys) or `read_namespaced_secret` + `replace_namespaced_secret` (mode `replace`, keeps only the given keys). Same value inputs as `k8s.secret.create`; response is key names only. `ops_secret_write.py`. |
@@ -520,6 +526,21 @@ aggregate-only. A resolved payload missing the requested field raises
 `KubernetesSecretRefError` (never a bare `KeyError`, never echoing a
 value).
 
+**`k8s.secret.create` labels and annotations (#3680).** Some tools find a
+Secret by its label. ArgoCD, for example, reads repository credentials
+from Secrets labelled `argocd.argoproj.io/secret-type: repository`. So
+`k8s.secret.create` takes two optional string maps:
+
+- `labels` -- set as the new Secret's `metadata.labels`.
+- `annotations` -- set as the new Secret's `metadata.annotations`.
+
+With them, one call (and one approval) creates such a Secret, also when
+its value comes from a `*_secret_ref`. Before, this took a create plus a
+`k8s.apply` to add the label. Labels and annotations are not secret: the
+approval preview shows them in full. Any other unknown key is still
+rejected (`additionalProperties: false`). `k8s.secret.update` keeps the
+labels and annotations of an existing Secret as they are.
+
 **`k8s.apply` dry-run preview.** The op supports `dry_run="server"` (maps
 to the API's `?dryRun=All`) so the would-be object is returned without
 mutating -- the diff-preview an agent or reviewer runs before the real
@@ -551,6 +572,18 @@ raises from aiohttp). The discovery reads that
 `DynamicClient` makes before the apply go through the same unchecked
 path, but a denied discovery read still ends in an error (usually
 `ResourceNotFoundError`), not a false success.
+
+**`k8s.apply` API-server warnings (#3842).** The API server can accept
+an apply and still send `Warning` response headers, for example when the
+manifest uses a deprecated `apiVersion`. Each entry in `applied` has a
+`warnings` list with the text of these headers for that document (an
+empty list when there are none). This works on the real apply and on the
+dry-run, so the approval preview shows the warnings too. The header form
+is `299 - "text"`; several warnings can come as several header lines or
+comma-separated in one line. A header in an unknown form is kept as it
+is. Each text is redacted with the default policy before it is returned,
+because an admission webhook can write any text into a warning. Other
+write ops do not return warnings yet.
 
 ### Change or delete an existing Secret -- `k8s.secret.update` / `k8s.secret.delete`
 

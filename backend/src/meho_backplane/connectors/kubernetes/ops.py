@@ -176,8 +176,8 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
     Composition: ``k8s.about`` (T1 canary) + ``CORE_OPS`` (T2 inventory:
     ``k8s.ls`` / ``k8s.namespace.list`` / ``k8s.node.list``) +
     ``WORKLOAD_OPS`` (T3 workload: ``k8s.pod.{list,info}`` /
-    ``k8s.deployment.{list,info}``) + ``JOB_OPS`` (Job reads:
-    ``k8s.job.{list,info}``) + ``NETWORK_OPS`` (T4 network:
+    ``k8s.deployment.{list,info}``) + ``JOB_OPS`` (``k8s.job.{list,info}``)
+    + ``WORKLOAD_SET_OPS`` (``k8s.workload.list``) + ``NETWORK_OPS`` (T4 network:
     ``k8s.service.list`` / ``k8s.ingress.list``) + ``CONFIG_OPS`` (T4
     config: ``k8s.configmap.list`` keys-only / ``k8s.configmap.info``
     full data) + ``EVENT_OPS`` (T4 observability: ``k8s.event.list``)
@@ -194,13 +194,8 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
 
     Implemented as a function call rather than a literal-and-splat at
     module level so the import order stays linear: ``ops.py`` defines
-    :class:`KubernetesOp` + ``_K8S_ABOUT_OP``, then imports the T2
-    inventory ops from :mod:`ops_core`, the T3 workload ops from
-    :mod:`ops_workload`, the T4 network ops from :mod:`ops_network`,
-    the T4 config ops from :mod:`ops_config`, the T4 event ops from
-    :mod:`ops_events`, and the T5 logs op metadata from
-    :mod:`ops_logs` (each of which only depends on ``KubernetesOp``
-    plus its own helpers). The arrangement keeps the canary op's
+    :class:`KubernetesOp` + ``_K8S_ABOUT_OP``, then imports the op tuples
+    from their ``ops_*`` modules. The arrangement keeps the canary op's
     metadata co-located with the dataclass definition while letting
     the larger surfaces live in their own modules next to their
     helpers.
@@ -218,6 +213,7 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
     from meho_backplane.connectors.kubernetes.ops_secret_write import SECRET_WRITE_OPS
     from meho_backplane.connectors.kubernetes.ops_storage import STORAGE_OPS
     from meho_backplane.connectors.kubernetes.ops_workload import WORKLOAD_OPS
+    from meho_backplane.connectors.kubernetes.ops_workload_set import WORKLOAD_SET_OPS
     from meho_backplane.connectors.kubernetes.ops_write_meta import (
         WRITE_CAUTION_OPS,
         WRITE_DANGEROUS_OPS,
@@ -228,6 +224,7 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
         *CORE_OPS,
         *WORKLOAD_OPS,
         *JOB_OPS,
+        *WORKLOAD_SET_OPS,
         *NETWORK_OPS,
         *CONFIG_OPS,
         *EVENT_OPS,

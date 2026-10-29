@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -114,9 +114,10 @@ def _revisions(sync_url: str) -> list[dict[str, object]]:
 
 def test_upgrade_backfills_one_labelled_current_revision_per_kb_entry(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     provenance = {
         "source_kind": "directory",
         "relative_path": "ops/a.md",
@@ -150,9 +151,11 @@ def test_upgrade_backfills_one_labelled_current_revision_per_kb_entry(
     assert by_body["body b"]["provenance"] is None
 
 
-def test_downgrade_drops_table_and_keeps_documents(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_drops_table_and_keeps_documents(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     _insert_document(sync_url, source="kb", source_id="a", body="body a", metadata={})
     command.upgrade(cfg, _REVISION)
     command.downgrade(cfg, _DOWN_REVISION)
@@ -166,9 +169,11 @@ def test_downgrade_drops_table_and_keeps_documents(alembic_cfg: tuple[Config, st
         engine.dispose()
 
 
-def test_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     command.downgrade(cfg, _DOWN_REVISION)
     command.upgrade(cfg, _REVISION)
     assert _TABLE in _tables(sync_url)

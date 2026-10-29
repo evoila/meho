@@ -427,6 +427,82 @@ func TestFormatReplayNodeNullDuration(t *testing.T) {
 	}
 }
 
+// TestFormatReplayNodeShowsTenant pins the trailing tenant field (#5238):
+// the tenant name when the backend sends one, else the tenant id, else "-".
+func TestFormatReplayNodeShowsTenant(t *testing.T) {
+	name := "team-a"
+	node := func(tname *string, tid string) *api.ReplayNode {
+		n := &api.ReplayNode{
+			Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
+			Ts:           mustTS(t, "2026-05-13T10:00:00Z"),
+			PrincipalSub: "damir",
+			Method:       "GET",
+			Path:         "/x",
+			StatusCode:   200,
+			OpId:         "x.y",
+			OpClass:      "read",
+			ResultStatus: "ok",
+			TenantName:   tname,
+		}
+		if tid != "" {
+			n.TenantId = mustUUIDPtr(t, tid)
+		}
+		return n
+	}
+	cases := []struct {
+		node *api.ReplayNode
+		want string
+	}{
+		{node(&name, "22222222-2222-2222-2222-222222222222"), "2026-05-13T10:00:00Z x.y [ok] (-ms) tenant=team-a"},
+		{node(nil, "22222222-2222-2222-2222-222222222222"), "2026-05-13T10:00:00Z x.y [ok] (-ms) tenant=22222222-2222-2222-2222-222222222222"},
+		{node(nil, ""), "2026-05-13T10:00:00Z x.y [ok] (-ms) tenant=-"},
+	}
+	for i, tc := range cases {
+		if got := formatReplayNode(tc.node); got != tc.want {
+			t.Errorf("case %d: got %q; want %q", i, got, tc.want)
+		}
+	}
+}
+
+// TestRunReplayTreeShowsTenantOnEveryNode — the text tree names the
+// tenant on each line, children included (#5238).
+func TestRunReplayTreeShowsTenantOnEveryNode(t *testing.T) {
+	fixture := twoLevelReplay(t)
+	name := "team-a"
+	var tag func(nodes []api.ReplayNode)
+	tag = func(nodes []api.ReplayNode) {
+		for i := range nodes {
+			nodes[i].TenantName = &name
+			if nodes[i].Children != nil {
+				tag(*nodes[i].Children)
+			}
+		}
+	}
+	tag(fixture.Root)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/audit/sessions/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(fixture)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newRunCmd(t)
+	err := runReplay(cmd, replayOptions{
+		SessionID:         "11111111-1111-1111-1111-111111111111",
+		MaxDepth:          defaultReplayMaxDepth,
+		BackplaneOverride: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("runReplay: %v; stderr=%s", err, stderr.String())
+	}
+	out := stdout.String()
+	if got := strings.Count(out, "tenant=team-a"); got != 4 {
+		t.Errorf("want tenant on all 4 nodes, got %d in:\n%s", got, out)
+	}
+}
+
 // TestCountDescendantsNilChildren pins the helper's nil-children
 // arm. The generated `ReplayNode.Children` is `*[]ReplayNode`; a
 // nil pointer must round-trip as zero descendants.

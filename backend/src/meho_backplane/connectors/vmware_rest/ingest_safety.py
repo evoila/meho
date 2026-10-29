@@ -12,10 +12,14 @@ from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 
 __all__ = [
     "VMWARE_APPLIANCE_AND_ACCESS_WRITES",
+    "VMWARE_VIM_SNAPSHOT_CREATES",
+    "VMWARE_VIM_VM_STATE_WRITES",
     "is_vmware_appliance_or_access_write",
     "is_vmware_host_maintenance_exit",
     "is_vmware_library_item_delete",
     "is_vmware_tagging_removal",
+    "is_vmware_vim_snapshot_create",
+    "is_vmware_vim_vm_state_write",
     "is_vmware_vm_relocate",
     "vmware_rest_safety_floor",
 ]
@@ -93,6 +97,50 @@ VMWARE_APPLIANCE_AND_ACCESS_WRITES: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/esx/settings/inventory?action=apply&vmw-task=true"),
     }
 )
+
+# VM power, terminate, clone, snapshot revert and migrate calls on the older
+# API (VI-JSON, #3869). Each is a ``POST`` to ``/<Type>/{moId}/<Method>``, so
+# the parser gave it ``caution`` without approval and a person's call ran at
+# once. Each is ``dangerous`` with approval, like the typed ``vm.power``,
+# ``vm.clone``, ``vm.snapshot.revert`` and ``vm.migrate`` and the generic
+# ``/vcenter/vm/{vm}/power`` calls. ``RelocateVM_Task`` has its own rule above;
+# the snapshot removals are deletes and the parser's delete-name rule already
+# makes them wait.
+VMWARE_VIM_VM_STATE_WRITES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("POST", "/VirtualMachine/{}/PowerOnVM_Task"),
+        ("POST", "/VirtualMachine/{}/PowerOffVM_Task"),
+        ("POST", "/VirtualMachine/{}/ResetVM_Task"),
+        ("POST", "/VirtualMachine/{}/SuspendVM_Task"),
+        ("POST", "/VirtualMachine/{}/ShutdownGuest"),
+        ("POST", "/VirtualMachine/{}/RebootGuest"),
+        ("POST", "/VirtualMachine/{}/StandbyGuest"),
+        ("POST", "/VirtualMachine/{}/TerminateVM"),
+        ("POST", "/VirtualMachine/{}/TerminateFaultTolerantVM_Task"),
+        ("POST", "/VirtualMachine/{}/CloneVM_Task"),
+        ("POST", "/VirtualMachine/{}/InstantClone_Task"),
+        ("POST", "/VirtualMachine/{}/MigrateVM_Task"),
+        ("POST", "/VirtualMachine/{}/RevertToCurrentSnapshot_Task"),
+        ("POST", "/VirtualMachineSnapshot/{}/RevertToSnapshot_Task"),
+        ("POST", "/Datacenter/{}/PowerOnMultiVM_Task"),
+        ("POST", "/VirtualApp/{}/PowerOnVApp_Task"),
+        ("POST", "/VirtualApp/{}/PowerOffVApp_Task"),
+        ("POST", "/VirtualApp/{}/SuspendVApp_Task"),
+        ("POST", "/VirtualApp/{}/CloneVApp_Task"),
+        ("POST", "/HostAutoStartManager/{}/AutoStartPowerOn"),
+        ("POST", "/HostAutoStartManager/{}/AutoStartPowerOff"),
+    }
+)
+
+# Taking a VM snapshot on the older API (#3869) waits for approval but keeps
+# its ``caution`` level, like the typed ``vm.snapshot.create``: a new snapshot
+# changes nothing in the running VM.
+VMWARE_VIM_SNAPSHOT_CREATES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("POST", "/VirtualMachine/{}/CreateSnapshot_Task"),
+        ("POST", "/VirtualMachine/{}/CreateSnapshotEx_Task"),
+    }
+)
 _PATH_PARAM_RE = re.compile(r"\{[^/{}]+\}")
 
 
@@ -100,6 +148,13 @@ def _canonical(path: str) -> tuple[str, str]:
     """Split *path* into ``(path without the /api mount, query)``."""
     raw_path, _, query = path.partition("?")
     return raw_path.removeprefix("/api"), query
+
+
+def _operation_key(method: str, path: str) -> tuple[str, str]:
+    """Return ``(METHOD, path?query)`` without the /api mount and with ``{}`` path parameters."""
+    canonical_path, query = _canonical(path)
+    key = _PATH_PARAM_RE.sub("{}", canonical_path) + (f"?{query}" if query else "")
+    return method.upper(), key
 
 
 def _is_tag_detach(method: str, canonical_path: str, query: str) -> bool:
@@ -172,9 +227,24 @@ def is_vmware_appliance_or_access_write(method: str, path: str) -> bool:
     spelling of a path parameter. The query must match exactly, so
     ``POST /appliance/update/pending/{version}?action=stage`` does not count.
     """
-    canonical_path, query = _canonical(path)
-    key = _PATH_PARAM_RE.sub("{}", canonical_path) + (f"?{query}" if query else "")
-    return (method.upper(), key) in VMWARE_APPLIANCE_AND_ACCESS_WRITES
+    return _operation_key(method, path) in VMWARE_APPLIANCE_AND_ACCESS_WRITES
+
+
+def is_vmware_vim_vm_state_write(method: str, path: str) -> bool:
+    """Return whether ``(method, path)`` is in :data:`VMWARE_VIM_VM_STATE_WRITES`.
+
+    Matches with or without the ``/api`` mount in the path and with any
+    spelling of the path parameter. A path with a query does not count.
+    """
+    return _operation_key(method, path) in VMWARE_VIM_VM_STATE_WRITES
+
+
+def is_vmware_vim_snapshot_create(method: str, path: str) -> bool:
+    """Return whether ``(method, path)`` is in :data:`VMWARE_VIM_SNAPSHOT_CREATES`.
+
+    Matches like :func:`is_vmware_vim_vm_state_write`.
+    """
+    return _operation_key(method, path) in VMWARE_VIM_SNAPSHOT_CREATES
 
 
 def _requires_vmware_safety_floor(method: str, path: str) -> bool:
@@ -185,6 +255,7 @@ def _requires_vmware_safety_floor(method: str, path: str) -> bool:
         is_vmware_vm_relocate(method, path)
         or is_vmware_host_maintenance_exit(method, path)
         or is_vmware_appliance_or_access_write(method, path)
+        or is_vmware_vim_vm_state_write(method, path)
     ):
         return True
     canonical_path, _query = _canonical(path)
@@ -209,7 +280,11 @@ def vmware_rest_safety_floor(
     The VM writes include the moves that copy disks (:func:`is_vmware_vm_relocate`)
     and the host maintenance-mode exit (:func:`is_vmware_host_maintenance_exit`).
     The appliance, permission, session, certificate and host-image writes are
-    :func:`is_vmware_appliance_or_access_write`.
+    :func:`is_vmware_appliance_or_access_write`. The older-API VM power,
+    terminate, clone, snapshot revert and migrate calls are
+    :func:`is_vmware_vim_vm_state_write`. The older-API snapshot creates
+    (:func:`is_vmware_vim_snapshot_create`) keep their level and wait for
+    approval.
     """
     if version not in _FLOORED_VERSIONS:
         return proto
@@ -218,6 +293,8 @@ def vmware_rest_safety_floor(
         method, proto.path
     ):
         return proto.model_copy(update={"safety_level": "destructive", "requires_approval": True})
+    if is_vmware_vim_snapshot_create(method, proto.path):
+        return proto.model_copy(update={"requires_approval": True})
     if not _requires_vmware_safety_floor(method, proto.path):
         return proto
     safety_level = proto.safety_level if proto.safety_level == "destructive" else "dangerous"

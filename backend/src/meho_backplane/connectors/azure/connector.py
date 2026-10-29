@@ -72,6 +72,46 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
 )
 
+# The family mixin classes. Each family imports its mixin on the line under its
+# own comment: from meho_backplane.connectors.azure.<family> import <Family>Ops
+# Ruff does not sort this part, so two families never add a line at the same place.
+# Keep the empty line under each family: Ruff wants one between two imports.
+# isort: off
+# aks (Task #5087)
+from meho_backplane.connectors.azure.aks import AksOps
+
+# arc (Task #5084)
+from meho_backplane.connectors.azure.arc import ArcOps
+
+# automation (Task #5092)
+from meho_backplane.connectors.azure.automation import AutomationOps
+
+# avs (Task #5091)
+from meho_backplane.connectors.azure.avs import AvsOps
+
+# compute (Task #5083)
+from meho_backplane.connectors.azure.compute import ComputeOps
+
+# cost (Task #5088)
+from meho_backplane.connectors.azure.cost import CostOps
+
+# inventory (Task #5082)
+from meho_backplane.connectors.azure.inventory import InventoryOps
+
+# migrate (Task #5093)
+from meho_backplane.connectors.azure.migrate import MigrateOps
+
+# monitor (Task #5090)
+
+# network (Task #5085)
+
+# security (Task #5089)
+from meho_backplane.connectors.azure.security import SecurityOps
+
+# storage (Task #5086)
+from meho_backplane.connectors.azure.storage import StorageOps
+# isort: on
+
 __all__ = ["AzureConnector"]
 
 _log = structlog.get_logger(__name__)
@@ -118,7 +158,33 @@ def _may_use_cache(operator: Operator) -> bool:
 
 
 class AzureConnector(
-    # Family mixin classes first, one per line in alphabetical order; the HTTP base last.
+    # Family mixin classes first, each on the line under its own comment below;
+    # the HTTP base last. The mixins must stay before HttpConnector, so that a
+    # mixin can replace a method of the base (the inventory family replaces
+    # list_candidates). Their order among themselves does not matter today:
+    # no two families define a method with the same name.
+    # aks (Task #5087)
+    AksOps,
+    # arc (Task #5084)
+    ArcOps,
+    # automation (Task #5092)
+    AutomationOps,
+    # avs (Task #5091)
+    AvsOps,
+    # compute (Task #5083)
+    ComputeOps,
+    # cost (Task #5088)
+    CostOps,
+    # inventory (Task #5082)
+    InventoryOps,
+    # migrate (Task #5093)
+    MigrateOps,
+    # monitor (Task #5090)
+    # network (Task #5085)
+    # security (Task #5089)
+    SecurityOps,
+    # storage (Task #5086)
+    StorageOps,
     HttpConnector,
 ):
     """Azure Resource Manager connector. One target is one subscription.
@@ -165,11 +231,13 @@ class AzureConnector(
         return token
 
     async def authorize(
-        self, target: AzureTargetLike, operator: Operator
+        self, target: AzureTargetLike, operator: Operator, *, scope: str | None = None
     ) -> tuple[dict[str, str], tuple[str, str]]:
         """Return the ``Authorization`` header and the login (Azure tenant ID, client ID).
 
-        The transport uses the login to apply the limit per Azure login.
+        The token is for *scope*, the API it is sent to; without it, for
+        Resource Manager. The transport uses the login to apply the limit per
+        Azure login.
         """
         auth_model = getattr(target, "auth_model", None)
         if not is_acceptable_auth_model(auth_model):
@@ -178,18 +246,23 @@ class AzureConnector(
                 f"{AuthModel.SHARED_SERVICE_ACCOUNT.value!r}; target {target.name!r} "
                 f"asked for auth_model={auth_model!r}"
             )
-        token, login = await self._token_and_login(target, operator)
+        token, login = await self._token_and_login(target, operator, scope=scope)
         return {"Authorization": f"Bearer {token.value}"}, login
 
     async def _token_and_login(
-        self, target: AzureTargetLike, operator: Operator
+        self, target: AzureTargetLike, operator: Operator, *, scope: str | None = None
     ) -> tuple[MicrosoftAccessToken, tuple[str, str]]:
-        """Return a token for *target* and the login it belongs to."""
+        """Return a token for *target* and the login it belongs to.
+
+        The token is for *scope*; without it, for Resource Manager. The cache
+        keeps one token per scope, so a token for one API never goes to
+        another (the storage reads ask for Azure Storage's scope).
+        """
         config = resolve_target_config(target)
         credentials = await self._credentials_for(target, operator)
         check_tenant_match(target, config, credentials)
         login = (credentials.tenant_id, credentials.client_id)
-        scope = config.cloud.arm_scope
+        scope = config.cloud.arm_scope if scope is None else scope
         key: _TokenKey = (*target_cache_key(target), *login, scope)
         use_cache = _may_use_cache(operator)
         cached = self._tokens.get(key)
@@ -235,13 +308,18 @@ class AzureConnector(
             self._credentials[key] = credentials
             return credentials
 
-    async def invalidate_session(self, target: AzureTargetLike) -> None:
+    async def invalidate_session(
+        self, target: AzureTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Drop the target's cached tokens (the dispatcher's 401 hook).
 
         After Azure answers 401 the dispatcher calls this and tries the call
         once more. The retry then logs in again. The cached secret stays: a
         401 means the token is no longer accepted, not that the secret is
         wrong.
+
+        The token is per target, so *rejected* (the request that got the
+        ``401``) is not needed and not read.
         """
         self._drop_tokens(target)
 

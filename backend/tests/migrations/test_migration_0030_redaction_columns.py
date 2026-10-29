@@ -15,7 +15,7 @@ SQLite parity holds (the ORM pins ``JSONB`` on PG via
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -78,10 +78,12 @@ def _audit_log_column_is_nullable(sync_url: str, column: str) -> bool:
     raise AssertionError(f"column {column!r} not present on audit_log")
 
 
-def test_upgrade_adds_both_columns_nullable(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_both_columns_nullable(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade head`` lands both JSON columns as nullable."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     columns = _audit_log_columns(sync_url)
     assert "raw_payload" in columns
@@ -90,10 +92,12 @@ def test_upgrade_adds_both_columns_nullable(alembic_cfg: tuple[Config, str]) -> 
     assert _audit_log_column_is_nullable(sync_url, "redaction_manifest")
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade 0029`` drops both columns; ``upgrade head`` restores them."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     assert "raw_payload" in _audit_log_columns(sync_url)
     assert "redaction_manifest" in _audit_log_columns(sync_url)
 
@@ -108,11 +112,13 @@ def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> 
     assert "redaction_manifest" in columns
 
 
-def test_existing_columns_untouched(alembic_cfg: tuple[Config, str]) -> None:
+def test_existing_columns_untouched(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """Pre-0030 columns survive: actor_sub (0021), agent_session_id (0014),
     parent_audit_id (0006), target_id (0004), tenant_id (0002)."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     columns = _audit_log_columns(sync_url)
     for column in (

@@ -267,12 +267,15 @@ class CoreInstallTests(InstallTestCase):
 
 class FromDiskTests(InstallTestCase):
     """The download folder on the disk of a cleaned machine: the RKE2 files
-    and the image archive are gone, the chart, bin/ and VERSION are there."""
+    and the image archive are gone, the chart, bin/ and VERSION are there.
+    RKE2 itself is installed, so its kernel settings file for the CIS
+    profile is in its share folder."""
 
     def setUp(self) -> None:
         super().setUp()
         shutil.rmtree(self.machine.download / "rke2")
         shutil.rmtree(self.machine.download / "images")
+        self.machine.install_rke2_files()
 
     def test_from_disk_runs_only_the_steps_that_need_the_host_name(self) -> None:
         result = self.machine.run("--from-disk", "--hostname", "new-name.example.org")

@@ -53,6 +53,9 @@ def _not_found(path: str) -> httpx.HTTPStatusError:
 class _RestFake:
     """Recording REST double over an in-memory content-library store + a vim fake."""
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(self) -> None:
         self.libraries: dict[str, dict[str, Any]] = {}
         self.items: dict[str, dict[str, Any]] = {}

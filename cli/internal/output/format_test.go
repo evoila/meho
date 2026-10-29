@@ -119,6 +119,42 @@ func TestRenderHumanHealth_OperationCatalog(t *testing.T) {
 	}
 }
 
+// TestRenderHumanHealth_ConnectorPackages: `meho status` lists the
+// connector packages the image carries (#5036), prints "none" for the
+// plain public image, and prints nothing when an older backplane sends
+// no field.
+func TestRenderHumanHealth_ConnectorPackages(t *testing.T) {
+	base := func(pkgs *[]api.ConnectorPackage) *api.HealthResponse {
+		return &api.HealthResponse{
+			Operator:          api.OperatorIdentity{Sub: "alice-sub-id"},
+			Vault:             api.VaultStatus{Reachable: true, ReadOk: true},
+			Db:                api.DbStatus{Migrated: ptrBool(true)},
+			ConnectorPackages: pkgs,
+		}
+	}
+	render := func(resp *api.HealthResponse) string {
+		var buf bytes.Buffer
+		if err := PrintHealth(&buf, resp); err != nil {
+			t.Fatalf("PrintHealth: %v", err)
+		}
+		return buf.String()
+	}
+	digest := "sha256:" + strings.Repeat("a", 64)
+	listed := render(base(&[]api.ConnectorPackage{
+		{Name: "example-connectors", Version: "1.2.0", WheelDigest: digest, Folders: []string{"example_widget"}},
+	}))
+	if !strings.Contains(listed, "  Connector packages:\n    example-connectors 1.2.0 ("+digest+")\n") {
+		t.Errorf("expected the package line, got:\n%s", listed)
+	}
+	none := render(base(&[]api.ConnectorPackage{}))
+	if !strings.Contains(none, "  Connector packages: none\n") {
+		t.Errorf("expected none for the plain image, got:\n%s", none)
+	}
+	if older := render(base(nil)); strings.Contains(older, "Connector packages") {
+		t.Errorf("no line when the backplane sends no field, got:\n%s", older)
+	}
+}
+
 // TestFormatDB pins the DB line for a database at the expected
 // revision, behind it, ahead of it (normal after a rollback), with no
 // revision, and for the failure and old-backplane shapes (#4830).

@@ -86,6 +86,7 @@ from pydantic import ValidationError
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import (
+    READ_ONLY,
     ToolDefinition,
     ToolSurface,
     register_mcp_tool,
@@ -247,7 +248,7 @@ _NEXT_DESCRIPTION: Final[str] = (
     "presence match --\n"
     "   no JSONPath, no operators, no boolean composition; the substrate "
     "is dumb on\n"
-    "   purpose, see #1177).\n"
+    "   purpose).\n"
     "   - You pass verify_response=None on `next` calls for operation_call "
     "verifies --\n"
     "     the substrate does the dispatch + match for you.\n"
@@ -704,6 +705,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
         name="meho_runbook_list_runs",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=_LIST_DESCRIPTION,
         inputSchema={

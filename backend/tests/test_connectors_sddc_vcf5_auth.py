@@ -31,7 +31,7 @@ import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -176,7 +176,7 @@ async def test_token_cached_across_calls() -> None:
         await connector._get_json(_TARGET_A, "/v1/clusters", operator=_make_operator())
 
     assert tokens.call_count == 1
-    assert connector._session_tokens == {target_cache_key(_TARGET_A): "tok-c"}
+    assert connector._session_tokens == {credential_cache_key(_TARGET_A): "tok-c"}
     await connector.aclose()
 
 
@@ -213,8 +213,8 @@ async def test_same_name_targets_in_different_tenants_get_distinct_tokens() -> N
         await connector._get_json(tenant_two, _DOMAINS_PATH, operator=_make_operator())
 
     assert connector._session_tokens == {
-        target_cache_key(tenant_one): "tok-one",
-        target_cache_key(tenant_two): "tok-two",
+        credential_cache_key(tenant_one): "tok-one",
+        credential_cache_key(tenant_two): "tok-two",
     }
     await connector.aclose()
 
@@ -356,7 +356,7 @@ async def test_aclose_clears_tokens_and_pool() -> None:
         mock.get(_DOMAINS_PATH).respond(200, json={"elements": []})
         await connector._get_json(_TARGET_A, _DOMAINS_PATH, operator=_make_operator())
 
-    assert connector._session_tokens == {target_cache_key(_TARGET_A): "tok"}
+    assert connector._session_tokens == {credential_cache_key(_TARGET_A): "tok"}
     await connector.aclose()
     assert connector._session_tokens == {}
     assert connector._clients == {}

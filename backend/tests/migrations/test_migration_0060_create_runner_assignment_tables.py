@@ -20,7 +20,7 @@ test and the migration uses only generic DDL, so PG parity holds.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -145,19 +145,23 @@ def _table_sql(sync_url: str, table: str) -> str:
     return str(row[0])
 
 
-def test_upgrade_creates_both_tables(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_creates_both_tables(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0060`` creates both gateway tables with the full column sets."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     assert _columns(sync_url, _ASSIGNMENTS_TABLE) == _ASSIGNMENTS_COLUMNS
     assert _columns(sync_url, _RESULTS_TABLE) == _RESULTS_COLUMNS
 
 
-def test_upgrade_creates_indexes(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_creates_indexes(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """The unique + staleness indexes are created."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     assert _unique_index_names(sync_url, _ASSIGNMENTS_TABLE) >= {
         "runner_assignments_tenant_runner_idx"
@@ -167,10 +171,12 @@ def test_upgrade_creates_indexes(alembic_cfg: tuple[Config, str]) -> None:
     assert "runner_check_results_staleness_idx" in _index_names(sync_url, _RESULTS_TABLE)
 
 
-def test_results_status_check_constraint(alembic_cfg: tuple[Config, str]) -> None:
+def test_results_status_check_constraint(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """The ``status`` CHECK bounds to the tri-state ``ok``/``refused``/``error``."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     sql = _table_sql(sync_url, _RESULTS_TABLE)
     # The tri-state (matching the wire ``RunnerResult.status`` vocabulary) is
@@ -182,6 +188,7 @@ def test_results_status_check_constraint(alembic_cfg: tuple[Config, str]) -> Non
 
 def test_stamp_down_revision_then_upgrade_is_idempotent(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Stamp ``0059`` then upgrade to ``0060`` — pinned to own revisions, never ``head``.
 
@@ -191,7 +198,7 @@ def test_stamp_down_revision_then_upgrade_is_idempotent(
     on an already-migrated schema, since no leg targets ``"head"``.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     command.stamp(cfg, _DOWN_REVISION)
     command.upgrade(cfg, _REVISION)
 
@@ -199,13 +206,15 @@ def test_stamp_down_revision_then_upgrade_is_idempotent(
     assert _RESULTS_TABLE in _table_names(sync_url)
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade "0059"`` drops both tables; ``upgrade "0060"`` recreates them.
 
     Pinned to this migration's own revision on both legs (never ``head``).
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert _ASSIGNMENTS_TABLE in _table_names(sync_url)
     assert _RESULTS_TABLE in _table_names(sync_url)
 

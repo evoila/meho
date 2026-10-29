@@ -352,6 +352,12 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 		}
 	}
 
+	// Connector packages the image carries (#5036). An older backplane
+	// sends no field; the line is skipped then.
+	if resp.ConnectorPackages != nil {
+		fmt.Fprint(stdoutW, FormatConnectorPackages("  ", *resp.ConnectorPackages))
+	}
+
 	// Sandbox mode (#4622): one line when it is on, nothing when it is
 	// off. Older backplanes send no field; the generated decoder leaves
 	// it nil or empty, which reads as off.
@@ -383,6 +389,23 @@ func formatOperationCatalog(c *api.OperationCatalogStatus) string {
 		"  Operation settings: written by release %s, this server runs %s (see docs/acceptance/rollback.md)",
 		writer, c.ThisRelease,
 	)
+}
+
+// FormatConnectorPackages renders the connector packages an image
+// carries (#5036): "Connector packages: none" for the plain public
+// image, otherwise a header plus one line per package with its version
+// and wheel digest. Every line starts with indent and ends with a
+// newline. `meho status` and `meho version` both use it.
+func FormatConnectorPackages(indent string, pkgs []api.ConnectorPackage) string {
+	if len(pkgs) == 0 {
+		return indent + "Connector packages: none\n"
+	}
+	var b strings.Builder
+	b.WriteString(indent + "Connector packages:\n")
+	for _, p := range pkgs {
+		fmt.Fprintf(&b, "%s  %s %s (%s)\n", indent, p.Name, p.Version, p.WheelDigest)
+	}
+	return b.String()
 }
 
 // formatOperatorIdentity collapses the OperatorIdentity model into a

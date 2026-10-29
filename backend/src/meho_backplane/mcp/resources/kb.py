@@ -120,7 +120,16 @@ async def _kb_entry_handler(
       matcher ever changes shape, which is the right loud failure for
       a registry bug.
     """
-    slug = bound["slug"]
+    return await read_kb_entry(operator, bound["slug"])
+
+
+async def read_kb_entry(operator: Operator, slug: str) -> dict[str, Any]:
+    """Return the latest entry for *slug* in the operator's tenant, body wrapped.
+
+    Shared by this resource and the ``slug`` read of ``search_knowledge``
+    (#4138), so both answer with the same shape, the same tenant check
+    and the same "not found" error.
+    """
     try:
         validate_slug(slug)
     except InvalidKbSlugError as exc:

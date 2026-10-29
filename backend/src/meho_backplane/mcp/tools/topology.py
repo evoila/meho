@@ -116,16 +116,22 @@ from meho_backplane.connectors.topology.schemas import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphEdgeKind, Tenant
 from meho_backplane.db.models import Target as TargetORM
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.server import (
     McpInternalError,
     McpInvalidParamsError,
     McpPermissionDeniedError,
 )
 from meho_backplane.mcp.tools._topology_answer import COMPLETENESS_SCHEMA, bounded_answer
-from meho_backplane.operations._lookup import parse_connector_id
+from meho_backplane.operations._lookup import connector_product_known, parse_connector_id
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.operations.meta_tools import UnknownConnectorError
 from meho_backplane.settings import get_settings
 from meho_backplane.topology.evidence import (
     FRESHNESS_COPY,
@@ -1061,6 +1067,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="topology",
         name=_QUERY_TOPOLOGY_NAME,
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=_QUERY_TOPOLOGY_DESCRIPTION,
         inputSchema=_QUERY_TOPOLOGY_INPUT_SCHEMA,
@@ -1089,8 +1096,7 @@ register_mcp_tool(
                         "`meho_backplane.topology.schemas.TopologyNode`. "
                         "A larger answer has `handle` instead. "
                         "When the anchor is untracked the array is empty "
-                        "and `status` carries `node_untracked` (G0.18-T4 "
-                        "#1357)."
+                        "and `status` carries `node_untracked`."
                     ),
                 },
                 "status": {
@@ -1105,10 +1111,10 @@ register_mcp_tool(
                         "one-element `[root]` in `nodes`). Auto-discovery "
                         "is k8s-only today; non-k8s targets surface here "
                         "until a populator or curated annotation lands. "
-                        "(G0.18-T4 #1357, RDC #789 N2.) `kind=path`: "
+                        "`kind=path`: "
                         "always present — `found`, `node_untracked` (an "
                         "endpoint is not in the graph) or `no_route` "
-                        "(both ends exist, no route) (#3760)."
+                        "(both ends exist, no route)."
                     ),
                 },
                 "detail": {
@@ -1383,19 +1389,16 @@ _LIST_TARGETS_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "Cross-tenant scope. Omit / null → the operator's own "
                 "tenant. A tenant slug OR UUID naming a DIFFERENT tenant "
                 "selects that tenant's targets and REQUIRES the "
-                "`platform_admin` capability (#1641); a caller who is "
+                "`platform_admin` capability; a caller who is "
                 "not a platform-admin passing a foreign tenant gets "
                 "-32602 (naming your own tenant explicitly is always "
-                "allowed). Canonical name "
-                "(G0.18-T5 #1358); matches `tenant_id` on "
+                "allowed). Canonical name; matches `tenant_id` on "
                 "`meho_connector_*` / `meho_scheduler_create`. "
                 "NOTE: `list_targets.tenant_id` accepts a slug OR a "
                 "UUID; the connector / scheduler tools accept UUID-"
                 "only because they cannot resolve slugs from inside "
                 "their service layer (cross-tenant slug resolution "
-                "requires a session). The accepted-shape asymmetry "
-                "is documented in "
-                "`docs/codebase/api-shape-conventions.md` §14."
+                "requires a session)."
             ),
             "maxLength": 256,
         },
@@ -1552,7 +1555,10 @@ async def _list_targets_handler(
     ``connector_id`` is canonicalised through
     :func:`~meho_backplane.operations._lookup.parse_connector_id` and
     only its product component drives a ``TargetORM.product`` exact-match
-    filter (targets carry a product slug, not a connector id).
+    filter (targets carry a product slug, not a connector id). When that
+    filter finds nothing and no connector the caller can see has the
+    product, the id is wrong: the answer is the unknown-connector
+    ``-32602`` with close ids, not an empty list (#4136).
 
     Soft-deleted targets (``deleted_at IS NOT NULL``, G0.14-T4 #1145)
     are excluded — same filter the REST list route applies so MCP and
@@ -1607,6 +1613,9 @@ async def _list_targets_handler(
         result = await session.execute(stmt)
         rows = result.all()
 
+    if not rows and connector_id:
+        await _reject_unknown_connector(scope_tenant_id, connector_id)
+
     targets = [
         {
             "id": str(t.id),
@@ -1621,6 +1630,23 @@ async def _list_targets_handler(
     # name as the keyset cursor. A short page is definitively the end.
     next_cursor = targets[-1]["name"] if len(targets) == limit else None
     return await _reduce_target_page(operator, {"targets": targets, "next_cursor": next_cursor})
+
+
+async def _reject_unknown_connector(tenant_id: uuid.UUID, connector_id: str) -> None:
+    """Raise the unknown-connector ``-32602`` when no visible connector has the id's product.
+
+    Runs only when the ``connector_id`` filter found no target (#4136).
+    Without it, a wrong id such as ``vmware-rest`` (product
+    ``vmware-rest``, which no target has) came back as an empty list with
+    no warning. A known product with no targets still returns the empty
+    list. The error is the one ``search_operations`` raises, with the
+    close ids the caller can see.
+    """
+    product, _version, _impl_id = parse_connector_id(connector_id)
+    if await connector_product_known(tenant_id=tenant_id, product=product):
+        return
+    exc = await UnknownConnectorError.for_caller(tenant_id=tenant_id, connector_id=connector_id)
+    raise McpInvalidParamsError(f"list_targets: {exc}", data=exc.as_error_data())
 
 
 async def _reduce_target_page(operator: Operator, page: dict[str, Any]) -> dict[str, Any]:
@@ -1661,6 +1687,7 @@ register_mcp_tool(
         # registry entry, not Topology v2's.
         feature="targets",
         name=_LIST_TARGETS_NAME,
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=_LIST_TARGETS_DESCRIPTION,
         inputSchema=_LIST_TARGETS_INPUT_SCHEMA,
@@ -1904,9 +1931,9 @@ _ANNOTATE_DESCRIPTION: Final[str] = (
     "AUTO-DISCOVERABLE KINDS (`runs-on`, `mounts`, `routes-through`, "
     "`belongs-to`) — accepted, with one caveat: when a probe-written "
     "**auto** edge already exists for the same pair, the curated row "
-    "lands as a §6 conflict marker (`conflicts_with`) for operator "
+    "lands as a conflict marker (`conflicts_with`) for operator "
     "review. Today only the Kubernetes connector populates auto edges "
-    "(G0.18-T4 #1357 — every other shipped connector inherits the "
+    "(every other shipped connector inherits the "
     "no-op `Connector.discover_topology` from the ABC), so on a "
     "non-k8s pair (or any pair no probe covers) the curated row "
     "inserts clean (`source: curated, conflicts: []`) and is the "
@@ -1969,7 +1996,7 @@ register_mcp_tool(
 
 
 _UNANNOTATE_DESCRIPTION: Final[str] = (
-    "Hard-delete a curated `graph_edge` and clear its reciprocal §6 "
+    "Hard-delete a curated `graph_edge` and clear its reciprocal conflict "
     "markers (tenant_admin only). Pass either `edge_id` OR the full "
     "`(from_name, kind, to_name)` triple — both forms, partial triples, "
     "or empty strings are rejected at the inputSchema layer (-32602) "
@@ -1979,7 +2006,7 @@ _UNANNOTATE_DESCRIPTION: Final[str] = (
     "but it turns out the real dependency is `database-Z`. "
     "`meho_topology_unannotate {from_name: service-X, kind: depends-on, "
     "to_name: database-Y}` removes the curated row and re-promotes any "
-    "auto edge it had marked superseded (§6 recoverability invariant). "
+    "auto edge it had marked superseded. "
     "After this, blast-radius checks no longer include the wrong edge.\n\n"
     "Refuses to delete an `source='auto'` edge — those resurrect on the "
     "next refresh, making manual deletion meaningless. The refusal "

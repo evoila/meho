@@ -121,8 +121,8 @@ register_mcp_tool(
         name="meho_agents_list",
         surface=ToolSurface.OPERATOR,
         description=(
-            "List agent definitions for the operator's tenant "
-            "(Initiative #802). Operator-level read. Returns "
+            "List agent definitions for the operator's tenant. "
+            "Operator-level read. Returns "
             "{agents: [definition, ...]} sorted by name."
         ),
         inputSchema={
@@ -165,7 +165,7 @@ register_mcp_tool(
         surface=ToolSurface.OPERATOR,
         description=(
             "Fetch one agent definition by name for the operator's "
-            "tenant (Initiative #802). Operator-level read. Returns "
+            "tenant. Operator-level read. Returns "
             "{agent: {...}}. A missing / cross-tenant name returns an "
             "error with detail 'agent_not_found' -- existence is not "
             "leaked across tenant boundaries."
@@ -232,8 +232,8 @@ register_mcp_tool(
         name="meho_agents_create",
         surface=ToolSurface.OPERATOR,
         description=(
-            "Create an agent definition for the operator's tenant "
-            "(Initiative #802). Tenant-admin only. Args: name (slug), "
+            "Create an agent definition for the operator's tenant. "
+            "Tenant-admin only. Args: name (slug), "
             "identity_ref (must name a registered, non-revoked agent "
             "principal in the operator's tenant -- typically "
             "'agent:<principal-name>'), model_tier (standard|fast|deep), "
@@ -241,7 +241,7 @@ register_mcp_tool(
             "output_schema objects, optional enabled (default true). A "
             "duplicate name returns an error with detail "
             "'agent_already_exists'; an unknown / cross-tenant / revoked "
-            "identity_ref returns 'identity_ref_unknown' (G11.2-T8 #1099). "
+            "identity_ref returns 'identity_ref_unknown'. "
             "Response: {name, agent: {...}}."
         ),
         inputSchema={
@@ -258,12 +258,12 @@ register_mcp_tool(
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 256,
-                    "description": "Reference to the agent principal (G11.2).",
+                    "description": "Reference to the agent principal.",
                 },
                 "model_tier": {
                     "type": "string",
                     "enum": ["standard", "fast", "deep"],
-                    "description": "Logical model tier (resolved at run time by G11.5).",
+                    "description": "Logical model tier (resolved to a model at run time).",
                 },
                 "system_prompt": {
                     "type": "string",
@@ -344,15 +344,15 @@ register_mcp_tool(
         name="meho_agents_edit",
         surface=ToolSurface.OPERATOR,
         description=(
-            "Apply a partial update to an agent definition by name "
-            "(Initiative #802). Tenant-admin only. Supply name plus any "
+            "Apply a partial update to an agent definition by name. "
+            "Tenant-admin only. Supply name plus any "
             "of identity_ref, model_tier, system_prompt, toolset, "
             "turn_budget, output_schema, enabled -- only supplied "
             "fields change. name itself is not renamable. A missing / "
             "cross-tenant name returns 'agent_not_found'; an "
             "identity_ref update that doesn't resolve to a registered, "
             "non-revoked tenant principal returns 'identity_ref_unknown' "
-            "(G11.2-T8 #1099). Response: {name, agent: {...}}."
+            "Response: {name, agent: {...}}."
         ),
         inputSchema={
             "type": "object",
@@ -417,7 +417,7 @@ register_mcp_tool(
         surface=ToolSurface.OPERATOR,
         description=(
             "Delete an agent definition by name for the operator's "
-            "tenant (Initiative #802). Tenant-admin only. Returns "
+            "tenant. Tenant-admin only. Returns "
             "{removed: true} on success. A missing / cross-tenant name "
             "returns 'agent_not_found' -- existence is not leaked "
             "across tenant boundaries."

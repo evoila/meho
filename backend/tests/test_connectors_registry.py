@@ -491,6 +491,7 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                 load_catalog=MagicMock(),
                 validate_catalog_registry_coverage=MagicMock(),
                 stamp_catalog_profiled_connectors=AsyncMock(),
+                restore_ingested_profiled_connectors=AsyncMock(),
                 # #3640 result-read pool sizing reads real settings fields;
                 # keep it out of this env-free test.
                 configure_result_read_admission=MagicMock(),
@@ -672,6 +673,7 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                 load_catalog=MagicMock(),
                 validate_catalog_registry_coverage=MagicMock(),
                 stamp_catalog_profiled_connectors=AsyncMock(),
+                restore_ingested_profiled_connectors=AsyncMock(),
                 # #3640 result-read pool sizing reads real settings fields;
                 # keep it out of this env-free test.
                 configure_result_read_admission=MagicMock(),

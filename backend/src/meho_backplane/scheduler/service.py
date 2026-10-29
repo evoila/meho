@@ -60,6 +60,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.db.connector_usage_lock import lock_connector_usage_shared
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AgentDefinition,
@@ -189,6 +190,9 @@ class SchedulerAdminService:
         """
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
+            # #5027: a connector delete must not run between its in-use
+            # check and its row delete while this schedule is saved.
+            await lock_connector_usage_shared(session)
             await self._assert_agent_definition_exists(
                 session,
                 tenant_id,

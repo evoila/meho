@@ -22,14 +22,15 @@ truth:
 
 - **T4 owns the queue lifecycle** (`backend/src/meho_backplane/operations/approval_queue.py`):
   `create_pending_request`, `approve_request`, `reject_request`,
-  `expire_stale_requests`. Every mutation writes a synchronous audit
-  row in the same transaction (the "request" row on create; the
-  "decision" row on approve/reject/expire).
+  `expire_stale_requests`, `withdraw_request`. Every mutation writes a
+  synchronous audit row in the same transaction (the "request" row on
+  create; the "decision" row on approve/reject/expire; the
+  `approval.withdraw` row when the sender takes the request back).
 - **T5 wires the operator surfaces on top:** `GET /api/v1/approvals/{id}`
   (inspect), `meho_approvals_{list,get,approve,reject}` MCP tools, and
-  `meho approvals {list,show,approve,reject}` CLI verbs. Since #3758 no
+  `meho approvals {list,show,approve,reject,withdraw}` CLI verbs. Since #3758 no
   approval step is published to Broadcast. `record_approval_step_event`
-  records `approval.{pending,approved,rejected,expired}` only for the
+  records `approval.{pending,approved,rejected,expired,withdrawn}` only for the
   paired add-on that asked (#3027); the audit log records every step; the
   agent waiter, the bell badge and the console read the stored row.
 
@@ -393,7 +394,11 @@ What it resolves, all fail-open to `None`:
   so the reviewer reads `web-01 (vm-1042)` instead of an unresolved
   `{vm}`. The gate params already carry the sub-op's full logical params
   (`connectors/vmware_rest/composites/_write.py`), so no live read is
-  needed at render time.
+  needed at render time. When the params name no subject, the resolver
+  uses a `subject` string the preview builder stored under
+  `proposed_effect.preview`, with the same credential-class and redaction
+  rules. `k8s.apply` names its objects there, for example
+  `Deployment/prod/web, Service/prod/web` (#3877).
 - **parent composite** — for a composite *child* park, the op id of the
   composite that fanned it out, walked off the `request_audit_id` →
   `parent_audit_id` lineage the #3348 direct-seam fix records (see
@@ -472,9 +477,11 @@ model, or resume endpoint):
    exception message, so the `APPROVAL_ALLOW_SELF_APPROVAL` break-glass
    hint reaches the operator-facing REST `detail` and MCP error message
    rather than being dropped to a bare token (#1483). Even under break-glass the self-approval writes
-   its decision audit row, so the use is forensically visible. **Reject
-   is unguarded** — withdrawing one's own pending request is never a
-   privilege escalation. The guard runs after the role check and before
+   its decision audit row, so the use is forensically visible. Reject
+   has no self-guard. To take back your own pending request, do not
+   reject it: use withdraw (see
+   [The sender withdraws its own request](#the-sender-withdraws-its-own-request-4987)).
+   The guard runs after the role check and before
    the params-hash check, so a self-approver gets the precise refusal
    reason.
 
@@ -656,6 +663,44 @@ How a refusal reads:
 `features.approval_queue.delegated_decision_posture`:
 `"production_own_hand_only"` (switch off) or
 `"lab_class_delegation_allowed"` (switch on).
+
+## The sender withdraws its own request (#4987)
+
+The sender of a request can take it back while it still waits for
+approval. This is **not** a decision. Before #4987 the only way was to
+reject your own request, which looked like an approver said no, needed a
+person, and was a decision an agent must never make.
+
+- **Who:** only the sender (`operator.sub == request.principal_sub`).
+  Any kind of principal may do it: a person, an agent, or a service
+  account. Anyone else gets 403 `not_request_sender`, an approver
+  included. The route uses `verify_jwt_and_bind`, not the
+  approvals-plane gate and not `require_human_principal`.
+- **When:** only while the request is `pending`. A decided, expired or
+  already withdrawn request gets 409 `approval_request_already_<status>`.
+  The owner check runs first, so a non-sender never learns the state.
+- **What changes:** `withdraw_request` (`approval_queue.py`) takes the
+  same row lock as approve and reject, sets `status = 'withdrawn'`,
+  `withdrawn_at` and `withdraw_reason` (columns added by migration
+  `0119`), and drops a stored credential handoff (#3537).
+  `reviewed_by` and `decided_at` stay NULL.
+- **Audit:** one row, `path = 'approval.withdraw'`,
+  `event_class = 'operation_execution'` (not `approval_decision`),
+  `operator_sub` = the sender. The payload has `withdrawn_by` and the
+  optional `reason`, and no `decision` or `reviewed_by` key. A paired
+  add-on gets the `approval.withdrawn` step event (#3027).
+- **Nothing runs:** approve, reject and decide on a withdrawn request
+  see a closed row and answer 409 `approval_request_already_withdrawn`.
+  An agent run that waits in process for the decision stops at once
+  with `error_code = "approval_withdrawn"`.
+- **Surfaces:** `POST /api/v1/approvals/{id}/withdraw` with an optional
+  `reason` (answers with the updated request view), and
+  `meho approvals withdraw <id> [--reason TEXT]`. List, show and the
+  console show `withdrawn` with the time and the reason. The console
+  has a "Withdrawn" tab, and its request page says "Withdrawn by the
+  sender" and shows no approve or deny buttons.
+- **MCP:** there is no withdraw tool. Adding one to the agent tool list
+  is a separate team decision.
 
 ## Single-operator tenants: use an agent-requester, not break-glass (#1738)
 
@@ -1289,7 +1334,19 @@ The only builder wired in #1437 is **`k8s.apply`**: it re-invokes the
 `k8s_apply` handler with `dry_run="server"` forced on (the API's
 `?dryRun=All`), so nothing persists and the per-document summary
 (resource identity + `resourceVersion` + `uid`) is the diff-preview the
-reviewer reads. When the API server rejects the dry-run (for example an
+reviewer reads. The builder also adds `manifest` (the applied manifest,
+one dict per document) and `subject` (the objects it touches), so the
+approver sees what the apply sets, not only which objects it touches
+(#3877). Secret `data` / `stringData` values, every `env` value, every
+`httpHeaders` value of a probe or lifecycle hook, every `command` / `args`
+list (only its size in bytes stays) and the
+`kubectl.kubernetes.io/last-applied-configuration` annotation are hidden
+first, at any depth (`connectors/kubernetes/ops_write_preview.py`), then
+the echo goes through the same two-pass redaction as the generic params
+echo. The echo keeps at most 16 KB in total, counting every entry: a
+document that does not fit in full keeps only its identity, and when not
+even that fits, one closing entry counts the documents left out. When the
+API server rejects the dry-run (for example an
 admission webhook denial), the handler raises `ApplyRejectedError` and the
 row gets the `preview_unavailable` marker with the server's message in
 `preview_error`, so the reviewer sees that the apply will be rejected
@@ -1346,7 +1403,7 @@ got one in #4850; `k8s.secret.update` came later with its own builder
 | `keycloak.user.reset_password` | every call | user (`username` / `id`), realm, Vault path of the new password (`password_secret_ref`, mount, field), `temporary` | the password |
 | `vault.auth.userpass.update_password` | every call | mount, username, `sets_password` | the password |
 | `vault.auth.userpass.write` | every call | mount, username, `sets_password`, `token_policies` and whether they are replaced or kept | the password |
-| `k8s.secret.create` | every call | name, namespace, type, all key names, inline key names, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts | any value |
+| `k8s.secret.create` | every call | name, namespace, type, all key names, inline key names, the `labels` and `annotations` maps, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts | any value |
 | `k8s.secret.update` | every call | name, namespace, `mode`, the key names that are set, inline key names, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts, the key names the Secret has now, in `replace` mode the key names that are removed | any value |
 | `k8s.job.create` | every call | name, namespace, service account, per container: name, image, env var names, `envFrom` Secret / ConfigMap names, command size in bytes | env values, the command and args text |
 | `sddc.host.validate` | an agent's call | host count; per host: `fqdn`, `username`, `storageType`, `networkPoolId` | the ESXi password and any other spec field |
@@ -1725,6 +1782,60 @@ so a write Vault would refuse is refused at park time instead of after
 approval. See
 [`docs/codebase/connectors-kubernetes.md`](connectors-kubernetes.md).
 
+### The requester's policy on a second target (#3898)
+
+Some ops write to a second target that the caller names in the params.
+`vcfa.provider.api_token.create` is the first: it writes the minted token
+through `vault.kv.patch` on the caller-named `vault_target`. The handler
+calls the Vault handler directly, so the dispatcher's policy gate never
+sees that write. One shared module checks it:
+`operations/secondary_target_policy.py`.
+
+**Execution runs as the reviewer. The requester's policy on the second
+target is still enforced.** The operator approval surfaces (REST
+`/approve` and `/decide`, the MCP by-id approve) run the approved call as
+the reviewer. Without this module, only the reviewer's policy would be
+checked, and an agent's `deny` on the Vault target would be skipped.
+
+How it works:
+
+1. **At park time** the op's permission preflight calls
+   `requester_policy_preflight`. It runs the policy gate for the requester
+   on the second target and adds three keys to
+   `proposed_effect["permission_preflight"]`:
+   - `requester_denied` — `true` when the requester's policy says `deny`.
+   - `requester_reason` — the `policy_denied: …` reason, or `null`.
+   - `requester` — who asked: `sub`, `principal_kind`, `client_id`,
+     `tenant_role`, `act`. The resume uses this to check them again.
+
+   `needs-approval` counts as allowed: the approval being asked for
+   satisfies it. A `requester_denied: true` does **not** refuse the park.
+   The reviewer sees it on the card and should reject.
+2. **On a reviewer's resume** `_dispatch_resume_with_bound_context` binds
+   the requester for the run (`bind_approved_requester`). Who asked comes
+   from the approval row (`principal_sub` / `principal_act`). The card's
+   `requester` record supplies the rest (kind, role, client id), and only
+   when its `sub` matches the row.
+3. **In the handler** `secondary_target_refusal` checks the caller (the
+   reviewer) as before, then the bound requester, **live**, with
+   `decide_only=True` (no standing grant is marked used). A requester
+   `deny` refuses before any appliance call:
+   `policy_denied: requester '<sub>': <op> on <target label> '<name>': …`.
+   A deny added while the request waited still stops it.
+
+The agent's own resume (`call_operation_with_approval`) runs as the agent,
+so the agent is the caller and the requester check adds nothing. When a
+reviewer runs an opted-in op and the card has no `requester` record, or
+its `sub` does not match the row, the run is refused before any appliance
+call: `policy_denied: the requester's policy … cannot be checked … -- ask
+again`. This covers a park whose preflight failed and a request parked
+before #3898. Ops that do not opt in never read the binding.
+
+**To opt an op in:** describe its second-target write as a
+`SecondaryTargetWrite(connector_id, op_ids, target_label)`. Call
+`requester_policy_preflight` from its registered permission preflight and
+`secondary_target_refusal` from its handler, with the same value.
+
 ## Transports
 
 ### REST (`backend/src/meho_backplane/api/v1/approvals.py`)
@@ -1786,6 +1897,7 @@ token-decode + live decouple verification, and a rollback note — lives in
 | `POST` | `/api/v1/approvals/{id}/approve` | **human** operator **or** approver | Approve. Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and break-glass is off (G11.7-T1); 403 `human_principal_required` for a machine `principal_kind` (#289). |
 | `POST` | `/api/v1/approvals/{id}/decide` | **human** operator **or** approver | Decide (`approved` / `rejected`) by id alone. For an approved **direct** op (`run_id IS NULL`) re-dispatches with the **stored** params (#1503) and returns the outcome in `dispatch_*`; for an agent-run request records the decision only (the agent runtime resumes). 403 `human_principal_required` for a machine `principal_kind` (#289). |
 | `POST` | `/api/v1/approvals/{id}/reject` | **human** operator **or** approver | Reject. The op never executes. 403 `human_principal_required` for a machine `principal_kind` (#289). |
+| `POST` | `/api/v1/approvals/{id}/withdraw` | **request sender** (any role, any principal kind) | The sender takes back its own pending request (#4987). Not a decision. 403 `not_request_sender` for anyone else; 409 on a closed request. Writes an `approval.withdraw` audit row. |
 
 ### MCP (`backend/src/meho_backplane/mcp/tools/approvals.py`)
 
@@ -1812,7 +1924,9 @@ dispatcher re-checks `required_role` at `tools/call`.
 ### CLI (`cli/internal/cmd/approvals/`)
 
 `meho approvals list / show <id> / approve <id> / reject <id> [--reason]`
-verbs that hit the REST surface via the generated typed client. `list`
+verbs that hit the REST surface via the generated typed client.
+`meho approvals withdraw <id> [--reason]` lets the sender take back its own
+pending request (#4987). `list`
 has a `RUN` column and `show` / `approve` print how the run of an approved
 request ended (#3543, see "Approved, but the run failed" above).
 `list` shows only pending requests unless `--status` is set; `--status all`
@@ -1932,12 +2046,14 @@ query `audit_log` by this id.
 
 ## Audit rows
 
-Two rows per request lifecycle (the synchronous-audit invariant):
+Two rows per request lifecycle (the synchronous-audit invariant). A
+withdrawn request has a withdraw row instead of a decision row:
 
 | Row | `path` | `status_code` | Written by |
 |---|---|---|---|
 | Request | `approval.request` | `202` | `create_pending_request` |
 | Decision | `approval.decision` | `200` (approved) / `403` (rejected) / `410` (expired) | `approve_request` / `reject_request` / `expire_stale_requests` |
+| Withdraw | `approval.withdraw` | `200` | `withdraw_request` (#4987) |
 
 ### Session-replay lineage (#2086)
 

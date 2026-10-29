@@ -42,7 +42,12 @@ from pydantic import ValidationError
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.jsonflux.query.json_pointer import MAX_POINTER_LENGTH
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
 from meho_backplane.operations.result_query import (
     DEFAULT_LIMIT,
@@ -97,7 +102,9 @@ async def _result_query_handler(
         handle_id = UUID(str(raw_handle))
     except (ValueError, TypeError) as exc:
         raise McpInvalidParamsError(
-            f"handle_id is not a valid UUID: {raw_handle!r}",
+            f"handle_id is not a valid UUID: {raw_handle!r}. "
+            "`result_query` reads stored results only. To read a knowledge "
+            "entry, call `search_knowledge` with `slug`.",
             data={"reason": "invalid_handle_id", "handle_id": str(raw_handle)},
         ) from exc
 
@@ -188,6 +195,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="result_query",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Read the full data behind a result handle. When "

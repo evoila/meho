@@ -11,7 +11,8 @@
 * the operation metadata: safe reads, the shared ``content_library`` group
   text, and the parameter schemas;
 * through the dispatcher on ``vmware-rest-9.0`` (and ``8.0``): both ops are
-  registered with their schemas and run; they never answer ``unknown_op``.
+  registered with their schemas and run; they never answer ``unknown_op``;
+  a large answer becomes a result handle.
 """
 
 from __future__ import annotations
@@ -52,8 +53,9 @@ from meho_backplane.connectors.vmware_rest.typed_ops_content_library_find import
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
-from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations import dispatch, reset_dispatcher_caches, set_default_reducer
 from meho_backplane.operations._validate import validate_params
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.settings import get_settings
 from tests.test_connectors_vmware_rest_composites_write_e2e import (
     _FakeVmwareTarget,
@@ -361,3 +363,28 @@ async def test_both_finds_run_through_call_operation_on_9_0(
     assert refused.extras["error_code"] == "invalid_params"
     assert refused.extras["validation_errors"][0]["validator"] == "minProperties"
     assert len(fake.calls) == 2
+
+
+async def test_a_large_answer_becomes_a_result_handle(
+    _clean_registry: None,
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The id list is the one list in the answer, so JSONFlux spills a big one to a handle."""
+    many = [f"{i:08x}-0000-4000-8000-000000000000" for i in range(300)]
+    fake = _FakeVcenter({"/api/content/library/item?action=find": many})
+    _seed_connector(fake)  # type: ignore[arg-type]
+    await register_vmware_typed_operations(embedding_service=stub_embedding_service)
+    # The tests run with a pass-through reducer; the app installs this one at start.
+    # The conftest safety net puts the pass-through reducer back after the test.
+    set_default_reducer(JsonFluxReducer())
+
+    result = await dispatch(
+        operator=_make_e2e_operator(sub="content-library-finder"),
+        connector_id="vmware-rest-9.0",
+        op_id=_ITEM_FIND_OP,
+        target=_FakeVmwareTarget(),
+        params={"library_id": _LIB_ID},
+    )
+    assert result.status == "ok", result.error
+    assert result.handle is not None
+    assert result.result["row_count"] == 300

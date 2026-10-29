@@ -62,7 +62,11 @@ from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup, Tenant
-from meho_backplane.operations.ingest import InvalidStateTransitionError
+from meho_backplane.operations.ingest import (
+    ConnectorInUseError,
+    ConnectorUser,
+    InvalidStateTransitionError,
+)
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
@@ -738,6 +742,40 @@ def test_invalid_state_transition_panel() -> None:
     assert "data-registry-error" in body
     assert "transition" in body.lower()
     assert "Traceback" not in body
+
+
+def test_connector_in_use_panel_lists_each_user() -> None:
+    """#5027: a refused delete renders a panel that lists every user."""
+    users = [
+        ConnectorUser(
+            kind="sensor",
+            id=str(uuid.uuid4()),
+            name="disk-free",
+            op_id="GET:/disks",
+            tenant_id=uuid.uuid4(),
+        ),
+        ConnectorUser(
+            kind="hosted_agent",
+            id=str(uuid.uuid4()),
+            name="nightly-check",
+            op_id=None,
+            tenant_id=uuid.uuid4(),
+        ),
+    ]
+    refusal = ConnectorInUseError(
+        connector_id=_CONNECTOR_ID, users=users, other_tenant_user_count=2
+    )
+    exc = HTTPException(status_code=409, detail=dict(refusal.detail))
+    response = _panel_from_http_exception(_bare_request(), exc, connector_id=_CONNECTOR_ID)
+
+    assert response.status_code == 409
+    body = response.body.decode()
+    assert "Connector is still in use" in body
+    assert "data-connector-users" in body
+    assert "sensor: disk-free" in body
+    assert "operation GET:/disks" in body
+    assert "hosted_agent: nightly-check" in body
+    assert "2 more item(s) are in other tenants" in body
 
 
 # ---------------------------------------------------------------------------

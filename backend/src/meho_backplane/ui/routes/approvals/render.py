@@ -23,7 +23,11 @@ from meho_backplane.operations.approval_outcome import (
     resume_outcome,
     resume_outcome_from_envelope,
 )
-from meho_backplane.operations.approval_queue import Delegation, approval_result_state
+from meho_backplane.operations.approval_queue import (
+    ChainPosition,
+    Delegation,
+    approval_result_state,
+)
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME
 from meho_backplane.ui.references import subject_ref
 
@@ -104,7 +108,9 @@ def project_run_result(result: Any) -> dict[str, Any] | None:
 
 
 def project_request_to_view(
-    row: ApprovalRequest, delegation: Delegation | None = None
+    row: ApprovalRequest,
+    delegation: Delegation | None = None,
+    chain: ChainPosition | None = None,
 ) -> dict[str, Any]:
     """Project an :class:`ApprovalRequest` ORM row into a template dict.
 
@@ -145,6 +151,10 @@ def project_request_to_view(
     ``result_state`` and ``outcome`` (#3543) say whether an approved request
     ran and how it ended. Both are ``None`` for a request that is not
     approved; ``outcome`` is also ``None`` before the run starts.
+
+    ``chain`` (#3596) is ``{"work_ref", "step", "total"}`` when the request
+    is step ``step`` of ``total`` pending requests under one change ticket,
+    else ``None``. Only the callers that computed it pass it.
     """
     result_state = approval_result_state(row)
     return {
@@ -167,6 +177,11 @@ def project_request_to_view(
         "delegation": delegation.to_payload() if delegation is not None else None,
         "result_state": result_state.value if result_state is not None else None,
         "outcome": project_outcome(resume_outcome(row)),
+        "chain": (
+            {"work_ref": chain.work_ref, "step": chain.step, "total": chain.total}
+            if chain is not None
+            else None
+        ),
     }
 
 

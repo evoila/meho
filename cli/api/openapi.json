@@ -10045,7 +10045,7 @@
           "approvals"
         ],
         "summary": "List Approvals",
-        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired`` / ``?status=withdrawn``, ``?status=all`` for every\nstate (the same sentinel ``meho_approvals_list`` accepts), and by\nchange ticket via\n``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first\n(``created_at DESC``). ``limit`` / ``offset`` page through the\nresult; no ``limit`` returns every match.",
+        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired`` / ``?status=withdrawn``, ``?status=all`` for every\nstate (the same sentinel ``meho_approvals_list`` accepts), and by\nchange ticket via\n``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first\n(``created_at DESC``) by default; ``?order=oldest`` returns\noldest-first (``created_at ASC``, ties broken on ``id``) so a chain of\nrequests under one change ticket reads in the order it was sent\n(#3596). ``limit`` / ``offset`` page through the result; no ``limit``\nreturns every match.",
         "operationId": "list_approvals_api_v1_approvals_get",
         "parameters": [
           {
@@ -10093,11 +10093,27 @@
             "schema": {
               "type": "integer",
               "minimum": 0,
-              "description": "Skip this many requests first (newest first). Defaults to 0.",
+              "description": "Skip this many requests first, in the chosen order. Defaults to 0.",
               "default": 0,
               "title": "Offset"
             },
-            "description": "Skip this many requests first (newest first). Defaults to 0."
+            "description": "Skip this many requests first, in the chosen order. Defaults to 0."
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "oldest",
+                "newest"
+              ],
+              "type": "string",
+              "description": "Sort by creation time. 'newest' (default) lists the newest request first; 'oldest' lists the oldest first, which is the order a chain of requests under one change ticket was sent in.",
+              "default": "newest",
+              "title": "Order"
+            },
+            "description": "Sort by creation time. 'newest' (default) lists the newest request first; 'oldest' lists the oldest first, which is the order a chain of requests under one change ticket was sent in."
           },
           {
             "name": "authorization",
@@ -19612,6 +19628,16 @@
               "default": "",
               "title": "Partial"
             }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Order"
+            }
           }
         ],
         "responses": {
@@ -19677,6 +19703,16 @@
               "minimum": 0,
               "default": 0,
               "title": "Offset"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Order"
             }
           }
         ],

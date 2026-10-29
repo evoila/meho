@@ -48,11 +48,23 @@
     confirm mold (``runbooks/_detail_actions.html``) and the ops Run gate
     (#1881). A blocked self-approval Approve (#1401) never arms.
 
+  Out-of-order approve (#3596)
+    ``request.chain`` is set when this pending request is step k of N pending
+    requests under one change ticket (``work_ref``). The modal names the step
+    and links to the whole group, oldest first. When k > 1 an earlier step
+    still waits, so the Approve armer first opens one more confirm
+    (``data-approval-confirm="out-of-order"``) that says the approver is
+    approving step k before earlier steps; only after that does the normal
+    approve confirm appear. The step is computed by the route for every way
+    the modal opens (bell, history row, or a deep link), so the extra confirm
+    cannot be skipped by the link the approver used.
+
   Context:
     request               -- dict: id / op_id / connector_id / principal_sub /
                              principal_act / proposed_effect / status /
                              reviewed_by / work_ref / created_at /
-                             decided_at / expires_at
+                             decided_at / expires_at / chain (#3596:
+                             {work_ref, step, total} or None)
     reviewer_context      -- ReviewerContext (#3353): the redacted, resolved
                              judging context shared with ``meho approvals
                              show`` -- target_name / target_product /
@@ -334,6 +346,22 @@
           <dd class="font-mono text-xs [overflow-wrap:anywhere] text-right">{{ reviewer_context.work_ref }}</dd>
         </div>
       {% endif %}
+      {#- Chain step (#3596): this request is one of two or more pending
+          requests under the same change ticket, numbered oldest first. -#}
+      {% if request.chain %}
+        <div class="flex items-baseline justify-between gap-4" data-approval-chain-step="{{ request.chain.step }}">
+          <dt class="shrink-0 text-base-content/55">Step</dt>
+          <dd class="text-right">
+            <span class="font-semibold">{{ request.chain.step }} of {{ request.chain.total }}</span>
+            <span class="opacity-70">waiting in this change ticket</span>
+            <a
+              class="link link-primary ml-1 text-xs"
+              href="/ui/approvals?tab=pending&order=oldest&work_ref={{ request.chain.work_ref | urlencode }}"
+              data-approval-chain-link
+            >See all steps in order</a>
+          </dd>
+        </div>
+      {% endif %}
       {% if reviewer_context.run_id %}
         <div class="flex items-baseline justify-between gap-4">
           <dt class="shrink-0 text-base-content/55">Run</dt>
@@ -544,6 +572,7 @@
         is absent). No server change -- the value already rides
         ``proposed_effect``. -#}
     {% set safety = effect.get("safety_level") %}
+    {% set out_of_order = request.chain is not none and request.chain.step > 1 %}
     <div
       role="alert"
       class="alert {{ 'alert-error' if safety in ('dangerous', 'destructive') else 'alert-warning' }} mt-5 items-start"
@@ -559,6 +588,13 @@
           immediately &mdash; there is no un-approve. Denying is terminal; the
           requester must re-file.
         </p>
+        {% if out_of_order %}
+          <p class="mt-1 text-xs font-semibold [overflow-wrap:anywhere]" data-approval-out-of-order>
+            This is step {{ request.chain.step }} of {{ request.chain.total }}.
+            {{ request.chain.step - 1 }} earlier step{{ "s" if request.chain.step > 2 else "" }}
+            of this change ticket still wait{{ "" if request.chain.step > 2 else "s" }} for a decision.
+          </p>
+        {% endif %}
         {% if safety %}
           <div class="mt-2 flex flex-wrap items-center gap-2">
             {{ proposed_effect_safety_badge(safety) }}
@@ -612,7 +648,7 @@
           type="button"
           class="btn btn-sm btn-primary gap-1"
           data-action="approve"
-          {% if self_approval_blocked %}disabled aria-disabled="true" aria-label="Approve disabled: you cannot approve your own request unless APPROVAL_ALLOW_SELF_APPROVAL is enabled"{% else %}x-on:click="armed = 'approve'"{% endif %}
+          {% if self_approval_blocked %}disabled aria-disabled="true" aria-label="Approve disabled: you cannot approve your own request unless APPROVAL_ALLOW_SELF_APPROVAL is enabled"{% elif out_of_order %}x-on:click="armed = 'approve-early'"{% else %}x-on:click="armed = 'approve'"{% endif %}
         >
           {{ icon("check", class="size-4") }}
           Approve
@@ -649,6 +685,28 @@
          (#1401): with no approve armer above and no confirm block here, there is
          no reachable approve confirm state at all. #}
       {% if not self_approval_blocked %}
+      {# Out-of-order step (#3596): one more confirm before the normal approve
+         confirm, when an earlier step of the same change ticket still waits. #}
+      {% if out_of_order %}
+      <div x-show="armed === 'approve-early'" x-cloak class="flex flex-col items-stretch gap-2">
+        <p class="text-xs font-semibold text-error [overflow-wrap:anywhere]" data-approval-confirm="out-of-order">
+          You are approving step {{ request.chain.step }} of {{ request.chain.total }}
+          before the earlier steps. This runs at once and cannot be un-approved.
+          If this step needs an earlier step, it may fail.
+        </p>
+        <div class="flex items-center justify-end gap-2">
+          <button type="button" class="btn btn-ghost btn-sm" x-on:click="armed = ''">Cancel</button>
+          <button
+            type="button"
+            class="btn btn-sm btn-error btn-outline"
+            data-confirm="out-of-order"
+            x-on:click="armed = 'approve'"
+          >
+            Approve step {{ request.chain.step }} anyway
+          </button>
+        </div>
+      </div>
+      {% endif %}
       <div x-show="armed === 'approve'" x-cloak class="flex flex-col items-stretch gap-2">
         <p class="text-xs text-base-content/70 [overflow-wrap:anywhere]" data-approval-confirm="approve">
           Approving dispatches <span class="font-mono">{{ request.op_id }}</span>

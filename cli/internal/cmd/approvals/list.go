@@ -17,14 +17,18 @@ import (
 
 // newListCmd returns the `meho approvals list` command.
 //
-//	meho approvals list [--status pending|approved|rejected|expired|all] [--limit N] [--offset N] [--json] [--backplane <url>]
+//	meho approvals list [--status pending|approved|rejected|expired|all] [--work-ref REF] [--order oldest|newest] [--limit N] [--offset N] [--json] [--backplane <url>]
 //
-// Role: operator. Lists approval requests for the operator's tenant,
-// newest-first, via GET /api/v1/approvals.
+// Role: operator. Lists approval requests for the operator's tenant via
+// GET /api/v1/approvals: newest first, or oldest first with
+// --order oldest. With --work-ref the default is oldest first (#3596), so
+// a chain of requests under one change ticket reads in the order it was
+// sent.
 func newListCmd() *cobra.Command {
 	var (
 		statusFilter      string
 		workRef           string
+		order             string
 		limit             int
 		offset            int
 		jsonOut           bool
@@ -40,7 +44,10 @@ func newListCmd() *cobra.Command {
 			"every state, or --status approved|rejected|expired for " +
 			"one state. --work-ref filters to the requests " +
 			"authorised by an external change ticket (exact match, " +
-			"e.g. gh:evoila/meho#1). --limit caps how many requests " +
+			"e.g. gh:evoila/meho#1). --order oldest|newest picks the " +
+			"sort; the default is newest first, or oldest first when " +
+			"--work-ref is set, so the steps of one change ticket read " +
+			"in the order they were sent. --limit caps how many requests " +
 			"come back (1..500; no limit when omitted). --offset " +
 			"skips that many requests first. --json emits the raw " +
 			"JSON array for jq pipelines.",
@@ -51,6 +58,7 @@ func newListCmd() *cobra.Command {
 			return runList(cmd, listOpts{
 				StatusFilter:      statusFilter,
 				WorkRef:           workRef,
+				Order:             order,
 				Limit:             limit,
 				Offset:            offset,
 				JSONOut:           jsonOut,
@@ -62,6 +70,8 @@ func newListCmd() *cobra.Command {
 		"filter by status: pending, approved, rejected, expired, withdrawn, all (default: pending)")
 	cmd.Flags().StringVar(&workRef, "work-ref", "",
 		"filter by external change-ticket reference, exact match (e.g. gh:evoila/meho#1)")
+	cmd.Flags().StringVar(&order, "order", "",
+		"sort order: oldest or newest (default: newest; oldest when --work-ref is set)")
 	// 0 means "not set": the flag is then left off the request and the
 	// server applies no limit / no offset.
 	cmd.Flags().IntVar(&limit, "limit", 0,
@@ -78,6 +88,7 @@ func newListCmd() *cobra.Command {
 type listOpts struct {
 	StatusFilter      string
 	WorkRef           string
+	Order             string
 	Limit             int
 	Offset            int
 	JSONOut           bool
@@ -96,6 +107,13 @@ func runList(cmd *cobra.Command, opts listOpts) error {
 				"--status must be one of: pending, approved, rejected, expired, withdrawn, all; got %q",
 				opts.StatusFilter,
 			)),
+			opts.JSONOut,
+		)
+	}
+	if opts.Order != "" && opts.Order != "oldest" && opts.Order != "newest" {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("--order must be oldest or newest; got %q", opts.Order)),
 			opts.JSONOut,
 		)
 	}
@@ -163,6 +181,10 @@ func fetchList(
 		w := opts.WorkRef
 		params.WorkRef = &w
 	}
+	if order := listOrder(opts); order != "" {
+		o := api.ListApprovalsApiV1ApprovalsGetParamsOrder(order)
+		params.Order = &o
+	}
 	if opts.Limit > 0 {
 		l := opts.Limit
 		params.Limit = &l
@@ -191,6 +213,20 @@ func fetchList(
 		return nil, nil
 	}
 	return *resp.JSON200, nil
+}
+
+// listOrder returns the order to send: --order when set, else "oldest"
+// when --work-ref is set (the steps of one change ticket in the order
+// they were sent, #3596), else "" so the server keeps its newest-first
+// default.
+func listOrder(opts listOpts) string {
+	if opts.Order != "" {
+		return opts.Order
+	}
+	if opts.WorkRef != "" {
+		return "oldest"
+	}
+	return ""
 }
 
 // printListTable renders the list as a compact table.

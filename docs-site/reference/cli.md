@@ -416,6 +416,7 @@ meho approvals list [flags]
 - `--json` — emit raw JSON array instead of the human table
 - `--limit` — max requests to return (1..500; no limit when omitted)
 - `--offset` — skip this many requests first (default 0)
+- `--order` — sort order: oldest or newest (default: newest; oldest when --work-ref is set)
 - `--status` — filter by status: pending, approved, rejected, expired, withdrawn, all (default: pending)
 - `--work-ref` — filter by external change-ticket reference, exact match
 

@@ -823,6 +823,12 @@ const (
 	MehoBackplaneUiRoutesTopologyTableSortColumnName      MehoBackplaneUiRoutesTopologyTableSortColumn = "name"
 )
 
+// Defines values for ListApprovalsApiV1ApprovalsGetParamsOrder.
+const (
+	ListApprovalsApiV1ApprovalsGetParamsOrderNewest ListApprovalsApiV1ApprovalsGetParamsOrder = "newest"
+	ListApprovalsApiV1ApprovalsGetParamsOrderOldest ListApprovalsApiV1ApprovalsGetParamsOrder = "oldest"
+)
+
 // Defines values for ListEndpointApiV1ConnectorsGetParamsStatus.
 const (
 	ListEndpointApiV1ConnectorsGetParamsStatusAll      ListEndpointApiV1ConnectorsGetParamsStatus = "all"
@@ -10739,10 +10745,16 @@ type ListApprovalsApiV1ApprovalsGetParams struct {
 	// Limit Return at most this many requests (1..500). Omit for no limit.
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 
-	// Offset Skip this many requests first (newest first). Defaults to 0.
-	Offset        *int    `form:"offset,omitempty" json:"offset,omitempty"`
-	Authorization *string `json:"authorization,omitempty"`
+	// Offset Skip this many requests first, in the chosen order. Defaults to 0.
+	Offset *int `form:"offset,omitempty" json:"offset,omitempty"`
+
+	// Order Sort by creation time. 'newest' (default) lists the newest request first; 'oldest' lists the oldest first, which is the order a chain of requests under one change ticket was sent in.
+	Order         *ListApprovalsApiV1ApprovalsGetParamsOrder `form:"order,omitempty" json:"order,omitempty"`
+	Authorization *string                                    `json:"authorization,omitempty"`
 }
+
+// ListApprovalsApiV1ApprovalsGetParamsOrder defines parameters for ListApprovalsApiV1ApprovalsGet.
+type ListApprovalsApiV1ApprovalsGetParamsOrder string
 
 // GetApprovalRequestApiV1ApprovalsRequestIdGetParams defines parameters for GetApprovalRequestApiV1ApprovalsRequestIdGet.
 type GetApprovalRequestApiV1ApprovalsRequestIdGetParams struct {
@@ -11738,6 +11750,7 @@ type ApprovalsIndexUiApprovalsGetParams struct {
 	Tab     *string `form:"tab,omitempty" json:"tab,omitempty"`
 	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	Offset  *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	Order   *string `form:"order,omitempty" json:"order,omitempty"`
 }
 
 // ApprovalsHistoryUiApprovalsListGetParams defines parameters for ApprovalsHistoryUiApprovalsListGet.
@@ -11746,6 +11759,7 @@ type ApprovalsHistoryUiApprovalsListGetParams struct {
 	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	Offset  *int    `form:"offset,omitempty" json:"offset,omitempty"`
 	Partial *string `form:"partial,omitempty" json:"partial,omitempty"`
+	Order   *string `form:"order,omitempty" json:"order,omitempty"`
 }
 
 // UiAuditPageUiAuditGetParams defines parameters for UiAuditPageUiAuditGet.
@@ -24662,6 +24676,22 @@ func NewListApprovalsApiV1ApprovalsGetRequest(server string, params *ListApprova
 
 		}
 
+		if params.Order != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "order", runtime.ParamLocationQuery, *params.Order); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -36428,6 +36458,22 @@ func NewApprovalsIndexUiApprovalsGetRequest(server string, params *ApprovalsInde
 
 		}
 
+		if params.Order != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "order", runtime.ParamLocationQuery, *params.Order); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -36539,6 +36585,22 @@ func NewApprovalsHistoryUiApprovalsListGetRequest(server string, params *Approva
 		if params.Partial != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "partial", runtime.ParamLocationQuery, *params.Partial); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Order != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "order", runtime.ParamLocationQuery, *params.Order); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

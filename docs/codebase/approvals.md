@@ -394,7 +394,11 @@ What it resolves, all fail-open to `None`:
   so the reviewer reads `web-01 (vm-1042)` instead of an unresolved
   `{vm}`. The gate params already carry the sub-op's full logical params
   (`connectors/vmware_rest/composites/_write.py`), so no live read is
-  needed at render time.
+  needed at render time. When the params name no subject, the resolver
+  uses a `subject` string the preview builder stored under
+  `proposed_effect.preview`, with the same credential-class and redaction
+  rules. `k8s.apply` names its objects there, for example
+  `Deployment/prod/web, Service/prod/web` (#3877).
 - **parent composite** — for a composite *child* park, the op id of the
   composite that fanned it out, walked off the `request_audit_id` →
   `parent_audit_id` lineage the #3348 direct-seam fix records (see
@@ -1330,7 +1334,19 @@ The only builder wired in #1437 is **`k8s.apply`**: it re-invokes the
 `k8s_apply` handler with `dry_run="server"` forced on (the API's
 `?dryRun=All`), so nothing persists and the per-document summary
 (resource identity + `resourceVersion` + `uid`) is the diff-preview the
-reviewer reads. When the API server rejects the dry-run (for example an
+reviewer reads. The builder also adds `manifest` (the applied manifest,
+one dict per document) and `subject` (the objects it touches), so the
+approver sees what the apply sets, not only which objects it touches
+(#3877). Secret `data` / `stringData` values, every `env` value, every
+`httpHeaders` value of a probe or lifecycle hook, every `command` / `args`
+list (only its size in bytes stays) and the
+`kubectl.kubernetes.io/last-applied-configuration` annotation are hidden
+first, at any depth (`connectors/kubernetes/ops_write_preview.py`), then
+the echo goes through the same two-pass redaction as the generic params
+echo. The echo keeps at most 16 KB in total, counting every entry: a
+document that does not fit in full keeps only its identity, and when not
+even that fits, one closing entry counts the documents left out. When the
+API server rejects the dry-run (for example an
 admission webhook denial), the handler raises `ApplyRejectedError` and the
 row gets the `preview_unavailable` marker with the server's message in
 `preview_error`, so the reviewer sees that the apply will be rejected

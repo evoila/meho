@@ -12,7 +12,7 @@ backend/tests/test_chart_core_secrets.py:generic-api-key:65
 # it in every merge commit that brings the fixtures in from main.
 backend/tests/_entra_fixtures.py:generic-api-key:217
 #
-# The placeholder account key in the Azure storage tests. It is base64 for
-# the words "fake-account-key-for-tests-only", not a credential. The hook
-# sees it in every merge commit that brings the test in from main.
+# The made-up storage account key in the Azure storage test. It is a
+# fixture that checks no secret reaches a result, not a credential. The
+# hook sees it in every merge commit that brings the test in from main.
 backend/tests/test_connectors_azure_storage.py:generic-api-key:114

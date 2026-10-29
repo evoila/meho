@@ -65,7 +65,8 @@ pair with their own certificate by setting `ingress.tls.secretName`.
 - The `meho-backplane` client secret: Keycloak makes it at realm import, and
   it never leaves Keycloak.
 - `-core-vault-unseal`, `-core-vault-init`, `-core-vault-snapshot`,
-  `-core-vault-scheduler`: the `vault-init` Job (#4044).
+  `-core-vault-scheduler`: the `vault-init` Job (#4044,
+  docs/codebase/core-vault-init.md).
 - `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `MAIL_SMTP_PASSWORD`,
   `METRICS_AUTH_TOKEN`, `CORPUS_SERVICE_TOKEN`, `VCF_PAIF_OIDC_CLIENT_SECRET`:
   the operator gives them; they are never generated.
@@ -160,18 +161,16 @@ One namespaced Role, nothing cluster-wide:
 - `create` on Secrets. Kubernetes cannot limit `create` to names; creating a
   name that exists fails with 409 and changes nothing, so an operator's
   Secret is never overwritten.
-- `get` and `patch` only on the sixteen `<release>-core-*` names (the ten
-  above, `-core-first-login` and `-core-ci-login` of the realm stage, and the
-  four `-core-vault-*` Secrets).
+- `get` and `patch` only on the twelve `<release>-core-*` names (the ten
+  above, and `-core-first-login` and `-core-ci-login` of the realm stage).
 - `get` only on the Secrets the operator named in values, to check their
   keys.
-- `delete` only on `<release>-core-vault-init` (the `vault-init` Job of #4044
-  deletes its short-lived Secret).
 - No `list`, no `watch`, no access to the chart's own ServiceAccount.
 
 The ServiceAccount mounts no token by default. Only the Job pods set
-`automountServiceAccountToken: true`. The `bootstrap` (#4043) and
-`vault-init` (#4044) Jobs use the same account.
+`automountServiceAccountToken: true`. The `bootstrap` Job (#4043) uses the
+same account. The `vault-init` Job (#4044) has its own account and Role
+(docs/codebase/core-vault-init.md).
 
 The Job pod does not carry the backplane's selector labels, because the
 backplane NetworkPolicy allows no egress to the Kubernetes API.

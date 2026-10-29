@@ -722,7 +722,7 @@ until all five exist.
 | ConfigMap `<release>-keycloak-realm` | `meho-realm.json`, mounted at `/opt/keycloak/data/import` |
 | Service `<release>-keycloak` | port 8080, plain HTTP inside the namespace |
 | two more paths on the backplane's Ingress (parent chart, `templates/_core-keycloak.tpl`) | on `ingress.host`: `/auth/realms/meho` and `/auth/resources` only (`Prefix`), to the Keycloak Service; `coreKeycloak.ingress.exposeAdmin: true` adds `/auth/admin` and `/auth/realms/master`. One Ingress keeps one set of annotations and one TLS certificate for the host |
-| NetworkPolicy `<release>-keycloak` | off by default; admits port 8080 from the backplane pods and `networkPolicy.extraFrom` |
+| NetworkPolicy `<release>-keycloak` | off by default; admits port 8080 from the backplane pods, the core hook Jobs, the built-in OpenBao and its `vault-init` Job, and `networkPolicy.extraFrom` |
 
 **Addresses.** Browsers, the CLI and the `iss` claim use the public URL
 `https://<coreKeycloak.hostname>/auth` (`KC_HOSTNAME`,
@@ -950,9 +950,11 @@ The `vault:` block stays for a Vault you bring yourself. MEHO's names stay
 `vault` (`coreVault`, `<release>-vault`, `VAULT_ADDR`): they name the job,
 not the product.
 
-**Not yet:** the setup Job `vault-init-<hash>` (the first start, the key
-and login setup, the policies). Until it lands, the server runs empty and
-locked, and nothing makes the Secret `<release>-core-vault-unseal`.
+**Setup.** The Job `<release>-vault-init-<hash>` starts OpenBao the first
+time, stores the unseal key in `<release>-core-vault-unseal`, sets up the
+logins, the policies and the tenant separation, and revokes the root token.
+The chart refuses `coreVault` without `coreKeycloak`. Details:
+docs/codebase/core-vault-init.md.
 
 **What it renders.**
 
@@ -962,7 +964,7 @@ locked, and nothing makes the Secret `<release>-core-vault-unseal`.
 | ConfigMap `<release>-vault-config` | `server.hcl` at `/openbao/config`: raft storage, a plain-HTTP listener on 8200 (`tls_disable`), `ui = false`, the `file` audit device with `file_path = "stdout"`. A changed config restarts the pod (checksum annotation) |
 | Service `<release>-vault` | port 8200; `publishNotReadyAddresses: true` |
 | Service `<release>-vault-internal` | headless, ports 8200 and 8201; `publishNotReadyAddresses: true`. It gives the pod its DNS name, which sets `BAO_API_ADDR` and `BAO_CLUSTER_ADDR` |
-| NetworkPolicy `<release>-vault` | off by default; admits port 8200 from the backplane pods and `networkPolicy.extraFrom` |
+| NetworkPolicy `<release>-vault` | off by default; admits port 8200 from the backplane pods, the `vault-init` Job and `networkPolicy.extraFrom` |
 | ServiceAccount `<release>-vault` and ClusterRoleBinding `<namespace>-<release>-vault-auth-delegator` | only with `coreVault.authDelegator: true` (default false); the chart's only cluster-wide object |
 
 **A locked pod is not ready.** The readiness check is `bao status`, which
@@ -983,7 +985,7 @@ every 5 seconds. When the server is sealed and `/unseal/key` exists, it runs
 `127.0.0.1:8200`. The key file is the Secret `<release>-core-vault-unseal`,
 mounted only in this container, `optional: true` and without `subPath`.
 The Secret's `key` value is the key alone. White space around it (such as
-the line break `echo` adds) is dropped, so the setup Job (#4044 part 2),
+the line break `echo` adds) is dropped, so the setup Job (`vault-init`),
 the installers and an operator restoring by hand can write it either way;
 without the `tr`, a key with a line break never unseals.
 
@@ -1013,7 +1015,7 @@ kubelet rotates; they count against the container's `ephemeral-storage`.
 **A Vault image (tests only).** `coreVault.binary: vault` with a matching
 `image` switches the program name, the variables (`VAULT_*`), the paths
 (`/vault/...`) and the config: `disable_mlock = true` is written, and the
-audit device is left out (the setup Job turns it on through the API).
+audit device is left out; the setup Job does not turn one on either.
 
 **`authDelegator`.** A Kubernetes login method checks tokens through the
 cluster's TokenReview API, which needs the cluster-wide binding to

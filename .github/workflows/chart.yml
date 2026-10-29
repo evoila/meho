@@ -321,6 +321,9 @@ jobs:
           # The built-in OpenBao subchart (#4044) renders in the same pass.
           grep -q 'name: test-vault$' /tmp/rendered-core.yaml \
             || { echo "::error::built-in OpenBao (test-vault) did not render with coreVault on"; exit 1; }
+          # Its setup Job (#4044), named by a hash of its setup.
+          grep -Eq 'name: test-vault-init-[0-9a-f]{8}$' /tmp/rendered-core.yaml \
+            || { echo "::error::OpenBao setup Job (test-vault-init-<hash>) did not render with coreVault on"; exit 1; }
 
       - name: Render the chart the way the form-2 download build does (#4820)
         # build-download.sh and check-download.sh render the chart with
@@ -680,10 +683,21 @@ jobs:
             helm template test deploy/charts/meho/ -f "$f" "${base[@]}" \
               | python3 scripts/ci/check_chart_namespace_scope.py --namespace meho-scope --label "$f"
           done
-          helm template test deploy/charts/meho/ "${base[@]}" --set coreVault.enabled=true \
+          # OpenBao's setup Job (#4044) needs the built-in Keycloak, which needs
+          # the built-in PostgreSQL.
+          vault_on=(
+            --set coreVault.enabled=true
+            --set corePostgres.enabled=true
+            --set coreKeycloak.enabled=true
+            --set coreKeycloak.hostname=meho.test
+            --set coreKeycloak.firstTenantId=3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c
+            --set keycloak.issuer=
+            --set config.keycloakIssuerUrl=
+          )
+          helm template test deploy/charts/meho/ "${base[@]}" "${vault_on[@]}" \
             | python3 scripts/ci/check_chart_namespace_scope.py --namespace meho-scope --label "coreVault on"
-          helm template test deploy/charts/meho/ "${base[@]}" \
-            --set coreVault.enabled=true --set coreVault.authDelegator=true \
+          helm template test deploy/charts/meho/ "${base[@]}" "${vault_on[@]}" \
+            --set coreVault.authDelegator=true \
             | python3 scripts/ci/check_chart_namespace_scope.py --namespace meho-scope \
                 --label "coreVault.authDelegator on" --allow-auth-delegator
 

@@ -285,9 +285,10 @@ _POOL_DELETE_OP = GcloudOp(
     handler_attr="gcloud_wif_pool_delete",
     summary="Mark one workload identity pool deleted; it can be restored for 30 days.",
     description=(
-        "Sends DELETE .../workloadIdentityPools/<pool>. Google only marks the pool "
-        "deleted: it stops working at once, can be restored for 30 days, and its ID "
-        "cannot be used again in that time. Waits for approval."
+        "Sends DELETE .../workloadIdentityPools/<pool> and waits a short time for "
+        "Google's operation to finish. Google only marks the pool deleted: it stops "
+        "working at once, can be restored for 30 days, and its ID cannot be used again "
+        "in that time. Waits for approval."
     ),
     parameter_schema={
         "type": "object",
@@ -301,7 +302,15 @@ _POOL_DELETE_OP = GcloudOp(
         "properties": {
             "pool_id": {"type": "string", "description": "The pool ID."},
             "name": {"type": "string", "description": "The full resource name."},
-            "state": {"type": "string", "description": "DELETED: the pool is marked deleted."},
+            "state": {
+                "type": "string",
+                "enum": ["DELETED", "DELETE_PENDING"],
+                "description": (
+                    "DELETED: Google finished the delete, or the pool was already deleted. "
+                    "DELETE_PENDING: Google accepted the delete but its operation was still "
+                    "running when MEHO stopped waiting; the pool is not deleted yet."
+                ),
+            },
             "already_deleted": {
                 "type": "boolean",
                 "description": "True when the pool was already marked deleted; nothing was sent.",
@@ -316,9 +325,15 @@ _POOL_DELETE_OP = GcloudOp(
             },
             "operation_done": {
                 "type": ["boolean", "null"],
-                "description": "True when Google reports the operation as finished.",
+                "description": (
+                    "True when Google reported the operation as finished; false when it "
+                    "was still running (state DELETE_PENDING); null when nothing was sent."
+                ),
             },
-            "note": {"type": "string", "description": "What the delete means, in plain words."},
+            "note": {
+                "type": "string",
+                "description": "What the result means, in plain words, and how to check.",
+            },
         },
         "required": ["pool_id", "name", "state", "already_deleted", "restorable_for_days", "note"],
         "additionalProperties": False,
@@ -334,14 +349,17 @@ _POOL_DELETE_OP = GcloudOp(
         ),
         "preconditions": (
             "A person must approve the call. The login needs "
-            "iam.workloadIdentityPools.delete; MEHO checks this, and that the pool "
-            "exists, before it asks for approval. Read the providers first, so the "
-            "approver knows which outside system loses access."
+            "iam.workloadIdentityPools.delete on the project; MEHO checks this on the "
+            "project, and reads the pool, before it asks for approval. Read the "
+            "providers first, so the approver knows which outside system loses access."
         ),
         "output_shape": (
-            "{pool_id, name, state: 'DELETED', already_deleted, restorable_for_days: 30, "
-            "operation_name, operation_done, note}. The pool is only marked deleted: "
-            "Google keeps it for 30 days and it can be restored (undelete) in that time."
+            "{pool_id, name, state, already_deleted, restorable_for_days: 30, "
+            "operation_name, operation_done, note}. state is DELETED when Google "
+            "finished, or DELETE_PENDING when its operation was still running after a "
+            "short wait; then check with gcloud.iam.workload_identity_pools.list "
+            "(show_deleted=true). The pool is only marked deleted: Google keeps it for "
+            "30 days and it can be restored (undelete) in that time."
         ),
         "next_step": (
             "Remove the service-account bindings that name the pool with "

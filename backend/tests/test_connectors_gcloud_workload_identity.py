@@ -7,14 +7,19 @@ Covers the five operations in
 :mod:`meho_backplane.connectors.gcloud.ops_workload_identity`:
 
 * pool list and provider list: URL, paging, the shown fields, no key material;
-* pool delete: reads first, marks deleted, says it can be restored for 30
-  days, safe to run twice, clear answer for a missing pool;
+* pool delete: reads first, waits for Google's operation, says it can be
+  restored for 30 days, safe to run twice, clear answer for a missing pool,
+  an explicit pending result when the operation does not finish in time,
+  and a failure when the operation fails later;
 * service-account policy read: asks for policy version 3;
 * binding removal: drops only the named member from the named role, sends
   the etag it read, refuses a stale etag without a retry;
 * strict value checks: a bad pool ID, service account, role or member never
   reaches Google;
-* the checks before approval (``testIamPermissions``).
+* the checks before approval: the pool read plus the project-level
+  ``testIamPermissions`` for the delete, ``testIamPermissions`` on the
+  service account for the binding removal, and the dispatcher's decision
+  on them (refuse, or go on to approval).
 
 Google is never called: every answer comes from ``respx``. Auth is mocked as in
 ``test_connectors_gcloud_ops.py``.
@@ -34,12 +39,18 @@ import respx
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
-from meho_backplane.connectors.base import ConnectorResourceNotFoundError
+from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
 from meho_backplane.connectors.gcloud import GcloudConnector
+from meho_backplane.connectors.gcloud import workload_identity as wif
 from meho_backplane.connectors.gcloud.session import GcloudTargetLike
 from meho_backplane.connectors.gcloud.workload_identity import GcloudPolicyChangedError
 from meho_backplane.connectors.schemas import AuthModel
-from meho_backplane.operations._preview import _PERMISSION_PREFLIGHTS, PreviewContext
+from meho_backplane.operations._preview import (
+    _PERMISSION_PREFLIGHTS,
+    PreviewContext,
+    build_permission_preflight,
+)
+from meho_backplane.operations.dispatcher import _preflight_denied_refusal
 
 _OPERATOR: Operator = synthesise_system_operator()
 
@@ -47,6 +58,13 @@ _PROJECT = "my-project-123"
 _IAM = "https://iam.googleapis.com/v1"
 _POOLS_URL = f"{_IAM}/projects/{_PROJECT}/locations/global/workloadIdentityPools"
 _POOL_URL = f"{_POOLS_URL}/old-vault-pool"
+_OPERATION_NAME = (
+    f"projects/{_PROJECT}/locations/global/workloadIdentityPools/old-vault-pool/operations/op-1"
+)
+_OPERATION_URL = f"{_IAM}/{_OPERATION_NAME}"
+_PROJECT_TEST_URL = (
+    f"https://cloudresourcemanager.googleapis.com/v1/projects/{_PROJECT}:testIamPermissions"
+)
 _SA = "vault-auth@my-project-123.iam.gserviceaccount.com"
 _SA_URL = f"{_IAM}/projects/{_PROJECT}/serviceAccounts/{_SA}"
 _WIF_ROLE = "roles/iam.workloadIdentityUser"
@@ -218,23 +236,122 @@ async def test_providers_list_shows_issuer_and_condition_without_key_material(
 async def test_pool_delete_marks_deleted_and_says_it_can_be_restored(
     connector: GcloudConnector,
 ) -> None:
-    with respx.mock() as mock:
+    with respx.mock(assert_all_called=False) as mock:
         get = mock.get(_POOL_URL).respond(200, json={"name": "x", "state": "ACTIVE"})
-        delete = mock.delete(_POOL_URL).respond(
-            200, json={"name": "projects/123/locations/global/operations/op-1", "done": True}
-        )
+        delete = mock.delete(_POOL_URL).respond(200, json={"name": _OPERATION_NAME, "done": True})
+        poll = mock.get(_OPERATION_URL).respond(200, json={"name": _OPERATION_NAME, "done": True})
         result = await connector.gcloud_wif_pool_delete(
             _OPERATOR, _TARGET, params={"pool_id": "old-vault-pool"}
         )
 
     assert get.call_count == 1
     assert delete.call_count == 1
+    assert poll.call_count == 0
     assert result["state"] == "DELETED"
     assert result["already_deleted"] is False
     assert result["restorable_for_days"] == 30
+    assert result["operation_name"] == _OPERATION_NAME
     assert result["operation_done"] is True
     assert "30 days" in result["note"]
     assert "restored" in result["note"]
+
+
+@pytest.fixture
+def no_wait(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Replace the poll sleep so the tests do not wait; returns the delays asked for."""
+    delays: list[float] = []
+
+    async def _fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(wif, "_sleep", _fake_sleep)
+    return delays
+
+
+async def test_pool_delete_waits_until_the_operation_is_done(
+    connector: GcloudConnector, no_wait: list[float]
+) -> None:
+    answers = iter(
+        [
+            {"name": _OPERATION_NAME, "done": False},
+            {"name": _OPERATION_NAME, "done": True, "response": {}},
+        ]
+    )
+    with respx.mock() as mock:
+        mock.get(_POOL_URL).respond(200, json={"name": "x", "state": "ACTIVE"})
+        mock.delete(_POOL_URL).respond(200, json={"name": _OPERATION_NAME, "done": False})
+        poll = mock.get(_OPERATION_URL).mock(
+            side_effect=lambda _request: httpx.Response(200, json=next(answers))
+        )
+        result = await connector.gcloud_wif_pool_delete(
+            _OPERATOR, _TARGET, params={"pool_id": "old-vault-pool"}
+        )
+
+    assert poll.call_count == 2
+    assert no_wait == [1.0, 1.0]
+    assert result["state"] == "DELETED"
+    assert result["operation_done"] is True
+    assert result["operation_name"] == _OPERATION_NAME
+
+
+async def test_pool_delete_fails_when_the_operation_fails_later(
+    connector: GcloudConnector, no_wait: list[float]
+) -> None:
+    failed = {
+        "name": _OPERATION_NAME,
+        "done": True,
+        "error": {"code": 9, "message": "pool has active providers"},
+    }
+    with respx.mock() as mock:
+        mock.get(_POOL_URL).respond(200, json={"name": "x", "state": "ACTIVE"})
+        mock.delete(_POOL_URL).respond(200, json={"name": _OPERATION_NAME, "done": False})
+        mock.get(_OPERATION_URL).respond(200, json=failed)
+        with pytest.raises(ConnectorUpstreamError, match="could not delete") as info:
+            await connector.gcloud_wif_pool_delete(
+                _OPERATOR, _TARGET, params={"pool_id": "old-vault-pool"}
+            )
+
+    assert info.value.http_status == 502
+    assert info.value.upstream_message == "pool has active providers"
+
+
+async def test_pool_delete_fails_when_the_delete_answers_with_an_error(
+    connector: GcloudConnector, no_wait: list[float]
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get(_POOL_URL).respond(200, json={"name": "x", "state": "ACTIVE"})
+        mock.delete(_POOL_URL).respond(
+            200, json={"name": _OPERATION_NAME, "done": True, "error": {"message": "nope"}}
+        )
+        poll = mock.get(_OPERATION_URL).respond(200, json={})
+        with pytest.raises(ConnectorUpstreamError, match="could not delete"):
+            await connector.gcloud_wif_pool_delete(
+                _OPERATOR, _TARGET, params={"pool_id": "old-vault-pool"}
+            )
+
+    assert poll.call_count == 0
+    assert no_wait == []
+
+
+async def test_pool_delete_says_pending_when_the_operation_does_not_finish(
+    connector: GcloudConnector, no_wait: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(wif, "_OPERATION_POLL_TRIES", 3)
+    with respx.mock() as mock:
+        mock.get(_POOL_URL).respond(200, json={"name": "x", "state": "ACTIVE"})
+        mock.delete(_POOL_URL).respond(200, json={"name": _OPERATION_NAME, "done": False})
+        poll = mock.get(_OPERATION_URL).respond(200, json={"name": _OPERATION_NAME, "done": False})
+        result = await connector.gcloud_wif_pool_delete(
+            _OPERATOR, _TARGET, params={"pool_id": "old-vault-pool"}
+        )
+
+    assert poll.call_count == 3
+    assert len(no_wait) == 3
+    assert result["state"] == "DELETE_PENDING"
+    assert result["operation_done"] is False
+    assert result["operation_name"] == _OPERATION_NAME
+    assert "not deleted yet" in result["note"]
+    assert "gcloud.iam.workload_identity_pools.list" in result["note"]
 
 
 async def test_pool_delete_on_a_deleted_pool_sends_nothing(connector: GcloudConnector) -> None:
@@ -486,24 +603,92 @@ def test_both_writes_have_a_check_before_approval() -> None:
     assert _REMOVE_OP in _PERMISSION_PREFLIGHTS
 
 
-async def test_pool_delete_check_passes_with_the_permission(connector: GcloudConnector) -> None:
+async def test_pool_delete_check_reads_the_pool_and_asks_the_project(
+    connector: GcloudConnector,
+) -> None:
     with respx.mock() as mock:
-        route = mock.post(f"{_POOL_URL}:testIamPermissions").respond(
+        pool = mock.get(_POOL_URL).respond(200, json={"name": "x", "state": "ACTIVE"})
+        route = mock.post(_PROJECT_TEST_URL).respond(
             200, json={"permissions": ["iam.workloadIdentityPools.delete"]}
         )
         check = await _PERMISSION_PREFLIGHTS[_DELETE_OP](
             _ctx(connector, _DELETE_OP, {"pool_id": "old-vault-pool"})
         )
 
+    assert pool.call_count == 1
     assert json.loads(route.calls[0].request.content) == {
         "permissions": ["iam.workloadIdentityPools.delete"]
     }
+    assert check == {
+        "check": "gcloud.testIamPermissions",
+        "path": f"projects/{_PROJECT}",
+        "pool": f"projects/{_PROJECT}/locations/global/workloadIdentityPools/old-vault-pool",
+        "required": ["iam.workloadIdentityPools.delete"],
+        "granted": ["iam.workloadIdentityPools.delete"],
+        "will_be_denied": False,
+    }
+
+
+async def test_pool_delete_check_denies_without_the_permission(
+    connector: GcloudConnector,
+) -> None:
+    with respx.mock() as mock:
+        mock.get(_POOL_URL).respond(200, json={"name": "x", "state": "ACTIVE"})
+        mock.post(_PROJECT_TEST_URL).respond(200, json={"permissions": []})
+        check = await _PERMISSION_PREFLIGHTS[_DELETE_OP](
+            _ctx(connector, _DELETE_OP, {"pool_id": "old-vault-pool"})
+        )
+
     assert check is not None
-    assert check["will_be_denied"] is False
-    assert (
-        check["path"]
-        == f"projects/{_PROJECT}/locations/global/workloadIdentityPools/old-vault-pool"
+    assert check["will_be_denied"] is True
+    assert check["granted"] == []
+
+
+async def test_pool_delete_check_is_skipped_when_the_pool_read_fails(
+    connector: GcloudConnector,
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get(_POOL_URL).respond(503, json={})
+        route = mock.post(_PROJECT_TEST_URL).respond(200, json={"permissions": []})
+        check = await _PERMISSION_PREFLIGHTS[_DELETE_OP](
+            _ctx(connector, _DELETE_OP, {"pool_id": "old-vault-pool"})
+        )
+
+    assert check is None
+    assert route.call_count == 0
+
+
+@pytest.mark.parametrize("pool_exists", [True, False])
+async def test_pool_delete_approval_path_refuses_only_a_missing_pool(
+    connector: GcloudConnector, pool_exists: bool
+) -> None:
+    """The dispatcher's park-time check: an existing pool goes on to approval,
+    a missing pool is refused before an approval request is made."""
+    with respx.mock(assert_all_called=False) as mock:
+        if pool_exists:
+            mock.get(_POOL_URL).respond(200, json={"name": "x", "state": "ACTIVE"})
+        else:
+            mock.get(_POOL_URL).respond(404, json={"error": {"code": 404}})
+        project = mock.post(_PROJECT_TEST_URL).respond(
+            200, json={"permissions": ["iam.workloadIdentityPools.delete"]}
+        )
+        preflight = await build_permission_preflight(
+            _ctx(connector, _DELETE_OP, {"pool_id": "old-vault-pool"})
+        )
+
+    refusal = _preflight_denied_refusal(
+        op_id=_DELETE_OP, proposed_effect={"permission_preflight": preflight}, duration_ms=1.0
     )
+    if pool_exists:
+        assert project.call_count == 1
+        assert refusal is None
+    else:
+        assert project.call_count == 0
+        assert preflight is not None
+        assert preflight["reason"] == "pool_not_found"
+        assert refusal is not None
+        assert refusal.status == "denied"
+        assert refusal.extras["error_code"] == "write_capability_denied"
 
 
 async def test_binding_remove_check_denies_without_set_permission(
@@ -522,16 +707,16 @@ async def test_binding_remove_check_denies_without_set_permission(
     assert check["granted"] == ["iam.serviceAccounts.getIamPolicy"]
 
 
-async def test_check_denies_a_missing_pool(connector: GcloudConnector) -> None:
+async def test_check_denies_a_missing_service_account(connector: GcloudConnector) -> None:
     with respx.mock() as mock:
-        mock.post(f"{_POOL_URL}:testIamPermissions").respond(404, json={"error": {"code": 404}})
-        check = await _PERMISSION_PREFLIGHTS[_DELETE_OP](
-            _ctx(connector, _DELETE_OP, {"pool_id": "old-vault-pool"})
+        mock.post(f"{_SA_URL}:testIamPermissions").respond(404, json={"error": {"code": 404}})
+        check = await _PERMISSION_PREFLIGHTS[_REMOVE_OP](
+            _ctx(connector, _REMOVE_OP, _REMOVE_PARAMS)
         )
 
     assert check is not None
     assert check["will_be_denied"] is True
-    assert check["reason"] == "pool_not_found"
+    assert check["reason"] == "service_account_not_found"
 
 
 async def test_check_is_skipped_when_google_fails(connector: GcloudConnector) -> None:

@@ -69,7 +69,8 @@ identities act as that account.
 
 Source: metadata in `ops_workload_identity.py` (`WORKLOAD_IDENTITY_OPS`,
 appended to `GCLOUD_OPS`); handlers in `workload_identity.py`, as the
-`WorkloadIdentityOps` mixin that `GcloudConnector` inherits.
+`WorkloadIdentityOps` mixin that `GcloudConnector` inherits; the checks
+before approval in `workload_identity_preflight.py`.
 
 How they behave:
 
@@ -80,6 +81,13 @@ How they behave:
   SAML metadata, trust stores) is never returned.
 - **Pool delete** reads the pool first. A missing pool gives `not_found`. A
   pool that is already marked deleted is not sent again (safe to run twice).
+  The `DELETE` answers with a Google operation. MEHO polls it (up to 15
+  times, one second apart) until it is done. A finished operation gives
+  `state: DELETED`; an operation with an `error` fails the call
+  (`ConnectorUpstreamError`, status 502); an operation still running after
+  the wait gives `state: DELETE_PENDING`, `operation_done: false` and a
+  `note` that says how to check (`gcloud.iam.workload_identity_pools.list`
+  with `show_deleted=true`). MEHO never says `DELETED` before Google does.
   Google only marks a pool deleted: it stops working at once, Google keeps
   it for 30 days and it can be restored in that time, and its ID cannot be
   used again in those days. The result says so (`restorable_for_days: 30`,
@@ -102,9 +110,13 @@ How they behave:
   member prefix is refused before any call, so it cannot change the URL
   path.
 - **Check before approval.** Both writes register a
-  `register_permission_preflight` check. It calls Google's
-  `testIamPermissions` on the pool or service account. A missing permission
-  or a missing pool / service account (404) sets `will_be_denied`, so the
+  `register_permission_preflight` check. The binding removal calls Google's
+  `testIamPermissions` on the service account. The pool delete reads the
+  pool (`GET`) and then calls `testIamPermissions` on the **project**
+  (`cloudresourcemanager.googleapis.com/v1/projects/<p>:testIamPermissions`)
+  for `iam.workloadIdentityPools.delete`, because the IAM API does not
+  answer `testIamPermissions` on every pool. A missing permission or a
+  missing pool / service account (404) sets `will_be_denied`, so the
   dispatcher refuses at once (`write_capability_denied`) instead of asking a
   person to approve a call that cannot work. Any other failure skips the
   check; the call still waits for approval.

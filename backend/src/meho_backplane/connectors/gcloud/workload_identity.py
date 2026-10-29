@@ -12,11 +12,13 @@ holds:
   never change the URL path or the policy in an unplanned way;
 * :class:`WorkloadIdentityOps`, the mixin :class:`GcloudConnector` inherits.
   Its methods are the ``handler_attr`` targets of the five operations;
-* the two checks that run before a person is asked to approve a change
-  (``register_permission_preflight``). They ask Google's
-  ``testIamPermissions`` whether the login may do the change. A missing pool
-  or service account, or a missing permission, stops the call before an
-  approval request is made.
+* the two checks that run before a person is asked to approve a change are
+  in :mod:`meho_backplane.connectors.gcloud.workload_identity_preflight`.
+
+The pool delete waits a short, bounded time for Google's operation to
+finish. When it finishes, the result says ``DELETED``; when it fails, the
+call fails; when it is still running after the wait, the result says
+``DELETE_PENDING`` and how to check.
 
 The binding removal is a read-change-write: it reads the policy, drops only
 the named member from the named role (only in bindings without a
@@ -27,6 +29,7 @@ policy changed in between, Google answers ``409``; MEHO then refuses with
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import TYPE_CHECKING, Any, Final, cast
 
@@ -34,7 +37,6 @@ import httpx
 
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
 from meho_backplane.connectors.gcloud.session import GcloudTargetLike
-from meho_backplane.operations._preview import PreviewContext, register_permission_preflight
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -72,6 +74,15 @@ MEMBER_PATTERN: Final[str] = (
 )
 
 _IAM_API: Final[str] = "https://iam.googleapis.com/v1"
+_CRM_API: Final[str] = "https://cloudresourcemanager.googleapis.com/v1"
+
+#: How often, and how many times at most, the pool delete asks Google
+#: whether its operation has finished before it answers ``DELETE_PENDING``.
+_OPERATION_POLL_INTERVAL_SECONDS: Final[float] = 1.0
+_OPERATION_POLL_TRIES: Final[int] = 15
+
+#: Sleep. Tests replace it to move time forward without waiting.
+_sleep = asyncio.sleep
 
 #: How long Google keeps a deleted pool so it can be restored.
 _RESTORE_DAYS: Final[int] = 30
@@ -82,12 +93,12 @@ _DELETE_NOTE: Final[str] = (
     "Its ID cannot be used for a new pool during those 30 days."
 )
 
-_POOL_DELETE_OP_ID: Final[str] = "gcloud.iam.workload_identity_pools.delete"
-_BINDING_REMOVE_OP_ID: Final[str] = "gcloud.iam.service_accounts.binding.remove"
-_POOL_DELETE_PERMISSIONS: Final[tuple[str, ...]] = ("iam.workloadIdentityPools.delete",)
-_BINDING_REMOVE_PERMISSIONS: Final[tuple[str, ...]] = (
-    "iam.serviceAccounts.getIamPolicy",
-    "iam.serviceAccounts.setIamPolicy",
+_PENDING_NOTE: Final[str] = (
+    "Google accepted the delete but its operation had not finished when MEHO stopped "
+    "waiting. The pool is not deleted yet. Check with "
+    "gcloud.iam.workload_identity_pools.list (show_deleted=true): the pool is deleted "
+    "when its state is DELETED. Google keeps a deleted pool for 30 days and it can be "
+    "restored (undelete) in that time."
 )
 
 #: Google returns 409 (ABORTED) when the etag no longer matches; 412 is accepted too.
@@ -368,18 +379,49 @@ async def pool_delete(
     if result["already_deleted"]:
         return result
     operation = await _delete_json_abs(connector, target, url, operator=operator)
-    error = operation.get("error")
-    if error:
-        message = error.get("message") if isinstance(error, dict) else str(error)
-        raise ConnectorUpstreamError(
-            f"Google could not delete workload identity pool {pool_id!r}.",
-            # The DELETE itself succeeded; the operation it started failed.
-            http_status=502,
-            upstream_message=message,
-        )
+    operation = await _wait_for_operation(connector, target, operation, operator=operator)
+    _raise_if_operation_failed(operation, pool_id)
     result["operation_name"] = operation.get("name")
-    result["operation_done"] = operation.get("done")
+    result["operation_done"] = operation.get("done") is True
+    if not result["operation_done"]:
+        result["state"] = "DELETE_PENDING"
+        result["note"] = _PENDING_NOTE
     return result
+
+
+async def _wait_for_operation(
+    connector: GcloudConnector,
+    target: GcloudTargetLike,
+    operation: dict[str, Any],
+    *,
+    operator: Operator,
+) -> dict[str, Any]:
+    """Poll a Google operation until it is done, or the bounded wait is used up.
+
+    Returns the last state seen. The caller decides what a still-running
+    operation means. An operation without a name cannot be polled and is
+    returned as it is.
+    """
+    for _ in range(_OPERATION_POLL_TRIES):
+        name = operation.get("name")
+        if operation.get("done") is True or not isinstance(name, str) or not name:
+            break
+        await _sleep(_OPERATION_POLL_INTERVAL_SECONDS)
+        operation = await connector._get_json_abs(target, f"{_IAM_API}/{name}", operator=operator)
+    return operation
+
+
+def _raise_if_operation_failed(operation: dict[str, Any], pool_id: str) -> None:
+    error = operation.get("error")
+    if not error:
+        return
+    message = error.get("message") if isinstance(error, dict) else str(error)
+    raise ConnectorUpstreamError(
+        f"Google could not delete workload identity pool {pool_id!r}.",
+        # The DELETE itself succeeded; the operation it started failed.
+        http_status=502,
+        upstream_message=message if isinstance(message, str) else str(message),
+    )
 
 
 async def sa_policy_read(
@@ -498,69 +540,3 @@ class WorkloadIdentityOps:
     ) -> dict[str, Any]:
         """``gcloud.iam.service_accounts.binding.remove``: drop one member from one role."""
         return await sa_binding_remove(_connector(self), operator, target, params)
-
-
-# ---------------------------------------------------------------------------
-# Checks before approval
-# ---------------------------------------------------------------------------
-
-
-async def _permission_check(
-    ctx: PreviewContext, resource: str, required: tuple[str, ...], missing_reason: str
-) -> dict[str, Any] | None:
-    """Ask Google whether the login holds *required* on *resource*.
-
-    Returns ``will_be_denied: True`` when a permission is missing or the
-    resource does not exist (404), so MEHO does not ask a person to approve
-    a call that cannot work. Any other failure returns ``None``: the check
-    is skipped and the call still waits for approval.
-    """
-    from meho_backplane.connectors.gcloud.connector import GcloudConnector
-
-    connector = ctx.connector_instance
-    if not isinstance(connector, GcloudConnector) or ctx.target is None:
-        return None
-    url = f"{_IAM_API}/{resource}:testIamPermissions"
-    check: dict[str, Any] = {
-        "check": "gcloud.testIamPermissions",
-        "path": resource,
-        "required": list(required),
-    }
-    try:
-        payload = await connector._post_json_abs(
-            ctx.target, url, operator=ctx.operator, json_body={"permissions": list(required)}
-        )
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code != 404:
-            return None
-        return {**check, "granted": [], "will_be_denied": True, "reason": missing_reason}
-    granted = sorted(p for p in payload.get("permissions") or [] if isinstance(p, str))
-    return {**check, "granted": granted, "will_be_denied": not set(required) <= set(granted)}
-
-
-async def _pool_delete_preflight(ctx: PreviewContext) -> dict[str, Any] | None:
-    try:
-        pool_id = _pool_id(ctx.params)
-    except ValueError:
-        return None
-    if ctx.target is None:
-        return None
-    resource = f"{_pools_name(ctx.target)}/{pool_id}"
-    return await _permission_check(ctx, resource, _POOL_DELETE_PERMISSIONS, "pool_not_found")
-
-
-async def _binding_remove_preflight(ctx: PreviewContext) -> dict[str, Any] | None:
-    try:
-        account = _service_account(ctx.params)
-    except ValueError:
-        return None
-    if ctx.target is None:
-        return None
-    resource = _service_account_name(ctx.target, account)
-    return await _permission_check(
-        ctx, resource, _BINDING_REMOVE_PERMISSIONS, "service_account_not_found"
-    )
-
-
-register_permission_preflight(_POOL_DELETE_OP_ID, _pool_delete_preflight)
-register_permission_preflight(_BINDING_REMOVE_OP_ID, _binding_remove_preflight)

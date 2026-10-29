@@ -151,7 +151,9 @@ A single `roles/viewer` project-level binding covers most of the reads;
 assign narrower custom roles for production least-privilege setups. The two
 changes need the write permissions above. MEHO checks them with Google's
 `testIamPermissions` before it asks a person to approve, and refuses at once
-when one is missing.
+when one is missing. For the pool delete the check runs on the project
+(Cloud Resource Manager), so grant `iam.workloadIdentityPools.delete` at the
+project level.
 
 ## Prerequisites
 

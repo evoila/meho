@@ -236,6 +236,7 @@ def keycloak() -> Iterator[_Keycloak]:
     env = {
         "MEHO_REALM_PUBLIC_URL": _PUBLIC_URL,
         "MEHO_REALM_TENANT_ID": _TENANT_ID,
+        "MEHO_REALM_TENANT_NAME": "main",
         ADMIN_SECRET_ENV: secrets.token_hex(16),
         "MEHO_REALM_WEB_CLIENT_SECRET": secrets.token_hex(16),
         "MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET": secrets.token_hex(16),
@@ -254,6 +255,7 @@ def keycloak() -> Iterator[_Keycloak]:
     for name in (
         "MEHO_REALM_PUBLIC_URL",
         "MEHO_REALM_TENANT_ID",
+        "MEHO_REALM_TENANT_NAME",
         ADMIN_SECRET_ENV,
         "MEHO_REALM_WEB_CLIENT_SECRET",
         "MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET",

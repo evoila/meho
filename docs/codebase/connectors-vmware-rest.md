@@ -1185,10 +1185,14 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
      excluded composite with its reason. The test
      `test_connectors_vmware_rest_catalog_parity.py` fails when a composite
      or typed op on 9.0 is neither on 8.0 nor in that list.
-   - The governed child ops inside a composite keep their
-     `vmware-rest-9.0` keys on both catalogs. One grant set covers the
-     composite on either catalog, and approving a parked child op re-runs
-     the composite on the 9.0 catalog, where it is also registered.
+   - The write steps inside a composite are checked under the connector
+     the target resolves to (#4991): `vmware-rest-8.0` for an 8.0.x
+     target, `vmware-rest-9.0` for a 9.x target. The handlers read it off
+     the connector instance (`_step_connector_id` in `composites/_write.py`).
+     So a step grant for an 8.0.x target names `vmware-rest-8.0`, and
+     approving a parked step re-runs the composite on the 8.0 catalog.
+     The Supervisor and namespace composites are not on that catalog, so an
+     approved step of one of them on an 8.0.x target cannot resume there.
    - VI-JSON needs vCenter 8.0 U1 or later, so the VI-JSON composites do
      not work on an 8.0 GA target.
    - When the 9.0 catalog refuses an ingested op for an 8.0.x target

@@ -2185,11 +2185,10 @@ async def register_vmware_composite_operations_8_0(
     handlers and policy as the 9.0 catalog, minus
     :data:`COMPOSITES_NOT_ON_8_0`.
 
-    The governed child ops of a composite keep their ``vmware-rest-9.0``
-    keys on both catalogs (``_CONNECTOR_ID`` in ``_write.py`` /
-    ``_guest.py``). One grant set covers a composite on either catalog, and
-    the approval resume of a parked child op re-runs the composite on the
-    9.0 catalog, where it is also registered.
+    The write steps of a composite are checked under the connector the
+    target resolves to (``_step_connector_id`` in ``_write.py``, #4991), so
+    on an 8.0.x target a step grant names ``vmware-rest-8.0`` and the
+    approval resume of a parked step re-runs the composite on this catalog.
     """
     specs = tuple(spec for spec in _COMPOSITES if spec.op_id not in COMPOSITES_NOT_ON_8_0)
     await _register_specs(specs, version=_VERSION_8_0, embedding_service=embedding_service)

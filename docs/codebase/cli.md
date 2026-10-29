@@ -1656,7 +1656,10 @@ removes one through `DELETE /api/v1/targets/{name}`.
   more. The system itself and its Vault secret are not touched. Without
   `--confirm` the verb asks y/N on stdin first; closed stdin counts as
   no, and a decline exits 0 without a request (`--json` prints
-  `{"name", "status": "declined", "force"}`). When topology nodes
+  `{"name", "status": "declined", "force"}`). With `--json` the question
+  goes to the terminal, not to stdout or stderr, so both streams hold
+  only JSON; when a program pipes the answer in, no question is printed.
+  When topology nodes
   (`graph_node` rows) still point at the target, the server answers 409
   `target_has_references` with the count; the CLI turns it into a plain
   message ("This target is linked from 3 topology nodes. The nodes

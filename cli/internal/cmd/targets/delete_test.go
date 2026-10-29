@@ -7,8 +7,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -255,8 +257,9 @@ func TestDeleteDeclinedDoesNotCallServer(t *testing.T) {
 }
 
 // TestDeletePromptJSONKeepsStdoutClean pins that with --json and
-// without --confirm, the y/N prompt goes to stderr and the whole stdout
-// is one JSON envelope, for "y", "n" and closed stdin.
+// without --confirm, a piped answer gets no prompt text, so the whole
+// stdout is one JSON envelope and stderr stays empty, for "y", "n" and
+// closed stdin.
 func TestDeletePromptJSONKeepsStdoutClean(t *testing.T) {
 	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
 	var f fakeDeleteServer
@@ -283,12 +286,89 @@ func TestDeletePromptJSONKeepsStdoutClean(t *testing.T) {
 		if got != (deleteResult{Name: "demo-vault", Status: c.wantStatus}) {
 			t.Errorf("stdin %q: unexpected envelope: %+v", c.stdin, got)
 		}
-		if !strings.Contains(stderr.String(), "[y/N]:") {
-			t.Errorf("stdin %q: the prompt should go to stderr; got:\n%s", c.stdin, stderr.String())
+		if stderr.Len() != 0 {
+			t.Errorf("stdin %q: stderr should be empty; got:\n%s", c.stdin, stderr.String())
 		}
 		if f.calls != c.wantCalls {
 			t.Errorf("stdin %q: want %d request(s); got %d", c.stdin, c.wantCalls, f.calls)
 		}
+	}
+}
+
+// TestDeletePromptJSONErrorIsOneEnvelope pins that with --json, after
+// a piped "y", a 404 and a 409 leave stderr as one JSON error envelope
+// with no prompt text in front of it, and stdout empty.
+func TestDeletePromptJSONErrorIsOneEnvelope(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
+	cases := []struct {
+		name   string
+		status int
+		reply  string
+	}{
+		{name: "404", status: http.StatusNotFound,
+			reply: `{"detail":{"error":"no_target","query":"prmo","matches":[{"name":"prom","aliases":[]}]}}`},
+		{name: "409", status: http.StatusConflict, reply: hasReferences409},
+	}
+	for _, c := range cases {
+		var f fakeDeleteServer
+		url := f.start(t, c.status, c.reply)
+		stdout, stderr, err := runDeleteCmd(t, url, "y\n", "prmo", "--json")
+		if exitCodeOf(err) != 4 {
+			t.Fatalf("%s: should exit 4; got %v", c.name, err)
+		}
+		if f.calls != 1 {
+			t.Fatalf("%s: want 1 request after \"y\"; got %d", c.name, f.calls)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("%s: stdout should be empty; got:\n%s", c.name, stdout.String())
+		}
+		var env struct {
+			Error    string `json:"error"`
+			ExitCode int    `json:"exit_code"`
+		}
+		if jerr := json.Unmarshal(stderr.Bytes(), &env); jerr != nil {
+			t.Fatalf("%s: stderr is not one JSON error envelope: %v\n%s", c.name, jerr, stderr.String())
+		}
+		if env.Error != "unexpected_response" || env.ExitCode != 4 {
+			t.Errorf("%s: unexpected error envelope: %+v", c.name, env)
+		}
+	}
+}
+
+// TestDeletePromptJSONTerminalGetsQuestion pins that with --json, when
+// a person is at the keyboard, the question goes to the terminal and
+// still not to stdout or stderr.
+func TestDeletePromptJSONTerminalGetsQuestion(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv and the test
+	// overrides the package-level openTerminal seam.
+	tty, err := os.CreateTemp(t.TempDir(), "tty")
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := openTerminal
+	openTerminal = func(io.Reader) *os.File { return tty }
+	t.Cleanup(func() { openTerminal = orig })
+
+	var f fakeDeleteServer
+	url := f.start(t, http.StatusNotFound,
+		`{"detail":{"error":"no_target","query":"prmo","matches":[]}}`)
+	stdout, stderr, err := runDeleteCmd(t, url, "y\n", "prmo", "--json")
+	if exitCodeOf(err) != 4 {
+		t.Fatalf("404 should exit 4; got %v", err)
+	}
+	shown, rerr := os.ReadFile(tty.Name())
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if !strings.Contains(string(shown), "[y/N]:") {
+		t.Errorf("the question should go to the terminal; got %q", shown)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout should be empty; got:\n%s", stdout.String())
+	}
+	var env map[string]any
+	if jerr := json.Unmarshal(stderr.Bytes(), &env); jerr != nil {
+		t.Fatalf("stderr is not one JSON error envelope: %v\n%s", jerr, stderr.String())
 	}
 }
 

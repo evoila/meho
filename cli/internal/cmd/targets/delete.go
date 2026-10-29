@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
@@ -89,12 +91,9 @@ func newDeleteCmd() *cobra.Command {
 func runDelete(cmd *cobra.Command, name string, force, confirm, jsonOut bool, backplaneOverride string) error {
 	result := deleteResult{Name: name, Force: force}
 	// Ask before resolving the backplane, so a decline exits 0 even
-	// when the operator is not logged in. With --json the prompt goes
-	// to stderr, so stdout holds only the envelope.
-	promptW := cmd.OutOrStdout()
-	if jsonOut {
-		promptW = cmd.ErrOrStderr()
-	}
+	// when the operator is not logged in.
+	promptW, closePrompt := promptWriter(cmd, jsonOut)
+	defer closePrompt()
 	if !confirm && !confirmPrompt(cmd, promptW, deletePrompt(name, force)) {
 		result.Status = "declined"
 		if jsonOut {
@@ -127,6 +126,42 @@ func runDelete(cmd *cobra.Command, name string, force, confirm, jsonOut bool, ba
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "deleted target %q\n", name)
 	return nil
+}
+
+// promptWriter returns where the y/N question goes, and a function
+// that releases it. Without --json it is stdout, as for the other
+// delete verbs. With --json, stdout carries the success envelope and
+// stderr the error envelope, so the question lands on neither: it goes
+// to the terminal when a person types the answer, and nowhere when a
+// program pipes the answer in.
+func promptWriter(cmd *cobra.Command, jsonOut bool) (io.Writer, func()) {
+	if !jsonOut {
+		return cmd.OutOrStdout(), func() {}
+	}
+	tty := openTerminal(cmd.InOrStdin())
+	switch tty {
+	case nil:
+		return io.Discard, func() {}
+	case os.Stderr:
+		return tty, func() {}
+	}
+	return tty, func() { _ = tty.Close() }
+}
+
+// openTerminal returns the terminal to show the y/N question on when a
+// person is at the keyboard, or nil when stdin is not a terminal. When
+// the terminal device cannot be opened it returns stderr, so the person
+// still sees the question. Tests override it to capture the question.
+var openTerminal = func(in io.Reader) *os.File {
+	f, ok := in.(*os.File)
+	if !ok || !term.IsTerminal(int(f.Fd())) {
+		return nil
+	}
+	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
+	if err != nil {
+		return os.Stderr
+	}
+	return tty
 }
 
 // deletePrompt is the question shown before the DELETE.

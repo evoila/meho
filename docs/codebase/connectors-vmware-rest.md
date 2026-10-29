@@ -2274,8 +2274,9 @@ On the command line, `meho vmware vm cdrom mount-library-iso <vm-name-or-id>
 --library-item <id>` (or `--library-item-name <name> [--library-name <library>]`)
 and `meho vmware vm cdrom unmount-library-iso <vm-name-or-id> --cdrom <id>`
 (`cli/internal/cmd/vmware/vm_cdrom.go`) run the two operations through the
-same dispatch path as MCP. The VM name is resolved to its id on the client,
-like `vm info`, so the approval names the VM id.
+same dispatch path as MCP. The VM name is resolved to its id on the client
+through the typed `vmware.vm.info` read, so the commands work before the
+catalog is ingested, and the approval names the VM id.
 
 ### Shared disks for WSFC/FCI — bus-sharing, eagerzeroedthick, shared-attach (#3256)
 

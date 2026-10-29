@@ -17,9 +17,10 @@ const (
 
 // newVMCdromCmd returns the `meho vmware vm cdrom` parent with the two
 // content-library ISO verbs (#3576). Both are thin wrappers: they resolve
-// the VM name to its id on the client, like `vm info`, and dispatch the
-// composite op_id through the shared dispatch path. The backend waits for
-// approval; the approval names the VM id, never a name.
+// the VM name to its id through the typed vmware.vm.info read (no catalog
+// ingest needed) and dispatch the composite op_id through the shared
+// dispatch path. The backend waits for approval; the approval names the
+// VM id, never a name.
 func newVMCdromCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "cdrom",
@@ -51,16 +52,16 @@ func newVMCdromMountLibraryISOCmd() *cobra.Command {
 			"new CD drive to the VM, backed by the ISO file of the library item,\n" +
 			"and the answer carries the new drive id (cdrom). Keep it: the\n" +
 			"unmount needs it.\n\n" +
-			"<vm-name-or-id> accepts a VM name (resolved client-side to a moid)\n" +
-			"or a moid directly. Give the library item by id (--library-item) or\n" +
+			"<vm-name-or-id> accepts a VM name (resolved to a moid through the typed\n" +
+			"vmware.vm.info read) or a moid directly. Give the library item by id (--library-item) or\n" +
 			"by name (--library-item-name, optionally inside one library with\n" +
 			"--library-name). A name that fits no item, or more than one, is\n" +
 			"refused before anything is sent.\n\n" +
 			"The call waits for approval. The approval preview shows the item id\n" +
 			"the name resolved to; the approved run mounts exactly that item.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vmware vm cdrom mount-library-iso web-01 --target rdc-vcenter --library-item 0b6e3e0c-1f2a-4c55-9a51-2f6d7a8b9c01\n" +
-			"  meho vmware vm cdrom mount-library-iso vm-42 --target rdc-vcenter --library-item-name boot.iso --library-name isos",
+		Example: "  meho vmware vm cdrom mount-library-iso web-01 --target <target> --library-item 0b6e3e0c-1f2a-4c55-9a51-2f6d7a8b9c01\n" +
+			"  meho vmware vm cdrom mount-library-iso vm-42 --target <target> --library-item-name boot.iso --library-name isos",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -88,7 +89,7 @@ func runVMCdromMountLibraryISO(cmd *cobra.Command, nameOrID string, opts vmCdrom
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	moid, err := resolveName(cmd.Context(), backplaneURL, opts.TargetName, "vm", nameOrID)
+	moid, err := resolveVMTyped(cmd.Context(), backplaneURL, opts.TargetName, nameOrID)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(),
 			&output.StructuredError{Code: "resolve_failed", Detail: err.Error(), Exit: 1},
@@ -124,12 +125,12 @@ func newVMCdromUnmountLibraryISOCmd() *cobra.Command {
 		Long: "unmount-library-iso dispatches op_id=\"" + opUnmountLibraryISO + "\"\n" +
 			"against the connector_id=\"vmware-rest-9.0\" connector. vCenter removes\n" +
 			"the CD drive that mount-library-iso added.\n\n" +
-			"<vm-name-or-id> accepts a VM name (resolved client-side to a moid)\n" +
-			"or a moid directly. --cdrom is the drive id the mount returned;\n" +
+			"<vm-name-or-id> accepts a VM name (resolved to a moid through the typed\n" +
+			"vmware.vm.info read) or a moid directly. --cdrom is the drive id the mount returned;\n" +
 			"vmware.vm.hardware.show lists it too.\n\n" +
 			"The call waits for approval.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example:       "  meho vmware vm cdrom unmount-library-iso web-01 --target rdc-vcenter --cdrom 16002",
+		Example:       "  meho vmware vm cdrom unmount-library-iso web-01 --target <target> --cdrom 16002",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -151,7 +152,7 @@ func runVMCdromUnmountLibraryISO(cmd *cobra.Command, nameOrID, targetName, cdrom
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	moid, err := resolveName(cmd.Context(), backplaneURL, targetName, "vm", nameOrID)
+	moid, err := resolveVMTyped(cmd.Context(), backplaneURL, targetName, nameOrID)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(),
 			&output.StructuredError{Code: "resolve_failed", Detail: err.Error(), Exit: 1},

@@ -76,6 +76,10 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     "AKS_NODE_POOLS_PATH": (("GET",), "AKS_API_VERSION"),
     "AKS_KUBERNETES_VERSIONS_PATH": (("GET",), "AKS_API_VERSION"),
     # arc (Task #5084)
+    "ARC_MACHINES_PATH": (("GET",), "ARC_API_VERSION"),
+    "ARC_MACHINE_PATH": (("GET",), "ARC_API_VERSION"),
+    "ARC_ASSESS_PATCHES_PATH": (("POST",), "ARC_API_VERSION"),
+    "VM_ASSESS_PATCHES_PATH": (("POST",), "VM_ASSESS_API_VERSION"),
     # automation (Task #5092)
     "AUTOMATION_ACCOUNTS_PATH": (("GET",), "AUTOMATION_API_VERSION"),
     "AUTOMATION_RUNBOOKS_PATH": (("GET",), "AUTOMATION_API_VERSION"),
@@ -236,6 +240,10 @@ def test_the_checked_paths_are_pinned() -> None:
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.containerservice/managedclusters/{}/upgradeprofiles/default@2026-08-01",
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.containerservice/managedclusters/{}@2026-08-01",
         "# arc (Task #5084)",
+        "GET:/subscriptions/{}/providers/microsoft.hybridcompute/machines@2026-09-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.hybridcompute/machines/{}@2026-09-01",
+        "POST:/subscriptions/{}/resourcegroups/{}/providers/microsoft.compute/virtualmachines/{}/assesspatches@2026-04-01",
+        "POST:/subscriptions/{}/resourcegroups/{}/providers/microsoft.hybridcompute/machines/{}/assesspatches@2026-09-01",
         "# automation (Task #5092)",
         "GET:/subscriptions/{}/providers/microsoft.automation/automationaccounts@2024-10-23",
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.automation/automationaccounts/{}/jobs@2024-10-23",

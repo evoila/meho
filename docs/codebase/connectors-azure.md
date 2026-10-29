@@ -753,7 +753,111 @@ result holds a kubeconfig, a token or a certificate.
 
 ## arc
 
-Not built yet (Task #5084).
+The arc family reads the Azure Arc machines of the target's subscription
+(servers outside Azure, in a data center or another cloud, that are
+connected to Azure) and the patching results Azure Update Manager stores.
+It can also check one machine for missing updates, after a person approves.
+All five operations are in group `arc`.
+
+| Operation | Risk level | What it does | Parameters |
+|---|---|---|---|
+| `azure.arc.machine.list` | `safe` | every Arc machine: name, OS, connection status, agent version, last status change, location, tags; plus counts by status | none |
+| `azure.arc.machine.show` | `safe` | one Arc machine: the list fields plus host name, domain, OS edition, update settings (`assessment_mode`, `patch_mode`), the agent's services and its errors | `resource_group`, `name` |
+| `azure.patching.assessment.list` | `safe` | the last stored update check of each Azure VM and Arc machine: OS, time of the check, missing updates by class (critical, security, other), reboot pending | none |
+| `azure.patching.installation.list` | `safe` | past update installation runs: machine, time, status, installed, failed and pending counts, reboot status | `days` (1 to 30, default 30) |
+| `azure.patching.assessment.start` | `caution`, waits for approval | checks one Azure VM or Arc machine for missing updates now and returns the counts by class and the time of the check | `machine_id` |
+
+The ids say "patching", not "patch": `patch` is a write word
+(`WRITE_WORDS` in `delete_names.py`), and a `safe` id has none.
+
+**API versions.** The Arc calls use `2026-09-01` (`ARC_API_VERSION`), the
+check of an Azure VM `2026-04-01` (`VM_ASSESS_API_VERSION`), and the two
+patching lists use Resource Graph (`2024-04-01`). Every path is a `*_PATH`
+constant in the `arc` section of `_paths.py`, and the spec path check finds
+each of them, with its API version, in the pinned spec files
+(`hybridcompute` and `compute`).
+
+**Files.** `arc.py` holds the group text, the guidance for the AI, the
+operation table (`OPS`) and the mixin `ArcOps`. `arc_reads.py` holds the
+bodies of the four reads, `arc_assess.py` the body of the check,
+`arc_rows.py` builds the rows and counts, `arc_schemas.py` holds the schemas.
+
+**Stored patching results.** Azure Update Manager keeps its results in two
+Azure Resource Graph tables: `patchassessmentresources` (the last check of
+each machine, kept about 7 days) and `patchinstallationresources`
+(installation runs, kept 30 days). Both lists send one fixed query with
+`query_resource_graph`, with `subscriptions` set to the target's own
+subscription only, and follow `$skipToken`. The queries leave out the rows
+of single updates (`softwarepatches`) and use no `limit`, `take` or
+`sample`, so every page can be read. The only value MEHO puts into a query
+is the start of the installation window, a time it computes itself from the
+checked `days`. A result whose ID names another subscription is left out.
+The machine of a result is read from the result's ID: the part before
+`/patchAssessmentResults/` or `/patchInstallationResults/`.
+
+**Counts.** `critical` and `security` are Azure's counts of those classes;
+`other` adds up every other class (definitions, rollups, tools, ...). When
+Azure reports no counts, all three are `null`, never `0`. The check of an
+Azure VM answers with two totals (`criticalAndSecurityPatchCount`,
+`otherPatchCount`) and a list of the missing updates; MEHO counts
+`critical`, `security` and `by_class` from that list. An Arc machine answers
+with counts per class (`availablePatchCountByClassification`).
+
+**Result shapes.** Each list returns its rows under `value`, a `summary`
+object with counts over every row read, and the paging fields (`truncated`,
+`omission`, `omission_kind`, `pages_read`). The installation list also
+returns `window: {days, from, to}`. More than 50 rows come back as a link to
+the stored result; the `llm_instructions` of each list carry a
+`result_objects` hint for `summary` (and `window`), so these objects stay
+inline next to the link.
+
+**The check (`azure.patching.assessment.start`).**
+
+1. `machine_id` must be the ID of one Azure VM
+   (`Microsoft.Compute/virtualMachines`) or one Arc machine
+   (`Microsoft.HybridCompute/machines`) in the target's subscription, in any
+   letter case. Another subscription, another type, a longer or shorter ID,
+   or a name with `..`, `?`, `#` or `%` is refused before any call.
+2. MEHO sends one `POST .../assessPatches` with no body. Like every write it
+   is sent again only after a 429 or a 401, never after a timeout or a 5xx.
+3. Azure answers 202. Both API descriptions put the result at the `Location`
+   URL (`final-state-via: location`), so MEHO polls that URL with
+   `wait_for_operation` (202 while the check runs, 200 with the result), at
+   most 5 minutes. `operation_reference` would prefer `Azure-AsyncOperation`,
+   so the family builds the reference itself; it falls back to
+   `operation_reference` when there is no `Location`.
+4. The answer is `{machine_id, machine_type, status, done, assessment, error,
+   retry_after_seconds, operation}`. When the wait runs out, or a poll fails,
+   `done` is `false` and `operation` is the reference:
+   `azure.operation.status` reads the outcome later, also after a restart,
+   without sending the check again.
+
+A check installs no updates. The first check on a machine makes Azure add
+its update extension to the machine. A second check is a new check: it
+changes nothing on the machine and only gives fresh counts. The login needs
+a role that allows `assessPatches` on the machine, for example Virtual
+Machine Contributor for a VM.
+
+**Secrets and untrusted text.** Every row is built from a fixed list of
+fields. An Arc machine's answer also holds the agent's settings (for
+example its proxy URL), a public key and a TPM certificate; none of them
+reaches a result. Error codes and messages from Azure are filtered with
+`clean_azure_text`. Names, tags and other text from Azure are data; the
+guidance for the AI says so.
+
+**Tests.** `backend/tests/test_connectors_azure_arc.py` runs every operation
+through the real dispatcher with mocked HTTP: the row shapes, paging with
+`nextLink` and `$skipToken`, the Resource Graph request body, 60 rows per
+list through the real result reduction and `result_query` (the `summary`
+and `window` objects stay inline), refused names, days and machine IDs,
+`not_found`, the wait for approval, the check of a VM and of an Arc machine,
+a wait that runs out followed by `azure.operation.status`, a failed poll, a
+failed check and no second `POST` after a 5xx.
+
+**Proven live:** nothing yet. The lab login does not exist yet, so the live
+proof (a check on the lab test VM after approval, the same counts in
+`azure.patching.assessment.list`, and one lab Linux VM connected to Azure
+Arc) is still open.
 
 ## automation
 

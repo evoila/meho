@@ -88,6 +88,37 @@ AKS_API_VERSION: Final[str] = "2026-08-01"
 
 # ---- arc (Task #5084) ----
 
+#: ``GET /subscriptions/{subscriptionId}/providers/Microsoft.HybridCompute/machines``:
+#: the Azure Arc machines of one subscription (Machines - List By Subscription).
+ARC_MACHINES_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.HybridCompute/machines"
+)
+
+#: ``GET .../resourceGroups/{resourceGroupName}/providers/Microsoft.HybridCompute/
+#: machines/{machineName}``: one Azure Arc machine (Machines - Get).
+ARC_MACHINE_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    + "/providers/Microsoft.HybridCompute/machines/{name}"
+)
+
+#: ``POST .../Microsoft.HybridCompute/machines/{name}/assessPatches``: check one
+#: Arc machine for missing updates (Machines - Assess Patches). Long-running.
+ARC_ASSESS_PATCHES_PATH: Final[str] = ARC_MACHINE_PATH + "/assessPatches"
+
+#: The API version of the Azure Arc calls (Microsoft.HybridCompute).
+ARC_API_VERSION: Final[str] = "2026-09-01"
+
+#: ``POST .../Microsoft.Compute/virtualMachines/{vmName}/assessPatches``: check
+#: one Azure VM for missing updates (Virtual Machines - Assess Patches).
+#: Long-running.
+VM_ASSESS_PATCHES_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    + "/providers/Microsoft.Compute/virtualMachines/{name}/assessPatches"
+)
+
+#: The API version of the VM patch assessment (Microsoft.Compute).
+VM_ASSESS_API_VERSION: Final[str] = "2026-04-01"
+
 # ---- automation (Task #5092) ----
 #
 # Azure Automation (Microsoft.Automation). MEHO reads only these lists: the

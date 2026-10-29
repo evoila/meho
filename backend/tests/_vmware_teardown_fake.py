@@ -9,7 +9,8 @@ A recording stand-in for the connector's VI-JSON seam
 path fails the way vCenter 8.0.x fails it), a per-datastore file tree
 answers the ``HostDatastoreBrowser`` searches, and the mutating methods
 (``Destroy_Task``, ``RemovePortGroup``, ``DeleteDatastoreFile_Task``,
-``MakeDirectory``, and a rule removal through ``ReconfigureComputeResource_Task``)
+``MakeDirectory``, and the DRS rule and group changes through
+``ReconfigureComputeResource_Task``)
 change the store so the handlers' read-backs see the result. A many-object
 answer is split into pages the way vCenter may (``tests._vim_pages.PagedVim``).
 ``GateRecorder`` replaces the #2254 sub-op gate.
@@ -147,7 +148,7 @@ class VimFake(PagedVim):
         if method == "MakeDirectory":
             return self._sync(lambda: self._mkdir(json["name"], json["createParentDirectories"]))
         if method == "ReconfigureComputeResource_Task":
-            return self._task(method, apply=lambda: self._remove_cluster_rules(moid, json))
+            return self._task(method, apply=lambda: self._reconfigure_cluster(moid, json))
         raise AssertionError(f"unexpected vim call {path}")
 
     # -- RetrievePropertiesEx ----------------------------------------------
@@ -237,22 +238,37 @@ class VimFake(PagedVim):
             props["config.network.portgroup"] = [g for g in groups if g["spec"]["name"] != name]
 
     # -- cluster DRS rules ----------------------------------------------------
-    def _remove_cluster_rules(self, cluster: str, body: dict[str, Any]) -> None:
-        """Apply the ``rulesSpec`` removals to the cluster's ``configurationEx``.
+    def _reconfigure_cluster(self, cluster: str, body: dict[str, Any]) -> None:
+        """Apply the ``rulesSpec`` / ``groupSpec`` changes to the cluster's ``configurationEx``.
 
-        Like vCenter, an empty ``rule`` array is left out of the object.
+        Rules are keyed by ``key``, groups by ``name`` (the boxed ``removeKey``).
+        Like vCenter, an empty ``rule`` or ``group`` array is left out of the object.
         """
         config_ex = self.objects[("ClusterComputeResource", cluster)]["configurationEx"]
-        removed = {
-            spec["removeKey"]["_value"]
-            for spec in body["spec"]["rulesSpec"]
-            if spec["operation"] == "remove"
-        }
-        kept = [rule for rule in config_ex.get("rule", []) if rule.get("key") not in removed]
-        if kept:
-            config_ex["rule"] = kept
+        spec = body["spec"]
+        self._apply_array(config_ex, "rule", spec.get("rulesSpec", []), "key")
+        self._apply_array(config_ex, "group", spec.get("groupSpec", []), "name")
+
+    @staticmethod
+    def _apply_array(
+        config_ex: dict[str, Any], member: str, specs: list[dict[str, Any]], key: str
+    ) -> None:
+        items = list(config_ex.get(member, []))
+        for update in specs:
+            op = update["operation"]
+            if op == "remove":
+                items = [i for i in items if i.get(key) != update["removeKey"]["_value"]]
+            elif op == "edit":
+                items = [update["info"] if i.get(key) == update["info"][key] else i for i in items]
+            else:
+                info = dict(update["info"])
+                if key == "key":
+                    info.setdefault("key", max([i.get("key", 0) for i in items], default=0) + 1)
+                items.append(info)
+        if items:
+            config_ex[member] = items
         else:
-            config_ex.pop("rule", None)
+            config_ex.pop(member, None)
 
     # -- datastore files -----------------------------------------------------
     @staticmethod

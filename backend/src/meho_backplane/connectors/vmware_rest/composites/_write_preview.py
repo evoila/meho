@@ -82,6 +82,10 @@ teardown deletes (#3339)  live-read: the mandatory ``blast_radius`` built from
 ``cluster.drs_rule.``     live-read: the same ``blast_radius`` from the
 ``delete``                handler's plan -- the rule's type, enabled,
                           mandatory, VMs or groups
+``cluster.drs_group.``    live-read: the handler's plan -- members before,
+``members.set``           added, removed, the rules that use the group
+``cluster.drs_group.``    live-read: the ``blast_radius`` from the handler's
+``delete``                plan -- the group, its members, blocking rules
 ``datastore.dir.create``  echo: datastore, path, create_parents
 ========================  ====================================================
 
@@ -189,8 +193,17 @@ from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
     datastore_dir_create_preview,
     datastore_file_delete_preview,
 )
+from meho_backplane.connectors.vmware_rest.composites._drs_group import (
+    cluster_drs_group_members_set_preview,
+)
+from meho_backplane.connectors.vmware_rest.composites._drs_group_delete import (
+    cluster_drs_group_delete_preview,
+)
 from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
     cluster_drs_rule_delete_preview,
+)
+from meho_backplane.connectors.vmware_rest.composites._drs_vm_host_rule_existing import (
+    existing_groups_preview,
 )
 from meho_backplane.connectors.vmware_rest.composites._library_delete import (
     content_library_delete_preview,
@@ -952,8 +965,11 @@ async def _cluster_drs_vm_host_rule_create_preview(ctx: PreviewContext) -> dict[
     — capped at :data:`_PREVIEW_RESOLVED_CAP` with the uncapped ``total_*``
     counts, plus the best-effort cluster display name. The reconfigure write
     never fires here. Declines without a resolved connector or on malformed
-    params.
+    params. With ``use_existing_groups=true`` it shows the members of the two
+    existing groups instead.
     """
+    if ctx.params.get("use_existing_groups"):
+        return await existing_groups_preview(ctx)
     cluster = ctx.params.get("cluster")
     rule_name = ctx.params.get("rule_name")
     vm_group_name = ctx.params.get("vm_group_name")
@@ -1837,6 +1853,11 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     # The DRS rule delete is destructive too: its blast radius is the
     # handler's own plan (the rule, its type, its VMs or groups).
     "vmware.composite.cluster.drs_rule.delete": cluster_drs_rule_delete_preview,
+    # The DRS group ops: the handler's own plan. The member change shows the
+    # members before, what is added and removed, and the rules that use the
+    # group; the destructive delete shows the group as its blast radius.
+    "vmware.composite.cluster.drs_group.members.set": cluster_drs_group_members_set_preview,
+    "vmware.composite.cluster.drs_group.delete": cluster_drs_group_delete_preview,
     # Licence assign: live-read of the asset's licence now and the licence it
     # would get, from the handler's own plan. Keys are masked.
     "vmware.composite.license.assign": license_assign_preview,
@@ -1848,7 +1869,7 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 52 write-composite park-time preview builders. Import-time.
+    """Wire the 54 write-composite park-time preview builders. Import-time.
 
     The read composites register no builder here. The one read that can
     wait for approval, the ``caution`` ``vm.guest.file.read``, registers

@@ -61,6 +61,8 @@ SUBSCRIBED composites** subsection), and the seven teardown composites /
 `content_library.delete`, `content_library.item.delete`, plus the caution
 `datastore.dir.create` (see **Governed teardown deletes**), the destructive
 DRS rule delete `cluster.drs_rule.delete` (see **Governed DRS rule delete**), the
+DRS group writes `cluster.drs_group.members.set` (`caution`) and
+`cluster.drs_group.delete` (`destructive`) (see **Governed DRS group changes**), the
 CD drive add `vm.cdrom.add` (`dangerous`) and the VMware Tools installer unmount
 `vm.tools.installer.unmount` (`caution`) (see **VM hardware read, CD drive add and
 Tools installer unmount**), the VM snapshot writes `vm.snapshot.create` (caution)
@@ -1204,19 +1206,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 75 `vmware.composite.*` rows with
+   queued registrar and upserts: the 77 `vmware.composite.*` rows with
    `source_kind="composite"` — 17 reads (16 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 58 writes, all `requires_approval=True`
-   (35 `safety_level="dangerous"`; 12 `safety_level="caution"` —
+   service principals), and 60 writes, all `requires_approval=True`
+   (35 `safety_level="dangerous"`; 13 `safety_level="caution"` —
    `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
    `vm.resource_allocation.set` / `#3880`, `datastore.dir.create` / `#3339`,
-   `vm.tools.installer.unmount`, `vm.snapshot.create`;
-   and 11 `safety_level="destructive"` — `vm.destroy` / `#3198`,
+   `vm.tools.installer.unmount`, `vm.snapshot.create`,
+   `cluster.drs_group.members.set`;
+   and 12 `safety_level="destructive"` — `vm.destroy` / `#3198`,
    `namespace.delete`, `storage_policy.delete`, `cluster.drs_rule.delete`,
+   `cluster.drs_group.delete`,
    `vm.snapshot.delete`, and the six `#3339` teardown deletes) —
    plus the `vmware.host.usage` row with
    `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
@@ -1822,7 +1826,9 @@ enum) are:
 | `cluster.patch` | `completed`, `stopped` (per-host vim maintenance `*_Task`s + the vLCM `software?action=apply&vmw-task=true` cis task, every task polled before the next step, #2970) |
 | `cluster.drs_rule.create` | `created`, `rule_exists`, `insufficient_vms`, `timeout` (idempotent on rule name — a duplicate `rule_exists` is refused before any write; `insufficient_vms` when fewer than two named VMs resolve to the cluster; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
 | `cluster.drs_rule.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present`, `timeout` (removes one rule of any type by name; `unchanged` when no rule has the name; `precondition_failed` when two or more rules share it, listed in `blockers`; `invalid_request` for an unknown cluster; `deleted` only after a new read of the rules misses the rule's key; a task *fault* raises `connector_error`) |
-| `cluster.drs_vm_host_rule.create` | `created`, `rule_exists`, `group_exists`, `insufficient_vms`, `insufficient_hosts`, `timeout` (#3505 VM-Host rule; rule + group names are idempotence keys refused before any write; `insufficient_*` when no VM / host name resolves in the cluster; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
+| `cluster.drs_vm_host_rule.create` | `created`, `rule_exists`, `group_exists`, `group_not_found`, `insufficient_vms`, `insufficient_hosts`, `timeout` (#3505 VM-Host rule; rule + group names are idempotence keys refused before any write; `insufficient_*` when no VM / host name resolves in the cluster; `group_not_found` when `use_existing_groups=true` and a group is missing; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
+| `cluster.drs_group.members.set` | `updated`, `unchanged`, `invalid_request`, `group_not_found`, `names_not_found`, `mismatch`, `timeout` (changes the members of one existing VM or host group; `names_not_found` when a name to add is not in the cluster, before any write; `updated` only after the group reads back with the planned members, else `mismatch`) |
+| `cluster.drs_group.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present`, `timeout` (removes one group by name; `precondition_failed` while a rule uses the group, the rules listed in `blockers`; `deleted` only after a new read no longer shows the group) |
 | `resource_pool.create` | `created`, `cluster_root_pool_unresolved`, `no_parent` (#3505; the REST `POST:/vcenter/resource-pool` create — `cluster_root_pool_unresolved` when the `cluster` convenience cannot read the cluster's root pool, `no_parent` when neither `parent` nor `cluster` is given, both before any write; read-back confirms the pool under the resolved parent) |
 | `resource_pool.delete` | `deleted`, `not_empty`, `delete_unverified` (#3505; `not_empty` refuses a pool with child pools / VMs unless `force=true` — the REST `DELETE` reparents children up to the parent; `delete_unverified` when the read-back still lists the pool) |
 | `folder.create` | `created`, `parent_not_found`, `ambiguous_parent` (synchronous `CreateFolder`; both resolution refusals happen before any write and carry an `error` issue, so the operation fails and the audit row reads `error`, #3588; `ambiguous_parent` lists `candidate_folders`, behind a result handle when oversized, #4223) |
@@ -2504,6 +2510,51 @@ hosts.
 Code: `composites/_drs_rule_delete.py`. The governed sub-op manifest
 (`RetrievePropertiesEx` + `ReconfigureComputeResource_Task`) is in
 `_governed_subops.py`.
+
+### Governed DRS group changes (`cluster.drs_group.members.set`, `cluster.drs_group.delete`)
+
+A DRS group is a named list of VMs (a VM group) or hosts (a host group) on one
+cluster. `cluster.drs_vm_host_rule.create` makes groups, and
+`cluster.drs_rule.delete` leaves them behind on purpose. These two ops change a
+group after that. Both use the same vim call as the DRS rule ops:
+`ReconfigureComputeResource_Task` with one `groupSpec` entry and
+`modify=true`. Both read the whole `configurationEx`, never a path into it.
+
+- **`cluster.drs_group.members.set`** (`caution` + `requires_approval=True`):
+  `add` and `remove` take VM names for a VM group, host names for a host
+  group. Names are looked up in the cluster (`GET /vcenter/vm` or
+  `/vcenter/host`, filtered by name and cluster). A name to add that is not in
+  the cluster refuses the whole call (`names_not_found`, nothing written). A
+  name to remove that is not in the group is skipped (`not_members`), so the
+  op is safe to run twice. vim `edit` replaces the whole member list, so the
+  handler sends the full new list (the same as `govc cluster.group.change`).
+  After the task it reads the group back: `updated` only when the members
+  match the plan, else `mismatch`.
+- **`cluster.drs_group.delete`** (`destructive` + `requires_approval=True`):
+  removes one group by name. `removeKey` is the group name, boxed as
+  `{"_typeName": "string", "_value": <name>}` (the `Any` discriminator maps
+  `string` to `PrimitiveString`; the body-shape reconcile lane checks it).
+  While a rule uses the group (a VM-Host rule's `vmGroupName` /
+  `affineHostGroupName` / `antiAffineHostGroupName`, or a dependency rule's
+  `vmGroup` / `dependsOnVmGroup`), it refuses before any write with
+  `precondition_failed`, and the rules are named in `blockers` and
+  `guidance`. No group with the name gives `unchanged`. The VMs and hosts stay.
+- **Approval card:** both use the handler's own plan. `members.set` shows the
+  members before (names), what is added and removed (names), and the rules
+  that use the group. The delete shows the group, its members and the
+  blocking rules as its `blast_radius`.
+- **`drs_vm_host_rule.create` with `use_existing_groups=true`** makes no group:
+  it adds only the rule, on a VM group and a host group that already exist
+  (leave out `vms` and `hosts`; the schema `oneOf` enforces this). A missing
+  group, or a group of the other kind, gives `group_not_found` before any
+  write. `resolved_vms` / `resolved_hosts` and the approval card list the
+  groups' members by name. Making new groups stays the default.
+
+Code: `composites/_drs_group.py` (shared group reads + `members.set`),
+`composites/_drs_group_delete.py`, `composites/_drs_vm_host_rule_existing.py`
+(called from the create handler in `_write.py`). The governed sub-op
+manifests are in `_governed_subops.py`. All three are on `vmware-rest-8.0` and
+`vmware-rest-9.0`.
 
 ### VM snapshot operations (`vmware.snapshot.list`, `vm.snapshot.create` / `.delete` / `.revert`)
 
@@ -4643,8 +4694,9 @@ a key; flight-recorder spans, with a control case without the tag),
   the vim API declares the property as the base type
   `ComputeResourceConfigInfo`, and `rule` / `group` / `drsConfig` exist only
   on the cluster type `ClusterConfigInfoEx`. So `cluster.drs_recommendations`,
-  `cluster.drs_rule.create`, `cluster.drs_vm_host_rule.create` and
-  `cluster.drs_rule.delete` read the whole object and pick the member in code
+  `cluster.drs_rule.create`, `cluster.drs_vm_host_rule.create`,
+  `cluster.drs_rule.delete` and the two `cluster.drs_group.*` ops read the
+  whole object and pick the member in code
   (`_write._cluster_config_items`; an absent `rule` / `group` array is an
   empty list, because vim leaves empty arrays out). The unit-test fakes
   (`tests/_vmware_cluster_config_fake.py`) answer a dotted

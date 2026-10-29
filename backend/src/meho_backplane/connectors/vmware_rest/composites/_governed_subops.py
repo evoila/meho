@@ -33,6 +33,8 @@ from typing import Final
 from meho_backplane.connectors.vmware_rest.composites import (
     _alarm,
     _datastore_files,
+    _drs_group,
+    _drs_group_delete,
     _drs_rule_delete,
     _host,
     _library,
@@ -106,6 +108,13 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     # destructive, so a human always decides.
     "vmware.composite.cluster.drs_rule.delete": (
         _drs_rule_delete._VIM_SUB_OPS_CLUSTER_DRS_RULE_DELETE
+    ),
+    # The DRS group ops: the same reconfigure, with a groupSpec edit or remove.
+    "vmware.composite.cluster.drs_group.members.set": (
+        _drs_group._VIM_SUB_OPS_CLUSTER_DRS_GROUP_MEMBERS_SET
+    ),
+    "vmware.composite.cluster.drs_group.delete": (
+        _drs_group_delete._VIM_SUB_OPS_CLUSTER_DRS_GROUP_DELETE
     ),
     "vmware.composite.resource_pool.create": (
         _write._SUB_OPS_RESOURCE_POOL_CREATE + _write._VIM_SUB_OPS_RESOURCE_POOL_CREATE

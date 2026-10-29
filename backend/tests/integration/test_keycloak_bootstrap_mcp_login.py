@@ -513,7 +513,8 @@ async def test_user_in_no_group_is_refused(
     with pytest.raises(HTTPException) as refused:
         await _verify(fresh_keycloak, access_token, monkeypatch)
     assert refused.value.status_code == 401
-    assert refused.value.detail == "missing_tenant_claim"
+    assert refused.value.detail.startswith("missing_tenant_claim: ")
+    assert "role group" in refused.value.detail
 
 
 def _old_fixed_mapper(name: str, claim: str, value: str) -> dict:

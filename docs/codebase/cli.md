@@ -845,6 +845,13 @@ readiness checks and the approval key state all come from one
      at login time. If refresh succeeds, retries the request once.
    * If refresh fails (no refresh_token, IdP rejected), surfaces
      `auth_expired`.
+   * A 401 whose `detail` is `missing_tenant_claim` (bare, or with
+     the explanation newer backplanes add) is checked first, by
+     `noTenantMessage` (#3872). The login worked but the token has no
+     tenant, so "run `meho login`" would be wrong. The CLI writes its
+     own text: the person is in no MEHO role group, ask the admin, and
+     the link to the guide `guides/tenant-bootstrap/`. Exit code stays
+     2 (`auth_expired`).
 4. **Check the version gap.** `printVersionSkew` reads the
    backplane's `GET /version` (3-second cap) and compares its
    `chart_version` with the CLI's build version

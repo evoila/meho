@@ -11,10 +11,13 @@ stands in its place, or the file is refused. All values are made up.
 from __future__ import annotations
 
 import json
+from collections import Counter
+from urllib.parse import quote
 
 import pytest
 import yaml
 
+from meho_backplane.connectors._shared import api_file_last_check, api_file_secrets
 from meho_backplane.connectors._shared.api_file_secrets import (
     REDACTED,
     ApiFileFormatError,
@@ -29,7 +32,9 @@ from meho_backplane.connectors._shared.api_file_values import (
     NOT_UNICODE,
     REPEATED_KEY,
     SECRET_CHILD_ELEMENT,
+    SECRET_NAME_AFTER_FLATTENING,
     SECRET_NAME_IN_TEXT,
+    TOO_DEEP,
     Scrubber,
 )
 
@@ -1427,3 +1432,217 @@ def test_text_rule_runs_on_xml_and_html_text_and_attributes() -> None:
 def test_without_a_text_rule_text_values_come_back_as_they_are() -> None:
     text, count = _check("note: Bearer TOKEN\n", _YAML)
     assert (text, count) == ("note: Bearer TOKEN\n", 0)
+
+
+# ---------------------------------------------------------------------------
+# The last check: the copy read the way a person reads it
+# ---------------------------------------------------------------------------
+
+
+#: Secrets that only show once the copy is read as a person reads it:
+#: ``(content type, document)``. Each one comes back with the earlier
+#: checks alone.
+_FLATTENED_FORMS: list[object] = [
+    pytest.param(
+        _JSON,
+        json.dumps({"description": f'"session\\u0049d": {_SECRET}'}),
+        id="yaml-with-a-u-escape-inside-a-json-description",
+    ),
+    pytest.param(
+        _JSON,
+        json.dumps({"description": f'"session\\x49d": {_SECRET}'}),
+        id="yaml-with-an-x-escape-inside-a-json-description",
+    ),
+    pytest.param(
+        _YAML,
+        f"info:\n  description: '\"session\\u0049d\": {_SECRET}'\n",
+        id="yaml-with-a-u-escape-inside-a-yaml-description",
+    ),
+    pytest.param(_HTML, f"<div><span>sessionId</span>: {_SECRET}</div>", id="inline-span"),
+    pytest.param(
+        _HTML,
+        f"<p>Send <b><i><u>sess</u>ion</i>Id</b>: {_SECRET} on each call.</p>",
+        id="name-split-over-three-nested-inline-tags",
+    ),
+    pytest.param(
+        _HTML,
+        f"<table><tr><td>password</td><td>{_SECRET}</td></tr></table>",
+        id="name-and-value-in-two-table-cells",
+    ),
+    pytest.param(
+        _HTML,
+        f"<p><span>&#115;ession</span>&#73;d: {_SECRET}</p>",
+        id="name-made-of-html-entities-split-by-a-tag",
+    ),
+    pytest.param(
+        _HTML,
+        f'<a title="session%49d={_SECRET}">link</a>',
+        id="percent-encoded-name-in-an-attribute",
+    ),
+    pytest.param(
+        _JSON,
+        json.dumps(
+            {"description": f"&#115;&#101;&#115;&#115;&#105;&#111;&#110;&#73;&#100;: {_SECRET}"}
+        ),
+        id="name-made-of-html-entities-in-a-json-description",
+    ),
+    pytest.param(
+        _JSON,
+        json.dumps(
+            {"description": f"Open https://logs.example.invalid/ui?session%49d={_SECRET} now."}
+        ),
+        id="percent-encoded-name-in-a-url-in-a-description",
+    ),
+    pytest.param(
+        _JSON,
+        json.dumps({"description": f"Open /ui?session%2549d={_SECRET} now."}),
+        id="name-percent-encoded-twice",
+    ),
+    pytest.param(
+        _JSON,
+        json.dumps({"description": f"Run: login --password {_SECRET}"}),
+        id="name-and-value-with-white-space-only",
+    ),
+    pytest.param(
+        _JSON,
+        json.dumps({"session&#73;d": _SECRET}),
+        id="key-made-of-html-entities",
+    ),
+    pytest.param(
+        _JSON,
+        json.dumps({"description": f"<b>password</b> &lt;i&gt;=&lt;/i&gt; {_SECRET}"}),
+        id="tags-made-of-html-entities",
+    ),
+    pytest.param(
+        _XML,
+        f"<doc><p><b>session</b>Id: {_SECRET}</p></doc>",
+        id="xml-name-split-over-two-elements",
+    ),
+]
+
+
+def _without_the_last_check(
+    monkeypatch: pytest.MonkeyPatch, text: str, content_type: str
+) -> api_file_secrets.CheckedApiFile:
+    with monkeypatch.context() as patch:
+        for fmt in api_file_secrets._LAST_CHECKS:
+            patch.setitem(api_file_secrets._LAST_CHECKS, fmt, lambda copy, _s, _w: copy)
+        return check_api_file(text, content_type=content_type, path="/x")
+
+
+@pytest.mark.parametrize(("content_type", "document"), _FLATTENED_FORMS)
+def test_last_check_holds_back_a_secret_name_with_a_value_once_flattened(
+    monkeypatch: pytest.MonkeyPatch, content_type: str, document: str
+) -> None:
+    assert _SECRET in _without_the_last_check(monkeypatch, document, content_type).text
+    checked = check_api_file(document, content_type=content_type, path="/x")
+    assert _SECRET not in checked.text
+    assert REDACTED in checked.text
+    assert SECRET_NAME_AFTER_FLATTENING in checked.withheld
+
+
+def test_last_check_holds_back_the_texts_that_hold_the_secret_whole() -> None:
+    checked = check_api_file(
+        f"<h1>Login</h1><div><span>sessionId</span>: {_SECRET}</div><p>Other text.</p>",
+        content_type=_HTML,
+        path="/x",
+    )
+    assert checked.text == (
+        f"<h1>Login</h1><div><span>{REDACTED}</span>{REDACTED}</div><p>Other text.</p>"
+    )
+    assert checked.withheld == (SECRET_NAME_AFTER_FLATTENING,)
+    assert checked.secrets_replaced == 2
+
+
+def test_last_check_holds_back_a_json_text_value_whole() -> None:
+    document = json.dumps({"description": f"Log in. Then send session%49d={_SECRET}.", "n": 1})
+    checked = check_api_file(document, content_type=_JSON, path="/x")
+    assert json.loads(checked.text) == {"description": REDACTED, "n": 1}
+    assert checked.withheld == (SECRET_NAME_AFTER_FLATTENING,)
+
+
+@pytest.mark.parametrize(
+    ("content_type", "document"),
+    [
+        (_JSON, '{"description":"Each session ends after 30 minutes without a call."}'),
+        (_JSON, '{"description":"Set the password. The session then starts."}'),
+        (_JSON, '{"description":"Send it as <code>password</code>, or as token."}'),
+        (_HTML, "<p>Each <b>session</b> ends after 30 minutes without a call.</p>"),
+        (_HTML, "<p>Set the <b>password</b>.</p><p>Done.</p>"),
+        (_YAML, "description: Each session ends after 30 minutes.\n"),
+        (_XML, "<doc><p>Each <b>session</b> ends after 30 minutes.</p></doc>"),
+    ],
+)
+def test_text_that_names_no_secret_with_a_value_comes_back_as_written(
+    content_type: str, document: str
+) -> None:
+    checked = check_api_file(document, content_type=content_type, path="/x")
+    assert (checked.text, checked.secrets_replaced, checked.withheld) == (document, 0, ())
+
+
+@pytest.mark.parametrize(
+    ("content_type", "document"),
+    [
+        (_JSON, json.dumps({"password": _SECRET})),
+        (_HTML, f'<pre>{{"password": "{_SECRET}"}}</pre>'),
+        (_HTML, f"<pre>user: admin\nsessionId: {_SECRET}\n</pre>"),
+        (_YAML, f"user: admin\nsessionId: {_SECRET}\n"),
+    ],
+)
+def test_a_value_an_earlier_check_replaced_is_not_held_back_again(
+    content_type: str, document: str
+) -> None:
+    checked = check_api_file(document, content_type=content_type, path="/x")
+    assert _SECRET not in checked.text
+    assert checked.secrets_replaced == 1
+    assert checked.withheld == ()
+
+
+@pytest.mark.parametrize(
+    ("content_type", "document"),
+    [
+        *_FLATTENED_FORMS,
+        (_HTML, f"<pre>sessionId: {_SECRET}\n---\nok: true</pre>"),
+        (_HTML, f'<pre>{{"password": "{_SECRET}" "x"}}</pre><p>sessionId: {_SECRET}</p>'),
+        (_JSON, json.dumps({"example": f'{{"x":{{"password":"{_SECRET}"}},"x":1}}'})),
+        (_YAML, f"note: 'sessionId: {_SECRET}'\n"),
+    ],
+)
+def test_last_check_only_holds_back_more(
+    monkeypatch: pytest.MonkeyPatch, content_type: str, document: str
+) -> None:
+    """Whatever the earlier checks withheld stays withheld; the last check adds to it."""
+    earlier = _without_the_last_check(monkeypatch, document, content_type)
+    checked = check_api_file(document, content_type=content_type, path="/x")
+    assert not Counter(earlier.withheld) - Counter(checked.withheld)
+    assert checked.secrets_replaced >= earlier.secrets_replaced
+    assert checked.text.count(REDACTED) >= earlier.text.count(REDACTED)
+    assert _SECRET not in checked.text
+
+
+def test_text_encoded_too_many_times_is_held_back() -> None:
+    encoded = f"password={_SECRET}"
+    for _ in range(9):
+        encoded = quote(encoded)
+    checked = check_api_file(json.dumps({"d": encoded}), content_type=_JSON, path="/x")
+    assert json.loads(checked.text) == {"d": REDACTED}
+    assert checked.withheld == (TOO_DEEP,)
+
+
+def test_copy_too_costly_for_the_last_check_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(api_file_last_check, "_WORK_FACTOR", 1)
+    monkeypatch.setattr(api_file_last_check, "_WORK_FLOOR", 0)
+    with pytest.raises(ApiFileFormatError, match="too costly to check"):
+        check_api_file(json.dumps({"a": "word " * 100}), content_type=_JSON, path="/x")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        f"/rest-api/login;jsessionid={_SECRET}",
+        f"/rest-api/x?group=a&session%2549d={_SECRET}",
+        f"/rest-api/session%49d={_SECRET}",
+    ],
+)
+def test_redirect_path_that_still_shows_a_secret_becomes_the_placeholder(path: str) -> None:
+    assert scrub_query_string(path) == (REDACTED, 1)

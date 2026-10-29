@@ -73,12 +73,24 @@ What the helper does, in order:
    written back, so the writer quotes the changed value as the format
    needs and no value changes its type.
 5. Writes the checked copy in the same format and counts the replaced
-   values. A copy that cannot be written as UTF-8 (a key with a lone
-   surrogate) is refused.
+   values.
+6. Runs the last check on the copy (:mod:`.api_file_last_check`). It
+   reads the copy the way a person reads it: tags removed and text joined
+   in document order, HTML entities, backslash escapes and URL percent
+   escapes decoded, and every JSON or YAML document inside a text parsed.
+   If a secret name still has a value, that part is held back whole and
+   counted, with its reason. This check only holds back more. It then
+   runs once more on its own result; a copy that still shows a secret, or
+   that is too costly to read this way, is refused.
+7. Refuses a copy that cannot be written as UTF-8 (a key with a lone
+   surrogate).
 
 :func:`scrub_query_string` does the same for the query of a redirect
 path: the names are decoded first (``license%4Bey`` reads as
-``licenseKey``), and a secret-named value is replaced.
+``licenseKey``), and a secret-named value is replaced. The last check
+reads the whole path after that (``;jsessionid=...`` in a path segment, a
+name encoded twice); a path that still shows a secret becomes the
+placeholder.
 """
 
 from __future__ import annotations
@@ -89,7 +101,18 @@ from dataclasses import dataclass
 from typing import Final
 from urllib.parse import parse_qsl, urlencode
 
-from meho_backplane.connectors._shared.api_file_markup import check_html, check_xml
+from meho_backplane.connectors._shared.api_file_last_check import (
+    LastCheckTooCostlyError,
+    Work,
+    last_check_json,
+    secret_in_text,
+)
+from meho_backplane.connectors._shared.api_file_markup import (
+    check_html,
+    check_xml,
+    last_check_html,
+    last_check_xml,
+)
 from meho_backplane.connectors._shared.api_file_values import (
     REDACTED,
     ApiFileFormatError,
@@ -99,7 +122,7 @@ from meho_backplane.connectors._shared.api_file_values import (
     is_secret_name,
     is_unicode,
 )
-from meho_backplane.connectors._shared.api_file_yaml import check_yaml
+from meho_backplane.connectors._shared.api_file_yaml import check_yaml, last_check_yaml
 
 __all__ = [
     "REDACTED",
@@ -197,6 +220,7 @@ def check_api_file(
         )
     try:
         copy, scrubber = _CHECKERS[fmt](text, path, text_rule)
+        copy = _last_check(copy, fmt, path, scrubber)
     except RecursionError:
         raise ApiFileFormatError(f"{path} is nested too deeply to check; not returned") from None
     if not is_unicode(copy):
@@ -204,27 +228,57 @@ def check_api_file(
     return CheckedApiFile(copy, scrubber.count, tuple(scrubber.withheld))
 
 
+def _last_check(copy: str, fmt: str, path: str, scrubber: Scrubber) -> str:
+    """*copy* after the last check (:mod:`.api_file_last_check`), which counts on *scrubber*.
+
+    When the check held back a part, it runs once more on its own result
+    and must find nothing; otherwise the file is refused. A copy that is
+    too costly to read this way is refused too.
+    """
+    work = Work(len(copy))
+    before = scrubber.count
+    try:
+        checked = _LAST_CHECKS[fmt](copy, scrubber, work)
+        if scrubber.count != before:
+            again = scrubber.fresh()
+            _LAST_CHECKS[fmt](checked, again, work)
+            if again.count:
+                raise ApiFileFormatError(
+                    f"{path} still shows a secret after the last check; not returned"
+                )
+    except LastCheckTooCostlyError:
+        raise ApiFileFormatError(f"{path} is too costly to check; not returned") from None
+    return checked
+
+
 def scrub_query_string(path: str) -> tuple[str, int]:
     """Replace secret-named values in the query of *path*; return it and the count.
 
     The names are decoded before the check, so an encoded name cannot hide
-    a secret-named key. A path whose query holds no secret comes back as
-    written.
+    a secret-named key. Then the last check reads the whole path as a
+    person reads it (:func:`secret_in_text`): a path that still shows a
+    secret name with a value becomes the placeholder. A path that holds no
+    secret comes back as written.
     """
     base, separator, query = path.partition("?")
-    if not separator:
-        return path, 0
     count = 0
-    pairs: list[tuple[str, str]] = []
-    for key, value in parse_qsl(query, keep_blank_values=True):
-        if is_secret_name(key):
-            pairs.append((key, REDACTED))
-            count += 1
-        else:
-            pairs.append((key, value))
-    if not count:
-        return path, 0
-    return f"{base}?{urlencode(pairs, safe='[]:')}", count
+    if separator:
+        pairs: list[tuple[str, str]] = []
+        for key, value in parse_qsl(query, keep_blank_values=True):
+            if is_secret_name(key):
+                pairs.append((key, REDACTED))
+                count += 1
+            else:
+                pairs.append((key, value))
+        if count:
+            path = f"{base}?{urlencode(pairs, safe='[]:')}"
+    try:
+        shows_a_secret = secret_in_text(path, Work(len(path))) is not None
+    except LastCheckTooCostlyError:
+        shows_a_secret = True
+    if shows_a_secret:
+        return REDACTED, count + 1
+    return path, count
 
 
 # ---------------------------------------------------------------------------
@@ -250,4 +304,11 @@ _CHECKERS: Final[dict[str, Callable[[str, str, TextRule | None], tuple[str, Scru
     "yaml": check_yaml,
     "xml": check_xml,
     "html": check_html,
+}
+
+_LAST_CHECKS: Final[dict[str, Callable[[str, Scrubber, Work], str]]] = {
+    "json": last_check_json,
+    "yaml": last_check_yaml,
+    "xml": last_check_xml,
+    "html": last_check_html,
 }

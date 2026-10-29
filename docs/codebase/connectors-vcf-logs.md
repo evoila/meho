@@ -384,8 +384,14 @@ only as one JSON or YAML document read whole (maybe after a request
 line), or as plain text. An example with two YAML documents, a key named
 twice at any depth, or text that does not parse is withheld. So is a
 text value that gives a secret name a value in plain text
-(`sessionId: ...`). See `connectors-shared-api-file-secrets.md` for the
-full rule.
+(`sessionId: ...`). The last check runs on everything the read returns
+(the page, the `401` and `440` bodies, the flight recorder copy): it
+reads the answer the way a person would read it, and if a secret name
+still has a value, the part is held back. So
+`<div><span>sessionId</span>: ...</div>` and a YAML key written with an
+escape inside a JSON description are held back too, with the reason
+"names a secret next to a value once tags and escapes are removed". See
+`connectors-shared-api-file-secrets.md` for the full rule.
 
 A page or file can also hold free text that looks like a secret. The
 vendor's Logs 9.0 API file has `Authorization: Bearer ...` examples in
@@ -494,9 +500,10 @@ External: `httpx>=0.27` (Bearer header + `AsyncClient`), `structlog`
   (prose, a shell command in a `<pre>` block) has no structure; MEHO's
   general redaction rules check it, and they replace only what they
   match. Free text that gives a secret name a value (`sessionId: ...`,
-  `password=...`) is withheld. An example block that the check cannot
-  read whole is withheld; it comes back without its colour markup when
-  it can. A licence key under a name that is not a secret name (the
+  `password=...`) is withheld, and so is prose where a word follows a
+  secret name ("the credentials by ..."). An example block that the
+  check cannot read whole is withheld; it comes back without its colour
+  markup when it can. A licence key under a name that is not a secret name (the
   Logs licence API calls it `key`) is not replaced.
 - No DELETE-revoke on `aclose()` — a per-target network call during
   lifespan shutdown is more risk than benefit (same posture NSX

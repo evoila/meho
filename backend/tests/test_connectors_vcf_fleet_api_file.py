@@ -886,15 +886,16 @@ async def test_secret_that_crosses_a_part_boundary_stops_with_an_error(
     """``Bearer`` ends the first part and the token starts the second.
 
     A secret name next to a value (``password=...``) never gets this far:
-    the file check withholds that text.
+    the file check withholds that text. The made-up token is no secret
+    name, so the last check of the file leaves the text as it is.
     """
     await _register_and_resolve(_stub_embedding)
     set_default_reducer(JsonFluxReducer(store=ResultHandleStore(_FakeValkey())))  # type: ignore[arg-type]
     label = b" Bearer "
-    page = b"x" * (PART_BYTES - len(label)) + label + b"example-secret-value-0123456789 tail\n"
+    page = b"x" * (PART_BYTES - len(label)) + label + b"example-bearer-value-0123456789 tail\n"
     parts = [part.decode() for part in split_parts(page)]
     assert parts[0].endswith("Bearer ")
-    assert parts[1].startswith("example-secret-value")
+    assert parts[1].startswith("example-bearer-value")
     for index, text in enumerate(parts):
         alone = apply_connector_boundary_redaction(
             {"index": index, "text": text}, connector_id=FLEET_CONNECTOR_ID, tenant=None, op=None
@@ -912,7 +913,7 @@ async def test_secret_that_crosses_a_part_boundary_stops_with_an_error(
     message = result.extras["exception_message"]
     assert "the exact file cannot be returned" in message
     assert "1 place(s)" in message
-    assert "example-secret-value" not in json.dumps(result.result) + json.dumps(
+    assert "example-bearer-value" not in json.dumps(result.result) + json.dumps(
         result.extras, default=str
     )
 

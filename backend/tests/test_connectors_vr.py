@@ -540,7 +540,7 @@ async def test_401_on_the_file_makes_a_new_login_and_the_read_then_succeeds(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("name", "spec_file", "expected_replaced"),
-    [("vr", "replication-vr-v2.yaml", 8), ("configure", "appliance-configure-v2.yaml", 11)],
+    [("vr", "replication-vr-v2.yaml", 9), ("configure", "appliance-configure-v2.yaml", 17)],
 )
 async def test_pinned_vendor_file_comes_back_through_the_read(
     _stub_embedding: AsyncMock,
@@ -555,7 +555,10 @@ async def test_pinned_vendor_file_comes_back_through_the_read(
     has ``Authorization: Basic ...`` examples in its description text; the
     read returns them replaced instead of stopping, and the parts join back
     to the copy that ``size`` and ``sha256`` describe. Each count includes
-    one ``session_id`` schema field, which is a secret name.
+    one ``session_id`` schema field, which is a secret name. It also
+    includes the descriptions the last check holds back because a secret
+    name is followed by a word ("the credentials by ..."): 1 in the vSphere
+    Replication file, 6 in the appliance file.
     """
     spec_path = require_shelf_spec("vcf-protection-and-recovery-9.1", spec_file)
     content = spec_path.read_bytes()

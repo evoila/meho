@@ -30,6 +30,12 @@ parse, holds more than one document, names a key twice at any depth,
 holds text that is not valid Unicode, has a child element that is
 secret or a script, or is plain text that names a secret next to a
 value.
+
+The last check runs on the written copy (:func:`last_check_html`,
+:func:`last_check_xml`; :mod:`.api_file_last_check`). It parses the copy
+again and reads it the way a person reads it: the page text joined over
+its tags, each attribute value, each ``<script>`` and ``<style>`` block.
+A part that still shows a secret name with a value is held back.
 """
 
 from __future__ import annotations
@@ -38,7 +44,7 @@ import html
 import io
 import json
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any, Final
@@ -46,10 +52,18 @@ from typing import Any, Final
 import defusedxml.ElementTree as DefusedET
 from defusedxml import DefusedXmlException
 
+from meho_backplane.connectors._shared.api_file_last_check import (
+    Work,
+    hold_back_pieces,
+    is_placeholder,
+    names_a_secret,
+    secret_in_text,
+)
 from meho_backplane.connectors._shared.api_file_values import (
     REDACTED,
     REPEATED_KEY,
     SECRET_CHILD_ELEMENT,
+    SECRET_NAME_AFTER_FLATTENING,
     SECRET_NAME_IN_TEXT,
     TOO_DEEP,
     ApiFileFormatError,
@@ -64,7 +78,7 @@ from meho_backplane.connectors._shared.api_file_values import (
 )
 from meho_backplane.connectors._shared.api_file_yaml import check_yaml_example
 
-__all__ = ["check_html", "check_xml"]
+__all__ = ["check_html", "check_xml", "last_check_html", "last_check_xml"]
 
 #: Attributes that name an element (``<input name="password">``). One
 #: whose value is a secret name is a label and stays; the element's
@@ -118,6 +132,15 @@ _Declaration = tuple[str, str]
 
 
 def check_xml(text: str, path: str, text_rule: TextRule | None = None) -> tuple[str, Scrubber]:
+    root, declared_on = _parse_xml(text, path)
+    writer = _XmlWriter(declared_on, Scrubber(text_rule=text_rule, strict=True))
+    out: list[str] = []
+    writer.element(root, out, ())
+    return "".join(out), writer.scrubber
+
+
+def _parse_xml(text: str, path: str) -> tuple[Any, dict[int, list[_Declaration]]]:
+    """The root element of *text* and the namespace declarations made on each element."""
     declared_on: dict[int, list[_Declaration]] = {}
     pending: list[_Declaration] = []
     try:
@@ -137,10 +160,63 @@ def check_xml(text: str, path: str, text_rule: TextRule | None = None) -> tuple[
         raise ApiFileFormatError(
             f"{path} is XML that MEHO refuses to parse ({type(exc).__name__}); not returned"
         ) from None
-    writer = _XmlWriter(declared_on, text_rule)
+    return root, declared_on
+
+
+def last_check_xml(copy: str, scrubber: Scrubber, work: Work) -> str:
+    """*copy*, a checked XML file, with every part that still shows a secret held back.
+
+    The parts are each attribute value and the text of the file, joined
+    in document order over its elements (:func:`hold_back_pieces`). A
+    copy with nothing to hold back comes back as it is; otherwise it is
+    written again from the changed tree, as the check wrote it.
+    """
+    root, declared_on = _parse_xml(copy, "the checked copy")
+    before = scrubber.count
+    places: list[tuple[Any, str]] = []
+    for element in root.iter():
+        for key, value in list(element.attrib.items()):
+            reason = secret_in_text(value, work)
+            if (
+                reason is None
+                and names_a_secret(_split_tag(key)[1], work)
+                and not is_placeholder(value)
+            ):
+                reason = SECRET_NAME_AFTER_FLATTENING
+            if reason is not None:
+                element.set(key, scrubber.withhold(reason))
+    _xml_text_places(root, places)
+    pieces = [getattr(element, side) for element, side in places]
+    hold_back_pieces(pieces, scrubber, work)
+    if scrubber.count == before:
+        return copy
+    for (element, side), piece in zip(places, pieces, strict=True):
+        setattr(element, side, piece)
     out: list[str] = []
-    writer.element(root, out, ())
-    return "".join(out), writer.scrubber
+    _XmlWriter(declared_on, _AsWritten()).element(root, out, ())
+    return "".join(out)
+
+
+def _xml_text_places(root: Any, places: list[tuple[Any, str]]) -> None:
+    """Every text of the tree under *root* as ``(element, "text" or "tail")``, in document order."""
+    stack: list[tuple[Any, bool]] = [(root, False)]
+    while stack:
+        element, done = stack.pop()
+        if done:
+            if element is not root and element.tail:
+                places.append((element, "tail"))
+            continue
+        if element.text:
+            places.append((element, "text"))
+        stack.append((element, True))
+        stack.extend((child, False) for child in reversed(element))
+
+
+class _AsWritten(Scrubber):
+    """A scrubber that leaves every text as it is: the copy is written again as it was checked."""
+
+    def text(self, value: str) -> str:
+        return value
 
 
 def _split_tag(tag: str) -> tuple[str, str]:
@@ -162,13 +238,12 @@ class _XmlWriter:
     declarations in scope, innermost first.
 
     *declared_on* maps the id of each parsed element to the declarations
-    the file made on it, in order.
+    the file made on it, in order. *scrubber* checks each text and
+    attribute value.
     """
 
-    def __init__(
-        self, declared_on: dict[int, list[_Declaration]], text_rule: TextRule | None = None
-    ) -> None:
-        self.scrubber = Scrubber(text_rule=text_rule, strict=True)
+    def __init__(self, declared_on: dict[int, list[_Declaration]], scrubber: Scrubber) -> None:
+        self.scrubber = scrubber
         self._declared_on = declared_on
 
     def element(self, el: Any, out: list[str], outer: tuple[list[_Declaration], ...]) -> None:
@@ -382,6 +457,95 @@ def check_html(text: str, _path: str, text_rule: TextRule | None = None) -> tupl
     out: list[str] = []
     _html_children(parser.root, out, scrubber)
     return "".join(out), scrubber
+
+
+#: Elements whose text the parser keeps as it is, without decoding
+#: entities (``<script>``, ``<style>``, ...). Their text is written back
+#: as it is too.
+_HTML_RAW_TEXT: Final[frozenset[str]] = frozenset({*HTMLParser.CDATA_CONTENT_ELEMENTS, "plaintext"})
+
+#: Blocks that are no page text: each is checked alone, as one part.
+_HTML_OWN_PARTS: Final[frozenset[str]] = frozenset({"script", "style"})
+
+
+def last_check_html(copy: str, scrubber: Scrubber, work: Work) -> str:
+    """*copy*, a checked HTML page, with every part that still shows a secret held back.
+
+    The parts are each attribute value, each ``<script>`` and ``<style>``
+    block, each declaration, and the page text, joined in document order
+    over its tags (:func:`hold_back_pieces`). A copy with nothing to hold
+    back comes back as it is; otherwise it is written again from the
+    changed tree, as the check wrote it.
+    """
+    parser = _HtmlTree()
+    parser.feed(copy)
+    parser.close()
+    before = scrubber.count
+    places: list[tuple[_HtmlNode, int]] = []
+    pieces: list[str] = []
+    stack: list[tuple[_HtmlNode, Iterator[tuple[int, _HtmlNode | str]]]] = [
+        (parser.root, enumerate(parser.root.children))
+    ]
+    while stack:
+        node, children = stack[-1]
+        for index, child in children:
+            if isinstance(child, str):
+                places.append((node, index))
+                pieces.append(child)
+            elif child.tag in _HTML_OWN_PARTS or child.tag == "!":
+                _hold_back_html_block(child, scrubber, work)
+            else:
+                _hold_back_html_attributes(child, scrubber, work)
+                stack.append((child, enumerate(child.children)))
+                break
+        else:
+            stack.pop()
+    hold_back_pieces(pieces, scrubber, work)
+    if scrubber.count == before:
+        return copy
+    for (node, index), piece in zip(places, pieces, strict=True):
+        node.children[index] = piece
+    out: list[str] = []
+    _html_as_written(parser.root, out)
+    return "".join(out)
+
+
+def _hold_back_html_attributes(node: _HtmlNode, scrubber: Scrubber, work: Work) -> None:
+    """Hold back each attribute value of *node* that shows a secret, or sits under a secret name."""
+    for index, (key, value) in enumerate(node.attrs):
+        if value is None:
+            continue
+        reason = secret_in_text(value, work)
+        if reason is None and names_a_secret(key, work) and not is_placeholder(value):
+            reason = SECRET_NAME_AFTER_FLATTENING
+        if reason is not None:
+            node.attrs[index] = (key, scrubber.withhold(reason))
+
+
+def _hold_back_html_block(node: _HtmlNode, scrubber: Scrubber, work: Work) -> None:
+    """A ``<script>`` or ``<style>`` block or a declaration: one part, checked alone."""
+    _hold_back_html_attributes(node, scrubber, work)
+    content = "".join(c for c in node.children if isinstance(c, str))
+    reason = secret_in_text(content, work) if content else None
+    if reason is not None:
+        node.children = [scrubber.withhold(reason)]
+
+
+def _html_as_written(node: _HtmlNode, out: list[str]) -> None:
+    """Write the children of *node* back as the check wrote them; no value is checked again."""
+    for child in node.children:
+        if isinstance(child, str):
+            out.append(child if node.tag in _HTML_RAW_TEXT else html.escape(child, quote=False))
+        elif child.tag == "!":
+            out.append(f"<!{child.children[0]}>")
+        else:
+            head = [f"<{child.tag}"]
+            for key, value in child.attrs:
+                head.append(f" {key}" if value is None else f' {key}="{html.escape(value)}"')
+            out.append("".join(head) + ">")
+            if child.tag not in _HTML_VOID:
+                _html_as_written(child, out)
+                out.append(f"</{child.tag}>")
 
 
 def _html_children(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:

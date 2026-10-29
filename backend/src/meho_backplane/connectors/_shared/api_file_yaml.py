@@ -12,12 +12,14 @@ file, and the copy is written back by the safe dumper. Comments and
 repeated keys are not in the copy: the dumper writes only what the loader
 built, so a secret the loader dropped never comes back either.
 
-:func:`check_yaml` serves a YAML file. :func:`check_yaml_example` serves
-a YAML example inside an HTML page (a ``<pre>`` or ``<code>`` block). It
-fails closed: an example it cannot read whole raises :exc:`WithheldError`
-with the reason, and the caller withholds the block. That is an example
-with more than one document, one that does not parse, and one that names
-a key twice in one mapping, at any depth.
+:func:`check_yaml` serves a YAML file, and :func:`last_check_yaml` runs
+the last check on its copy (:mod:`.api_file_last_check`).
+:func:`check_yaml_example` serves a YAML example inside an HTML page (a
+``<pre>`` or ``<code>`` block). It fails closed: an example it cannot
+read whole raises :exc:`WithheldError` with the reason, and the caller
+withholds the block. That is an example with more than one document, one
+that does not parse, and one that names a key twice in one mapping, at
+any depth.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from typing import Any, Final
 
 import yaml
 
+from meho_backplane.connectors._shared.api_file_last_check import Work, hold_back_in_data
 from meho_backplane.connectors._shared.api_file_values import (
     MORE_THAN_ONE_DOCUMENT,
     NOT_PARSED,
@@ -39,7 +42,7 @@ from meho_backplane.connectors._shared.api_file_values import (
     is_secret_name,
 )
 
-__all__ = ["check_yaml", "check_yaml_example"]
+__all__ = ["check_yaml", "check_yaml_example", "last_check_yaml"]
 
 _YAML_STR_TAG: Final[str] = "tag:yaml.org,2002:str"
 _YAML_LOADER: Final[type[yaml.SafeLoader]] = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
@@ -74,6 +77,20 @@ def check_yaml(text: str, path: str, text_rule: TextRule | None) -> tuple[str, S
         raise ApiFileFormatError(
             f"{path} cannot be written back as YAML ({type(exc).__name__}); not returned"
         ) from None
+
+
+def last_check_yaml(copy: str, scrubber: Scrubber, work: Work) -> str:
+    """*copy*, a checked YAML file, with every part that still shows a secret held back.
+
+    The copy is loaded again and walked by :func:`hold_back_in_data`. A
+    copy with nothing to hold back comes back as it is; otherwise it is
+    written again by the safe dumper.
+    """
+    if not copy:
+        return copy
+    before = scrubber.count
+    data = hold_back_in_data(yaml.load(copy, Loader=_YAML_LOADER), scrubber, work)
+    return copy if scrubber.count == before else _dump(data)
 
 
 def check_yaml_example(text: str, scrubber: Scrubber) -> tuple[str | None, Any]:

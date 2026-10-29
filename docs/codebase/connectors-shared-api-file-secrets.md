@@ -30,6 +30,10 @@ rules key by key, comes back. It comes back redacted. Before this rule,
 each code review found one more form that a parser could not read and
 the check let through. Now every such form is withheld.
 
+**A last check runs on everything the read returns.** It reads the
+answer the way a person would read it; if a secret name still has a
+value, the part is held back. See [The last check](#the-last-check).
+
 Every API file read uses this helper (#4780): `fleet.api_file.get`,
 `hcx.api_file.get` and `vcenter.sso_admin.api_file.get` on main, and the
 reads of #4690 (VCF Operations) and #4731 (Aria Automation 8) after it.
@@ -70,12 +74,13 @@ copy keeps its format and every value keeps its type.
   catches it and withholds the part. The reasons are fixed texts, for
   example "holds more than one document" or "names a key twice".
 
-The three sibling modules hold the parts: `api_file_values.py` has the
+The sibling modules hold the parts: `api_file_values.py` has the
 `Scrubber` walk over parsed values, the placeholder, the withheld
 reasons and the search for JSON documents inside a text value;
 `api_file_yaml.py` has the YAML check on the node graph, for a YAML file
 and for a YAML example in an HTML page; `api_file_markup.py` has the XML
-and HTML parsers and writers, and the check of an example block. The
+and HTML parsers and writers, and the check of an example block;
+`api_file_last_check.py` has the last check. The
 fail-closed rules for text values are on only for the API file checks
 (`Scrubber(strict=True)`). The Salt connector uses the same walk without
 them, so its results do not change.
@@ -188,7 +193,9 @@ is how `{"credentials": {"default": "..."}}` got through a text scan.
        `\ud800`);
      - the parser cannot finish it within a bounded amount of work.
 
-     A secret name without a value (`the sessionId field`) stays.
+     A secret name without `:` or `=` (`the sessionId field`) passes
+     this step. The last check then holds it back, because a word
+     follows the name.
    - Any text value that holds a private key in PEM form
      (`-----BEGIN ... PRIVATE KEY-----`), under any name.
 4. Write the copy in the same format from the parsed file. JSON is
@@ -200,6 +207,63 @@ is how `{"credentials": {"default": "..."}}` got through a text scan.
    to another namespace; comments, the XML declaration and CDATA markers
    do not come back. HTML comes back without comments.
 5. Count every placeholder written.
+6. Run the last check on the written copy (next section).
+7. Refuse a copy that cannot be written as UTF-8.
+
+## The last check
+
+`api_file_last_check.py` runs after every other step, also after MEHO's
+general redaction rules (the text rule). It runs on the success answer,
+on the `401` and `440` bodies and on the copy the flight recorder gets,
+because all of them are the checked copy.
+
+The last check reads the answer the way a person would read it; if a
+secret name still has a value, the part is held back. It only holds
+back more. It never brings back a part that an earlier step held back,
+and it never returns a part with only some of its text cleaned.
+
+How it reads a text:
+
+1. **Flatten.** Decode HTML entities (`&#73;`), backslash escapes
+   (`\u0049`, `\x49`, a YAML line break) and URL percent escapes
+   (`%49`). Repeat until nothing changes. Read the text three ways: with
+   its tags, without its tags, and with a space for each tag.
+2. **Search.** Look for a secret name with a value: the name, maybe a
+   quote, then `:`, `=`, `=>` or only white space, maybe a quote, then a
+   word or a number. A value that already is a placeholder
+   (`[REDACTED:...]`) does not count. The names are the same as for the
+   step before (`is_secret_name_lowercased`), so there is no second list.
+   A full stop after a name ends the sentence (`Set the password.`).
+3. **Look inside.** Parse every JSON or YAML document in the flattened
+   text. Check each key and each text value the same way. A secret-named
+   key whose value is not a placeholder is a secret too.
+
+What it holds back, as one part:
+
+- In a JSON or YAML file: the text value; the value under a key that
+  reads as a secret name once flattened (`session&#73;d`); a whole
+  mapping when a key itself shows a secret with a value.
+- In an HTML or XML file: an attribute value; a `<script>` or `<style>`
+  block; and page text. Page text is joined in document order over its
+  tags first, so `<div><span>sessionId</span>: ...</div>` or a name
+  split over three nested tags is found. The check then holds back the
+  few texts next to the secret, not the whole page:
+  `<div><span>[REDACTED:param_name]</span>[REDACTED:param_name]</div>`.
+  Other text on the page stays.
+- A redirect path (`scrub_query_string`): the whole path, for example
+  `;jsessionid=...` in a path segment.
+
+A held-back part becomes `[REDACTED:param_name]`. It is counted in
+`secrets_replaced` and `withheld`, with the reason "names a secret next
+to a value once tags and escapes are removed", never its text. A text
+encoded more than eight times is held back with the reason "is nested
+too deeply to check".
+
+When the last check held back something, it runs once more on its own
+result. If that run still finds a secret, the file is refused. The check
+reads at most 128 times the size of the copy (plus 4 MiB); a copy that
+needs more is refused as "too costly to check". On a 2 MB page the last
+check about doubles the time of the whole file check.
 
 ## What the reads do with it
 
@@ -212,9 +276,9 @@ joining the parts gives the copy. A redirect path goes through
 withheld) and `withheld_reasons` (each reason with its count).
 
 The size limit stays as before: a file too big for one stored result is
-refused with its size, before parsing. The last check stays too: the
-read stops when MEHO's general redaction rules (`redaction/patterns.py`)
-would still change the copy, for example an `Authorization` header line
+refused with its size, before parsing. The redaction check at the end of
+the read stays too: the read stops when MEHO's general redaction rules
+(`redaction/patterns.py`) would still change the copy, for example an `Authorization` header line
 in free text. A read that gives those rules as `text_rule` has already
 replaced such text, value by value, so this check passes. The `api_key` rule skips a value that already is a
 complete `[REDACTED:...]` placeholder, so a replaced value does not set
@@ -230,9 +294,15 @@ it off.
   attribute values go too, also a schema `type`.
 - Inline JavaScript does not come back. JavaScript, CSS and plain text
   files are refused.
-- Free text that is not JSON, such as "the password is abc", cannot be
-  parsed; MEHO's general redaction rules check it, as before. Free text
-  that gives a secret name a value (`password: abc`) is withheld whole.
+- Free text that gives a secret name a value (`password: abc`) is
+  withheld whole.
+- The last check also holds back prose where a word follows a secret
+  name, because it cannot tell a word from a value: "the password is
+  abc", but also "Password for the administrator user." In the pinned
+  9.1 vendor files this holds back 2 descriptions of the SRM file
+  (among them the long API introduction, for "construct the credentials
+  by ..."), 1 of the vSphere Replication file (its API introduction) and
+  6 of the appliance file both reads share.
 - An example block comes back without its child elements (the colour
   markup) and written from the parsed copy, like a file: JSON compact,
   YAML from the safe dumper (comments gone, keys in order, flow lists as
@@ -253,8 +323,8 @@ PyYAML (`yaml`, the C loader and dumper when libyaml is present);
   document and is refused. OpenAPI files are single documents. A YAML
   example with several documents inside a page is withheld.
 - The check reads a secret by its name. Free text that holds a secret
-  without a name and without a form the general rules know (`the
-  password is abc`) still comes back. The general rules run on it.
+  without any secret name and without a form the general rules know
+  still comes back. The general rules run on it.
 - The HTML parser does not close elements the way a browser does
   (`<p>` and `<li>` are not closed by the next one). The written copy
   keeps everything in order, so this changes nesting only.

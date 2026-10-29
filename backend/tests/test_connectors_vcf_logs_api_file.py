@@ -85,6 +85,7 @@ from meho_backplane.connectors._shared.api_file_values import (
     MORE_THAN_ONE_DOCUMENT,
     NOT_PARSED,
     REPEATED_KEY,
+    SECRET_NAME_AFTER_FLATTENING,
 )
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
@@ -1289,6 +1290,66 @@ _SECRET_PAGES: list[Any] = [
         "example-folded-secret",
         id="yaml-folded-block",
     ),
+    # The last check: the copy read the way a person reads it.
+    pytest.param(
+        "application/json",
+        _API_DOCS,
+        json.dumps({"description": '"session\\u0049d": example-session-id-0123456789'}),
+        "example-session-id-0123456789",
+        id="yaml-with-an-escaped-key-inside-a-json-description",
+    ),
+    pytest.param(
+        "application/yaml",
+        "/rest-api/openapi.yaml",
+        "info:\n  description: '\"session\\u0049d\": example-session-id-0123456789'\n",
+        "example-session-id-0123456789",
+        id="yaml-with-an-escaped-key-inside-a-yaml-description",
+    ),
+    pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        "<div><span>sessionId</span>: example-session-id-0123456789</div>",
+        "example-session-id-0123456789",
+        id="name-and-value-split-by-inline-html",
+    ),
+    pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        "<p>Send <b><i><u>sess</u>ion</i>Id</b>: example-session-id-0123456789 on each call.</p>",
+        "example-session-id-0123456789",
+        id="name-split-over-three-nested-inline-tags",
+    ),
+    pytest.param(
+        "application/json",
+        _API_DOCS,
+        json.dumps(
+            {
+                "description": "&#115;&#101;&#115;&#115;&#105;&#111;&#110;&#73;&#100;: "
+                "example-session-id-0123456789"
+            }
+        ),
+        "example-session-id-0123456789",
+        id="name-made-of-html-entities-in-a-json-description",
+    ),
+    pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        "<p><span>&#115;ession</span>&#73;d: example-session-id-0123456789</p>",
+        "example-session-id-0123456789",
+        id="name-made-of-html-entities-split-by-a-tag",
+    ),
+    pytest.param(
+        "application/json",
+        _API_DOCS,
+        json.dumps(
+            {
+                "description": "Open https://logs.example.invalid/ui?session%49d="
+                "example-session-id-0123456789 to start."
+            }
+        ),
+        "example-session-id-0123456789",
+        id="percent-encoded-session-id-in-a-url-inside-a-description",
+    ),
 ]
 
 
@@ -1441,6 +1502,65 @@ async def test_withheld_blocks_are_counted_with_their_reasons_and_never_their_te
     assert body["withheld_reasons"] == {MORE_THAN_ONE_DOCUMENT: 1, NOT_PARSED: 1, REPEATED_KEY: 1}
     assert body["secrets_replaced"] == 4
     assert "made-up-" not in _rendered(result)
+
+
+@pytest.mark.asyncio
+async def test_last_check_holds_back_the_part_and_counts_it_with_its_reason(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """The name and its value are split by inline tags: that text is held back, the rest stays."""
+    await _register_and_resolve(_stub_embedding)
+    page = (
+        "<h1>Login</h1>"
+        "<div><span>sessionId</span>: made-up-flattened-1</div>"
+        "<p>Each session ends after 30 minutes.</p>"
+    )
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        mock.get("/rest-api/login.html").respond(
+            200, text=page, headers={"Content-Type": "text/html"}
+        )
+        result = await _dispatch("/rest-api/login.html")
+
+    assert result.status == "ok", result.error
+    body = result.result
+    joined = "".join(item["text"] for item in body["items"])
+    assert joined == (
+        f"<h1>Login</h1><div><span>{REDACTED}</span>{REDACTED}</div>"
+        "<p>Each session ends after 30 minutes.</p>"
+    )
+    assert body["withheld"] == 1
+    assert body["withheld_reasons"] == {SECRET_NAME_AFTER_FLATTENING: 1}
+    assert body["secrets_replaced"] == 2
+    assert "made-up-flattened-1" not in _rendered(result)
+
+
+@pytest.mark.parametrize(
+    ("content_type", "page"),
+    [
+        (
+            "application/json",
+            '{"description":"Each session ends after 30 minutes without a call."}',
+        ),
+        ("text/html", "<p>Each <b>session</b> ends after 30 minutes without a call.</p>"),
+    ],
+    ids=["json-description", "html-page"],
+)
+@pytest.mark.asyncio
+async def test_description_that_mentions_a_session_without_a_value_comes_back(
+    _stub_embedding: AsyncMock, session: AsyncSession, content_type: str, page: str
+) -> None:
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        mock.get(_API_DOCS).respond(200, text=page, headers={"Content-Type": content_type})
+        result = await _dispatch(_API_DOCS)
+
+    assert result.status == "ok", result.error
+    body = result.result
+    assert "".join(item["text"] for item in body["items"]) == page
+    assert body["withheld"] == 0
+    assert body["secrets_replaced"] == 0
 
 
 # ---------------------------------------------------------------------------

@@ -53,6 +53,7 @@ __all__ = [
     "REDACTED",
     "REPEATED_KEY",
     "SECRET_CHILD_ELEMENT",
+    "SECRET_NAME_AFTER_FLATTENING",
     "SECRET_NAME_IN_TEXT",
     "TOO_COSTLY",
     "TOO_DEEP",
@@ -93,6 +94,11 @@ SECRET_CHILD_ELEMENT: Final[str] = "has a child element that is secret or a scri
 NOT_UNICODE: Final[str] = "holds text that is not valid Unicode"
 TOO_DEEP: Final[str] = "is nested too deeply to check"
 TOO_COSTLY: Final[str] = "is too costly to check"
+#: The last check (:mod:`.api_file_last_check`) found a secret name with a
+#: value once it read the text as a person reads it.
+SECRET_NAME_AFTER_FLATTENING: Final[str] = (
+    "names a secret next to a value once tags and escapes are removed"
+)
 
 
 #: The end of a name that holds a login session id (``sessionId``,

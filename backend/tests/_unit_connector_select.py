@@ -110,6 +110,8 @@ CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_gateway_assignment_api.py",
     # ``sudo`` command lines in every connector folder.
     "tests/test_connectors_sudo_argv_gate.py",
+    # Imports of a leaving VMware folder, read from every module in the package.
+    "tests/test_split_ready_imports.py",
 )
 
 _DOTTED = re.compile(r"\bmeho_backplane\.connectors\.([A-Za-z0-9_]+)")

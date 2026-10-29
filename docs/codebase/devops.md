@@ -1904,8 +1904,8 @@ the four shards, so every test still runs before a change lands on `main`.
   (registry, catalog, operation contract, flight recorder, reference docs,
   MCP tool list and app start tests, plus the tests that scan the source of
   every connector or all docs: read-back hints, broadcast and audit calls,
-  sandbox mode, one unique class name, and `sudo` command lines). A missing
-  contract file fails the job.
+  sandbox mode, one unique class name, `sudo` command lines, and imports of
+  a leaving VMware folder). A missing contract file fails the job.
 - **The required check.** The fan-in `python-unit-lane` is unchanged: the
   matrix result is `success` only if its one leg passed, so the required
   check `Python (ruff + mypy + pytest)` keeps its name and its strict rule.

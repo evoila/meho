@@ -169,6 +169,7 @@ WALKS_SOMETHING_ELSE = {
     "tests/acceptance/test_g41_kb_canary.py": "a sample knowledge folder",
     "tests/test_connectors_azure_spec_reconcile.py": "the azure spec files",
     "tests/test_connectors_bind9_atomic.py": "a temp folder",
+    "tests/test_capture_secret_scan.py": "the saved test captures",
     "tests/test_connectors_vmware_rest_8_0_spec_reconcile.py": "the vmware_rest folder",
     "tests/test_kb_service.py": "a fake rglob in a knowledge folder",
     "tests/test_operations_connector_auth_failed.py": "the Go CLI source",

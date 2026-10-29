@@ -159,6 +159,10 @@ in.
   build refuses such files.
 - Plain modules (single `.py` files) directly in `connectors/` are not
   imported by the walk, so the check does not look at them.
+- The check does not stop public code from importing a connector folder
+  that will leave this repository in a package. A separate test does:
+  `backend/tests/test_split_ready_imports.py` reads every public module
+  and fails when one imports such a folder.
 - MEHO must be installed, as a wheel or as an editable install of the same
   checkout. A bare source tree on `PYTHONPATH` that borrows another
   checkout's install has no file list and is outside that checkout, so

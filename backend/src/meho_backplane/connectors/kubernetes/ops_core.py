@@ -80,6 +80,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from meho_backplane.connectors.kubernetes._node_identity import (
+    NODE_IDENTITY_PROPERTIES,
+    node_identity,
+)
 from meho_backplane.connectors.kubernetes.ops import KubernetesOp
 
 if TYPE_CHECKING:
@@ -258,6 +262,7 @@ def node_row(node: V1Node, *, now: datetime | None = None) -> dict[str, Any]:
             now=now,
         ),
         "labels": (metadata.labels or {}) if metadata is not None else {},
+        **node_identity(node),
     }
 
 
@@ -475,6 +480,7 @@ _K8S_NODE_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
                     },
                     "age_seconds": {"type": ["integer", "null"]},
                     "labels": {"type": "object"},
+                    **NODE_IDENTITY_PROPERTIES,
                 },
                 "required": [
                     "name",
@@ -487,6 +493,7 @@ _K8S_NODE_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
                     "taints",
                     "age_seconds",
                     "labels",
+                    *NODE_IDENTITY_PROPERTIES,
                 ],
                 "additionalProperties": False,
             },
@@ -508,7 +515,8 @@ K8S_NODE_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
     "parameter_hints": {},
     "output_shape": (
         "{'rows': [{name, status, roles, version, kernel, os, "
-        "internal_ip, taints, age_seconds, labels}], 'total': <int>}. "
+        "internal_ip, taints, age_seconds, labels, system_uuid (BIOS UUID), "
+        "os_image, architecture, cpu_capacity, memory_capacity}], 'total': <int>}. "
         "``status`` reflects the Ready condition ('Ready' / 'NotReady' "
         "/ 'Unknown'). ``roles`` is the sorted list of role suffixes "
         "from the node-role.kubernetes.io/<role> labels."

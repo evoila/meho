@@ -168,7 +168,7 @@ func newCreateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&principal, "principal", "", "JWT sub of the service principal (required)")
-	cmd.Flags().StringVar(&opID, "op-id", "", "exact operation id; globs are refused, and a delete operation is refused (delete grants are made in the web console, only in sandbox mode) (required)")
+	cmd.Flags().StringVar(&opID, "op-id", "", "exact operation id; globs are refused. A delete operation needs a delete grant: only in sandbox mode, by a tenant admin, with --expires within 30 days. REST and the CLI refuse it unless MEHO_SANDBOX_DELETE_GRANTS_FROM_API is on; the server decides (required)")
 	cmd.Flags().StringVar(&connectorID, "connector-id", "", "exact connector id; globs are refused (required)")
 	cmd.Flags().StringVar(&target, "target", "", "target UUID (optional; targetless is not a wildcard)")
 	cmd.Flags().StringVar(&targetProduct, "target-product", "", "exact target-product selector (optional)")
@@ -189,9 +189,6 @@ func buildGrantCreateBody(principal, opID, connectorID, target, targetProduct, t
 	}
 	if target != "" && (targetProduct != "" || targetNamePattern != "") {
 		return api.ServiceGrantCreate{}, fmt.Errorf("--target is mutually exclusive with --target-product and --target-name-pattern")
-	}
-	if isDeleteShaped(opID) {
-		return api.ServiceGrantCreate{}, fmt.Errorf("--op-id %q is a delete operation. A delete grant is made in the web console, by a tenant admin, and only on an instance in sandbox mode; the CLI cannot create one", opID)
 	}
 	body := api.ServiceGrantCreate{PrincipalSub: principal, OpId: opID, ConnectorId: connectorID, Reason: reason}
 	if target != "" {
@@ -251,10 +248,6 @@ func hasGlob(value string) bool { return strings.ContainsAny(value, "*[") }
 func isAffirmative(answer string) bool {
 	answer = strings.ToLower(strings.TrimSpace(answer))
 	return answer == "y" || answer == "yes"
-}
-
-func isDeleteShaped(opID string) bool {
-	return strings.HasPrefix(opID, "DELETE:") || strings.HasSuffix(opID, ".delete") || strings.HasSuffix(opID, ".destroy") || strings.HasSuffix(opID, ".remove") || strings.HasSuffix(opID, ".purge")
 }
 
 func createGrant(ctx context.Context, url string, body api.ServiceGrantCreate) (*api.CreateGrantApiV1ServicePrincipalsGrantsPostResponse, error) {

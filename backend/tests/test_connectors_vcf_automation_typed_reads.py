@@ -50,7 +50,6 @@ import respx
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.schemas import FingerprintResult
 from meho_backplane.connectors.vcf_automation import (
@@ -66,6 +65,7 @@ from meho_backplane.connectors.vcf_automation._routing import (
     TENANT_ACCEPT,
     plane_for_path,
 )
+from meho_backplane.connectors.vcf_automation.connector import _plane_cache_key
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, Target
 from meho_backplane.operations import (
@@ -438,7 +438,8 @@ async def test_provider_typed_op_rides_provider_plane() -> None:
     await VcfAutomationConnector.register_typed_operations()
     seeded = await _seed_target(host=_HOST, fqdn=_FQDN)
     instance = _resolve_connector()
-    cache_key = target_cache_key(seeded)
+    provider_key = _plane_cache_key(seeded, "provider")
+    tenant_key = _plane_cache_key(seeded, "tenant")
     accept_by_path: dict[str, str] = {}
 
     try:
@@ -456,8 +457,8 @@ async def test_provider_typed_op_rides_provider_plane() -> None:
                 },
             )
             # Snapshot the caches before aclose() (in finally) clears them.
-            provider_cached = instance._provider_tokens.get(cache_key)
-            tenant_cached = instance._tenant_tokens.get(cache_key)
+            provider_cached = instance._provider_tokens.get(provider_key)
+            tenant_cached = instance._tenant_tokens.get(tenant_key)
     finally:
         await instance.aclose()
         reset_dispatcher_caches()
@@ -489,7 +490,8 @@ async def test_tenant_typed_op_rides_tenant_plane() -> None:
     await VcfAutomationConnector.register_typed_operations()
     seeded = await _seed_target(host=_HOST, fqdn=_FQDN)
     instance = _resolve_connector()
-    cache_key = target_cache_key(seeded)
+    provider_key = _plane_cache_key(seeded, "provider")
+    tenant_key = _plane_cache_key(seeded, "tenant")
     accept_by_path: dict[str, str] = {}
 
     try:
@@ -507,8 +509,8 @@ async def test_tenant_typed_op_rides_tenant_plane() -> None:
                 },
             )
             # Snapshot the caches before aclose() (in finally) clears them.
-            tenant_cached = instance._tenant_tokens.get(cache_key)
-            provider_cached = instance._provider_tokens.get(cache_key)
+            tenant_cached = instance._tenant_tokens.get(tenant_key)
+            provider_cached = instance._provider_tokens.get(provider_key)
     finally:
         await instance.aclose()
         reset_dispatcher_caches()
@@ -535,7 +537,7 @@ async def test_tenant_op_on_91_appliance_falls_back_and_re_mints_through_dispatc
     await VcfAutomationConnector.register_typed_operations()
     seeded = await _seed_target(host=_HOST, fqdn=_FQDN)
     instance = _resolve_connector()
-    cache_key = target_cache_key(seeded)
+    tenant_key = _plane_cache_key(seeded, "tenant")
 
     try:
         async with respx.mock(
@@ -565,7 +567,7 @@ async def test_tenant_op_on_91_appliance_falls_back_and_re_mints_through_dispatc
                     "params": {},
                 },
             )
-            tenant_cached = instance._tenant_tokens.get(cache_key)
+            tenant_cached = instance._tenant_tokens.get(tenant_key)
     finally:
         await instance.aclose()
         reset_dispatcher_caches()

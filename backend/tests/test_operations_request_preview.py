@@ -1178,6 +1178,7 @@ async def test_preview_operation_missing_target_name_returns_target_required_env
     )
     assert result["status"] == "error"
     assert result["extras"]["error_code"] == "target_required"
+    assert "call list_targets" in result["error"]
 
 
 # ---------------------------------------------------------------------------

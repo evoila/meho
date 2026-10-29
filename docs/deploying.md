@@ -487,6 +487,19 @@ each lives inline in
   trust-bundle mount point (`SSL_CERT_FILE`) and any other operator env.
   Applied to **both** the backplane container and the migration Job
   container.
+- **`sandboxMode.*`** — only for an instance that holds disposable test
+  systems ([decision](decisions/sandbox-mode.md)). All three are read at
+  boot only; no request can change them.
+  - `sandboxMode.enabled` → `MEHO_SANDBOX_MODE` (default `false`). Turns
+    sandbox mode on: a tenant admin may give a service principal a grant
+    that also covers deletes (a delete grant). Fixed for the life of the
+    database.
+  - `sandboxMode.confirmHost` → `MEHO_SANDBOX_MODE_CONFIRM`. Must equal
+    `ingress.host`, and that host needs a part that is exactly `sandbox`.
+  - `sandboxMode.deleteGrantsFromApi` → `MEHO_SANDBOX_DELETE_GRANTS_FROM_API`
+    (default `false`). Lets a tenant admin create a delete grant through
+    REST and the CLI too, not only in the web console. Rendered only when
+    `sandboxMode.enabled` is `true`.
 
 ## In-cluster webhook senders
 

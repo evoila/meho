@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
 
@@ -109,7 +110,8 @@ def test_select_falls_back_when_a_test_name_is_not_in_the_list(tool: ModuleType)
     file_map = {
         # A decorator wrapped the test, so coverage named it after the decorator's module.
         "backend/src/pkg/wrapped.py": {"functools.test_one"},
-        # One test is in the list, the other is not: still cannot be judged.
+        # One test is in the list, the other is not: the known one still counts
+        # in "map only", but the file cannot be judged, so "safe" picks the full suite.
         "backend/src/pkg/mixed.py": {"tests.test_a.test_one", "tests.test_new.test_four"},
     }
 
@@ -121,9 +123,12 @@ def test_select_falls_back_when_a_test_name_is_not_in_the_list(tool: ModuleType)
     assert wrapped.no_test_ran == []
 
     mixed = tool.select(["backend/src/pkg/mixed.py"], file_map, suite)
-    assert mixed.map_only == set()
+    assert mixed.map_only == {"tests/test_a.py::test_one"}
     assert mixed.safe_full
     assert mixed.test_not_in_list == ["backend/src/pkg/mixed.py"]
+
+    text = tool.report([(2, "t", ["backend/src/pkg/mixed.py"])], file_map, suite, top=1)
+    assert "| #2 | 1 | 1 | 4 | " in text
 
     text = tool.report([(1, "t", ["backend/src/pkg/wrapped.py"])], file_map, suite, top=1)
     assert "| #1 | 1 | 0 | 4 | " in text
@@ -131,16 +136,51 @@ def test_select_falls_back_when_a_test_name_is_not_in_the_list(tool: ModuleType)
     assert "test not in list: 1" in text
 
 
-def test_merged_last_orders_by_merge_date_not_creation_date(tool: ModuleType) -> None:
-    # The order gh pr list gives: newest created first.
-    listed = [
-        {"number": 30, "title": "new, merged early", "mergedAt": "2026-10-01T00:00:00Z"},
-        {"number": 20, "title": "merged last", "mergedAt": "2026-10-03T00:00:00Z"},
-        {"number": 10, "title": "old, merged late", "mergedAt": "2026-10-02T00:00:00Z"},
+def _pr(number: int, merged_at: str | None, updated_at: str) -> dict[str, object]:
+    return {
+        "number": number,
+        "title": f"pr {number}",
+        "merged_at": merged_at,
+        "updated_at": updated_at,
+    }
+
+
+def test_merged_last_finds_a_merge_newer_than_the_first_page(tool: ModuleType) -> None:
+    # Pages as the API gives them: most recently updated first. The two pull
+    # requests on the first page got a comment after the newest merge, so the
+    # pull request merged last is only on the second page.
+    pages = [
+        [
+            _pr(30, "2026-10-01T00:00:00Z", "2026-10-05T00:00:00Z"),
+            _pr(20, "2026-10-02T00:00:00Z", "2026-10-04T12:00:00Z"),
+        ],
+        [
+            _pr(40, None, "2026-10-04T00:00:00Z"),
+            _pr(10, "2026-10-03T00:00:00Z", "2026-10-03T00:00:01Z"),
+        ],
     ]
 
-    assert [pr["number"] for pr in tool.merged_last(listed, 2)] == [20, 10]
-    assert [pr["number"] for pr in tool.merged_last(listed, 5)] == [20, 10, 30]
+    assert [pr["number"] for pr in tool.merged_last(pages, 2)] == [10, 20]
+    assert [pr["number"] for pr in tool.merged_last(pages, 5)] == [10, 20, 30]
+    assert [pr["number"] for pr in tool.merged_last(pages, 1, "2026-10-03T00:00:00Z")] == [20]
+
+
+def test_merged_last_stops_reading_when_no_later_page_can_hold_a_newer_merge(
+    tool: ModuleType,
+) -> None:
+    read: list[int] = []
+
+    def pages() -> Iterator[list[dict[str, object]]]:
+        # Every pull request here was updated when it was merged. So after
+        # the first page, no later page can hold a newer merge.
+        read.append(1)
+        yield [_pr(20, "2026-10-02T00:00:00Z", "2026-10-02T00:00:00Z")]
+        read.append(2)
+        yield [_pr(10, "2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z")]
+
+    assert [pr["number"] for pr in tool.merged_last(pages(), 1)] == [20]
+    assert read == [1]
+    assert [pr["number"] for pr in tool.merged_last(pages(), 2)] == [20, 10]
 
 
 def test_unmatched_functions_finds_tests_missing_from_the_list(tool: ModuleType) -> None:

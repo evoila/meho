@@ -108,11 +108,14 @@ whose name is not in the test list (the decorator case above), and other
 files (config, test helpers, files outside `backend/`). A pull request with
 a file of any kind counts as a full-suite run in the "safe" column.
 
-The script reads the merged pull requests with `gh pr list`, which orders
-by creation date. No GitHub API orders by merge date. So the script reads a
-window of ten times the number asked for, sorts it by merge date, and keeps
-the ones merged last. A pull request created before that window and merged
-recently is still left out.
+No GitHub API orders pull requests by merge date. So the script reads the
+closed pull requests page by page, most recently updated first. A merge
+updates a pull request, so its update time is never before its merge time.
+Reading stops at the first page whose oldest update time is not after the
+N-th newest merge time found so far: no later page can hold a pull request
+merged after it. This finds the N merged last, also when they were created
+long ago. Give `--merged-before` the time the coverage run started, so the
+sample stays the same when the script runs again later on the same data.
 
 Things to know about the data:
 

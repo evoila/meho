@@ -25,11 +25,15 @@ Input:
   decorator wraps: coverage then names them after the decorator's module
   (for example ``functools.test_x``).
 * The files changed by the last N merged pull requests, read with ``gh``.
-  ``gh pr list`` orders by creation date, and no GitHub API orders by
-  merge date. So the script reads a larger window of merged pull requests
-  (``_WINDOW`` times N, newest created first), sorts them by merge date
-  and keeps the N merged last. A pull request created before that window
-  and merged recently is still left out.
+  No GitHub API orders pull requests by merge date. The script reads the
+  closed pull requests page by page, most recently updated first. A merge
+  updates a pull request, so its update time is never before its merge
+  time. Reading stops at the first page whose oldest update time is not
+  after the N-th newest merge time found so far: no later page can hold a
+  pull request merged after it. This finds the N merged last, also when
+  they were created long ago. ``--merged-before`` keeps only pull requests
+  merged before a time, so the sample stays the same when the script runs
+  again later on the same coverage data.
 
 For each pull request it counts the test items the map would pick, in two
 ways:
@@ -51,6 +55,7 @@ ways:
   * **test not in list**: a source file that a test function ran which
     the test list does not have (a decorator-wrapped test, or inputs from
     different commits). The map cannot turn that name into test items.
+    The tests of the file that are in the list still count in "map only".
   * **other**: a config or data file, a test helper or ``conftest.py``, or
     a file outside ``backend/``.
 
@@ -63,7 +68,8 @@ step in a checkout of the commit the coverage run tested::
     (cd /tmp/tested/backend && uv run pytest --collect-only -q tests \\
         --ignore=tests/integration) > /tmp/collected.txt
     uv run python ../scripts/ci/measure_test_map.py \\
-        --data .coverage --collected /tmp/collected.txt --last 30
+        --data .coverage --collected /tmp/collected.txt --last 30 \\
+        --merged-before <time the coverage run started, like 2026-10-28T22:02:55Z>
 """
 
 from __future__ import annotations
@@ -75,7 +81,7 @@ import statistics
 import subprocess
 import sys
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -83,9 +89,6 @@ _SOURCE = re.compile(r"^backend/src/.+\.py$")
 _TEST_FILE = re.compile(r"^backend/tests/(?!integration/)(?:.+/)?test_[^/]+\.py$")
 _INTEGRATION = re.compile(r"^backend/tests/integration/")
 _DOCS = re.compile(r"(^docs/|\.md$)")
-# How many merged pull requests to read per pull request asked for, so the
-# ones merged last are in the window even when they were created earlier.
-_WINDOW = 10
 
 
 @dataclass
@@ -171,10 +174,11 @@ def select(changed: Iterable[str], file_map: dict[str, set[str]], suite: Suite) 
             sel.not_in_data.append(path)
         elif not file_map[path]:
             sel.no_test_ran.append(path)
-        elif not file_map[path] <= suite.by_function.keys():
-            sel.test_not_in_list.append(path)
         else:
-            for function in file_map[path]:
+            known = file_map[path] & suite.by_function.keys()
+            if known != file_map[path]:
+                sel.test_not_in_list.append(path)
+            for function in known:
                 sel.map_only.update(suite.by_function[function])
     return sel
 
@@ -199,51 +203,59 @@ def touched_by_most(file_map: dict[str, set[str]], top: int) -> tuple[int, list[
     return total, shares[:top]
 
 
-def merged_last(listed: list[dict[str, Any]], last: int) -> list[dict[str, Any]]:
+def _gh(*args: str) -> str:
+    return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
+
+
+def closed_pr_pages(repo: str) -> Iterator[list[dict[str, Any]]]:
+    """Yield the closed pull requests page by page, most recently updated first."""
+    page = 1
+    while prs := json.loads(
+        _gh(
+            "api",
+            f"repos/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page={page}",
+        )
+    ):
+        yield prs
+        page += 1
+
+
+def merged_last(
+    pages: Iterable[list[dict[str, Any]]], last: int, before: str | None = None
+) -> list[dict[str, Any]]:
     """Keep the ``last`` pull requests merged most recently, newest merge first.
 
-    ``listed`` is in the order ``gh pr list`` gives, newest created first,
-    which is not the merge order.
+    ``pages`` gives closed pull requests page by page, most recently updated
+    first. A merge updates a pull request, so its update time is never
+    before its merge time. Reading stops at the first page whose oldest
+    update time is not after the ``last``-th newest merge time found so
+    far, because no later page can hold a pull request merged after it.
+    ``before`` keeps only pull requests merged before that time.
     """
-    return sorted(listed, key=lambda pr: pr["mergedAt"], reverse=True)[:last]
+    kept: list[dict[str, Any]] = []
+    for page in pages:
+        kept += [
+            pr for pr in page if pr["merged_at"] and (before is None or pr["merged_at"] < before)
+        ]
+        kept.sort(key=lambda pr: pr["merged_at"], reverse=True)
+        del kept[last:]
+        if len(kept) == last and page[-1]["updated_at"] <= kept[-1]["merged_at"]:
+            break
+    return kept
 
 
-def fetch_prs(repo: str, last: int) -> list[tuple[int, str, list[str]]]:
+def fetch_prs(repo: str, last: int, before: str | None) -> list[tuple[int, str, list[str]]]:
     """Return (number, title, changed files) for the last merged pull requests."""
-    listed = subprocess.run(
-        [
-            "gh",
-            "pr",
-            "list",
-            "--repo",
-            repo,
-            "--state",
-            "merged",
-            "--limit",
-            str(last * _WINDOW),
-            "--json",
-            "number,title,mergedAt",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
     prs = []
-    for pr in merged_last(json.loads(listed.stdout), last):
-        files = subprocess.run(
-            [
-                "gh",
-                "api",
-                "--paginate",
-                f"repos/{repo}/pulls/{pr['number']}/files",
-                "--jq",
-                ".[] | .filename, (.previous_filename // empty)",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
+    for pr in merged_last(closed_pr_pages(repo), last, before):
+        files = _gh(
+            "api",
+            "--paginate",
+            f"repos/{repo}/pulls/{pr['number']}/files",
+            "--jq",
+            ".[] | .filename, (.previous_filename // empty)",
         )
-        prs.append((pr["number"], pr["title"], files.stdout.splitlines()))
+        prs.append((pr["number"], pr["title"], files.splitlines()))
     return prs
 
 
@@ -326,6 +338,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--collected", required=True, help="output of pytest --collect-only -q")
     parser.add_argument("--repo", default="evoila/meho")
     parser.add_argument("--last", type=int, default=30, help="number of merged pull requests")
+    parser.add_argument(
+        "--merged-before",
+        help="keep only pull requests merged before this time (ISO 8601, UTC, like "
+        "2026-10-28T22:02:55Z); use the time the coverage run started",
+    )
     parser.add_argument("--top", type=int, default=25, help="number of most-run files to list")
     args = parser.parse_args(argv)
 
@@ -343,7 +360,8 @@ def main(argv: list[str] | None = None) -> int:
             " functools.test_x). A changed file that such a test ran picks the full suite.",
             file=sys.stderr,
         )
-    print(report(fetch_prs(args.repo, args.last), file_map, suite, args.top))
+    prs = fetch_prs(args.repo, args.last, args.merged_before)
+    print(report(prs, file_map, suite, args.top))
     return 0
 
 

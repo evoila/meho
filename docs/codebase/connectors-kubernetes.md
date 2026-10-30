@@ -476,8 +476,29 @@ carries the name the API server chose. A missing CronJob raises
 still runs. The params and the result hold only names, so the op is not
 pinned `credential_write`. Its approval preview (`ops_write_preview.py`)
 reads the CronJob and shows the schedule, `suspend`, `concurrencyPolicy`,
-the names of its Jobs that still run and each container's name, image,
-env var names and command size, never an env value or the command text.
+the names of its Jobs that still run and the job template spec
+(`job_spec`). The spec is shown the same way as in the `k8s.job.create`
+preview below.
+
+**`k8s.job.create` and `k8s.cronjob.run` approval previews (#5259).** The
+approver sees the Job spec as it will run, so they can judge what the pods
+do and with which rights: `command`, `args`, image, pod and container
+`securityContext`, `hostPID` / `hostNetwork` / `hostIPC`, node choice
+(`nodeName`, `nodeSelector`, `tolerations`, `affinity`), service account,
+`volumes` and `volumeMounts`. `ops_write_preview.py` hides every inline
+`env` value and every probe `httpHeaders` value; the name stays, and
+`valueFrom` / `envFrom` references stay. On `command` and `args` the
+words stay, but these values are hidden: the value of a `NAME=VALUE` or
+`--name=value` whose name holds a secret word (`PGPASSWORD=...`,
+`AWS_SECRET_ACCESS_KEY=...`, `--password=...`, any length), the word after
+a secret flag (`--password x`, `--token x`, `-p x`), the password in
+`user:password` after `-u` or `--user`, the password in a URL that
+carries a user and password, and tokens with a known vendor prefix
+(`ghp_...`). Then the same two-step redaction as the generic params echo
+runs over the spec: it hides secret-shaped text anywhere (JWTs, bearer
+tokens) and the value of a field with a secret-shaped name (a `secret`
+volume, `imagePullSecrets`). A secret on a command line with no known
+shape (for example `mytool hunter2`) is shown to the approver.
 
 **Secret redaction reuses the shipped `credential_write` op-class
 (#1401), not a new mechanism.** `k8s.secret.create` was already in

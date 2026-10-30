@@ -665,6 +665,53 @@ func TestPrintDetailRendersOptionalFields(t *testing.T) {
 	}
 }
 
+// TestPrintDetailRendersJobSpecPreview confirms show prints the Job spec a
+// k8s.job.create preview carries, so the approver reads the privileges,
+// the node and the command of the Job (#5259).
+func TestPrintDetailRendersJobSpecPreview(t *testing.T) {
+	d := newApprovalView(t, "pending", "")
+	var effect map[string]interface{}
+	raw := `{
+		"op_class": "credential_write",
+		"preview": {
+			"resource": "job",
+			"name": "node-check",
+			"namespace": "default",
+			"spec": {"template": {"spec": {
+				"nodeName": "node-01",
+				"hostPID": true,
+				"containers": [{
+					"name": "check",
+					"image": "busybox:1.36",
+					"command": ["nsenter", "-t", "1", "--", "uptime"],
+					"securityContext": {"privileged": true},
+					"env": [{"name": "API_TOKEN", "value": "***REDACTED***"}]
+				}]
+			}}}
+		}
+	}`
+	if err := json.Unmarshal([]byte(raw), &effect); err != nil {
+		t.Fatalf("unmarshal sample effect: %v", err)
+	}
+	d.ProposedEffect = effect
+
+	cmd, stdout, _ := newCapturingCmd(t)
+	printDetail(cmd, &d)
+	out := stdout.String()
+	for _, want := range []string{
+		`"privileged": true`,
+		`"hostPID": true`,
+		`"nodeName": "node-01"`,
+		`"nsenter"`,
+		`"uptime"`,
+		`"value": "***REDACTED***"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printDetail render missing %q in:\n%s", want, out)
+		}
+	}
+}
+
 // TestPrintDetailRendersReleaseAndExpiredReason confirms show prints the
 // release a request was made under, and why an expired request expired
 // with the advice to ask again (#5030).

@@ -37,6 +37,7 @@ from kubernetes_asyncio.client.models import (
     V1PodSpec,
     V1PodTemplateSpec,
     V1SecretEnvSource,
+    V1SecurityContext,
 )
 
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -59,6 +60,10 @@ _BATCH_V1 = "meho_backplane.connectors.kubernetes.ops_cronjob.client.BatchV1Api"
 
 #: A made-up secret. The preview must never show it.
 _SECRET = "made-up-env-Value-4958"
+#: A short made-up password on a command line.
+_SHORT = "Xq9"
+#: A URL with a user and the short made-up password in it.
+_URL_WITH_PASSWORD = f"https://bob:{_SHORT}@example.invalid"  # trufflehog:ignore
 
 
 @pytest.fixture(autouse=True)
@@ -316,8 +321,19 @@ class _FakeDescriptor:
 
 
 @pytest.mark.asyncio
-async def test_cronjob_run_preview_shows_containers_and_active_jobs_not_values() -> None:
+async def test_cronjob_run_preview_shows_job_template_and_active_jobs_not_values() -> None:
     cronjob = _cronjob(active=["db-backup-29300000", "db-backup-29301440"])
+    pod_spec = cronjob.spec.job_template.spec.template.spec
+    pod_spec.node_name = "node-01"
+    pod_spec.host_pid = True
+    pod_spec.containers[0].security_context = V1SecurityContext(privileged=True)
+    pod_spec.containers[0].args = [
+        f"--token={_SECRET}",
+        f"PGPASSWORD={_SHORT} pg_dump -h db app",
+        "--password",
+        _SHORT,
+        f"curl -u admin:{_SHORT} {_URL_WITH_PASSWORD}",  # gitleaks:allow
+    ]
     ctx = PreviewContext(
         descriptor=_FakeDescriptor(op_id="k8s.cronjob.run"),  # type: ignore[arg-type]
         connector_instance=_make_connector(),
@@ -332,7 +348,8 @@ async def test_cronjob_run_preview_shows_containers_and_active_jobs_not_values()
     assert effect is not None
     api.create_namespaced_job.assert_not_awaited()
     assert _SECRET not in json.dumps(effect)
-    assert "run-backup" not in json.dumps(effect)
+    assert _SHORT not in json.dumps(effect)
+    assert "pg_dump -h db app" in json.dumps(effect)
     preview = effect["preview"]
     assert preview["resource"] == "cronjob_run"
     assert preview["cronjob"] == "db-backup"
@@ -342,18 +359,18 @@ async def test_cronjob_run_preview_shows_containers_and_active_jobs_not_values()
     assert preview["suspend"] is False
     assert preview["concurrency_policy"] == "Forbid"
     assert preview["active_jobs"] == ["db-backup-29300000", "db-backup-29301440"]
-    assert preview["containers"] == [
-        {
-            "name": "backup",
-            "image": "registry.example/backup:1.2",
-            "env_var_names": ["DB_PASSWORD"],
-            "env_from": ["secret:db-creds"],
-            "command_bytes": len("sh-crun-backup"),
-        }
-    ]
-    assert preview["init_containers"] == [
-        {"name": "wait", "image": "busybox:1.36", "env_var_names": [], "env_from": []}
-    ]
+    job_spec = preview["job_spec"]
+    assert job_spec["backoffLimit"] == 2
+    pod = job_spec["template"]["spec"]
+    assert pod["nodeName"] == "node-01"
+    assert pod["hostPID"] is True
+    (container,) = pod["containers"]
+    assert container["image"] == "registry.example/backup:1.2"
+    assert container["command"] == ["sh", "-c", "run-backup"]
+    assert container["securityContext"] == {"privileged": True}
+    assert container["env"] == [{"name": "DB_PASSWORD", "value": "***REDACTED***"}]
+    assert container["envFrom"] == [{"secretRef": {"name": "db-creds"}}]
+    assert pod["initContainers"] == [{"name": "wait", "image": "busybox:1.36"}]
 
 
 @pytest.mark.asyncio

@@ -48,6 +48,7 @@ from meho_backplane.connectors.vmware_rest.composites._teardown import (
     STATUS_STILL_PRESENT,
     TeardownPlan,
     blast_radius,
+    capped,
     envelope,
     pre_write_outcome,
     timeout_envelope,
@@ -195,7 +196,11 @@ async def cluster_drs_group_delete_composite(
 
 
 async def cluster_drs_group_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Blast radius for ``cluster.drs_group.delete`` (the handler's own plan)."""
+    """Blast radius for ``cluster.drs_group.delete`` (the handler's own plan).
+
+    The ``members`` list is cut to :data:`LIST_CAP` rows on the card;
+    ``member_count`` carries the full number.
+    """
     cluster = ctx.params.get("cluster")
     group_name = ctx.params.get("group_name")
     if (
@@ -210,4 +215,8 @@ async def cluster_drs_group_delete_preview(ctx: PreviewContext) -> dict[str, Any
         ctx.operator,
         {"cluster": cluster, "group_name": group_name},
     )
-    return blast_radius(plan)
+    effect = blast_radius(plan)
+    obj = effect["blast_radius"]["object"]
+    if isinstance(obj.get("members"), list):
+        obj["members"] = capped(obj["members"])
+    return effect

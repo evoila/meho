@@ -36,10 +36,10 @@ from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
     _rules,
 )
 from meho_backplane.connectors.vmware_rest.composites._teardown import (
-    LIST_CAP,
     STATUS_INVALID_REQUEST,
     STATUS_TIMEOUT,
     STATUS_UNCHANGED,
+    capped,
 )
 from meho_backplane.connectors.vmware_rest.composites._teardown_reads import (
     moid_problem,
@@ -80,6 +80,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "GROUP_TYPES",
+    "approval_lists",
     "cluster_drs_group_members_set_composite",
     "cluster_drs_group_members_set_preview",
     "find_group",
@@ -175,10 +176,29 @@ async def member_rows(
     mo_type: str,
     moids: list[str],
 ) -> list[dict[str, Any]]:
-    """``[{moid, name}]`` for the first :data:`LIST_CAP` moids (names best effort)."""
-    shown = moids[:LIST_CAP]
-    names = await read_names(connector, target, operator, mo_type=mo_type, moids=shown)
-    return [{"moid": moid, "name": names.get(moid)} for moid in shown]
+    """``[{moid, name}]`` for every moid, in vCenter's order (names best effort).
+
+    The whole list, however long: an operation result must carry the full
+    membership (JSONFlux stores a large list and ``result_query`` reads it
+    back). Only the approval cards cut it, see :func:`approval_lists`.
+    """
+    names = await read_names(connector, target, operator, mo_type=mo_type, moids=moids)
+    return [{"moid": moid, "name": names.get(moid)} for moid in moids]
+
+
+def approval_lists(card: dict[str, Any], *keys: tuple[str, str]) -> dict[str, Any]:
+    """A copy of *card* for the approval display: each list cut to :data:`LIST_CAP`.
+
+    *keys* are ``(list key, count key)`` pairs; the count key carries the
+    full length, so the approver sees the true size next to the first rows.
+    """
+    out = dict(card)
+    for key, count_key in keys:
+        rows = card.get(key)
+        if isinstance(rows, list):
+            out[key] = capped(rows)
+            out[count_key] = len(rows)
+    return out
 
 
 async def reconfigure_cluster(
@@ -457,7 +477,11 @@ async def cluster_drs_group_members_set_composite(
 
 
 async def cluster_drs_group_members_set_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Approval card for ``members.set``: the handler's own plan (no write)."""
+    """Approval card for ``members.set``: the handler's own plan (no write).
+
+    The member lists are cut to :data:`LIST_CAP` rows; ``member_count_before``,
+    ``added_count`` and ``removed_count`` carry the full numbers.
+    """
     p = ctx.params
     if (
         not isinstance(p.get("cluster"), str)
@@ -471,7 +495,12 @@ async def cluster_drs_group_members_set_preview(ctx: PreviewContext) -> dict[str
         ctx.operator,
         {k: p.get(k) for k in ("cluster", "group_name", "add", "remove")},
     )
-    effect = dict(plan.card)
+    effect = approval_lists(
+        plan.card,
+        ("members_before", "member_count_before"),
+        ("added", "added_count"),
+        ("removed", "removed_count"),
+    )
     if plan.refusal is not None:
         effect["refusal"] = {"status": plan.refusal[0], "guidance": plan.refusal[1]}
     elif not plan.changed:

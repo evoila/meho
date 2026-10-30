@@ -30,6 +30,7 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest.composites import (
     _drs_group,
@@ -40,6 +41,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
 from meho_backplane.connectors.vmware_rest.composites._register import (
     register_vmware_composite_operations_8_0,
 )
+from meho_backplane.connectors.vmware_rest.composites._teardown import LIST_CAP
 from meho_backplane.connectors.vmware_rest.composites._write_preview import (
     _cluster_drs_vm_host_rule_create_preview,
 )
@@ -53,7 +55,9 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
+from meho_backplane.operations import jsonflux_reducer as reducer_module
 from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations import result_query as rq
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations._preview import blast_radius_missing_reason
 from meho_backplane.operations._validate import validate_params
@@ -61,8 +65,11 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
 )
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import call_operation, preview_operation
+from meho_backplane.operations.result_query import ResultQuerySpec, run_result_query
 from meho_backplane.settings import get_settings
+from tests._result_store_helpers import MemoryValkey
 from tests._vmware_cluster_config_fake import cluster_config_ex
 from tests._vmware_teardown_fake import (
     GateRecorder,
@@ -602,7 +609,9 @@ async def test_create_preview_shows_the_existing_group_members() -> None:
         {"vm": "vm-1", "name": "runner-01"},
         {"vm": "vm-2", "name": "runner-02"},
     ]
+    assert effect["total_vms"] == 2
     assert effect["resolved_hosts"] is None
+    assert effect["total_hosts"] is None
     assert effect["refusal"]["status"] == "group_not_found"
 
 
@@ -628,6 +637,163 @@ def test_create_schema_new_or_existing_groups(extra: dict[str, Any], accepted: b
     }
     errors = validate_params(CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA, params)
     assert (errors == []) is accepted, errors
+
+
+# ===========================================================================
+# Groups with more than LIST_CAP members: results are whole, cards are cut
+# ===========================================================================
+
+_BIG = LIST_CAP + 10
+
+
+def _big_fake(rules: list[dict[str, Any]] | None = None) -> DrsFake:
+    """A VM group of ``_BIG`` VMs (``vm-1`` .. ``vm-60``) plus one VM outside the group."""
+    conn = _fake(
+        groups=[_vm_group(vms=tuple(f"vm-{i}" for i in range(1, _BIG + 1))), _host_group()]
+    )
+    for i in range(1, _BIG + 2):
+        conn.add("VirtualMachine", f"vm-{i}", name=f"runner-{i:02d}")
+        conn.in_cluster[f"vm-{i}"] = _CLUSTER
+    return conn
+
+
+def _names(rows: list[dict[str, Any]]) -> list[str]:
+    return [row["name"] for row in rows]
+
+
+async def test_members_result_carries_every_member_of_a_large_group(gate: GateRecorder) -> None:
+    conn = _big_fake()
+    remove = [f"runner-{i:02d}" for i in range(1, LIST_CAP + 6)]
+    out = await _members(conn, group_name="runners-a", add=[f"runner-{_BIG + 1}"], remove=remove)
+
+    assert out["status"] == "updated"
+    assert len(out["members_before"]) == _BIG
+    assert out["member_count_before"] == _BIG
+    assert len(out["removed"]) == LIST_CAP + 5
+    assert _names(out["added"]) == [f"runner-{_BIG + 1}"]
+    assert out["member_count_after"] == _BIG - (LIST_CAP + 5) + 1
+    kept = _names(out["members_before"])[LIST_CAP + 5 :]
+    assert _names(out["members"]) == [*kept, f"runner-{_BIG + 1}"]
+    assert len(_groups(conn)["runners-a"]["vm"]) == out["member_count_after"]
+    _valid(CLUSTER_DRS_GROUP_MEMBERS_SET_RESPONSE_SCHEMA, out)
+
+
+async def test_members_result_reads_back_a_large_group_whole(gate: GateRecorder) -> None:
+    conn = _big_fake()
+    out = await _members(conn, group_name="runners-a", add=[f"runner-{_BIG + 1}"])
+    assert out["status"] == "updated"
+    assert len(out["members"]) == _BIG + 1
+    assert out["members"][-1] == {"moid": f"vm-{_BIG + 1}", "name": f"runner-{_BIG + 1}"}
+
+
+@pytest.fixture
+def result_store(monkeypatch: pytest.MonkeyPatch) -> ResultHandleStore:
+    """The real result store on an in-memory stand-in for Valkey."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    store = ResultHandleStore(MemoryValkey())  # type: ignore[arg-type]
+    monkeypatch.setattr(rq, "get_result_handle_store", lambda: store)
+    monkeypatch.setattr(reducer_module, "get_result_handle_store", lambda: store)
+    return store
+
+
+@pytest.mark.usefixtures("result_store")
+async def test_a_large_member_list_is_stored_and_read_back_whole(gate: GateRecorder) -> None:
+    """JSONFlux keeps the whole result; ``result_query`` pages ``members`` past row 50.
+
+    The result carries several lists (``members``, ``members_before``, ...),
+    so the reducer stores it whole as one document and the status stays
+    inline. A ``path`` read then pages any of the lists, nothing is cut.
+    """
+    conn = _big_fake()
+    out = await _members(conn, group_name="runners-a", add=[f"runner-{_BIG + 1}"])
+    op = operator()
+    context = {"op_id": _MEMBERS_OP, "tenant_id": str(op.tenant_id), "operator_sub": op.sub}
+
+    reduced, handle = await JsonFluxReducer().reduce(
+        out, CLUSTER_DRS_GROUP_MEMBERS_SET_RESPONSE_SCHEMA, context
+    )
+
+    assert handle is not None
+    assert reduced["status"] == "updated"
+    assert reduced["member_count_after"] == _BIG + 1
+
+    read = await run_result_query(
+        op, handle.handle_id, ResultQuerySpec(path="/members"), offset=LIST_CAP, limit=LIST_CAP
+    )
+    assert read["coverage"] == "complete"
+    assert read["total_rows"] == _BIG + 1
+    assert _names(read["rows"]) == [f"runner-{i:02d}" for i in range(LIST_CAP + 1, _BIG + 1)] + [
+        f"runner-{_BIG + 1}"
+    ]
+    before = await run_result_query(op, handle.handle_id, ResultQuerySpec(path="/members_before"))
+    assert before["total_rows"] == _BIG
+
+
+async def test_members_preview_cuts_the_lists_and_keeps_the_counts() -> None:
+    conn = _big_fake()
+    remove = [f"runner-{i:02d}" for i in range(1, LIST_CAP + 6)]
+    params = {
+        "cluster": _CLUSTER,
+        "group_name": "runners-a",
+        "add": [f"runner-{_BIG + 1}"],
+        "remove": remove,
+    }
+    effect = await _drs_group.cluster_drs_group_members_set_preview(preview_ctx(params, conn))
+    assert effect is not None
+    assert len(effect["members_before"]) == LIST_CAP
+    assert effect["member_count_before"] == _BIG
+    assert len(effect["removed"]) == LIST_CAP
+    assert effect["removed_count"] == LIST_CAP + 5
+    assert _names(effect["added"]) == [f"runner-{_BIG + 1}"]
+    assert effect["added_count"] == 1
+    assert effect["member_count_after"] == _BIG - (LIST_CAP + 5) + 1
+    assert "ReconfigureComputeResource_Task" not in conn.methods()
+
+
+async def test_delete_result_carries_every_member_and_the_card_is_cut(
+    gate: GateRecorder,
+) -> None:
+    conn = _big_fake()
+    effect = await _drs_group_delete.cluster_drs_group_delete_preview(
+        preview_ctx({"cluster": _CLUSTER, "group_name": "runners-a"}, conn)
+    )
+    assert effect is not None
+    card = effect["blast_radius"]["object"]
+    assert len(card["members"]) == LIST_CAP
+    assert card["member_count"] == _BIG
+
+    out = await _delete(conn, group_name="runners-a")
+    assert out["status"] == "deleted"
+    assert len(out["object"]["members"]) == _BIG
+    assert out["object"]["member_count"] == _BIG
+    _valid(CLUSTER_DRS_GROUP_DELETE_RESPONSE_SCHEMA, out)
+
+
+async def test_create_on_existing_groups_lists_every_member_and_the_card_is_cut(
+    gate: GateRecorder,
+) -> None:
+    conn = _big_fake()
+    params = {
+        "cluster": _CLUSTER,
+        "rule_name": "new-rule",
+        "vm_group_name": "runners-a",
+        "host_group_name": "hosts-a",
+        "use_existing_groups": True,
+    }
+    effect = await _cluster_drs_vm_host_rule_create_preview(preview_ctx(params, conn))
+    assert effect is not None
+    assert len(effect["resolved_vms"]) == LIST_CAP
+    assert effect["total_vms"] == _BIG
+    assert _names(effect["resolved_hosts"]) == ["esx-01", "esx-02"]
+    assert effect["total_hosts"] == 2
+
+    out = await _create(conn)
+    assert out["status"] == "created"
+    assert len(out["resolved_vms"]) == _BIG
+    assert out["resolved_vms"][-1] == {"vm": f"vm-{_BIG}", "name": f"runner-{_BIG}"}
 
 
 # ===========================================================================

@@ -32,6 +32,7 @@ from meho_backplane.connectors.vmware_rest.composites._drs_group import (
     reconfigure_cluster,
 )
 from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import _rules
+from meho_backplane.connectors.vmware_rest.composites._teardown import capped
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _CLUSTER_HOST_GROUP_TYPE,
     _CLUSTER_RULE_SPEC_TYPE,
@@ -173,7 +174,9 @@ async def create_rule_on_existing_groups(
 async def existing_groups_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Approval card for the existing-groups arm: both groups and their members, by name.
 
-    A missing group shows ``null`` members and the ``group_not_found``
+    Each member list is cut to :data:`~._teardown.LIST_CAP` rows; ``total_vms``
+    and ``total_hosts`` carry the full numbers (the same keys as the new-groups
+    arm). A missing group shows ``null`` members and the ``group_not_found``
     refusal the handler will apply.
     """
     params = ctx.params
@@ -191,8 +194,10 @@ async def existing_groups_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "affine": bool(params.get("affine", True)),
         "mandatory": bool(params.get("mandatory", False)),
         "enabled": bool(params.get("enabled", True)),
-        "resolved_vms": vms,
-        "resolved_hosts": hosts,
+        "resolved_vms": capped(vms) if vms is not None else None,
+        "total_vms": len(vms) if vms is not None else None,
+        "resolved_hosts": capped(hosts) if hosts is not None else None,
+        "total_hosts": len(hosts) if hosts is not None else None,
     }
     if isinstance(params.get("rule_name"), str):
         refusal = _refusal(props, params, vms, hosts)

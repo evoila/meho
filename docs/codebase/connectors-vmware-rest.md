@@ -2624,6 +2624,16 @@ group after that. Both use the same vim call as the DRS rule ops:
   `vmGroup` / `dependsOnVmGroup`), it refuses before any write with
   `precondition_failed`, and the rules are named in `blockers` and
   `guidance`. No group with the name gives `unchanged`. The VMs and hosts stay.
+- **Member lists:** every result carries the whole member list
+  (`members_before` / `members` on `members.set`, `object.members` on the
+  delete, `resolved_vms` / `resolved_hosts` on the rule create), however
+  long; `read_names` reads every page. A result with a long list goes
+  through JSONFlux like any other: the reducer keeps it whole as a document
+  under a result handle, and `result_query` with `path` (for example
+  `/members`) pages the list. Only the approval cards cut a list to the
+  first 50 rows (`LIST_CAP`), with the full count next to it
+  (`member_count_before` / `added_count` / `removed_count`, `member_count`,
+  `total_vms` / `total_hosts`).
 - **Approval card:** both use the handler's own plan. `members.set` shows the
   members before (names), what is added and removed (names), and the rules
   that use the group. The delete shows the group, its members and the
@@ -2632,8 +2642,9 @@ group after that. Both use the same vim call as the DRS rule ops:
   it adds only the rule, on a VM group and a host group that already exist
   (leave out `vms` and `hosts`; the schema `oneOf` enforces this). A missing
   group, or a group of the other kind, gives `group_not_found` before any
-  write. `resolved_vms` / `resolved_hosts` and the approval card list the
-  groups' members by name. Making new groups stays the default.
+  write. `resolved_vms` / `resolved_hosts` list the groups' members by name
+  (the approval card cuts them to 50, with `total_vms` / `total_hosts`).
+  Making new groups stays the default.
 
 Code: `composites/_drs_group.py` (shared group reads + `members.set`),
 `composites/_drs_group_delete.py`, `composites/_drs_vm_host_rule_existing.py`

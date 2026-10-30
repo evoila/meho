@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``0120_add_approval_request_release_id`` (#5030).
+"""Behavioural tests for ``0126_add_approval_request_release_id`` (#5030).
 
 The migration adds one nullable column, ``approval_request.release_id``:
 the MEHO release a request was made under. Rows saved before it keep
 NULL, which counts as an older release.
 
-Every step targets this migration's own revision (``0120``) and its
-``down_revision`` (``0119``), never ``head``, so a later migration cannot
+Every step targets this migration's own revision (``0126``) and its
+``down_revision`` (``0125``), never ``head``, so a later migration cannot
 break these tests.
 """
 
@@ -27,8 +27,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0120"
-_DOWN_REVISION = "0119"
+_REVISION = "0126"
+_DOWN_REVISION = "0125"
 _COLUMN = "release_id"
 
 
@@ -38,7 +38,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0120.db"
+    db_path = tmp_path / "migration_0126.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

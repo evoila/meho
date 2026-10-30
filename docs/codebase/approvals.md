@@ -105,7 +105,7 @@ It is the simple and strict choice.
 
 **What MEHO records.** `create_pending_request` stores the running
 release on the new column `approval_request.release_id` (migration
-`0120`). The value comes from `version.running_release_id()`: the full
+`0126`). The value comes from `version.running_release_id()`: the full
 commit hash (`GIT_SHA`), plus the chart version (`CHART_VERSION`) when it
 is set. These are the same values `GET /version` shows.
 

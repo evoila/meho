@@ -3,8 +3,8 @@
 
 """Add ``approval_request.release_id`` (#5030).
 
-Revision ID: 0120
-Revises: 0119
+Revision ID: 0126
+Revises: 0125
 Create Date: 2026-10-27
 
 One nullable column: the MEHO release an approval request was made under.
@@ -25,8 +25,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0120"
-down_revision: str | None = "0119"
+revision: str = "0126"
+down_revision: str | None = "0125"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

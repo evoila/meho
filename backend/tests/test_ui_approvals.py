@@ -205,6 +205,7 @@ def _seed_request(
     release_id: str | None = None,
     withdrawn_at: datetime | None = None,
     withdraw_reason: str | None = None,
+    created_at: datetime | None = None,
 ) -> uuid.UUID:
     """Insert one ``approval_request`` row; return its id."""
     rid = request_id or uuid.uuid4()
@@ -237,7 +238,7 @@ def _seed_request(
                     reviewed_by=reviewed_by,
                     decided_at=decided_at,
                     work_ref=work_ref,
-                    created_at=datetime(2026, 6, 15, 12, 0, tzinfo=UTC),
+                    created_at=created_at or datetime(2026, 6, 15, 12, 0, tzinfo=UTC),
                     expires_at=stored_expires_at,
                     resumed_at=resumed_at,
                     resume_result=resume_result,
@@ -2656,3 +2657,240 @@ def test_approve_already_resumed_elsewhere_shows_the_approved_card() -> None:
     assert "Request approved" in body
     assert "the run failed" not in body
     assert 'data-testid="approval-outcome"' not in body
+
+
+# ---------------------------------------------------------------------------
+# #3596 -- oldest-first + "step k of N" for a change ticket's pending chain,
+# and one more confirm before approving a later step out of order.
+# ---------------------------------------------------------------------------
+
+_CHAIN_REF = "gh:evoila/meho#7"
+
+
+def _seed_chain() -> list[uuid.UUID]:
+    """Seed three pending steps under one change ticket plus an unrelated
+    request that is newer than all of them; return the step ids, oldest first.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    base = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
+    steps = [
+        _seed_request(
+            tenant_id=_TENANT_A,
+            op_id=f"chain.step{n}",
+            work_ref=_CHAIN_REF,
+            created_at=base + timedelta(minutes=n),
+        )
+        for n in (1, 2, 3)
+    ]
+    _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="unrelated.op",
+        created_at=base + timedelta(hours=1),
+    )
+    return steps
+
+
+def _positions(body: str, *markers: str) -> list[int]:
+    return [body.index(marker) for marker in markers]
+
+
+def test_panel_lists_a_chain_oldest_first_with_step_numbers() -> None:
+    """The bell panel shows a change ticket's pending steps oldest first,
+    each with "Step k of N", without any filter typing."""
+    _seed_chain()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    first, second, third, unrelated = _positions(
+        body, "chain.step1", "chain.step2", "chain.step3", "unrelated.op"
+    )
+    assert first < second < third < unrelated
+    assert "Step 1 of 3" in body
+    assert "Step 2 of 3" in body
+    assert "Step 3 of 3" in body
+    # The unrelated request has no step.
+    assert body.count("data-approval-chain-step=") == 3
+
+
+def test_panel_stays_newest_first_without_a_chain() -> None:
+    """With no change ticket holding two pending requests, nothing changes."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    base = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
+    _seed_request(tenant_id=_TENANT_A, op_id="older.op", work_ref=_CHAIN_REF, created_at=base)
+    _seed_request(tenant_id=_TENANT_A, op_id="newer.op", created_at=base + timedelta(minutes=5))
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals", headers=_HX_HEADERS)
+
+    body = response.text
+    newer, older = _positions(body, "newer.op", "older.op")
+    assert newer < older
+    assert "data-approval-chain-step=" not in body
+
+
+def test_pending_tab_lists_a_chain_oldest_first_by_default() -> None:
+    """The default Pending tab reads a chain oldest first, with step numbers,
+    and the oldest/newest toggle shows oldest as the active order."""
+    _seed_chain()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    first, second, third, unrelated = _positions(
+        body, "chain.step1", "chain.step2", "chain.step3", "unrelated.op"
+    )
+    assert first < second < third < unrelated
+    assert "Step 2 of 3" in body
+    assert 'aria-pressed="true"' in _opening_tag(body, 'data-approval-order="oldest"')
+    assert 'aria-pressed="false"' in _opening_tag(body, 'data-approval-order="newest"')
+
+
+def test_history_toggle_can_pick_newest_first() -> None:
+    """The explicit toggle wins over the default on the Pending tab."""
+    _seed_chain()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?tab=pending&order=newest", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    unrelated, third, first = _positions(body, "unrelated.op", "chain.step3", "chain.step1")
+    assert unrelated < third < first
+    assert 'aria-pressed="true"' in _opening_tag(body, 'data-approval-order="newest"')
+    # The live refresh keeps the operator's choice.
+    assert 'hx-get="/ui/approvals/list?tab=pending&order=newest"' in body
+
+
+def test_history_toggle_can_pick_oldest_first_on_a_decided_tab() -> None:
+    """The All tab is newest first by default; ``order=oldest`` flips it."""
+    _seed_chain()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        default = client.get("/ui/approvals/list?tab=all", headers=_HX_HEADERS).text
+        oldest = client.get("/ui/approvals/list?tab=all&order=oldest", headers=_HX_HEADERS).text
+
+    unrelated, first = _positions(default, "unrelated.op", "chain.step1")
+    assert unrelated < first
+    first, unrelated = _positions(oldest, "chain.step1", "unrelated.op")
+    assert first < unrelated
+
+
+def test_history_load_more_keeps_the_order() -> None:
+    """The pager's "Load more" URL carries the order of the first page."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    base = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
+    for n in range(26):
+        _seed_request(tenant_id=_TENANT_A, op_id=f"op{n}", created_at=base + timedelta(minutes=n))
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?tab=pending&order=oldest", headers=_HX_HEADERS)
+
+    assert "/ui/approvals/list?tab=pending&order=oldest&offset=25&partial=rows" in response.text
+
+
+def test_history_unknown_order_is_422() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?order=random", headers=_HX_HEADERS)
+
+    assert response.status_code == 422
+
+
+def _render_chain_modal(request_id: uuid.UUID) -> str:
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{request_id}")
+    assert response.status_code == 200, response.text
+    return response.text
+
+
+def test_modal_out_of_order_step_needs_one_more_confirm() -> None:
+    """Opening step 2 directly (as a deep link does) names the step and puts
+    one more confirm in front of the approve confirm."""
+    steps = _seed_chain()
+
+    body = _render_chain_modal(steps[1])
+
+    assert 'data-approval-chain-step="2"' in body
+    assert "2 of 3" in body
+    # The group link opens the oldest-first Pending view for this ticket.
+    link = _opening_tag(body, "data-approval-chain-link")
+    assert 'href="/ui/approvals?tab=pending&order=oldest&work_ref=gh%3Aevoila/meho%237"' in link
+    # The Approve armer goes to the extra confirm, not straight to approve.
+    armer = _opening_tag(body, 'data-action="approve"')
+    assert "armed = 'approve-early'" in armer
+    early = body.split('data-approval-confirm="out-of-order"')[1].split("</p>")[0]
+    assert "step 2 of 3" in early
+    assert "before the earlier steps" in early
+    assert "cannot be un-approved" in early
+    # Only the extra confirm's button moves on to the approve confirm.
+    assert "armed = 'approve'" in _opening_tag(body, 'data-confirm="out-of-order"')
+    assert "data-approval-out-of-order" in body
+
+
+def test_modal_first_step_has_no_extra_confirm() -> None:
+    """Step 1 is the oldest waiting step: the normal approve flow applies."""
+    steps = _seed_chain()
+
+    body = _render_chain_modal(steps[0])
+
+    assert 'data-approval-chain-step="1"' in body
+    assert "armed = 'approve'" in _opening_tag(body, 'data-action="approve"')
+    assert 'data-approval-confirm="out-of-order"' not in body
+    assert "data-approval-out-of-order" not in body
+
+
+def test_modal_step_numbers_move_up_once_an_earlier_step_is_decided() -> None:
+    """Step numbers count pending requests only: once step 1 is decided, the
+    old step 2 is the oldest waiting step and needs no extra confirm."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    base = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
+    _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="chain.step1",
+        work_ref=_CHAIN_REF,
+        status_value=ApprovalRequestStatus.APPROVED.value,
+        reviewed_by=_REVIEWER_SUB,
+        created_at=base,
+    )
+    second = _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="chain.step2",
+        work_ref=_CHAIN_REF,
+        created_at=base + timedelta(minutes=1),
+    )
+    _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="chain.step3",
+        work_ref=_CHAIN_REF,
+        created_at=base + timedelta(minutes=2),
+    )
+
+    body = _render_chain_modal(second)
+
+    assert 'data-approval-chain-step="1"' in body
+    assert "1 of 2" in body
+    assert 'data-approval-confirm="out-of-order"' not in body

@@ -155,6 +155,12 @@ from meho_backplane.connectors.vmware_rest.composites._library_delete import (
     content_library_delete_composite,
     content_library_item_delete_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._library_local import (
+    CONTENT_LIBRARY_CREATE_COMPOSITE,
+)
+from meho_backplane.connectors.vmware_rest.composites._library_upload import (
+    CONTENT_LIBRARY_ITEM_UPLOAD_COMPOSITE,
+)
 from meho_backplane.connectors.vmware_rest.composites._license import (
     LICENSE_ASSIGN_LLM_INSTRUCTIONS,
     LICENSE_ASSIGN_PARAMETER_SCHEMA,
@@ -2033,6 +2039,10 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "vmware.composite.content_library.item.delete"
         ],
     ),
+    # Create a local content library and add a file to one from a URL
+    # (caution + approval); the rows live in their own modules.
+    _CompositeSpec(**CONTENT_LIBRARY_CREATE_COMPOSITE),
+    _CompositeSpec(**CONTENT_LIBRARY_ITEM_UPLOAD_COMPOSITE),
     # Add a CD drive and unmount the VMware Tools installer; the rows live in
     # their own module.
     *(_CompositeSpec(**row) for row in VM_CDROM_TOOLS_COMPOSITES),

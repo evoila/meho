@@ -9155,6 +9155,16 @@
               "nullable": true,
               "title": "X-Meho-Runner-Wire-Version"
             }
+          },
+          {
+            "name": "X-MEHO-Runner-Package-Set",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Package-Set"
+            }
           }
         ],
         "responses": {
@@ -9220,6 +9230,16 @@
               "type": "string",
               "nullable": true,
               "title": "X-Meho-Runner-Wire-Version"
+            }
+          },
+          {
+            "name": "X-MEHO-Runner-Package-Set",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Package-Set"
             }
           }
         ],
@@ -9327,7 +9347,7 @@
           "checks"
         ],
         "summary": "Get Assignment",
-        "description": "Return runner *runner*'s versioned assignment (runner-authenticated).\n\nA runner may fetch only its own assignment\n(:func:`assert_runner_scope`). A runner on another wire version gets a\n409 that names both versions. ``known_version`` matching the current\ncontent digest yields ``304 Not Modified`` (empty body); the runner\nkeeps its cache.",
+        "description": "Return runner *runner*'s versioned assignment (runner-authenticated).\n\nA runner may fetch only its own assignment\n(:func:`assert_runner_scope`). A runner on another wire version gets a\n409 that names both versions. Work for a connector package is left out\nwhen the runner's package set differs from central's (#5038).\n``known_version`` matching the current\ncontent digest yields ``304 Not Modified`` (empty body); the runner\nkeeps its cache.",
         "operationId": "get_assignment_api_v1_checks_assignment_get",
         "parameters": [
           {
@@ -9368,6 +9388,16 @@
               "type": "string",
               "nullable": true,
               "title": "X-Meho-Runner-Wire-Version"
+            }
+          },
+          {
+            "name": "X-MEHO-Runner-Package-Set",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Package-Set"
             }
           }
         ],
@@ -9422,6 +9452,16 @@
               "type": "string",
               "nullable": true,
               "title": "X-Meho-Runner-Wire-Version"
+            }
+          },
+          {
+            "name": "X-MEHO-Runner-Package-Set",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Package-Set"
             }
           }
         ],
@@ -34262,6 +34302,11 @@
             "type": "string",
             "nullable": true,
             "title": "Wire Version"
+          },
+          "package_set_digest": {
+            "type": "string",
+            "nullable": true,
+            "title": "Package Set Digest"
           }
         },
         "type": "object",
@@ -34396,6 +34441,11 @@
             "format": "date-time",
             "nullable": true,
             "title": "Expires At"
+          },
+          "package_set": {
+            "type": "string",
+            "nullable": true,
+            "title": "Package Set"
           }
         },
         "type": "object",
@@ -34408,7 +34458,7 @@
           "principal"
         ],
         "title": "RunnerWorkItem",
-        "description": "One centrally-authorized operation for the runner to execute.\n\nCarries the fields the runner needs to resolve and invoke a handler\nentirely locally: the dotted ``handler_ref`` (resolved via\n:func:`~meho_backplane.operations._handler_resolve.import_handler`),\nthe ``(product, version, impl_id)`` registry key used to rebind a\nbound-method handler against its connector instance, the validated\n``params``, the ``safety_level`` the runner re-checks (defence in\ndepth), the principal context, and the resolved target descriptor\n(``None`` for targetless synthetic ops such as ``net.*``).\n\nRemote-write signing (#3189): a ``caution`` / ``remote-write`` item\nadditionally carries the centre's Ed25519 ``signature`` over its\ncanonical payload and the ``expires_at`` freshness bound the signature\ncovers, both verified in\n:func:`~meho_backplane.runner.executor._screen_item` before execution.\nBoth are ``None`` for a ``safe`` read item (the recurring assignment\npath materialises only ``safe`` ops and never signs them) -- signing is\na write-tier property, so their absence on a ``safe`` item is correct,\nnot a missing field."
+        "description": "One centrally-authorized operation for the runner to execute.\n\nCarries the fields the runner needs to resolve and invoke a handler\nentirely locally: the dotted ``handler_ref`` (resolved via\n:func:`~meho_backplane.operations._handler_resolve.import_handler`),\nthe ``(product, version, impl_id)`` registry key used to rebind a\nbound-method handler against its connector instance, the validated\n``params``, the ``safety_level`` the runner re-checks (defence in\ndepth), the principal context, and the resolved target descriptor\n(``None`` for targetless synthetic ops such as ``net.*``).\n\nRemote-write signing (#3189): a ``caution`` / ``remote-write`` item\nadditionally carries the centre's Ed25519 ``signature`` over its\ncanonical payload and the ``expires_at`` freshness bound the signature\ncovers, both verified in\n:func:`~meho_backplane.runner.executor._screen_item` before execution.\nBoth are ``None`` for a ``safe`` read item (the recurring assignment\npath materialises only ``safe`` ops and never signs them) -- signing is\na write-tier property, so their absence on a ``safe`` item is correct,\nnot a missing field.\n\nConnector packages (#5038): ``package_set`` is the digest of the\nconnector package set the item needs\n(:func:`~meho_backplane.runner.package_set.package_set_digest`). The\ncentral MEHO sets it only when a connector package provides the op, and\nthe runner refuses the item when its own digest differs. ``None`` for an\nop built into MEHO."
       },
       "RunnerWriteAllowlistEntryRead": {
         "properties": {

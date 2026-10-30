@@ -89,6 +89,7 @@ from sqlalchemy import CursorResult, and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.approval_sign_in import ApprovalAuth
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op
@@ -140,6 +141,7 @@ __all__ = [
     "ApprovalRequestAlreadyDecidedError",
     "ApprovalRequestExpiredError",
     "ApprovalResultState",
+    "ApprovalSignInReusedError",
     "DelegatedDecisionForbiddenError",
     "DelegatedReasonInvalidError",
     "Delegation",
@@ -311,6 +313,24 @@ class PreviewBindingMissingError(ApprovalError):
             f"approval_request {request_id} is destructive-tier but carries no "
             "preview_hash binding; approval refused (the preview-result-hash "
             "binding is mandatory for the destructive tier, #3197)"
+        )
+
+
+class ApprovalSignInReusedError(ApprovalError):
+    """This sign-in already gave an approval (#3979).
+
+    One fresh sign-in or one-time code allows exactly one approval. Raised
+    by :func:`approve_request` when an earlier ``approval.decision`` audit
+    row of the same person carries the same ``sign_in_key``. The REST layer
+    answers ``401`` with the same fresh sign-in challenge as a too-old
+    sign-in, so the command line asks for a new sign-in.
+    """
+
+    def __init__(self, request_id: uuid.UUID) -> None:
+        self.request_id = request_id
+        super().__init__(
+            f"approval_request {request_id}: this sign-in was already used for "
+            "an approval; one sign-in allows one approval"
         )
 
 
@@ -1399,6 +1419,40 @@ async def create_pending_request(
 # code-quality-allow: 101 lines but ~70 are the Args/Raises docstring documenting
 # the four preconditions + the params/reason contract; the executable body is ~15
 # lines. Splitting it would scatter one linear approve flow for a line-count win.
+async def _refuse_reused_sign_in(
+    session: AsyncSession,
+    request_id: uuid.UUID,
+    operator: Operator,
+    approval_auth: ApprovalAuth,
+) -> None:
+    """Raise :class:`ApprovalSignInReusedError` when this sign-in already approved.
+
+    Looks at the person's ``approval.decision`` audit rows written since
+    the sign-in. The sign-in is at most a few minutes old, so the scan is
+    short. A web click is not single-use and is never checked.
+    """
+    key = approval_auth.sign_in_key(operator.sub)
+    if key is None or approval_auth.auth_time is None:
+        return
+    since = datetime.fromtimestamp(approval_auth.auth_time - 1, UTC)
+    rows = await session.execute(
+        select(AuditLog.payload).where(
+            AuditLog.operator_sub == operator.sub,
+            AuditLog.path == "approval.decision",
+            AuditLog.occurred_at >= since,
+        )
+    )
+    for (payload,) in rows:
+        earlier = payload.get("approval_auth") if isinstance(payload, dict) else None
+        if isinstance(earlier, dict) and earlier.get("sign_in_key") == key:
+            _log().warning(
+                "approval_sign_in_reused",
+                approval_request_id=str(request_id),
+                operator_sub=operator.sub,
+            )
+            raise ApprovalSignInReusedError(request_id)
+
+
 async def approve_request(
     session: AsyncSession,
     request_id: uuid.UUID,
@@ -1406,6 +1460,7 @@ async def approve_request(
     operator: Operator,
     params: dict[str, Any] | None = None,
     reason: str = "",
+    approval_auth: ApprovalAuth | None = None,
 ) -> ApprovalRequest:
     """Approve a pending request.
 
@@ -1458,6 +1513,10 @@ async def approve_request(
             MCP/CLI operator-decision path.
         reason: Optional human-readable approval reason (recorded in the
             audit payload). Mirrors :func:`reject_request`.
+        approval_auth: How the person proved they were present (#3979): a
+            web click, a fresh sign-in or a one-time code. Recorded in the
+            audit payload as ``approval_auth``. A token proof allows one
+            approval only. Every production approve path passes it.
 
     Returns:
         The updated, flushed :class:`ApprovalRequest`.
@@ -1477,6 +1536,8 @@ async def approve_request(
             (``Instructed-by:``) but its trailer block is incomplete (#3692).
         DelegatedDecisionForbiddenError: *reason* is a valid delegated
             decision but the deployment is not lab-class (#3693).
+        ApprovalSignInReusedError: *approval_auth* names a sign-in that
+            already gave an approval (#3979).
     """
     request = await _load_pending_for_approval(
         session, request_id, operator=operator, params=params
@@ -1485,6 +1546,8 @@ async def approve_request(
     # reason leaves the row pending (#3692, #3693).
     delegation = parse_delegation(reason)
     _check_delegated_allowed(delegation, request=request, operator=operator, decision="approved")
+    if approval_auth is not None:
+        await _refuse_reused_sign_in(session, request_id, operator, approval_auth)
 
     now = _now()
     request.status = ApprovalRequestStatus.APPROVED.value
@@ -1499,6 +1562,8 @@ async def approve_request(
     extra: dict[str, Any] = {"decision": "approved", "reviewed_by": operator.sub}
     if reason:
         extra["reason"] = reason
+    if approval_auth is not None:
+        extra["approval_auth"] = approval_auth.audit_payload(operator.sub)
     _record_delegation(extra, delegation, request=request, operator=operator, decision="approved")
 
     approve_audit_id = uuid.uuid4()

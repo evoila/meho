@@ -43,6 +43,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -217,6 +218,11 @@ func renderHTTPStatus(
 	bodyStr := trimmedBody(body)
 	switch statusCode {
 	case http.StatusUnauthorized:
+		if strings.Contains(bodyStr, "fresh_sign_in_") {
+			// The approval still found no fresh sign-in (#3979). Show
+			// the server's text: it names the web interface.
+			return output.RenderError(cmd.ErrOrStderr(), output.AuthExpired(bodyStr), jsonOut)
+		}
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
 				"backplane rejected the stored token; run `meho login %s`",

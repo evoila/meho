@@ -2538,8 +2538,11 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
 - `meho admin keycloak bootstrap-clients` — idempotently reconcile a
   realm against the recipe:
   1. Public device-code client (default name `meho-cli`,
-     `publicClient=true`, `oauth2DeviceAuthorizationGrantEnabled=true`,
-     every other flow off).
+     `publicClient=true`, `oauth2DeviceAuthorizationGrantEnabled=true`).
+     The standard flow is on too, with `pkce.code.challenge.method=S256`
+     and the one redirect URI `http://127.0.0.1:*`: `meho approvals
+     approve` uses it for the fresh browser sign-in an approval needs
+     (#3979). Implicit, password and service-account flows stay off.
   2. Public authorization-code+PKCE MCP client (default name
      `meho-mcp`, `standardFlowEnabled=true`,
      `pkce.code.challenge.method=S256`, default redirect URIs for the

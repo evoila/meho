@@ -36,6 +36,7 @@ path against a registered typed op.
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
@@ -196,6 +197,10 @@ def _make_operator(
         tenant_role=role,
         principal_kind=principal_kind,
         approver=approver,
+        # A person who just signed in, so the REST approve routes accept the
+        # reviewer (#3979). Each call is a new sign-in.
+        auth_time=int(time.time()),
+        sid=str(uuid.uuid4()),
     )
 
 

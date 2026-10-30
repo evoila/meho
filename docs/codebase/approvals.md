@@ -1973,6 +1973,42 @@ meho-automation approval bridge) still lists the tenant queue. The gate removes
 only machine kinds: the `approver` capability model (#3243) and the seniority
 self-approval rules are preserved unchanged for **human** principals.
 
+**Approve needs a fresh sign-in (#3979).** An approval is a person's
+decision. In the console the click is the proof. On REST (and so on the
+CLI) the token must prove it:
+
+- `POST /approve`, and `POST /decide` with `decision=approved`, run
+  `check_fresh_approval_sign_in` (`auth/approval_sign_in.py`; on
+  `/approve` through the `require_fresh_approval_sign_in` dependency in
+  `auth/rbac.py`). It runs after `require_human_principal`, so a machine
+  principal still gets its 403 first.
+- The token's `auth_time` claim (`Operator.auth_time`) must be no older
+  than `APPROVAL_FRESH_SIGN_IN_MAX_AGE_SECONDS` (default 300). A token
+  without `auth_time` is refused. A refreshed token keeps the time of the
+  first sign-in (RFC 9470 §6.1), so a long-lived `meho login` token never
+  passes. A plain API token never approves.
+- A token whose `acr` is in `APPROVAL_ONE_TIME_CODE_ACR_VALUES` (empty =
+  off) is recorded as a one-time code approval. It needs the same recent
+  `auth_time`: an `acr` alone is not enough.
+- The refusal is 401 `fresh_sign_in_required: <text>` with
+  `WWW-Authenticate: Bearer error="insufficient_user_authentication",
+  error_description="…", max_age="<N>"` (RFC 9470 §3). The request stays
+  pending.
+- **One sign-in, one approval.** `approve_request` gets an `ApprovalAuth`
+  and refuses (`ApprovalSignInReusedError`, mapped to the same 401 with
+  `fresh_sign_in_already_used:`) when an earlier `approval.decision` row of
+  the same person, written since that sign-in, carries the same
+  `sign_in_key`: a hash of `sub`, `sid` and `auth_time`. The audit row
+  keeps the hash, not the session id.
+- Every approve writes `payload["approval_auth"]` on its
+  `approval.decision` row: `{"channel": "rest" | "web", "method":
+  "fresh_sign_in" | "one_time_code" | "web_click", "auth_time": <int|null>}`
+  plus `sign_in_key` for a token approve.
+- Reject and `/decide` with `decision=rejected` need no fresh sign-in: a
+  reject never runs anything.
+- `/ready` shows both settings under `features.approval_queue`
+  (`fresh_sign_in_max_age_seconds`, `one_time_code_acr_values`).
+
 The realm-side provisioning path for the `approver` claim — a group-based
 Keycloak protocol-mapper recipe (`kcadm.sh` primary, Admin Console
 secondary), claim-name alignment with `JWT_APPROVER_CLAIM_NAME`,
@@ -1984,8 +2020,8 @@ token-decode + live decouple verification, and a rollback note — lives in
 | `GET` | `/api/v1/approvals` | operator **or** approver | List, newest first, filtered by `status` (default: `pending`; `all` = every state, #5129). Optional `limit` (1..500, no limit when omitted) and `offset`. |
 | `GET` | `/api/v1/approvals/{id}` | operator **or** approver | **Inspect one request** (T5). 404 on cross-tenant. |
 | `GET` | `/api/v1/approvals/{id}/result` | **request owner** (any role) | **Read the approved dispatch's result** (#3209). Principal-scoped: only `principal_sub` reads it; any other principal gets 403 `not_request_owner`. Writes an `approval.result` audit row. |
-| `POST` | `/api/v1/approvals/{id}/approve` | **human** operator **or** approver | Approve. Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and break-glass is off (G11.7-T1); 403 `human_principal_required` for a machine `principal_kind` (#289). |
-| `POST` | `/api/v1/approvals/{id}/decide` | **human** operator **or** approver | Decide (`approved` / `rejected`) by id alone. For an approved **direct** op (`run_id IS NULL`) re-dispatches with the **stored** params (#1503) and returns the outcome in `dispatch_*`; for an agent-run request records the decision only (the agent runtime resumes). 403 `human_principal_required` for a machine `principal_kind` (#289). |
+| `POST` | `/api/v1/approvals/{id}/approve` | **human** operator **or** approver, **fresh sign-in** | Approve. 401 `fresh_sign_in_required` / `fresh_sign_in_already_used` without a fresh, unused sign-in (#3979). Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and break-glass is off (G11.7-T1); 403 `human_principal_required` for a machine `principal_kind` (#289). |
+| `POST` | `/api/v1/approvals/{id}/decide` | **human** operator **or** approver; **fresh sign-in** for `approved` | Decide (`approved` / `rejected`) by id alone. `approved` needs a fresh, unused sign-in like `/approve` (#3979). For an approved **direct** op (`run_id IS NULL`) re-dispatches with the **stored** params (#1503) and returns the outcome in `dispatch_*`; for an agent-run request records the decision only (the agent runtime resumes). 403 `human_principal_required` for a machine `principal_kind` (#289). |
 | `POST` | `/api/v1/approvals/{id}/reject` | **human** operator **or** approver | Reject. The op never executes. 403 `human_principal_required` for a machine `principal_kind` (#289). |
 | `POST` | `/api/v1/approvals/{id}/withdraw` | **request sender** (any role, any principal kind) | The sender takes back its own pending request (#4987). Not a decision. 403 `not_request_sender` for anyone else; 409 on a closed request. Writes an `approval.withdraw` audit row. |
 
@@ -2016,7 +2052,24 @@ dispatcher re-checks `required_role` at `tools/call`.
 `meho approvals list / show <id> / approve <id> / reject <id> [--reason]`
 verbs that hit the REST surface via the generated typed client.
 `meho approvals withdraw <id> [--reason]` lets the sender take back its own
-pending request (#4987). `list`
+pending request (#4987).
+
+`approve` handles the fresh sign-in challenge (#3979, `approve.go`). When
+`/decide` answers 401 with `error="insufficient_user_authentication"`, the
+CLI does not refresh (a refresh keeps the old `auth_time`). It runs
+`auth.RunFreshSignIn` (`cli/internal/auth/freshsignin.go`): OIDC
+authorization code + PKCE S256 against the issuer and client id of the
+stored login, with a loopback redirect on `127.0.0.1` and a random port
+(RFC 8252 §7.3), and `prompt=login` + `max_age=0` so Keycloak asks for the
+credentials again. It retries `/decide` once with the new token, set by a
+per-request editor. The token stays in memory and is never written to the
+token store. When no browser can be opened (no `DISPLAY` /
+`WAYLAND_DISPLAY` on Linux, or the opener fails) it prints the sign-in link
+and says to approve in the web interface, and exits non-zero (auth_expired).
+The Keycloak side — standard flow, PKCE and `http://127.0.0.1:*` on
+`meho-cli` — is set by `meho admin keycloak bootstrap-clients`, the bundled
+realm `deploy/charts/meho/charts/keycloak/files/meho-realm.json` (new
+installs), and `docs-site/install/keycloak-realm.md` Step 2. `list`
 has a `RUN` column and `show` / `approve` print how the run of an approved
 request ended (#3543, see "Approved, but the run failed" above).
 `list` shows only pending requests unless `--status` is set; `--status all`

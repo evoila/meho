@@ -1464,6 +1464,26 @@ def _extract_runner_id(claims: Any, settings: Settings) -> UUID | None:
         raise _http_401("malformed_runner_id_claim") from exc
 
 
+def _extract_sign_in_claims(claims: Any) -> tuple[int | None, str | None, str | None]:
+    """Read ``auth_time``, ``acr`` and ``sid``: when and how the person signed in.
+
+    The approve check (#3979) needs them. A value of the wrong type reads
+    as missing, so the check refuses the approval (fail closed). A bool is
+    not a time, even though Python counts it as an ``int``.
+    """
+    raw_time = claims.get("auth_time")
+    auth_time: int | None = None
+    if isinstance(raw_time, (int, float)) and not isinstance(raw_time, bool):
+        auth_time = int(raw_time)
+    acr = claims.get("acr")
+    sid = claims.get("sid")
+    return (
+        auth_time,
+        acr if isinstance(acr, str) and acr else None,
+        sid if isinstance(sid, str) and sid else None,
+    )
+
+
 def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Operator:
     """Project the validated claims into the public :class:`Operator` shape.
 
@@ -1524,6 +1544,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     approver = _extract_approver(claims, settings)
     runner_id = _extract_runner_id(claims, settings)
     tenants = _extract_tenants(claims, settings, principal_kind)
+    auth_time, acr, sid = _extract_sign_in_claims(claims)
     if principal_kind is PrincipalKind.RUNNER and runner_id is None:
         # Fail-closed pairing (Initiative #2415, #2502): a runner-kind
         # token with no ``runner_id`` cannot be scoped by the gateway
@@ -1550,6 +1571,9 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             approver=approver,
             runner_id=runner_id,
             tenants=tenants,
+            auth_time=auth_time,
+            acr=acr,
+            sid=sid,
         )
     except pydantic.ValidationError as exc:
         raise _http_401("invalid_token") from exc

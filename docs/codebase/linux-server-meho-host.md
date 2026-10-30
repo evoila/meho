@@ -36,7 +36,8 @@ with anything but `yes`, and 2 for wrong usage.
 
 Later Tasks add to this file: the hardening lines of `check` (#4638) and
 the commands `certificate`, `keyholder` and `unseal` (#4738). `meho doctor`
-runs `check --json` when it runs on the server (#4740). For the hardening
+runs `check --json` as root on the server and shows its lines (#4740, see
+below). For the hardening
 lines, two read-only functions of the install already say `on` or
 `off: <reason>`: `firewall_state` in `lib/firewall.sh` and `cis_state` in
 `lib/cis.sh` ([linux-server-install.md](linux-server-install.md)).
@@ -107,6 +108,15 @@ form is
 ```
 
 with `status` one of `ok`, `warn` and `fail`. `hint` is empty on an ok line.
+
+`meho doctor` reads this form (#4740). When `/usr/local/sbin/meho-host`
+exists and the doctor runs as root, it runs `meho-host check --json` with
+a 60-second limit and shows each line in its server layer, after its own
+lines. It maps `ok`, `warn` and `fail` (and `skip`) to its own statuses.
+A line with another status word becomes a red line in the doctor, so a
+new status word needs a change in `cli/internal/cmd/doctor_server.go`
+too. Output that is not this JSON gives one red doctor line. See
+[cli.md](cli.md), section "Server layer".
 
 ### `support-bundle`
 

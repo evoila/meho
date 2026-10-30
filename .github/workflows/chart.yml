@@ -1276,6 +1276,285 @@ jobs:
           # securityContext the migrate init container inherits.
           kubectl get namespace meho-test -o yaml | grep -A2 labels || true
 
+  helm-test-byo:
+    # Why there are two kind jobs (#5412): the chart migrates the database
+    # in one of two ways.
+    #
+    #   - Built-in PostgreSQL (`helm-test` above): the backplane pod's
+    #     `migrate` init container runs the migration (#5233).
+    #   - Bring-your-own PostgreSQL (this job): the database is outside the
+    #     release, and the `pre-install,pre-upgrade` hook Job
+    #     (templates/migration-job.yaml) runs the migration. Installs that
+    #     bring their own database use this way.
+    #
+    # Each way needs its own install, so each runs in its own job. The two
+    # jobs run at the same time, so neither job needs more time.
+    #
+    # Same conditions as `helm-test`: the `changes` filter and the fork guard
+    # in the `if:` below, `ubuntu-24.04` for kind, and `helm install` and
+    # `helm test` as the namespace admin of #4099. The `if:` skips this job
+    # on a PR that does not touch the chart, and a skipped job reports
+    # Success. This job is not part of the required `helm-test-gate`.
+    name: helm install + helm test (bring-your-own PostgreSQL)
+    needs: [changes, validate]
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       needs.changes.outputs.chart == 'true')
+    # Pinned 2026-10-29 with `helm-test` (ubuntu-latest is now 26.04, whose Docker breaks kind image load); revisit when kind/docker support it.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
+        with:
+          version: v3.16.4
+
+      - name: Create kind cluster
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa  # v1.15.1
+        with:
+          cluster_name: meho-helm-test
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+
+      - name: Restore fastembed model cache (#1623)
+        # Same restore-only cache entry as `helm-test`.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.fastembed-cache
+          key: fastembed-model-${{ runner.os }}-${{ hashFiles('backend/uv.lock') }}
+          restore-keys: |
+            fastembed-model-${{ runner.os }}-
+
+      - name: Pre-seed fastembed snapshot into the build context (#1623)
+        # Same as in `helm-test`: a restored snapshot means no model download
+        # during the image build.
+        run: |
+          if [ -d "${{ github.workspace }}/.fastembed-cache" ] \
+             && [ -n "$(ls -A "${{ github.workspace }}/.fastembed-cache" 2>/dev/null)" ]; then
+            echo ">> fastembed cache restored; staging into backend/.model-preseed/"
+            cp -a "${{ github.workspace }}/.fastembed-cache/." backend/.model-preseed/
+          else
+            echo ">> fastembed cache MISS (cold path); warm RUN will download once"
+          fi
+
+      - name: Build backplane image locally (load into Docker, not push)
+        # Same build as in `helm-test`, but this job only reads the shared
+        # build cache. `helm-test` writes it, so the two jobs do not upload
+        # the same layers at the same time.
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: backend
+          platforms: linux/amd64
+          load: true
+          tags: ghcr.io/evoila/meho:test
+          cache-from: type=gha
+
+      - name: Load images into kind
+        # Three images: the backplane image built above, the chart's
+        # PostgreSQL image (the database below and the helm test pod) and the
+        # broadcast store's Valkey image. The chart pins the last two by
+        # digest. Each is pulled by that digest, then tagged and loaded by
+        # tag, because `kind load` keeps the tag. The install below renders
+        # them by tag (`corePostgres.image.digest=`,
+        # `broadcast.image.digest=`), so kind uses the loaded copy and pulls
+        # nothing from Docker Hub. The content is still the pinned digest.
+        run: |
+          set -euo pipefail
+          values=deploy/charts/meho/values.yaml
+          images=(ghcr.io/evoila/meho:test)
+          for part in corePostgres broadcast; do
+            repo=$(yq ".${part}.image.repository" "$values")
+            tag=$(yq ".${part}.image.tag" "$values")
+            digest=$(yq ".${part}.image.digest" "$values")
+            docker pull "${repo}@${digest}"
+            docker tag "${repo}@${digest}" "${repo}:${tag}"
+            images+=("${repo}:${tag}")
+          done
+          kind load docker-image "${images[@]}" --name meho-helm-test
+
+      - name: Create the namespace and a namespace admin (#4099)
+        # Same as in `helm-test`.
+        run: |
+          set -euo pipefail
+          kubectl create namespace meho-test
+          kubectl label namespace meho-test \
+            pod-security.kubernetes.io/enforce=baseline \
+            pod-security.kubernetes.io/warn=restricted \
+            pod-security.kubernetes.io/audit=restricted
+          kubectl -n meho-test create rolebinding meho-installer \
+            --clusterrole=admin --user=meho-installer
+          # Guard against a vacuous test: the user must not have cluster rights.
+          if kubectl auth can-i create clusterrolebindings --as=meho-installer; then
+            echo "::error::meho-installer has cluster-wide rights; the namespace-admin install proves nothing"
+            exit 1
+          fi
+
+      - name: Start a bring-your-own PostgreSQL outside the release (#5412)
+        # This is the customer's database. It is the chart's own PostgreSQL
+        # objects (`--show-only`), applied with kubectl and not with Helm, so
+        # they are not part of the release below. The three Secrets they read
+        # are made here with throwaway passwords. Their names, keys and URL
+        # shape are those the install's secrets Job uses.
+        #
+        # The database start-up script creates the `vector` extension as the
+        # superuser. That is the one step a customer's database admin does by
+        # hand (values.yaml, `postgres.credentialsSecret`). MEHO logs in as
+        # `meho`, which owns the `meho` database and is not a superuser.
+        #
+        # The database keeps its own NetworkPolicy. The hook Job pod and the
+        # helm test pod carry the backplane labels it admits.
+        run: |
+          set -euo pipefail
+          meho_pw=$(openssl rand -hex 16)
+          kubectl -n meho-test create secret generic meho-test-core-postgres-superuser \
+            --from-literal=password="$(openssl rand -hex 16)"
+          kubectl -n meho-test create secret generic meho-test-core-postgres-meho \
+            --from-literal=password="$meho_pw" \
+            --from-literal=url="postgresql+asyncpg://meho:${meho_pw}@meho-test-postgres:5432/meho"
+          kubectl -n meho-test create secret generic meho-test-core-postgres-keycloak \
+            --from-literal=password="$(openssl rand -hex 16)"
+          helm template meho-test ./deploy/charts/meho \
+            --namespace meho-test \
+            --set image.tag=test \
+            --set ingress.enabled=false \
+            --set networkPolicy.enabled=false \
+            --set postgres.credentialsSecret=meho-test-core-postgres-meho \
+            --set vault.address=https://vault.test \
+            --set keycloak.issuer=https://keycloak.test/realms/meho \
+            --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
+            --set config.keycloakAudience=meho-backplane \
+            --set config.vaultAddr=https://vault.test \
+            --set config.backplaneUrl=https://meho-test.test \
+            --set corePostgres.enabled=true \
+            --set corePostgres.image.digest= \
+            --show-only charts/corePostgres/templates/configmap.yaml \
+            --show-only charts/corePostgres/templates/service.yaml \
+            --show-only charts/corePostgres/templates/networkpolicy.yaml \
+            --show-only charts/corePostgres/templates/statefulset.yaml \
+            | kubectl -n meho-test apply -f -
+          kubectl -n meho-test rollout status statefulset/meho-test-postgres --timeout=180s
+          # Guard against a vacuous test: the migration must run as a role
+          # that is not a superuser.
+          rolsuper=$(kubectl -n meho-test exec meho-test-postgres-0 -c postgres -- \
+            psql -X -tA -h /var/run/postgresql -U postgres \
+            -c "SELECT rolsuper FROM pg_roles WHERE rolname = 'meho'")
+          test "$rolsuper" = f \
+            || { echo "::error::the meho role is a superuser or missing (rolsuper='${rolsuper}')"; exit 1; }
+
+      - name: Helm install meho chart with the bring-your-own PostgreSQL (#5412)
+        # `corePostgres` is off, so the chart renders the migration as the
+        # `pre-install,pre-upgrade` hook Job and gives the backplane no
+        # `migrate` init container. Helm runs the Job before it creates the
+        # release objects and waits for it. A failed Job fails the install.
+        #
+        # Every other flag is the same as in `helm-test`, so the two jobs
+        # differ only in the database part: `--wait --wait-for-jobs` (the
+        # command shape of the form-2 installer), the readiness probe on
+        # `/healthz` (no Keycloak and no Vault here), the placeholder
+        # backplane URL (#2394), and the broadcast store without its
+        # NetworkPolicy and password (#276). `broadcast.image.digest=` only
+        # makes kind use the image loaded above.
+        run: |
+          helm install meho-test ./deploy/charts/meho \
+            --namespace meho-test \
+            --kube-as-user meho-installer \
+            --wait \
+            --wait-for-jobs \
+            --timeout 10m \
+            --set image.tag=test \
+            --set ingress.enabled=false \
+            --set networkPolicy.enabled=false \
+            --set broadcast.networkPolicy.enabled=false \
+            --set broadcast.auth.enabled=false \
+            --set broadcast.image.digest= \
+            --set corePostgres.image.digest= \
+            --set postgres.credentialsSecret=meho-test-core-postgres-meho \
+            --set vault.address=https://vault.test \
+            --set keycloak.issuer=https://keycloak.test/realms/meho \
+            --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
+            --set config.keycloakAudience=meho-backplane \
+            --set config.vaultAddr=https://vault.test \
+            --set config.backplaneUrl=https://meho-test.test \
+            --set probes.readiness.httpGet.path=/healthz \
+            --set retrieval.modelCache.enabled=false
+
+      - name: Check the hook Job ran the migration (#5412)
+        # Helm deletes the hook Job once it succeeds (`hook-succeeded`), so
+        # the proof is Helm's own record of the hook run in the release:
+        # `last_run.phase` is `Succeeded`. The backplane has no `migrate`
+        # init container in this mode, so only the Job can have migrated the
+        # database. The backplane's `db` readiness check then reports the
+        # schema at the image's newest revision with pgvector present
+        # (detail `revision=<head>`).
+        run: |
+          set -euo pipefail
+          last_run=$(helm status meho-test --namespace meho-test --kube-as-user meho-installer -o json \
+            | jq -c '.hooks[]? | select(.kind == "Job" and .name == "meho-test-migrate") | .last_run')
+          echo ">> migration hook Job, last run: ${last_run}"
+          phase=$(jq -r '.phase' <<<"$last_run")
+          test "$phase" = Succeeded \
+            || { echo "::error::the migration hook Job meho-test-migrate did not succeed (phase '${phase}')"; exit 1; }
+          init=$(kubectl -n meho-test get deployment meho-test \
+            -o jsonpath='{.spec.template.spec.initContainers[*].name}')
+          if [ -n "$init" ]; then
+            echo "::error::with corePostgres off the backplane has init containers (${init}); only the hook Job may migrate (#5233)"
+            exit 1
+          fi
+          pod=$(kubectl -n meho-test get pods \
+            -l app.kubernetes.io/name=meho,app.kubernetes.io/instance=meho-test \
+            -o jsonpath='{.items[?(@.metadata.ownerReferences[0].kind=="ReplicaSet")].metadata.name}')
+          # /ready answers 503 here (no Keycloak, no Vault); read its body.
+          kubectl -n meho-test exec "$pod" -c backplane -- python -c '
+          import json, sys, urllib.error, urllib.request
+          try:
+              body = urllib.request.urlopen("http://127.0.0.1:8000/ready", timeout=10).read()
+          except urllib.error.HTTPError as exc:
+              body = exc.read()
+          db = next(c for c in json.loads(body)["checks"] if c["name"] == "db")
+          print(">> /ready db check:", json.dumps(db))
+          sys.exit(0 if db["ok"] and db["detail"].startswith("revision=") else 1)
+          '
+
+      - name: Run helm test (pgvector preflight Job)
+        # Same test as in `helm-test`. The test pod reaches the
+        # bring-your-own database through `postgres.credentialsSecret`.
+        run: |
+          helm test meho-test \
+            --namespace meho-test \
+            --kube-as-user meho-installer \
+            --timeout 2m
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          echo "=== Helm release status ==="
+          helm status meho-test --namespace meho-test || true
+          echo "=== Pods ==="
+          kubectl -n meho-test get pods -o wide || true
+          echo "=== Namespace events (sorted by lastTimestamp) ==="
+          kubectl -n meho-test get events --sort-by=.lastTimestamp || true
+          echo "=== Migration hook Job ==="
+          # A failed hook Job stays (no `hook-failed` delete policy).
+          # `--tail=-1`: with a label selector, kubectl shows 10 lines only.
+          kubectl -n meho-test describe job/meho-test-migrate || true
+          kubectl -n meho-test logs -l job-name=meho-test-migrate --tail=-1 || true
+          kubectl -n meho-test logs -l job-name=meho-test-migrate --previous --tail=-1 || true
+          echo "=== Backplane ==="
+          kubectl -n meho-test describe pods \
+            -l app.kubernetes.io/name=meho,app.kubernetes.io/instance=meho-test || true
+          kubectl -n meho-test logs deploy/meho-test -c backplane --tail=200 || true
+          echo "=== Bring-your-own PostgreSQL ==="
+          kubectl -n meho-test describe pod/meho-test-postgres-0 || true
+          kubectl -n meho-test logs pod/meho-test-postgres-0 -c postgres || true
+          kubectl -n meho-test logs pod/meho-test-postgres-0 -c reconcile || true
+          echo "=== kind cluster loaded images ==="
+          docker exec meho-helm-test-control-plane crictl images || true
+
   helm-test-gate:
     # The REQUIRED branch-protection context. It `always()` runs and explicitly
     # evaluates the upstream job results so the gate fails CLOSED: a skipped

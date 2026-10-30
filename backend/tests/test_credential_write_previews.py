@@ -195,57 +195,107 @@ async def test_k8s_secret_create_without_labels_omits_them_from_preview() -> Non
     assert "annotations" not in preview
 
 
-@pytest.mark.asyncio
-async def test_k8s_job_create_shows_containers_not_env_values_or_command() -> None:
-    command = ["/bin/sh", "-c", f"curl -H 'Authorization: {_SECRET}' https://example.invalid"]
-    _, preview = await _preview(
-        "k8s.job.create",
-        {
-            "name": "migrate",
-            "namespace": "apps",
-            "spec": {
-                "template": {
-                    "spec": {
-                        "serviceAccountName": "migrator",
-                        "initContainers": [{"name": "wait", "image": "busybox:1.36"}],
-                        "containers": [
-                            {
-                                "name": "run",
-                                "image": "registry.example/migrate:2.1",
-                                "command": command,
-                                "env": [
-                                    {"name": "DB_PASSWORD", "value": _SECRET},
-                                    {
-                                        "name": "API_TOKEN",
-                                        "valueFrom": {
-                                            "secretKeyRef": {"name": "api", "key": "token"}
-                                        },
-                                    },
-                                ],
-                                "envFrom": [
-                                    {"secretRef": {"name": "db-creds"}},
-                                    {"configMapRef": {"name": "settings"}},
-                                ],
-                            }
-                        ],
-                    }
-                }
+def _job_params(container: dict[str, Any], **pod_fields: Any) -> dict[str, Any]:
+    """``k8s.job.create`` params for one container and the given pod fields."""
+    return {
+        "name": "node-check",
+        "namespace": "default",
+        "spec": {
+            "backoffLimit": 0,
+            "template": {
+                "spec": {"restartPolicy": "Never", "containers": [container], **pod_fields}
             },
         },
+    }
+
+
+@pytest.mark.asyncio
+async def test_k8s_job_create_shows_privileges_node_and_command_not_secrets() -> None:
+    """The approver sees what a privileged Job runs and where (#5259)."""
+    command = ["nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "uptime"]
+    effect, preview = await _preview(
+        "k8s.job.create",
+        _job_params(
+            {
+                "name": "check",
+                "image": "busybox:1.36",
+                "command": command,
+                "args": [f"--token={_SECRET}", "--verbose"],
+                "securityContext": {"privileged": True},
+                "env": [
+                    {"name": "API_TOKEN", "value": _SECRET},
+                    {
+                        "name": "DB_PASSWORD",
+                        "valueFrom": {"secretKeyRef": {"name": "db", "key": "password"}},
+                    },
+                ],
+                "envFrom": [{"configMapRef": {"name": "settings"}}],
+                "volumeMounts": [{"name": "host-root", "mountPath": "/host"}],
+            },
+            nodeName="node-01",
+            hostPID=True,
+            serviceAccountName="checker",
+            volumes=[{"name": "host-root", "hostPath": {"path": "/"}}],
+        ),
     )
     assert preview["resource"] == "job"
-    assert preview["name"] == "migrate"
-    assert preview["namespace"] == "apps"
-    assert preview["service_account_name"] == "migrator"
-    assert preview["init_containers"] == [
-        {"name": "wait", "image": "busybox:1.36", "env_var_names": [], "env_from": []}
+    assert preview["name"] == "node-check"
+    assert preview["namespace"] == "default"
+    spec = preview["spec"]
+    assert spec["backoffLimit"] == 0
+    pod = spec["template"]["spec"]
+    assert pod["nodeName"] == "node-01"
+    assert pod["hostPID"] is True
+    assert pod["serviceAccountName"] == "checker"
+    assert pod["volumes"] == [{"name": "host-root", "hostPath": {"path": "/"}}]
+    (container,) = pod["containers"]
+    assert container["image"] == "busybox:1.36"
+    assert container["command"] == command
+    assert container["args"][1] == "--verbose"
+    assert container["securityContext"] == {"privileged": True}
+    assert container["volumeMounts"] == [{"name": "host-root", "mountPath": "/host"}]
+    assert container["env"] == [
+        {"name": "API_TOKEN", "value": "***REDACTED***"},
+        {"name": "DB_PASSWORD", "valueFrom": {"secretKeyRef": {"name": "db", "key": "password"}}},
     ]
-    (container,) = preview["containers"]
-    assert container["name"] == "run"
-    assert container["image"] == "registry.example/migrate:2.1"
-    assert container["env_var_names"] == ["API_TOKEN", "DB_PASSWORD"]
-    assert container["env_from"] == ["secret:db-creds", "config_map:settings"]
-    assert container["command_bytes"] == sum(len(part.encode()) for part in command)
+    assert container["envFrom"] == [{"configMapRef": {"name": "settings"}}]
+    text = json.dumps(effect)
+    assert "privileged" in text
+    assert "nsenter" in text
+
+
+@pytest.mark.asyncio
+async def test_k8s_job_create_hides_secret_shapes_anywhere_in_the_spec() -> None:
+    """Secret-shaped text and probe header values are hidden at any depth."""
+    effect, preview = await _preview(
+        "k8s.job.create",
+        _job_params(
+            {
+                "name": "run",
+                "image": "registry.example/migrate:2.1",
+                "command": ["/bin/sh", "-c", f"curl -H 'Authorization: Bearer {_SECRET}' x"],
+                "args": [f"API_KEY={_SECRET}"],
+                "livenessProbe": {
+                    "httpGet": {
+                        "path": "/health",
+                        "port": 8080,
+                        "httpHeaders": [{"name": "X-Auth", "value": _SECRET}],
+                    }
+                },
+            },
+            initContainers=[
+                {"name": "wait", "image": "busybox:1.36", "env": [{"name": "K", "value": _SECRET}]}
+            ],
+        ),
+    )
+    pod = preview["spec"]["template"]["spec"]
+    (container,) = pod["containers"]
+    assert container["command"][:2] == ["/bin/sh", "-c"]
+    assert container["livenessProbe"]["httpGet"]["httpHeaders"] == [
+        {"name": "X-Auth", "value": "***REDACTED***"}
+    ]
+    assert pod["initContainers"][0]["env"] == [{"name": "K", "value": "***REDACTED***"}]
+    assert "made-up-secret" not in json.dumps(effect)
 
 
 @pytest.mark.parametrize(

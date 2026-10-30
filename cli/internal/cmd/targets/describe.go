@@ -23,13 +23,13 @@ import (
 //
 // CLI shape:
 //
-//	meho targets describe <name|alias> \
+//	meho targets describe <name, alias or id> \
 //	  [--json]                                 # machine-readable output
 //	  [--backplane <url>]                      # override the backplane URL
 //
-// The query accepts either the target's canonical name or any of its
-// aliases — alias resolution happens server-side via the resolver
-// (backend/src/meho_backplane/targets/resolver.py).
+// The query accepts the target's canonical name, any of its aliases,
+// or its id — the lookup happens server-side (name, then alias, then
+// id; see backend/src/meho_backplane/api/v1/targets.py).
 //
 // Exit codes:
 //   - 0   target rendered cleanly
@@ -44,11 +44,11 @@ func newDescribeCmd() *cobra.Command {
 		backplaneOverride string
 	)
 	cmd := &cobra.Command{
-		Use:   "describe <name-or-alias>",
-		Short: "Describe a single target (alias-aware)",
+		Use:   "describe <name, alias or id>",
+		Short: "Describe a single target by name, alias or id",
 		Long: "describe calls GET /api/v1/targets/{name} and renders the " +
 			"full Target row. The supplied argument can be the target's " +
-			"canonical name or any of its aliases — resolution happens " +
+			"canonical name, any of its aliases, or its id — resolution happens " +
 			"server-side. On a 404 the CLI surfaces the near-miss " +
 			"suggestions the resolver computed so the operator can fix " +
 			"a typo in one shot. --json emits the raw API response.",
@@ -80,7 +80,7 @@ func runDescribe(cmd *cobra.Command, opts describeOptions) error {
 	if opts.Query == "" {
 		return output.RenderError(
 			cmd.ErrOrStderr(),
-			output.Unexpected("describe requires a non-empty <name-or-alias> argument"),
+			output.Unexpected("describe requires a non-empty <name, alias or id> argument"),
 			opts.JSONOut,
 		)
 	}

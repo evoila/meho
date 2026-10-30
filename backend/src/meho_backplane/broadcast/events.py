@@ -109,6 +109,13 @@ _CREDENTIAL_READ_OPS: Final[frozenset[str]] = frozenset(
         # so audit + broadcast collapse to aggregate-only on top of its
         # requires_approval gate; the result is value-free by construction.
         "k8s.secret.read_to_ref",
+        # #5230 -- the two compare reads. The backplane reads the secret
+        # values itself to compare them and returns only same/different, so
+        # the answer is value-free by construction. The pin makes the flight
+        # recorder drop the vendor bodies of these reads (they carry the
+        # values) and collapses the broadcast to aggregate-only.
+        "vault.kv.compare",
+        "k8s.secret.compare_to_ref",
         # #4617 -- the ingested SDDC Manager reads whose answer holds
         # credentials. Same posture as ``sddc.credential.list``: the catalog
         # row ``sddc`` / ``9.0`` raises them to caution with approval, and
@@ -183,6 +190,9 @@ _CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
         # flight recorder drop its bodies (the OAuth form carries the session
         # JWT as the ``assertion``; the token response carries the token).
         "vcfa.provider.api_token.create",
+        # The handoff export returns a one-time handoff token: not the value,
+        # but it can fetch the value once. Aggregate-only keeps it off the feed.
+        "secret.handoff.export",
     }
 )
 
@@ -235,6 +245,9 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # k8s.secret.create (inline maps or store refs), so the same pin
         # keeps them off the approval row and the broadcast.
         "k8s.secret.update",
+        # The handoff import carries the one-time handoff token in params.
+        # The pin keeps it off the approval row (stored encrypted) and the feed.
+        "secret.handoff.import",
         "k8s.job.create",
         # G3.13-T4 #1406 — Keycloak user-credential write ops. Both source
         # the password from Vault (it is never an inline param), so the
@@ -397,6 +410,13 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # ``vmware.appliance.local_account.policy.set`` sends only expiry
         # numbers and flags, so it is NOT pinned.
         "vmware.appliance.local_account.password.set",
+        # The Keycloak login test. Its params carry only a Vault *path*
+        # (``password_secret_ref``); the password is read in-process and sent
+        # only in the token request BODY, and the token answer carries an
+        # access and a refresh token. The pin sets body_recorded=false for its
+        # flight-recorder spans, collapses the broadcast to aggregate-only and
+        # keeps a waiting approval's params in the encrypted handoff store.
+        "keycloak.user.check_login",
     }
 )
 

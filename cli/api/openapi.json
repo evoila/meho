@@ -36449,6 +36449,7 @@
               "mssql",
               "nsx",
               "pfsense",
+              "phpipam",
               "postgres",
               "prometheus",
               "proxmox",

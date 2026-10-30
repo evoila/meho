@@ -77,9 +77,10 @@ Notes:
 - **`list` is granted on `secret/metadata/...`**, not `secret/data/...`:
   KV-v2 authorises a LIST against the metadata path.
 - **Admin break-glass lives under `privileged/`** and is reachable by the
-  `tenant_admin` policy *alone* — `read_only`/`operator` policies never
-  template that sub-path, so a non-admin operator cannot reach it even
-  within their own tenant.
+  `tenant_admin` policy *alone*. The `read_only` and `operator` wildcards
+  `tenants/<id>/*` cover `privileged/` too, so these two policies deny it
+  explicitly: the more specific path wins, so a non-admin cannot read or
+  list it even within their own tenant.
 - The trailing `/*` is a **literal glob in the static portion** of the
   path, after the templated `{{...}}` segment. A glob must **never** be
   placed *inside* the `{{identity.entity.metadata.tenant_id}}` segment —
@@ -104,6 +105,13 @@ path "secret/data/tenants/{{identity.entity.metadata.tenant_id}}/*" {
 path "secret/metadata/tenants/{{identity.entity.metadata.tenant_id}}/*" {
   capabilities = ["read", "list"]
 }
+# The admin-only break-glass path: the wildcards above cover it too.
+path "secret/data/tenants/{{identity.entity.metadata.tenant_id}}/privileged/*" {
+  capabilities = ["deny"]
+}
+path "secret/metadata/tenants/{{identity.entity.metadata.tenant_id}}/privileged/*" {
+  capabilities = ["deny"]
+}
 ```
 
 ### 2.2 `meho-tenant-operator`
@@ -119,6 +127,13 @@ path "secret/metadata/tenants/{{identity.entity.metadata.tenant_id}}/*" {
 }
 path "secret/data/tenants/{{identity.entity.metadata.tenant_id}}/rotation/*" {
   capabilities = ["create", "read", "update"]
+}
+# The admin-only break-glass path: the wildcards above cover it too.
+path "secret/data/tenants/{{identity.entity.metadata.tenant_id}}/privileged/*" {
+  capabilities = ["deny"]
+}
+path "secret/metadata/tenants/{{identity.entity.metadata.tenant_id}}/privileged/*" {
+  capabilities = ["deny"]
 }
 ```
 

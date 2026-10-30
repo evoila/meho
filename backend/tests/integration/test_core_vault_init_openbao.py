@@ -53,27 +53,7 @@ _TENANT_B = "0f7e2a4c-5d3b-4e1a-9c8f-7b6a5d4c3b2a"
 _CLUSTER_ISSUER = "https://kubernetes.default.svc.cluster.local"
 _NAMESPACE = "meho"
 _PASSWORD = "it-" + secrets.token_hex(8)
-# The server config the chart renders (charts/openbao/templates/configmap.yaml),
-# with the addresses the StatefulSet gives through the environment.
-_HCL = """
-ui           = false
-api_addr     = "http://openbao:8200"
-cluster_addr = "https://openbao:8201"
-storage "raft" {
-  path    = "/openbao/file"
-  node_id = "openbao-0"
-}
-listener "tcp" {
-  address         = "0.0.0.0:8200"
-  cluster_address = "0.0.0.0:8201"
-  tls_disable     = 1
-}
-audit "file" "stdout" {
-  options {
-    file_path = "stdout"
-  }
-}
-"""
+_OPENBAO_CONFIG = Path(__file__).resolve().parents[1] / "fixtures" / "openbao" / "config"
 
 
 class _Store:
@@ -133,7 +113,7 @@ def _wait(url: str, timeout: float, ok: Any = lambda r: r.is_success) -> None:
             if ok(httpx.get(url)):
                 return
         except httpx.TransportError:
-            pass
+            pass  # not up yet; try again until the deadline
         if time.monotonic() > deadline:
             pytest.fail(f"{url} did not answer in time")
         time.sleep(2)
@@ -177,8 +157,6 @@ def env(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Env]:
     from tests._strategies import wait_for_log_message
 
     tmp = tmp_path_factory.mktemp("openbao")
-    (tmp / "config").mkdir()
-    (tmp / "config" / "server.hcl").write_text(_HCL)
 
     network = Network()
     network.create()
@@ -208,7 +186,7 @@ def env(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Env]:
         .with_network_aliases("openbao")
         .with_command("server")
         .with_env("SKIP_CHOWN", "true")
-        .with_volume_mapping(str(tmp / "config"), "/openbao/config", "ro")
+        .with_volume_mapping(str(_OPENBAO_CONFIG), "/openbao/config", "ro")
         .with_exposed_ports(8200)
     )
     try:
@@ -283,6 +261,8 @@ def _make_users(kc_url: str) -> None:
     groups = {g["name"]: g["id"] for g in call("GET", "groups?max=100")}
     for user, member_of in (
         ("anna", ["MEHO-Admins"]),
+        ("rita", ["MEHO-Readers"]),
+        ("otto", ["MEHO-Operators"]),
         ("bob", ["B-Admins"]),
         ("pat", ["MEHO-Admins", "MEHO-Platform-Admins"]),
     ):
@@ -402,6 +382,27 @@ async def test_each_tenant_reads_and_writes_only_its_own_secrets(env: _Env) -> N
     # Both read the health check's test secret (policy meho-mcp).
     for token in tokens.values():
         assert _bao(env, "GET", "secret/data/meho/test/federation", token) == 200
+
+
+async def test_only_tenant_admins_reach_the_privileged_path(env: _Env) -> None:
+    tokens = {}
+    for user in ("anna", "rita", "otto"):
+        reply = _login(env, "meho-mcp", _user_jwt(env, user))
+        assert reply.status_code == 200, reply.text
+        tokens[user] = reply.json()["auth"]["client_token"]
+    a = f"secret/data/tenants/{_TENANT_A}"
+    privileged = f"{a}/privileged/break-glass"
+    listing = f"secret/metadata/tenants/{_TENANT_A}/privileged/"
+
+    assert _bao(env, "POST", privileged, tokens["anna"], {"data": {"v": "x"}}) == 200
+    assert _bao(env, "GET", privileged, tokens["anna"]) == 200
+    assert _bao(env, "LIST", listing, tokens["anna"]) == 200
+    for user in ("rita", "otto"):
+        assert _bao(env, "GET", f"{a}/target1", tokens[user]) == 200, user
+        assert _bao(env, "GET", privileged, tokens[user]) == 403, user
+        assert _bao(env, "LIST", listing, tokens[user]) == 403, user
+    assert _bao(env, "POST", f"{a}/target1", tokens["rita"], {"data": {"v": "y"}}) == 403
+    assert _bao(env, "POST", f"{a}/rotation/t1", tokens["otto"], {"data": {"v": "y"}}) == 200
 
 
 async def test_only_platform_admins_get_the_admin_login(env: _Env) -> None:

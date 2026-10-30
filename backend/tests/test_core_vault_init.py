@@ -493,6 +493,21 @@ def test_policy_files_template_only_on_the_login_accessor() -> None:
             ), path
 
 
+def test_only_tenant_admins_reach_the_privileged_path() -> None:
+    policies = load_policies(str(_POLICY_DIR))
+    tenant = f"{{{{identity.entity.aliases.{ACCESSOR_MARK}.metadata.tenant_id}}}}"
+    privileged = {
+        f"secret/data/tenants/{tenant}/privileged/*",
+        f"secret/metadata/tenants/{tenant}/privileged/*",
+    }
+    for name in ("meho-tenant-read-only", "meho-tenant-operator"):
+        rules = dict(_capabilities(policies[name]))
+        assert all(rules.get(path) == {"deny"} for path in privileged), name
+    admin = dict(_capabilities(policies["meho-tenant-admin"]))
+    assert "deny" not in set().union(*admin.values())
+    assert "read" in admin[f"secret/data/tenants/{tenant}/privileged/*"]
+
+
 def _jwk(public: Any) -> dict[str, Any]:
     algorithm = (
         jwt.algorithms.RSAAlgorithm

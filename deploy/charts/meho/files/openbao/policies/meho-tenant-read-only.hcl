@@ -9,3 +9,11 @@ path "secret/data/tenants/{{identity.entity.aliases.JWT_ACCESSOR.metadata.tenant
 path "secret/metadata/tenants/{{identity.entity.aliases.JWT_ACCESSOR.metadata.tenant_id}}/*" {
   capabilities = ["read", "list"]
 }
+# The break-glass path privileged/ is for tenant admins only. The wildcards
+# above cover it too, so deny it here: the more specific path wins.
+path "secret/data/tenants/{{identity.entity.aliases.JWT_ACCESSOR.metadata.tenant_id}}/privileged/*" {
+  capabilities = ["deny"]
+}
+path "secret/metadata/tenants/{{identity.entity.aliases.JWT_ACCESSOR.metadata.tenant_id}}/privileged/*" {
+  capabilities = ["deny"]
+}

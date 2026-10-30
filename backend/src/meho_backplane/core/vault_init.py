@@ -145,7 +145,6 @@ class Bao(Protocol):
 class Cluster(Protocol):
     async def issuer_keys(self) -> tuple[str, list[str]]:
         """The cluster's service-account token issuer and its signing keys as PEM text."""
-        ...
 
 
 class SecretStore(Protocol):

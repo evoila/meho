@@ -60,7 +60,7 @@ The policies:
 | Policy | Rights |
 | --- | --- |
 | `meho-mcp` | read `secret/meho/*` (docs/cross-repo/vault-provisioning.md §3) |
-| `meho-tenant-read-only`, `-operator`, `-admin` | the bodies of docs/cross-repo/connector-vault-tenant-policy.md §2, but the tenant comes from `identity.entity.aliases.<jwt accessor>.metadata.tenant_id` (the login's metadata), not from entity metadata |
+| `meho-tenant-read-only`, `-operator`, `-admin` | the bodies of docs/cross-repo/connector-vault-tenant-policy.md §2, but the tenant comes from `identity.entity.aliases.<jwt accessor>.metadata.tenant_id` (the login's metadata), not from entity metadata. Only `-admin` reaches the break-glass path `tenants/<id>/privileged/`; the other two deny it |
 | `meho-admin` | everything, with `sudo` |
 | `meho-scheduler` | docs/cross-repo/vault-provisioning.md §6 |
 | `meho-snapshot` | read and `sudo` on `sys/storage/raft/snapshot` (#3960) |
@@ -202,9 +202,7 @@ API). With the subcharts' NetworkPolicies on:
 
 ## References
 
-- Ticket: evoila/meho#4044. Core design: meho-internal
-  `docs/design/2026-10-10-install-forms/core.md` §4 sub-decisions 6 to 8;
-  the week-3 test: meho-internal `docs/design/spikes/openbao-week3/`.
+- Ticket: #4044.
 - OpenBao API (v2.7.1): `website/content/docs/api/system/init.mdx`,
   `api/auth/jwt.mdx` (`claim_mappings`, `groups_claim`, `bound_claims`,
   `jwt_validation_pubkeys`), `api/secret/identity/group-alias.mdx`,

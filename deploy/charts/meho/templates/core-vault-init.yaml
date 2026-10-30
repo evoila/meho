@@ -3,7 +3,7 @@
 {{- fail "coreVault.enabled needs coreKeycloak.enabled: the built-in OpenBao trusts logins from the built-in Keycloak." }}
 {{- end }}
 {{- /*
-The built-in core's `vault-init` Job (#4044; core design §4 sub-decision 6):
+The built-in core's `vault-init` Job (#4044):
 it starts OpenBao the first time and sets it up, then revokes the root
 token. Normal release objects, not hooks, so Helm `--wait-for-jobs`,
 klipper-helm and Argo CD all wait for the Job. Details:

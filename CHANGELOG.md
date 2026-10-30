@@ -90,25 +90,6 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Added
-
-#### Install and Helm chart
-
-- With the built-in OpenBao on, the install now sets OpenBao up by itself
-  (#4044). A Job (`<release>-vault-init-<hash>`) starts OpenBao, stores
-  the unseal key in `<release>-core-vault-unseal`, and sets up the login
-  that trusts the built-in Keycloak. Each tenant's users read and write
-  only their own tenant's secrets from the first login. The Job then
-  revokes the root token, so none is left; later runs log in with the
-  Job's own service account and change nothing. Platform admins
-  (`MEHO-Platform-Admins`) get the `meho-admin` login for day-2 work.
-  `coreVault.enabled` now needs `coreKeycloak.enabled`. Pointing MEHO
-  at the built-in OpenBao by default is a later change (#4047).
-- If you turned on the built-in OpenBao in an earlier version and set it
-  up by hand: before the upgrade, put a root token into the Secret
-  `<release>-core-vault-init` (key `token`). The Job takes OpenBao over
-  with it, then revokes that token. Without it the Job stops and says so.
-
 ## [0.38.0] - 2026-10-28
 
 MEHO 0.38.0 starts the Azure connector: the login with a service

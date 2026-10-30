@@ -59,6 +59,7 @@ __all__ = [
     "PATTERN_NAMES",
     "SecretFinder",
     "get_pattern",
+    "secret_spans",
 ]
 
 
@@ -297,3 +298,15 @@ def get_pattern(name: str) -> re.Pattern[str] | SecretFinder:
         raise KeyError(
             f"unknown named pattern {name!r}; known patterns: {', '.join(PATTERN_NAMES)}",
         ) from exc
+
+
+def secret_spans(pattern: re.Pattern[str] | SecretFinder, text: str) -> list[tuple[int, int]]:
+    """Return the spans *pattern* finds in *text*, left to right, never overlapping.
+
+    A regex reports its whole matches. A :class:`SecretFinder`
+    (``bind_key_secret``) reports only the secret part, so the text
+    around it stays readable. The engine replaces exactly these spans.
+    """
+    if isinstance(pattern, re.Pattern):
+        return [match.span() for match in pattern.finditer(text)]
+    return pattern.secret_spans(text)

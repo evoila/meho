@@ -71,7 +71,7 @@ All types are Pydantic v2 frozen models, defined in
 | `RedactionPolicyError` | `policy.py` | One typed exception for any parse / validation failure |
 | `RedactionManifestEntry` | `engine.py` | One manifest row (rule, pattern, action, count, span, reason, path) |
 | `RedactionResult` | `engine.py` | Engine return value: `redacted` + `manifest` |
-| `SecretFinder` | `patterns.py` | A named pattern written as code: `secret_spans(text)` returns the spans to replace |
+| `SecretFinder` | `patterns.py` | A named pattern written as code: `secret_spans(text)` returns the spans to replace. `patterns.secret_spans(pattern, text)` gives the spans of any named pattern, regex or finder |
 | `BindKeySecretFinder` | `bind_secret.py` | The `bind_key_secret` finder: reads BIND comments and quoted strings the way BIND does |
 
 `PATTERN_NAMES` (`patterns.py`) is the source of truth for the named

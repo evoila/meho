@@ -56,13 +56,12 @@ policy is responsible for ordering.
 from __future__ import annotations
 
 import hashlib
-import re
 from collections.abc import Mapping, Sequence
 from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from meho_backplane.redaction.patterns import SecretFinder, get_pattern
+from meho_backplane.redaction.patterns import get_pattern, secret_spans
 from meho_backplane.redaction.policy import RedactionPolicy, RedactionRule
 
 __all__ = [
@@ -255,7 +254,7 @@ def _apply_to_str(
     enforce mode; only the in-payload substitution is suppressed.
     """
     pattern = get_pattern(rule.pattern)
-    spans = _secret_spans(pattern, leaf)
+    spans = secret_spans(pattern, leaf)
     if not spans:
         return leaf
 
@@ -273,18 +272,6 @@ def _apply_to_str(
     if not mutate:
         return leaf
     return _replace_spans(rule, leaf, spans)
-
-
-def _secret_spans(pattern: re.Pattern[str] | SecretFinder, leaf: str) -> list[tuple[int, int]]:
-    """Return the spans *pattern* found in *leaf*, left to right, never overlapping.
-
-    A regex pattern reports its whole matches. A finder (``bind_key_secret``,
-    see :mod:`.bind_secret`) reports only the secret part, so the text
-    around it stays readable.
-    """
-    if isinstance(pattern, re.Pattern):
-        return [match.span() for match in pattern.finditer(leaf)]
-    return pattern.secret_spans(leaf)
 
 
 def _replace_spans(rule: RedactionRule, leaf: str, spans: list[tuple[int, int]]) -> str:

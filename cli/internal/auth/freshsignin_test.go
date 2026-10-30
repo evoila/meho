@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -146,6 +148,46 @@ func TestRunFreshSignInWithoutABrowserReturnsTheLink(t *testing.T) {
 	}
 	if !strings.HasPrefix(nb.URL, f.srv.URL+"/auth?") || !strings.Contains(nb.URL, "prompt=login") {
 		t.Errorf("link = %q", nb.URL)
+	}
+}
+
+func TestRunFreshSignInWithALauncherThatFailsReturnsTheLink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell as the fake launcher")
+	}
+	f := newFakeIdP(t)
+	start := time.Now()
+	_, err := RunFreshSignIn(context.Background(), f.doc(), "meho-cli", FreshSignInOptions{
+		OpenBrowser: func(string) error { return runLauncher(exec.Command("sh", "-c", "exit 3"), 10*time.Second) },
+		Timeout:     30 * time.Second,
+	})
+	var nb *NoBrowserError
+	if !errors.As(err, &nb) {
+		t.Fatalf("err = %v, want *NoBrowserError", err)
+	}
+	if !strings.HasPrefix(nb.URL, f.srv.URL+"/auth?") {
+		t.Errorf("link = %q", nb.URL)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Errorf("took %v, want no wait for the browser", time.Since(start))
+	}
+}
+
+func TestRunLauncherOutcomes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell as the fake launcher")
+	}
+	if err := runLauncher(exec.Command("sh", "-c", "exit 0"), 10*time.Second); err != nil {
+		t.Errorf("launcher that ends well: err = %v, want nil", err)
+	}
+	if err := runLauncher(exec.Command("sh", "-c", "exit 3"), 10*time.Second); err == nil {
+		t.Error("launcher that fails: err = nil, want an error")
+	}
+	if err := runLauncher(exec.Command("sh", "-c", "sleep 2"), 50*time.Millisecond); err != nil {
+		t.Errorf("launcher still running after the grace time: err = %v, want nil", err)
+	}
+	if err := runLauncher(exec.Command("/nonexistent/launcher"), time.Second); err == nil {
+		t.Error("launcher that cannot start: err = nil, want an error")
 	}
 }
 

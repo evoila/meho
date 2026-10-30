@@ -179,9 +179,18 @@ func randomState() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
+// launcherGrace is how long OpenSystemBrowser waits for the browser
+// launcher to fail. Launchers such as xdg-open, open and rundll32 end
+// within a moment when they cannot open a browser. Some keep running
+// while the browser is open; after this time that counts as success.
+const launcherGrace = 3 * time.Second
+
 // OpenSystemBrowser opens url in the default browser. On Linux and
 // other Unix systems without a graphical session (no DISPLAY and no
-// WAYLAND_DISPLAY) it returns an error instead of trying.
+// WAYLAND_DISPLAY) it returns an error instead of trying. It also
+// returns an error when the launcher starts but ends with an error, so
+// the caller can print the link instead of waiting for a browser that
+// never opened.
 func OpenSystemBrowser(url string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
@@ -195,5 +204,28 @@ func OpenSystemBrowser(url string) error {
 		}
 		cmd = exec.Command("xdg-open", url)
 	}
-	return cmd.Start()
+	return runLauncher(cmd, launcherGrace)
+}
+
+// runLauncher starts cmd and waits up to grace for it to end. It
+// returns an error when cmd cannot start or ends with an error within
+// grace. A launcher still running after grace counts as success; a
+// goroutine waits for it so it does not stay behind as a zombie.
+func runLauncher(cmd *exec.Cmd, grace time.Duration) error {
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("the browser launcher failed: %w", err)
+		}
+		return nil
+	case <-timer.C:
+		return nil
+	}
 }

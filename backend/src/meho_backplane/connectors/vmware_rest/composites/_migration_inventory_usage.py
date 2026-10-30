@@ -15,6 +15,7 @@ Two sources, one answer shape (:class:`~...migration.contracts.Utilization`):
   ``vrops.resource.stats`` operations, run as child operations on the named
   VCF Operations target. That read gives the latest values only, so the
   window is the time of those samples and ``samples`` says how few they are.
+  The sample interval is not reported, so it stays unknown.
   A child answer that came back as a stored result (a handle, because it
   was large) is read back from the result store for the caller's tenant.
 
@@ -128,13 +129,21 @@ def _utilization(
     end: datetime,
     samples: int,
     source: str,
+    interval_minutes: float | None = None,
 ) -> Utilization | None:
     stats: dict[str, Stat | None] = {
         name: nearest_rank_stat(values) for name, values in series.items()
     }
     if samples < 1 or all(stat is None for stat in stats.values()):
         return None
-    return Utilization(window_start=start, window_end=end, samples=samples, source=source, **stats)
+    return Utilization(
+        window_start=start,
+        window_end=end,
+        samples=samples,
+        sample_interval_minutes=interval_minutes,
+        source=source,
+        **stats,
+    )
 
 
 def _iso(moment: datetime) -> str:
@@ -247,7 +256,12 @@ class VcenterPerf:
             # vCenter writes -1 for a sample it does not have.
             series[name] = [v * factor for v in _numbers(entry.get("value")) if v >= 0]
         return _utilization(
-            series, start=self._start, end=self._end, samples=samples, source=VCENTER_SOURCE
+            series,
+            start=self._start,
+            end=self._end,
+            samples=samples,
+            source=VCENTER_SOURCE,
+            interval_minutes=self._interval / 60,
         )
 
 

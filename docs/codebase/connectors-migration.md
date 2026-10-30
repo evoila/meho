@@ -9,7 +9,9 @@ into an Azure migration assessment that people can check.
 The first part, in this package today:
 
 - **One inventory shape** for every source platform (`contracts.py`).
-- **One assessment result shape** (`contracts.py`).
+- **One calculation result shape** (`contracts.py`): the form any tool
+  uses to show how each number was made and what each check found.
+- **Both shapes as versioned JSON Schema files** in `docs/schemas/`.
 - **A loader** that reads stored inventories back by handle id, takes
   inventories given inline, and merges them (`inventory_load.py`).
 - **The Azure Migrate CSV mapping** (`azure_migrate_csv.py`) and the
@@ -71,7 +73,8 @@ Record kinds:
   (name, version, family, architecture), `boot_type` (`bios` or `uefi`),
   `secure_boot`, `power_state`, `nics`, `utilization` (CPU, memory and
   network as average, p95 and maximum, with the window, the number of
-  samples and the source) or `null`, `collected_at`, `missing`, and
+  samples, the minutes between two samples (`sample_interval_minutes`)
+  and the source) or `null`, `collected_at`, `missing`, and
   `source_attributes` (more facts with fixed keys per source; VMware:
   `vm_id`, `instance_uuid`, `esxi_host`, `cluster`).
 - `ApplicationRecord` (`kind="application"`): name, version, vendor,
@@ -95,22 +98,65 @@ Rules every record follows:
 - Unknown fields are refused (`extra="forbid"`), so a typo in a producer
   fails at once.
 
-### Assessment result (`AssessmentResult`)
+### Calculation result (`CalculationResult`)
 
-`calculation_version`, `inputs` (the inventory handles with their
-connector, target and time, other targets read, and when it ran),
-`assumptions` (region, currency, price date, hours per month, license,
-reservation, comfort factor, and free `other` values), `items`,
-`unknowns`, `omissions`.
+The form any tool uses to hand back what it computed from inventories. It
+holds no word, rule or price of one target.
+
+- `calculation_version`, `inputs` (the inventory handles with their
+  connector, target and time, other targets read, and when it ran),
+  `assumptions`, `items`, `unknowns`, `omissions`.
+- `assumptions` is a list of named values (`Assumption`): `name`,
+  `value`, and optionally `unit` and `source`. A name appears once.
+- Each item (`ResultItem`) holds the numbers (`figures`) and the checked
+  statements (`findings`) for one record.
 
 Every number is a `Figure`: `value`, `unit`, `basis` (`measured` or
 `allocated`; never "right-sized" without measurements), `inputs`, the
 names of the `assumptions` it used, `calculation_version`, and
 `unknown_reason` when `value` is `null`. The model refuses a figure that
-cites an assumption that is not set.
+cites an assumption that is not in the list.
 
-`inventory_json_schema()` and `assessment_result_json_schema()` export the
-two shapes as JSON Schema for the operations' response schemas.
+Every check is a `Finding`: `check` (what was checked), `state` (`pass`,
+`fail` or `unknown`), `reason`, `inputs`, `source` (a link to the rule
+the check follows) and `source_checked_on` (the day the source was last
+read). An input that is `null` means the data is missing; then the state
+must be `unknown`, never `pass`. The shape ships no check.
+
+Renamed from the first version: `AssessmentResult` is now
+`CalculationResult`, `AssessmentInputs` is `CalculationInputs`,
+`AssessmentItem` is `ResultItem` (its plain-text `flags` became
+`findings`), and `assessment_result_json_schema()` is
+`calculation_result_json_schema()`. The fixed `Assumptions` fields
+(region, currency, price date, and so on) became the named-value list.
+
+### JSON Schema files
+
+`inventory_json_schema()` and `calculation_result_json_schema()` export
+the two shapes as JSON Schema. The same schemas are checked in as
+`docs/schemas/inventory-v1.schema.json` and
+`docs/schemas/calculation-result-v1.schema.json`, so a tool outside the
+backplane can check an inventory or a result without importing backplane
+code. The number in the file name is the `schema_version`.
+
+- Make the files again after a model change:
+  `cd backend && uv run python scripts/generate_inventory_schemas.py`.
+- `backend/tests/test_inventory_shapes.py` fails when a file does not
+  match the models.
+- Version 1 merged after the last release, so it may still change. After
+  the next release, a breaking change raises `schema_version` and adds a
+  new file.
+
+### Sample interval of older inventories
+
+`Utilization.sample_interval_minutes` came after the first inventories
+were stored. A stored inventory without it still loads: the field is
+`null`, and `missing` gets `utilization.sample_interval_minutes:
+not_reported_by_source` (unless a parent path already gives a reason).
+Only stored JSON gets this default. A producer that builds a record in
+code sets the interval or gives its own reason. The vCenter read sets
+the vCenter history interval; the VCF Operations read reports latest
+values only, so its interval is `null` with `not_reported_by_source`.
 
 ## Control flow
 
@@ -416,7 +462,8 @@ Utilization:
   `net.received.average` and `net.transmitted.average` (aggregate instance
   only). The counter ids come from `PerformanceManager.perfCounter`. The
   sample interval follows the window: 5 minutes up to a day, 30 minutes up
-  to a week, 2 hours up to 30 days, 1 day above. Average, p95 (nearest rank)
+  to a week, 2 hours up to 30 days, 1 day above; it is stored as
+  `sample_interval_minutes`. Average, p95 (nearest rank)
   and maximum; vCenter's `-1` (no sample) is skipped. `source` is
   `vcenter-performance`.
 - **With `vcf_operations_target`**: per VM, the child operations
@@ -491,6 +538,13 @@ a handle the CSV operation accepts. The golden file
 `backend/tests/data/migration_azure_migrate_golden.csv` pins the CSV
 output; the test also checks its header against Microsoft's template
 header, column for column.
+
+`backend/tests/test_inventory_shapes.py` covers the calculation result
+(named assumptions, a figure that cites an assumption that is not set, a
+finding with and without data), the sample interval (set, missing in an
+older inventory, missing from a producer), and the JSON Schema files
+(they match the models, they are valid schemas, and the result file checks
+a result with no backplane code).
 
 ## Known issues
 

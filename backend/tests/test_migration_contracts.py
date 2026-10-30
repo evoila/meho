@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Fixture tests for the migration inventory shape, the assessment result
-shape, the stored-inventory loader and the Azure Migrate CSV mapping.
+"""Fixture tests for the migration inventory shape, the stored-inventory
+loader and the Azure Migrate CSV mapping. The calculation result shape is
+tested in ``test_inventory_shapes.py``.
 
 The fixtures are made up: a Windows VM with three disks, a Linux VM with no
 utilization, the same Linux machine read again through its guest OS (same
@@ -29,11 +30,10 @@ from meho_backplane.connectors.migration import azure_migrate_csv
 from meho_backplane.connectors.migration import ops as migration_ops
 from meho_backplane.connectors.migration.azure_migrate_csv import inventory_to_csv
 from meho_backplane.connectors.migration.contracts import (
-    AssessmentResult,
     InventoryEnvelope,
     KubernetesWorkloadRecord,
     ServerRecord,
-    assessment_result_json_schema,
+    calculation_result_json_schema,
     inventory_json_schema,
 )
 from meho_backplane.connectors.migration.inventory_load import (
@@ -453,76 +453,8 @@ def test_json_schemas_export() -> None:
     assert {"ServerRecord", "ApplicationRecord", "KubernetesWorkloadRecord"} <= set(
         inventory["$defs"]
     )
-    assessment = assessment_result_json_schema()
-    assert "calculation_version" in assessment["properties"]
-
-
-# --- assessment result shape ------------------------------------------------
-
-
-def _assessment(figure: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "schema_version": "1",
-        "calculation_version": "sizing-0.1",
-        "inputs": {
-            "inventories": [
-                {
-                    "handle_id": str(uuid4()),
-                    "connector_id": "vmware-rest-9.0",
-                    "target": "vc-lab-a",
-                    "collected_at": _TIME,
-                }
-            ],
-            "generated_at": _TIME,
-        },
-        "assumptions": {
-            "region": "westeurope",
-            "currency": "EUR",
-            "price_date": "2026-10-01",
-            "hours_per_month": 730,
-            "comfort_factor": 1.3,
-        },
-        "items": [
-            {
-                "source_id": "vmware:x:vm-1",
-                "name": "app-win-01",
-                "figures": {"monthly_compute_cost": figure},
-            }
-        ],
-        "unknowns": [{"what": "disk throughput of db-lnx-01", "reason": "not_measured"}],
-    }
-
-
-def test_assessment_figure_carries_inputs_assumptions_and_version() -> None:
-    figure = {
-        "value": 140.16,
-        "unit": "EUR/month",
-        "basis": "allocated",
-        "inputs": {"vm_size": "Standard_D4s_v5", "price_per_hour": 0.192},
-        "assumptions": ["region", "currency", "hours_per_month"],
-        "calculation_version": "sizing-0.1",
-    }
-    result = AssessmentResult.model_validate(_assessment(figure))
-    stored = result.items[0].figures["monthly_compute_cost"]
-    assert stored.inputs["vm_size"] == "Standard_D4s_v5"
-    assert stored.calculation_version == "sizing-0.1"
-
-
-def test_assessment_unknown_needs_a_reason_and_known_assumptions() -> None:
-    unknown = {"value": None, "unit": "EUR/month", "calculation_version": "sizing-0.1"}
-    with pytest.raises(ValidationError, match="unknown value needs an unknown_reason"):
-        AssessmentResult.model_validate(_assessment(unknown))
-    unknown["unknown_reason"] = "no price for the region"
-    AssessmentResult.model_validate(_assessment(unknown))
-
-    unset = {
-        "value": 1.0,
-        "unit": "EUR/month",
-        "assumptions": ["reservation"],
-        "calculation_version": "sizing-0.1",
-    }
-    with pytest.raises(ValidationError, match=r"cites assumptions \['reservation'\]"):
-        AssessmentResult.model_validate(_assessment(unset))
+    result = calculation_result_json_schema()
+    assert "calculation_version" in result["properties"]
 
 
 # --- stored inventories ----------------------------------------------------

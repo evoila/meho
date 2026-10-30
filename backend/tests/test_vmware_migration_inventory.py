@@ -586,6 +586,7 @@ async def test_utilization_comes_from_vcenter_history_with_its_window() -> None:
     usage = record["utilization"]
     assert usage["source"] == "vcenter-performance"
     assert usage["samples"] == 4
+    assert usage["sample_interval_minutes"] == 120
     assert usage["cpu_percent"] == {"average": 20.0, "p95": 30.0, "maximum": 30.0}
     assert usage["memory_percent"] == {"average": 57.5, "p95": 70.0, "maximum": 70.0}
     assert usage["network_in_mb_per_s"] == {"average": 2.5, "p95": 4.0, "maximum": 4.0}
@@ -1067,6 +1068,11 @@ async def test_utilization_comes_from_vcf_operations_when_named(
     usage = records["app-win-01"]["utilization"]
     assert usage["source"] == "vcf-operations-latest"
     assert usage["samples"] == 1
+    assert usage["sample_interval_minutes"] is None
+    assert (
+        records["app-win-01"]["missing"]["utilization.sample_interval_minutes"]
+        == "not_reported_by_source"
+    )
     assert usage["cpu_percent"] == {"average": 12.5, "p95": 12.5, "maximum": 12.5}
     assert usage["window_start"] == usage["window_end"]
     assert records["app-win-01"]["missing"]["utilization.network_in_mb_per_s"] == "not_measured"

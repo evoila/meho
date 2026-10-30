@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""The shapes every migration assessment step reads and writes.
+"""The estate inventory shape and the calculation result shape.
 
 Two shapes live here:
 
@@ -12,14 +12,19 @@ Two shapes live here:
   ``_mb_per_s``, ``_millicores``). A field that is unknown is ``None`` and
   says why in ``missing``, nested fields and list items included; it is
   never ``0``.
-* The **assessment result**: every number (a :class:`Figure`) carries its
-  inputs, the assumptions it used and the calculation version.
+* The **calculation result**: what any tool computed from inventories.
+  Every number (a :class:`Figure`) carries its inputs, the named
+  assumptions it used and the calculation version. Every checked statement
+  about a record (a :class:`Finding`) carries its state, the reason, its
+  inputs and the source it follows. Neither shape holds a word, rule or
+  price of one target.
 
 The models check their own rules, so a producer cannot hand on an
 inventory whose counts do not match its records, or a number without a
 reason when it is unknown. :func:`inventory_json_schema` and
-:func:`assessment_result_json_schema` export them as JSON Schema for the
-operations' response schemas.
+:func:`calculation_result_json_schema` export them as JSON Schema. The
+same schemas are checked in as versioned files under ``docs/schemas/``, so
+a tool outside the backplane can check a result without importing it.
 """
 
 from __future__ import annotations
@@ -32,15 +37,16 @@ from typing import Annotated, Any, Final, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 __all__ = [
+    "CALCULATION_RESULT_SCHEMA_VERSION",
     "INVENTORY_SCHEMA_VERSION",
     "ApplicationRecord",
-    "AssessmentInputs",
-    "AssessmentItem",
-    "AssessmentResult",
-    "Assumptions",
+    "Assumption",
+    "CalculationInputs",
+    "CalculationResult",
     "CountCheck",
     "Disk",
     "Figure",
+    "Finding",
     "IdentityDuplicate",
     "IdentityHints",
     "IdentityIndex",
@@ -56,13 +62,14 @@ __all__ = [
     "Omission",
     "OperatingSystem",
     "RecordKind",
+    "ResultItem",
     "ServerRecord",
     "Stat",
     "Unknown",
     "Utilization",
     "WorkloadVolume",
-    "assessment_result_json_schema",
     "bios_uuid_match_key",
+    "calculation_result_json_schema",
     "find_identity_duplicates",
     "inventory_json_schema",
     "missing_reason",
@@ -71,6 +78,9 @@ __all__ = [
 #: The inventory shape version this code reads and writes. A reader refuses
 #: any other value, so a later shape change cannot be read wrongly.
 INVENTORY_SCHEMA_VERSION: Final[str] = "1"
+
+#: The calculation result shape version, with the same rule.
+CALCULATION_RESULT_SCHEMA_VERSION: Final[str] = "1"
 
 #: Why a field or a whole part of the estate was not collected.
 MissingReason = Literal[
@@ -252,6 +262,15 @@ class Utilization(_Shape):
     window_start: datetime = Field(description="Start of the measurement window.")
     window_end: datetime = Field(description="End of the measurement window.")
     samples: int = Field(ge=1, description="Number of samples in the window.")
+    sample_interval_minutes: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Minutes between two samples, as the source keeps them. With 'samples' it "
+            "tells how much of the window the samples cover. An inventory stored "
+            "before this field loads with null and the reason 'not_reported_by_source'."
+        ),
+    )
     source: str = Field(description="Where the numbers come from, for example 'vcenter-perf'.")
     cpu_percent: Stat | None = Field(default=None, description="CPU use in percent.")
     memory_percent: Stat | None = Field(default=None, description="Memory use in percent.")
@@ -289,6 +308,24 @@ class ServerRecord(_Record):
             "'vm_id', 'instance_uuid', 'hardware_version', 'esxi_host', 'cluster'."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _interval_of_an_older_inventory(cls, data: Any) -> Any:
+        """A stored inventory from before ``sample_interval_minutes`` loads as unknown.
+
+        Only stored JSON (a dict) is changed. A producer that builds the record
+        in code must set the interval or give its reason itself.
+        """
+        if not isinstance(data, dict):
+            return data
+        utilization = data.get("utilization")
+        if not isinstance(utilization, dict) or "sample_interval_minutes" in utilization:
+            return data
+        missing = dict(data.get("missing") or {})
+        if missing_reason(missing, "utilization.sample_interval_minutes") is None:
+            missing["utilization.sample_interval_minutes"] = "not_reported_by_source"
+        return {**data, "missing": missing}
 
 
 class ApplicationRecord(_Record):
@@ -537,11 +574,11 @@ class InventoryEnvelope(_Shape):
                 )
 
 
-# --- assessment result ------------------------------------------------------
+# --- calculation result -----------------------------------------------------
 
 
 class Figure(_Shape):
-    """One number of an assessment, with everything needed to check it."""
+    """One number of a calculation result, with everything needed to check it."""
 
     value: float | None = Field(description="The number; null when it is unknown.")
     unit: str = Field(min_length=1, description="For example 'EUR/month' or 'cores'.")
@@ -570,30 +607,44 @@ class Figure(_Shape):
         return self
 
 
-class Assumptions(_Shape):
-    """Everything an assessment assumed. Names in ``other`` are free."""
+class Assumption(_Shape):
+    """One named value a calculation assumed, for example an hours-per-month figure."""
 
-    region: str | None = None
-    currency: str | None = None
-    price_date: date | None = None
-    hours_per_month: float | None = Field(default=None, gt=0)
-    license: str | None = Field(default=None, description="For example 'pay-as-you-go'.")
-    reservation: str | None = Field(default=None, description="For example 'none' or '1-year'.")
-    comfort_factor: float | None = Field(default=None, gt=0)
-    other: dict[str, str | float | int | bool] = Field(default_factory=dict)
+    name: str = Field(min_length=1, description="The name a figure cites.")
+    value: str | float | int | bool = Field(description="The assumed value.")
+    unit: str | None = Field(default=None, description="Unit of the value, if it has one.")
+    source: str | None = Field(
+        default=None, description="Where the value comes from, for example a link."
+    )
 
-    def names(self) -> set[str]:
-        """Names a :class:`Figure` may cite: the set fields plus the ``other`` keys."""
-        named = {
-            name
-            for name in type(self).model_fields
-            if name != "other" and getattr(self, name) is not None
-        }
-        return named | set(self.other)
+
+class Finding(_Shape):
+    """One checked statement about one record, and the source the check follows."""
+
+    check: str = Field(min_length=1, description="What was checked, in plain words.")
+    state: Literal["pass", "fail", "unknown"] = Field(
+        description="The outcome. Missing data gives 'unknown', never 'pass'."
+    )
+    reason: str = Field(min_length=1, description="Why the check has this state.")
+    inputs: dict[str, str | float | int | bool | None] = Field(
+        default_factory=dict,
+        description="The input values the check read. A null input means the data is missing.",
+    )
+    source: str = Field(min_length=1, description="Link to the rule or document the check follows.")
+    source_checked_on: date = Field(description="The day the source was last read.")
+
+    @model_validator(mode="after")
+    def _missing_data_is_unknown(self) -> Finding:
+        missing = sorted(name for name, value in self.inputs.items() if value is None)
+        if missing and self.state != "unknown":
+            raise ValueError(
+                f"inputs {missing} are missing, so the state must be 'unknown', not {self.state!r}"
+            )
+        return self
 
 
 class InventoryInput(_Shape):
-    """One inventory an assessment read."""
+    """One inventory a calculation read."""
 
     handle_id: str = Field(min_length=1)
     connector_id: str = Field(min_length=1)
@@ -601,45 +652,51 @@ class InventoryInput(_Shape):
     collected_at: datetime
 
 
-class AssessmentInputs(_Shape):
-    """What an assessment read, and when it ran."""
+class CalculationInputs(_Shape):
+    """What a calculation read, and when it ran."""
 
     inventories: list[InventoryInput]
     targets: list[str] = Field(default_factory=list, description="Other targets it read.")
     generated_at: datetime
 
 
-class AssessmentItem(_Shape):
-    """The numbers and flags for one record."""
+class ResultItem(_Shape):
+    """The numbers and the findings for one record."""
 
     source_id: str = Field(min_length=1)
     name: str
     figures: dict[str, Figure] = Field(default_factory=dict)
-    flags: list[str] = Field(default_factory=list)
+    findings: list[Finding] = Field(default_factory=list)
 
 
 class Unknown(_Shape):
-    """Something the assessment could not decide, and why."""
+    """Something the calculation could not decide, and why."""
 
     source_id: str | None = None
     what: str = Field(min_length=1)
     reason: str = Field(min_length=1)
 
 
-class AssessmentResult(_Shape):
-    """The result of one assessment calculation."""
+class CalculationResult(_Shape):
+    """The result of one calculation over inventories."""
 
     schema_version: Literal["1"]
     calculation_version: str = Field(min_length=1)
-    inputs: AssessmentInputs
-    assumptions: Assumptions
-    items: list[AssessmentItem]
+    inputs: CalculationInputs
+    assumptions: list[Assumption] = Field(
+        default_factory=list, description="Every value the calculation assumed, by name."
+    )
+    items: list[ResultItem]
     unknowns: list[Unknown] = Field(default_factory=list)
     omissions: list[Omission] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _figures_cite_known_assumptions(self) -> AssessmentResult:
-        known = self.assumptions.names()
+    def _figures_cite_known_assumptions(self) -> CalculationResult:
+        names = [assumption.name for assumption in self.assumptions]
+        repeated = sorted({name for name in names if names.count(name) > 1})
+        if repeated:
+            raise ValueError(f"assumption names repeat: {repeated}")
+        known = set(names)
         for item in self.items:
             for key, figure in item.figures.items():
                 unknown = sorted(set(figure.assumptions) - known)
@@ -656,6 +713,6 @@ def inventory_json_schema() -> dict[str, Any]:
     return InventoryEnvelope.model_json_schema()
 
 
-def assessment_result_json_schema() -> dict[str, Any]:
-    """JSON Schema of :class:`AssessmentResult`."""
-    return AssessmentResult.model_json_schema()
+def calculation_result_json_schema() -> dict[str, Any]:
+    """JSON Schema of :class:`CalculationResult`."""
+    return CalculationResult.model_json_schema()

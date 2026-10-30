@@ -43,6 +43,7 @@ from meho_backplane.middleware import (
     RequestContextMiddleware,
     verify_jwt_and_bind,
 )
+from meho_backplane.runner.package_set import EMPTY_PACKAGE_SET_DIGEST
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -89,7 +90,11 @@ def _build_guard_app() -> FastAPI:
     ) -> dict[str, str]:
         async with get_sessionmaker()() as session:
             row = await assert_runner_scope(
-                operator, runner_name=runner, session=session, wire_version="1"
+                operator,
+                runner_name=runner,
+                session=session,
+                wire_version="1",
+                package_set=EMPTY_PACKAGE_SET_DIGEST,
             )
         return {"resolved_id": str(row.id), "resolved_name": row.name}
 

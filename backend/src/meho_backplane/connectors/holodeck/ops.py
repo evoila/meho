@@ -143,13 +143,16 @@ def _holodeck_ops() -> tuple[HolodeckOp, ...]:
     4 deploy-lifecycle ops
     (:data:`~meho_backplane.connectors.holodeck.ops_deploy.DEPLOY_OPS`:
     ``holodeck.config.apply`` / ``holodeck.instance.start`` /
-    ``holodeck.instance.status`` / ``holodeck.router.patch``) -- 17 ops total.
+    ``holodeck.instance.status`` / ``holodeck.router.patch``) -- 17 ops.
+    ``holodeck.instance.remove``
+    (:data:`~meho_backplane.connectors.holodeck.ops_remove.REMOVE_OPS`) makes 18.
     """
     from meho_backplane.connectors.holodeck.ops_deploy import DEPLOY_OPS
     from meho_backplane.connectors.holodeck.ops_read import READ_OPS
+    from meho_backplane.connectors.holodeck.ops_remove import REMOVE_OPS
     from meho_backplane.connectors.holodeck.ops_write import WRITE_OPS
 
-    return (_HOLODECK_ABOUT_OP, *READ_OPS, *WRITE_OPS, *DEPLOY_OPS)
+    return (_HOLODECK_ABOUT_OP, *READ_OPS, *WRITE_OPS, *DEPLOY_OPS, *REMOVE_OPS)
 
 
 #: The ops :class:`HolodeckConnector` registers at lifespan startup.

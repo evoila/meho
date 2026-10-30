@@ -100,6 +100,7 @@ from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = [
+    "AUTH_WHEN_TO_USE",
     "VAULT_AUTH_APPROLE_LIST_PARAMETER_SCHEMA",
     "VAULT_AUTH_APPROLE_READ_PARAMETER_SCHEMA",
     "VAULT_AUTH_USERPASS_LIST_PARAMETER_SCHEMA",
@@ -323,6 +324,25 @@ async def _reclassify_not_found(
     raise exc
 
 
+#: The ``auth`` group's text, surfaced verbatim by ``list_operation_groups``.
+#: The group row is created by the first registrar that runs (this module),
+#: so this is the text a new database shows. It sends token-identity and
+#: mount-listing questions to the ``sys`` group.
+AUTH_WHEN_TO_USE = (
+    "Use for the roles and users of three Vault login methods. userpass: "
+    "list, read, create, change the password of, or delete a user "
+    "(``vault.auth.userpass.*``). approle: list, read, create or delete a "
+    "machine-login role and make a SecretID (``vault.auth.approle.*``). "
+    "JWT/OIDC, the login method people and services use with an identity "
+    "provider: list, read and change login roles, for example token_ttl or "
+    "token_policies, and read the mount config without its client secret "
+    "(``vault.auth.jwt.role.{list,read,write}``, ``vault.auth.jwt.config.read``). "
+    "Every change needs approval. Route 'who am I in this Vault?' and 'which "
+    "login methods are mounted where?' to the 'sys' group (``sys.auth.list``); "
+    "kubernetes and other login methods are not covered here."
+)
+
+
 # --- registration ----------------------------------------------------------
 
 #: Per-op registration spec. Collapsing the four near-identical
@@ -429,26 +449,6 @@ async def register_vault_auth_operations(
     ``safety_level="safe"``, ``group_key="auth"`` and
     ``requires_approval=False`` -- read-only identity inspection.
     """
-    # Curated by T4b (#732); surfaced verbatim by
-    # ``list_operation_groups``. Differentiates against the sibling
-    # ``kv`` and ``sys`` groups so the agent routes identity questions
-    # here rather than mistakenly searching ``sys`` for an auth-method
-    # listing.
-    auth_when_to_use = (
-        "Use for per-role inspection of two specific Vault auth "
-        "backends, ``userpass`` and ``approle``: list the roles "
-        "defined on each backend and read one named role's config "
-        "(``vault.auth.userpass.{list,read}`` / "
-        "``vault.auth.approle.{list,read}``). Read-only; never "
-        "creates, edits, or rotates roles. Route token-identity "
-        "questions ('who am I in this Vault?'), auth-backend mount "
-        "listings ('which auth methods are mounted at which "
-        "paths?'), and any JWT / OIDC / kubernetes-backend role "
-        "inspection to the 'sys' group (``sys.auth.list``) -- the "
-        "auth group only covers the two backends named above. Pair "
-        "with the 'kv' group for the post-auth 'what can this "
-        "identity read?' follow-up."
-    )
     for spec in _AUTH_OP_SPECS:
         await register_typed_operation(
             product="vault",
@@ -461,7 +461,7 @@ async def register_vault_auth_operations(
             parameter_schema=spec["parameter_schema"],
             response_schema=spec["response_schema"],
             group_key="auth",
-            when_to_use=auth_when_to_use,
+            when_to_use=AUTH_WHEN_TO_USE,
             tags=["read-only", "auth", "identity"],
             safety_level="safe",
             requires_approval=False,

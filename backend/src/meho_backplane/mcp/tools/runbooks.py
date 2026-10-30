@@ -99,6 +99,7 @@ from pydantic import ValidationError
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.kb.schemas import InvalidKbSlugError
 from meho_backplane.mcp.registry import (
+    READ_ONLY,
     ToolDefinition,
     ToolSurface,
     register_mcp_tool,
@@ -376,7 +377,7 @@ _SHOW_DESCRIPTION: Final[str] = (
     "template.** An operator calling `meho_runbook_show_template` directly "
     "while a run\n"
     "is in flight is denied (-32602, opacity_floor).\n\n"
-    "POST-COMPLETION EXCEPTION (G12.3): once an operator has a completed or "
+    "POST-COMPLETION EXCEPTION: once an operator has a completed or "
     "abandoned\n"
     "run against (slug, version), reading the template they ran is allowed "
     "for\n"
@@ -409,7 +410,7 @@ _TEMPLATE_SLUG_PROPERTY: Final[dict[str, Any]] = {
         "entries): must start with a lowercase letter and contain only "
         "lowercase letters, digits, hyphens, or dots. Example: "
         "'vcenter-9.0-cert-rotation'. REQUIRED. Canonical field name "
-        "across all 12 runbook tools (#1612) — the same name "
+        "across all 12 runbook tools — the same name "
         "`meho_runbook_start` takes. Template responses (show_template, "
         "each list_templates summary) carry this id under both "
         "`template_slug` (this canonical mirror) and the model-native "
@@ -840,6 +841,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
         name="meho_runbook_list_templates",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=_LIST_DESCRIPTION,
         inputSchema={
@@ -876,6 +878,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
         name="meho_runbook_show_template",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=_SHOW_DESCRIPTION,
         inputSchema={

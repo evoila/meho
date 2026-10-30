@@ -266,6 +266,7 @@ from typing import Any, Literal
 import httpx
 import hvac.exceptions
 import structlog
+from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
@@ -367,7 +368,11 @@ from meho_backplane.operations._validate import (
     policy_gate,
     validate_params,
 )
-from meho_backplane.operations._vendor_text import withhold_vendor_text
+from meho_backplane.operations._vendor_text import (
+    redact_error_payload,
+    redact_error_result,
+    withhold_vendor_text,
+)
 from meho_backplane.operations.composite import (
     COMPOSITE_DEPTH_TOP_LEVEL,
     CompositeRecursionLimitExceeded,
@@ -512,6 +517,33 @@ def descriptor_requires_target(descriptor: EndpointDescriptor) -> bool:
     return False
 
 
+async def _restore_saved_ingest_profiles(target: Any) -> None:
+    """Build missing ingested connector classes for the target's product.
+
+    #5016: another replica may have taken an ingest after this one
+    started, so its class exists only there. Reading the saved login types
+    of the target's product before the resolver runs lets this replica
+    build the class first. This also covers a replica that already holds
+    another connector for the same product: without the read the resolver
+    would pick that one, even when the target prefers the new connector.
+    A row whose key already has a class is skipped, so the read is cheap
+    on the usual path. A database error is logged and the resolver runs
+    on the classes this replica already has. A target without a product
+    slug is left to the resolver, which reports the miss.
+    """
+    from meho_backplane.operations.ingest.ingest_auth_store import (
+        restore_ingested_profiled_connectors,
+    )
+
+    product = getattr(target, "product", None)
+    if not isinstance(product, str) or not product:
+        return
+    try:
+        await restore_ingested_profiled_connectors(product=product)
+    except SQLAlchemyError:
+        _log.warning("ingested_profile_restore_before_call_failed", exc_info=True)
+
+
 async def _resolve_connector_instance(
     descriptor: EndpointDescriptor,
     target: Any,
@@ -576,6 +608,7 @@ async def _resolve_connector_instance(
     (consumer feedback signal 19, ``claude-rdc-hetzner-dc#697``).
     """
     if descriptor.source_kind == "ingested":
+        await _restore_saved_ingest_profiles(target)
         cls, label, exc_message = resolve_connector_or_label(target)
         if label is not None:
             return None, label, exc_message
@@ -1072,6 +1105,49 @@ def _composite_error_summary(error_code: str, envelope: dict[str, Any]) -> str:
     return error_code
 
 
+async def _reduce_composite_error_envelope(
+    full_envelope: dict[str, Any],
+    *,
+    op_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    audit_id: uuid.UUID,
+) -> tuple[dict[str, Any] | None, ResultHandle | None, Literal["unavailable"] | None]:
+    """Run the reducer over a cleaned terminal-error envelope.
+
+    Returns the inline envelope, the handle and the delivery: the envelope
+    itself when it is small, the bounded summary with the failure fields
+    copied over it (#3813) when the reducer minted a handle, and ``None`` /
+    ``"unavailable"`` when the reducer failed.
+    """
+    try:
+        summary, handle = await _DEFAULT_REDUCER.reduce(
+            full_envelope,
+            descriptor.response_schema,
+            _build_reducer_context(
+                op_id=op_id,
+                descriptor=descriptor,
+                operator=operator,
+                target=target,
+                audit_id=audit_id,
+            ),
+        )
+    except Exception as exc:
+        _log.warning(
+            "result_delivery_unavailable",
+            op_id=op_id,
+            audit_id=str(audit_id),
+            exception_class=type(exc).__name__,
+        )
+        return None, None, "unavailable"
+    if handle is None:
+        return full_envelope, None, None
+    envelope = dict(summary) if isinstance(summary, dict) else {"value": summary}
+    envelope.update(_terminal_error_inline_fields(full_envelope))
+    return envelope, handle, None
+
+
 async def _reduce_and_audit_composite_error(
     *,
     op_id: str,
@@ -1111,36 +1187,42 @@ async def _reduce_and_audit_composite_error(
     summary kept. A reducer failure keeps the operation an error and drops the
     inline envelope (``delivery="unavailable"``) instead of leaking it; the
     audit row still records the raw payload and the redaction manifest.
+
+    #5031: the full error cleanup (the secret-field walk, then the pinned
+    Tier-1 default policy) runs over the envelope **before** the reduce, the
+    same cleanup every error result gets in :func:`_audit_error_and_return`.
+    ``redaction.redacted`` went through the operator's policy only, and a
+    shadow-mode policy leaves a ``Bearer`` token in place; the reducer would
+    then store that token behind the handle, where the later cleanup of the
+    inline result cannot reach it. If the cleanup fails, the envelope is
+    withheld like a reducer failure, and the ``error`` line is the code alone.
     """
-    error_summary = _composite_error_summary(error_code, redaction.redacted)
     serialised_manifest = manifest_to_audit_payload(redaction.manifest)
-    envelope: dict[str, Any] | None = redaction.redacted
+    envelope: dict[str, Any] | None
     handle: ResultHandle | None = None
     delivery: Literal["complete", "partial", "unavailable"] | None = None
     try:
-        summary, handle = await _DEFAULT_REDUCER.reduce(
-            redaction.redacted,
-            descriptor.response_schema,
-            _build_reducer_context(
-                op_id=op_id,
-                descriptor=descriptor,
-                operator=operator,
-                target=target,
-                audit_id=audit_id,
-            ),
-        )
+        full_envelope: dict[str, Any] = redact_error_payload(redaction.redacted)
     except Exception as exc:
         _log.warning(
             "result_delivery_unavailable",
             op_id=op_id,
             audit_id=str(audit_id),
             exception_class=type(exc).__name__,
+            reason="error_redaction_failed",
         )
-        envelope, handle, delivery = None, None, "unavailable"
+        error_summary = error_code
+        envelope, delivery = None, "unavailable"
     else:
-        if handle is not None:
-            envelope = dict(summary) if isinstance(summary, dict) else {"value": summary}
-            envelope.update(_terminal_error_inline_fields(redaction.redacted))
+        error_summary = _composite_error_summary(error_code, full_envelope)
+        envelope, handle, delivery = await _reduce_composite_error_envelope(
+            full_envelope,
+            op_id=op_id,
+            descriptor=descriptor,
+            operator=operator,
+            target=target,
+            audit_id=audit_id,
+        )
     duration_ms = _elapsed_ms(started)
     return await _audit_error_and_return(
         result_composite_terminal_error(
@@ -1313,7 +1395,7 @@ async def _run_branch_with_error_handling(
     vRLI's ``440``); G0.29-T2 (#2067) then makes that status *recoverable*
     at the dispatch path itself (the delegation lives in
     :func:`_handle_http_status_error`): a session-stateful connector that
-    advertises a duck-typed ``invalidate_session(target)`` hook has its
+    advertises a duck-typed ``invalidate_session(target, *, rejected)`` hook has its
     cached token evicted and the op re-dispatched once, so an expired vCenter
     (401) / vRLI (440) session re-logs-in and recovers without a backplane
     restart. Only when the re-login *also* fails does the missing/invalid/
@@ -1846,8 +1928,14 @@ async def _audit_error_and_return(
     first (:func:`~meho_backplane.operations._vendor_text.withhold_vendor_text`).
     Every error result passes here, so the caller's answer, the audit row and
     the stored approval result all hold the same text.
+
+    #5031: then, for every operation, secrets are removed from the whole
+    result (:func:`~meho_backplane.operations._vendor_text.redact_error_result`):
+    secret-named fields and Tier-1 shapes in every string of ``error``,
+    ``extras`` and ``result``.
     """
     result = withhold_vendor_text(result, op_id=descriptor.op_id, tags=descriptor.tags)
+    result = redact_error_result(result)
     receipt = await audit_safe(
         audit_id=audit_id,
         event_class=AuditEventClass.OPERATION_EXECUTION,
@@ -1971,7 +2059,7 @@ async def _handle_http_status_error(
     future ``ProfiledRestConnector`` traverse: this is the only place a
     generic-ingested dispatch acts on an auth failure. When the status is
     auth-class **and** the connector advertises a duck-typed
-    ``invalidate_session(target)`` hook, evict the cached session token and
+    ``invalidate_session(target, *, rejected)`` hook, evict the cached session token and
     re-dispatch the *same* ingested request exactly once. A re-login that
     succeeds returns the raw payload up to the caller's success path, which
     runs the redact -> reduce -> audit sequence -- so a recovered call writes
@@ -2006,6 +2094,7 @@ async def _handle_http_status_error(
     if is_auth_failure and callable(invalidate_session):
         recovered = await _retry_after_session_invalidation(
             invalidate_session=invalidate_session,
+            rejected=http_exc.request,
             descriptor=descriptor,
             connector_instance=connector_instance,
             operator=operator,
@@ -2039,7 +2128,8 @@ async def _handle_http_status_error(
 
 async def _retry_after_session_invalidation(
     *,
-    invalidate_session: Callable[[Any], Awaitable[None]],
+    invalidate_session: Callable[..., Awaitable[None]],
+    rejected: httpx.Request,
     descriptor: EndpointDescriptor,
     connector_instance: Connector | None,
     operator: Operator,
@@ -2069,8 +2159,13 @@ async def _retry_after_session_invalidation(
     every other status => its usual shape); any other exception (a
     second-attempt ``ConnectError``, a loader ``RuntimeError`` from the
     re-login itself, ...) flattens to ``connector_error``.
+
+    The hook gets the *rejected* request (#5033). A connector whose token is
+    shared by several targets drops its cached token only when the rejected
+    request sent it: a late ``401`` must not drop the new token another call
+    just logged in for.
     """
-    await invalidate_session(target)
+    await invalidate_session(target, rejected=rejected)
     try:
         raw = await _run_source_kind_branch(
             descriptor=descriptor,
@@ -2367,6 +2462,23 @@ def _result_document_from_descriptor(descriptor: EndpointDescriptor) -> dict[str
     return None
 
 
+def _result_handle_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, Any] | None:
+    """Extract ``result_handle`` from a descriptor's ``llm_instructions`` (#5143).
+
+    An op whose result other operations take by its handle registers
+    ``{"always": true}``; the reducer then stores even a small result and
+    returns a handle next to it. A plain dict is returned, as for the other
+    hints; the reducer checks it. ``None`` when the op did not register it.
+    """
+    instructions = descriptor.llm_instructions
+    if not isinstance(instructions, dict):
+        return None
+    raw = instructions.get("result_handle")
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
 async def _unavailable_delivery_result(
     *,
     op_id: str,
@@ -2579,6 +2691,9 @@ def _build_reducer_context(
     result_document = _result_document_from_descriptor(descriptor)
     if result_document is not None:
         reducer_context["result_document"] = result_document
+    result_handle = _result_handle_from_descriptor(descriptor)
+    if result_handle is not None:
+        reducer_context["result_handle"] = result_handle
     return reducer_context
 
 

@@ -34,7 +34,6 @@ import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.adapters.http import HttpConnector
@@ -257,7 +256,7 @@ async def test_token_cached_across_calls_against_same_target() -> None:
         )
 
     assert login.call_count == 1
-    assert connector._session_tokens == {target_cache_key(_TARGET_A): "p-jwt"}
+    assert connector._session_tokens == {connector._session_cache_key(_TARGET_A): "p-jwt"}
     await connector.aclose()
 
 
@@ -279,8 +278,8 @@ async def test_per_target_isolation_keeps_tokens_separate() -> None:
         await connector._vcd_get(_TARGET_B, _ORGS_PATH, operator=_make_operator())
 
     assert connector._session_tokens == {
-        target_cache_key(_TARGET_A): "p-a",
-        target_cache_key(_TARGET_B): "p-b",
+        connector._session_cache_key(_TARGET_A): "p-a",
+        connector._session_cache_key(_TARGET_B): "p-b",
     }
     await connector.aclose()
 
@@ -318,8 +317,8 @@ async def test_same_name_targets_in_different_tenants_get_distinct_tokens() -> N
         await connector._vcd_get(tenant_two, _ORGS_PATH, operator=_make_operator())
 
     assert connector._session_tokens == {
-        target_cache_key(tenant_one): "p-one",
-        target_cache_key(tenant_two): "p-two",
+        connector._session_cache_key(tenant_one): "p-one",
+        connector._session_cache_key(tenant_two): "p-two",
     }
     await connector.aclose()
 
@@ -468,7 +467,7 @@ async def test_aclose_clears_tokens_and_pool() -> None:
         mock.get(_ORGS_PATH).respond(200, json={"values": []})
         await connector._vcd_get(_TARGET_A, _ORGS_PATH, operator=_make_operator())
 
-    assert connector._session_tokens == {target_cache_key(_TARGET_A): "jwt"}
+    assert connector._session_tokens == {connector._session_cache_key(_TARGET_A): "jwt"}
     await connector.aclose()
     assert connector._session_tokens == {}
     assert connector._clients == {}

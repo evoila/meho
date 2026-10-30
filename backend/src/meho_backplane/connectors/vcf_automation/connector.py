@@ -47,10 +47,10 @@ comment + login blocks, 2026-05-21):
   application/json``. Tokens are bespoke per plane; the provider
   JWT does NOT authenticate the tenant plane and vice versa.
 
-Both per-plane token caches are keyed on the tenant-unique
-``(tenant_id, target.id)`` tuple (``target_cache_key``, #1642/#1672) --
-so two same-named targets in different tenants never share a cached
-token -- and established lazily on first request that resolves to that plane.
+Both per-plane token caches are keyed on the credential plus the plane's
+login inputs (:func:`_plane_cache_key`, #5033) -- so two targets that share
+one credential share one token, and the tenant in the key keeps tenants
+apart (#1642/#1672) -- and established lazily on first request that resolves to that plane.
 On HTTP 401 from a downstream call, the relevant plane's cache is
 invalidated and the call retries once -- consumer wrapper posture:
 re-login once on session-expiry, not a retry loop.
@@ -108,7 +108,8 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key
+from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.adapters.http import HttpConnector, json_payload_or_empty
 from meho_backplane.connectors.schemas import (
@@ -118,7 +119,9 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
 )
 from meho_backplane.connectors.vcf_automation._auth import (
+    _tenant_domain,
     load_credentials_with_override,
+    provider_login_inputs,
     tenant_login,
     vcfa_provider_login,
 )
@@ -151,6 +154,32 @@ from meho_backplane.connectors.vcf_automation.typed_ops import (
 __all__ = ["VcfAutomationConfigurationError", "VcfAutomationConnector"]
 
 _log = structlog.get_logger(__name__)
+
+
+def _plane_cache_key(target: VcfAutomationTargetLike, plane: Plane) -> tuple[str, ...]:
+    """Return the token cache key for *plane*: the credential plus the plane's login inputs.
+
+    The provider login uses ``provider_secret_ref`` in place of
+    ``target.secret_ref`` when it is set, so that is the secret in the key:
+    two targets with different tenant secrets but one provider secret share
+    one provider session. It also reads ``provider_username``, and the
+    ``domain`` only when ``provider_username`` is unset
+    (:func:`provider_login_inputs`), so two targets with one explicit
+    provider user and different tenant domains share one provider session.
+    The tenant login reads the tenant domain. Both send ``fqdn`` as the
+    ``Host`` header, and the appliance picks the organisation from it, so
+    the ``fqdn`` is a login input of both planes. Host names are
+    case-insensitive, so it is case-folded like the host.
+    """
+    fqdn = str(getattr(target, "fqdn", None) or "").strip().lower()
+    if plane == "provider":
+        return credential_cache_key(
+            target,
+            fqdn,
+            *provider_login_inputs(target),
+            secret_ref=getattr(target, "provider_secret_ref", None) or None,
+        )
+    return credential_cache_key(target, fqdn, _tenant_domain(target))
 
 
 class VcfAutomationConnector(HttpConnector):
@@ -186,12 +215,12 @@ class VcfAutomationConnector(HttpConnector):
         credentials_loader: VcfAutomationCredentialsLoader | None = None,
     ) -> None:
         super().__init__()
-        # Per-target, per-plane token caches. Keyed on the tenant-unique
-        # ``(tenant_id, target.id)`` tuple (``target_cache_key``, #1642/#1672)
-        # so two same-named targets in different tenants never share a
-        # cached token; same isolation invariant the NSX precedent established.
-        self._provider_tokens: dict[tuple[str, str], str] = {}
-        self._tenant_tokens: dict[tuple[str, str], str] = {}
+        # Per-plane token caches keyed on the credential
+        # (``credential_cache_key``, #5033) plus what each plane's login reads
+        # from the target. Two targets that share a credential share one
+        # token; the tenant id in the key keeps tenants apart (#1642/#1672).
+        self._provider_tokens: dict[tuple[str, ...], str] = {}
+        self._tenant_tokens: dict[tuple[str, ...], str] = {}
         # One lock per plane -- provider and tenant first-uses are
         # independent and shouldn't block each other.
         self._provider_lock = asyncio.Lock()
@@ -347,7 +376,7 @@ class VcfAutomationConnector(HttpConnector):
                 f"target={target.name!r} has no operator JWT (system-initiated calls "
                 "cannot read per-target vendor credentials)"
             )
-        cache_key = target_cache_key(target)
+        cache_key = _plane_cache_key(target, "provider")
         async with self._provider_lock:
             cached = self._provider_tokens.get(cache_key)
             if cached is not None:
@@ -399,7 +428,7 @@ class VcfAutomationConnector(HttpConnector):
                 f"target={target.name!r} has no operator JWT (system-initiated calls "
                 "cannot read per-target vendor credentials)"
             )
-        cache_key = target_cache_key(target)
+        cache_key = _plane_cache_key(target, "tenant")
         async with self._tenant_lock:
             cached = self._tenant_tokens.get(cache_key)
             if cached is not None:
@@ -414,12 +443,23 @@ class VcfAutomationConnector(HttpConnector):
             self._tenant_tokens[cache_key] = token
             return token
 
-    async def _invalidate_plane(self, target: VcfAutomationTargetLike, plane: Plane) -> None:
-        """Drop the cached token for *plane* on *target* under the plane's lock."""
+    async def _invalidate_plane(
+        self, target: VcfAutomationTargetLike, plane: Plane, rejected: httpx.Request
+    ) -> None:
+        """Drop the cached token for *plane* on *target* under the plane's lock.
+
+        The token is dropped only when *rejected* sent it; a newer token
+        another call just logged in for stays (#5033).
+        """
         lock = self._provider_lock if plane == "provider" else self._tenant_lock
         cache = self._provider_tokens if plane == "provider" else self._tenant_tokens
         async with lock:
-            cache.pop(target_cache_key(target), None)
+            drop_rejected_token(
+                cache,
+                _plane_cache_key(target, plane),
+                rejected,
+                lambda token: {"Authorization": f"Bearer {token}"},
+            )
 
     # ------------------------------------------------------------------
     # Transport overrides -- thread path into auth_headers + 401 retry-once
@@ -529,16 +569,54 @@ class VcfAutomationConnector(HttpConnector):
     ) -> dict[str, Any]:
         """Shared per-plane 401 retry-once dance for _request_json + _post_json.
 
+        Sends through :meth:`_send_with_retry` and parses the body. A ``204
+        No Content`` / empty-body response maps to ``{}`` via
+        :func:`~meho_backplane.connectors.adapters.http.json_payload_or_empty`
+        — contract parity with the base transport helpers (#3082).
+        """
+        resp = await self._send_with_retry(
+            target,
+            method,
+            path,
+            operator=operator,
+            params=params,
+            json=json,
+            data=data,
+            extra_headers=extra_headers,
+            timeout=timeout,
+        )
+        payload = json_payload_or_empty(resp)
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"vcf-automation {method} {path} for target {target.name!r} "
+                f"returned a non-object JSON payload of type {type(payload).__name__}"
+            )
+        return payload
+
+    async def _send_with_retry(
+        self,
+        target: VcfAutomationTargetLike,
+        method: str,
+        path: str,
+        *,
+        operator: Operator,
+        params: Mapping[str, Any] | None = None,
+        json: Mapping[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+        timeout: Any = httpx.USE_CLIENT_DEFAULT,
+    ) -> httpx.Response:
+        """Send one request with the per-plane 401 retry-once; return the response.
+
         Build headers, fire the request; on 401 invalidate the relevant
         plane's token, refresh headers, retry once. A second 401
-        surfaces as :exc:`RuntimeError`. ``extra_headers`` (header-located
+        surfaces as :exc:`RuntimeError`; any other 4xx/5xx raises
+        :exc:`httpx.HTTPStatusError`. ``extra_headers`` (header-located
         op params) merge onto the plane auth headers; ``data`` carries a
         form-encoded body. ``timeout`` overrides the pooled client's default
         per-request timeout, defaulting to :data:`httpx.USE_CLIENT_DEFAULT`
-        so reads keep the client default unchanged (#3076). A ``204 No
-        Content`` / empty-body response maps to ``{}`` via
-        :func:`~meho_backplane.connectors.adapters.http.json_payload_or_empty`
-        — contract parity with the base transport helpers (#3082).
+        so reads keep the client default unchanged (#3076). Callers that
+        need a response header (the feature-flag ``ETag``) use this directly.
         """
 
         # vhost routing is applied per-request (never baked into the pooled
@@ -568,7 +646,7 @@ class VcfAutomationConnector(HttpConnector):
             headers = {**headers, **extra_headers}
         resp = await _fire(headers)
         if resp.status_code == 401:
-            await self._invalidate_plane(target, plane)
+            await self._invalidate_plane(target, plane, resp.request)
             headers = await self.auth_headers(target, operator, path=path)
             if extra_headers:
                 headers = {**headers, **extra_headers}
@@ -580,13 +658,7 @@ class VcfAutomationConnector(HttpConnector):
                     "HTTP 401 after refresh"
                 )
         resp.raise_for_status()
-        payload = json_payload_or_empty(resp)
-        if not isinstance(payload, dict):
-            raise RuntimeError(
-                f"vcf-automation {method} {path} for target {target.name!r} "
-                f"returned a non-object JSON payload of type {type(payload).__name__}"
-            )
-        return payload
+        return resp
 
     # ------------------------------------------------------------------
     # fingerprint / probe -- unauthenticated per-plane version endpoints
@@ -937,6 +1009,17 @@ class VcfAutomationConnector(HttpConnector):
 
         return await provider_role_create(self, operator, target, params)
 
+    async def provider_role_delete(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.role.delete`` — see :mod:`._role_user`."""
+        from meho_backplane.connectors.vcf_automation._role_user import provider_role_delete
+
+        return await provider_role_delete(self, operator, target, params)
+
     async def provider_user_create(
         self,
         operator: Operator,
@@ -991,6 +1074,37 @@ class VcfAutomationConnector(HttpConnector):
         from meho_backplane.connectors.vcf_automation._provisioning import tenant_login_test
 
         return await tenant_login_test(self, operator, target, params)
+
+    # ------------------------------------------------------------------
+    # Feature-flag ops -- thin shims over :mod:`._feature_flags`; metadata in
+    # :mod:`.feature_flag_ops`.
+    # ------------------------------------------------------------------
+
+    async def provider_feature_flag_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.feature_flag.list`` — see :mod:`._feature_flags`."""
+        from meho_backplane.connectors.vcf_automation._feature_flags import (
+            provider_feature_flag_list,
+        )
+
+        return await provider_feature_flag_list(self, operator, target, params)
+
+    async def provider_feature_flag_set(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.feature_flag.set`` — see :mod:`._feature_flags`."""
+        from meho_backplane.connectors.vcf_automation._feature_flags import (
+            provider_feature_flag_set,
+        )
+
+        return await provider_feature_flag_set(self, operator, target, params)
 
     # ------------------------------------------------------------------
     # Image ops -- thin shims over :mod:`._images`; metadata in :mod:`.image_ops`.
@@ -1159,8 +1273,9 @@ class VcfAutomationConnector(HttpConnector):
         plus
         :data:`~meho_backplane.connectors.vcf_automation.provisioning_ops.VCFA_PROVISIONING_OPS`,
         :data:`~meho_backplane.connectors.vcf_automation.image_ops.VCFA_IMAGE_OPS`,
-        :data:`~meho_backplane.connectors.vcf_automation.network_ops.VCFA_NETWORK_OPS` and
-        :data:`~meho_backplane.connectors.vcf_automation.deploy_ops.VCFA_DEPLOY_OPS`,
+        :data:`~meho_backplane.connectors.vcf_automation.network_ops.VCFA_NETWORK_OPS`,
+        :data:`~meho_backplane.connectors.vcf_automation.deploy_ops.VCFA_DEPLOY_OPS` and
+        :data:`~meho_backplane.connectors.vcf_automation.feature_flag_ops.VCFA_FEATURE_FLAG_OPS`,
         resolves each op's ``handler_attr`` to the bound method, looks the
         group's curated ``when_to_use`` up in
         :data:`~meho_backplane.connectors.vcf_automation.typed_ops.VCFA_TYPED_WHEN_TO_USE_BY_GROUP`,
@@ -1175,6 +1290,9 @@ class VcfAutomationConnector(HttpConnector):
         # pipeline (ONNX runtime + model) which pure fingerprint/probe unit
         # tests should not pay. Lifespan callers have it warmed by now.
         from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
+        from meho_backplane.connectors.vcf_automation.feature_flag_ops import (
+            VCFA_FEATURE_FLAG_OPS,
+        )
         from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
         from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
         from meho_backplane.connectors.vcf_automation.provisioning_ops import (
@@ -1192,6 +1310,7 @@ class VcfAutomationConnector(HttpConnector):
             *VCFA_IMAGE_OPS,
             *VCFA_NETWORK_OPS,
             *VCFA_DEPLOY_OPS,
+            *VCFA_FEATURE_FLAG_OPS,
         )
         for op in all_ops:
             handler = getattr(cls, op.handler_attr, None)

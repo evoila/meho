@@ -72,6 +72,13 @@ backend tolerating it. What "verified rollback" means precisely, and
 the schema-check fallback when it cannot be, is specified in the
 [rollback acceptance contract](https://github.com/evoila/meho/blob/main/docs/acceptance/rollback.md).
 
+Every start writes the settings of the built-in operations into rows that
+all pods share. A start that fails changes none of them. A pod that started
+does change them, so during an update the old pod serves the new settings
+until it stops. `GET /api/v1/health` shows which release wrote the rows
+(`operation_catalog`). After a rollback, if it names another release,
+restart the pods you keep. The rollback contract above has the steps.
+
 ## Version-specific notes
 
 Read these when your upgrade crosses the version in question:

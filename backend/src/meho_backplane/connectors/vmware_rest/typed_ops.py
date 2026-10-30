@@ -392,9 +392,12 @@ from meho_backplane.connectors.vmware_rest.typed_ops_appliance_local_accounts im
     APPLIANCE_LOCAL_ACCOUNTS_OPS,
     APPLIANCE_LOCAL_ACCOUNTS_WHEN_TO_USE,
 )
-from meho_backplane.connectors.vmware_rest.typed_ops_content_library_find import (  # noqa: E402
+from meho_backplane.connectors.vmware_rest.typed_ops_content_library import (  # noqa: E402
     CONTENT_LIBRARY_GROUP_KEY,
+    CONTENT_LIBRARY_OPS,
     CONTENT_LIBRARY_WHEN_TO_USE,
+)
+from meho_backplane.connectors.vmware_rest.typed_ops_content_library_find import (  # noqa: E402
     VMWARE_CONTENT_LIBRARY_FIND_OP,
     VMWARE_CONTENT_LIBRARY_ITEM_FIND_OP,
 )
@@ -598,10 +601,13 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 #: ``vm.question.get`` / ``vm.question.answer`` (the answer waits for
 #: approval); the resource pool list ``resource_pool.list``; the two
 #: content-library finds ``content_library.find`` + ``content_library.item.find``
-#: (#3550); the datacenter list ``datacenter.list``; the inventory
-#: folder list ``folder.list``; and the install state of a new vCenter
-#: appliance, ``vcenter.deployment.status`` (#4394). The tuple shape lets
-#: future typed ops join without touching the registrar.
+#: (#3550); the datacenter list ``datacenter.list``; the inventory folder
+#: list ``folder.list``; the six content-library reads (one library,
+#: one item, the files of an item, the OVF options of an item, the
+#: subscription URL check and the Supervisor library list); and the
+#: install state of a new vCenter appliance, ``vcenter.deployment.status``
+#: (#4394). The tuple shape lets future typed ops join without touching
+#: the registrar.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
     VMWARE_HOST_NETWORK_UPLINKS_OP,
@@ -626,6 +632,7 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_CONTENT_LIBRARY_ITEM_FIND_OP,
     VMWARE_DATACENTER_LIST_OP,
     VMWARE_FOLDER_LIST_OP,
+    *CONTENT_LIBRARY_OPS,
     VMWARE_VCENTER_DEPLOYMENT_STATUS_OP,
 )
 

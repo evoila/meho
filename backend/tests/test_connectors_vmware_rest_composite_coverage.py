@@ -41,7 +41,8 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.cluster.drs_recommendations",
         "vmware.composite.event.tail",
         "vmware.composite.datastore.usage",
-        "vmware.composite.datastore.refresh",
+        # ``datastore.refresh`` is pinned ``write`` in ``_WRITE_OPS``: it is
+        # ``safe`` but makes the host rescan, so it is not a plain read.
         "vmware.composite.network.portgroup.audit",
         "vmware.composite.vm.clone",
         "vmware.composite.vm.deploy_from_library",

@@ -42,8 +42,8 @@ reads (``kubeconfig`` by default), so a freshly-created ``product=k8s``
 target whose ``secret_ref`` is the returned path authenticates out of
 the box.
 
-Governance posture (mirrors ``sddc.credential.list``, #2306)
-============================================================
+Governance posture (same as the other credential reads, #2306)
+==============================================================
 
 * ``safety_level="caution"`` + ``requires_approval=True`` — the policy
   gate parks an ordinary dispatch for operator approval; the read never

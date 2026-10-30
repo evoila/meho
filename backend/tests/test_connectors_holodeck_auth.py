@@ -226,14 +226,14 @@ def test_about_canary_op_remains_at_index_zero() -> None:
     """``holodeck.about`` is the T1 canary; T2 (#854) appends the 7 read ops
     and G3.18-T2 (#2154) the 3 write ops onto the same tuple while preserving
     the canary at index 0; #2847 later appends the ``holodeck.backups.list``
-    read op, #2908 the 4 deploy-lifecycle ops and then holodeck.instance.remove.
-    The full registration shape
+    read op, #2908 the 4 deploy-lifecycle ops, #4066 the 3 DNS ops and then
+    holodeck.instance.remove. The full registration shape
     lives in ``test_connectors_holodeck_ops.py`` /
     ``test_connectors_holodeck_write.py`` / ``test_connectors_holodeck_deploy.py``.
     """
     assert HOLODECK_OPS[0].op_id == "holodeck.about"
     assert HOLODECK_OPS[0].handler_attr == "about"
-    assert len(HOLODECK_OPS) == 18
+    assert len(HOLODECK_OPS) == 21
 
 
 # ---------------------------------------------------------------------------

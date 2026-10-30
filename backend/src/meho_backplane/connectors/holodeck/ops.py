@@ -144,15 +144,20 @@ def _holodeck_ops() -> tuple[HolodeckOp, ...]:
     (:data:`~meho_backplane.connectors.holodeck.ops_deploy.DEPLOY_OPS`:
     ``holodeck.config.apply`` / ``holodeck.instance.start`` /
     ``holodeck.instance.status`` / ``holodeck.router.patch``) -- 17 ops.
-    ``holodeck.instance.remove``
-    (:data:`~meho_backplane.connectors.holodeck.ops_remove.REMOVE_OPS`) makes 18.
+    #4066 appends the 3 DNS name ops
+    (:data:`~meho_backplane.connectors.holodeck.ops_dns.DNS_OPS`:
+    ``holodeck.dns.host.list`` / ``holodeck.dns.host.add`` /
+    ``holodeck.dns.host.remove``), and ``holodeck.instance.remove``
+    (:data:`~meho_backplane.connectors.holodeck.ops_remove.REMOVE_OPS`)
+    makes 21.
     """
     from meho_backplane.connectors.holodeck.ops_deploy import DEPLOY_OPS
+    from meho_backplane.connectors.holodeck.ops_dns import DNS_OPS
     from meho_backplane.connectors.holodeck.ops_read import READ_OPS
     from meho_backplane.connectors.holodeck.ops_remove import REMOVE_OPS
     from meho_backplane.connectors.holodeck.ops_write import WRITE_OPS
 
-    return (_HOLODECK_ABOUT_OP, *READ_OPS, *WRITE_OPS, *DEPLOY_OPS, *REMOVE_OPS)
+    return (_HOLODECK_ABOUT_OP, *READ_OPS, *WRITE_OPS, *DEPLOY_OPS, *DNS_OPS, *REMOVE_OPS)
 
 
 #: The ops :class:`HolodeckConnector` registers at lifespan startup.
@@ -163,7 +168,8 @@ def _holodeck_ops() -> tuple[HolodeckOp, ...]:
 #: ``holodeck.k8s.exec``, ``holodeck.logs.tail``,
 #: ``holodeck.networking.show``); G3.18-T1 (#2153) appends
 #: ``holodeck.disk.usage`` and #2847 appends ``holodeck.backups.list``
-#: -- 10 read ops (13 total with the 3 G3.18-T2 write ops). The
+#: -- 10 read ops (13 total with the 3 G3.18-T2 write ops; 17 with the
+#: #2908 deploy ops; 20 with the #4066 DNS name ops). The
 #: registration walk in :meth:`HolodeckConnector.register_operations`
 #: does not need to change as ops are added; only :func:`_holodeck_ops`
 #: composes the merged tuple.

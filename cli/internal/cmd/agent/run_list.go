@@ -13,15 +13,16 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/cmd/workref"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
 // newRunListCmd returns the `meho agent run-list` command.
 //
-//	meho agent run-list [--work-ref REF] [--status S] [--limit N] [--offset N] [--json] [--backplane <url>]
+//	meho agent run-list [--filter-work-ref REF] [--status S] [--limit N] [--offset N] [--json] [--backplane <url>]
 //
 // Role: operator. Lists the tenant's agent runs via GET /api/v1/agents/runs,
-// newest first. Filters: --work-ref (exact-match external change-ticket
+// newest first. Filters: --filter-work-ref (exact-match external change-ticket
 // reference, work_ref I3-T2 #1662), --status, and --agent-name (exact-match
 // agent definition name, #2472). Tenant-isolated server-side via the JWT —
 // only the caller's tenant's runs are visible.
@@ -37,10 +38,10 @@ func newRunListCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "run-list",
-		Short: "List agent runs (filter by --work-ref / --status)",
+		Short: "List agent runs (filter by --filter-work-ref / --status)",
 		Long: "run-list calls GET /api/v1/agents/runs and renders the " +
 			"tenant's runs as a compact table, newest first. Filters: " +
-			"--work-ref (exact-match change-ticket reference, e.g. " +
+			"--filter-work-ref (exact-match change-ticket reference, e.g. " +
 			"gh:evoila/meho#11), --status (pending / running / " +
 			"awaiting_approval / succeeded / failed / cancelled), " +
 			"--agent-name (exact-match agent definition name — an unknown " +
@@ -53,7 +54,7 @@ func newRunListCmd() *cobra.Command {
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runRunList(cmd, runListOptions{
-				WorkRef:           workRef,
+				WorkRef:           workref.Filter(cmd, workRef),
 				Status:            statusFilter,
 				AgentName:         agentName,
 				Limit:             limit,
@@ -63,7 +64,7 @@ func newRunListCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&workRef, "work-ref", "",
+	cmd.Flags().StringVar(&workRef, workref.FilterFlag, "",
 		"filter by external change-ticket reference (exact match, e.g. gh:evoila/meho#11)")
 	cmd.Flags().StringVar(&statusFilter, "status", "",
 		"filter by lifecycle status: pending, running, awaiting_approval, succeeded, failed, or cancelled")

@@ -24,7 +24,7 @@ shows it unprompted today — see
   `{"checks_alert_advisory": [{"dashboard_id", "name", "state"}, ...]}`
   or `{}`.
 - `CHECKS_ADVISORY_EXTRAS_KEY = "checks_alert_advisory"` — the extras
-  key, sibling of `broadcast.history.ADVISORY_EXTRAS_KEY`
+  key, sibling of `broadcast.target_advisory.ADVISORY_EXTRAS_KEY`
   (`target_activity_advisory`, #2550).
 - `settings.checks_alert_advisory_window_minutes` — dedupe window,
   default `30`, `ge=0`; `0` disables the feature before any I/O.

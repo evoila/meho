@@ -27,14 +27,15 @@ from uuid import UUID
 import pytest
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.broadcast import history
+from meho_backplane.broadcast import announce_claim_lookup
+from meho_backplane.broadcast import client as broadcast_client
+from meho_backplane.broadcast.announce_claim_lookup import (
+    announce_claim_gap,
+    caller_has_active_announce_claim,
+)
 from meho_backplane.broadcast.announce_gate import (
     announce_gate_blocks,
     reset_announce_gate_cache_for_testing,
-)
-from meho_backplane.broadcast.history import (
-    announce_claim_gap,
-    caller_has_active_announce_claim,
 )
 from meho_backplane.broadcast.reflex import (
     _ANNOUNCE_NUDGES,
@@ -72,12 +73,16 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _no_stream_read() -> Iterator[None]:
-    """The lookup must read only the archive, never the Valkey stream."""
-    with patch.object(
-        history,
-        "get_broadcast_client",
-        new=MagicMock(side_effect=AssertionError("the claim lookup read the stream")),
-    ):
+    """The lookup must read only the archive, never the Valkey stream.
+
+    Every module reaches Valkey through the one shared client, so a stand-in
+    client that fails on a stream read catches it wherever the read happens.
+    """
+    stream_read = AssertionError("the claim lookup read the stream")
+    stand_in = MagicMock(
+        **{f"{command}.side_effect": stream_read for command in ("xrange", "xrevrange", "xread")}
+    )
+    with patch.object(broadcast_client, "_CLIENT", new=stand_in):
         yield
 
 
@@ -154,7 +159,7 @@ async def test_peer_announcements_do_not_hide_the_callers_claim(
     archive lookup keeps only the caller's rows, so even with a tiny cap the
     claim is found behind more peer rows than the cap.
     """
-    monkeypatch.setattr(history, "_CLAIM_SCAN_LIMIT", 3)
+    monkeypatch.setattr(announce_claim_lookup, "_CLAIM_SCAN_LIMIT", 3)
     await _claim(minutes_ago=10, target=_VC)
     for i in range(5):
         await _claim(minutes_ago=5 - i, principal_sub=f"peer-{i}", target=_VC)
@@ -222,7 +227,7 @@ async def test_the_closest_reason_wins(claims: list[dict[str, Any]], expected: s
 
 async def test_cap_keeps_the_newest_own_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     """Past the cap an older covering claim is not seen (documented bound)."""
-    monkeypatch.setattr(history, "_CLAIM_SCAN_LIMIT", 1)
+    monkeypatch.setattr(announce_claim_lookup, "_CLAIM_SCAN_LIMIT", 1)
     await _claim(minutes_ago=10, target=_VC)
     await _claim(minutes_ago=1, target="vc-other")
     assert await _gap() == "other_target"

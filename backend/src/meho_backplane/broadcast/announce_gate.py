@@ -48,11 +48,9 @@ import structlog
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.broadcast.announce_claim_lookup import caller_has_active_announce_claim
 from meho_backplane.broadcast.events import classify_op
-from meho_backplane.broadcast.history import (
-    WRITE_OP_CLASSES,
-    caller_has_active_announce_claim,
-)
+from meho_backplane.broadcast.history import WRITE_OP_CLASSES
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Tenant
 
@@ -142,7 +140,7 @@ async def announce_gate_blocks(
     * the op's ``safety_level`` is below ``caution`` -- no policy read;
     * the tenant has not enabled the gate (:func:`announce_gate_enabled`);
     * the caller holds an active covering claim
-      (:func:`~meho_backplane.broadcast.history.caller_has_active_announce_claim`).
+      (:func:`~meho_backplane.broadcast.announce_claim_lookup.caller_has_active_announce_claim`).
 
     Only when the tenant opted in AND the claim is absent does it return
     :data:`_ANNOUNCE_REQUIRED_REMEDIATION`. Fail-open: any internal error

@@ -417,7 +417,13 @@ session of ~50 dispatch calls pays the JWT/installation-token
 round-trip exactly once per target. The PAT-path cache lives for
 the connector instance lifetime — operator-managed expiry, no
 MEHO-side refresh dance. Re-reads only on cold cache (restart /
-`aclose`, or the App-path window expiring).
+`aclose`, the App-path window expiring, or `invalidate_credentials`).
+
+`invalidate_credentials(target)` drops both kept tokens for one target.
+Two callers use it: the dispatcher after a failed login, and the target
+update route after a change to the target's connection fields (#3879).
+So a new or narrower credential works on the next call, not after the
+kept token expires.
 
 ### Fingerprint
 

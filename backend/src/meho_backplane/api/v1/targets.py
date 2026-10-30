@@ -131,15 +131,16 @@ available is the strongest answer.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import Any, Final, NoReturn
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -160,7 +161,10 @@ from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.flight_recorder.config import invalidate_target_override_cache
-from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._handler_resolve import (
+    forget_target_in_connectors,
+    get_or_create_connector_instance,
+)
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import (
     TargetNotFoundError,
@@ -173,6 +177,10 @@ from meho_backplane.targets.schemas import (
     TargetListResponse,
     TargetUpdate,
     project_target_to_summary,
+)
+from meho_backplane.targets.secret_field_map import (
+    check_secret_field_map_sources,
+    merge_secret_field_map,
 )
 
 __all__ = ["count_graph_node_refs", "router", "soft_delete_target"]
@@ -395,6 +403,7 @@ def _to_full(t: TargetORM) -> Target:
         verify_tls=t.verify_tls,
         tls_ca_pin=t.tls_ca_pin,
         tls_server_name=t.tls_server_name,
+        secret_field_map=t.secret_field_map or {},
         extras=t.extras,
         notes=t.notes,
         fingerprint=t.fingerprint,
@@ -1201,6 +1210,31 @@ async def describe_target(
     return _to_full(t)
 
 
+def _raise_fingerprint_failed(
+    exc: Exception, *, cls: type[Connector], t: TargetORM, operator: Operator
+) -> NoReturn:
+    """Turn a probe failure into the structured ``fingerprint_failed`` 500.
+
+    G0.15-T1 #1210: a connector that raises mid-fingerprint used to bubble
+    past the route and surface as FastAPI's bare 500 with a ``text/plain``
+    body. Catch + convert to a structured 500 via
+    :func:`_build_fingerprint_failed_detail` (the builder mirrors the
+    dispatcher's ``connector_error`` envelope). Full stacktrace lands in
+    the structured log via :meth:`_log.exception`; only the capped
+    exception message reaches the response body.
+    """
+    detail = _build_fingerprint_failed_detail(exc=exc, cls=cls, target_name=t.name)
+    _log.exception(
+        "probe_fingerprint_failed",
+        target_id=str(t.id),
+        target_name=t.name,
+        tenant_id=str(operator.tenant_id),
+        connector_id=detail["connector_id"],
+        exception_class=detail["exception_class"],
+    )
+    raise HTTPException(status_code=500, detail=detail) from exc
+
+
 @router.post("/{name}/probe", response_model=FingerprintResult)
 async def probe_target(
     name: str,
@@ -1259,26 +1293,14 @@ async def probe_target(
         # per-target Vault credentials under the operator's identity, the
         # same code path the dispatch surface uses (G0.16-T4 #1306).
         # Connectors whose fingerprint does not touch Vault ignore it.
+        # #3711: a mis-mapped secret_field_map fails here with a 422 naming
+        # the missing source fields, not later in the middle of a dispatch.
+        await check_secret_field_map_sources(t, operator)
         fp = await cls().fingerprint(t, operator=operator)
+    except HTTPException:
+        raise
     except Exception as exc:
-        # G0.15-T1 #1210: a connector that raises mid-fingerprint used
-        # to bubble past the route and surface as FastAPI's bare 500
-        # with a ``text/plain`` body. Catch + convert to a structured
-        # 500 via :func:`_build_fingerprint_failed_detail` (the
-        # builder mirrors the dispatcher's ``connector_error``
-        # envelope). Full stacktrace lands in the structured log via
-        # :meth:`_log.exception`; only the capped exception message
-        # reaches the response body.
-        detail = _build_fingerprint_failed_detail(exc=exc, cls=cls, target_name=t.name)
-        _log.exception(
-            "probe_fingerprint_failed",
-            target_id=str(t.id),
-            target_name=t.name,
-            tenant_id=str(operator.tenant_id),
-            connector_id=detail["connector_id"],
-            exception_class=detail["exception_class"],
-        )
-        raise HTTPException(status_code=500, detail=detail) from exc
+        _raise_fingerprint_failed(exc, cls=cls, t=t, operator=operator)
     # ``model_dump(mode='json')`` produces a JSONB-safe dict (datetime
     # → ISO string, enum → value, UUID → str). Plain ``model_dump()``
     # would leak Python-native types into the JSON column, breaking
@@ -1379,6 +1401,8 @@ async def create_target(
     # default; an explicit ``{"secret_ref": null}`` persists verbatim. See
     # :func:`_resolve_create_secret_ref`.
     create_fields["secret_ref"] = _resolve_create_secret_ref(body, operator)
+    # #3711: an empty map is stored as NULL ("no map").
+    create_fields["secret_field_map"] = body.secret_field_map or None
     t = TargetORM(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
@@ -1422,6 +1446,71 @@ async def create_target(
     return _to_full(t)
 
 
+#: PATCH fields that change how MEHO reaches or logs in to a target. Sending
+#: any of them makes connectors drop what they keep for the target (#3879).
+#: The check is "field sent", not "value changed": re-sending the same
+#: ``secret_ref`` is how an operator makes MEHO read a secret again after it
+#: was changed only in Vault.
+_CONNECTION_FIELDS = frozenset(
+    {
+        "product",
+        "version",
+        "preferred_impl_id",
+        "host",
+        "port",
+        "fqdn",
+        "secret_ref",
+        "auth_model",
+        "verify_tls",
+        "tls_ca_pin",
+        "tls_server_name",
+        "extras",
+    }
+)
+
+
+#: Post-commit drop tasks, kept here so the event loop does not lose them
+#: before they finish (``asyncio`` holds only weak references to tasks).
+_AFTER_COMMIT_DROP_TASKS: set[asyncio.Task[None]] = set()
+
+
+def _drop_again_after_commit(session: AsyncSession, t: TargetORM) -> None:
+    """Run :func:`forget_target_in_connectors` once more after *session* commits.
+
+    #3879. The handler does not commit on its own: the request's session
+    commits after the response is sent, and the UI import updates many
+    targets in one transaction. A dispatch that reads the target before that
+    commit still sees the old row and can keep a new login made with the old
+    values. A one-time ``after_commit`` listener drops the kept login again
+    once the new row is saved. SQLAlchemy session events are sync, so the
+    listener starts the drop as a task on the running event loop. A rollback
+    never fires the listener, and the session is closed at the end of the
+    request, so nothing is left behind.
+    """
+
+    @event.listens_for(session.sync_session, "after_commit", once=True)
+    def _schedule_drop(_session: Any) -> None:
+        task = asyncio.get_running_loop().create_task(forget_target_in_connectors(t))
+        _AFTER_COMMIT_DROP_TASKS.add(task)
+        task.add_done_callback(_AFTER_COMMIT_DROP_TASKS.discard)
+
+
+async def _drop_kept_logins_on_connection_change(
+    session: AsyncSession, t: TargetORM, updates: dict[str, Any]
+) -> None:
+    """Make connectors drop the login they keep for *t* after a connection change.
+
+    #3879. Runs only when the PATCH sent a field in :data:`_CONNECTION_FIELDS`.
+    Every connector drops the login and credentials it keeps for the target,
+    so the next dispatch logs in with the new values. The drop runs now, and
+    once more after the transaction commits (see
+    :func:`_drop_again_after_commit`).
+    """
+    if _CONNECTION_FIELDS.intersection(updates):
+        await forget_target_in_connectors(t)
+        _drop_again_after_commit(session, t)
+
+
 def _validate_update_body_fields(
     updates: dict[str, Any],
     t: TargetORM,
@@ -1431,7 +1520,7 @@ def _validate_update_body_fields(
 
     Extracted from :func:`update_target` so the handler stays within the
     function-size budget while the validation phase reads as one unit.
-    Three checks, all raising *before* the row is mutated:
+    Four checks, all raising *before* the row is mutated:
 
     * **product** — G0.14-T4 (#1145) / G0.18-T2 (#1355). Reject
       ``{"product": null}`` and validate a changed product against the
@@ -1447,11 +1536,19 @@ def _validate_update_body_fields(
       for an explicit non-null ``secret_ref``; an explicit null (clear)
       and an absent field pass through. See
       :func:`_enforce_secret_ref_tenant_scope`.
+    * **secret_field_map** — #3711. The sent entries are merged into the
+      stored map (``null`` entry removes, ``null`` map clears) and
+      ``updates`` is rewritten to the merged result; a merged map above
+      the entry limit is a 422. See :func:`merge_secret_field_map`.
     """
     effective_product = _apply_product_patch(updates, t.product)
     _validate_preferred_impl_id(updates.get("preferred_impl_id"), effective_product)
     if updates.get("secret_ref") is not None:
         _enforce_secret_ref_tenant_scope(updates["secret_ref"], operator, t.name)
+    if "secret_field_map" in updates:
+        updates["secret_field_map"] = merge_secret_field_map(
+            t.secret_field_map, updates["secret_field_map"]
+        )
 
 
 @router.patch("/{name}", response_model=Target)
@@ -1554,6 +1651,7 @@ async def update_target(
         _audit_flight_recorder_capture_write(
             t, tenant_id=operator.tenant_id, before=fr_capture_before
         )
+    await _drop_kept_logins_on_connection_change(session, t, updates)
     return _to_full(t)
 
 

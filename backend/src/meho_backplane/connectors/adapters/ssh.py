@@ -31,7 +31,10 @@ system-initiated calls cannot read per-target vendor credentials
 
 * **Key auth (preferred):** the secret carries a ``ssh_private_key``
   field (PEM-encoded text) plus ``username``; the key is parsed via
-  ``asyncssh.import_private_key`` and passed as ``client_keys``.
+  ``asyncssh.import_private_key`` and passed as ``client_keys``. When
+  ``ssh_private_key`` is absent, a ``private_key`` field is used instead
+  (#3711), so a secret written by an automation pack under that name works
+  with no ``secret_field_map`` on the target.
 * **Password auth (fallback):** the secret carries ``username`` and
   ``password``; used when ``ssh_private_key`` is absent.
 * **Missing credentials:** raises :exc:`ValueError` immediately so callers
@@ -217,6 +220,20 @@ def _record_ssh_span(
         logger.warning("flight_recorder_ssh_span_failed", exc_info=True)
 
 
+class SshTargetChangedError(RuntimeError):
+    """The target changed while MEHO was logging in to it (#3879).
+
+    The login was started with the target's old host or secret. Its result
+    is not kept, so the next call logs in with the new values.
+    """
+
+    def __init__(self, target_name: str) -> None:
+        super().__init__(
+            f"target {target_name!r} changed while MEHO was logging in to it; "
+            "the login was dropped. Retry the call."
+        )
+
+
 class ConnectorUnreachableError(RuntimeError):
     """An ``about``-style op ran against an unreachable target.
 
@@ -254,6 +271,13 @@ class SshConnector(Connector):
         # Per-target connect locks — SSH handshakes for distinct targets run
         # in parallel. Keyed on the same tenant-unique tuple as the pool.
         self._connect_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        # Per-target drop counter (#3879). ``invalidate_credentials`` raises
+        # it; ``_connect`` reads it on entry, checks it again once it holds
+        # the connect lock, and keeps the new connection only when it is
+        # still unchanged after the handshake. So a call that was started
+        # with the old target values never puts a login in the pool, whether
+        # it was waiting for the lock or already logging in during the drop.
+        self._pool_generations: dict[tuple[str, str], int] = {}
 
     async def _resolve_secret(self, target: Target, operator: Operator | None) -> dict[str, Any]:
         """Resolve ``target.secret_ref`` (a Vault KV-v2 path string) to the secret dict.
@@ -291,15 +315,17 @@ class SshConnector(Connector):
         :class:`asyncssh.SSHKnownHosts` pin, or ``None`` for the audited
         per-target opt-out); it is threaded here so :meth:`_connect`
         never has to re-read the secret. Raises :exc:`ValueError` when
-        the resolved secret carries neither ``ssh_private_key`` nor
-        ``password``, and :exc:`SshHostKeyUnpinnedError` when it pins no
+        the resolved secret carries none of ``ssh_private_key``,
+        ``private_key`` or ``password``, and :exc:`SshHostKeyUnpinnedError` when it pins no
         host key and sets no opt-out; Vault resolution failures propagate
         per :meth:`_resolve_secret`'s two-phase error contract.
         """
         secret = await self._resolve_secret(target, operator)
         username: str = strip_credential_value(secret.get("username", "root"))
         known_hosts = _known_hosts_from_secret(target.name, secret)
-        private_key_raw = secret.get("ssh_private_key")
+        # #3711: ``private_key`` is an alias used only when ``ssh_private_key``
+        # is absent.
+        private_key_raw = secret.get("ssh_private_key") or secret.get("private_key")
         if private_key_raw:
             key = asyncssh.import_private_key(strip_credential_value(private_key_raw))
             return {"username": username, "known_hosts": known_hosts, "client_keys": [key]}
@@ -312,7 +338,8 @@ class SshConnector(Connector):
             }
         raise ValueError(
             f"target '{target.name}': the Vault secret at secret_ref must include "
-            "ssh_private_key or password"
+            "ssh_private_key or password (private_key is accepted in place of "
+            "ssh_private_key)"
         )
 
     async def _connect(
@@ -325,6 +352,11 @@ class SshConnector(Connector):
         lock, evicts stale/closed entries, and opens a fresh connection.
         """
         cache_key = target_cache_key(target)
+        # Read the drop counter first (#3879). A call that waits for the
+        # per-target lock keeps the target values it was given. When a drop
+        # runs while it waits, those values are old, and the call must not
+        # log in with them after it gets the lock.
+        generation = self._pool_generations.get(cache_key, 0)
         # Fast path: check without acquiring any lock.
         entry = self._connections.get(cache_key)
         if entry is not None:
@@ -355,6 +387,12 @@ class SshConnector(Connector):
                     await conn.wait_closed()
                 del self._connections[cache_key]
 
+            if self._pool_generations.get(cache_key, 0) != generation:
+                # The target changed while this call waited for the lock.
+                # The connection the lock holder made with the old values
+                # was already dropped; this call must not make another one.
+                logger.info("ssh_login_dropped_target_changed", target=target.name)
+                raise SshTargetChangedError(target.name)
             auth_kwargs = await self._auth_config(target, operator)
             # ``known_hosts`` is fail-closed: the base ``_auth_config`` (and
             # every subclass override) resolves it via
@@ -371,6 +409,14 @@ class SshConnector(Connector):
                 password=auth_kwargs.get("password"),
                 known_hosts=auth_kwargs["known_hosts"],
             )
+            if self._pool_generations.get(cache_key, 0) != generation:
+                # The target was changed while this login ran: the secret
+                # read above, and maybe the host, are the old ones. Keeping
+                # the connection would serve later calls with the old login.
+                conn.close()
+                await conn.wait_closed()
+                logger.info("ssh_login_dropped_target_changed", target=target.name)
+                raise SshTargetChangedError(target.name)
             self._connections[cache_key] = (conn, time.monotonic())
             logger.info("ssh_connected", target=target.name, host=target.host)
             return conn
@@ -433,12 +479,30 @@ class SshConnector(Connector):
             f"target unreachable for {result.product!r} via {result.probe_method!r}{detail}"
         )
 
+    async def invalidate_credentials(self, target: Target) -> None:
+        """Close and drop the pooled connection for *target* (#2396, #3879).
+
+        A pooled connection was opened with the old host and secret. Dropping
+        it makes the next command open a new one with the current values.
+        Called after a failed login and after a target change. A login that
+        is still running is not waited for: the drop counter tells
+        :meth:`_connect` to discard its result instead.
+        """
+        cache_key = target_cache_key(target)
+        async with self._pool_lock:
+            entry = self._connections.pop(cache_key, None)
+            self._pool_generations[cache_key] = self._pool_generations.get(cache_key, 0) + 1
+        if entry is not None and not entry[0].is_closed():
+            entry[0].close()
+            await entry[0].wait_closed()
+
     async def aclose(self) -> None:
         """Close all pooled connections. Called by lifespan or cleanup."""
         async with self._pool_lock:
             to_close = list(self._connections.values())
             self._connections.clear()
             self._connect_locks.clear()
+            self._pool_generations.clear()
         for conn, _ in to_close:
             if not conn.is_closed():
                 conn.close()

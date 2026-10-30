@@ -970,6 +970,55 @@ func TestRunImportNonexistentFileSurfacesUnexpected(t *testing.T) {
 	_ = err
 }
 
+// TestMapEntrySecretFieldMapIsTopLevel pins that a YAML
+// secret_field_map lands at the top level, not in extras (#3711).
+func TestMapEntrySecretFieldMapIsTopLevel(t *testing.T) {
+	t.Parallel()
+	body, _ := mapEntry(map[string]any{
+		"name": "ssh-01", "product": "ssh", "host": "ssh-01.example.com",
+		"secret_field_map": map[string]any{"ssh_private_key": "private_key"},
+	})
+	m, ok := body["secret_field_map"].(map[string]any)
+	if !ok || m["ssh_private_key"] != "private_key" {
+		t.Errorf("secret_field_map: got %#v", body["secret_field_map"])
+	}
+	if _, spilled := body["extras"]; spilled {
+		t.Errorf("secret_field_map must not spill into extras; got %v", body["extras"])
+	}
+}
+
+// TestApplySecretFieldMapMergesFlagOverYAML pins that --secret-field
+// entries are added to every entry and win over a YAML entry with the
+// same connector field, while other YAML entries are kept.
+func TestApplySecretFieldMapMergesFlagOverYAML(t *testing.T) {
+	t.Parallel()
+	entries := []map[string]any{
+		{"name": "a", "secret_field_map": map[string]any{"username": "login", "ssh_private_key": "old"}},
+		{"name": "b"},
+	}
+	applySecretFieldMap(entries, map[string]any{"ssh_private_key": "private_key"})
+
+	a := entries[0]["secret_field_map"].(map[string]any)
+	if a["username"] != "login" || a["ssh_private_key"] != "private_key" || len(a) != 2 {
+		t.Errorf("entry a: got %v", a)
+	}
+	b := entries[1]["secret_field_map"].(map[string]any)
+	if b["ssh_private_key"] != "private_key" || len(b) != 1 {
+		t.Errorf("entry b: got %v", b)
+	}
+}
+
+// TestApplySecretFieldMapNoFlagsLeavesEntries pins that without
+// --secret-field the entries are not touched.
+func TestApplySecretFieldMapNoFlagsLeavesEntries(t *testing.T) {
+	t.Parallel()
+	entries := []map[string]any{{"name": "a"}}
+	applySecretFieldMap(entries, map[string]any{})
+	if _, ok := entries[0]["secret_field_map"]; ok {
+		t.Errorf("entry should have no secret_field_map; got %v", entries[0])
+	}
+}
+
 // TestRunImportAppliesVersionAndExtrasFromOneFile is the #3649
 // round trip on the CLI side: one import file registers a versioned
 // target with `extras.scheme`. The POST body carries `version` at the

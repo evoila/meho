@@ -99,6 +99,7 @@ __all__ = [
     "DATASTORE_USAGE_RESPONSE_SCHEMA",
     "DATASTORE_VSAN_FOLDER_LIST_PARAMETER_SCHEMA",
     "DATASTORE_VSAN_FOLDER_LIST_RESPONSE_SCHEMA",
+    "DVS_MOID_PATTERN",
     "EVENT_TAIL_PARAMETER_SCHEMA",
     "EVENT_TAIL_RESPONSE_SCHEMA",
     "FOLDER_CREATE_PARAMETER_SCHEMA",
@@ -2010,6 +2011,12 @@ HOST_MAINTENANCE_EXIT_PARAMETER_SCHEMA: dict[str, Any] = {
 }
 
 
+#: Distributed switch moids, e.g. ``dvs-31``. A switch name does not match.
+DVS_MOID_PATTERN: str = r"^dvs-[0-9]+$"
+#: Distributed portgroup moids, e.g. ``dvportgroup-42``. A portgroup name does not match.
+PORTGROUP_MOID_PATTERN: str = r"^dvportgroup-[0-9]+$"
+
+
 #: ``vmware.composite.host.detach_from_vds`` parameter schema.
 #:
 #: Per-VM NIC migration off the DVS, then DVS host-detach. Refuses to
@@ -2025,8 +2032,10 @@ HOST_DETACH_FROM_VDS_PARAMETER_SCHEMA: dict[str, Any] = {
         "dvs": {
             "type": "string",
             "minLength": 1,
+            "pattern": DVS_MOID_PATTERN,
             "description": (
-                "DVS moid the host is currently attached to. Required to scope the portgroup query."
+                "Distributed switch moid the host is attached to, like 'dvs-31'. "
+                "Not the name. Read the id with vmware.composite.network.portgroup.audit."
             ),
         },
         "fallback_network": {
@@ -2591,11 +2600,10 @@ NETWORK_PORTGROUP_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
         "vds": {
             "type": "string",
             "minLength": 1,
+            "pattern": DVS_MOID_PATTERN,
             "description": (
-                "DistributedVirtualSwitch moid the portgroup is created on (e.g. "
-                "'dvs-16'). There is no portgroup/switch REST list to resolve a "
-                "display name against, so the moid is passed directly — obtain it "
-                "from the networking group's portgroup.audit read."
+                "Distributed switch moid the portgroup is created on, like 'dvs-31'. "
+                "Not the name. Read the id with vmware.composite.network.portgroup.audit."
             ),
         },
         "name": {
@@ -2689,10 +2697,10 @@ NETWORK_PORTGROUP_SECURITY_SET_PARAMETER_SCHEMA: dict[str, Any] = {
         "portgroup": {
             "type": "string",
             "minLength": 1,
+            "pattern": PORTGROUP_MOID_PATTERN,
             "description": (
-                "DistributedVirtualPortgroup moid whose security policy is set "
-                "(e.g. 'dvportgroup-42'). Obtain it from the networking group's "
-                "portgroup.audit read."
+                "Distributed portgroup moid whose security policy is set, like 'dvportgroup-42'. "
+                "Not the name. Read the id with vmware.composite.network.portgroup.audit."
             ),
         },
         "allow_promiscuous": {
@@ -2752,10 +2760,10 @@ NETWORK_PORTGROUP_VLAN_SET_PARAMETER_SCHEMA: dict[str, Any] = {
         "portgroup": {
             "type": "string",
             "minLength": 1,
+            "pattern": PORTGROUP_MOID_PATTERN,
             "description": (
-                "DistributedVirtualPortgroup moid whose VLAN config is set (e.g. "
-                "'dvportgroup-42'). Obtain it from the networking group's "
-                "portgroup.audit read."
+                "Distributed portgroup moid whose VLAN config is set, like 'dvportgroup-42'. "
+                "Not the name. Read the id with vmware.composite.network.portgroup.audit."
             ),
         },
         "vlan_trunk_ranges": {
@@ -8226,7 +8234,6 @@ DATASTORE_PATH_PATTERN: str = (
 
 #: Moid / id shapes shared by the teardown schemas and their handlers.
 DATASTORE_MOID_PATTERN: str = r"^datastore-[0-9]+$"
-PORTGROUP_MOID_PATTERN: str = r"^dvportgroup-[0-9]+$"
 HOST_MOID_PATTERN: str = r"^host-[0-9]+$"
 #: Cluster (``ClusterComputeResource``) moids, e.g. ``domain-c7``.
 CLUSTER_MOID_PATTERN: str = r"^domain-c[0-9]+$"

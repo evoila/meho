@@ -443,10 +443,10 @@
           "enum": ["true", "false"],
           "description": "Lab-class switch for delegated approval decisions (#3693), rendered unconditionally into the `APPROVAL_ALLOW_DELEGATED_DECISION` env var. A delegated decision is an approve or reject whose reason ends with an `Instructed-by:` block. Default `\"false\"` (fail-closed, production) refuses every delegated decision with 403 `delegated_decision_forbidden`. Set `\"true\"` only on a lab-class deployment. Deliberately absent from `config.required`."
         },
-        "approvalFreshSignInMaxAgeSeconds": {
+        "freshSignInMaxAgeSeconds": {
           "type": "string",
-          "pattern": "^[1-9][0-9]*$",
-          "description": "How old a sign-in may be, in seconds, to approve on the command line or REST (#3979). Rendered into `APPROVAL_FRESH_SIGN_IN_MAX_AGE_SECONDS`. Default `\"300\"`. The web interface is not affected."
+          "pattern": "^([3-9][0-9]|[1-9][0-9]{2}|[12][0-9]{3}|3[0-5][0-9]{2}|3600)$",
+          "description": "How old a sign-in may be, in seconds, for an action that needs a fresh sign-in: turning approval off for an operation (#4711) and approving on the command line or REST (#3979). From 30 to 3600. Rendered into `FRESH_SIGN_IN_MAX_AGE_SECONDS`. Default `\"300\"`. The web interface is not affected."
         },
         "approvalOneTimeCodeAcrValues": {
           "type": "string",

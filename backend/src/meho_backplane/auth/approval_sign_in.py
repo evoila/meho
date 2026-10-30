@@ -5,12 +5,14 @@
 
 An approve is a person's decision (v0.1-spec §7). In the web interface the
 click is the proof. On the command line and REST the token must show a
-fresh sign-in: its ``auth_time`` claim is at most
-:attr:`~meho_backplane.settings.Settings.approval_fresh_sign_in_max_age_seconds`
-old (default 5 minutes). A token whose ``acr`` is one of
+fresh sign-in: the shared check
+:func:`~meho_backplane.auth.fresh_sign_in.has_fresh_sign_in` must pass. It
+is the same check, with the same ``FRESH_SIGN_IN_MAX_AGE_SECONDS`` window
+(default 5 minutes), that turning approval off for an operation uses
+(#4711). A token whose ``acr`` is one of
 :attr:`~meho_backplane.settings.Settings.approval_one_time_code_acr_values`
-is recorded as a one-time code step; it needs the same recent
-``auth_time``. A token without ``auth_time`` never approves (#3979,
+is recorded as a one-time code step; it needs the same fresh sign-in. A
+token without ``auth_time`` never approves (#3979,
 ``docs/decisions/approval-groups-and-self-approval.md``).
 
 A refreshed token keeps the time of the first sign-in (RFC 9470 §6.1), so a
@@ -26,13 +28,13 @@ approval" needs the audit log, so it lives in
 from __future__ import annotations
 
 import hashlib
-import time
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
 import structlog
-from fastapi import HTTPException, status
+from fastapi import HTTPException
 
+from meho_backplane.auth.fresh_sign_in import fresh_sign_in_challenge, has_fresh_sign_in
 from meho_backplane.auth.operator import Operator
 from meho_backplane.settings import Settings
 
@@ -106,23 +108,13 @@ def web_click_approval_auth(operator: Operator) -> ApprovalAuth:
     return ApprovalAuth(channel="web", method="web_click", auth_time=operator.auth_time)
 
 
-def fresh_sign_in_required(settings: Settings, *, reason: str) -> HTTPException:
+def fresh_sign_in_required(*, reason: str) -> HTTPException:
     """Build the ``401`` that asks for a fresh sign-in (RFC 9470 §3).
 
-    ``max_age`` tells the client how old the new sign-in may be, in
-    seconds. *reason* is the machine-readable prefix of ``detail``.
+    The shared :func:`~meho_backplane.auth.fresh_sign_in.fresh_sign_in_challenge`
+    builds it. *reason* is the machine-readable prefix of ``detail``.
     """
-    max_age = settings.approval_fresh_sign_in_max_age_seconds
-    challenge = (
-        'Bearer error="insufficient_user_authentication", '
-        'error_description="A fresh sign-in is required to approve", '
-        f'max_age="{max_age}"'
-    )
-    return HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail=f"{reason}: {FRESH_SIGN_IN_REMEDIATION}",
-        headers={"WWW-Authenticate": challenge},
-    )
+    return fresh_sign_in_challenge(f"{reason}: {FRESH_SIGN_IN_REMEDIATION}")
 
 
 def check_fresh_approval_sign_in(
@@ -133,32 +125,24 @@ def check_fresh_approval_sign_in(
 ) -> ApprovalAuth:
     """Return the proof for a token approve, or raise the ``401`` challenge.
 
-    The sign-in must be at most ``approval_fresh_sign_in_max_age_seconds``
-    old. A sign-in time further in the future than the JWT clock leeway is
-    refused too. A token with no ``auth_time`` is refused (fail closed).
+    The shared :func:`~meho_backplane.auth.fresh_sign_in.has_fresh_sign_in`
+    decides: a person whose sign-in is at most
+    ``FRESH_SIGN_IN_MAX_AGE_SECONDS`` old. A token with no ``auth_time`` is
+    refused (fail closed).
     """
-    current = time.time() if now is None else now
-    auth_time = operator.auth_time
-    log = structlog.get_logger(__name__)
-    if auth_time is None:
-        log.warning("approval_sign_in_missing", operator_sub=operator.sub)
-        raise fresh_sign_in_required(settings, reason="fresh_sign_in_required")
-    age = current - auth_time
-    max_age = settings.approval_fresh_sign_in_max_age_seconds
-    if age > max_age or age < -settings.keycloak_jwt_leeway_seconds:
-        log.warning(
-            "approval_sign_in_too_old",
+    if not has_fresh_sign_in(operator, now=now):
+        structlog.get_logger(__name__).warning(
+            "approval_sign_in_not_fresh",
             operator_sub=operator.sub,
-            age_seconds=int(age),
-            max_age_seconds=max_age,
+            has_auth_time=operator.auth_time is not None,
         )
-        raise fresh_sign_in_required(settings, reason="fresh_sign_in_required")
+        raise fresh_sign_in_required(reason="fresh_sign_in_required")
     one_time_code = operator.acr is not None and (
         operator.acr in settings.approval_one_time_code_acr_values
     )
     return ApprovalAuth(
         channel="rest",
         method="one_time_code" if one_time_code else "fresh_sign_in",
-        auth_time=auth_time,
+        auth_time=operator.auth_time,
         sid=operator.sid,
     )

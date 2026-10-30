@@ -100,7 +100,7 @@ Two backplane settings control the check:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `APPROVAL_FRESH_SIGN_IN_MAX_AGE_SECONDS` (chart `config.approvalFreshSignInMaxAgeSeconds`) | `300` | How old the sign-in may be, in seconds. |
+| `FRESH_SIGN_IN_MAX_AGE_SECONDS` (chart `config.freshSignInMaxAgeSeconds`) | `300` | How old the sign-in may be, in seconds (30 to 3600). The same window applies when someone turns approval off for an operation. |
 | `APPROVAL_ONE_TIME_CODE_ACR_VALUES` (chart `config.approvalOneTimeCodeAcrValues`) | empty (off) | Comma-separated `acr` values that mean "the person entered a one-time code". |
 
 **Optional one-time code step.** You can ask for a code from an

@@ -638,7 +638,7 @@ async def _capture_operator_decision(
             detail="preview_binding_missing",
         ) from exc
     except ApprovalSignInReusedError as exc:
-        raise fresh_sign_in_required(get_settings(), reason="fresh_sign_in_already_used") from exc
+        raise fresh_sign_in_required(reason="fresh_sign_in_already_used") from exc
     except DelegatedReasonInvalidError as exc:
         raise _delegated_reason_http_error(exc) from exc
     except DelegatedDecisionForbiddenError as exc:
@@ -903,7 +903,7 @@ async def _record_approval_decision(
             detail="preview_binding_missing",
         ) from exc
     except ApprovalSignInReusedError as exc:
-        raise fresh_sign_in_required(get_settings(), reason="fresh_sign_in_already_used") from exc
+        raise fresh_sign_in_required(reason="fresh_sign_in_already_used") from exc
     except DelegatedReasonInvalidError as exc:
         raise _delegated_reason_http_error(exc) from exc
     except DelegatedDecisionForbiddenError as exc:
@@ -942,7 +942,7 @@ async def approve_approval_request(
     * 200 — approved + re-dispatched successfully (sync).
     * 202 — approved; resume launched in the background (``async: true``).
     * 401 — the token shows no fresh sign-in (#3979): its ``auth_time`` is
-      missing or older than ``APPROVAL_FRESH_SIGN_IN_MAX_AGE_SECONDS``, or
+      missing or older than ``FRESH_SIGN_IN_MAX_AGE_SECONDS``, or
       this sign-in already gave an approval. The answer carries
       ``WWW-Authenticate: Bearer error="insufficient_user_authentication"``
       with ``max_age`` (RFC 9470). Approve in the web interface, or sign in

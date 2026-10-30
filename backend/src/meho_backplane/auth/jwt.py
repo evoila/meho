@@ -1474,9 +1474,7 @@ def _extract_sign_in_claims(claims: Any) -> tuple[int | None, str | None, str | 
     though Python counts it as an ``int``.
     """
     raw_time = claims.get("auth_time")
-    auth_time = (
-        raw_time if isinstance(raw_time, int) and not isinstance(raw_time, bool) else None
-    )
+    auth_time = raw_time if isinstance(raw_time, int) and not isinstance(raw_time, bool) else None
     acr = claims.get("acr")
     sid = claims.get("sid")
     return (

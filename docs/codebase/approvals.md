@@ -2024,18 +2024,23 @@ CLI) the token must prove it:
   `/approve` through the `require_fresh_approval_sign_in` dependency in
   `auth/rbac.py`). It runs after `require_human_principal`, so a machine
   principal still gets its 403 first.
-- The token's `auth_time` claim (`Operator.auth_time`) must be no older
-  than `APPROVAL_FRESH_SIGN_IN_MAX_AGE_SECONDS` (default 300). A token
-  without `auth_time` is refused. A refreshed token keeps the time of the
-  first sign-in (RFC 9470 §6.1), so a long-lived `meho login` token never
-  passes. A plain API token never approves.
+- It uses the shared fresh sign-in check, `has_fresh_sign_in` in
+  `auth/fresh_sign_in.py` (see
+  [Operator overrides and the fresh sign-in check](#operator-overrides-and-the-fresh-sign-in-check-4711)).
+  So the token's `auth_time` claim (`Operator.auth_time`) must be no older
+  than `FRESH_SIGN_IN_MAX_AGE_SECONDS` (default 300, chart
+  `config.freshSignInMaxAgeSeconds`). It is the same window as for turning
+  approval off for an operation. A token without `auth_time` is refused.
+  A refreshed token keeps the time of the first sign-in (RFC 9470 §6.1),
+  so a long-lived `meho login` token never passes. A plain API token never
+  approves.
 - A token whose `acr` is in `APPROVAL_ONE_TIME_CODE_ACR_VALUES` (empty =
   off) is recorded as a one-time code approval. It needs the same recent
   `auth_time`: an `acr` alone is not enough.
 - The refusal is 401 `fresh_sign_in_required: <text>` with
   `WWW-Authenticate: Bearer error="insufficient_user_authentication",
-  error_description="…", max_age="<N>"` (RFC 9470 §3). The request stays
-  pending.
+  max_age=<N>` (the shared `fresh_sign_in_challenge`, RFC 9470 §3). The
+  request stays pending.
 - **One sign-in, one approval.** `approve_request` gets an `ApprovalAuth`
   and refuses (`ApprovalSignInReusedError`, mapped to the same 401 with
   `fresh_sign_in_already_used:`) when an earlier `approval.decision` row of

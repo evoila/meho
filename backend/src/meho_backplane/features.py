@@ -469,7 +469,7 @@ def _approval_queue_block(settings: Settings) -> dict[str, Any]:
             else "production_own_hand_only"
         ),
         "sandbox_mode": sandbox_mode_label(),
-        "fresh_sign_in_max_age_seconds": settings.approval_fresh_sign_in_max_age_seconds,
+        "fresh_sign_in_max_age_seconds": settings.fresh_sign_in_max_age_seconds,
         "one_time_code_acr_values": list(settings.approval_one_time_code_acr_values),
     }
 

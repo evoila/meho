@@ -317,7 +317,7 @@ def test_ready_shows_the_approval_sign_in_settings() -> None:
 
     block = build_features_block(
         _settings_with(
-            approval_fresh_sign_in_max_age_seconds=120,
+            fresh_sign_in_max_age_seconds=120,
             approval_one_time_code_acr_values=("otp",),
         )
     )

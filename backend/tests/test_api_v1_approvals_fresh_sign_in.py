@@ -5,7 +5,7 @@
 
 ``POST /api/v1/approvals/{id}/approve`` and ``/decide`` with
 ``decision=approved`` accept only a token whose ``auth_time`` is at most
-``APPROVAL_FRESH_SIGN_IN_MAX_AGE_SECONDS`` old. Otherwise they answer 401
+``FRESH_SIGN_IN_MAX_AGE_SECONDS`` old. Otherwise they answer 401
 with the RFC 9470 challenge and the request stays pending. One sign-in
 (same ``sid`` and ``auth_time``) allows one approval. Reject is unchanged.
 The ``approval.decision`` audit row records how the approval was given.
@@ -50,7 +50,7 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", _AUDIENCE)
     monkeypatch.setenv("KEYCLOAK_JWT_LEEWAY_SECONDS", "30")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
-    monkeypatch.delenv("APPROVAL_FRESH_SIGN_IN_MAX_AGE_SECONDS", raising=False)
+    monkeypatch.delenv("FRESH_SIGN_IN_MAX_AGE_SECONDS", raising=False)
     monkeypatch.delenv("APPROVAL_ONE_TIME_CODE_ACR_VALUES", raising=False)
     get_settings.cache_clear()
     clear_jwks_cache()
@@ -151,7 +151,7 @@ def _assert_challenge(response: httpx.Response, max_age: int = 300) -> None:
     assert response.status_code == 401, response.text
     challenge = response.headers["www-authenticate"]
     assert challenge.startswith('Bearer error="insufficient_user_authentication"')
-    assert f'max_age="{max_age}"' in challenge
+    assert f"max_age={max_age}" in challenge
     assert "approve in the web interface, or sign in again" in response.json()["detail"]
 
 
@@ -192,7 +192,7 @@ async def test_max_age_follows_the_setting(
     _client: tuple[httpx.AsyncClient, Any],
     _fake_resume: list[uuid.UUID],
 ) -> None:
-    monkeypatch.setenv("APPROVAL_FRESH_SIGN_IN_MAX_AGE_SECONDS", "60")
+    monkeypatch.setenv("FRESH_SIGN_IN_MAX_AGE_SECONDS", "60")
     get_settings.cache_clear()
     ac, key = _client
     request_id = await _park()
@@ -348,7 +348,7 @@ async def test_machine_principal_still_gets_403_first(
     ("claims", "expected"),
     [
         ({"auth_time": 1700000000, "acr": "1", "sid": "abc"}, (1700000000, "1", "abc")),
-        ({"auth_time": 1700000000.7}, (1700000000, None, None)),
+        ({"auth_time": 1700000000.7}, (None, None, None)),
         ({"auth_time": True, "acr": "", "sid": 5}, (None, None, None)),
         ({"auth_time": "1700000000"}, (None, None, None)),
         ({}, (None, None, None)),

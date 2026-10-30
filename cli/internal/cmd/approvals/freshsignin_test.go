@@ -18,8 +18,8 @@ import (
 	"github.com/evoila/meho/cli/internal/auth"
 )
 
-const freshChallenge = `Bearer error="insufficient_user_authentication", ` +
-	`error_description="A fresh sign-in is required to approve", max_age="300"`
+// freshChallenge is the 401 challenge the backplane sends (RFC 9470 §3).
+const freshChallenge = `Bearer error="insufficient_user_authentication", max_age=300`
 
 // newFakeSignInIdP is an authorization server with a discovery
 // document and a token endpoint that hands out "fresh-token".
@@ -229,9 +229,9 @@ func TestApproveWithoutABrowserPrintsTheLinkAndTheWebHint(t *testing.T) {
 func TestNeedsFreshSignInReadsTheChallenge(t *testing.T) {
 	for header, want := range map[string]bool{
 		freshChallenge: true,
-		`Bearer error=insufficient_user_authentication, max_age=300`: true,
-		`Bearer error="invalid_token"`:                               false,
-		"":                                                           false,
+		`Bearer error=insufficient_user_authentication, max_age="300"`: true,
+		`Bearer error="invalid_token"`:                                 false,
+		"":                                                             false,
 	} {
 		resp := &http.Response{Header: http.Header{}}
 		if header != "" {

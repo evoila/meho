@@ -18,7 +18,16 @@ each other's code:
 | MCP `list_targets` | `backend/src/meho_backplane/mcp/tools/topology.py` | working-surface enumeration for agents |
 
 `meho_targets_register` (`mcp/tools/targets_register.py`) is the
-operator-plane MCP write; every `target` argument elsewhere resolves
+operator-plane MCP write. It runs the `targets.register` operation, whose
+params schema is `TARGETS_REGISTER_PARAMETER_SCHEMA`
+(`connectors/targets/schemas.py`): required `name`, `product`, `host`;
+optional `aliases`, `version`, `port`, `fqdn`, `secret_ref`,
+`auth_model`, `verify_tls`, `tls_ca_pin`, `tls_server_name`,
+`vpn_required`, `extras`, `notes`, `preferred_impl_id`. Any other field
+is refused. `vpn_required` (boolean, default `false`) records that a
+VPN must be up to reach the target. MEHO does not act on it; it is
+shown to the people and agents that read the target (#5075). Every
+`target` argument elsewhere resolves
 through `resolve_target` (`targets/resolver.py`). Destination checks
 are covered in [`target-ssrf-guard.md`](target-ssrf-guard.md).
 

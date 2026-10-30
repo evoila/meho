@@ -799,7 +799,10 @@ flips it after the LLM-grouping pass runs.
 
 `safety_changes` (#2702) is a tuple of frozen `SafetyChange`
 entries — one per **existing** row whose `safety_level` the call
-overwrote with a different value. Both existing-row update paths in
+overwrote with a different value. An operator's stricter level is an
+override kept apart from the row (#4711, see
+[Operator overrides of risk level and approval](#operator-overrides-of-risk-level-and-approval-4711)),
+so a re-ingest never overwrites it and it never shows up here. Both existing-row update paths in
 `_upsert.py` capture the diff (the body hash covers embedding text,
 not safety metadata, so the skip-re-embed branch can carry a
 reclassification too). After the upsert loop,
@@ -1084,6 +1087,171 @@ Since #3870 a tenant's own copy is the only copy used for that tenant,
 and the old copy lacks the hand-written ops of the built-in copy
 (`vrli.event.query`), so the tenant would lose them.
 
+### Operator overrides of risk level and approval (#4711)
+
+An operator can make an operation stricter: raise its risk level,
+require approval, or turn it off. The change stays after a restart, an
+upgrade and a new ingest of the API description.
+
+**Where the values live.**
+
+* `endpoint_descriptor.safety_level` / `requires_approval` hold the
+  *classification*: the value in code (typed and composite operations)
+  or from the API description plus its safety floors (ingested
+  operations). Typed registration at every start and every re-ingest
+  write only these columns.
+* `operation_policy_override` (migration `0127`, model
+  `OperationPolicyOverride`) holds the operator's choice, one row per
+  scope and operation name `(product, version, impl_id, op_id)`.
+  `tenant_id` is the scope: a tenant UUID (that tenant only) or `NULL`
+  (the whole install). Keyed on the name, not on a descriptor id, so a
+  re-ingest that deletes and re-creates rows keeps it.
+* Turning an operation off still writes `endpoint_descriptor.is_enabled`
+  as before; both registration paths already keep it. A per-tenant
+  on/off switch for built-in operations is a separate task.
+
+**The effective values** (`operations/op_policy.py`,
+`effective_policy`):
+
+* risk level: the highest of the classification and every override that
+  applies (install-wide plus the caller's tenant);
+* approval: required when the classification or any override says so.
+  The only way to turn it off is an override with
+  `requires_approval=false` (see below). A destructive operation always
+  requires approval.
+
+`lookup_descriptor` (dispatch, preview, checks, gateway mint, governed
+sub-operations, service grants), the operation contract,
+`search_operations` hits, `describe_descriptor` (`GET
+/api/v1/operations/{descriptor_id}`, the console operation drawer and run
+window), the operations list on the console connector page and the review
+payload all read these effective values, so a call, a preview and the
+approval check always agree. For example, a typed operation raised to
+`destructive` shows the preview step in the console, because a
+destructive call needs a preview. The
+review payload also carries `classified_safety_level` /
+`classified_requires_approval` (the floor).
+
+**Edit rules** (`apply_policy_edit`, called by `ReviewService.edit_op`):
+
+| Edit | Who | Scope | Result |
+|---|---|---|---|
+| raise the risk level (any of the four levels) | tenant admin | own tenant | override; `destructive` also requires approval |
+| raise the risk level | platform admin, built-in operation | whole install | override |
+| require approval | tenant admin / platform admin | as above | override |
+| set the level back to the classification | same scope | same scope | override field removed, value from code applies |
+| remove an override (`remove_override`, `ReviewService.remove_op_override`) | platform admin: any scope; tenant admin: own tenant only | the named scope | override row deleted; when that ends approval in the scope, the approval-off checks apply |
+| a level below the classification | anyone | - | refused, `risk_level_below_classification`: open a pull request |
+| `requires_approval=false` where the classification requires it | platform admin, with a non-empty `reason` and a person present | whole install (built-in) or the row's tenant | override `false`; listed in the reduced-approval report |
+| `requires_approval=false` on a destructive operation | anyone | - | always refused, `approval_off_destructive` |
+
+**Every edit that ends approval passes the same checks.** The rule looks
+at the result, not at the field in the request. When the effective
+approval goes from required to not required, the edit needs
+`platform_admin`, a reason and a person present, and it is refused for a
+destructive operation and by the MCP tool. This also covers removing an
+override that required approval, and setting a level back from
+`destructive` (which ends the approval that `destructive` brings). A
+tenant admin who lowers their own `destructive` override can keep
+approval by also sending `requires_approval=true`.
+
+**An install-wide change is checked in every scope it reaches.** An
+install-wide override also applies to a tenant's own copy of the
+operation (a tenant row with the same name), and that copy may have its
+own classification. Before an install-wide override is lowered or
+removed, `apply_policy_edit` / `remove_override` look at every tenant
+with its own copy or its own override: when approval ends for any of
+them, the approval-off checks apply, even when the built-in operation
+keeps approval. The audit row names those tenants in
+`approval_ended_for_tenants`. An install-wide `requires_approval=true`
+is stored when any tenant needs it: because its copy's classification
+does not require approval, or because an approved tenant override turned
+approval off. So a platform admin can lower the level, or require
+approval again after a tenant exception, and it holds for everyone.
+
+**Edits of one operation run one at a time.** `apply_policy_edit` and
+`remove_override` first take a transaction-level PostgreSQL advisory
+lock on the operation name (`_lock_operation`), before they read any
+override. A second edit or removal of the same operation, in any scope,
+waits until the first commits and then reads what it wrote. Without the
+lock, two removals in different scopes (the install-wide override and a
+tenant's, both requiring approval) could each see the other's row, both
+pass the approval-off checks, and leave the tenant without approval.
+PostgreSQL releases the lock with the transaction. On SQLite the call
+does nothing; `tests/integration/test_operation_policy_override_pg.py`
+proves the rule against the real database.
+
+**Each scope's override stands on its own.** The stored value is
+measured against the classification, not against the other scopes'
+overrides. A tenant that selects `destructive` while the install-wide
+override already says `destructive` still gets its own row, so the
+tenant's choice holds when the install-wide override is removed. The
+same holds for approval: a tenant's `requires_approval=true` is stored
+unless the classification itself requires approval and no override turns
+it off.
+
+**Removing a tenant's override.** A platform admin's edit of a built-in
+operation targets the install-wide override, so it cannot reach a row a
+tenant stored. `DELETE
+/api/v1/connectors/{id}/operation-overrides/{op_id}?tenant_id=<uuid>`
+(`meho connector remove-override <id> <op_id> --tenant <uuid> --reason
+<text>`) removes the named tenant's override; without `tenant_id` it
+removes the install-wide one. A platform admin can remove any tenant's;
+a tenant admin only their own (`404` for another tenant's, `403` for the
+install-wide one). When the removal ends approval in that scope, the
+approval-off checks apply (`403` / `400` / `401` as for an edit). `404`
+when the scope has no override. The audit row is a
+`meho_connector_edit_op` row with `override_removed=true` and
+`override_tenant_id`.
+
+"A person present" is the fresh sign-in check on REST
+(`auth/fresh_sign_in.py`, see `approvals.md`) and the web session in the
+console. A tenant admin may now edit the risk level and approval of a
+built-in operation without `platform_admin`: the change is an override
+for their tenant, not a write to the shared row. Every other field of a
+built-in row still needs `platform_admin`.
+
+**Surfaces.** REST `PATCH /api/v1/connectors/{id}/operations/{op_id}`
+(body field `reason`), the console review drawer (the approval toggle
+asks for a reason; the risk level select offers only levels at or above
+the classification), the CLI `meho connector edit-op --safety
+safe|caution|dangerous|destructive --reason <text>`, and the MCP tool
+`meho_connector_edit_op`. The MCP tool passes `tighten_only=True`: it
+refuses `requires_approval=false` and any level below the current one
+(`edit_tool_cannot_loosen`), so an AI client can never loosen approval
+with an admin's token. REST maps refusals to `400`, a tenant admin
+turning approval off to `403`, and a missing fresh sign-in to `401` with
+`WWW-Authenticate: Bearer error="insufficient_user_authentication",
+max_age=<N>` (RFC 9470).
+
+**Audit.** The `meho_connector_edit_op` row carries `changes`
+(`{field: {"old", "new"}}` for the risk level, approval and
+`is_enabled`, with effective values; a field that changed as a side
+effect is recorded too, for example approval when a raise to
+`destructive` turns it on), `scope` (`tenant` / `install`),
+`approval_ended_for_tenants` (the tenants whose own copy of a built-in
+operation lost its approval requirement through an install-wide change)
+and `reason`, next to the existing `fields_updated` and
+`is_enabled_set_to`.
+
+**Report.** `GET /api/v1/connectors/operation-overrides`
+(`?reduced_approval=true` for the operations running with reduced
+approval), `meho connector overrides [--reduced-approval]`, and the
+console page `/ui/connectors/overrides`. A tenant admin sees the
+install-wide rows and their own tenant's; a platform admin sees all.
+The CLI table shows the tenant id in the scope column, so a platform
+admin can pass it to `remove-override --tenant`.
+Each row shows the risk level and approval that apply in the row's scope
+(the classification with every override there), not the stored override
+fields. The reduced-approval view lists an override only while approval
+is really off, so an exception that a later raise to `destructive` made
+void drops out. A later edit that does not touch approval keeps the
+reason, author and time of an approval exception.
+
+**Upgrade.** Before this change an edit wrote the descriptor row, so it
+was lost at the next start (typed) or re-ingest (ingested). Existing
+stricter edits on rows stay until then; re-apply them once with
+`edit-op` to make them stick.
 ### Each tenant turns built-in operations on or off (#5029)
 
 A built-in operation row (`endpoint_descriptor.tenant_id IS NULL`) is

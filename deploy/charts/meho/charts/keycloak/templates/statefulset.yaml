@@ -137,6 +137,16 @@ spec:
                 secretKeyRef:
                   name: {{ include "coreKeycloak.coreSecret" (dict "root" . "kind" "check-runner") }}
                   key: client_secret
+            {{- if .Values.companyLogin.enabled }}
+            {{- with .Values.companyLogin.caBundle }}
+            {{- if .configMapName }}
+            # The private CA of the company login, added to the CAs Keycloak
+            # trusts for its calls to it (token, keys, user info).
+            - name: KC_TRUSTSTORE_PATHS
+              value: {{ printf "/opt/keycloak/conf/company-login-ca/%s" .key | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
           ports:
             - name: http
               containerPort: 8080
@@ -175,10 +185,23 @@ spec:
             - name: realm
               mountPath: /opt/keycloak/data/import
               readOnly: true
+            {{- if and .Values.companyLogin.enabled .Values.companyLogin.caBundle.configMapName }}
+            - name: company-login-ca
+              mountPath: /opt/keycloak/conf/company-login-ca
+              readOnly: true
+            {{- end }}
       volumes:
         - name: realm
           configMap:
             name: {{ include "coreKeycloak.fullname" . }}-realm
+        {{- if and .Values.companyLogin.enabled .Values.companyLogin.caBundle.configMapName }}
+        - name: company-login-ca
+          configMap:
+            name: {{ .Values.companyLogin.caBundle.configMapName }}
+            items:
+              - key: {{ .Values.companyLogin.caBundle.key }}
+                path: {{ .Values.companyLogin.caBundle.key }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

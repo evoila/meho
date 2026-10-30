@@ -71,6 +71,8 @@ All types are Pydantic v2 frozen models, defined in
 | `RedactionPolicyError` | `policy.py` | One typed exception for any parse / validation failure |
 | `RedactionManifestEntry` | `engine.py` | One manifest row (rule, pattern, action, count, span, reason, path) |
 | `RedactionResult` | `engine.py` | Engine return value: `redacted` + `manifest` |
+| `SecretFinder` | `patterns.py` | A named pattern written as code: `secret_spans(text)` returns the spans to replace. `patterns.secret_spans(pattern, text)` gives the spans of any named pattern, regex or finder |
+| `BindKeySecretFinder` | `bind_secret.py` | The `bind_key_secret` finder: reads BIND comments and quoted strings the way BIND does |
 
 `PATTERN_NAMES` (`patterns.py`) is the source of truth for the named
 catalogue; the policy schema validates `rule.pattern` against it at
@@ -122,7 +124,7 @@ production traffic cannot reach that branch.
 | `jwt` | `ey<base64url>.<base64url>.<base64url>` three-segment tokens |
 | `api_key` | Labelled credential pairs: `api_key`, `access_token`, `refresh_token`, `auth_token`, `session_token`, `token` (bare), `secret` / `secret_key` / `secret_id`, `private_key`, `password`, `passwd`, `pwd`, `client_secret` — each followed by `=` or `:` and an 8+ char value |
 | `kubeconfig` | YAML kubeconfig blobs (`apiVersion: v1` + `kind: Config`) |
-| `bind_key_secret` | The quoted value after the `secret` keyword in a BIND `key` block (`secret "<base64>";`, TSIG and rndc keys), also when BIND comments (`/* */`, `//`, `#`) sit between the keyword and the value; the keyword and the comments stay so the file stays readable. The value must be base64, and the keyword may not follow a quote, a hyphen, or a word character, so a key *name* like `"transfer-secret"` is not taken for the directive (#4617) |
+| `bind_key_secret` | The value after the `secret` keyword in a BIND `key` block (`secret "<base64>";`, TSIG and rndc keys) and after `cookie-secret` in the `options` block, with or without quotes, also when BIND comments (`/* */`, `//`, `#`) sit between the keyword and the value; the keyword and the comments stay so the file stays readable. Not a regex: `bind_secret.py` first splits the text into comments, quoted strings and code the way BIND's lexer does, then reads the value only inside the same scope. So a `secret` word in a comment can never reach past that comment, a commented-out key block is still hidden, an old secret in a comment between the keyword and its value is hidden together with the value, a key *name* like `"transfer-secret"` or `"my secret"` is never the keyword, and a `#` or `//` inside a quoted string does not start a comment (#4617, #5342 review). A quoted value must be base64 or hex. A value without quotes must be followed by `;` or a comment |
 | `uuid` | RFC 4122 canonical 8-4-4-4-12 hex |
 | `ipv4` | Dotted-quad with 0-255 per-octet bounds |
 | `ipv6` | Full + compressed RFC 5952 forms |
@@ -147,13 +149,15 @@ matched only partially (tail leaked) or not at all (whole value
 leaked). The labelled-context requirement, not the value alphabet, is
 what keeps opaque IDs (Git SHAs, build hashes) from false-positiving.
 
-The engine replaces the whole match (group 0) of a pattern. One
-exception: a pattern that must look past variable-width context before
-the secret names the secret part `value` (a Python look-behind cannot
-skip variable-width text). The engine then replaces only that group,
-keeps the rest of the match in the output, and reports the span of the
-group in the manifest. `bind_key_secret` uses this so the `secret`
-keyword and any BIND comments before the value stay readable.
+The engine replaces the whole match of a regex pattern. One named
+pattern, `bind_key_secret`, is code instead of a regex: a
+`SecretFinder` (`patterns.py`) with one method, `secret_spans(text)`,
+that returns the `(start, end)` of every secret. The engine replaces
+only those spans and reports the first one in the manifest, so the
+`secret` keyword and any BIND comments around the value stay readable.
+`bind_secret.py` holds the finder. It keeps every scan linear: a
+comment or quote that never closes is looked for once, so a payload
+full of `/*` or `"` cannot keep the middleware busy.
 
 Calibration notes (over-match vs under-match) are inline in
 `patterns.py`. The Tier-1 posture deliberately leans toward

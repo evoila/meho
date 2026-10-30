@@ -14,6 +14,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/cmd/workref"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -42,7 +43,7 @@ func newListCmd() *cobra.Command {
 		Long: "list calls GET /api/v1/scheduler/triggers and renders " +
 			"the triggers in the operator's tenant, newest-first. " +
 			"--kind narrows to cron|one_off|event; --status narrows to " +
-			"active|paused|cancelled|fired. --work-ref narrows to triggers " +
+			"active|paused|cancelled|fired. --filter-work-ref narrows to triggers " +
 			"carrying that exact change-ticket reference (e.g. " +
 			"gh:evoila/meho#13). --tenant is a tenant_admin-" +
 			"only filter that targets another tenant; operator role " +
@@ -57,7 +58,7 @@ func newListCmd() *cobra.Command {
 			return runList(cmd, listOptions{
 				Kind:              kind,
 				Status:            status,
-				WorkRef:           workRef,
+				WorkRef:           workref.Filter(cmd, workRef),
 				Tenant:            tenant,
 				Limit:             limit,
 				Offset:            offset,
@@ -70,7 +71,7 @@ func newListCmd() *cobra.Command {
 		"filter by trigger kind: cron | one_off | event")
 	cmd.Flags().StringVar(&status, "status", "",
 		"filter by trigger status: active | paused | cancelled | fired")
-	cmd.Flags().StringVar(&workRef, "work-ref", "",
+	cmd.Flags().StringVar(&workRef, workref.FilterFlag, "",
 		"filter by external change-ticket reference (exact match, e.g. gh:evoila/meho#13)")
 	cmd.Flags().StringVar(&tenant, "tenant", "",
 		"target tenant UUID (tenant_admin only; operator role is locked to its own tenant)")

@@ -364,8 +364,10 @@ real operator through the same loader.
 | `k8s.auth.can_i`       | safe   | `AuthorizationV1Api.create_self_subject_access_review()` -- may the target's kubeconfig identity do one verb on one resource (or one non-resource path)? `{allowed, denied, reason, evaluation_error}`. Same as `kubectl auth can-i`. (`ops_access.py`, #3840) |
 | `k8s.auth.rules`       | safe   | `AuthorizationV1Api.create_self_subject_rules_review()` -- every rule that identity has in one namespace, one row per rule, plus `incomplete`. Same as `kubectl auth can-i --list`. (`ops_access.py`, #3840) |
 | `k8s.admission_webhook.list` | safe | `AdmissionregistrationV1Api.list_validating_webhook_configuration()` + `list_mutating_webhook_configuration()` -- one row per webhook: rules, selectors, `failure_policy`, `side_effects`, `timeout_seconds`, service or URL. `caBundle` is left out. Optional `type` filter. (`ops_admission.py`, #3840) |
-| `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap. `container` also accepts an init container name. |
+| `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap; since_time / until_time read an older time window, oldest line first. `container` also accepts an init container name. |
 | `k8s.exec`             | **dangerous** (`requires_approval=True`) | `CoreV1Api.connect_get_namespaced_pod_exec()` over the `WsApiClient` websocket transport -- bounded argv command-and-capture: stdout / stderr demuxed from the `v4.channel.k8s.io` channels + exit code parsed from the channel-3 status frame, per-stream 1 MiB cap, bounded timeout. Interactive `-it` deferred. |
+| `k8s.secret.list`     | safe   | `CoreV1Api.list_namespaced_secret()` / `list_secret_for_all_namespaces()` -- one row per Secret: name / namespace / type / `keys` (names only) / `key_count` / labels / `annotation_keys` (names only) / `owner_count` / created / resource_version. **Never a value.** Same `namespace` XOR `all_namespaces` + `label_selector` params as `k8s.configmap.list`. Needs `list` on `secrets`. (`ops_secret_list.py`) |
+| `k8s.secret.info`     | safe   | `CoreV1Api.read_namespaced_secret()` -- the list row fields plus `immutable`, `owners` (kind + name) and `key_sizes` (bytes per key). **Never a value.** Needs `get` on `secrets`. (`ops_secret_list.py`) |
 | `k8s.secret.read_to_ref` | **caution** (`requires_approval=True`) | `CoreV1Api.read_namespaced_secret()` -- reads one Secret's `data[data_key]` (default `value`), decodes it, and stages the value to a **tenant-scoped Vault `secret_ref`** via `vault.kv.put`; returns **only** the ref + provenance (SHA-256 / byte length), never the value. Classified `credential_read` (audit + broadcast aggregate-only). The governed VKS guest-kubeconfig read (`ops_secret_read.py`, #3496). |
 
 The multi-step read `k8s.migration.inventory` (group `migration`, `safe`)
@@ -1061,11 +1063,12 @@ per-connector redactors (see [`redaction.md`](redaction.md)).
 The redactor is wired into `custom_resource_row`
 (`ops_customresource.py`), the projection both `k8s.cr.list` and
 `k8s.cr.info` share, so a dynamic read pointed at core Secrets
-(`group=""` / `version="v1"` / `plural="secrets"`) — the one shipped read
-path that can surface a raw Secret object — is scrubbed before JSONFlux /
-audit / broadcast. For a list read, each item first gets `kind: Secret`
-from its `SecretList` (see "Built-in kinds" above), because the API
-server leaves `kind` off list items.
+(`group=""` / `version="v1"` / `plural="secrets"`) is scrubbed before
+JSONFlux / audit / broadcast. For a list read, each item first gets
+`kind: Secret` from its `SecretList` (see "Built-in kinds" above),
+because the API server leaves `kind` off list items. The dedicated way
+to look at core Secrets is `k8s.secret.list` / `k8s.secret.info` (next
+section), which also run this redactor as a second net.
 
 **Projection note.** `custom_resource_row` otherwise keeps only
 `metadata` + bounded `.spec` / `.status` excerpts and drops every other
@@ -1083,6 +1086,40 @@ pass: it reads the value inside the backplane and stages it to a Vault
 `secret_ref`, returning only the ref + a SHA-256 + byte length — no
 `data` map and no `kind: Secret` object, so the structural walk finds
 nothing to redact and the op's no-transit contract is preserved.
+
+### List and describe Secrets by name only -- `k8s.secret.list` / `k8s.secret.info` (`ops_secret_list.py`)
+
+Before a Secret change an operator needs to know which keys the Secret
+has, and whether it carries labels, annotations or owners (a full
+replace would drop them). These two safe reads answer that through MEHO,
+so nobody needs `kubectl get secret` by hand.
+
+- `k8s.secret.list` -- same params as `k8s.configmap.list`
+  (`namespace` XOR `all_namespaces`, `label_selector`). One row per
+  Secret: `name`, `namespace`, `type`, `keys`, `key_count`, `labels`,
+  `annotation_keys`, `owner_count`, `created`, `resource_version`. A
+  long list comes back as a link to the stored result (JSONFlux).
+- `k8s.secret.info` -- params `name`, `namespace`. The row fields plus
+  `immutable`, `owners` (`kind` + `name` of each owner reference) and
+  `key_sizes` (bytes per key; the decoded size of a `data` value).
+
+**Never a value.** The answer is built from names only: key names from
+`data` / `stringData`, annotation names only (the
+`kubectl.kubernetes.io/last-applied-configuration` annotation can hold
+the whole Secret, values included), owner kind and name. No value is
+copied out of the `V1Secret`. The answer then passes through
+`redact_kubernetes_payload` as a second net. So no value reaches the
+result, the audit row, the stored result or the broadcast feed.
+
+**Kubernetes rights.** The target's service account needs `list` on
+`secrets` for `k8s.secret.list` (cluster-wide for `all_namespaces`) and
+`get` on `secrets` for `k8s.secret.info`. The API server sends the values
+to MEHO on both calls; MEHO drops them before the answer is built.
+
+Reading a value stays with `k8s.secret.read_to_ref` (copied to the
+credential store, never shown).
+
+Tests: `tests/test_connectors_k8s_secret_list.py`.
 
 ## Control flow
 

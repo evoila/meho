@@ -51,8 +51,9 @@ What is never shown
   ``--name=value`` whose name holds a secret word (``PGPASSWORD=...``,
   ``AWS_SECRET_ACCESS_KEY=...``, ``--password=...``, any length), the
   argument after a secret flag (``--password x``, ``--token x``, ``-p x``;
-  the whole list item, or the whole quoted value in a shell string, also
-  when the flag ends ``command`` and the value starts ``args``), the
+  the whole list item, or the whole shell word in a shell string, quotes
+  and backslash escapes included, also when the flag ends ``command`` and
+  the value starts ``args``), the
   password in ``user:password`` after ``-u`` or ``--user``, the password
   in a URL that carries a user and password and tokens with a known
   vendor prefix (``ghp_...``). Then the shared
@@ -181,10 +182,27 @@ _COMMAND_SECRET_WORDS = ("PASS", "PWD", "SECRET", "TOKEN", "KEY", "CREDENTIAL", 
 #: Flags whose next word is ``user:password`` (``curl -u``, ``--user``).
 _USER_FLAGS = frozenset({"u", "user"})
 
-#: ``NAME=VALUE``, also as ``--name=value``; a quoted value may hold spaces.
+
+def _shell_word(stop: str = "") -> str:
+    """Regex for one shell word, read the way a POSIX shell reads it.
+
+    A word is bare text, escaped characters (``\\ `` and ``\\"`` are part of
+    the word, not an end of it), single-quoted parts and double-quoted parts
+    in which ``\\"`` does not close the quote, in any mix. So a password with
+    an escaped space or an escaped quote in it is one word. A quote that is
+    never closed runs to the end of the string, as in a shell. *stop* names
+    more characters that end bare text (shell operators, for a value).
+    """
+    return (
+        rf"""(?:[^\s'"\\{stop}]+|\\(?:[\s\S]|\Z)|'[^']*(?:'|\Z)|"(?:[^"\\]|\\[\s\S])*(?:"|\Z))+"""
+    )
+
+
+#: ``NAME=VALUE``, also as ``--name=value``; the value is one shell word, so
+#: a quoted or escaped value may hold spaces.
 _ASSIGNMENT = re.compile(
     r"(?<![A-Za-z0-9_.-])(?P<name>-{0,2}[A-Za-z_][A-Za-z0-9_.-]*)="
-    r"(?P<value>'[^']*'|\"[^\"]*\"|[^\s'\";&|]+)"
+    rf"(?P<value>{_shell_word(';&|')})"
 )
 
 #: The password in a URL that carries a user and password before the ``@``.
@@ -199,10 +217,11 @@ _KNOWN_TOKEN = re.compile(
 #: A command-line flag: ``-u``, ``--password``.
 _FLAG = re.compile(r"^--?(?P<name>[A-Za-z][A-Za-z0-9_-]*)$")
 
-#: One token of a shell string: whitespace, or a word in which a quoted part
-#: may hold spaces (``--password 'my phrase'``). An unclosed quote is a word
-#: on its own. Joined back, the tokens give the string as it was.
-_TOKEN = re.compile(r"""\s+|(?:[^\s'"]+|'[^']*'|"[^"]*")+|\S+""")
+#: One token of a shell string: whitespace, or a shell word in which a quoted
+#: or escaped part may hold spaces (``--password 'my phrase'``,
+#: ``--password my\\ phrase``). Joined back, the tokens give the string as
+#: it was.
+_TOKEN = re.compile(rf"""\s+|{_shell_word()}|\S+""")
 
 
 def _secret_shaped_name(name: str) -> bool:
@@ -249,8 +268,9 @@ def _hide_command_secrets(parts: list[Any]) -> list[Any]:
     the password in ``user:password`` after ``-u`` or ``--user``. A flag
     and its value may be two list items or two words of one string
     (``sh -c "..."``). The argument after a flag is hidden whole: the
-    whole list item, or the whole quoted value in a string, so a password
-    with a space in it does not leak in part.
+    whole list item, or the whole shell word in a string, quotes and
+    backslash escapes included (``"a\\" b"``, ``a\\ b``), so a password
+    with a space or a quote in it does not leak in part.
     """
     hidden: list[Any] = []
     pending: str | None = None

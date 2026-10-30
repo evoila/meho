@@ -315,6 +315,10 @@ _URL_WITH_PASSWORD = f"https://bob:{_SHORT}@example.invalid"  # trufflehog:ignor
         (["--password", f"{_SHORT} phrase", "--verbose"], "--verbose"),
         (["-c", f"mytool --password '{_SHORT} phrase' run"], "run"),
         (["-c", f'mytool --password "{_SHORT} phrase" run'], "run"),
+        (["-c", f'mytool --password "{_SHORT}\\" phrase" run'], "run"),
+        (["-c", f"mytool --password {_SHORT}\\ phrase run"], "run"),
+        (["-c", f"mytool --password={_SHORT}\\ phrase run"], "run"),
+        (["-c", f"PGPASSWORD='{_SHORT} phrase pg_dump"], "PGPASSWORD="),
         (["-c", f"mysql -u root -p {_SHORT} app"], "mysql"),
         (["-c", f"curl -u admin:{_SHORT} https://example.invalid"], "admin:"),  # gitleaks:allow
         (["curl", "--user", f"admin:{_SHORT}", _URL_WITH_PASSWORD], "curl"),
@@ -354,6 +358,32 @@ async def test_k8s_job_create_hides_the_whole_argument_after_a_secret_flag() -> 
     )
     (container,) = preview["spec"]["template"]["spec"]["containers"]
     assert container["args"] == ["--password", "***REDACTED***", "-c", "tool -p ***REDACTED*** x"]
+
+
+@pytest.mark.asyncio
+async def test_k8s_job_create_hides_a_password_with_shell_escapes_whole() -> None:
+    """An escaped quote or space is part of the password, not its end."""
+    _, preview = await _preview(
+        "k8s.job.create",
+        _job_params(
+            {
+                "name": "run",
+                "image": "busybox:1.36",
+                "command": ["sh", "-c"],
+                "args": [
+                    f'tool --password "{_SHORT}\\" phrase" run',
+                    f"tool --password {_SHORT}\\ phrase run",
+                    f"tool -p '{_SHORT}' --user admin:{_SHORT}\\ phrase run",  # gitleaks:allow
+                ],
+            }
+        ),
+    )
+    (container,) = preview["spec"]["template"]["spec"]["containers"]
+    assert container["args"] == [
+        "tool --password ***REDACTED*** run",
+        "tool --password ***REDACTED*** run",
+        "tool -p ***REDACTED*** --user admin:***REDACTED*** run",
+    ]
 
 
 @pytest.mark.asyncio

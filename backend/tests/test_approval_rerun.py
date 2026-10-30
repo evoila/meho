@@ -280,6 +280,65 @@ async def test_two_reruns_at_the_same_time_run_once(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
+async def test_rerun_that_read_the_old_failure_is_refused_after_a_failed_rerun(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two callers read the original failure. The first re-run fails fast.
+
+    The second caller still holds the row it read before the first re-run.
+    Its claim must not match, although the stored result is a failure again,
+    or both callers would run the operation.
+    """
+    import meho_backplane.operations.approval_rerun as rerun_module
+
+    failing = _FakeDispatch(status="error")
+    monkeypatch.setattr(dispatcher_module, "dispatch", failing)
+    request_id = await _park_failed()
+
+    real_rehydrate = rerun_module.rehydrate_resume_target
+    both_read = asyncio.Event()
+    first_done = asyncio.Event()
+    counts_read: list[int] = []
+
+    async def _gated_rehydrate(operator: Operator, request: Any) -> Any:
+        # Both callers pass here after reading the row and before claiming.
+        # The first one waits until the second has read the row too, then
+        # runs. The second one waits until the first re-run finished.
+        counts_read.append(request.rerun_count)
+        if len(counts_read) == 1:
+            await both_read.wait()
+        else:
+            both_read.set()
+            await first_done.wait()
+        return await real_rehydrate(operator, request)
+
+    monkeypatch.setattr(rerun_module, "rehydrate_resume_target", _gated_rehydrate)
+
+    async def _attempt() -> Any:
+        try:
+            return await rerun_failed_request(operator=_operator(), request_id=request_id)
+        finally:
+            first_done.set()
+
+    results = await asyncio.gather(_attempt(), _attempt(), return_exceptions=True)
+
+    assert counts_read == [0, 0]
+    assert len(failing.calls) == 1
+    ran = [r for r in results if not isinstance(r, BaseException)]
+    refused = [r for r in results if isinstance(r, RerunNotAllowedError)]
+    assert len(ran) == 1
+    assert ran[0].attempt == 2
+    assert ran[0].result.status == "error"
+    assert len(refused) == 1
+    row = await _row(request_id)
+    assert row.rerun_count == 1
+    assert approval_result_state(row) is ApprovalResultState.FAILED
+    audits = await _rerun_rows(request_id)
+    assert sorted(a.payload["result_status"] for a in audits) == ["accepted", "refused"]
+    assert [a.payload["refusal"] for a in audits if "refusal" in a.payload] == ["claim_lost"]
+
+
+@pytest.mark.asyncio
 async def test_run_that_raises_stores_a_failure_so_it_can_run_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

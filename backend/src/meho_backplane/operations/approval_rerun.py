@@ -22,8 +22,10 @@ The rules, checked in this order:
    always come from the request, so the caller cannot change them.
 4. One run at a time. The claim is one conditional ``UPDATE`` that clears
    ``resume_result`` and adds one to ``rerun_count``, only while the stored
-   result is a failure. Two re-runs sent at the same time: one wins, the
-   other is refused. ``resumed_at`` stays the one-way latch of the first run.
+   result is a failure and ``rerun_count`` is still the value the caller
+   read. Two re-runs sent at the same time: one wins, the other is refused,
+   also when the first one already ran and failed again before the second
+   claims. ``resumed_at`` stays the one-way latch of the first run.
 
 Every re-run writes an ``approval.rerun`` audit row that names the request
 and the attempt, in the same transaction as the claim. A refused re-run
@@ -269,6 +271,11 @@ async def _claim_rerun(operator: Operator, request: ApprovalRequest) -> int | No
 
     Returns the attempt number, or ``None`` when another re-run took the
     claim first (or the stored result is no longer a failure).
+
+    The claim only matches the row as *request* read it: the same
+    ``rerun_count``. So a caller that read the original failure cannot take
+    the claim after another re-run already ran and failed in between. It
+    is refused and has to read the request again.
     """
     from meho_backplane.db.engine import get_sessionmaker
 
@@ -279,6 +286,7 @@ async def _claim_rerun(operator: Operator, request: ApprovalRequest) -> int | No
             .where(
                 ApprovalRequest.id == request.id,
                 ApprovalRequest.status == ApprovalRequestStatus.APPROVED.value,
+                ApprovalRequest.rerun_count == request.rerun_count,
                 ApprovalRequest.resume_result.is_not(None),
                 func.coalesce(result_status, "") != "ok",
             )

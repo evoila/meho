@@ -1008,9 +1008,12 @@ re-run of a credential write must send the params again. They must match
 **Runs once.** The re-run has its own claim, because `resumed_at` stays
 the one-way latch of the first run. The claim is one conditional `UPDATE`:
 it sets `resume_result` to NULL and adds one to `rerun_count` (migration
-`0129`), only while the stored result is a failure. Two re-runs sent at the
-same time: one wins, the other gets 409. While the re-run runs,
-`result_state` reads `started`.
+`0129`), only while the stored result is a failure and `rerun_count` is
+still the value the caller read. Two re-runs sent at the same time: one
+wins, the other gets 409. That also holds when the first re-run already
+ran and failed again before the second one claims: the second one read the
+old `rerun_count`, so its claim does not match and it must read the
+request again. While the re-run runs, `result_state` reads `started`.
 
 **Who runs it.** The run uses the requester's identity, like the agent's
 own resume after approval. The approval is the authorization

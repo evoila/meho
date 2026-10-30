@@ -439,6 +439,18 @@ class Settings(BaseModel):
         every existing token is unaffected unless a realm explicitly
         grants the claim. Override only when the realm exposes the flag
         under a different attribute.
+    jwt_self_approver_group:
+        Name of the login group whose members may approve their own
+        changes (#3327, the rules of #3325). Default
+        ``MEHO-SA-Operators``, the group the shipped login setup creates
+        (``docs/decisions/login-role-groups.md``). ``verify_jwt`` sets
+        :attr:`~meho_backplane.auth.operator.Operator.self_approver` when
+        the token's ``groups`` claim names this group. This is used only
+        when the token has no ``meho_tenants`` claim; with that claim, the
+        current tenant's ``SA-Operators`` entry decides. Off when the
+        group is missing; a machine login never gets the flag. Change it
+        only together with ``JWT_ROLE_GROUPS``, when the site renamed the
+        groups. A blank value keeps the default.
     jwt_runner_id_claim_name:
         Name of the JWT claim that carries a satellite runner principal's
         row UUID (Initiative #2415, #2502). Default ``runner_id`` matches
@@ -1348,6 +1360,7 @@ class Settings(BaseModel):
     jwt_platform_admin_claim_name: str = Field(default="platform_admin", min_length=1)
     jwt_platform_admin_role_name: str | None = None
     jwt_approver_claim_name: str = Field(default="approver", min_length=1)
+    jwt_self_approver_group: str = Field(default="MEHO-SA-Operators", min_length=1)
     jwt_runner_id_claim_name: str = Field(default="runner_id", min_length=1)
     keycloak_admin_url: str = ""
     keycloak_admin_client_id: str = ""
@@ -2597,6 +2610,9 @@ def get_settings() -> Settings:
         jwt_approver_claim_name=os.environ.get(
             "JWT_APPROVER_CLAIM_NAME",
             "approver",
+        ),
+        jwt_self_approver_group=(
+            os.environ.get("JWT_SELF_APPROVER_GROUP", "").strip() or "MEHO-SA-Operators"
         ),
         jwt_runner_id_claim_name=os.environ.get(
             "JWT_RUNNER_ID_CLAIM_NAME",

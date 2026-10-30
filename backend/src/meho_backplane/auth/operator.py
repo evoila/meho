@@ -115,10 +115,22 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
   :func:`~meho_backplane.auth.jwt._extract_tenants`. One login can list
   several tenants (``docs/decisions/2026-10-28-several-tenants-per-person.md``).
   Empty for a token without the claim and always empty for a machine
-  login (agent, service, runner). **Nothing reads it yet:** the current
-  tenant still comes from ``tenant_id`` / ``tenant_role``. The role and
+  login (agent, service, runner). Only ``self_approver`` reads it so far:
+  the current tenant still comes from ``tenant_id`` / ``tenant_role``. The role and
   flags of an entry come from :func:`group_grant`, the one table in code
   that matches ``docs/decisions/login-role-groups.md``.
+* ``self_approver`` — whether the person is in the ``MEHO-SA-Operators``
+  group of the current tenant (#3327). SA-Operators may approve their own
+  changes, at every risk level that waits for approval (#3325). Read by
+  :func:`~meho_backplane.auth.jwt._extract_self_approver`: from the
+  current tenant's ``meho_tenants`` entry when the token has that claim,
+  else from the ``groups`` claim (group name ``JWT_SELF_APPROVER_GROUP``).
+  Defaults to ``False`` and fails closed: a missing or malformed claim
+  gives ``False``. Separate from :class:`TenantRole` (an SA-Operator has
+  the ``operator`` role) and from ``approver``. It gives no right to run
+  operations. Never read from a request field, header or command-line
+  flag. The approval checks ask :attr:`Operator.may_self_approve`, which
+  also refuses every machine login.
 
 Email validation uses pydantic's ``EmailStr`` (powered by
 ``email-validator``); a malformed ``email`` claim from Keycloak is a
@@ -236,8 +248,8 @@ class GroupGrant(NamedTuple):
     * ``approver`` — the person may decide approval requests
       (the same meaning as :attr:`Operator.approver`).
     * ``self_approval`` — the person may approve their own change. Only
-      ``SA-Operators`` sets it. Nothing reads it yet: the rule comes with
-      the self-approval work (#3327).
+      ``SA-Operators`` sets it. It sets :attr:`Operator.self_approver`
+      for the current tenant (#3327).
     """
 
     role: TenantRole
@@ -327,9 +339,27 @@ class Operator(BaseModel):
     auth_time: int | None = None
     #: Every tenant the person is in, with the login group in each, in
     #: token order (#5236). Empty when the token has no ``meho_tenants``
-    #: claim, and always empty for a machine login. Not used yet: the
-    #: current tenant still comes from ``tenant_id`` / ``tenant_role``.
+    #: claim, and always empty for a machine login. Only ``self_approver``
+    #: reads it so far: the current tenant still comes from ``tenant_id`` /
+    #: ``tenant_role``.
     tenants: tuple[TenantMembership, ...] = ()
+    #: The person is in the SA-Operators group of the current tenant
+    #: (#3327). Off by default. Read it through :attr:`may_self_approve`.
+    self_approver: bool = False
+
+    @property
+    def may_self_approve(self) -> bool:
+        """Return ``True`` when this person may approve their own change.
+
+        The one place the approval checks ask (#3328). True only for a
+        person (``principal_kind=user``) with :attr:`self_approver` set.
+        A machine login (agent, service, runner) always gets ``False``,
+        even when its token carries the group: agents never approve
+        (#3325). The answer is the same for every risk level that waits
+        for approval. There are no per-system, per-connector or
+        time-limited exceptions.
+        """
+        return self.self_approver and is_human_principal(self)
 
 
 #: Machine (non-human) principal kinds. A human operator authenticates as

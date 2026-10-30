@@ -94,6 +94,10 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Literal, NamedTuple
 
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest._content_library_schemas import (
+    CONTENT_LIBRARY_GROUP_KEY,
+    CONTENT_LIBRARY_WHEN_TO_USE,
+)
 from meho_backplane.connectors.vmware_rest.alarm_state import (
     ALARMS_GROUP_KEY,
     ALARMS_WHEN_TO_USE,
@@ -411,10 +415,6 @@ from meho_backplane.connectors.vmware_rest.license_common import (
     LICENSE_KEY_TAG,
     LICENSE_WHEN_TO_USE,
 )
-from meho_backplane.connectors.vmware_rest.typed_ops_content_library_find import (
-    CONTENT_LIBRARY_GROUP_KEY,
-    CONTENT_LIBRARY_WHEN_TO_USE,
-)
 from meho_backplane.operations.typed_register import register_composite_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
 
@@ -608,8 +608,7 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "'content_library' for the library id, and 'networking' for the network "
         "settings."
     ),
-    # Shared with the two typed finds vmware.content_library.find and
-    # vmware.content_library.item.find (#3550): the same key and text.
+    # Shared with the typed content-library reads and finds: the same key and text.
     CONTENT_LIBRARY_GROUP_KEY: CONTENT_LIBRARY_WHEN_TO_USE,
     # Shared with the two typed licence reads: the same key and text.
     LICENSE_GROUP_KEY: LICENSE_WHEN_TO_USE,

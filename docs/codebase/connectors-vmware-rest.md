@@ -809,6 +809,63 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   - **Approval preview.** A preview builder shows the approver the
     question text, the label of the chosen answer, whether the question
     is still open, the running tasks and `tasks_error`.
+- **Content-library reads** (`typed_ops_content_library.py` for the
+  metadata, `content_library_reads.py` for the handlers,
+  `_content_library_schemas.py` for the group text and response schemas).
+  Six `safe` reads with `requires_approval: false`, in the group
+  `content_library`, on both `vmware-rest-8.0` and `vmware-rest-9.0`. They
+  call the vCenter REST API on the connector session, so they need no spec
+  ingest.
+
+  | Operation | What it returns | Vendor calls |
+  |---|---|---|
+  | `vmware.content_library.get` | One library by `library_id` or `library_name`: type, storage, publish or subscription settings, last sync, state, item count | `GET /content/library/{id}`, then `GET /content/local-library/{id}` or `GET /content/subscribed-library/{id}` by type, then `GET /content/library/item?library_id=` for the count. A name is found first with `POST /content/library?action=find` |
+  | `vmware.content_library.item.get` | One item: library, name, type, size in bytes, versions, cached or not, times, source item | `GET /content/library/item/{id}` |
+  | `vmware.content_library.item.files.list` | The files of one item: name, size, checksum, cached or not, and the datastores and storage URIs of each file | `GET /content/library/item/{id}/file` and `GET .../storage`, joined by file name |
+  | `vmware.content_library.item.ovf_options` | What an OVF item needs before a deploy: size options (the `deployment_option` keys of `vm.deploy_from_library`), networks, storage groups, disk sizes, licence texts, IP settings and properties | `POST /vcenter/ovf/library-item/{id}?action=filter` |
+  | `vmware.content_library.subscribed.probe` | Whether vCenter reaches a subscription URL, whether the source wants a login, the status, the certificate thumbprint and the error texts | `POST /content/subscribed-library?action=probe` |
+  | `vmware.supervisor.content_library.list` | The libraries the Supervisors use, with their status | `GET /vcenter/namespace-management/lifecycle/content/libraries` (vCenter 9.0 and newer) |
+
+  - **Ids.** A library or item id goes into a URL path, so it must be a
+    UUID: the parameter schema checks it, and the handler checks it again
+    with `id_problem` from `composites/_library_checks.py` before any
+    call. A name lookup that matches more than one library is refused.
+  - **Not found.** A vendor 404, and a library name that matches nothing,
+    raise `ConnectorResourceNotFoundError`, so the caller gets
+    `not_found`.
+  - **POST calls that change nothing.** The OVF `filter` and the
+    subscription `probe` are `POST` calls in the vendor API, but they only
+    read. Both descriptions say so. The `filter` body is `{"target":
+    {"resource_pool_id", "host_id"?, "folder_id"?}}` on vCenter 8 and 9 (the
+    raw 8.0 operation's schema puts the fields at the top, which vCenter
+    refuses). The `probe` body is `{"subscription_info": {"subscription_url",
+    "authentication_method": "NONE"}}`: the probe sends no login, so a source
+    that needs one answers `INVALID_CREDENTIALS`. That answer still means
+    vCenter reached the source, so `reachable` is true for `SUCCESS` and
+    for `INVALID_CREDENTIALS`, and `needs_login` is true only for the
+    second.
+  - **No secrets.** The rows copy named fields only, so the `password`
+    fields of the publish and subscription settings never reach the
+    result. The value of an OVF property whose type starts with `password`
+    is always `null`.
+  - **Version check.** `supervisor.content_library.list` calls
+    `require_vcenter_version(minimum="9.0")` first; on vCenter 8 it stops
+    with `connector_unsupported` before any call.
+  - **Long lists.** A long file list goes behind a result handle like any
+    other list.
+  - **Group text.** `CONTENT_LIBRARY_WHEN_TO_USE` lives in
+    `_content_library_schemas.py` and is shared with the content-library
+    composites (`composites/_register.py`) and the two typed finds, so the
+    group `content_library` has one text.
+  - **Vendor calls.** `VENDOR_OP_IDS` is built from the path constants the
+    handlers use, plus the shared find call `FIND_LIBRARY_CALL`, so the
+    reconcile test checks the paths that run.
+
+  Tests: `tests/test_connectors_vmware_rest_typed_content_library.py`
+  (saved vCenter answers over mocked HTTP, the result handle, metadata) and
+  `tests/test_connectors_vmware_rest_content_library_reconcile.py` (the
+  pinned 8.0 and 9.0 `vcenter.yaml` serve every path; the Supervisor list
+  only on 9.0).
 - **`vmware.host.storage_devices`** (`typed_ops_host_storage_devices.py`,
   handler `host_storage_devices`, `#3332`) — per-host raw SCSI storage
   devices, the `safe` read that supplies the runtime input

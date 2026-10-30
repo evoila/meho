@@ -9,7 +9,9 @@ vCenter):
 * the folder rows with their datacenter and parent, on vCenter 9.0 and 8.0;
 * the filters reach the vCenter query by their ``/api`` names;
 * a failed datacenter or parent read leaves those fields ``null`` and says so
-  in ``read_note``; a failed folder listing fails the operation;
+  in ``read_note``, also when the HTTP call succeeds but vCenter could not read
+  the parent of one folder (a ``missingSet`` fault); a failed folder listing
+  fails the operation;
 * an empty list sends no extra reads;
 * the operation metadata: a ``safe`` read with no approval, in its own group.
 """
@@ -267,6 +269,47 @@ async def test_failed_parent_read_keeps_the_list(connector: VmwareRestConnector)
     assert all(row["parent_id"] is None for row in out["folders"])
     assert out["folders"][1]["datacenter_id"] == "datacenter-3"
     assert out["read_note"].startswith("the parent read failed")
+    Draft202012Validator(VMWARE_FOLDER_LIST_OP.response_schema).validate(out)
+
+
+async def test_unreadable_parent_of_one_folder_is_reported(connector: VmwareRestConnector) -> None:
+    """HTTP 200, but the ``parent`` of one folder is in its ``missingSet``.
+
+    That folder must not look like a folder with no parent: its parent fields
+    are ``null`` and ``read_note`` names the fault type (never the fault text).
+    The other folders keep their parent.
+    """
+
+    def _answer(request: httpx.Request) -> httpx.Response:
+        answer = _parent_answer(json.loads(request.content))
+        for obj in answer["objects"]:
+            if obj["obj"]["value"] == "group-v10":
+                obj["propSet"] = []
+                obj["missingSet"] = [
+                    {
+                        "path": "parent",
+                        "fault": {
+                            "_typeName": "LocalizedMethodFault",
+                            "fault": {"_typeName": "NoPermission", "object": "group-v10"},
+                            "localizedMessage": "Permission to perform this operation was denied.",
+                        },
+                    }
+                ]
+        return httpx.Response(200, json=answer)
+
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        vcenter = _mock_vcenter(mock)
+        vcenter.retrieve.mock(side_effect=_answer)
+        out = await _list(connector)
+
+    by_id = {row["id"]: row for row in out["folders"]}
+    assert by_id["group-v10"]["parent_id"] is None
+    assert by_id["group-v10"]["parent_type"] is None
+    assert by_id["group-v10"]["datacenter_id"] == "datacenter-3"
+    assert by_id["group-v4"]["parent_id"] == "datacenter-3"
+    assert by_id["group-h5"]["parent_id"] == "datacenter-3"
+    assert out["read_note"] == "the parent read failed for 1 folder(s) with NoPermission"
+    assert "denied" not in out["read_note"]
     Draft202012Validator(VMWARE_FOLDER_LIST_OP.response_schema).validate(out)
 
 

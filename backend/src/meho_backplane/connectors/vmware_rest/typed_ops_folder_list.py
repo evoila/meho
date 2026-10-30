@@ -25,7 +25,13 @@ Three reads:
    page). The summary has no parent either.
 
 Reads 2 and 3 are best effort: when one fails, its fields are ``null`` and
-``read_note`` says which read failed. The folder list itself stays.
+``read_note`` says which read failed. The folder list itself stays. Read 3
+can also fail for single folders inside a successful answer: vCenter then
+puts the ``parent`` property in that object's ``missingSet`` with a fault
+(for example no permission). Such a folder gets ``null`` parent fields and
+``read_note`` names the fault type, so it does not look like a folder with
+no parent. Only the fault type name is reported, never the fault text, which
+can echo a private identifier (#3708).
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp, _unwrap_value
 from meho_backplane.connectors.vmware_rest.vim_body import (
+    fault_type_name,
     retrieve_properties_body,
     unwrap_vim_value,
 )
@@ -143,11 +150,19 @@ async def _parent_of_each_folder(
     operator: Operator,
     target: VsphereTargetLike,
     folder_ids: list[str],
-) -> dict[str, dict[str, Any]]:
-    """Folder id -> parent reference ``{type, value}``; a folder without a parent is left out."""
+) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    """``(parents, unreadable)`` of the asked folders.
+
+    *parents* is folder id -> parent reference ``{type, value}``; a folder
+    without a parent is left out. *unreadable* is folder id -> fault type
+    name for each folder whose ``parent`` vCenter could not read: the HTTP
+    call succeeded, but the property is in that object's ``missingSet``
+    with a fault instead of in ``propSet``.
+    """
     body = retrieve_properties_body(_FOLDER_MO_TYPE, folder_ids, (_PROP_PARENT,))
     result = await retrieve_all_pages(connector, target, operator, body)
     parents: dict[str, dict[str, Any]] = {}
+    unreadable: dict[str, str] = {}
     for obj in result["objects"]:
         ref = obj.get("obj")
         moid = ref.get("value") if isinstance(ref, dict) else None
@@ -159,11 +174,21 @@ async def _parent_of_each_folder(
             parent = unwrap_vim_value(prop.get("val"))
             if isinstance(parent, dict) and isinstance(parent.get("value"), str):
                 parents[moid] = parent
-    return parents
+        for miss in obj.get("missingSet") or []:
+            if isinstance(miss, dict) and miss.get("path") == _PROP_PARENT:
+                unreadable[moid] = fault_type_name(miss.get("fault")) or "unknown fault"
+    return parents, unreadable
 
 
 def _failed(read: str, exc: Exception) -> str:
     return f"{read} failed with {type(exc).__name__}: {exc}"
+
+
+def _unreadable_note(unreadable: dict[str, str]) -> str:
+    """One note for the folders whose parent vCenter could not read, by fault type."""
+    faults = ", ".join(sorted(set(unreadable.values())))
+    count = len(unreadable)
+    return f"the parent read failed for {count} folder(s) with {faults}"
 
 
 async def folder_list_impl(
@@ -192,9 +217,14 @@ async def folder_list_impl(
         except (httpx.HTTPError, RuntimeError) as exc:
             notes.append(_failed("the datacenter read", exc))
         try:
-            parents = await _parent_of_each_folder(connector, operator, target, folder_ids)
+            parents, unreadable = await _parent_of_each_folder(
+                connector, operator, target, folder_ids
+            )
         except (httpx.HTTPError, RuntimeError) as exc:
             notes.append(_failed("the parent read", exc))
+        else:
+            if unreadable:
+                notes.append(_unreadable_note(unreadable))
 
     folders: list[dict[str, Any]] = []
     for row in summaries:
@@ -299,7 +329,8 @@ _FOLDER_ROW_SCHEMA: dict[str, Any] = {
         "parent_id": {
             "type": ["string", "null"],
             "description": (
-                "Id of the parent object; null for the root folder or when the read failed."
+                "Id of the parent object; null for the root folder or when the read failed "
+                "(for the whole list, or for this folder: see read_note)."
             ),
         },
         "parent_type": {
@@ -323,7 +354,10 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "read_note": {
             "type": ["string", "null"],
-            "description": "Which extra read (datacenter or parent) failed; null when all worked.",
+            "description": (
+                "Which extra read (datacenter or parent) failed, or for how many folders "
+                "vCenter could not read the parent and with which fault; null when all worked."
+            ),
         },
     },
     "required": ["folders", "read_note"],
@@ -361,7 +395,9 @@ VMWARE_FOLDER_LIST_OP = VmwareTypedOp(
             "datacenter_id, datacenter_name, parent_id, parent_type: Folder|Datacenter}], "
             "read_note}. A long list comes back as a result handle; read it with "
             "result_query. When the datacenter or parent read failed, those fields are null "
-            "and read_note says which read."
+            "and read_note says which read. When vCenter could not read the parent of some "
+            "folders (for example no permission), their parent fields are null and read_note "
+            "says how many and why; a null parent with a null read_note is the root folder."
         ),
         "next_step": (
             "Use the folder id in vmware.composite.folder.create (as the parent) or "

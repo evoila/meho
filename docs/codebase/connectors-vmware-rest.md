@@ -4175,13 +4175,17 @@ How it reads:
    A top folder of a datacenter has a `Datacenter` parent.
 
 Reads 2 and 3 are best effort. When one fails, its fields are `null` and
-`read_note` says which read failed; the list stays. An empty list sends no
-extra reads. A long list comes back as a result handle, like every other
+`read_note` says which read failed; the list stays. Read 3 can also fail for
+single folders inside a successful answer: vCenter then puts `parent` in that
+object's `missingSet` with a fault (for example no permission). Such a folder
+gets `null` parent fields, and `read_note` says for how many folders and with
+which fault type (only the type name, never the fault text, #3708), so it does
+not look like a folder with no parent. An empty list sends no extra reads. A long list comes back as a result handle, like every other
 set-shaped answer.
 
 Tests: `test_connectors_vmware_rest_typed_folder_list.py` (the real connector
 over mocked HTTP on vCenter 9.0 and 8.0, the filter names on the wire, the
-best-effort reads, the metadata) and
+best-effort reads including a `missingSet` parent fault, the metadata) and
 `test_connectors_vmware_rest_folder_list_reconcile.py` (the two REST paths and
 their filters against the pinned 9.0 and 8.0 U3 `vcenter.yaml`, the summary
 fields and folder types against 9.0, and `Folder.parent` against the 9.0

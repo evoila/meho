@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Response schemas for the 17 Holodeck operations, keyed by op id.
+"""Response schemas for the 18 Holodeck operations, keyed by op id.
 
 Each schema names the fields the handler really returns (see the handlers
-in ``ops.py``, ``ops_read.py``, ``ops_write.py`` and ``ops_deploy.py``).
+in ``ops.py``, ``ops_read.py``, ``ops_write.py``, ``ops_deploy.py`` and
+``ops_remove.py``).
 Holodeck has no published API file. Where a field is a cmdlet answer passed
 through as is (``Get-HoloDeckConfig``, ``Get-HoloDeckPod``), the schema keeps
 that object open and names only the keys MEHO itself reads. The schemas are
@@ -336,7 +337,7 @@ _INSTANCE_STATUS = _envelope(
         "status": _f(
             "string",
             "Deploy state.",
-            enum=["running", "completed", "failed", "unknown"],
+            enum=["running", "completed", "failed", "unknown", "removed"],
         ),
         "current_step": _f(["string", "null"], "The step the deploy is on."),
         "started_at": _f(["string", "null"], "When the deploy started."),
@@ -347,9 +348,84 @@ _INSTANCE_STATUS = _envelope(
             "Notes, for example the known harmless VCF 5.2 last-step message.",
             items={"type": "string"},
         ),
+        "leftover_vms": _f(
+            ["array", "null"],
+            "After holodeck.instance.remove: the VMs whose name still starts with "
+            "'<instance-id>-'. Null when MEHO could not check. Only with instance_id.",
+            items={"type": "string"},
+        ),
+        "removal": _obj(
+            "Progress of the last holodeck.instance.remove of this instance. Only "
+            "with instance_id, and only after a remove was started.",
+            {
+                "state": _f(
+                    "string",
+                    "running, done or failed. interrupted: the script ended (for "
+                    "example by the router reboot) before it finished; call "
+                    "holodeck.instance.remove again to finish it.",
+                ),
+                "started_at": _f(["string", "null"], "When the remove started (UTC)."),
+                "finished_at": _f(["string", "null"], "When the remove ended (UTC)."),
+                "reset_router": _f("boolean", "True when the HoloRouter was reset."),
+                "resumed": _f("boolean", "True when a second call finished an interrupted remove."),
+                "deleted": _f(
+                    ["boolean", "null"],
+                    "True when Remove-HoloDeckInstance finished, false when it failed, "
+                    "null when the script ended before it could say. status is removed "
+                    "only when this is true.",
+                ),
+                "error": _f(["string", "null"], "Error text of Remove-HoloDeckInstance."),
+                "leftover_error": _f(["string", "null"], "Why MEHO could not list VMs."),
+                "moved_to": _f(["string", "null"], "Folder the state files moved to."),
+                "moved_files": _f("array", "Files that moved.", items={"type": "string"}),
+                "move_errors": _f(
+                    "array", "Files that did not move, with the error.", items={"type": "string"}
+                ),
+            },
+        ),
         "error": _ERROR,
     },
     required=["status", "notes"],
+)
+
+_INSTANCE_REMOVE = _envelope(
+    {
+        "status": _f(
+            "string",
+            "started: the delete runs in the background. unchanged: no such "
+            "instance, nothing deleted. refused: see 'reason'.",
+            enum=["started", "unchanged", "refused"],
+        ),
+        "instance_id": _f("string", "The instance id."),
+        "reason": _f("string", "Why the call was refused or changed nothing."),
+        "config_id": _f("string", "The config MEHO loaded before the delete."),
+        "reset_router": _f("boolean", "True when the HoloRouter is reset and rebooted."),
+        "move_state_files": _f("boolean", "True when the state files are moved aside."),
+        "resumed": _f(
+            "boolean",
+            "True when the call only finishes an interrupted remove: no VM is deleted, "
+            "the leftover VMs are listed and the files move.",
+        ),
+        "vms": _f(
+            "array",
+            "VM names that Get-HoloDeckInstance or the instance's state file names.",
+            items={"type": "string"},
+        ),
+        "files_to_move": _f(
+            "array",
+            "Files under /holodeck-runtime/config, output and state that move.",
+            items={"type": "string"},
+        ),
+        "start_marker": _obj(
+            "Where the background delete runs.",
+            {
+                "tmux_session": _f("string", "Name of the tmux session on the appliance."),
+                "log_path": _f("string", "Output of the delete on the appliance."),
+                "record_path": _f("string", "Progress file that holodeck.instance.status reads."),
+            },
+        ),
+    },
+    required=["status", "instance_id"],
 )
 
 _ROUTER_PATCH = _envelope(
@@ -395,5 +471,6 @@ HOLODECK_RESPONSE_SCHEMAS: dict[str, dict[str, Any]] = {
     "holodeck.config.apply": _CONFIG_APPLY,
     "holodeck.instance.start": _INSTANCE_START,
     "holodeck.instance.status": _INSTANCE_STATUS,
+    "holodeck.instance.remove": _INSTANCE_REMOVE,
     "holodeck.router.patch": _ROUTER_PATCH,
 }

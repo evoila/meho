@@ -517,7 +517,7 @@ async def _resume_approved_or_already_resumed(
     # #3486: store the outcome, as the operator resume does, so the list and
     # show views move the request from ``started`` to ``executed`` or
     # ``failed``. Fail-soft: the dispatch's own audit row already committed.
-    await persist_resume_result(approval_request_id, envelope)
+    await persist_resume_result(approval_request_id, envelope, parked_op_id=request.op_id)
     return envelope
 
 

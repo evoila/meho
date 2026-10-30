@@ -1896,6 +1896,7 @@ type AuditClassCountsRequest struct {
 //     “Operator.name“ since G0.15-T3 #1212; HTTP-chassis rows remain
 //     None pending a separate fix to bind “name“ to contextvars in
 //     “verify_jwt_and_bind“.
+//   - “sandbox_mode“ ← “audit_log.sandbox_mode“ (the sandbox mark; #4622)
 //   - “broadcast_event_id“ — v0.2 placeholder, always None (FK direction
 //     is reversed: “BroadcastEvent.audit_id“ points at the audit row).
 type AuditEntry struct {
@@ -1915,6 +1916,7 @@ type AuditEntry struct {
 	PrincipalSub     string                 `json:"principal_sub"`
 	RequestId        *openapi_types.UUID    `json:"request_id"`
 	ResultStatus     string                 `json:"result_status"`
+	SandboxMode      bool                   `json:"sandbox_mode"`
 	StatusCode       int                    `json:"status_code"`
 	TargetId         *openapi_types.UUID    `json:"target_id"`
 	TargetName       *string                `json:"target_name"`
@@ -7809,6 +7811,7 @@ type ReplayNode struct {
 	PrincipalSub     string                 `json:"principal_sub"`
 	RequestId        *openapi_types.UUID    `json:"request_id"`
 	ResultStatus     string                 `json:"result_status"`
+	SandboxMode      bool                   `json:"sandbox_mode"`
 	StatusCode       int                    `json:"status_code"`
 	TargetId         *openapi_types.UUID    `json:"target_id"`
 	TargetName       *string                `json:"target_name"`

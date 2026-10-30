@@ -457,6 +457,7 @@ def _build_audit_entry(
         work_ref=row.work_ref,
         policy_decision=row.policy_decision,
         event_class=row.event_class,
+        sandbox_mode=row.sandbox_mode,
         broadcast_event_id=None,
     )
 

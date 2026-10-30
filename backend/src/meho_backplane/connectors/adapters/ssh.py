@@ -388,6 +388,7 @@ class SshConnector(Connector):
         *,
         operator: Operator | None = None,
         timeout: float = 30.0,
+        stdin: str | None = None,
     ) -> asyncssh.SSHCompletedProcess:
         """Run *cmd* on *target* via the pooled SSH connection.
 
@@ -395,6 +396,11 @@ class SshConnector(Connector):
         for the operator-context Vault credential read on a pool miss;
         ``None`` fails closed at Vault per :meth:`_resolve_secret`.
         Raises :exc:`asyncio.TimeoutError` when *timeout* is exceeded.
+
+        ``stdin``, when set, is written to the command's standard input,
+        followed by end-of-file. Use it for a value that must not appear on
+        the remote command line, such as a password. It is never logged and
+        never reaches the flight-recorder span (only *cmd* and the result do).
         """
         conn = await self._connect(target, operator)
         # Flight-recorder typed span (#3217, F8) -- the shared SSH-transport
@@ -407,7 +413,12 @@ class SshConnector(Connector):
         # omits both and degrades the trace to operator-only (F5) -- an SSH
         # command / its output never reaches a span un-redacted.
         _fr_start = flight_recorder_typed.typed_span_start(f"ssh {getattr(target, 'name', '?')}")
-        result = await asyncio.wait_for(conn.run(cmd, check=False), timeout=timeout)
+        if stdin is None:
+            result = await asyncio.wait_for(conn.run(cmd, check=False), timeout=timeout)
+        else:
+            result = await asyncio.wait_for(
+                conn.run(cmd, input=stdin, check=False), timeout=timeout
+            )
         _record_ssh_span(_fr_start, cmd=cmd, result=result)
         logger.info(
             "ssh_command_executed",

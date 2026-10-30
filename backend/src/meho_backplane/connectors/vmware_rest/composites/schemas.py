@@ -5528,11 +5528,15 @@ VM_IMPORT_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
                         "description": "Lease device id the file went to.",
                     },
                     "size_bytes": {"type": "integer", "description": "Bytes sent."},
+                    "sha256": {
+                        "type": "string",
+                        "description": "SHA-256 (hex) of the bytes sent.",
+                    },
                 },
             },
             "description": (
-                "Per-disk transfer manifest ``{path, device_id, size_bytes}`` for the "
-                "files streamed to the lease. Empty unless ``status='deployed'``."
+                "Per-disk transfer manifest ``{path, device_id, size_bytes, sha256}`` for "
+                "the files streamed to the lease. Empty unless ``status='deployed'``."
             ),
         },
         "candidates": {

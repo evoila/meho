@@ -446,6 +446,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_tasks_recent import (  # no
     TASKS_RECENT_WHEN_TO_USE,
     VMWARE_TASKS_RECENT_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_vcenter_deployment_status import (  # noqa: E402
+    DEPLOYMENT_STATUS_GROUP_KEY,
+    DEPLOYMENT_STATUS_WHEN_TO_USE,
+    VMWARE_VCENTER_DEPLOYMENT_STATUS_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware import (  # noqa: E402
     VM_HARDWARE_GROUP_KEY,
     VM_HARDWARE_WHEN_TO_USE,
@@ -496,6 +501,8 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     ALARM_TRIGGERED_GROUP_KEY: ALARM_TRIGGERED_WHEN_TO_USE,
     # Shared with the content-library composites: the same key and text.
     CONTENT_LIBRARY_GROUP_KEY: CONTENT_LIBRARY_WHEN_TO_USE,
+    # Shared with the three install composites: the same key and text.
+    DEPLOYMENT_STATUS_GROUP_KEY: DEPLOYMENT_STATUS_WHEN_TO_USE,
 }
 
 VMWARE_HOST_USAGE_OP = VmwareTypedOp(
@@ -569,8 +576,9 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 #: ``alarm.triggered.list`` (#4383); and the VM question read and answer
 #: ``vm.question.get`` / ``vm.question.answer`` (the answer waits for
 #: approval); and the two content-library finds ``content_library.find`` +
-#: ``content_library.item.find`` (#3550). The tuple shape lets future typed
-#: ops join without touching the registrar.
+#: ``content_library.item.find`` (#3550); and the install state of a new
+#: vCenter appliance, ``vcenter.deployment.status`` (#4394). The tuple shape
+#: lets future typed ops join without touching the registrar.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
     VMWARE_HOST_NETWORK_UPLINKS_OP,
@@ -592,6 +600,7 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_VM_QUESTION_ANSWER_OP,
     VMWARE_CONTENT_LIBRARY_FIND_OP,
     VMWARE_CONTENT_LIBRARY_ITEM_FIND_OP,
+    VMWARE_VCENTER_DEPLOYMENT_STATUS_OP,
 )
 
 

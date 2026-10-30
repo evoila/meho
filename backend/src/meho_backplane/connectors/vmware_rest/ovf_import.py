@@ -82,6 +82,7 @@ class ImportPlacement:
     network_mappings: dict[str, str] = field(default_factory=dict)
     ovf_properties: dict[str, str] = field(default_factory=dict)
     disk_provisioning: str | None = None
+    deployment_option: str | None = None
 
 
 @dataclass(frozen=True)

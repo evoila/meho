@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
@@ -263,7 +264,14 @@ async def test_import_success_streams_disk_and_completes() -> None:
     assert result.status == "imported"
     assert result.vm_id == "vm-9"
     assert result.resource_type == "VirtualMachine"
-    assert result.transfer == [{"path": "app-disk1.vmdk", "device_id": "disk1", "size_bytes": 8}]
+    assert result.transfer == [
+        {
+            "path": "app-disk1.vmdk",
+            "device_id": "disk1",
+            "size_bytes": 8,
+            "sha256": hashlib.sha256(b"12345678").hexdigest(),
+        }
+    ]
     # The disk was PUT to the substituted (concrete-host) device URL and Complete ran.
     assert conn._client.puts[0]["url"] == "https://vcenter.lab/nfc/lease-1/disk-0.vmdk"
     assert conn._client.puts[0]["headers"]["Content-Type"] == "application/x-vnd.vmware-streamVmdk"

@@ -8,7 +8,7 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 77 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 80 hand-authored composites
 that orchestrate cross-spec workflows: 19 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
@@ -21,8 +21,10 @@ cache-refresh read `datastore.refresh` / `#3789` + the datastore file list
 read `datastore.file.list` / `#3432` + the vSAN folder list
 read `datastore.vsan.folder.list` / `#4022` + the VM limit and
 reservation read `vm.resource_allocation.show` / `#3880` + the migration
-inventory read `vmware.migration.inventory`) and 58 write
-composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
+inventory read `vmware.migration.inventory`) and 61 write
+composites (G3.1-T6 / `#509`, incl. the three vCenter install changes
+`vcenter.appliance.deploy` / `vcenter.install` / `vcenter.deployment.answer`
+(`#4394`), the destructive-tier `vm.destroy` / `#3198`, the
 governed vSphere Namespace `namespace.create` (caution) +
 `namespace.delete` (destructive) / `#3502` (see the **Governed vSphere
 Namespace composites** subsection under Control flow), the
@@ -496,9 +498,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `vcenter.yaml` by `test_connectors_vmware_rest_library_reconcile.py`.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 77
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 80
   `_CompositeSpec` rows (19 read — incl. the `#3789` datastore
-  cache-refresh read `datastore.refresh` — + 46 dangerous/destructive
+  cache-refresh read `datastore.refresh` — + 49 dangerous/destructive
   writes + 12 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
@@ -1278,12 +1280,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 77 `vmware.composite.*` rows with
+   queued registrar and upserts: the 80 `vmware.composite.*` rows with
    `source_kind="composite"` — 19 reads (18 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 58 writes, all `requires_approval=True`
-   (35 `safety_level="dangerous"`; 12 `safety_level="caution"` —
+   service principals), and 61 writes, all `requires_approval=True`
+   (38 `safety_level="dangerous"`; 12 `safety_level="caution"` —
    `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
@@ -1675,7 +1677,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 77 composites (19 reads + 58 writes) land as `source_kind="composite"`
+The 80 composites (19 reads + 61 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1772,7 +1774,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 77 composites are hand-authored aggregators the connector ships as
+The 80 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -3204,7 +3206,7 @@ missing hashes, CA pins, hostname checks, and redirects.
 reuses `_resolve_deploy_library_item`, and the outcome maps onto the **same**
 `deployed` / `deploy_failed` / `deploy_error` family (#3071) as the deploy
 composite, plus a per-disk `transfer` manifest (`{path, device_id,
-size_bytes}`). `datastore` is **required** (the vim `CreateImportSpec` request
+size_bytes, sha256}`; the SHA-256 is of the bytes sent). `datastore` is **required** (the vim `CreateImportSpec` request
 takes an explicit placement datastore, unlike the REST deploy which derives
 it). As with the deploy composite, multi-GB imports should ride **async
 governed dispatch** (#3079) so a dropped caller does not lose the outcome.
@@ -4390,6 +4392,107 @@ the filter enum values and the object types against the pinned 9.0
 `test_connectors_vmware_rest_8_0_spec_reconcile.py` checks the methods
 against 8.0 U1 to U3. `AlarmFilterSpec` is in the type-name list of
 `test_connectors_vmware_rest_composites_write_body_reconcile.py`.
+
+### Install a new vCenter from a JSON spec (`#4394`)
+
+An agent or an operator can install a new vCenter in two steps and follow the
+install to the end. All four operations are typed (hand-written) and need no
+spec ingest. They are on both catalogs, `vmware-rest-8.0` and
+`vmware-rest-9.0`, in the group `vcenter_install`.
+
+| Operation | What it does | What it returns | Risk | Versions |
+|---|---|---|---|---|
+| `vmware.composite.vcenter.appliance.deploy` | Step 1, on an existing vCenter: imports the vCenter appliance file (OVA) from a content library onto a cluster or host, with size, disk mode, network settings and host name, then powers it on. | `status` (`deployed`, ...), `vm_id`, `deployment_option`, `settings_sent`, `settings_not_used`, `transfer` (each file with size and SHA-256), `issues` | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.composite.vcenter.install` | Step 2, on the new appliance: checks the install spec, then starts the setup with a new SSO domain or a join to an existing one. | `status` (`accepted`, `check_failed`, `already_running`, ...), `check` messages, `steps`, `status_read` | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.vcenter.deployment.status` | The install state of the new appliance. | `state` (`not_ready`, `ready`, `running`, `waiting_for_answer`, `failed`, `done`, `unknown`, `not_reachable`), progress, `steps` with their errors, `questions` | `safe` | 8.0, 9.x |
+| `vmware.composite.vcenter.deployment.answer` | Answers a question the setup asks, so the setup goes on. The answer must be one of the question's choices. | `status` (`accepted`, `no_question`, `answer_not_allowed`, ...), the question, `steps` | `dangerous`, waits for approval | 8.0, 9.x |
+
+Vendor calls: step 1 uses the import path of `vm.import_from_library`
+(`POST /api/content/library/item?action=find`, the content-library download
+session, `OvfManager.CreateImportSpec`, `ResourcePool.ImportVApp`,
+`HttpNfcLeaseProgress`, `HttpNfcLeaseComplete`), plus the power-on. The other
+three use the setup API of the appliance: `GET /api/vcenter/deployment`,
+`GET /api/vcenter/deployment/question`,
+`POST /api/vcenter/deployment/install?action=check|start` and
+`POST /api/vcenter/deployment/question?action=answer`. vCenter 8.0 and 9.0
+serve all of them; `tests/test_connectors_vmware_rest_vcenter_install_reconcile.py`
+checks them against the pinned `vcenter.yaml` of 8.0 U3 and 9.0 and the 9.0
+`vi-json.yaml`.
+
+**The new appliance is its own target.** Before its setup, the appliance
+answers only on port 5480 (port 443 is closed). So steps 2 and later run on a
+MEHO target with the appliance address, port 5480, and a Vault login with
+user `root` and the root password of step 1. The factory certificate of the
+appliance names no host, so this target needs `verify_tls: false` until the
+setup has replaced the certificate. When the setup is done, add the new
+vCenter as a normal target on port 443.
+
+**What step 1 sends.** Only the settings the appliance file marks as user
+configurable: the seven network settings (`guestinfo.cis.appliance.net.*`;
+the host name is `net.pnid`) and the root password
+(`guestinfo.cis.appliance.root.passwd`). vCenter does not pass hidden
+settings such as the SSO domain to the appliance on an import, so the
+appliance stops after its network setup and waits for step 2. When a vCenter
+warning says it did not use a sent setting, the answer names it in
+`settings_not_used`. The size and the storage size become the deployment
+option (`small`, `small-lstorage`, ...).
+
+**Passwords.** The root password (step 1) and the SSO administrator password
+(step 2) come from Vault (`root_password_secret_ref`,
+`sso_admin_password_secret_ref`). MEHO reads them when the call runs, under
+the identity of the person who runs it (after an approval: the approver).
+They are only in the vendor request bodies. A vendor message that holds one
+is replaced. The deploy and the install are pinned as `credential_write`
+(`broadcast/events.py`), so the flight recorder keeps no request body, the
+dispatcher keeps no vendor text of a failed call, and the broadcast carries
+no params. The approval request shows the Vault path, never the
+password.
+
+**The setup is a vendor job.** `vcenter.install` and
+`vcenter.deployment.answer` return as soon as the appliance has accepted the
+call: `status: accepted`, never "done". The vendor gives no job id for the
+setup; an appliance runs one setup, so the target names the job, and
+`status_read` names the read that follows it.
+
+- Before a start, `vcenter.install` reads the state. A setup that runs
+  already gives `already_running` (or `waiting_for_answer`) and starts
+  nothing. This check is a help, not a lock: two callers can both read
+  `ready` before either starts.
+- After a lost reply (`start_unknown`, `answer_unknown`), do not start again
+  blindly. Read `vmware.vcenter.deployment.status`: `running` or
+  `waiting_for_answer` means the start worked; `ready` means it did not. For
+  an answer: if the question is still open, answer again.
+- Use MEHO's async mode (`async: true`, `docs/codebase/async-governed-dispatch.md`)
+  for the start and the answer: MEHO keeps the answer under a run handle, so a
+  lost reply does not lose it.
+- An expired login gives HTTP 401: the dispatcher logs in again and runs the
+  status read once more. A 401 on the install check of a new SSO domain is
+  passed on the same way. When joining a domain, a 401 means the partner
+  vCenter refused the SSO login, so the check fails with that message.
+- The appliance restarts its services during the setup. A status read that
+  gets no answer says `state: not_reachable` with the reason (`connect_failed`,
+  `timeout`, or `tls_verify_failed` when the certificate changed), the target
+  and the time. It never says `failed` for that. MEHO keeps no job state
+  between calls.
+- Each answer lists the `steps` (`done`, `failed` with the vendor's error,
+  `unknown`, `not_run`). MEHO does not undo a step that ran.
+
+**Step 1 is work MEHO does inside its own call.** The handler runs until the
+copy of the disks and the clean-up are done; use async mode (`async: true`):
+MEHO answers `202` with a run handle at once, and the stored result has the
+final answer. The answer lists each file with its name, size, SHA-256 and the
+disk it went to. The download session is cancelled in a `finally` block, also
+after an error, and a failed copy aborts the lease, so vCenter removes the
+half-made VM. Credentials never cross redirects: the pooled client refuses a
+redirect to another host, and the disk uploads follow no redirect. If the
+MEHO process dies during the copy, the run ends as failed (async mode does
+not resume work) and nothing runs the clean-up: vCenter ends the download
+session and the lease after their own idle timeouts and removes the half-made
+VM with the lease. A finished import whose power-on did not run leaves a
+powered-off VM with the given name; a new run with the same name then fails
+in `ImportVApp`, so check the inventory first and delete or rename that VM.
+A power-on that waits for approval saves the import's answer: approving it
+only powers on the VM and does not import again.
 
 ### Reads of many objects read every page (`vim_retrieve.py`, #4862)
 

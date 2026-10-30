@@ -14,7 +14,7 @@ Structurally it is a copy of the ``winsrv`` estate mold (#3261): identity canary
 JSONFlux envelope for list reads, and the ``rke2`` approval-parked-write mold
 for its destructive ops.
 
-Op surface (28 ops across five groups; safety tier per the Initiative #3259
+Op surface (34 ops across six groups; safety tier per the Initiative #3259
 satellite table — reads ``safe``, recoverable writes ``caution``, destructive
 ``dangerous`` + ``requires_approval``):
 
@@ -23,6 +23,9 @@ satellite table — reads ``safe``, recoverable writes ``caution``, destructive
 * ``msad.domain.forest``          [safe]      Get-ADForest (FSMO schema/naming, mode).
 * ``msad.domain.controllers``     [safe]      Get-ADDomainController -Filter * (list).
 * ``msad.domain.replication``     [safe]      Get-ADReplicationPartnerMetadata (list).
+* ``msad.domain.settings``        [safe]      password rules + join limit in one read.
+* ``msad.domain.password-policy.set`` [caution+approval]  Set-ADDefaultDomainPasswordPolicy.
+* ``msad.domain.machine-account-quota.set`` [caution+approval]  Set-ADDomain -Replace.
 * ``msad.user.list``              [safe]      Get-ADUser -Filter * (list).
 * ``msad.user.get``               [safe]      Get-ADUser -Identity.
 * ``msad.user.search``            [safe]      Get-ADUser -Filter {name/sam -like} (list).
@@ -35,6 +38,7 @@ satellite table — reads ``safe``, recoverable writes ``caution``, destructive
 * ``msad.group.list``             [safe]      Get-ADGroup -Filter * (list).
 * ``msad.group.get``              [safe]      Get-ADGroup -Identity.
 * ``msad.group.members``          [safe]      Get-ADGroupMember (list).
+* ``msad.group.create``           [caution+approval]  New-ADGroup (safe to run twice).
 * ``msad.group.add-member``       [caution]   Add-ADGroupMember.
 * ``msad.group.remove-member``    [caution]   Remove-ADGroupMember.
 * ``msad.group.delete``           [dangerous+approval]  Remove-ADGroup.
@@ -46,6 +50,8 @@ satellite table — reads ``safe``, recoverable writes ``caution``, destructive
 * ``msad.ou.list``                [safe]      Get-ADOrganizationalUnit -Filter * (list).
 * ``msad.ou.create``              [caution]   New-ADOrganizationalUnit.
 * ``msad.ou.move``                [caution]   Move-ADObject.
+* ``msad.ou.grant-create-child``  [caution+approval]  allow a group to create objects in an OU.
+* ``msad.ou.revoke-create-child`` [caution+approval]  remove that access rule again.
 
 **Password-reset is deferred, not shipped** (in-task decision; see
 ``docs/codebase/connectors-msad.md``): a plaintext AD password cannot ride the
@@ -119,7 +125,8 @@ MSAD_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     ),
     "groups": (
         "Use to inventory and manage AD groups and their membership: list / "
-        "get / members (read-only, ``safe``); add-member / remove-member "
+        "get / members (read-only, ``safe``); create a group (``caution``, "
+        "waits for a person to approve it); add-member / remove-member "
         "(``caution`` — recoverable); delete the group (``dangerous`` + "
         "``requires_approval``). The right group to grant a service account "
         "into a role group (e.g. add ``svc-sql`` to a SQL admins group)."
@@ -135,8 +142,20 @@ MSAD_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "ou": (
         "Use to inventory and shape the OU tree: list OUs (read-only, "
         "``safe``); create a new OU (``create``) and move an object / OU to a "
-        "new parent (``move``) — both ``caution``. Deleting an OU is out of "
-        "scope for this connector cut."
+        "new parent (``move``) — both ``caution``; let a group create "
+        "computers, users or groups in an OU (``grant-create-child``) and "
+        "take that right away again (``revoke-create-child``) — both wait for "
+        "a person to approve them. Deleting an OU is out of scope for this "
+        "connector cut."
+    ),
+    "domain-config": (
+        "Use for the domain-wide settings a new domain needs: read the "
+        "password rules and the join limit in one call "
+        "(``msad.domain.settings``), change the password rules "
+        "(``msad.domain.password-policy.set``) and set how many computers a "
+        "normal user may join (``msad.domain.machine-account-quota.set``). "
+        "Both changes wait for a person to approve them and are safe to run "
+        "twice. No op here takes or returns a password."
     ),
 }
 
@@ -310,8 +329,10 @@ def _msad_ops() -> tuple[MsadOp, ...]:
     """
     from meho_backplane.connectors.msad.ops_computers import COMPUTER_OPS
     from meho_backplane.connectors.msad.ops_domain import DOMAIN_OPS
+    from meho_backplane.connectors.msad.ops_domain_config import DOMAIN_CONFIG_OPS
     from meho_backplane.connectors.msad.ops_groups import GROUP_OPS
     from meho_backplane.connectors.msad.ops_ou import OU_OPS
+    from meho_backplane.connectors.msad.ops_ou_access import OU_ACCESS_OPS
     from meho_backplane.connectors.msad.ops_password import PASSWORD_OPS
     from meho_backplane.connectors.msad.ops_users import USER_OPS
 
@@ -323,6 +344,8 @@ def _msad_ops() -> tuple[MsadOp, ...]:
         *GROUP_OPS,
         *COMPUTER_OPS,
         *OU_OPS,
+        *OU_ACCESS_OPS,
+        *DOMAIN_CONFIG_OPS,
     )
 
 

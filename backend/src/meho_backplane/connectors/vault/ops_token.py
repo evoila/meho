@@ -39,8 +39,12 @@ the token ``id`` (Vault blanks it), so it exposes no secret.
 
 Handler shape mirrors :mod:`meho_backplane.connectors.vault.ops_auth`:
 ``async def (operator, target, params) -> dict``, raises on failure,
-forwards the operator JWT via ``vault_client_for_operator``, offloads the
-blocking hvac call with ``asyncio.to_thread``. The ``token`` backend is
+opens its Vault client through
+:func:`~meho_backplane.connectors.vault.target_auth.vault_client_for_target`
+(the operator JWT, logged in under the target's ``extras["vault_role"]``
+when set, else the deployment-wide role; a refused target role fails the
+call with no fallback), offloads the blocking hvac call with
+``asyncio.to_thread``. The ``token`` backend is
 core (always mounted); ``list_accessors`` normalises an empty-store
 ``404`` to ``{"keys": []}``.
 """
@@ -50,7 +54,6 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vault.ops_auth import _extract_data, _extract_keys
 from meho_backplane.connectors.vault.ops_token_schemas import (
@@ -67,6 +70,7 @@ from meho_backplane.connectors.vault.ops_token_schemas import (
     VAULT_TOKEN_REVOKE_ACCESSOR_PARAMETER_SCHEMA,
     VAULT_TOKEN_REVOKE_ACCESSOR_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vault.target_auth import vault_client_for_target
 
 __all__ = [
     "TOKEN_OP_SPECS",
@@ -132,7 +136,7 @@ async def vault_token_create(
     if params.get("ttl_period") is not None:
         kwargs["period"] = params["ttl_period"]
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         payload = await asyncio.to_thread(client.auth.token.create, **kwargs)
 
     auth = dict(payload["auth"])
@@ -158,7 +162,7 @@ async def vault_token_revoke_accessor(
     """
     accessor: str = str(params["accessor"]).strip()
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         await asyncio.to_thread(client.auth.token.revoke_accessor, accessor=accessor)
 
     return {"accessor": accessor, "revoked": True}
@@ -174,7 +178,7 @@ async def vault_token_list_accessors(
     ``{"keys": [...]}`` dict. Accessors are non-secret references (never
     token secrets). An empty token store normalises to ``{"keys": []}``.
     """
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         try:
             payload = await asyncio.to_thread(client.auth.token.list_accessors)
         except _hvac_invalid_path():
@@ -204,7 +208,7 @@ async def vault_token_lookup_accessor(
     """
     accessor: str = str(params["accessor"]).strip()
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         payload = await asyncio.to_thread(client.auth.token.lookup_accessor, accessor=accessor)
 
     return _extract_data(payload)
@@ -220,6 +224,9 @@ TOKEN_WHEN_TO_USE: str = (
     "list active token accessors (vault.token.list_accessors -- safe), "
     "and look up one token's TTL/policies/expiry by its accessor "
     "(vault.token.lookup_accessor -- safe). "
+    "To make a token and store it straight in a Vault KV path or a "
+    "Kubernetes Secret, so nobody sees it, use "
+    "vault.token.create_and_store (requires approval). "
     "Token roles are saved sets of rules for making tokens (allowed "
     "policies, orphan, renewable, period): create or change one with "
     "vault.token.role.write (requires approval), read one with "

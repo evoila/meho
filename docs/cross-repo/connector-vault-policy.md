@@ -529,6 +529,11 @@ role the token logs in under is picked in this order (first match wins):
    step;
 4. the deployment-global `VAULT_OIDC_ROLE` (usually `meho-mcp`).
 
+The same order picks the role for the identity operations
+(`vault.identity.*`) and the token operations (`vault.token.*`)
+(evoila/meho#4970). So a vault target whose `vault_role` may change
+identities or tokens also covers those operations.
+
 So the write identity is the operator's JWT together with the role this
 chain selects. When you diagnose a denied write on a target without a
 `vault_role`, check steps 2–4 for the acting operator before you edit a
@@ -554,6 +559,8 @@ caveat). The contract a deploy must satisfy is therefore:
 | Write (`vault.auth.jwt.role.write` create or change a JWT/OIDC login role) | same | `create` + `read` + `update` on `auth/<mount>/role/<role>` (§6.5) |
 | Read (`vault.auth.jwt.role.read` / `.role.list` / `.config.read`) | same | `read` on `auth/<mount>/role/<role>` and `auth/<mount>/config`; `list` on `auth/<mount>/role` (§6.5) |
 | Write (`vault.sys.policy.delete` delete one Vault policy) | same; use a target whose `vault_role` has this rule, not `meho-mcp` | `delete` on `sys/policy/<name>` ([vault-remove-tenant.md](vault-remove-tenant.md) step 4) |
+| Delete (`vault.identity.oidc.role.delete` / `vault.identity.oidc.key.delete`) | same | `delete` on `identity/oidc/role/<name>` or `identity/oidc/key/<name>` (§6.7) |
+| Read (`vault.identity.oidc.role.*` / `vault.identity.oidc.key.*` list and read) | same | `read` on the role or key path; `list` on `identity/oidc/role` or `identity/oidc/key` (§6.7) |
 
 A deploy that follows only the §2 read grant provisions **read-only** and
 discovers the missing write grant *after* an operator approves a parked
@@ -630,7 +637,7 @@ Notes:
 - **Nothing here lets the identity make tokens.** Making a token from a
   role is a separate operation with its own grant on `auth/token/create`
   (and `auth/token/create/<role>`); this section only covers the role
-  settings.
+  settings. §6.8 covers making a token from a role.
 
 ### 6.5 JWT/OIDC login roles (`vault.auth.jwt.*`)
 
@@ -749,6 +756,116 @@ with §6.2, using the path above:
 vault token capabilities "secret/data/tenants/<tenant-uuid>/<register_as>"
 # Expect: create read update
 ```
+
+### 6.7 Identity token roles and keys (`vault.identity.oidc.*`)
+
+Vault signs identity tokens (JWTs) that another system, such as a cloud
+provider, trusts. A **role** under `identity/oidc/role/<name>` says which
+**key** under `identity/oidc/key/<name>` signs its tokens and who the
+token audience is. MEHO lists, reads and deletes both. The deletes are
+dangerous and wait until a person approves. Like §6.4, the rules go into
+the policy of the role that will manage them (the target's `vault_role`),
+not into the shared read policy of every operator:
+
+```hcl
+# List the names (`vault.identity.oidc.role.list` / `.key.list`).
+path "identity/oidc/role" {
+  capabilities = ["list"]
+}
+path "identity/oidc/key" {
+  capabilities = ["list"]
+}
+
+# Read and delete one role (`vault.identity.oidc.role.read` / `.delete`).
+# Replace <name> with the role this identity may remove.
+path "identity/oidc/role/<name>" {
+  capabilities = ["read", "delete"]
+}
+
+# Read and delete one key (`vault.identity.oidc.key.read` / `.delete`).
+path "identity/oidc/key/<name>" {
+  capabilities = ["read", "delete"]
+}
+```
+
+Notes:
+
+- **Check before approval.** Before MEHO asks for approval of a delete, it
+  runs the §6.2 `sys/capabilities-self` probe on the role or key path under
+  the target's role. When `delete` is missing, the call is refused with
+  `error_code: "write_capability_denied"` and no approval request is
+  written.
+- **Delete the role before its key.** Vault refuses to delete a key while
+  a role still uses it. MEHO then returns `connector_error` with
+  `exception_class: "VaultOidcKeyInUseError"`, and the `remediation` names
+  the roles. Vault never deletes the key named `default`.
+- **The trust on the other side stays.** Deleting the role stops new
+  tokens. The system that trusted those tokens keeps its own trust
+  setting until someone removes it there.
+### 6.8 Make a token from a role and store it (`vault.token.create_and_store`)
+
+`vault.token.create_and_store` makes a Vault token from a token role and
+writes it straight to a Vault KV path or to one key of an existing
+Kubernetes Secret. Nobody sees the token. It runs under the same identity
+chain as §6.3 (the target's `vault_role`). MEHO's shared policy has no
+right to make tokens, so give these rights only to the role of the Vault
+target you use for this operation.
+
+**1. Create the token role.** The role decides which policies a token may
+get. It must set `orphan=true`: MEHO's own Vault login ends (and is
+revoked) when the call ends, and Vault revokes a token's children with it.
+An orphan token has no parent, so it stays valid. MEHO refuses a token that
+is not an orphan and revokes it at once.
+
+```shell
+vault write auth/token/roles/<role> allowed_policies=<policy> orphan=true
+```
+
+Or with MEHO: `vault.token.role.write` with `role_name=<role>`,
+`allowed_policies=[<policy>]` and `orphan=true` (§6.4).
+
+**2. Let the target's role make tokens from it:**
+
+```hcl
+# Make a token from the token role <role> (`vault.token.create_and_store`).
+path "auth/token/create/<role>" {
+  capabilities = ["update"]
+}
+```
+
+Without `role_name`, MEHO uses `auth/token/create-orphan` instead; then the
+grant is `update` on `auth/token/create-orphan`, and the token may only get
+policies the target's role has itself. A token role is the better way.
+
+**3. For a Vault KV destination**, the same role needs the KV write rights
+of `vault.kv.put` and `vault.kv.patch` on the destination path (§6.1):
+`create`, `read` and `update` on `<mount>/data/<path>`. For a Kubernetes
+Secret destination no Vault right is needed; the caller must be allowed to
+run `k8s.secret.update` on that Kubernetes target.
+
+Notes:
+
+- **Check before approval.** Before MEHO asks for approval, it runs the
+  §6.2 `sys/capabilities-self` probe under the target's role: `update` on
+  the create path, and for a KV destination `create` + `read` + `update` on
+  the KV path. When a right is missing, the call is refused with
+  `error_code: "write_capability_denied"` and no approval request is
+  written. For a Kubernetes Secret destination, the approval card also
+  shows whether the person or agent who asked may run `k8s.secret.update`
+  on that target (`requester_denied`). When a second person approves, MEHO
+  checks the requester's policy again before it makes the token, so an
+  approval cannot give a denied requester that write.
+- **A new KV path.** When the KV path does not exist yet, MEHO creates it
+  with a check-and-set guard (`cas=0`): Vault writes only when the path is
+  still missing. When someone else created the path in the meantime, the
+  call fails, MEHO revokes the new token, and the other writer's fields
+  are kept. Call the operation again; it then merges the token into the
+  path.
+- **Clean up.** When the write fails, MEHO revokes the new token with the
+  token itself (`auth/token/revoke-self`, which Vault's `default` policy
+  allows). Do not set `no_default_policy` on the role, or this clean-up
+  cannot run. If the revoke fails too, the error names the token's
+  accessor; revoke it with `vault.token.revoke_accessor`.
 
 ## Scope note — `shared_service_account` only; `per_user`/`impersonation` deferred
 

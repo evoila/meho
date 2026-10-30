@@ -25,6 +25,8 @@ running realm up to date through the Admin REST API:
   leaves other attributes alone;
 * when ``coreKeycloak.ci.enabled`` is on, it also makes a CI-only service
   client and a group for a second tenant;
+* when ``coreKeycloak.companyLogin.enabled`` is on, it sets up the company
+  login (:mod:`meho_backplane.core.company_login`);
 * on the first run it checks that ``meho-admin`` can log in, then removes
   the first-start account.
 
@@ -49,6 +51,13 @@ import httpx
 from kubernetes_asyncio import client, config
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from meho_backplane.core.company_login import (
+    SECRET_ENV as COMPANY_SECRET_ENV,
+)
+from meho_backplane.core.company_login import (
+    CompanyLoginPlan,
+    ensure_company_login,
+)
 from meho_backplane.core.keycloak_api import (
     REALM,
     Admin,
@@ -162,6 +171,7 @@ class Plan(BaseModel):
     approver_username: str = Field(min_length=1)
     tenants: tuple[TenantPlan, ...] = ()
     ci: CiPlan = CiPlan()
+    company_login: CompanyLoginPlan = CompanyLoginPlan()
 
     @model_validator(mode="after")
     def _tenants_differ(self) -> Plan:
@@ -646,6 +656,10 @@ async def finish_realm(
         await realm.ensure_client(want, scope_ids)
     if plan.ci.enabled:
         await _ensure_ci(realm, plan, environ, store, scope_ids)
+    if plan.company_login.enabled:
+        _require_env(environ, COMPANY_SECRET_ENV)
+        secret = environ[COMPANY_SECRET_ENV]
+        await ensure_company_login(admin, plan.company_login, secret, realm.group_id)
     await _ensure_first_login(realm, plan, store)
     if session == "bootstrap":
         await _remove_bootstrap_account(admin, environ)

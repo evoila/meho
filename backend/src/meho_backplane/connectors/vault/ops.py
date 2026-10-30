@@ -477,7 +477,8 @@ _VAULT_KV_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
         ),
     },
     "output_shape": (
-        "On success: {'keys': [<name>, ...]}. On failure: the "
+        "On success: {'keys': [<name>, ...]}; an empty or missing "
+        "folder returns {'keys': []}. On failure: the "
         "dispatcher wraps the raised exception into a connector_error "
         "OperationResult with extras.exception_class set to the "
         "Vault-side error type."
@@ -494,9 +495,14 @@ async def vault_kv_list(operator: Operator, target: Any, params: dict[str, Any])
     key names themselves can leak structure.
 
     Delegates to hvac's ``secrets.kv.v2.list_secrets`` (the underlying
-    ``LIST /v1/<mount>/metadata/<path>`` call). Raises on a malformed
-    hvac payload so the dispatcher's ``connector_error`` branch surfaces
-    a structured error rather than an unhandled exception.
+    ``LIST /v1/<mount>/metadata/<path>`` call). Vault answers a LIST on
+    an empty or missing folder with a 404, which hvac raises as
+    ``InvalidPath``; that is an empty folder, not an error, so it
+    returns ``{"keys": []}``. Any other error (for example a
+    ``Forbidden`` permission denial) is raised unchanged. Raises on a
+    malformed hvac payload so the dispatcher's ``connector_error``
+    branch surfaces a structured error rather than an unhandled
+    exception.
 
     With ``recursive=true`` it walks every sub-folder
     (:func:`~meho_backplane.connectors.vault.kv_tree.list_kv_tree`) and
@@ -516,11 +522,14 @@ async def vault_kv_list(operator: Operator, target: Any, params: dict[str, Any])
                 client, mount=mount, path=path.strip("/"), max_keys=folder_max_keys()
             )
             return {"keys": tree}
-        list_payload = await asyncio.to_thread(
-            client.secrets.kv.v2.list_secrets,
-            path=path,
-            mount_point=mount,
-        )
+        try:
+            list_payload = await asyncio.to_thread(
+                client.secrets.kv.v2.list_secrets,
+                path=path,
+                mount_point=mount,
+            )
+        except hvac.exceptions.InvalidPath:
+            return {"keys": []}
         # Structural unwrap -- raises KeyError on a malformed hvac
         # payload (missing the nested ``data``/``keys`` keys). The
         # dispatcher's ``connector_error`` branch turns the KeyError
@@ -1623,8 +1632,9 @@ async def register_vault_typed_operations(
         "Use for HashiCorp Vault KV-v2 secret CRUD: read a secret, "
         "write a new version, list child paths under a folder, "
         "enumerate version history, soft-delete a version, soft-delete "
-        "many secrets under a folder with one approval, or "
-        "permanently remove a whole secret. The right "
+        "many secrets under a folder with one approval, permanently "
+        "remove a whole secret, or check that copies of one secret hold "
+        "the same value without showing it. The right "
         "group when the question names a specific secret path "
         "(``kubeconfig/<cluster>``, ``oidc/clients/<id>``, etc.) and "
         "the operator wants the value, the existence, or the "
@@ -1634,7 +1644,11 @@ async def register_vault_typed_operations(
         "mountpoint is this secret stored at?' rather than the "
         "value itself."
     )
-    for spec in _KV_OP_SPECS:
+    # Lazy import: kv_compare imports this module's shared schema
+    # fragments, so a top-level import here would be circular.
+    from meho_backplane.connectors.vault.kv_compare import KV_COMPARE_OP_SPEC
+
+    for spec in (*_KV_OP_SPECS, KV_COMPARE_OP_SPEC):
         # Every spec states ``safety_level`` and ``requires_approval``. The
         # mutating KV ops (put / patch / delete) set it True so the
         # dispatcher routes human principals to the approval queue rather

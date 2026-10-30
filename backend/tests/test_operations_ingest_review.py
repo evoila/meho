@@ -48,7 +48,12 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
+from meho_backplane.db.models import (
+    AuditLog,
+    EndpointDescriptor,
+    OperationGroup,
+    OperationPolicyOverride,
+)
 from meho_backplane.operations._lookup import lookup_descriptor
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
@@ -1125,9 +1130,14 @@ async def test_edit_op_updates_overrides_and_writes_audit() -> None:
         result = await session.execute(stmt)
         op_row = result.scalar_one()
         assert op_row.custom_description == "A safer summary."
-        assert op_row.safety_level == "dangerous"
-        assert op_row.requires_approval is True
+        # #4711: risk level and approval are an override; the row keeps
+        # the classification.
+        assert op_row.safety_level == "safe"
+        assert op_row.requires_approval is False
         assert op_row.is_enabled is False
+        override = (await session.execute(select(OperationPolicyOverride))).scalar_one()
+        assert (override.tenant_id, override.op_id) == (tenant_id, target_op)
+        assert (override.safety_level, override.requires_approval) == ("dangerous", True)
 
     assert await _count_audit_rows(op_id="meho_connector_edit_op") == 1
     row = await _latest_audit_row(op_id="meho_connector_edit_op")
@@ -1137,6 +1147,12 @@ async def test_edit_op_updates_overrides_and_writes_audit() -> None:
         ["custom_description", "safety_level", "requires_approval", "is_enabled"],
     )
     assert payload["is_enabled_set_to"] is False
+    assert payload["changes"] == {
+        "safety_level": {"old": "safe", "new": "dangerous"},
+        "requires_approval": {"old": False, "new": True},
+        "is_enabled": {"old": False, "new": False},
+    }
+    assert payload["scope"] == "tenant"
 
 
 @pytest.mark.asyncio

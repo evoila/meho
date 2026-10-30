@@ -115,10 +115,20 @@ class _FakeTokenAuth:
     roles_payload: Any = None
     raise_on_list_roles: Exception | None = None
     list_roles_calls: int = 0
+    # ``vault.token.create_and_store``: what Vault says about the new token
+    # (``orphan`` / ``lease_duration``), the ``create-orphan`` calls, and the
+    # token each ``revoke_self`` ran with (read off the client, ``parent``).
+    minted_orphan: bool = True
+    minted_lease_duration: int = 86400
+    create_orphan_calls: list[dict[str, Any]] = field(default_factory=list)
+    revoked_tokens: list[str | None] = field(default_factory=list)
+    parent: Any | None = None
 
     def revoke_self(self, mount_point: str = "token") -> None:
         _ = mount_point
         self.revoke_calls += 1
+        if self.parent is not None:
+            self.revoked_tokens.append(self.parent.token)
         if self.raise_on_revoke is not None:
             raise self.raise_on_revoke
 
@@ -126,11 +136,22 @@ class _FakeTokenAuth:
         self.create_calls.append(dict(kwargs))
         if self.raise_on_create is not None:
             raise self.raise_on_create
+        return self._minted(kwargs)
+
+    def create_orphan(self, **kwargs: Any) -> dict[str, Any]:
+        self.create_orphan_calls.append(dict(kwargs))
+        if self.raise_on_create is not None:
+            raise self.raise_on_create
+        return self._minted(kwargs)
+
+    def _minted(self, kwargs: dict[str, Any]) -> dict[str, Any]:
         return {
             "auth": {
                 "client_token": self.minted_client_token,
                 "accessor": self.minted_accessor,
                 "policies": list(kwargs.get("policies", []) or []),
+                "orphan": self.minted_orphan,
+                "lease_duration": self.minted_lease_duration,
             }
         }
 
@@ -501,6 +522,18 @@ class _FakeIdentity:
     group_delete_calls: list[str] = field(default_factory=list)
     read_entity_calls: list[str] = field(default_factory=list)
     read_group_calls: list[str] = field(default_factory=list)
+    # Identity token roles and keys (``vault.identity.oidc.*``): reads look
+    # up the per-name payload (missing name -> ``InvalidPath``), lists return
+    # the ``keys`` envelope or raise, deletes record the name or raise.
+    oidc_role_payloads: dict[str, Any] = field(default_factory=dict)
+    oidc_roles_payload: Any = None
+    raise_on_list_oidc_roles: Exception | None = None
+    oidc_role_delete_calls: list[str] = field(default_factory=list)
+    oidc_key_payloads: dict[str, Any] = field(default_factory=dict)
+    oidc_keys_payload: Any = None
+    raise_on_list_oidc_keys: Exception | None = None
+    raise_on_delete_oidc_key: Exception | None = None
+    oidc_key_delete_calls: list[str] = field(default_factory=list)
 
     def _mint_envelope(self) -> Any:
         if self.minted_id is None:
@@ -558,6 +591,42 @@ class _FakeIdentity:
         if self.raise_on_list_entities is not None:
             raise self.raise_on_list_entities
         return self.entities_payload
+
+    def list_roles(self, mount_point: str = "identity") -> Any:
+        _ = mount_point
+        if self.raise_on_list_oidc_roles is not None:
+            raise self.raise_on_list_oidc_roles
+        return self.oidc_roles_payload
+
+    def read_role(self, name: str, mount_point: str = "identity") -> Any:
+        _ = mount_point
+        if name not in self.oidc_role_payloads:
+            raise hvac.exceptions.InvalidPath(f"no role {name}")
+        return self.oidc_role_payloads[name]
+
+    def delete_role(self, name: str, mount_point: str = "identity") -> _DeleteResponse:
+        _ = mount_point
+        self.oidc_role_delete_calls.append(name)
+        return _DeleteResponse()
+
+    def list_named_keys(self, mount_point: str = "identity") -> Any:
+        _ = mount_point
+        if self.raise_on_list_oidc_keys is not None:
+            raise self.raise_on_list_oidc_keys
+        return self.oidc_keys_payload
+
+    def read_named_key(self, name: str, mount_point: str = "identity") -> Any:
+        _ = mount_point
+        if name not in self.oidc_key_payloads:
+            raise hvac.exceptions.InvalidPath(f"no key {name}")
+        return self.oidc_key_payloads[name]
+
+    def delete_named_key(self, name: str, mount_point: str = "identity") -> _DeleteResponse:
+        _ = mount_point
+        if self.raise_on_delete_oidc_key is not None:
+            raise self.raise_on_delete_oidc_key
+        self.oidc_key_delete_calls.append(name)
+        return _DeleteResponse()
 
 
 @dataclass
@@ -825,6 +894,7 @@ def install_fake_vault(
         secrets=_FakeSecrets(kv=_FakeKV(v2=kv_v2), identity=_FakeIdentity()),
     )
     jwt_auth.parent = fake
+    token_auth.parent = fake
 
     def _fake_build_client(_settings: Any, *, token: str | None = None) -> _FakeClient:
         fake.token = token

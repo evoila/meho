@@ -8,7 +8,42 @@
 # Globals set by build-download.sh: LINUX_SERVER_DIR, PACKAGING_DIR,
 # REPO_ROOT, WORK, STAGE, VERSION, CHART_VERSION, IMAGE_TAG, SIGNER_REF,
 # WAIT_SECONDS, CLI_BINARY. This file sets HELM, CHART_DIGEST and
-# IMAGE_DIGEST.
+# IMAGE_DIGEST, and read_image_settings sets IMAGE_REPOSITORY, IMAGE_SIGNER,
+# IMAGE_OIDC_ISSUER and IMAGE_LICENCE (the MEHO image, or an overlay image,
+# and its signer).
+
+# read_image_settings: the MEHO image and its signer, or the overlay image
+# and its signer. Without MEHO_OVERLAY_IMAGE, the image is
+# ghcr.io/evoila/meho, signed by image.yml of this repository.
+read_image_settings() {
+    IMAGE_REPOSITORY=$MEHO_IMAGE_REPOSITORY
+    IMAGE_SIGNER=$SIGNER_PREFIX/image.yml@$SIGNER_REF
+    IMAGE_OIDC_ISSUER=$OIDC_ISSUER
+    IMAGE_LICENCE=""
+    if [[ -z ${MEHO_OVERLAY_IMAGE:-} ]]; then
+        [[ -z ${MEHO_OVERLAY_SIGNER:-}${MEHO_OVERLAY_OIDC_ISSUER:-}${MEHO_OVERLAY_LICENCE:-} ]] ||
+            usage_error "MEHO_OVERLAY_SIGNER, MEHO_OVERLAY_OIDC_ISSUER and MEHO_OVERLAY_LICENCE need MEHO_OVERLAY_IMAGE."
+        return 0
+    fi
+    local normal licences source file
+    normal=$(normalize_image_ref "$MEHO_OVERLAY_IMAGE") || normal=""
+    # A repository without a tag reads as <repository>:latest.
+    [[ $normal == "$MEHO_OVERLAY_IMAGE latest -" ]] ||
+        usage_error "MEHO_OVERLAY_IMAGE must be an image repository with its registry and without a tag, like registry.example.com/team/meho-overlay."
+    [[ -n ${MEHO_OVERLAY_SIGNER:-} ]] ||
+        usage_error "MEHO_OVERLAY_SIGNER must name the cosign identity that signed $MEHO_OVERLAY_IMAGE."
+    read -r licences source <<<"${MEHO_OVERLAY_LICENCE:-}"
+    [[ -n $licences && -n $source ]] ||
+        usage_error "MEHO_OVERLAY_LICENCE must be \"<licence files> <source>\", like the lines of packaging/image-sources.txt."
+    for file in ${licences//,/ }; do
+        [[ $file == Apache-2.0.txt || $file == MEHO-NOTICE.txt || -f $PACKAGING_DIR/licenses/$file ]] ||
+            usage_error "MEHO_OVERLAY_LICENCE names $file, which is not in LICENSES/ of the download."
+    done
+    IMAGE_REPOSITORY=$MEHO_OVERLAY_IMAGE
+    IMAGE_SIGNER=$MEHO_OVERLAY_SIGNER
+    IMAGE_OIDC_ISSUER=${MEHO_OVERLAY_OIDC_ISSUER:-$OIDC_ISSUER}
+    IMAGE_LICENCE="$licences $source"
+}
 
 # fetch <url> <file>
 fetch() {
@@ -23,6 +58,17 @@ add_scripts() {
     install -m 0644 "$LINUX_SERVER_DIR/storage/local-path-storage.yaml" "$STAGE/storage/"
     install -m 0644 "$LINUX_SERVER_DIR/values-single-node.yaml" "$STAGE/chart/"
     ok "install.sh, meho-host, lib/, storage/ and chart/values-single-node.yaml"
+    name_overlay_image "$STAGE/chart/values-single-node.yaml"
+}
+
+# name_overlay_image <values file>: with an overlay image, the values file
+# of the download names it. install.sh, the update and check-download.sh
+# all pass this file to Helm, so each of them uses the overlay image.
+name_overlay_image() {
+    [[ ${IMAGE_REPOSITORY:-$MEHO_IMAGE_REPOSITORY} != "$MEHO_IMAGE_REPOSITORY" ]] || return 0
+    printf '%s\n' "" "# The overlay image of this download, set by build-download.sh." \
+        "image:" "  repository: $IMAGE_REPOSITORY" >>"$1"
+    ok "chart/values-single-node.yaml names the overlay image $IMAGE_REPOSITORY"
 }
 
 # Helm goes into the download, and the build uses the same binary to pull
@@ -51,25 +97,28 @@ add_cli() {
     ok "bin/meho: $reported"
 }
 
-# cosign_verify <image reference by digest> <workflow file that signed it>
+# cosign_verify <image reference by digest> <certificate identity> <OIDC issuer>:
+# the image is signed by exactly this identity; no other signer passes.
 cosign_verify() {
     cosign verify "$1" \
-        --certificate-identity "$SIGNER_PREFIX/$2@$SIGNER_REF" \
-        --certificate-oidc-issuer "$OIDC_ISSUER" >/dev/null 2>"$WORK/cosign.log"
+        --certificate-identity "$2" \
+        --certificate-oidc-issuer "$3" >/dev/null 2>"$WORK/cosign.log"
 }
 
-# published: the chart and the MEHO image of this version are on ghcr.io and
-# signed by the workflows of this repository. PUBLISH_STATE says what is
-# still missing.
+# published: the chart of this version is on ghcr.io and signed by chart.yml
+# of this repository, and the MEHO image (or the overlay image) is in its
+# registry and signed by IMAGE_SIGNER. PUBLISH_STATE says what is still
+# missing.
 published() {
     PUBLISH_STATE="the chart $MEHO_CHART_REPOSITORY:$CHART_VERSION is not on ghcr.io"
     CHART_DIGEST=$(regctl image digest "$MEHO_CHART_REPOSITORY:$CHART_VERSION" 2>/dev/null) || return 1
-    PUBLISH_STATE="the image $MEHO_IMAGE_REPOSITORY:$IMAGE_TAG is not on ghcr.io"
-    IMAGE_DIGEST=$(regctl image digest "$MEHO_IMAGE_REPOSITORY:$IMAGE_TAG" 2>/dev/null) || return 1
+    PUBLISH_STATE="the image $IMAGE_REPOSITORY:$IMAGE_TAG is not on ${IMAGE_REPOSITORY%%/*}"
+    IMAGE_DIGEST=$(regctl image digest "$IMAGE_REPOSITORY:$IMAGE_TAG" 2>/dev/null) || return 1
     PUBLISH_STATE="the chart $MEHO_CHART_REPOSITORY@$CHART_DIGEST has no valid signature from chart.yml@$SIGNER_REF"
-    cosign_verify "$MEHO_CHART_REPOSITORY@$CHART_DIGEST" chart.yml || return 1
-    PUBLISH_STATE="the image $MEHO_IMAGE_REPOSITORY@$IMAGE_DIGEST has no valid signature from image.yml@$SIGNER_REF"
-    cosign_verify "$MEHO_IMAGE_REPOSITORY@$IMAGE_DIGEST" image.yml || return 1
+    cosign_verify "$MEHO_CHART_REPOSITORY@$CHART_DIGEST" "$SIGNER_PREFIX/chart.yml@$SIGNER_REF" "$OIDC_ISSUER" ||
+        return 1
+    PUBLISH_STATE="the image $IMAGE_REPOSITORY@$IMAGE_DIGEST has no valid signature from $IMAGE_SIGNER (OIDC issuer $IMAGE_OIDC_ISSUER)"
+    cosign_verify "$IMAGE_REPOSITORY@$IMAGE_DIGEST" "$IMAGE_SIGNER" "$IMAGE_OIDC_ISSUER" || return 1
 }
 
 # On a release tag, chart.yml and image.yml run at the same time as this
@@ -80,12 +129,13 @@ wait_until_published() {
         if ((SECONDS >= deadline)); then
             [[ $PUBLISH_STATE != *signature* ]] || cat "$WORK/cosign.log" >&2
             fail "After $((WAIT_SECONDS / 60)) minutes, $PUBLISH_STATE." \
-                "check that chart.yml and image.yml passed for $SIGNER_REF, then run the build again."
+                "check that chart.yml passed for $SIGNER_REF and that $IMAGE_SIGNER signed the image, then run the build again."
         fi
         note "waiting: $PUBLISH_STATE"
         sleep 30
     done
-    ok "chart $CHART_VERSION ($CHART_DIGEST) and image $IMAGE_TAG ($IMAGE_DIGEST) are signed by chart.yml and image.yml at $SIGNER_REF"
+    ok "chart $CHART_VERSION ($CHART_DIGEST) is signed by chart.yml at $SIGNER_REF"
+    ok "image $IMAGE_REPOSITORY:$IMAGE_TAG ($IMAGE_DIGEST) is signed by $IMAGE_SIGNER"
 }
 
 add_chart() {
@@ -133,9 +183,9 @@ add_images() {
         images_in_manifests <"$STAGE/storage/local-path-storage.yaml"
     } | LC_ALL=C sort -u >"$refs"
     lock_images "$refs" "$lock"
-    awk -v prefix="$MEHO_IMAGE_REPOSITORY:" -v digest="$IMAGE_DIGEST" \
+    awk -v prefix="$IMAGE_REPOSITORY:" -v digest="$IMAGE_DIGEST" \
         'index($1, prefix) == 1 && $2 == digest { found = 1 } END { exit !found }' "$lock" ||
-        fail "The chart does not use the signed MEHO image $MEHO_IMAGE_REPOSITORY@$IMAGE_DIGEST." \
+        fail "The chart does not use the signed MEHO image $IMAGE_REPOSITORY@$IMAGE_DIGEST." \
             "build with the chart and the image of the same version."
     fetch_images "$lock" "$WORK/image-layout"
     write_image_archive "$WORK/image-layout" "$STAGE/$IMAGE_ARCHIVE"
@@ -147,8 +197,13 @@ add_images() {
 }
 
 # licence_line_for <repository>: print "<licence files> <source>" from
-# packaging/image-sources.txt, or nothing when the image has no line.
+# packaging/image-sources.txt, or nothing when the image has no line. The
+# overlay image has its own line, IMAGE_LICENCE.
 licence_line_for() {
+    if [[ -n ${IMAGE_LICENCE:-} && $1 == "${IMAGE_REPOSITORY-}" ]]; then
+        printf '%s\n' "$IMAGE_LICENCE"
+        return
+    fi
     awk -v repository="$1" '!/^#/ && $1 == repository { $1 = ""; sub(/^ +/, ""); print; exit }' \
         "$PACKAGING_DIR/image-sources.txt"
 }

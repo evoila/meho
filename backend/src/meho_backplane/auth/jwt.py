@@ -95,6 +95,7 @@ from meho_backplane.auth.operator import (
     RoleGroup,
     TenantMembership,
     TenantRole,
+    group_grant,
 )
 from meho_backplane.health import ProbeResult
 from meho_backplane.settings import Settings, get_settings
@@ -877,8 +878,9 @@ def _extract_tenants(
     when its token carries the claim: a machine stays in its one tenant.
 
     The entries come from the trusted issuer's signed token, so they are
-    safe to log. The result is not used yet; the current tenant still
-    comes from :func:`_extract_tenant_id` and :func:`_extract_tenant_role`.
+    safe to log. Only :func:`_extract_self_approver` reads the result so
+    far; the current tenant still comes from :func:`_extract_tenant_id`
+    and :func:`_extract_tenant_role`.
     """
     if principal_kind in MACHINE_PRINCIPAL_KINDS:
         return ()
@@ -1426,6 +1428,54 @@ def _extract_approver(claims: Any, settings: Settings) -> bool:
     return False
 
 
+def _extract_self_approver(
+    claims: Any,
+    settings: Settings,
+    principal_kind: PrincipalKind,
+    tenant_id: UUID,
+    tenants: tuple[TenantMembership, ...],
+) -> bool:
+    """Read whether the person is in the SA-Operators group of *tenant_id* (#3327).
+
+    SA-Operators may approve their own changes (#3325). The flag is off
+    by default and fails closed: anything unclear gives ``False``.
+
+    * A machine login (agent, service, runner) always gets ``False``,
+      even when its token carries the group. Agents never approve.
+    * The token has a ``meho_tenants`` claim (``JWT_TENANTS_CLAIM_NAME``):
+      only the list counts. The flag is on when the list has exactly
+      one entry for *tenant_id* and that entry's group gives
+      ``self_approval`` (:func:`~meho_backplane.auth.operator.group_grant`).
+      An entry of another tenant never counts. A claim that is not a
+      list, or has no good entry for *tenant_id*, gives ``False``.
+    * The token has no ``meho_tenants`` claim (a site with one tenant
+      and the older mappers): the flag is on when the ``groups`` claim
+      names the group ``JWT_SELF_APPROVER_GROUP`` (default
+      ``MEHO-SA-Operators``). A leading ``/`` is ignored on both sides,
+      the same as in the one-group check. A ``groups`` claim that is not
+      a list gives ``False`` and logs ``malformed_groups_claim``.
+
+    Both claims come from the shipped login setup
+    (``docs/decisions/login-role-groups.md``): the ``groups-claim`` mapper
+    and the ``meho-tenants`` mapper. The flag is only ever read from the
+    signed token, never from a request field or header.
+    """
+    if principal_kind in MACHINE_PRINCIPAL_KINDS:
+        return False
+    if settings.jwt_tenants_claim_name in claims:
+        current = [t for t in tenants if t.tenant_id == tenant_id]
+        return len(current) == 1 and group_grant(current[0].group).self_approval
+    raw = claims.get(_GROUPS_CLAIM_NAME)
+    if raw is None:
+        return False
+    if not isinstance(raw, list):
+        log = structlog.get_logger(__name__)
+        log.warning("malformed_groups_claim", claim_name=_GROUPS_CLAIM_NAME, reason="not_a_list")
+        return False
+    names = {item.lstrip("/") for item in raw if isinstance(item, str)}
+    return settings.jwt_self_approver_group.lstrip("/") in names
+
+
 def _extract_runner_id(claims: Any, settings: Settings) -> UUID | None:
     """Extract the optional ``runner_id`` claim as a :class:`UUID`.
 
@@ -1524,6 +1574,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     approver = _extract_approver(claims, settings)
     runner_id = _extract_runner_id(claims, settings)
     tenants = _extract_tenants(claims, settings, principal_kind)
+    self_approver = _extract_self_approver(claims, settings, principal_kind, tenant_id, tenants)
     if principal_kind is PrincipalKind.RUNNER and runner_id is None:
         # Fail-closed pairing (Initiative #2415, #2502): a runner-kind
         # token with no ``runner_id`` cannot be scoped by the gateway
@@ -1550,6 +1601,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             approver=approver,
             runner_id=runner_id,
             tenants=tenants,
+            self_approver=self_approver,
         )
     except pydantic.ValidationError as exc:
         raise _http_401("invalid_token") from exc

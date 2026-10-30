@@ -611,6 +611,14 @@ needed its own `vault.kv.delete` call and its own approval.
   `k8s.secret.compare_to_ref` (a Kubernetes Secret key against one Vault
   copy; see `connectors-kubernetes.md`).
 
+**Empty folder (`vault.kv.list`, #5231).** Vault answers a LIST on an
+empty or missing folder with a `404`, which hvac raises as
+`InvalidPath`. Like `vault.identity.list`, `vault.token.list_accessors`
+and `vault.token.role.list`, `vault.kv.list` turns that `404` into
+`{"keys": []}` with `status: ok`, so an agent can tell "the folder is
+empty" from "something broke". A permission denial (`Forbidden`) is
+still an error.
+
 **Permanent delete (`vault.kv.metadata.delete`, #3424).** `kv.delete` is a
 soft delete: Vault keeps the data and an undelete brings it back.
 `kv.metadata.delete` removes the whole secret for good: every version and

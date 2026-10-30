@@ -158,11 +158,12 @@ on:
   # the SonarCloud coverage artifact: the 8 `python-coverage` shards and
   # `python-coverage-combine` run here and on a PR with the
   # `ci-coverage-validate` label, not after every merge. quality-gate.yml
-  # analyzes only this run. 06:00-07:00 UTC is the quietest hour for
-  # merges; minute 17, not 0, because GitHub delays scheduled runs at the
-  # start of every hour.
+  # analyzes only this run. It starts at 02:17 UTC (#5429): between 00:00
+  # and 04:59 UTC a job waits about 0.2 min for a heavy runner, between
+  # 05:00 and 08:00 UTC it waits 7-12 min. Minute 17, not 0, because
+  # GitHub delays scheduled runs at the start of every hour.
   schedule:
-    - cron: '17 6 * * *'
+    - cron: '17 2 * * *'
 
 permissions:
   contents: read

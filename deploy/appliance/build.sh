@@ -367,12 +367,14 @@ run_clean() {
     scp_build "$APPLIANCE_DIR/clean.sh" "$BUILD_USER@${MEHO_BUILD_ADDRESS%/*}:meho-clean.sh"
     # /run is a RAM disk, so the script is not in the OVA. systemd-run
     # starts it outside this SSH session, which the script cuts. Its lines
-    # go to the VM console as well as the journal, so a failed check can be
-    # read in vCenter after SSH is closed. --collect: a failed unit does not
-    # keep the name, so a second run after a failure in its step 1 works.
+    # go to the VM's screen (tty1), so a failed check can be read in the
+    # vCenter console after SSH is closed. Not "console": on the cloud image
+    # that is the serial port. --collect: a failed unit does not keep the
+    # name, so a second run after a failure in its step 1 works. Ubuntu
+    # mounts /run noexec, so bash reads the script; it is not run.
     ssh_build "sudo install -m 0700 meho-clean.sh /run/meho-clean.sh && rm meho-clean.sh &&
-        sudo systemd-run --unit=$CLEAN_UNIT --collect -p StandardOutput=journal+console -p StandardError=journal+console \
-            /run/meho-clean.sh --build-user $BUILD_USER --build-hostname $MEHO_BUILD_HOSTNAME"
+        sudo systemd-run --unit=$CLEAN_UNIT --collect -p TTYPath=/dev/tty1 -p StandardOutput=tty -p StandardError=tty \
+            /bin/bash /run/meho-clean.sh --build-user $BUILD_USER --build-hostname $MEHO_BUILD_HOSTNAME"
     note "the clean script runs on the build VM; waiting for the power-off"
     until [[ $(vm_power_state) == poweredOff ]]; do
         ((waited += 15))

@@ -18,7 +18,8 @@
 #      and rke2-killall.sh stops the pods, which outlive the service; then
 #      RKE2's own state: server/db, server/tls, server/cred and the token
 #      files; everything under agent/ except agent/images/; the node
-#      password; the kubeconfig; /var/lib/kubelet
+#      password; the kubeconfig; /var/lib/kubelet; Canal's /etc/cni and
+#      /var/lib/cni
 #   3. MEHO's data, once nothing writes to it: everything under
 #      /var/lib/meho/ (the data volumes, the OpenBao init in them, the two
 #      one-time files, support bundles), and the install's answers under
@@ -74,6 +75,10 @@ readonly RKE2_PRESET=/etc/systemd/system-preset/10-meho-appliance.preset
 # RKE2's tarball installer, which the form-2 install runs, puts it here.
 readonly RKE2_KILLALL=/usr/local/bin/rke2-killall.sh
 readonly KUBELET_DIR=/var/lib/kubelet
+# Canal's settings (with the node's host name and a login token of the
+# cluster) and its address state. Canal writes them again at every start;
+# RKE2's own uninstall removes both folders.
+readonly CNI_DIRS=(/etc/cni /var/lib/cni)
 readonly RKE2_SERVER_STATE=(server/db server/tls server/cred server/token server/agent-token server/node-token)
 readonly RKE2_KEEP=(server/manifests agent/images)
 readonly APPLIANCE_DIR=/opt/meho/appliance
@@ -204,6 +209,9 @@ remove_rke2_state() {
     find "${HOST_ROOT}${RKE2_DIR}/agent" -mindepth 1 -maxdepth 1 ! -name images -exec rm -rf {} +
     rm -f "${HOST_ROOT}${RKE2_NODE_PASSWORD}" "${HOST_ROOT}${RKE2_KUBECONFIG}"
     rm -rf --one-file-system "${HOST_ROOT}${KUBELET_DIR}"
+    for item in "${CNI_DIRS[@]}"; do
+        rm -rf "${HOST_ROOT}${item:?}"
+    done
     ok "RKE2 and its pods are stopped, RKE2 does not start at boot (also not at the first boot), and its state is gone; its images and manifests stay"
 }
 
@@ -312,7 +320,7 @@ check_clean() {
     done
     found=$(find "${HOST_ROOT}${RKE2_DIR}/agent" -mindepth 1 -maxdepth 1 ! -name images 2>/dev/null | head -n 1)
     [[ -z $found ]] || left "RKE2 state under $RKE2_DIR/agent/ other than images/"
-    check_none "$RKE2_NODE_PASSWORD" "$RKE2_KUBECONFIG" "$KUBELET_DIR" "$MEHO_PLACE_VALUES" "$MEHO_INSTALL_RECORD" \
+    check_none "$RKE2_NODE_PASSWORD" "$RKE2_KUBECONFIG" "$KUBELET_DIR" "${CNI_DIRS[@]}" "$MEHO_PLACE_VALUES" "$MEHO_INSTALL_RECORD" \
         "$BUILD_NETPLAN" "$SUDOERS_CLOUD_INIT" "$ROOT_AUTHORIZED_KEYS"
     if [[ $(systemctl is-enabled rke2-server 2>/dev/null || true) == enabled ]]; then
         left "rke2-server starts at boot"

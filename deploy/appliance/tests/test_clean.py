@@ -26,6 +26,8 @@ GONE = (
     "/etc/rancher/node/password",
     "/etc/rancher/rke2/rke2.yaml",
     "/var/lib/kubelet",
+    "/etc/cni",
+    "/var/lib/cni",
     "/etc/meho/values-place.yaml",
     "/etc/meho/install.json",
     "/root/.ssh/authorized_keys",
@@ -235,6 +237,16 @@ class CheckTests(CleanTestCase):
                 "/var/lib/kubelet/pods/uid-1/volumes/x",
                 "/var/lib/kubelet",
                 "/var/lib/kubelet is still there",
+            ),
+            "Canal's settings": (
+                "/etc/cni/net.d/calico-kubeconfig",
+                "/etc/cni",
+                "/etc/cni is still there",
+            ),
+            "Canal's address state": (
+                "/var/lib/cni/networks/x",
+                "/var/lib/cni",
+                "/var/lib/cni is still there",
             ),
             "the install's answers": (
                 "/etc/meho/values-place.yaml",

@@ -190,6 +190,7 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
     guest-cluster kubeconfig read: ``k8s.secret.read_to_ref``) +
     ``SECRET_WRITE_OPS`` (``k8s.secret.update`` / ``k8s.secret.delete``) +
     ``SECRET_LIST_OPS`` (``k8s.secret.{list,info}``, names only) +
+    ``SECRET_COMPARE_OPS`` (``k8s.secret.compare_to_ref``) +
     ``ACCESS_OPS`` / ``ADMISSION_OPS`` (#3840: ``k8s.auth.can_i`` /
     ``k8s.auth.rules`` / ``k8s.admission_webhook.list``).
 
@@ -207,6 +208,7 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
     from meho_backplane.connectors.kubernetes.ops_events import EVENT_OPS
     from meho_backplane.connectors.kubernetes.ops_job import JOB_OPS
     from meho_backplane.connectors.kubernetes.ops_network import NETWORK_OPS
+    from meho_backplane.connectors.kubernetes.ops_secret_compare import SECRET_COMPARE_OPS
     from meho_backplane.connectors.kubernetes.ops_secret_list import SECRET_LIST_OPS
     from meho_backplane.connectors.kubernetes.ops_secret_read import SECRET_READ_OPS
     from meho_backplane.connectors.kubernetes.ops_secret_write import SECRET_WRITE_OPS
@@ -237,6 +239,7 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
         *SECRET_READ_OPS,
         *SECRET_WRITE_OPS,
         *SECRET_LIST_OPS,
+        *SECRET_COMPARE_OPS,
         *ACCESS_OPS,
         *ADMISSION_OPS,
     )

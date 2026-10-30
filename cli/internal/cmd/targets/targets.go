@@ -13,7 +13,7 @@
 //     set (so server defaults apply), renders the created row like
 //     `describe`, and keeps all validation server-side.
 //
-//   - `meho targets update <name|alias> [field flags] [--clear F]`
+//   - `meho targets update <name, alias or id> [field flags] [--clear F]`
 //     (Task #3854) — PATCH /api/v1/targets/{name} for one target.
 //     Sends only the flags the operator set; `--clear <field>` sends
 //     an explicit null (for example to drop a target's credential).
@@ -27,12 +27,12 @@
 //     GET /api/v1/targets, keyset-paginated, optionally narrowed by
 //     product slug.
 //
-//   - `meho targets describe <name|alias> [--json]` —
-//     GET /api/v1/targets/{name}, alias-aware via the backend's
-//     resolve_target. Renders the full Target read shape including
+//   - `meho targets describe <name, alias or id> [--json]` —
+//     GET /api/v1/targets/{name}; the backend finds the target by
+//     name, alias or id. Renders the full Target read shape including
 //     `fingerprint` + `preferred_impl_id` (added by G0.3-T1.5).
 //
-//   - `meho targets probe <name|alias> [--json]` —
+//   - `meho targets probe <name, alias or id> [--json]` —
 //     POST /api/v1/targets/{name}/probe. The backend calls
 //     Connector.fingerprint(), persists the FingerprintResult to
 //     targets.fingerprint (so the G0.6 resolver can read it without

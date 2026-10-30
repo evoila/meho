@@ -13,7 +13,7 @@ each other's code:
 
 | Front | Where | Purpose |
 |---|---|---|
-| REST `/api/v1/targets` | `backend/src/meho_backplane/api/v1/targets.py` | list, discover, describe, probe, create, patch, soft-delete |
+| REST `/api/v1/targets` | `backend/src/meho_backplane/api/v1/targets.py` | list, discover, describe, probe, create, patch, soft-delete (the last four by name, alias or id) |
 | CLI `meho targets …` | `cli/` (Go) over the REST routes | operator verbs; `meho targets list` calls `GET /api/v1/targets`, `meho targets delete` calls `DELETE /api/v1/targets/{name}` |
 | MCP `list_targets` | `backend/src/meho_backplane/mcp/tools/topology.py` | working-surface enumeration for agents |
 
@@ -31,8 +31,42 @@ shown to the people and agents that read the target (#5075). Every
 through `resolve_target` (`targets/resolver.py`). Destination checks
 are covered in [`target-ssrf-guard.md`](target-ssrf-guard.md).
 
-This document covers the two **list** paths, how `list_targets`
-bounds its response (#3858), and how a target is deleted.
+This document covers the two **list** paths and how `list_targets`
+bounds its response (#3858), how the single-target REST routes find a
+target, and how a target is removed.
+
+## Finding one target: describe, update, probe, delete
+
+These four routes take a name, an alias or an id in the path (#5245):
+
+- `GET /api/v1/targets/{value}`
+- `PATCH /api/v1/targets/{value}`
+- `POST /api/v1/targets/{value}/probe`
+- `DELETE /api/v1/targets/{value}`
+
+All four call `_resolve_route_target` in `api/v1/targets.py`. It tries,
+in this order:
+
+1. Exact name, then exact alias, through `resolve_target`. Everything
+   that worked before works the same way.
+2. The id, through `resolve_target_by_id`. This step runs only when
+   step 1 found nothing and the value is a valid UUID. So a target
+   named like a UUID is still found by its name first.
+
+The id step finds only a live (not deleted) target of the caller's
+tenant. The id of another tenant's target, or of a deleted target,
+gives the same 404 as an unknown name. When a UUID matches nothing, the
+404 body (`error: no_target`) also has
+`message: "No target has this name, alias or id."`.
+
+`resolve_target` binds `target_id` and `target_name` for the audit row
+when it finds a target; `resolve_target_by_id` does not. So the helper
+binds them after an id match. A delete by id writes the same audit row
+as a delete by name: `target_id` set, op id `targets.delete`.
+
+Only these four routes take an id. The `target` argument of
+`call_operation` and every other caller of `resolve_target` still take
+a name or an alias only. Tests: `tests/test_api_v1_targets_by_id.py`.
 
 ## Key types
 
@@ -147,8 +181,9 @@ params={"target_id": "<target-uuid>"})`. It is the opposite of
   call `soft_delete_target` in `api/v1/targets.py`. It counts the
   `graph_node` rows that point at the target and refuses when the count is
   not zero, unless `force` is true. Then it stamps `deleted_at`. The REST
-  route looks the target up by name; the op looks it up by id
-  (`resolve_target_by_id`), in the caller's tenant only.
+  route looks the target up by name, alias or id (see above); the op
+  looks it up by id (`resolve_target_by_id`). Both look only in the
+  caller's tenant.
 - **Result.** `{status, target_id, name}`. `status` is `removed`, or
   `unchanged` when no live target with that id exists in the caller's
   tenant (also for a target of another tenant). A second run gives

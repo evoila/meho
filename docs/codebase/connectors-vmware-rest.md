@@ -3564,6 +3564,27 @@ read (which surfaces the DVS / portgroup moids these writes take — there is
 no portgroup/switch REST list to resolve a display name against, so the moid
 is passed directly, the `host.detach_from_vds` `dvs`-moid convention).
 
+**The switch and portgroup fields must be moids, not names (#5073).** These
+fields declare a `pattern`:
+
+| Op | Field | Pattern (`schemas.py`) |
+|---|---|---|
+| `network.portgroup.create` | `vds` | `^dvs-[0-9]+$` (`DVS_MOID_PATTERN`) |
+| `network.portgroup.security.set` | `portgroup` | `^dvportgroup-[0-9]+$` (`PORTGROUP_MOID_PATTERN`) |
+| `network.portgroup.vlan.set` | `portgroup` | `^dvportgroup-[0-9]+$` (`PORTGROUP_MOID_PATTERN`) |
+| `host.detach_from_vds` | `dvs` | `^dvs-[0-9]+$` (`DVS_MOID_PATTERN`) |
+
+A name fails schema validation, so `preview_operation` and `call_operation`
+return `invalid_params` with a `validation_errors` entry at that field
+(`validator: "pattern"`). No approval request is made and vCenter is not
+contacted. The entry's `remediation` adds the field's description, which
+names `vmware.composite.network.portgroup.audit` as the op that reads the
+id. Before the pattern, a name passed the preview, waited for approval, and
+failed only when it ran, because the handlers use the value as a moid
+directly. The ops do not look a name up: two portgroups can share a name,
+and a write must not guess. `network.portgroup.delete` already had the
+portgroup pattern.
+
 **`network.portgroup.create`** creates a portgroup on an existing DVS through
 vim `DistributedVirtualSwitch.CreateDVPortgroup_Task` with one
 `DVPortgroupConfigSpec` — `name`, binding `type` (default `earlyBinding`, a

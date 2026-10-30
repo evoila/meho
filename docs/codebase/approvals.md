@@ -28,7 +28,7 @@ truth:
   `approval.withdraw` row when the sender takes the request back).
 - **T5 wires the operator surfaces on top:** `GET /api/v1/approvals/{id}`
   (inspect), `meho_approvals_{list,get,approve,reject}` MCP tools, and
-  `meho approvals {list,show,approve,reject,withdraw}` CLI verbs. Since #3758 no
+  `meho approvals {list,show,result,approve,reject,withdraw}` CLI verbs. Since #3758 no
   approval step is published to Broadcast. `record_approval_step_event`
   records `approval.{pending,approved,rejected,expired,withdrawn}` only for the
   paired add-on that asked (#3027); the audit log records every step; the
@@ -2016,7 +2016,14 @@ dispatcher re-checks `required_role` at `tools/call`.
 `meho approvals list / show <id> / approve <id> / reject <id> [--reason]`
 verbs that hit the REST surface via the generated typed client.
 `meho approvals withdraw <id> [--reason]` lets the sender take back its own
-pending request (#4987). `list`
+pending request (#4987). `meho approvals result <id> [--json]` lets the
+sender read the output of its approved run from the owner-only `/result`
+read (#5313). It prints the stored result the way `meho operation call`
+does (with the `meho operation result-query` command for a result
+handle), says in plain words when there is no result yet, and shows the
+403 `not_request_owner` answer as `insufficient_role` (exit 5). `show`
+adds a `Run output:` line naming that command once the run is done, and
+the parked hint of every call that waits for approval names it too. `list`
 has a `RUN` column and `show` / `approve` print how the run of an approved
 request ended (#3543, see "Approved, but the run failed" above).
 `list` shows only pending requests unless `--status` is set; `--status all`

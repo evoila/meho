@@ -210,7 +210,7 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 			return err
 		}
 	} else {
-		printCallResult(cmd.OutOrStdout(), opts.ConnectorID, opts.OpID, result)
+		PrintCallResult(cmd.OutOrStdout(), opts.ConnectorID, opts.OpID, result)
 	}
 	// "ok" → success (exit 0). "error" / "denied" / "rate_limited" /
 	// "not_found" → exit 1 via errOpError so shell pipelines see the
@@ -292,8 +292,8 @@ func postCall(
 	return &out, nil
 }
 
-// resultHandleID returns the handle_id of a result handle, or "" when there is none.
-func resultHandleID(raw json.RawMessage) string {
+// ResultHandleID returns the handle_id of a result handle, or "" when there is none.
+func ResultHandleID(raw json.RawMessage) string {
 	var h struct {
 		HandleID string `json:"handle_id"`
 	}
@@ -303,7 +303,10 @@ func resultHandleID(raw json.RawMessage) string {
 	return h.HandleID
 }
 
-func printCallResult(w io.Writer, connectorID, opID string, r *CallResult) {
+// PrintCallResult is the human render of an OperationResult envelope.
+// `meho approvals result` uses it too, so the stored result of an
+// approved run looks the same as a direct call (#5313).
+func PrintCallResult(w io.Writer, connectorID, opID string, r *CallResult) {
 	fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", connectorID, opID, r.Status, r.DurationMs)
 	if r.Status == "ok" {
 		if len(r.Result) > 0 && string(r.Result) != "null" {
@@ -331,7 +334,7 @@ func printCallResult(w io.Writer, connectorID, opID string, r *CallResult) {
 		if r.Delivery != nil && (*r.Delivery == "unavailable" || *r.Delivery == "partial") {
 			fmt.Fprintln(w, "delivery incomplete: operation already executed; do not re-invoke it.")
 			if *r.Delivery == "partial" {
-				if id := resultHandleID(r.Handle); id != "" {
+				if id := ResultHandleID(r.Handle); id != "" {
 					fmt.Fprintf(w, "the response was too large to show; read it with `meho operation result-query %s`.\n", id)
 				}
 			}

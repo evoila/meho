@@ -1976,6 +1976,17 @@ shows that order on the surfaces an approver uses. Nothing here changes what
   approval" result), so the link used cannot skip it. This is a console
   prompt, not a server rule: REST and CLI approve a later step without
   asking.
+- **"Waiting for approval" result in the console.** When an operator runs
+  an operation (`operations/_result.html`) or a Vault write
+  (`vault/_write_result.html`) and it waits for approval, the result
+  fragment calls `render.parked_request_chain(tenant_id, envelope)`. It
+  loads the parked request named by `extras.approval_request_id` and
+  numbers it among the pending requests of its `work_ref`. When the ticket
+  has two or more pending requests, the fragment says "Step k of N waiting
+  in change ticket `<work_ref>`" and its first link opens the Pending tab
+  filtered to that ticket, oldest first; the per-request modal link stays
+  as the second link. A lone request, a request with no `work_ref`, or an
+  id outside the tenant keeps the plain per-request link.
 - **Step event for the requesting add-on.** The `approval.pending` add-on
   step event (`record_approval_step_event`) adds `chain_step` and
   `chain_total` to its payload when the new request is one of two or more

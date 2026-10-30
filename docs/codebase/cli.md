@@ -1759,7 +1759,7 @@ removes one through `DELETE /api/v1/targets/{name}`.
   `import.go`'s `doAuthedRequest` POST plumbing, so a static-bearer
   escape hatch is deliberately **not** offered — auth stays interactive
   `meho login` only.
-- `meho targets update <name-or-alias> [field flags] [--clear F]`
+- `meho targets update <name, alias or id> [field flags] [--clear F]`
   (Task #3854) — calls `PATCH /api/v1/targets/{name}` (`TargetUpdate`)
   for one target. The field flags have the same names as `add`'s and
   are sent only when set, so every other column keeps its value.
@@ -1803,15 +1803,15 @@ removes one through `DELETE /api/v1/targets/{name}`.
   paginated by name; `--cursor <last-name-seen>` walks pages. `--limit`
   is capped at 500 by the API; the CLI fails fast at the boundary so
   operators see the constraint without a 422 round-trip.
-- `meho targets describe <name-or-alias>` — calls
+- `meho targets describe <name, alias or id>` — calls
   `GET /api/v1/targets/{name}`. Renders the full `Target` read shape
   as a stable key-value summary including the post-#477 fields
   `fingerprint` (cached `FingerprintResult` from the last successful
   probe) and `preferred_impl_id` (operator override for the G0.6
-  resolver's tie-break ladder). Alias resolution happens server-side
-  via `resolve_target`; a 404 surfaces the resolver's near-miss list
+  resolver's tie-break ladder). The server finds the target by name,
+  alias or id (see [`targets.md`](targets.md)); a 404 surfaces the resolver's near-miss list
   so operators can correct a typo in one shot.
-- `meho targets probe <name-or-alias>` — calls
+- `meho targets probe <name, alias or id>` — calls
   `POST /api/v1/targets/{name}/probe`. Backend invokes the registered
   `Connector.fingerprint(target)`, persists the `FingerprintResult` to
   `targets.fingerprint` (so the G0.6 resolver reads it without

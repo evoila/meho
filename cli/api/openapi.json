@@ -3706,7 +3706,7 @@
           "operations"
         ],
         "summary": "Get Operation Run Status",
-        "description": "Poll an async operation run's durable state by handle (the run id).\n\nReads the durable ``operation_run`` row, so it works after the request\nthat submitted the run has returned \u2014 the dropped-response-class fix: the\nfull result envelope is retrievable here even if the submit response was\nlost in transit. An unknown / cross-tenant handle is 404.",
+        "description": "Poll an async operation run's durable state by handle (the run id).\n\nReads the durable ``operation_run`` row, so it works after the request\nthat submitted the run has returned \u2014 the dropped-response-class fix: the\nfull result envelope is retrievable here even if the submit response was\nlost in transit. An unknown / cross-tenant handle is 404.\n\nWith ``wait_seconds`` the answer comes as soon as the run ends, or when\nthe time is up with the run still ``pending`` or ``running``. The wait\nholds no database connection.",
         "operationId": "get_operation_run_status_api_v1_operations_runs__handle__get",
         "parameters": [
           {
@@ -3718,6 +3718,20 @@
               "format": "uuid",
               "title": "Handle"
             }
+          },
+          {
+            "name": "wait_seconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 50,
+              "minimum": 0,
+              "description": "Wait up to this many seconds for the run to end, then answer. 0 (the default) answers at once. At most 50.",
+              "default": 0,
+              "title": "Wait Seconds"
+            },
+            "description": "Wait up to this many seconds for the run to end, then answer. 0 (the default) answers at once. At most 50."
           },
           {
             "name": "authorization",

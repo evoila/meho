@@ -76,8 +76,9 @@ MIGRATION_INVENTORY_DESCRIPTION: Final = (
 
 MIGRATION_GROUP_WHEN_TO_USE: Final = (
     "Use to collect a vCenter's VMs for a migration assessment, in MEHO's common "
-    "inventory shape. The result is always stored and its handle feeds the migration "
-    "operations (for example migration.inventory.csv). Read-only."
+    "inventory shape (vmware.migration.inventory, safe). The result is always "
+    "stored, and its handle feeds the migration operations (for example "
+    "migration.inventory.csv)."
 )
 
 MIGRATION_INVENTORY_LLM_INSTRUCTIONS: dict[str, Any] = {
@@ -97,16 +98,18 @@ MIGRATION_INVENTORY_LLM_INSTRUCTIONS: dict[str, Any] = {
     "output_shape": (
         "One inventory: {schema_version, source, records: [server records], omissions, "
         "counts: {server, source_totals, reconciliation: [{kind, source_total, records, "
-        "omitted, difference, matches}]}, duplicates}. It is always stored whole: the "
-        "answer is a short summary with the handle, whatever the size."
+        "omitted, difference, matches}]}, duplicates}. A small inventory comes back "
+        "whole, with a handle next to it. A large one is stored whole and the answer "
+        "is a short summary with the handle. Both handles feed the migration operations."
     ),
     "next_step": (
-        "Pass the handle to migration.inventory.csv for an Azure Migrate file. Read the "
-        "inventory with result_query and a path, for example '/counts' or '/duplicates'. "
+        "Pass the handle to migration.inventory.csv for an Azure Migrate file. Read a "
+        "stored inventory with result_query and a path, for example '/counts' or "
+        "'/duplicates'. "
         "Check counts.reconciliation (matches true, else name the difference; empty "
         "when the count read failed, then an omission says so) and the duplicates."
     ),
     # The migration operations load the inventory by its handle, so a small
-    # inventory (one VM) must be stored too. See the reducer's document hint.
-    "result_document": {"always": True},
+    # inventory (one VM) is stored too and comes back whole with a handle (#5143).
+    "result_handle": {"always": True},
 }

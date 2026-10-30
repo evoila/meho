@@ -9,10 +9,12 @@ array plus one recognised Boolean outcome field (`handshake`, `reachable`,
 that rule. A lone `status` is not enough to qualify: it can be an opaque vendor
 state rather than a complete outcome.
 
-An operation may declare `result_document: {"always": true}` when other
-operations load its whole result by handle (the migration inventory reads):
-the reducer then stores the payload as a document record whatever its size.
-See "Document records" in `result-spill.md`.
+An operation may declare `result_document: {"always": true}` when its result
+must always be a document record: the reducer then stores the payload whole
+whatever its size and returns the document summary. See "Document records"
+in `result-spill.md`. An operation whose small result should come back whole
+declares `result_handle` instead (below); `result_document` wins when an
+operation declares both.
 
 An operation may declare `result_objects` for a bounded top-level identity
 projection. `result_object_truncations` names an inline field whose value was
@@ -39,3 +41,13 @@ object) is named in `parts_not_inline` like a part, and `path="/<name>"` returns
 it whole. Only the reducer's own keys never move. Credential-class ops
 keep the old rule: no part is copied or stored without their hint. The
 `result_objects` hint only chooses the inline fields of the objects it names.
+
+An operation may declare `result_handle: {"always": true}` (#5143) when other
+operations take its result by its handle (an inventory read, whose result
+`migration.inventory.csv` reads back). A result under the limits (50 rows,
+4,096 bytes) then comes back **whole**, and the reducer also stores it as a
+document record and returns a handle next to it. `result_query` with
+`query={"path": ""}` returns the same answer. Over the limits nothing changes.
+A credential-class operation gets no handle and nothing is stored. When the
+store does not keep the record (no tenant, store down), the result still comes
+back whole, with no handle. See `result-spill.md`.

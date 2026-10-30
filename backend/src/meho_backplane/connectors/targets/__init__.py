@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""meho_backplane.connectors.targets — targetless target-registry write op (#2861).
+"""meho_backplane.connectors.targets — targetless target-registry write ops.
+
+``targets.register`` (#2861) and its opposite ``targets.remove`` (#4623).
 
 The third **synthetic** connector subpackage (after ``secret`` and
 ``topology``): no vendor connector backs it. Importing the package (the
@@ -11,8 +13,9 @@ walks ``connectors/<product>/`` and imports each subpackage) queues
 :func:`~meho_backplane.connectors.targets.ops.register_targets_registry_operations`
 onto the lifespan-driven registrar list via
 :func:`~meho_backplane.operations.typed_register.register_typed_op_registrar`,
-so the ``targets.register`` ``endpoint_descriptor`` row lands before the
-first dispatch.
+so the ``targets.register`` and ``targets.remove`` ``endpoint_descriptor``
+rows land before the first dispatch. Importing the package also registers
+the ``targets.remove`` preview builder.
 
 Like the other synthetic packages, this one calls neither
 ``register_connector`` nor ``register_connector_v2``: the synthetic
@@ -32,12 +35,19 @@ human-only and keep calling
 :func:`~meho_backplane.api.v1.targets.create_target` directly.
 """
 
-from meho_backplane.connectors.targets.ops import register_targets_registry_operations
+from meho_backplane.connectors.targets.ops import (
+    TARGETS_REMOVE_OP_ID,
+    build_targets_remove_preview,
+    register_targets_registry_operations,
+)
+from meho_backplane.operations._preview import register_preview_builder
 from meho_backplane.operations.typed_register import register_typed_op_registrar
 
-# Queue the targets.register typed-op upsert onto the lifespan-driven
-# registrar list (run after the connector eager-import pass).
+# Queue the targets.* typed-op upserts onto the lifespan-driven registrar
+# list (run after the connector eager-import pass).
 register_typed_op_registrar(register_targets_registry_operations)
+# The preview of targets.remove names the target and its topology count.
+register_preview_builder(TARGETS_REMOVE_OP_ID, build_targets_remove_preview)
 
 __all__ = [
     "register_targets_registry_operations",

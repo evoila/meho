@@ -665,9 +665,11 @@ func newRootCmdFor(args []string) *cobra.Command {
 // reference use --filter-work-ref instead (TestWorkRefFlagHasOneMeaning
 // keeps it that way).
 //
-// Commands that send no backplane request skip the check, so a bad
-// MEHO_WORK_REF does not break help, shell completion, version or
-// `doctor --no-network`. An online doctor run sends an authenticated
+// Commands that send no audited backplane request skip the check, so a
+// bad MEHO_WORK_REF does not break help, shell completion, version or
+// `doctor --no-network`. `meho version` reads only the public GET
+// /version route, which needs no login and is not audited, so it sends
+// no work reference. An online doctor run sends an authenticated
 // request to the health route, which the backplane audits, so it keeps
 // the check and sends the header like every other verb.
 func applyWorkRef(cmd *cobra.Command, _ []string) error {
@@ -705,7 +707,8 @@ func applyWorkRef(cmd *cobra.Command, _ []string) error {
 }
 
 // sendsNoBackplaneRequest reports whether cmd is, or sits under, a
-// top-level command that never talks to the backplane. `doctor` counts
+// top-level command that never sends an audited request to the
+// backplane. `doctor` counts
 // only with --no-network; its online layer talks to the backplane.
 func sendsNoBackplaneRequest(cmd *cobra.Command) bool {
 	top := cmd

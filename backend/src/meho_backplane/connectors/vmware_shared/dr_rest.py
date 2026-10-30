@@ -21,7 +21,7 @@ product, the version range and the paths: :attr:`DrRestConnector.api_base`,
 :attr:`DrRestConnector.api_files`. It also defines the two operation entry
 methods, ``about`` and ``api_file_get``, which call the shared code here
 (:meth:`DrRestConnector.server_about` and
-:func:`~meho_backplane.connectors._shared.dr_api_file.dr_api_file_get`).
+:func:`~meho_backplane.connectors.vmware_shared.dr_api_file.dr_api_file_get`).
 The entry methods are not on this base class on purpose: the stored
 handler of an operation names the class that defines the method, and the
 dispatcher binds it only to a connector of that class. So ``srm.about``

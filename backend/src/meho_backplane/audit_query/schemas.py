@@ -81,7 +81,7 @@ class AuditQueryFilters(BaseModel):
     injects it from the validated JWT.
 
     Glob semantics: ``op_id`` accepts shell-style ``*`` wildcards
-    (``"vsphere.vm.*"``), which the query handler translates to SQL ``LIKE``
+    (``"k8s.pod.*"``), which the query handler translates to SQL ``LIKE``
     with ``%`` substitution. ``?`` and bracket expressions are not supported
     in v0.2 — the consumer use case is prefix matching, not arbitrary glob.
 
@@ -133,6 +133,8 @@ class AuditEntry(BaseModel):
     * ``id`` ← ``audit_log.id``
     * ``ts`` ← ``audit_log.occurred_at``
     * ``tenant_id`` ← ``audit_log.tenant_id``
+    * ``tenant_name`` ← LEFT JOIN ``tenant.name`` ON ``audit_log.tenant_id``
+      (#5238). ``None`` when the tenant row is gone; show ``tenant_id`` then.
     * ``principal_sub`` ← ``audit_log.operator_sub``
     * ``target_id`` ← ``audit_log.target_id``
     * ``target_name`` ← LEFT JOIN ``targets.name`` ON ``audit_log.target_id``
@@ -158,6 +160,7 @@ class AuditEntry(BaseModel):
     id: uuid.UUID
     ts: datetime
     tenant_id: uuid.UUID | None
+    tenant_name: str | None = None
     principal_sub: str
     principal_name: str | None
     target_id: uuid.UUID | None

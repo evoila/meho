@@ -82,13 +82,13 @@ A worked session — a VM migration that dispatched a power-off, which in turn w
 
 ```text
 $ meho audit replay 11111111-1111-1111-1111-111111111111
-├── 2026-05-13T10:00:00Z vsphere.vm.migrate [ok] (120.5ms)
-│   └── 2026-05-13T10:00:01Z vsphere.vm.power_off [ok] (40ms)
-│       └── 2026-05-13T10:00:02Z vsphere.task.wait [error] (-ms)
-└── 2026-05-13T10:05:00Z vsphere.vm.list [ok] (8ms)
+├── 2026-05-13T10:00:00Z vsphere.vm.migrate [ok] (120.5ms) tenant=team-a
+│   └── 2026-05-13T10:00:01Z vsphere.vm.power_off [ok] (40ms) tenant=team-a
+│       └── 2026-05-13T10:00:02Z vsphere.task.wait [error] (-ms) tenant=team-a
+└── 2026-05-13T10:05:00Z vsphere.vm.list [ok] (8ms) tenant=team-a
 ```
 
-Roots are emitted in chronological order; children are ordered by `(occurred_at, id)`. A node with no recorded duration renders `(-ms)` so the column stays present and grep-friendly. An unknown, foreign, or empty session prints `no audit rows in this session` and exits cleanly (exit code 0) — a session that belongs to another tenant is indistinguishable from one that never existed (see [Tenant boundary](#tenant-boundary-and-the-10000-row-cap)).
+Roots are emitted in chronological order; children are ordered by `(occurred_at, id)`. A node with no recorded duration renders `(-ms)` so the column stays present and grep-friendly. Each line ends with `tenant=<name>`: the tenant name, or the tenant id when MEHO has no name for it (#5238). An unknown, foreign, or empty session prints `no audit rows in this session` and exits cleanly (exit code 0) — a session that belongs to another tenant is indistinguishable from one that never existed (see [Tenant boundary](#tenant-boundary-and-the-10000-row-cap)).
 
 ### `--json`
 
@@ -105,10 +105,10 @@ meho audit replay 11111111-1111-1111-1111-111111111111 --json \
 
 ```text
 $ meho audit replay 11111111-1111-1111-1111-111111111111 --max-depth 1
-├── 2026-05-13T10:00:00Z vsphere.vm.migrate [ok] (120.5ms)
-│   └── 2026-05-13T10:00:01Z vsphere.vm.power_off [ok] (40ms)
+├── 2026-05-13T10:00:00Z vsphere.vm.migrate [ok] (120.5ms) tenant=team-a
+│   └── 2026-05-13T10:00:01Z vsphere.vm.power_off [ok] (40ms) tenant=team-a
 │       └── … 1 more node(s) below depth 1 (raise --max-depth to expand)
-└── 2026-05-13T10:05:00Z vsphere.vm.list [ok] (8ms)
+└── 2026-05-13T10:05:00Z vsphere.vm.list [ok] (8ms) tenant=team-a
 ```
 
 `--json` is unaffected by `--max-depth` — the JSON envelope is always the full server tree.

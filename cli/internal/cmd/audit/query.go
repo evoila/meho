@@ -319,18 +319,19 @@ func postQuery(
 }
 
 // printQueryTable renders the audit page as a compact, scannable
-// table. Columns: AUDIT_ID, TIME, PRINCIPAL, TARGET, OP_ID, CLASS,
-// STATUS. The audit id comes first and is printed whole (#4858), so
-// an operator can paste it into `meho audit show` without re-running
-// the query with --json. When `next_cursor` is set, a final NEXT
+// table. Columns: AUDIT_ID, TIME, TENANT, PRINCIPAL, TARGET, OP_ID,
+// CLASS, STATUS. TENANT is the tenant name, or the tenant id when the
+// backend has no name for it (#5238). The audit id comes first and
+// is printed whole (#4858), so an operator can paste it into
+// `meho audit show` without re-running the query with --json. When `next_cursor` is set, a final NEXT
 // line tells the operator how to paste-paginate.
 func printQueryTable(w io.Writer, r *api.AuditQueryResult) {
 	if r == nil || len(r.Rows) == 0 {
 		fmt.Fprintln(w, "no audit rows matched the filter")
 		return
 	}
-	fmt.Fprintf(w, "%-36s  %-22s %-32s %-18s %-26s %-16s %s\n",
-		"AUDIT_ID", "TIME", "PRINCIPAL", "TARGET", "OP_ID", "CLASS", "STATUS")
+	fmt.Fprintf(w, "%-36s  %-22s %-18s %-32s %-18s %-26s %-16s %s\n",
+		"AUDIT_ID", "TIME", "TENANT", "PRINCIPAL", "TARGET", "OP_ID", "CLASS", "STATUS")
 	for _, row := range r.Rows {
 		principal := row.PrincipalSub
 		if name := strDeref(row.PrincipalName); name != "" {
@@ -340,9 +341,10 @@ func printQueryTable(w io.Writer, r *api.AuditQueryResult) {
 		if target == "" {
 			target = "-"
 		}
-		fmt.Fprintf(w, "%-36s  %-22s %-32s %-18s %-26s %-16s %s\n",
+		fmt.Fprintf(w, "%-36s  %-22s %-18s %-32s %-18s %-26s %-16s %s\n",
 			row.Id.String(),
 			truncate(formatTS(row.Ts), 22),
+			truncate(tenantLabel(row.TenantName, row.TenantId), 18),
 			principal,
 			truncate(target, 18),
 			truncate(row.OpId, 26),

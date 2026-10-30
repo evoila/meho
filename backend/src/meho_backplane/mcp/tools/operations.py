@@ -57,7 +57,12 @@ from __future__ import annotations
 from typing import Any
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools._call_operation_async import poll_call, submit_async_call
 from meho_backplane.operations.meta_tools import (
@@ -184,16 +189,19 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="list_operation_groups",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "List enabled operation groups for a connector. Each group "
             "carries a `when_to_use` blurb explaining what the group is "
             "for so you can pick the right group before searching its "
-            "operations. Call this FIRST when you don't know which "
+            "operations. A group can hold reads and writes. Check each "
+            "operation's `safety_level` in the `search_operations` results. "
+            "Call this FIRST when you don't know which "
             "operation to invoke -- it narrows the search space from "
             "hundreds of operations to a handful of relevant ones. "
             "Argument: `connector_id` in `<impl_id>-<version>` form "
-            '(e.g. "vmware-rest-9.0", "vault-1.x") -- NOT the bare '
+            '(e.g. "k8s-1.x", "vault-1.x") -- NOT the bare '
             "product name. Returns groups in `group_key` order. An "
             "UNKNOWN connector_id is an error (no such connector, "
             "`-32602` with `data.reason=unknown_connector`); a "
@@ -206,8 +214,8 @@ register_mcp_tool(
             "own review is still staged but that holds ≥1 per-op-enabled "
             "operation IS listed, flagged `partial=true` with a non-zero "
             "`enabled_op_count` — only those ops are live and "
-            "dispatchable; `search_operations` will find them. Pagination "
-            "(G0.18-T5 #1358): keyset on `group_key`; "
+            "dispatchable; `search_operations` will find them. Pagination: "
+            "keyset on `group_key`; "
             "default `limit=100`, max 500; pass the response's "
             "`next_cursor` back as the next call's `cursor` to fetch "
             "the next page. A `null` `next_cursor` is the end."
@@ -219,7 +227,7 @@ register_mcp_tool(
                     "type": "string",
                     "description": (
                         "Connector identifier in the form "
-                        '`<impl_id>-<version>` (e.g. "vmware-rest-9.0", '
+                        '`<impl_id>-<version>` (e.g. "k8s-1.x", '
                         '"vault-1.x") -- NOT the bare product name. A '
                         "value naming no registered connector is an error."
                     ),
@@ -233,7 +241,7 @@ register_mcp_tool(
                     "description": (
                         "Page size. Default 100; max 500. Matches "
                         "`list_targets` paging — sibling list tools share "
-                        "one upper bound (G0.18-T5 #1358)."
+                        "one upper bound."
                     ),
                 },
                 "cursor": {
@@ -244,7 +252,7 @@ register_mcp_tool(
                         "next. Results are ordered by `group_key` "
                         "ascending. Matches `cursor` on `query_audit` / "
                         "`query_topology` / `list_targets` / "
-                        "`meho_broadcast_recent` (G0.18-T5 #1358)."
+                        "`meho_broadcast_recent`."
                     ),
                     "maxLength": 256,
                 },
@@ -427,6 +435,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="search_operations",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Hybrid BM25 + cosine retrieval over a connector's enabled "
@@ -572,7 +581,7 @@ register_mcp_tool(
                     "minLength": 1,
                     "description": (
                         "Operation id from `search_operations`, e.g. "
-                        '"vault.kv.read" or "GET:/api/vcenter/cluster".'
+                        '"vault.kv.read" or "GET:/repos/{owner}/{repo}/issues".'
                     ),
                 },
                 "target": {
@@ -747,6 +756,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="preview_operation",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Preview an operation WITHOUT running it. Resolves the same "
@@ -796,7 +806,7 @@ register_mcp_tool(
                     "description": (
                         "Operation id as returned by `search_operations`. "
                         'Examples: "POST:/repos/{owner}/{repo}/issues", '
-                        '"GET:/api/vcenter/cluster".'
+                        '"GET:/repos/{owner}/{repo}/pulls".'
                     ),
                 },
                 "target": {
@@ -875,7 +885,7 @@ register_mcp_tool(
                 "preview_hash": {
                     "type": "string",
                     "description": (
-                        "Preview-result-hash binding (#3197, status=ok): a "
+                        "Preview-result-hash binding (status=ok): a "
                         "stable SHA-256 over the resolved request. Present it "
                         "as `call_operation`'s `preview_hash` arg to govern a "
                         "destructive-tier delete."

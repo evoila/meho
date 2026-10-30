@@ -202,8 +202,10 @@ def _seed_request(
     expires_at: datetime | None = None,
     resumed_at: datetime | None = None,
     resume_result: dict[str, object] | None = None,
+    release_id: str | None = None,
     withdrawn_at: datetime | None = None,
     withdraw_reason: str | None = None,
+    created_at: datetime | None = None,
 ) -> uuid.UUID:
     """Insert one ``approval_request`` row; return its id."""
     rid = request_id or uuid.uuid4()
@@ -236,10 +238,11 @@ def _seed_request(
                     reviewed_by=reviewed_by,
                     decided_at=decided_at,
                     work_ref=work_ref,
-                    created_at=datetime(2026, 6, 15, 12, 0, tzinfo=UTC),
+                    created_at=created_at or datetime(2026, 6, 15, 12, 0, tzinfo=UTC),
                     expires_at=stored_expires_at,
                     resumed_at=resumed_at,
                     resume_result=resume_result,
+                    release_id=release_id,
                     withdrawn_at=withdrawn_at,
                     withdraw_reason=withdraw_reason,
                 ),
@@ -433,6 +436,21 @@ def test_panel_lists_pending_requests() -> None:
     assert f'hx-get="/ui/approvals/{rid}"' in body
     # Fragment, not a full page.
     assert "<!doctype html>" not in body.lower()
+
+
+def test_page_heading_names_the_current_tenant() -> None:
+    """The full approvals page names the current tenant, not "this tenant" (#5238)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert '<span class="font-mono" data-tenant>Tenant tenant-a</span>' in body
+    assert "history for this tenant" not in body
 
 
 def test_panel_empty_state() -> None:
@@ -1723,6 +1741,43 @@ def test_detail_modal_decided_row_is_read_only() -> None:
     assert f'hx-post="/ui/approvals/{rid}/reject"' not in body
 
 
+def test_detail_modal_shows_release_changed_reason_and_release() -> None:
+    """A request ended by an update says so and tells the requester to ask again (#5030).
+
+    Only the start-up expiry ends a request before its deadline, so an
+    expired row with ``decided_at < expires_at`` reads as "MEHO was updated".
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="release.op",
+        status_value=ApprovalRequestStatus.EXPIRED.value,
+        decided_at=datetime(2026, 6, 16, 8, 0, tzinfo=UTC),
+        expires_at=datetime(2026, 6, 20, 8, 0, tzinfo=UTC),
+        release_id="feedfacefeedfacefeedfacefeedfacefeedface",
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub="op-99")
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-expired-reason="release_changed"' in body
+    assert "MEHO was updated while the request waited" in body
+    assert "Ask again." in body
+    assert "MEHO release" in body
+    assert "feedfacefeedfacefeedfacefeedfacefeedface" in body
+    # The banner shows when the update ended the request (``decided_at``),
+    # not the deadline it never reached. Prefix match, as the SQLite
+    # round-trip may drop the tz offset.
+    assert 'datetime="2026-06-16T08:00:00' in body
+    assert "2026-06-20T08:00:00" not in body
+
+
 def test_detail_modal_expired_row_shows_expiry_timestamp() -> None:
     """An expired request's banner renders the ``expires_at`` deadline as its "when".
 
@@ -1899,6 +1954,52 @@ def test_modal_generic_params_echo_renders_as_a_field_table() -> None:
     assert "widget" in table
     assert "replicas" in table
     assert "<details open" not in body
+
+
+def test_modal_k8s_apply_shows_manifest_and_subject() -> None:
+    """A ``k8s.apply`` card shows the echoed manifest and names the objects (#3877)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="k8s.apply",
+        connector_id="kubernetes-1.x",
+        proposed_effect={
+            "op_id": "k8s.apply",
+            "connector_id": "kubernetes-1.x",
+            "op_class": "other",
+            "preview": {
+                "dry_run": True,
+                "applied": [{"kind": "Secret", "namespace": "prod", "name": "db"}],
+                "subject": "Secret/prod/db",
+                "manifest": [
+                    {
+                        "apiVersion": "v1",
+                        "kind": "Secret",
+                        "metadata": {"name": "db", "namespace": "prod"},
+                        "data": {"pw": "***REDACTED***"},
+                    }
+                ],
+            },
+            "preview_populated": True,
+            "safety_level": "dangerous",
+        },
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+    assert response.status_code == 200, response.text
+    body = response.text
+
+    table = body.split('aria-label="Proposed effect fields"')[1].split("</table>")[0]
+    assert ">manifest<" in table
+    assert '"kind": "Secret"' in table
+    assert "***REDACTED***" in table
+    # The reviewer context names the object the apply touches.
+    assert ">Subject<" in body
+    assert "Secret/prod/db" in body
 
 
 def test_modal_credential_redacted_shows_elevated_risk_notice_and_no_table() -> None:
@@ -2409,6 +2510,91 @@ def test_detail_modal_renders_the_failed_run() -> None:
     assert "secret detail" not in body
 
 
+#: The stored envelope of a run MEHO refused because it was updated (#5030).
+_RELEASE_REFUSED_ENVELOPE: dict[str, object] = {
+    "status": "denied",
+    "op_id": "vsphere.vm.create",
+    "error": "release_changed_while_waiting: MEHO was updated after this request was made.",
+    "duration_ms": 0.0,
+    "audit_id": _RUN_AUDIT_ID,
+    "extras": {
+        "error_code": "release_changed_while_waiting",
+        "request_release": "feedfacefeedfacefeedfacefeedfacefeedface",
+        "running_release": "0123456789abcdef0123456789abcdef01234567",
+    },
+}
+
+
+def test_detail_modal_release_refusal_says_the_run_did_not_happen() -> None:
+    """A run MEHO refused because it was updated is not described as a run (#5030).
+
+    The stored refusal reads as ``result_state = "failed"`` like any other
+    failed run, but nothing ran and the vendor got no call. The banner must
+    say MEHO was updated, the operation did not run, and the requester must
+    ask again, not "the approved operation ran".
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_ran_request(op_id="refused.op", resume_result=_RELEASE_REFUSED_ENVELOPE)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-testid="approval-release-refused"' in body
+    assert "MEHO was updated after this request was made" in body
+    assert "The operation did not run." in body
+    assert "The requester must ask again." in body
+    assert "The approved operation ran" not in body
+    assert "did not succeed" not in body
+    # The outcome block still names the error code and the audit row.
+    assert 'data-result-state="failed"' in body
+    assert "release_changed_while_waiting" in body
+    assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
+
+
+def test_approve_refused_by_release_change_says_nothing_ran() -> None:
+    """An approve that MEHO refuses because it was updated does not say the run failed (#5030)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    refused = SimpleNamespace(
+        status="denied",
+        op_id="vsphere.vm.create",
+        audit_id=uuid.UUID(_RUN_AUDIT_ID),
+        extras={"error_code": "release_changed_while_waiting"},
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, AsyncMock(return_value=refused)),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/approve",
+                data={"reason": "looks safe"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Approved, but MEHO did not run it" in body
+    assert "The operation did not run." in body
+    assert "Approved, but the run failed" not in body
+    assert "was approved and ran" not in body
+    assert "Request approved" not in body
+    assert "release_changed_while_waiting" in body
+    assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
+
+
 def test_approve_whose_run_fails_shows_a_failed_card() -> None:
     """An approve whose run errors does not render the plain success card."""
     _seed_tenant(_TENANT_A, "tenant-a")
@@ -2471,3 +2657,240 @@ def test_approve_already_resumed_elsewhere_shows_the_approved_card() -> None:
     assert "Request approved" in body
     assert "the run failed" not in body
     assert 'data-testid="approval-outcome"' not in body
+
+
+# ---------------------------------------------------------------------------
+# #3596 -- oldest-first + "step k of N" for a change ticket's pending chain,
+# and one more confirm before approving a later step out of order.
+# ---------------------------------------------------------------------------
+
+_CHAIN_REF = "gh:evoila/meho#7"
+
+
+def _seed_chain() -> list[uuid.UUID]:
+    """Seed three pending steps under one change ticket plus an unrelated
+    request that is newer than all of them; return the step ids, oldest first.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    base = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
+    steps = [
+        _seed_request(
+            tenant_id=_TENANT_A,
+            op_id=f"chain.step{n}",
+            work_ref=_CHAIN_REF,
+            created_at=base + timedelta(minutes=n),
+        )
+        for n in (1, 2, 3)
+    ]
+    _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="unrelated.op",
+        created_at=base + timedelta(hours=1),
+    )
+    return steps
+
+
+def _positions(body: str, *markers: str) -> list[int]:
+    return [body.index(marker) for marker in markers]
+
+
+def test_panel_lists_a_chain_oldest_first_with_step_numbers() -> None:
+    """The bell panel shows a change ticket's pending steps oldest first,
+    each with "Step k of N", without any filter typing."""
+    _seed_chain()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    first, second, third, unrelated = _positions(
+        body, "chain.step1", "chain.step2", "chain.step3", "unrelated.op"
+    )
+    assert first < second < third < unrelated
+    assert "Step 1 of 3" in body
+    assert "Step 2 of 3" in body
+    assert "Step 3 of 3" in body
+    # The unrelated request has no step.
+    assert body.count("data-approval-chain-step=") == 3
+
+
+def test_panel_stays_newest_first_without_a_chain() -> None:
+    """With no change ticket holding two pending requests, nothing changes."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    base = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
+    _seed_request(tenant_id=_TENANT_A, op_id="older.op", work_ref=_CHAIN_REF, created_at=base)
+    _seed_request(tenant_id=_TENANT_A, op_id="newer.op", created_at=base + timedelta(minutes=5))
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals", headers=_HX_HEADERS)
+
+    body = response.text
+    newer, older = _positions(body, "newer.op", "older.op")
+    assert newer < older
+    assert "data-approval-chain-step=" not in body
+
+
+def test_pending_tab_lists_a_chain_oldest_first_by_default() -> None:
+    """The default Pending tab reads a chain oldest first, with step numbers,
+    and the oldest/newest toggle shows oldest as the active order."""
+    _seed_chain()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    first, second, third, unrelated = _positions(
+        body, "chain.step1", "chain.step2", "chain.step3", "unrelated.op"
+    )
+    assert first < second < third < unrelated
+    assert "Step 2 of 3" in body
+    assert 'aria-pressed="true"' in _opening_tag(body, 'data-approval-order="oldest"')
+    assert 'aria-pressed="false"' in _opening_tag(body, 'data-approval-order="newest"')
+
+
+def test_history_toggle_can_pick_newest_first() -> None:
+    """The explicit toggle wins over the default on the Pending tab."""
+    _seed_chain()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?tab=pending&order=newest", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    unrelated, third, first = _positions(body, "unrelated.op", "chain.step3", "chain.step1")
+    assert unrelated < third < first
+    assert 'aria-pressed="true"' in _opening_tag(body, 'data-approval-order="newest"')
+    # The live refresh keeps the operator's choice.
+    assert 'hx-get="/ui/approvals/list?tab=pending&order=newest"' in body
+
+
+def test_history_toggle_can_pick_oldest_first_on_a_decided_tab() -> None:
+    """The All tab is newest first by default; ``order=oldest`` flips it."""
+    _seed_chain()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        default = client.get("/ui/approvals/list?tab=all", headers=_HX_HEADERS).text
+        oldest = client.get("/ui/approvals/list?tab=all&order=oldest", headers=_HX_HEADERS).text
+
+    unrelated, first = _positions(default, "unrelated.op", "chain.step1")
+    assert unrelated < first
+    first, unrelated = _positions(oldest, "chain.step1", "unrelated.op")
+    assert first < unrelated
+
+
+def test_history_load_more_keeps_the_order() -> None:
+    """The pager's "Load more" URL carries the order of the first page."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    base = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
+    for n in range(26):
+        _seed_request(tenant_id=_TENANT_A, op_id=f"op{n}", created_at=base + timedelta(minutes=n))
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?tab=pending&order=oldest", headers=_HX_HEADERS)
+
+    assert "/ui/approvals/list?tab=pending&order=oldest&offset=25&partial=rows" in response.text
+
+
+def test_history_unknown_order_is_422() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?order=random", headers=_HX_HEADERS)
+
+    assert response.status_code == 422
+
+
+def _render_chain_modal(request_id: uuid.UUID) -> str:
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{request_id}")
+    assert response.status_code == 200, response.text
+    return response.text
+
+
+def test_modal_out_of_order_step_needs_one_more_confirm() -> None:
+    """Opening step 2 directly (as a deep link does) names the step and puts
+    one more confirm in front of the approve confirm."""
+    steps = _seed_chain()
+
+    body = _render_chain_modal(steps[1])
+
+    assert 'data-approval-chain-step="2"' in body
+    assert "2 of 3" in body
+    # The group link opens the oldest-first Pending view for this ticket.
+    link = _opening_tag(body, "data-approval-chain-link")
+    assert 'href="/ui/approvals?tab=pending&order=oldest&work_ref=gh%3Aevoila/meho%237"' in link
+    # The Approve armer goes to the extra confirm, not straight to approve.
+    armer = _opening_tag(body, 'data-action="approve"')
+    assert "armed = 'approve-early'" in armer
+    early = body.split('data-approval-confirm="out-of-order"')[1].split("</p>")[0]
+    assert "step 2 of 3" in early
+    assert "before the earlier steps" in early
+    assert "cannot be un-approved" in early
+    # Only the extra confirm's button moves on to the approve confirm.
+    assert "armed = 'approve'" in _opening_tag(body, 'data-confirm="out-of-order"')
+    assert "data-approval-out-of-order" in body
+
+
+def test_modal_first_step_has_no_extra_confirm() -> None:
+    """Step 1 is the oldest waiting step: the normal approve flow applies."""
+    steps = _seed_chain()
+
+    body = _render_chain_modal(steps[0])
+
+    assert 'data-approval-chain-step="1"' in body
+    assert "armed = 'approve'" in _opening_tag(body, 'data-action="approve"')
+    assert 'data-approval-confirm="out-of-order"' not in body
+    assert "data-approval-out-of-order" not in body
+
+
+def test_modal_step_numbers_move_up_once_an_earlier_step_is_decided() -> None:
+    """Step numbers count pending requests only: once step 1 is decided, the
+    old step 2 is the oldest waiting step and needs no extra confirm."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    base = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
+    _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="chain.step1",
+        work_ref=_CHAIN_REF,
+        status_value=ApprovalRequestStatus.APPROVED.value,
+        reviewed_by=_REVIEWER_SUB,
+        created_at=base,
+    )
+    second = _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="chain.step2",
+        work_ref=_CHAIN_REF,
+        created_at=base + timedelta(minutes=1),
+    )
+    _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="chain.step3",
+        work_ref=_CHAIN_REF,
+        created_at=base + timedelta(minutes=2),
+    )
+
+    body = _render_chain_modal(second)
+
+    assert 'data-approval-chain-step="1"' in body
+    assert "1 of 2" in body
+    assert 'data-approval-confirm="out-of-order"' not in body

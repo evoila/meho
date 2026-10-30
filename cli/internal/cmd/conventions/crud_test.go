@@ -917,6 +917,7 @@ func TestRunDeleteConfirmHappyPath(t *testing.T) {
 		if r.Method != http.MethodDelete {
 			t.Errorf("method: got %s; want DELETE", r.Method)
 		}
+		w.Header().Set("Meho-Audit-Id", "99999999-8888-7777-6666-555555555555")
 		w.WriteHeader(http.StatusNoContent)
 	})
 	srv := httptest.NewServer(mux)
@@ -932,6 +933,9 @@ func TestRunDeleteConfirmHappyPath(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "deleted convention") {
 		t.Errorf("stdout missing confirmation; got %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "audit receipt: 99999999-8888-7777-6666-555555555555\n") {
+		t.Errorf("expected audit receipt line; got %q", stdout.String())
 	}
 }
 

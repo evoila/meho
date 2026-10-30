@@ -45,6 +45,7 @@ from sqlalchemy import select, update
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.hetzner_robot import (
     ROBOT_CONNECTOR_ID,
+    ROBOT_CORE_OPS,
     ROBOT_IMPL_ID,
     ROBOT_PRODUCT,
     ROBOT_VERSION,
@@ -77,16 +78,21 @@ _TENANT = UUID("00000000-0000-0000-0000-0000000000a9")
 #: RFC 6761 ``.test.invalid`` host so no real network egress fires.
 _ROBOT_HOST = "robot-ws.test.invalid"
 
-#: op_ids the spec must yield — cross-checked against ROBOT_CORE_OPS so the
-#: ingested rows and the curated read core agree on the same strings.
+#: op_ids the spec must yield — every curated read in ROBOT_CORE_OPS, so the
+#: ingested rows and the curated read core agree on the same strings and the
+#: curation can run to the end on the shipped spec alone (#4963).
 _EXPECTED_READ_OP_IDS = frozenset(
     {
         "GET:/server",
         "GET:/server/{server-ip}",
+        "GET:/ip",
+        "GET:/subnet",
         "GET:/vswitch",
         "GET:/vswitch/{vswitch-id}",
+        "GET:/failover",
         "GET:/firewall/{server-ip}",
         "GET:/rdns",
+        "GET:/key",
     }
 )
 
@@ -205,6 +211,8 @@ def test_shipped_spec_parses_and_covers_the_wrapper_surface() -> None:
     assert op_ids >= _EXPECTED_WRITE_OP_IDS, (
         f"missing write op_ids: {sorted(_EXPECTED_WRITE_OP_IDS - op_ids)}"
     )
+    curated = {op.op_id for op in ROBOT_CORE_OPS}
+    assert op_ids >= curated, f"missing curated op_ids: {sorted(curated - op_ids)}"
     # Every op declares an operationId → a stable, non-empty op_id.
     for row in rows:
         method, _, path = row.op_id.partition(":")

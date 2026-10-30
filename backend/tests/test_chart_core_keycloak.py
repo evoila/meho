@@ -26,6 +26,8 @@ from typing import Any
 import pytest
 import yaml
 
+from meho_backplane.core.company_login import ROLES
+
 _CHART_DIR = Path(__file__).resolve().parents[2] / "deploy" / "charts" / "meho"
 _REALM_FILE = _CHART_DIR / "charts" / "keycloak" / "files" / "meho-realm.json"
 _TENANT = "3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c"
@@ -174,6 +176,7 @@ def test_keycloak_settings() -> None:
         "KC_CACHE": "local",
         "MEHO_REALM_PUBLIC_URL": "https://meho.test",
         "MEHO_REALM_TENANT_ID": _TENANT,
+        "MEHO_REALM_TENANT_NAME": "main",
     }
     assert {k: env[k]["value"] for k in expected} == expected
 
@@ -219,7 +222,9 @@ def test_realm_configmap_is_the_file_and_mounted_for_import() -> None:
     docs = _keycloak_docs()
     cm = docs["ConfigMap"]
     assert cm["metadata"]["name"] == "test-keycloak-realm"
-    assert json.loads(cm["data"]["meho-realm.json"]) == json.loads(_REALM_FILE.read_text())
+    # Byte for byte: with the company login off (the default), the realm
+    # is the file and nothing else.
+    assert cm["data"]["meho-realm.json"].strip() == _REALM_FILE.read_text().strip()
     pod = _pod(docs)
     (mount,) = pod["containers"][0]["volumeMounts"]
     assert mount["mountPath"] == "/opt/keycloak/data/import"
@@ -360,6 +365,17 @@ def test_long_release_name_keeps_statefulset_and_ingress_in_step() -> None:
         (["--set", "coreKeycloak.firstTenantId="], ("coreKeycloak.firstTenantId is empty",)),
         (["--set", "coreKeycloak.firstTenantId=not-a-uuid"], ("firstTenantId",)),
         (["--set", "coreKeycloak.unknownKey=1"], ("unknownKey",)),
+        (["--set", "coreKeycloak.tenantName=Main"], ("tenantName",)),
+        (["--set", "coreKeycloak.tenants[0].name=lab-b"], ("id",)),
+        (
+            [
+                "--set",
+                "coreKeycloak.tenants[0].name=lab:b",
+                "--set",
+                f"coreKeycloak.tenants[0].id={_TENANT}",
+            ],
+            ("name",),
+        ),
     ],
     ids=[
         "needs-postgres",
@@ -368,6 +384,9 @@ def test_long_release_name_keeps_statefulset_and_ingress_in_step() -> None:
         "no-tenant-id",
         "bad-tenant-id",
         "unknown-key",
+        "bad-tenant-name",
+        "extra-tenant-needs-id",
+        "bad-extra-tenant-name",
     ],
 )
 def test_bad_values_fail_at_render(extra: list[str], messages: tuple[str, ...]) -> None:
@@ -538,3 +557,73 @@ def test_issuer_audience_and_cidr_stay_required_for_bring_your_own() -> None:
     # settings, and the NetworkPolicy reaches the pod by its labels.
     blank = [arg for key in keys[2:] for arg in ("--set", f"{key}=")]
     assert _run(*_ON, *blank).returncode == 0
+
+
+# --- The company login's private CA (#4592) ---------------------------------
+
+_COMPANY_ON = [
+    "--set",
+    "coreKeycloak.companyLogin.enabled=true",
+    "--set",
+    "coreKeycloak.companyLogin.discoveryUrl=https://idp.test/.well-known/openid-configuration",
+    "--set",
+    "coreKeycloak.companyLogin.clientId=meho-keycloak",
+    "--set",
+    "coreKeycloak.companyLogin.clientSecret.secretName=company-login",
+]
+
+
+def test_the_job_account_gets_two_more_roles_only_with_the_company_login() -> None:
+    realm = json.loads(_REALM_FILE.read_text())
+    (account,) = realm["users"]
+    assert account["serviceAccountClientId"] == "meho-admin"
+    assert account["clientRoles"]["realm-management"] == ["manage-clients", "manage-users"]
+
+    rendered = json.loads(_keycloak_docs(*_COMPANY_ON)["ConfigMap"]["data"]["meho-realm.json"])
+
+    account["clientRoles"]["realm-management"] += list(ROLES)
+    assert rendered == realm
+    assert "${MEHO_REALM_TENANT_ID}" in json.dumps(rendered)
+
+
+def test_company_login_ca_bundle_is_mounted_as_the_truststore() -> None:
+    pod = _pod(
+        _keycloak_docs(
+            *_COMPANY_ON,
+            "--set",
+            "coreKeycloak.companyLogin.caBundle.configMapName=company-ca",
+            "--set",
+            "coreKeycloak.companyLogin.caBundle.key=root.pem",
+        )
+    )
+    (container,) = pod["containers"]
+    assert _env(container)["KC_TRUSTSTORE_PATHS"]["value"] == (
+        "/opt/keycloak/conf/company-login-ca/root.pem"
+    )
+    mount = next(m for m in container["volumeMounts"] if m["name"] == "company-login-ca")
+    assert mount == {
+        "name": "company-login-ca",
+        "mountPath": "/opt/keycloak/conf/company-login-ca",
+        "readOnly": True,
+    }
+    volume = next(v for v in pod["volumes"] if v["name"] == "company-login-ca")
+    assert volume["configMap"] == {
+        "name": "company-ca",
+        "items": [{"key": "root.pem", "path": "root.pem"}],
+    }
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        [],
+        _COMPANY_ON,
+        ["--set", "coreKeycloak.companyLogin.caBundle.configMapName=company-ca"],
+    ],
+    ids=["off", "on-without-ca", "ca-but-off"],
+)
+def test_no_truststore_without_a_ca_bundle_or_with_the_login_off(extra: list[str]) -> None:
+    pod = _pod(_keycloak_docs(*extra))
+    (container,) = pod["containers"]
+    assert "KC_TRUSTSTORE_PATHS" not in _env(container)
+    assert [v["name"] for v in pod["volumes"]] == ["realm"]

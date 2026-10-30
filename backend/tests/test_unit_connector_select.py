@@ -221,7 +221,7 @@ def test_ci_wires_the_short_run_into_the_unit_shards() -> None:
     shard = jobs["python-unit-shard"]
     matrix = shard["strategy"]["matrix"]["shard"]
     assert "needs.changes.outputs.single_connector" in matrix
-    assert "[1, 2, 3, 4]" in matrix
+    assert "[1, 2, 3, 4, 5]" in matrix
     pytest_step = next(step for step in shard["steps"] if step["name"].startswith("Pytest"))
     assert "tests/_unit_connector_select.py select" in pytest_step["run"]
     assert pytest_step["env"]["SINGLE_CONNECTOR"] == (

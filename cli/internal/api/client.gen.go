@@ -5988,6 +5988,12 @@ type HealthResponse struct {
 	// they serialise as a UUID string / role value under
 	// ``model_dump(mode="json")`` — the same wire shape the
 	// ``meho://tenant/<id>/info`` resource returns.
+	//
+	// ``tenants`` (#5239) lists every tenant of the person, with the role
+	// in each, when the token carries a tenant list (empty otherwise). A
+	// login with several tenants that chose none gets ``tenant_id`` and
+	// ``tenant_role`` as ``None``: the status answer then only lists the
+	// tenants.
 	Operator OperatorIdentity `json:"operator"`
 	Pairings *[]PairingHealth `json:"pairings,omitempty"`
 
@@ -6584,6 +6590,12 @@ type LivenessResponse struct {
 	// they serialise as a UUID string / role value under
 	// ``model_dump(mode="json")`` — the same wire shape the
 	// ``meho://tenant/<id>/info`` resource returns.
+	//
+	// ``tenants`` (#5239) lists every tenant of the person, with the role
+	// in each, when the token carries a tenant list (empty otherwise). A
+	// login with several tenants that chose none gets ``tenant_id`` and
+	// ``tenant_role`` as ``None``: the status answer then only lists the
+	// tenants.
 	Operator OperatorIdentity `json:"operator"`
 
 	// SensorRunner Liveness of this process's sensor evaluation loop (#2763).
@@ -7193,11 +7205,17 @@ type OperationRunSummaryResponse struct {
 // they serialise as a UUID string / role value under
 // “model_dump(mode="json")“ — the same wire shape the
 // “meho://tenant/<id>/info“ resource returns.
+//
+// “tenants“ (#5239) lists every tenant of the person, with the role
+// in each, when the token carries a tenant list (empty otherwise). A
+// login with several tenants that chose none gets “tenant_id“ and
+// “tenant_role“ as “None“: the status answer then only lists the
+// tenants.
 type OperatorIdentity struct {
-	Email    *string            `json:"email"`
-	Name     *string            `json:"name"`
-	Sub      string             `json:"sub"`
-	TenantId openapi_types.UUID `json:"tenant_id"`
+	Email    *string             `json:"email"`
+	Name     *string             `json:"name"`
+	Sub      string              `json:"sub"`
+	TenantId *openapi_types.UUID `json:"tenant_id"`
 
 	// TenantRole Per-tenant role granted to the operator by the JWT issuer.
 	//
@@ -7215,7 +7233,8 @@ type OperatorIdentity struct {
 	// 3.11+) gives the members ``str`` semantics for free, so
 	// ``f"role={role}"`` renders as ``"role=tenant_admin"`` rather than
 	// ``"role=TenantRole.TENANT_ADMIN"``.
-	TenantRole TenantRole `json:"tenant_role"`
+	TenantRole TenantRole     `json:"tenant_role"`
+	Tenants    *[]TenantEntry `json:"tenants,omitempty"`
 }
 
 // OrderBy One “ORDER BY“ term: a known column plus a direction.
@@ -9877,6 +9896,33 @@ type TemplateSummary struct {
 
 // TemplateSummaryStatus defines model for TemplateSummary.Status.
 type TemplateSummaryStatus string
+
+// TenantEntry One tenant of the person, with the role there (#5239).
+//
+// “current“ is “True“ for the tenant this request works in.
+type TenantEntry struct {
+	Current  bool               `json:"current"`
+	Name     string             `json:"name"`
+	TenantId openapi_types.UUID `json:"tenant_id"`
+
+	// TenantRole Per-tenant role granted to the operator by the JWT issuer.
+	//
+	// The set is intentionally small in v0.2: a closed three-value enum
+	// lets the RBAC primitive (Task #234, ``require_role``) make
+	// exhaustive comparisons without leaking arbitrary string handling
+	// into route code. A richer policy engine — topology-aware
+	// permissions, ABAC, approval workflows — is a separate v0.2.next
+	// Goal; widening this enum is the only ratcheting mechanism in the
+	// interim.
+	//
+	// Values are the literal strings the Keycloak protocol-mapper recipe
+	// (Task #235) emits, so a JWT carrying ``"tenant_admin"`` materialises
+	// cleanly as :attr:`TENANT_ADMIN`. ``StrEnum`` (PEP 663, stdlib in
+	// 3.11+) gives the members ``str`` semantics for free, so
+	// ``f"role={role}"`` renders as ``"role=tenant_admin"`` rather than
+	// ``"role=TenantRole.TENANT_ADMIN"``.
+	TenantRole TenantRole `json:"tenant_role"`
+}
 
 // TenantFlightRecorderPolicy Resolved per-tenant flight-recorder policy -- the PATCH read-back shape.
 //

@@ -89,6 +89,7 @@ from sqlalchemy import CursorResult, and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op
@@ -1065,6 +1066,8 @@ async def _write_audit_row(
     # name only, email is never widened onto this surface.
     if operator.name:
         payload["principal_name"] = operator.name
+    # #5239: the role of a platform admin without a group in this tenant.
+    payload.update(tenant_role_source_payload(operator))
     if extra_payload:
         payload.update(extra_payload)
     # policy-gate verdict (#130). The parked "request" row is written on the

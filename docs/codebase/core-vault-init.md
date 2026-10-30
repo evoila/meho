@@ -83,14 +83,23 @@ The Secrets:
    - **New server:** `init` with one key share and threshold 1. Store the
      unseal key first, then the root token, then unseal. The key goes first:
      without it the server can never be unsealed again.
-   - **Server set up before:** wait until it is unsealed (up to 10 minutes;
-     in keyholder mode a person unseals it). If `<release>-core-vault-init`
+     Then wait until OpenBao is active (`sys/health` answers 200). Right
+     after an unseal it answers for a moment before it is active, and fails
+     most calls with HTTP 500 then.
+   - **Server set up before:** wait until it is unsealed and active (up to
+     10 minutes; in keyholder mode a person unseals it). If `<release>-core-vault-init`
      holds a root token that still works, an earlier run stopped halfway:
      go on with it. Else log in with the `kubernetes-sa` login. A left-over
      Secret with a revoked root token is deleted. If that login fails, the
      Job stops and says how to give it a root token (see "When the Job
      cannot log in" below).
 3. Wait until Keycloak serves realm `meho` (up to 10 minutes).
+   When the Job writes the `jwt/` login's config, OpenBao fetches Keycloak's
+   keys itself, over the cluster network. On a fresh install that can still
+   fail for a short time after the Job sees the realm: OpenBao answers
+   `HTTP 400: error checking jwks URL`. The Job then tries again every
+   5 seconds for up to 2 minutes, and prints one line that it waits. After
+   that it stops with the same error. Any other error stops it at once.
 4. Set up the objects of the tables above. Mounts, groups, the test secret
    and the two tokens are read first and made only when missing; a group is
    written only when its type or policy differs (a real OpenBao stamps a

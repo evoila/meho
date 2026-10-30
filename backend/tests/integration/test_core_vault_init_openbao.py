@@ -200,6 +200,7 @@ def env(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Env]:
         kc_url = f"http://{keycloak.get_container_host_ip()}:{keycloak.get_exposed_port(8080)}/auth"
         bao_url = f"http://{openbao.get_container_host_ip()}:{openbao.get_exposed_port(8200)}"
         _wait(f"{kc_url}/realms/meho/.well-known/openid-configuration", 120)
+        _wait(f"{kc_url}/realms/meho/protocol/openid-connect/certs", 120)
         _wait(f"{bao_url}/v1/sys/seal-status", 60, ok=lambda r: r.status_code == 200)
 
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)

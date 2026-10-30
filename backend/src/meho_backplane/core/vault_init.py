@@ -15,7 +15,8 @@ changed setup starts a new Job under Helm, klipper-helm and Argo CD alike.
    A server that is already set up: the Job goes on with the root token
    from the short-lived Secret (an earlier run stopped halfway), else it
    logs in with its own service account (login ``kubernetes-sa``).
-2. It waits until the server is unsealed and Keycloak serves realm ``meho``.
+2. It waits until the server is unsealed and active, and Keycloak serves
+   realm ``meho``.
 3. It sets up the key-value store at ``secret/``, the ``jwt`` login that
    trusts Keycloak, the policies, the ``meho-mcp`` role with one group per
    tenant role, the ``meho-admin`` role, the ``kubernetes-sa`` login for
@@ -101,6 +102,11 @@ _HTTP_TIMEOUT_S = 30
 # realm. In keyholder mode a person must unseal within this time on a later run.
 _WAIT_S = 600
 _POLL_S = 5
+# OpenBao fetches Keycloak's keys itself when the Job writes the `jwt` login's
+# config, over the cluster network. On a fresh install that can fail for a
+# short time after the Job already sees the realm, so the Job tries again.
+_JWKS_WAIT_S = 120
+_JWKS_ERROR = "error checking jwks URL"
 
 
 class VaultInitError(Exception):
@@ -261,9 +267,18 @@ async def _answers(bao: Bao) -> bool:
     return await _seal_status(bao) is not None
 
 
-async def _unsealed(bao: Bao) -> bool:
-    status = await _seal_status(bao)
-    return status is not None and status.get("sealed") is False
+async def _active(bao: Bao) -> bool:
+    """True once OpenBao is unsealed and is the active node.
+
+    Right after an unseal it answers for a moment before it is active, and
+    fails most calls with HTTP 500 then. ``sys/health`` answers 200 only when
+    it is set up, unsealed and active.
+    """
+    try:
+        reply = await bao.call("GET", "sys/health")
+    except VaultInitError:
+        return False
+    return reply.status == 200
 
 
 @dataclass(frozen=True)
@@ -315,10 +330,13 @@ async def _open_session(plan: Plan, bao: Bao, store: SecretStore) -> _Session:
         await store.put(plan.init_secret, {"token": root})
         _say(f"OpenBao: initialised; unseal key in Secret {plan.unseal_secret}")
         _expect(await bao.call("PUT", "sys/unseal", json={"key": key}), 200, what="unseal failed")
+        await _wait(
+            lambda: _active(bao), f"OpenBao was not active {_WAIT_S} seconds after the unseal"
+        )
         return _Session(root, root=True, fresh=True)
 
     await _wait(
-        lambda: _unsealed(bao),
+        lambda: _active(bao),
         f"OpenBao is still sealed after {_WAIT_S} seconds. With the Secret "
         f"{plan.unseal_secret} the pod unseals itself; without it (keyholder mode) a "
         "person unseals it, and the Job runs again.",
@@ -390,6 +408,24 @@ async def _write(bao: Bao, token: str, path: str, body: Mapping[str, Any]) -> No
         204,
         what=f"cannot write {path}",
     )
+
+
+async def _write_jwt_config(bao: Bao, token: str, plan: Plan) -> None:
+    path = f"auth/{JWT_MOUNT}/config"
+    body = {"jwks_url": plan.jwks_url, "bound_issuer": plan.bound_issuer}
+    deadline = time.monotonic() + _JWKS_WAIT_S
+    waited = False
+    while True:
+        reply = await bao.call("POST", path, token=token, json=body)
+        if reply.status in (200, 204):
+            return
+        detail = _detail(reply)
+        if _JWKS_ERROR not in detail or time.monotonic() > deadline:
+            raise VaultInitError(f"cannot write {path}: {detail}")
+        if not waited:
+            _say(f"login {JWT_MOUNT}/: OpenBao cannot read Keycloak's keys yet; trying again")
+            waited = True
+        await asyncio.sleep(_POLL_S)
 
 
 async def _ensure_group(bao: Bao, token: str, policy: str, role: str, accessor: str) -> None:
@@ -471,12 +507,7 @@ async def set_up(
 
     await _ensure_kv(bao, token)
     accessor = await _ensure_jwt_login(bao, token, JWT_MOUNT)
-    await _write(
-        bao,
-        token,
-        f"auth/{JWT_MOUNT}/config",
-        {"jwks_url": plan.jwks_url, "bound_issuer": plan.bound_issuer},
-    )
+    await _write_jwt_config(bao, token, plan)
     for name, text in policies.items():
         _expect(
             await bao.call(

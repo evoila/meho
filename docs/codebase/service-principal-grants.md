@@ -483,8 +483,8 @@ What the code does:
   `preview_hash` and `blast_radius` for a `destructive` call, or
   `proposed_effect` for a delete below it. A step's row names its
   multi-step operation through `parent_audit_id`.
-- **The step list.** `GET /api/v1/operations/governed-subops` marks delete
-  steps grantable with the mode on.
+- **The step list.** `GET /api/v1/operations/governed-subops` (CLI:
+  `meho operation subops`) marks delete steps grantable with the mode on.
 - **Display.** `/ready` has a top-level `sandbox_mode` (`"on"` / `"off"`)
   for every caller and `features.approval_queue.sandbox_mode`;
   `GET /api/v1/health` has `sandbox_mode`; `meho status` prints one line
@@ -518,7 +518,7 @@ supported alternative:
 
 | Verb | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/v1/operations/governed-subops?op_id=<composite>&connector_id=<id>` | List the governed child ops a composite may dispatch (role: `operator`). |
+| `GET` | `/api/v1/operations/governed-subops?op_id=<composite>&connector_id=<id>` | List the governed child ops a composite may dispatch (role: `operator`). CLI: `meho operation subops <composite> [--connector <id>]`. |
 
 **Which connector id a step grant names.** Ask the route with the
 `connector_id` of the target's connector, and write each step grant with the

@@ -39,9 +39,8 @@ either widen the operator-facing enum (making operators choose between
 ``github-app`` and ``github-pat`` at target-registration time, on a
 value that's redundant with what Vault already holds) or — as G0.16-T2
 caught — fragment the connector boundary against the target schema
-when the two sides disagree. So the connector takes the same shape as
-vmware-rest: the target's ``auth_model`` says "shared service
-account"; the connector inspects the Vault payload to pick the
+when the two sides disagree. So the target's ``auth_model`` says
+"shared service account"; the connector inspects the Vault payload to pick the
 protocol.
 
 The two loaders below remain individually exported for
@@ -49,8 +48,7 @@ backwards-compatible test injection; production code routes through
 :func:`load_github_credentials_from_vault` which reads the secret once,
 inspects the field shape, and picks the right loader.
 
-All loaders are injectable callables (the same shape vmware-rest's
-:class:`VsphereSessionLoader` uses) so production deploys, unit tests,
+All loaders are injectable callables so production deploys, unit tests,
 and the future operator runbook can substitute alternative resolvers
 (e.g. a future GitHub Enterprise Server target with a different App
 installation endpoint).
@@ -492,7 +490,7 @@ async def load_github_credentials_from_vault(
     This matches the operator-runbook documentation in
     ``docs/cross-repo/github-connector.md`` (the ``auth_model: shared_
     service_account`` row + Vault-payload discriminator) and aligns the
-    gh-rest target shape with vmware-rest's
+    gh-rest target shape with the
     ``shared_service_account``-on-target / payload-shape-on-Vault split.
     See G0.16-T2 for the reconciliation history.
 

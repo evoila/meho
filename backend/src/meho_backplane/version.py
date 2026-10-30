@@ -15,6 +15,12 @@ is running in the cluster:
   starts) so the field never pretends an unknown release is a known
   one.
 
+It also lists ``connector_packages``: the connector packages this image
+carries (name, version, wheel digest and the folders each adds). The list
+comes from the allowlist file the overlay image build writes, read once at
+start (:func:`~meho_backplane.connector_packages.installed_connector_packages`).
+It is empty for the plain public image.
+
 Reading the values from environment variables (rather than baking them
 into a generated ``_version.py``) keeps the runtime image generic and
 the build pipeline simple: the same wheel can be re-tagged with
@@ -27,8 +33,17 @@ arguments.
 import os
 
 from fastapi import APIRouter
+from pydantic import BaseModel, ConfigDict
 
-__all__ = ["deployed_version_label", "router"]
+from meho_backplane.connector_packages import ConnectorPackage, installed_connector_packages
+
+__all__ = [
+    "VersionResponse",
+    "build_git_sha",
+    "deployed_version_label",
+    "router",
+    "running_release_id",
+]
 
 _UNKNOWN: str = "unknown"
 
@@ -39,6 +54,27 @@ _UNKNOWN: str = "unknown"
 _SHA_LABEL_LEN: int = 12
 
 router = APIRouter(tags=["version"])
+
+
+class VersionResponse(BaseModel):
+    """``GET /version`` response body."""
+
+    model_config = ConfigDict(frozen=True)
+
+    git_sha: str
+    build_date: str
+    chart_version: str | None
+    connector_packages: list[ConnectorPackage] = []
+
+
+def build_git_sha() -> str:
+    """Return the commit hash of the running build, or ``"unknown"``.
+
+    The release identity ``GET /version`` reports as ``git_sha``. The
+    operation catalog stamp (:mod:`meho_backplane.operations.catalog_release`)
+    uses the same value, so both name a release the same way.
+    """
+    return os.environ.get("GIT_SHA") or _UNKNOWN
 
 
 def deployed_version_label() -> str:
@@ -72,16 +108,37 @@ def deployed_version_label() -> str:
     return _UNKNOWN
 
 
-@router.get("/version")
-async def version() -> dict[str, str | None]:
-    """Return the build-identity payload.
+def running_release_id() -> str | None:
+    """Return the identity of the running release, or ``None`` when unknown.
 
-    Each field falls back to ``"unknown"`` when its env var is unset or
-    empty, which keeps local development frictionless without ever
-    pretending an unknown build is a known one.
+    An approval request is bound to this value (#5030): a person approves
+    one exact release of MEHO. The value is the full ``GIT_SHA`` plus the
+    ``CHART_VERSION`` when it is set, the same values ``GET /version``
+    shows. ``None`` when ``GIT_SHA`` is unset or ``unknown``: only a local
+    development run has no release identity, and then MEHO does not bind
+    or check a release.
     """
-    return {
-        "git_sha": os.environ.get("GIT_SHA") or _UNKNOWN,
-        "build_date": os.environ.get("BUILD_DATE") or _UNKNOWN,
-        "chart_version": os.environ.get("CHART_VERSION") or None,
-    }
+    git_sha = os.environ.get("GIT_SHA")
+    if not git_sha or git_sha == _UNKNOWN:
+        return None
+    chart_version = os.environ.get("CHART_VERSION")
+    if chart_version:
+        return f"{git_sha} (chart {chart_version})"
+    return git_sha
+
+
+@router.get("/version", response_model=VersionResponse)
+async def version() -> VersionResponse:
+    """Return the build-identity payload and the installed connector packages.
+
+    Each build field falls back to ``"unknown"`` when its env var is unset
+    or empty, which keeps local development frictionless without ever
+    pretending an unknown build is a known one. ``connector_packages`` is
+    empty for the plain public image.
+    """
+    return VersionResponse(
+        git_sha=build_git_sha(),
+        build_date=os.environ.get("BUILD_DATE") or _UNKNOWN,
+        chart_version=os.environ.get("CHART_VERSION") or None,
+        connector_packages=list(installed_connector_packages()),
+    )

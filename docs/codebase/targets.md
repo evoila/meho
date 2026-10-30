@@ -14,16 +14,25 @@ each other's code:
 | Front | Where | Purpose |
 |---|---|---|
 | REST `/api/v1/targets` | `backend/src/meho_backplane/api/v1/targets.py` | list, discover, describe, probe, create, patch, soft-delete |
-| CLI `meho targets …` | `cli/` (Go) over the REST routes | operator verbs; `meho targets list` calls `GET /api/v1/targets` |
+| CLI `meho targets …` | `cli/` (Go) over the REST routes | operator verbs; `meho targets list` calls `GET /api/v1/targets`, `meho targets delete` calls `DELETE /api/v1/targets/{name}` |
 | MCP `list_targets` | `backend/src/meho_backplane/mcp/tools/topology.py` | working-surface enumeration for agents |
 
 `meho_targets_register` (`mcp/tools/targets_register.py`) is the
-operator-plane MCP write; every `target` argument elsewhere resolves
+operator-plane MCP write. It runs the `targets.register` operation, whose
+params schema is `TARGETS_REGISTER_PARAMETER_SCHEMA`
+(`connectors/targets/schemas.py`): required `name`, `product`, `host`;
+optional `aliases`, `version`, `port`, `fqdn`, `secret_ref`,
+`auth_model`, `verify_tls`, `tls_ca_pin`, `tls_server_name`,
+`vpn_required`, `extras`, `notes`, `preferred_impl_id`. Any other field
+is refused. `vpn_required` (boolean, default `false`) records that a
+VPN must be up to reach the target. MEHO does not act on it; it is
+shown to the people and agents that read the target (#5075). Every
+`target` argument elsewhere resolves
 through `resolve_target` (`targets/resolver.py`). Destination checks
 are covered in [`target-ssrf-guard.md`](target-ssrf-guard.md).
 
-This document covers the two **list** paths and how `list_targets`
-bounds its response (#3858).
+This document covers the two **list** paths, how `list_targets`
+bounds its response (#3858), and how a target is deleted.
 
 ## Key types
 
@@ -105,6 +114,27 @@ rows about 165 bytes each):
 End-to-end call time (warm median of 7 calls each, same setup) was
 about the same in both versions: about 6–8 ms for an 89-row page and
 about 12 ms for a 500-row page.
+
+## Control flow — deleting a target
+
+`DELETE /api/v1/targets/{name}` (`tenant_admin`) and the CLI verb
+`meho targets delete <name> [--force] [--confirm]` (#3943) on top of it:
+
+1. The CLI asks y/N first unless `--confirm` is given. Closed stdin
+   counts as no, so a script never deletes by accident.
+2. The route resolves the name or alias in the caller's tenant (404
+   with near-misses, 409 on an ambiguous alias).
+3. It counts the `graph_node` rows that point at the target. Audit rows
+   are not counted: every request against a target writes one.
+4. When that count is above zero and `force` is not set, it answers 409
+   with `detail.kind = "target_has_references"` and
+   `detail.graph_node_refs`. The CLI prints the count and says to run
+   again with `--force`.
+5. Otherwise it sets `deleted_at` (a soft delete) and answers 204. The
+   row stays, so audit rows still point at it; every read path filters
+   it out. With `force`, the topology nodes stay and keep the deleted
+   target's id in `target_id`. The FK's `ON DELETE SET NULL` only acts
+   on a hard delete, which this route never does.
 
 ## Removing a target (`targets.remove`)
 

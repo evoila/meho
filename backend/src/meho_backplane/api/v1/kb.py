@@ -199,7 +199,7 @@ class KbEntryCreate(BaseModel):
             "the most common surprise: '657-recovery' is rejected; "
             "rewrite as 'ticket-657-recovery'."
         ),
-        examples=["vcenter-9.0-snapshot-revert"],
+        examples=["k8s-1.x-rollout-restart"],
     )
     body: str = Field(min_length=1)
     metadata: dict[str, Any] | None = None

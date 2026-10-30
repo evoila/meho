@@ -67,12 +67,12 @@ class ServiceGrantCreate(BaseModel):
     op_id: str = Field(
         min_length=1,
         max_length=512,
-        description="Exact operation id, no glob (e.g. 'POST:/vcenter/vm').",
+        description="Exact operation id, no glob (e.g. 'POST:/repos/{owner}/{repo}/issues').",
     )
     connector_id: str = Field(
         min_length=1,
         max_length=256,
-        description="Exact '<impl_id>-<version>' connector id, e.g. 'vmware-rest-9.0'.",
+        description="Exact '<impl_id>-<version>' connector id, e.g. 'gh-rest-3'.",
     )
     target_id: UUID | None = Field(
         default=None,
@@ -88,7 +88,7 @@ class ServiceGrantCreate(BaseModel):
         max_length=256,
         description=(
             "Target selector (#3349): match any dispatch whose target "
-            "product equals this exact value (e.g. 'vmware'). Requires "
+            "product equals this exact value (e.g. 'gh'). Requires "
             "target_id to be null."
         ),
     )

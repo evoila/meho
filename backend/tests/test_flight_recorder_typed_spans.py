@@ -481,6 +481,7 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "net-probe",
         "nsx-rest",
         "pfsense-ssh",
+        "phpipam-rest",
         "postgres-wire",
         "prometheus-api",
         "proxmox-api",

@@ -23,8 +23,9 @@ With every built-in part off (bring-your-own), the chart renders none of the
 new objects, so existing installs render byte for byte as before.
 
 Pointing MEHO's own pods at these Secrets (the backplane, Valkey, the
-Ingress) and moving the database migration into the backplane pod are the
-work of the wiring Task (#4047) and the PostgreSQL Task (#4039). Until then
+Ingress) is the work of the wiring Task (#4047). With the built-in
+PostgreSQL on, the database migration already runs in the backplane pod, as
+its `migrate` init container (#5233). Until #4047 lands
 an install can point at a made Secret by name, for example
 `approvalHandoff.secretName: <release>-core-approval-handoff` (see
 "Use your own Secret" below).
@@ -131,8 +132,8 @@ Helm order on `helm install` and `helm upgrade`:
 | -40 | ServiceAccount, Role, RoleBinding `<release>-core-bootstrap` | pre-install, pre-upgrade, post-install, post-upgrade |
 | -30 | Job `<release>-core-secrets` | pre-install, pre-upgrade |
 | -20 | the backplane ConfigMap (unchanged) | pre-install, pre-upgrade |
-| -10 | migration Job (unchanged) | pre-install, pre-upgrade |
-| 0 | release resources (Deployment, Services, …) | install, upgrade |
+| -10 | migration Job, bring-your-own PostgreSQL only (unchanged) | pre-install, pre-upgrade |
+| 0 | release resources (Deployment with the `migrate` init container when `corePostgres` is on, Services, …) | install, upgrade |
 
 Rules of `reconcile`:
 

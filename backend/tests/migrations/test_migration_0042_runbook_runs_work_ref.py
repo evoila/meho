@@ -16,7 +16,7 @@ driver and the migration uses only generic DDL, so PG parity holds.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -88,10 +88,12 @@ def _runbook_runs_indexes(sync_url: str) -> set[str]:
     return {str(row[1]) for row in rows}
 
 
-def test_upgrade_adds_work_ref_column_and_index(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_work_ref_column_and_index(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade head`` lands the nullable column + its named index."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     assert "work_ref" in _runbook_runs_columns(sync_url), (
         "migration 0042 must add runbook_runs.work_ref on upgrade head"
@@ -104,10 +106,12 @@ def test_upgrade_adds_work_ref_column_and_index(alembic_cfg: tuple[Config, str])
     )
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade "0041"`` drops column + index; ``upgrade head`` restores them."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     assert "work_ref" in _runbook_runs_columns(sync_url)
     assert "runbook_runs_tenant_work_ref_idx" in _runbook_runs_indexes(sync_url)
 
@@ -122,10 +126,12 @@ def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> 
     assert "runbook_runs_tenant_work_ref_idx" in _runbook_runs_indexes(sync_url)
 
 
-def test_prior_runbook_runs_columns_untouched(alembic_cfg: tuple[Config, str]) -> None:
+def test_prior_runbook_runs_columns_untouched(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """The pre-existing runbook_runs columns + indexes survive 0042."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     columns = _runbook_runs_columns(sync_url)
     assert "assigned_to" in columns, "the assigned_to column must survive 0042"

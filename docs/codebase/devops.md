@@ -2165,7 +2165,7 @@ fails only on a finding from an error-level rule.
 ### Coverage handoff to SonarCloud
 
 Coverage runs **once a night**, not after every merge (#4910). `ci.yml`
-has a `schedule` trigger (`cron: '17 6 * * *'`, UTC). That run is a full
+has a `schedule` trigger (`cron: '17 2 * * *'`, 02:17 UTC). That run is a full
 CI run on `main`. The 8 `python-coverage` shards and the
 `python-coverage-combine` job run only in that run, or on a PR that
 carries the `ci-coverage-validate` label; their `if:` conditions allow

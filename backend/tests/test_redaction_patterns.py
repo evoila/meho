@@ -419,6 +419,44 @@ def test_bind_key_secret_hides_a_commented_out_key(text: str, expected: str) -> 
     assert _FAKE_OLD_BIND_SECRET not in result.redacted
 
 
+@pytest.mark.parametrize(
+    "comment",
+    [
+        '/* secret "' + _FAKE_OLD_BIND_SECRET + '"; */ ',
+        "# secret " + _FAKE_OLD_BIND_SECRET + ";\n    ",
+        '// secret "' + _FAKE_OLD_BIND_SECRET + '";\n    ',
+    ],
+    ids=["block", "hash", "slash"],
+)
+def test_bind_key_secret_hides_a_secret_in_the_comment_before_the_value(comment: str) -> None:
+    """A comment between ``secret`` and its value may hold the old secret.
+
+    The finder reads the value in code past the comment, so it finds the
+    new value before the old one. The old scanner then dropped the old
+    value as if it overlapped (#5342 review). Both must be hidden.
+    """
+    block = (
+        'key "rndc-key" {\n'
+        "    algorithm hmac-sha256;\n"
+        "    secret " + comment + '"' + _FAKE_BIND_SECRET + '";\n'
+        "};\n"
+    )
+    result = redact(block, _BIND_KEY_SECRET_ONLY_POLICY)
+    assert result.redacted == (
+        'key "rndc-key" {\n'
+        "    algorithm hmac-sha256;\n"
+        "    secret "
+        + comment.replace(_FAKE_OLD_BIND_SECRET, "[REDACTED:bind_key_secret]").replace('"', "")
+        + "[REDACTED:bind_key_secret];\n"
+        "};\n"
+    )
+    assert _FAKE_BIND_SECRET not in result.redacted
+    assert _FAKE_OLD_BIND_SECRET not in result.redacted
+    assert result.manifest[0].count == 2
+    start, end = result.manifest[0].span
+    assert _FAKE_OLD_BIND_SECRET in block[start:end]
+
+
 def test_bind_key_secret_redacts_two_keys_on_one_line() -> None:
     line = (
         'key "a" { algorithm hmac-sha256; secret "' + _FAKE_BIND_SECRET + '"; }; '

@@ -27,7 +27,8 @@ reads the value only inside the same scope:
   "the secret is in the vault" is left alone.
 * In a comment, the value must sit inside the same comment. A
   commented-out key block is still hidden, and a comment can never
-  reach past its own end.
+  reach past its own end. A comment between a keyword and its value
+  may hold a secret of its own; both values are reported.
 * Inside a quoted string nothing is a keyword, so a key name such as
   ``"transfer-secret"`` or ``"my secret"`` is left alone, and a ``#``
   or ``//`` inside a string does not start a comment.
@@ -86,8 +87,7 @@ class BindKeySecretFinder:
     def secret_spans(self, text: str) -> list[tuple[int, int]]:
         """Return ``(start, end)`` of every secret value, left to right."""
         scopes = _split(text)
-        spans: list[tuple[int, int]] = []
-        last_end = 0
+        found: list[tuple[int, int]] = []
         for index, (kind, start, end) in enumerate(scopes):
             if kind == _STRING:
                 continue
@@ -96,9 +96,17 @@ class BindKeySecretFinder:
                     span = _value_in_comment(text, keyword.end(), end)
                 else:
                     span = _value_in_code(text, scopes, index, keyword.end())
-                if span is not None and span[0] >= last_end:
-                    spans.append(span)
-                    last_end = span[1]
+                if span is not None:
+                    found.append(span)
+        # A value in code can sit after a comment that holds a secret of
+        # its own, so the values are not found in text order. Sort them,
+        # and keep every value that does not overlap an earlier one.
+        spans: list[tuple[int, int]] = []
+        last_end = 0
+        for span in sorted(found):
+            if span[0] >= last_end:
+                spans.append(span)
+                last_end = span[1]
         return spans
 
 

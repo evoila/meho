@@ -52,6 +52,7 @@ _PASSWORD_SECRET = "super-secret" + "-esxi-pw"
 _FAKE_TSIG_VALUE = "exampleTsig" + "Value=="
 _FAKE_BARE_TSIG_VALUE = "exampleBare" + "Value=="
 _FAKE_OLD_TSIG_VALUE = "exampleOld" + "Value=="
+_FAKE_PREVIOUS_TSIG_VALUE = "examplePrevious" + "Value=="
 _FAKE_COOKIE_VALUE = "0123abcd" + "ef" * 12
 
 _SDDC_PRODUCT = "sddc"
@@ -298,7 +299,7 @@ _NAMED_CONF = (
     "# the secret /* of every key stays on the server\n"
     'key "rndc-key" {\n'
     "    algorithm hmac-sha256;\n"
-    f'    secret "{_FAKE_TSIG_VALUE}";\n'
+    f'    secret /* secret "{_FAKE_PREVIOUS_TSIG_VALUE}"; */ "{_FAKE_TSIG_VALUE}";\n'
     "};\n"
     'key "transfer-key" {\n'
     "    algorithm hmac-sha256;\n"
@@ -315,7 +316,8 @@ _NAMED_CONF = (
 )
 
 _NAMED_CONF_REDACTED = (
-    _NAMED_CONF.replace(f'secret "{_FAKE_TSIG_VALUE}";', "secret [REDACTED:bind_key_secret];")
+    _NAMED_CONF.replace(f'"{_FAKE_PREVIOUS_TSIG_VALUE}";', "[REDACTED:bind_key_secret];")
+    .replace(f'"{_FAKE_TSIG_VALUE}";', "[REDACTED:bind_key_secret];")
     .replace(f"secret {_FAKE_BARE_TSIG_VALUE};", "secret [REDACTED:bind_key_secret];")
     .replace(f'secret "{_FAKE_OLD_TSIG_VALUE}";', "secret [REDACTED:bind_key_secret];")
     .replace(f"cookie-secret {_FAKE_COOKIE_VALUE};", "cookie-secret [REDACTED:bind_key_secret];")
@@ -325,6 +327,7 @@ _NAMED_CONF_REDACTED = (
 def _assert_no_bind_secret(dumped: str) -> None:
     for value in (
         _FAKE_TSIG_VALUE,
+        _FAKE_PREVIOUS_TSIG_VALUE,
         _FAKE_BARE_TSIG_VALUE,
         _FAKE_OLD_TSIG_VALUE,
         _FAKE_COOKIE_VALUE,
@@ -389,8 +392,9 @@ async def test_bind9_config_show_key_secret_is_redacted(
 ) -> None:
     """Every key value becomes the placeholder; the rest of the file is unchanged.
 
-    The file holds a quoted secret, a secret without quotes and a
-    ``cookie-secret``. BIND accepts all of them.
+    The file holds a quoted secret, a secret without quotes, a
+    ``cookie-secret``, and an old secret in a comment between the
+    ``secret`` keyword and its value. BIND accepts all of them.
     """
     await _register_bind9_config_show(stub_embedding_service)
 

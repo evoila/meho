@@ -33,10 +33,11 @@ the engine then redacts the full match span (group 0). Patterns capture
 the *value* shape, not the surrounding context, except for
 ``authorization_header`` where the redacted span is the whole
 ``Authorization: ...`` line because the header name itself is the
-operator-facing signal. A pattern that must look past variable-width
-context (which a Python look-behind cannot do) names the secret part
-``value``: the engine then replaces only that group and keeps the rest
-of the match in the output (``bind_key_secret``).
+operator-facing signal. One named pattern, ``bind_key_secret``, is
+not a regex: it is a :class:`SecretFinder` (see :mod:`.bind_secret`)
+that reads BIND config text the way BIND does and reports only the
+value spans, so the keyword and the comments around them stay
+readable.
 
 **False-positive posture.** Tier-1 is the cheap layer. It will
 *occasionally* over-redact a benign UUID-shaped or FQDN-shaped string,
@@ -49,13 +50,27 @@ trust boundary is the API surface, per the parent goal (#800).
 from __future__ import annotations
 
 import re
-from typing import Final
+from typing import Final, Protocol
+
+from meho_backplane.redaction.bind_secret import BIND_KEY_SECRET
 
 __all__ = [
     "NAMED_PATTERNS",
     "PATTERN_NAMES",
+    "SecretFinder",
     "get_pattern",
 ]
+
+
+class SecretFinder(Protocol):
+    """A named pattern that is code, not a regex.
+
+    The engine replaces every span the finder reports and leaves the
+    rest of the text as it is.
+    """
+
+    def secret_spans(self, text: str) -> list[tuple[int, int]]:
+        """Return ``(start, end)`` of every secret in *text*, left to right."""
 
 
 # Secret-*value* character class shared by the labelled-secret patterns
@@ -185,57 +200,11 @@ _KUBECONFIG = re.compile(
     re.IGNORECASE,
 )
 
-# BIND key secrets (#4617). A ``named.conf`` ``key`` block carries the
-# shared secret of a TSIG or rndc key as ``secret "<base64>";``, and
-# the ``options`` block can carry ``cookie-secret "<hex>";``. BIND reads
-# both values as a string, with or without quotes, so the rule matches
-# both forms. A value without quotes ends at white space or at one of
-# BIND's special characters (``; { } / " !``), and the rule only takes
-# it when the closing ``;`` follows, so plain prose such as "the
-# secret is in the vault" is left alone. The keyword is followed by
-# whitespace, not ``=`` / ``:``, so ``api_key`` does not see it. BIND
-# also allows comments (``/* */``, ``//``, ``#``) between the keyword
-# and the value. A look-behind cannot skip them (it must be
-# fixed-width), so the match covers the keyword, any comments, and the
-# value, and the ``value`` group marks the
-# part the engine replaces. The keyword and the comments stay in the
-# output, so the file stays readable.
-#
-# Two guards keep a key *name* that ends in ``secret`` (``key
-# "transfer-secret"``, ``key "secret"``, ``key "my secret"``) from
-# matching the wrong pair of quotes: the keyword may not sit directly
-# after a quote, a hyphen, or another word character (``cookie-secret``
-# is matched as one keyword), and a quoted value must be base64 or hex
-# (BIND lets whitespace split it). The text from a name's closing quote
-# to the real value's opening quote holds ``{`` and ``;``, so it never
-# passes as a value. A value without quotes must follow white space or
-# a comment, so the opening quote of a name never starts one. It must
-# be followed by ``;`` or the start of a comment (white space may sit
-# in between). The check looks only at the first characters after the
-# value, so it stays fast on long text. ``#`` starts a comment anywhere
-# outside quotes in BIND, so it ends a value without quotes. A real
-# value is base64 or hex, so it never holds ``*``; leaving ``*`` out
-# keeps the end of a block comment (``*/``) out of a value.
-#
-# The gap between the keyword and the value is matched once and never
-# re-tried (possessive ``*+``). A line comment runs to the end of its
-# line, so a value on the same line after ``#`` or ``//`` is commented
-# out in BIND and is not matched. Without the possessive quantifier a
-# run of ``#`` characters with no quoted value after it could be split
-# into comments in exponentially many ways, and one short payload kept
-# the middleware busy for seconds (#4620 review).
-_BIND_COMMENT = r"(?:/\*[^*]*(?:\*(?!/)[^*]*)*\*/|//[^\n]*|#[^\n]*)"
-_BIND_KEY_SECRET = re.compile(
-    r"(?<![\w\"'-])(?:cookie-)?secret(?:\s|"
-    + _BIND_COMMENT
-    + r')*+(?P<value>"[A-Za-z0-9+/=\s]{1,'
-    + str(_VALUE_MAX)
-    + r'}"'
-    + r'|(?<=[\s/])[^\s;{}/*"!#]{1,'
-    + str(_VALUE_MAX)
-    + r"}+(?=\s*+(?:;|/[*/]|#)))",
-    re.IGNORECASE,
-)
+# BIND key secrets (#4617) are not a regex. A ``secret`` word inside a
+# comment or a quoted key name looks like the keyword, and a regex
+# cannot tell the two apart; one review found a comment that let the
+# old rule run over a real key block. :mod:`.bind_secret` reads the
+# text the way BIND does and reports only the value spans.
 
 # UUIDs (RFC 4122 canonical 8-4-4-4-12 hex). UUIDs in operator-facing
 # payloads are often resource identifiers (tenant id, agent run id) --
@@ -290,18 +259,18 @@ _FQDN = re.compile(
 )
 
 
-#: Frozen mapping from pattern name to compiled regex. Insertion order is
+#: Frozen mapping from pattern name to compiled regex or secret finder. Insertion order is
 #: the canonical evaluation order (engine iterates rules, not patterns,
 #: so this is documentation rather than a contract -- the engine applies
 #: rules in policy order). Names match the catalogue called out in the
 #: task body (#1070).
-NAMED_PATTERNS: Final[dict[str, re.Pattern[str]]] = {
+NAMED_PATTERNS: Final[dict[str, re.Pattern[str] | SecretFinder]] = {
     "authorization_header": _AUTHORIZATION_HEADER,
     "bearer_token": _BEARER_TOKEN,
     "jwt": _JWT,
     "api_key": _API_KEY,
     "kubeconfig": _KUBECONFIG,
-    "bind_key_secret": _BIND_KEY_SECRET,
+    "bind_key_secret": BIND_KEY_SECRET,
     "uuid": _UUID,
     "ipv4": _IPV4,
     "ipv6": _IPV6,
@@ -314,8 +283,8 @@ NAMED_PATTERNS: Final[dict[str, re.Pattern[str]]] = {
 PATTERN_NAMES: Final[tuple[str, ...]] = tuple(sorted(NAMED_PATTERNS))
 
 
-def get_pattern(name: str) -> re.Pattern[str]:
-    """Return the compiled regex for *name*.
+def get_pattern(name: str) -> re.Pattern[str] | SecretFinder:
+    """Return the compiled regex or the secret finder for *name*.
 
     Raises :class:`KeyError` with the known-names list when *name* is
     unknown -- the policy schema rejects unknown names at parse time

@@ -51,6 +51,7 @@ _REDACTED = "[REDACTED:param_name]"
 _PASSWORD_SECRET = "super-secret" + "-esxi-pw"
 _FAKE_TSIG_VALUE = "exampleTsig" + "Value=="
 _FAKE_BARE_TSIG_VALUE = "exampleBare" + "Value=="
+_FAKE_OLD_TSIG_VALUE = "exampleOld" + "Value=="
 _FAKE_COOKIE_VALUE = "0123abcd" + "ef" * 12
 
 _SDDC_PRODUCT = "sddc"
@@ -289,7 +290,12 @@ def test_bind9_config_show_classifies_credential_read() -> None:
     assert classify_op("bind9.config.show") == "credential_read"
 
 
+# A config BIND accepts, with the shapes a review found risky: a comment
+# that holds the word ``secret`` and an unclosed ``/*`` before the first
+# key block, a ``#`` inside a quoted string, a commented-out old key, and
+# a ``*/`` with a quoted string after it at the end of the file.
 _NAMED_CONF = (
+    "# the secret /* of every key stays on the server\n"
     'key "rndc-key" {\n'
     "    algorithm hmac-sha256;\n"
     f'    secret "{_FAKE_TSIG_VALUE}";\n'
@@ -298,22 +304,31 @@ _NAMED_CONF = (
     "    algorithm hmac-sha256;\n"
     f"    secret {_FAKE_BARE_TSIG_VALUE};\n"
     "};\n"
+    f'// key "old-key" {{ algorithm hmac-md5; secret "{_FAKE_OLD_TSIG_VALUE}"; }};\n'
     "options {\n"
     '    directory "/var/cache/bind";\n'
+    '    version "none # hidden";\n'
     f"    cookie-secret {_FAKE_COOKIE_VALUE};\n"
     "    allow-transfer { key rndc-key; };\n"
     "};\n"
+    '# */ "end of file"\n'
 )
 
 _NAMED_CONF_REDACTED = (
     _NAMED_CONF.replace(f'secret "{_FAKE_TSIG_VALUE}";', "secret [REDACTED:bind_key_secret];")
     .replace(f"secret {_FAKE_BARE_TSIG_VALUE};", "secret [REDACTED:bind_key_secret];")
+    .replace(f'secret "{_FAKE_OLD_TSIG_VALUE}";', "secret [REDACTED:bind_key_secret];")
     .replace(f"cookie-secret {_FAKE_COOKIE_VALUE};", "cookie-secret [REDACTED:bind_key_secret];")
 )
 
 
 def _assert_no_bind_secret(dumped: str) -> None:
-    for value in (_FAKE_TSIG_VALUE, _FAKE_BARE_TSIG_VALUE, _FAKE_COOKIE_VALUE):
+    for value in (
+        _FAKE_TSIG_VALUE,
+        _FAKE_BARE_TSIG_VALUE,
+        _FAKE_OLD_TSIG_VALUE,
+        _FAKE_COOKIE_VALUE,
+    ):
         assert value not in dumped
 
 

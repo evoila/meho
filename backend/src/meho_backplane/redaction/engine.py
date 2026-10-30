@@ -62,7 +62,7 @@ from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from meho_backplane.redaction.patterns import get_pattern
+from meho_backplane.redaction.patterns import SecretFinder, get_pattern
 from meho_backplane.redaction.policy import RedactionPolicy, RedactionRule
 
 __all__ = [
@@ -83,11 +83,6 @@ _HASH_SUFFIX_LEN: Final[int] = 12
 #: tokens it carries enough to disambiguate without leaking more than
 #: log2(16^4) = 16 bits.
 _MASK_SUFFIX_LEN: Final[int] = 4
-
-#: Name of the optional capture group that marks the secret part of a
-#: match. When a pattern defines it, only that part is replaced; the
-#: rest of the match stays in the output. See :mod:`.patterns`.
-_VALUE_GROUP: Final[str] = "value"
 
 
 class RedactionManifestEntry(BaseModel):
@@ -260,50 +255,48 @@ def _apply_to_str(
     enforce mode; only the in-payload substitution is suppressed.
     """
     pattern = get_pattern(rule.pattern)
-    matches = list(pattern.finditer(leaf))
-    if not matches:
+    spans = _secret_spans(pattern, leaf)
+    if not spans:
         return leaf
 
-    first = matches[0]
     manifest.append(
         RedactionManifestEntry(
             rule=rule.name,
             pattern=rule.pattern,
             action=rule.action,
-            count=len(matches),
-            span=_secret_span(first),
+            count=len(spans),
+            span=spans[0],
             reason=rule.reason,
             path=path,
         ),
     )
     if not mutate:
         return leaf
-    return pattern.sub(
-        lambda m: _substitute(rule, m),
-        leaf,
-    )
+    return _replace_spans(rule, leaf, spans)
 
 
-def _secret_span(match: re.Match[str]) -> tuple[int, int]:
-    """Return the span the engine replaces for *match*.
+def _secret_spans(pattern: re.Pattern[str] | SecretFinder, leaf: str) -> list[tuple[int, int]]:
+    """Return the spans *pattern* found in *leaf*, left to right, never overlapping.
 
-    Most patterns capture only the secret, so that is the whole match.
-    A pattern that has to include variable-width context before the
-    secret (``bind_key_secret``, see :mod:`.patterns`) names the secret
-    part ``value``; only that group is replaced and reported.
+    A regex pattern reports its whole matches. A finder (``bind_key_secret``,
+    see :mod:`.bind_secret`) reports only the secret part, so the text
+    around it stays readable.
     """
-    if _VALUE_GROUP in match.re.groupindex:
-        return match.span(_VALUE_GROUP)
-    return match.span()
+    if isinstance(pattern, re.Pattern):
+        return [match.span() for match in pattern.finditer(leaf)]
+    return pattern.secret_spans(leaf)
 
 
-def _substitute(rule: RedactionRule, match: re.Match[str]) -> str:
-    """Rewrite *match*: replace the secret span, keep the rest."""
-    start, end = _secret_span(match)
-    whole = match.group(0)
-    offset = match.start()
-    replacement = _replacement_for(rule, match.string[start:end])
-    return whole[: start - offset] + replacement + whole[end - offset :]
+def _replace_spans(rule: RedactionRule, leaf: str, spans: list[tuple[int, int]]) -> str:
+    """Rewrite *leaf*: replace every span, keep the rest."""
+    parts: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        parts.append(leaf[cursor:start])
+        parts.append(_replacement_for(rule, leaf[start:end]))
+        cursor = end
+    parts.append(leaf[cursor:])
+    return "".join(parts)
 
 
 def _replacement_for(rule: RedactionRule, matched: str) -> str:

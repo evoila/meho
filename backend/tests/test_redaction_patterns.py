@@ -16,6 +16,7 @@ so a pattern added in a future task fails CI until a row is added.
 
 from __future__ import annotations
 
+import re
 import time
 
 import pytest
@@ -340,6 +341,111 @@ def test_bind_key_secret_unquoted_value_in_a_key_named_secret() -> None:
     assert len(result.manifest) == 1
 
 
+_FAKE_OLD_BIND_SECRET = "oldTsig" + "Value=="
+
+
+@pytest.mark.parametrize(
+    "comment",
+    ["# the secret /* is below", "// the secret /* is below", '# the secret "', "/* secret"],
+    ids=["hash-opens-block", "slash-opens-block", "hash-opens-quote", "unclosed-block"],
+)
+def test_bind_key_secret_keyword_in_a_comment_cannot_reach_a_key_block(comment: str) -> None:
+    """A ``secret`` word in a comment never starts a match that spans real config.
+
+    The old regex read a ``/*`` inside a line comment as the start of a
+    comment between keyword and value, ran over the real key block up to
+    a later ``*/``, and left the real secret visible (#5342 review). The
+    finder reads comments the way BIND does, so the comment ends where
+    BIND ends it and the key block after it is redacted.
+    """
+    block = (
+        comment + "\n"
+        'key "rndc-key" {\n'
+        "    algorithm hmac-sha256;\n"
+        '    secret "' + _FAKE_BIND_SECRET + '";\n'
+        "};\n"
+        '# */ "end of file"\n'
+    )
+    result = redact(block, _BIND_KEY_SECRET_ONLY_POLICY)
+    assert result.redacted == (
+        comment + "\n"
+        'key "rndc-key" {\n'
+        "    algorithm hmac-sha256;\n"
+        "    secret [REDACTED:bind_key_secret];\n"
+        "};\n"
+        '# */ "end of file"\n'
+    )
+    assert _FAKE_BIND_SECRET not in result.redacted
+    assert len(result.manifest) == 1
+    start, end = result.manifest[0].span
+    assert block[start:end] == '"' + _FAKE_BIND_SECRET + '"'
+
+
+@pytest.mark.parametrize(
+    "line",
+    ['version "none # hidden";', 'directory "/var/cache//bind";', 'key "a /* b" { };'],
+    ids=["hash", "slashes", "block-start"],
+)
+def test_bind_key_secret_comment_marks_inside_a_quoted_string_are_text(line: str) -> None:
+    """``#``, ``//`` and ``/*`` inside a quoted string do not start a comment.
+
+    Otherwise the rest of the line, or the rest of the file, would count
+    as a comment and the ``cookie-secret`` after it would stay visible.
+    """
+    block = "options {\n    " + line + "\n    cookie-secret " + _FAKE_COOKIE_SECRET + ";\n};\n"
+    result = redact(block, _BIND_KEY_SECRET_ONLY_POLICY)
+    assert result.redacted == (
+        "options {\n    " + line + "\n    cookie-secret [REDACTED:bind_key_secret];\n};\n"
+    )
+    assert _FAKE_COOKIE_SECRET not in result.redacted
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            '/*\nkey "old" { algorithm hmac-md5; secret "' + _FAKE_OLD_BIND_SECRET + '"; };\n*/',
+            '/*\nkey "old" { algorithm hmac-md5; secret [REDACTED:bind_key_secret]; };\n*/',
+        ),
+        ('#secret "' + _FAKE_OLD_BIND_SECRET + '";', "#secret [REDACTED:bind_key_secret];"),
+        ("// secret " + _FAKE_OLD_BIND_SECRET + ";", "// secret [REDACTED:bind_key_secret];"),
+    ],
+    ids=["block", "hash-no-space", "slash-unquoted"],
+)
+def test_bind_key_secret_hides_a_commented_out_key(text: str, expected: str) -> None:
+    """A key block that an operator commented out still holds a secret."""
+    result = redact(text, _BIND_KEY_SECRET_ONLY_POLICY)
+    assert result.redacted == expected
+    assert _FAKE_OLD_BIND_SECRET not in result.redacted
+
+
+def test_bind_key_secret_redacts_two_keys_on_one_line() -> None:
+    line = (
+        'key "a" { algorithm hmac-sha256; secret "' + _FAKE_BIND_SECRET + '"; }; '
+        'key "b" { algorithm hmac-sha256; secret ' + _FAKE_OLD_BIND_SECRET + "; };"
+    )
+    result = redact(line, _BIND_KEY_SECRET_ONLY_POLICY)
+    assert result.redacted == (
+        'key "a" { algorithm hmac-sha256; secret [REDACTED:bind_key_secret]; }; '
+        'key "b" { algorithm hmac-sha256; secret [REDACTED:bind_key_secret]; };'
+    )
+    assert result.manifest[0].count == 2
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ["/*a" * 50000, '"a' * 50000, "secret /*" * 50000, "secret " + "#" * 100000],
+    ids=["unclosed-blocks", "unclosed-quotes", "keywords-and-blocks", "long-line-comment"],
+)
+def test_bind_key_secret_unclosed_comments_and_quotes_stay_fast(payload: str) -> None:
+    """A comment or quote that never closes is looked for once, not once per mark."""
+    policy = load_policy_yaml(DEFAULT_POLICY_PACKAGE, DEFAULT_POLICY_RESOURCE)
+    started = time.perf_counter()
+    redact(payload, policy)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 1.0, f"redaction took {elapsed:.2f}s"
+
+
 def test_get_pattern_returns_compiled_regex() -> None:
     """get_pattern is the runtime accessor the engine uses."""
     pat = get_pattern("uuid")
@@ -586,14 +692,18 @@ def test_pattern_matches_or_not(
 ) -> None:
     """Each pattern fires (or doesn't) on its representative sample."""
     pat = get_pattern(pattern)
-    matched = pat.search(sample)
+    matched = (
+        pat.search(sample) is not None
+        if isinstance(pat, re.Pattern)
+        else bool(pat.secret_spans(sample))
+    )
     if expect_match:
-        assert matched is not None, (
+        assert matched, (
             f"{pattern!r} did not match {sample!r} -- "
-            f"either the regex is too narrow or the sample is wrong"
+            f"either the pattern is too narrow or the sample is wrong"
         )
     else:
-        assert matched is None, (
+        assert not matched, (
             f"{pattern!r} unexpectedly matched {sample!r} -- "
             f"over-match risks false redaction in production"
         )

@@ -452,10 +452,12 @@ hides the raised message; read the details in `extras.remediation`.
 
 | What you see | What it means | What to do |
 |---|---|---|
-| could not reach the store | wrong address, network or TLS problem | fix the store target on B, then import again with the same handoff |
+| could not reach the store | wrong address, network or TLS problem | on A: check A's own store, then export again; on B: fix the store target on B, then import again with the same handoff |
 | the store's address is not dialed | the store target points at, or now resolves to, an address MEHO does not dial (not a public address); nothing was sent | fix the store target's host, or add the address to the allowlist if it is trusted |
 | the store answered with a redirect | B does not follow redirects | register the store target with the address the store itself listens on |
 | the store refused the login or the call | the operator's Vault login or policy does not allow the call | fix the Vault role or policy |
+| the source or sink is outside this operator's tenant path | the `from` or `to` path is not under the operator's tenant; nothing was read or sent | use a path under the tenant, then run the step again |
+| the source could not be read | the `from` path or field does not exist | check the path and the field name, then export again |
 | the store did not accept the handoff | the handoff was already used, expired, or was made by another store | run the export on A again |
 | SHA-256 does not match | the value is not the one the export reported | nothing was written; find out why, then export again |
 | the handoff was used, but writing failed | the sink write on B failed after the handoff was used | fix the sink, then export again |

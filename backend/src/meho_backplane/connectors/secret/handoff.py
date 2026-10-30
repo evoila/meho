@@ -50,7 +50,11 @@ from the error result and keeps only ``extras.remediation``
 (:mod:`meho_backplane.operations._vendor_text`). Every
 :class:`SecretHandoffError` therefore carries a ``remediation`` written
 by MEHO: the store, the Vault path, and what to do next. It never holds
-text from the store, the sink, or a client library.
+text from the store, the sink, or a client library. The source and sink
+adapters raise their own errors, which carry no remediation, so each
+step maps what the adapter raises before the first store call and on
+the source read (:func:`_read_source`, :func:`_check_sink`) into a
+handoff error too.
 """
 
 from __future__ import annotations
@@ -68,10 +72,12 @@ import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.connectors._shared.cache_key import DEFAULT_PORTS, effective_scheme
 from meho_backplane.connectors._shared.pinned_transport import build_pinned_async_transport
 from meho_backplane.connectors.secret.endpoints import (
+    SecretEndpoint,
     SecretMaterial,
     parse_secret_ref,
     resolve_secret_endpoint,
 )
+from meho_backplane.connectors.vault.tenant_scope import VaultTenantScopeError
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import resolve_target
@@ -206,6 +212,38 @@ def _raise_store_error(
 # ---------------------------------------------------------------------------
 
 
+async def _read_source(
+    operator: Operator, source: SecretEndpoint, source_name: str
+) -> SecretMaterial:
+    """Read the value from the source, in handoff-error terms.
+
+    The source adapter logs in to this instance's store and reads the
+    path. Its own errors carry no remediation, so a refused login, an
+    unreachable store, a denied tenant path or a missing field is mapped
+    here. *source_name* is the ``<kind>:<ref>`` address, never the value.
+    """
+    try:
+        return await source.read_secret(operator)
+    except VaultTenantScopeError as exc:
+        raise SecretHandoffRefusedError(
+            f"the source {source_name} is outside this operator's tenant path, so "
+            f"{_LOCAL_STORE} was not asked; use a path under the tenant, {_RETRY_EXPORT}"
+        ) from exc
+    except (
+        _auth_vault.VaultClientError,
+        hvac.exceptions.VaultError,
+        requests.exceptions.RequestException,
+    ) as exc:
+        _raise_store_error(
+            exc, store=_LOCAL_STORE, path=source_name, action="read the value", retry=_RETRY_EXPORT
+        )
+    except (ValueError, NotImplementedError) as exc:
+        raise SecretHandoffStoreError(
+            f"the source {source_name} could not be read ({type(exc).__name__}); check that "
+            f"the kind can be read from and that the path and the field exist, {_RETRY_EXPORT}"
+        ) from exc
+
+
 async def _wrap_on_local_store(
     operator: Operator, material: SecretMaterial, ttl_seconds: int
 ) -> tuple[str, int]:
@@ -249,7 +287,7 @@ async def secret_handoff_export(
     del target
     source_ref = parse_secret_ref(str(params["from"]))
     source = resolve_secret_endpoint(source_ref)
-    material = await source.read_secret(operator)
+    material = await _read_source(operator, source, f"{source_ref.kind}:{source_ref.ref}")
     ttl_seconds = int(params.get("ttl_seconds", DEFAULT_HANDOFF_TTL_SECONDS))
     token, ttl = await _wrap_on_local_store(operator, material, ttl_seconds)
     _log.info(
@@ -409,6 +447,26 @@ async def _unwrap(store: _RemoteStore, handoff_token: str) -> SecretMaterial:
     return SecretMaterial(value)
 
 
+def _check_sink(operator: Operator, sink: SecretEndpoint, sink_name: str) -> None:
+    """Run the sink's own write check before the handoff is used, in handoff-error terms.
+
+    Only a sink with ``check_write_allowed`` (the ``vault:`` kind) has a
+    check to run. A denied tenant path is reported with the sink address
+    and the fact that the handoff is still usable.
+    """
+    check_write = getattr(sink, "check_write_allowed", None)
+    if check_write is None:
+        return
+    try:
+        check_write(operator)
+    except VaultTenantScopeError as exc:
+        raise SecretHandoffRefusedError(
+            f"the sink {sink_name} is outside this operator's tenant path, so the handoff "
+            "was not used and is still usable; use a path under the tenant, then run "
+            "secret.handoff.import again with the same handoff"
+        ) from exc
+
+
 async def secret_handoff_import(
     operator: Operator, target: Any, params: dict[str, Any]
 ) -> dict[str, Any]:
@@ -421,14 +479,12 @@ async def secret_handoff_import(
     del target
     sink_ref = parse_secret_ref(str(params["to"]))
     sink = resolve_secret_endpoint(sink_ref)
-    check_write = getattr(sink, "check_write_allowed", None)
-    if check_write is not None:
-        check_write(operator)
+    sink_name = f"{sink_ref.kind}:{sink_ref.ref}"
+    _check_sink(operator, sink, sink_name)
     store = await _resolve_remote_store(operator, str(params["store"]))
 
     material = await _unwrap(store, str(params["handoff_token"]))
 
-    sink_name = f"{sink_ref.kind}:{sink_ref.ref}"
     expected = params.get("expect_sha256")
     if isinstance(expected, str) and expected.lower() != material.value_sha256:
         raise SecretHandoffDigestMismatchError(

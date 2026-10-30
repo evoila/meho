@@ -204,17 +204,22 @@ Both ops send a secret, so the dispatcher withholds the raised message
 (`extras.exception_message`) from the error result
 (`operations/_vendor_text.py`). Every error therefore sets `remediation`
 to the same MEHO-written text, and that is what the caller reads in
-`extras.remediation`.
+`extras.remediation`. The source and sink adapters raise their own
+errors, which carry no remediation. So the export maps what the source
+read raises (a refused login, an unreachable store, a denied tenant
+path, a missing field) into a handoff error naming the source address,
+and the import maps a denied sink tenant path the same way, before the
+handoff is used.
 
 | Error | When |
 |---|---|
-| `SecretHandoffUnreachableError` | the store cannot be reached (wrong address, network, TLS) |
+| `SecretHandoffUnreachableError` | the store cannot be reached (wrong address, network, TLS): A's own store on the source read or the wrap, the store target on the unwrap |
 | `SecretHandoffDestinationBlockedError` | the store target is, or now resolves to, an address this MEHO does not dial; nothing was sent, the handoff is still usable |
-| `SecretHandoffRefusedError` | the store refused the login or the call |
+| `SecretHandoffRefusedError` | the store refused the login or the call, or the source or sink path is outside the operator's tenant path |
 | `SecretHandoffInvalidError` | the handoff was already used, expired, or was made by another store |
 | `SecretHandoffDigestMismatchError` | the value's SHA-256 is not `expect_sha256`; nothing was written |
 | `SecretHandoffSinkWriteError` | the handoff was used but the sink write failed; make a new handoff |
-| `SecretHandoffStoreError` | a bad store target (not product `vault`, a pinned CA), a redirect, another HTTP status, or a malformed reply |
+| `SecretHandoffStoreError` | a bad store target (not product `vault`, a pinned CA), a redirect, another HTTP status, a malformed reply, or a source path or field that cannot be read |
 
 ## Ops example — move a Keycloak client secret into Vault
 

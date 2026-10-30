@@ -31,6 +31,7 @@ from uuid import UUID
 import httpx
 import hvac.exceptions
 import pytest
+import requests.exceptions
 import structlog
 from cryptography.fernet import Fernet
 from sqlalchemy import select
@@ -365,8 +366,27 @@ async def test_export_returns_handoff_hash_and_length_never_the_value(
 async def test_export_keeps_the_source_tenant_guard(instances: _Instances) -> None:
     instances.on_a()
     foreign = f"vault:tenants/{_TENANT_B}/targets/db#password"
-    with pytest.raises(VaultTenantScopeError):
+    with pytest.raises(SecretHandoffRefusedError) as excinfo:
         await secret_handoff_export(_operator(_TENANT_A), None, {"from": foreign})
+    assert isinstance(excinfo.value.__cause__, VaultTenantScopeError)
+    message = str(excinfo.value)
+    assert foreign in message
+    assert "tenant path" in message
+    assert "secret.handoff.export again" in message
+    assert instances.store_a.handoffs == {}
+
+
+async def test_export_missing_field_names_source_and_next_step(instances: _Instances) -> None:
+    """The source path exists but has no such field: a plain error, no handoff."""
+    instances.on_a()
+    missing = f"vault:{_SOURCE_PATH}#api_key"
+    with pytest.raises(SecretHandoffStoreError) as excinfo:
+        await secret_handoff_export(_operator(_TENANT_A), None, {"from": missing})
+    message = str(excinfo.value)
+    assert missing in message
+    assert "VaultSecretRefError" in message
+    assert "secret.handoff.export again" in message
+    assert _VALUE not in message
     assert instances.store_a.handoffs == {}
 
 
@@ -513,7 +533,7 @@ async def test_import_checks_sink_tenant_before_using_the_handoff(
     instances.on_b()
     foreign_sink = f"vault:tenants/{_TENANT_A}/targets/db#password"
 
-    with pytest.raises(VaultTenantScopeError):
+    with pytest.raises(SecretHandoffRefusedError) as excinfo:
         await secret_handoff_import(
             _operator(_TENANT_B),
             None,
@@ -523,6 +543,11 @@ async def test_import_checks_sink_tenant_before_using_the_handoff(
                 "to": foreign_sink,
             },
         )
+    assert isinstance(excinfo.value.__cause__, VaultTenantScopeError)
+    message = str(excinfo.value)
+    assert foreign_sink in message
+    assert "still usable" in message
+    assert exported["handoff_token"] not in message
 
     # The handoff was not used, so a corrected import still works.
     assert instances.store_a.unwrap_calls == 0
@@ -775,6 +800,58 @@ async def test_dispatch_import_wrong_address_names_store_path_and_next_step(
     assert "same handoff" in remediation
     assert exported["handoff_token"] not in result.model_dump_json()
     assert instances.store_b.writes == []
+
+
+async def test_dispatch_export_refused_first_login_names_store_and_source(
+    instances: _Instances, _registered_ops: None
+) -> None:
+    """The store refuses the login for the source read, before anything is read."""
+    instances.on_a()
+    instances.store_a.login_exc = hvac.exceptions.Forbidden("role denied")
+
+    result = await _dispatch(_TENANT_A, "secret.handoff.export", {"from": _FROM})
+
+    remediation = _assert_message_withheld(result, "SecretHandoffRefusedError")
+    assert "this instance's secret store" in remediation
+    assert _FROM in remediation
+    assert "refused the login" in remediation
+    assert "Vault role" in remediation
+    assert "secret.handoff.export again" in remediation
+    assert "role denied" not in remediation
+    assert instances.store_a.handoffs == {}
+
+
+async def test_dispatch_export_unreachable_store_names_store_and_source(
+    instances: _Instances, _registered_ops: None
+) -> None:
+    """The store cannot be reached for the source read: a plain error, no handoff."""
+    instances.on_a()
+    instances.store_a.login_exc = requests.exceptions.ConnectionError("connection refused")
+
+    result = await _dispatch(_TENANT_A, "secret.handoff.export", {"from": _FROM})
+
+    remediation = _assert_message_withheld(result, "SecretHandoffUnreachableError")
+    assert "could not reach this instance's secret store" in remediation
+    assert _FROM in remediation
+    assert "check the address and the network" in remediation
+    assert "secret.handoff.export again" in remediation
+    assert "connection refused" not in remediation
+    assert instances.store_a.handoffs == {}
+
+
+async def test_dispatch_export_foreign_source_names_tenant_path(
+    instances: _Instances, _registered_ops: None
+) -> None:
+    instances.on_a()
+    foreign = f"vault:tenants/{_TENANT_B}/targets/db#password"
+
+    result = await _dispatch(_TENANT_A, "secret.handoff.export", {"from": foreign})
+
+    remediation = _assert_message_withheld(result, "SecretHandoffRefusedError")
+    assert foreign in remediation
+    assert "tenant path" in remediation
+    assert "secret.handoff.export again" in remediation
+    assert instances.store_a.handoffs == {}
 
 
 async def test_dispatch_export_refused_by_the_store_names_store_and_path(

@@ -230,6 +230,58 @@ async def test_non_string_values_compare_by_content(monkeypatch: pytest.MonkeyPa
     assert result["same"] is True
 
 
+@pytest.mark.parametrize(
+    ("text", "other"),
+    [
+        ("123", 123),
+        ("1.5", 1.5),
+        ("true", True),
+        ("null", None),
+        ("[1]", [1]),
+        ('{"a":1}', {"a": 1}),
+    ],
+)
+async def test_a_string_never_matches_another_json_type(
+    monkeypatch: pytest.MonkeyPatch, text: str, other: Any
+) -> None:
+    """``"123"`` and ``123`` are different stored values, in either order."""
+    _install_store(
+        monkeypatch,
+        {
+            f"secret/{_BASE}/text": (1, {"k": text}),
+            f"secret/{_BASE}/other": (1, {"k": other}),
+            f"secret/{_BASE}/other-again": (2, {"k": other}),
+        },
+    )
+    text_first = await _compare(
+        [{"path": f"{_BASE}/text", "key": "k"}, {"path": f"{_BASE}/other", "key": "k"}]
+    )
+    assert text_first["same"] is False
+    assert [c["found"] for c in text_first["copies"]] == [True, True]
+    assert [c["matches_first"] for c in text_first["copies"]] == [True, False]
+
+    other_first = await _compare(
+        [
+            {"path": f"{_BASE}/other", "key": "k"},
+            {"path": f"{_BASE}/text", "key": "k"},
+            {"path": f"{_BASE}/other-again", "key": "k"},
+        ]
+    )
+    assert other_first["same"] is False
+    assert [c["matches_first"] for c in other_first["copies"]] == [True, False, True]
+
+
+async def test_number_and_boolean_are_different_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_store(
+        monkeypatch,
+        {f"secret/{_BASE}/a": (1, {"k": 1}), f"secret/{_BASE}/b": (1, {"k": True})},
+    )
+    result = await _compare(
+        [{"path": f"{_BASE}/a", "key": "k"}, {"path": f"{_BASE}/b", "key": "k"}]
+    )
+    assert result["same"] is False
+
+
 async def test_one_copy_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_store(
         monkeypatch,

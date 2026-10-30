@@ -558,9 +558,12 @@ needed its own `vault.kv.delete` call and its own approval.
 
 - Each copy is read with the caller's own Vault login (same role and same
   tenant guard as `vault.kv.read`).
-- The value under `key` becomes bytes (a string as UTF-8, any other JSON
-  value as canonical JSON). It is compared with the first copy by
-  `hmac.compare_digest` (constant time) and then dropped.
+- The value under `key` becomes a `StoredValue`: its kind (`text` for a
+  string, `json` for any other JSON value) and its bytes (UTF-8 text, or
+  canonical JSON). Two copies match only when the kind and the bytes
+  match, compared by `hmac.compare_digest` (constant time); then the value
+  is dropped. So the string `"123"` never matches the number `123`, and
+  `"null"` never matches `null`.
 - Answer: `{same, copies: [{mount, path, key, found, matches_first,
   version, reason}]}`. `same` is true only when every copy was found and
   matches. Never a value, never a hash: a hash of a short password can be
@@ -573,7 +576,7 @@ needed its own `vault.kv.delete` call and its own approval.
 - The op id is on `_CREDENTIAL_READ_OPS`. The backplane reads secret
   values to answer it, so the flight recorder never stores a vendor body
   for it and the broadcast feed shows only the outcome.
-- `read_kv_copy` and `compare_copies` are shared with
+- `read_kv_copy`, `compare_copies` and `text_value` are shared with
   `k8s.secret.compare_to_ref` (a Kubernetes Secret key against one Vault
   copy; see `connectors-kubernetes.md`).
 

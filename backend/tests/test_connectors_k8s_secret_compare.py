@@ -222,6 +222,23 @@ async def test_secret_and_vault_copy_different(monkeypatch: pytest.MonkeyPatch) 
     assert all(c["found"] for c in result["copies"])
 
 
+@pytest.mark.parametrize("vault_value", [123, 1.5, True, None, [1], {"a": 1}])
+async def test_secret_text_never_matches_a_non_string_vault_value(
+    monkeypatch: pytest.MonkeyPatch, vault_value: Any
+) -> None:
+    """A Secret holding ``123`` matches the Vault string ``"123"``, not the number."""
+    text = json.dumps(vault_value, separators=(",", ":"))
+    _install_vault(monkeypatch, {f"secret/{_BASE}/keycloak/admin": (6, {"password": vault_value})})
+    result = await _compare(_secret({"admin-password": _b64(text)}))
+    assert result["same"] is False
+    assert [c["found"] for c in result["copies"]] == [True, True]
+    assert [c["matches_first"] for c in result["copies"]] == [True, False]
+
+    _install_vault(monkeypatch, {f"secret/{_BASE}/keycloak/admin": (7, {"password": text})})
+    result = await _compare(_secret({"admin-password": _b64(text)}))
+    assert result["same"] is True
+
+
 async def test_secret_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_vault(monkeypatch, {f"secret/{_BASE}/keycloak/admin": (6, {"password": _VALUE})})
     result = await _compare(ApiException(status=404, reason="Not Found"))

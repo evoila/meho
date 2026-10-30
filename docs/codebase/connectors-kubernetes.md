@@ -777,6 +777,8 @@ match. `ops_secret_compare.py` answers that without showing the value.
   `ref: {path, key, mount?}`.
 - The Secret is read with the connector's normal Kubernetes access. Its
   value is base64-decoded, so it is compared with the plain text in Vault.
+  A Vault value that is not a string (a number, `null`, a list) never
+  matches the Secret.
 - The Vault copy is read with the caller's own Vault login and tenant
   guard. Like `k8s.secret.read_to_ref`, it uses no Vault target
   (`target=None`), so the deployment's Vault and the default role apply.

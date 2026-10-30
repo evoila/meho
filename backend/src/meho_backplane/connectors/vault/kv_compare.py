@@ -13,9 +13,12 @@ How it works
 
 * Each copy is read with the caller's own Vault login (the same role and
   the same tenant guard as ``vault.kv.read``).
-* The value under ``key`` is turned into bytes and compared with the first
-  copy's bytes by :func:`hmac.compare_digest` (constant time).
-* Only the first copy's bytes are kept while the others are read; every
+* The value under ``key`` becomes a :class:`StoredValue`: its kind (text,
+  or any other JSON value) and its bytes. Two copies match only when the
+  kind and the bytes match, compared by :func:`hmac.compare_digest`
+  (constant time). So the string ``"123"`` never matches the number
+  ``123``, and ``"null"`` never matches ``null``.
+* Only the first copy's value is kept while the others are read; every
   other value is dropped as soon as it is compared.
 * The answer holds ``same`` and, per copy, ``found``, ``matches_first``,
   the Vault ``version`` and a ``reason`` when the copy was not read. It
@@ -41,7 +44,8 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import hvac.exceptions
 
@@ -61,8 +65,10 @@ __all__ = [
     "KV_COMPARE_OP_SPEC",
     "REASONS",
     "VAULT_KV_REF_SCHEMA",
+    "StoredValue",
     "compare_copies",
     "read_kv_copy",
+    "text_value",
     "values_match",
     "vault_kv_compare",
 ]
@@ -179,28 +185,47 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
 }
 
 
-def _value_bytes(value: Any) -> bytes:
-    """Return the bytes compared for one stored value.
+@dataclass(frozen=True, slots=True)
+class StoredValue:
+    """One stored secret value, ready to compare.
 
-    A string is compared as its UTF-8 bytes, so a Vault string and the same
-    text in a Kubernetes Secret match. Any other JSON value is compared as
-    its canonical JSON text.
+    ``kind`` is ``"text"`` for a Vault string or the raw bytes of a
+    Kubernetes Secret, and ``"json"`` for any other JSON value in Vault
+    (number, boolean, null, list, object). ``data`` holds the UTF-8 bytes
+    of the text, or the canonical JSON text of the other value. Two values
+    match only when both fields match, so a Vault string ``"123"`` and the
+    number ``123`` are different, while a Kubernetes Secret holding
+    ``123`` and a Vault string ``"123"`` are the same.
     """
+
+    kind: Literal["text", "json"]
+    data: bytes
+
+
+def text_value(raw: bytes) -> StoredValue:
+    """The :class:`StoredValue` of raw text bytes (a Kubernetes Secret key)."""
+    return StoredValue("text", raw)
+
+
+def _stored_value(value: Any) -> StoredValue:
+    """The :class:`StoredValue` of one JSON value read from Vault."""
     if isinstance(value, str):
-        return value.encode("utf-8")
-    if isinstance(value, bytes):
-        return value
-    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return text_value(value.encode("utf-8"))
+    return StoredValue(
+        "json", json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
 
 
-def values_match(first: bytes | None, other: bytes | None) -> bool:
+def values_match(first: StoredValue | None, other: StoredValue | None) -> bool:
     """Constant-time equality of two values; a missing value never matches."""
     if first is None or other is None:
         return False
-    return hmac.compare_digest(first, other)
+    return first.kind == other.kind and hmac.compare_digest(first.data, other.data)
 
 
-def compare_copies(reads: list[tuple[dict[str, Any], bytes | None]]) -> dict[str, Any]:
+def compare_copies(
+    reads: list[tuple[dict[str, Any], StoredValue | None]],
+) -> dict[str, Any]:
     """Build the ``{same, copies}`` answer from per-copy reports and values.
 
     The first entry is the reference. Each report gets ``matches_first``.
@@ -213,8 +238,8 @@ def compare_copies(reads: list[tuple[dict[str, Any], bytes | None]]) -> dict[str
 
 async def read_kv_copy(
     client: Any, operator: Operator, ref: dict[str, Any], *, op_id: str
-) -> tuple[dict[str, Any], bytes | None]:
-    """Read one Vault copy; return its report and the value bytes (or ``None``).
+) -> tuple[dict[str, Any], StoredValue | None]:
+    """Read one Vault copy; return its report and its value (or ``None``).
 
     The report has ``mount``, ``path``, ``key``, ``found``, ``version`` and
     ``reason``. A forbidden, missing or key-less copy returns ``None`` as
@@ -252,7 +277,7 @@ async def read_kv_copy(
         return {**report, "reason": "not_found"}, None
     if key not in secret_data:
         return {**report, "reason": "key_not_found"}, None
-    return {**report, "found": True}, _value_bytes(secret_data[key])
+    return {**report, "found": True}, _stored_value(secret_data[key])
 
 
 async def vault_kv_compare(

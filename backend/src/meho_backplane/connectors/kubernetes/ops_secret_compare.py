@@ -15,9 +15,10 @@ How it works
 * The Vault copy is read with the caller's own Vault login and tenant
   guard, the same way ``k8s.secret.read_to_ref`` reaches Vault: no Vault
   target, so the deployment's Vault and the default role are used.
-* The two values are compared as bytes with :func:`hmac.compare_digest`
-  (constant time) and dropped. The Secret value is base64-decoded first,
-  so it is compared with the plain text stored in Vault.
+* The two values are compared with :func:`hmac.compare_digest` (constant
+  time) and dropped. The Secret value is base64-decoded first, so it is
+  compared with the plain text stored in Vault. A Vault value that is not
+  a string (a number, ``null``, a list) never matches the Secret.
 * The answer holds ``same`` and two copies (the Secret first, then Vault),
   each with ``found``, ``matches_first``, its version (the Secret's
   ``resourceVersion`` or the Vault version) and a ``reason`` when it was
@@ -96,16 +97,22 @@ async def k8s_secret_compare_to_ref(
     # Lazy imports, as in ``k8s.secret.read_to_ref``: this module is imported
     # while the kubernetes op tuple is built, so it stays free of import-time
     # coupling to the vault connector package.
-    from meho_backplane.connectors.vault.kv_compare import compare_copies, read_kv_copy
+    from meho_backplane.connectors.vault.kv_compare import (
+        compare_copies,
+        read_kv_copy,
+        text_value,
+    )
     from meho_backplane.connectors.vault.target_auth import vault_client_for_target
 
     api_client = await connector._get_api_client(target, operator)
-    secret_copy = await _read_secret_copy(
+    secret_report, secret_raw = await _read_secret_copy(
         client.CoreV1Api(api_client),
         name=params["name"],
         namespace=params["namespace"],
         key=params["key"],
     )
+    secret_copy = (secret_report, None if secret_raw is None else text_value(secret_raw))
+    del secret_raw
     async with vault_client_for_target(operator, None) as vault_client:
         vault_report, vault_value = await read_kv_copy(
             vault_client, operator, params["ref"], op_id=_OP_ID

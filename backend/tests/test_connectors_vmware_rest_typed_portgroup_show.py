@@ -7,7 +7,8 @@
   VI-JSON answers: the full row (VLAN, security, teaming, traffic shaping),
   the trunk, private VLAN and missing VLAN shapes, local and inherited
   settings mixed inside one policy (resolved against the switch defaults), a
-  whole inherited policy, unreadable switch defaults, the lookup by name on
+  whole inherited policy, unreadable switch defaults (an error when a setting
+  is inherited, a warning when none is), the lookup by name on
   the ``/api`` and the legacy ``/rest`` mount, an unknown or ambiguous name,
   an unknown port group and an unreadable ``config`` property;
 * the real connector over mocked HTTP: both reads land on the VI-JSON path of
@@ -546,7 +547,25 @@ async def test_whole_inherited_policy_takes_every_setting_from_the_switch() -> N
     Draft202012Validator(VMWARE_NETWORK_PORTGROUP_SHOW_OP.response_schema).validate(out)
 
 
-async def test_unreadable_switch_defaults_keep_the_portgroup_values_and_warn(
+@pytest.mark.parametrize(
+    "switch",
+    [
+        pytest.param(_switch_answer(None, missing=["config.defaultPortConfig"]), id="missing-set"),
+        pytest.param({"_typeName": "RetrieveResult", "objects": []}, id="switch-absent"),
+    ],
+)
+async def test_unreadable_switch_defaults_fail_when_a_setting_is_inherited(
+    switch: dict[str, Any],
+) -> None:
+    # The mixed config inherits its uplinks without listing them. Without the
+    # switch defaults the row would show empty uplink lists as if they were
+    # confirmed, so the call fails instead.
+    conn = _FakeConnector(_config_answer(_mixed_config()), switch_answer=switch)
+    with pytest.raises(RuntimeError, match="could not read the default port settings"):
+        await _show(conn)
+
+
+async def test_unreadable_switch_defaults_only_warn_when_nothing_is_inherited(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A fresh logger so capture_logs sees the event whatever an earlier test
@@ -554,17 +573,20 @@ async def test_unreadable_switch_defaults_keep_the_portgroup_values_and_warn(
     monkeypatch.setattr(
         typed_ops_portgroup_show, "_log", structlog.get_logger(typed_ops_portgroup_show.__name__)
     )
+    config = copy.deepcopy(_CONFIG)
+    # The switch defaults inherit nothing, so as a port group setting they
+    # are a config that is set locally all the way down.
+    config["defaultPortConfig"] = copy.deepcopy(_SWITCH_DEFAULTS)
     switch = _switch_answer(None, missing=["config.defaultPortConfig"])
-    conn = _FakeConnector(_config_answer(_mixed_config()), switch_answer=switch)
+    conn = _FakeConnector(_config_answer(config), switch_answer=switch)
     with structlog.testing.capture_logs() as events:
         out = await _show(conn)
     assert out["dvs_name"] == "dvs-prod"
-    # The flags still say what is inherited; the values are what vCenter sent.
-    assert out["teaming"]["load_balancing"] == "failover_explicit"
-    assert out["teaming"]["active_uplinks"] == []
-    assert out["teaming"]["inherited_settings"]["active_uplinks"] is True
-    assert out["vlan"] == {"mode": "access", "vlan_id": None}
-    assert out["inherited_settings"]["vlan"] is True
+    assert out["teaming"]["active_uplinks"] == ["uplink1", "uplink2"]
+    assert out["teaming"]["inherited"] is False
+    assert not any(out["teaming"]["inherited_settings"].values())
+    assert out["vlan"] == {"mode": "access", "vlan_id": 0}
+    assert out["inherited_settings"] == {"vlan": False, "blocked": False}
     warnings = [
         e for e in events if e["event"] == "vmware_portgroup_show_switch_defaults_unreadable"
     ]

@@ -39,7 +39,10 @@ Field names follow the VIM types in the pinned ``vi-json.yaml``:
 A missing port group is a ``not_found`` result. A ``config`` property vCenter
 could not read (a ``missingSet`` entry, for example no permission) fails the
 call: empty settings would be a wrong answer. Switch defaults vCenter could
-not read only log a warning: the row then shows the port group's own values.
+not read fail the call too when the port group inherits at least one setting:
+an inherited uplink list without the switch value would show as empty. When
+the port group inherits nothing, the defaults are not needed, and the read
+only logs a warning.
 """
 
 from __future__ import annotations
@@ -171,6 +174,17 @@ def _inherited(policy: Any) -> bool | None:
 def _moref_value(ref: Any) -> str | None:
     value = ref.get("value") if isinstance(ref, dict) else None
     return value if isinstance(value, str) else None
+
+
+def _inherits_from_switch(setting: Any) -> bool:
+    """Whether any policy in this port setting, at any depth, is inherited."""
+    if isinstance(setting, dict):
+        return setting.get("inherited") is True or any(
+            _inherits_from_switch(value) for value in setting.values()
+        )
+    if isinstance(setting, list):
+        return any(_inherits_from_switch(value) for value in setting)
+    return False
 
 
 def _vlan_view(raw: Any) -> dict[str, Any] | None:
@@ -314,8 +328,8 @@ def _portgroup_row(
 ) -> dict[str, Any]:
     """The operator-facing row from a ``DVPortgroupConfigInfo``.
 
-    *switch_defaults* is the switch's ``config.defaultPortConfig`` (``{}`` when
-    vCenter did not give it); inherited settings are resolved against it.
+    *switch_defaults* is the switch's ``config.defaultPortConfig``; inherited
+    settings are resolved against it. ``{}`` only when nothing is inherited.
     """
     port = _as_dict(config.get("defaultPortConfig"))
     pick = _picker(port, switch_defaults, None)
@@ -428,34 +442,35 @@ async def _switch_defaults(
     operator: Operator,
     target: VsphereTargetLike,
     switch_ref: Any,
-) -> tuple[str | None, dict[str, Any]]:
+) -> tuple[str | None, dict[str, Any] | None]:
     """The parent switch's display name and its default port settings.
 
-    ``(None, {})`` without a switch reference. Switch defaults vCenter could not
-    read (a ``missingSet`` entry, for example no permission on the switch) log a
-    warning and give ``{}``: the row then shows the port group's own values.
+    The defaults are ``None`` when vCenter did not give them (no switch
+    reference, the switch missing from the answer, or a ``missingSet`` entry,
+    for example no permission). That logs a warning; the caller decides whether
+    the defaults were needed.
     """
     moid = _moref_value(switch_ref)
-    if moid is None:
-        return None, {}
-    ref_type = switch_ref.get("type")
-    mo_type = ref_type if isinstance(ref_type, str) and ref_type else DVS_MO_TYPE
-    result = await connector._post_vmomi_json(
-        target,
-        _RETRIEVE_PROPERTIES_PATH,
-        operator=operator,
-        json=retrieve_properties_body(mo_type, [moid], (_PROP_NAME, SWITCH_DEFAULTS_PROPERTY)),
-    )
-    found = _object_props(result, moid)
-    if found is None:
-        return None, {}
-    props, missing = found
-    if SWITCH_DEFAULTS_PROPERTY in missing:
+    props: dict[str, Any] = {}
+    missing: set[str] = {SWITCH_DEFAULTS_PROPERTY}
+    if moid is not None:
+        ref_type = switch_ref.get("type")
+        mo_type = ref_type if isinstance(ref_type, str) and ref_type else DVS_MO_TYPE
+        result = await connector._post_vmomi_json(
+            target,
+            _RETRIEVE_PROPERTIES_PATH,
+            operator=operator,
+            json=retrieve_properties_body(mo_type, [moid], (_PROP_NAME, SWITCH_DEFAULTS_PROPERTY)),
+        )
+        props, missing = _object_props(result, moid) or (props, missing)
+    name = props.get(_PROP_NAME)
+    defaults = None if SWITCH_DEFAULTS_PROPERTY in missing else props.get(SWITCH_DEFAULTS_PROPERTY)
+    if not isinstance(defaults, dict):
         _log.warning(
             "vmware_portgroup_show_switch_defaults_unreadable", target=target.name, dvs=moid
         )
-    name = props.get(_PROP_NAME)
-    return (name if isinstance(name, str) else None), _as_dict(props.get(SWITCH_DEFAULTS_PROPERTY))
+        defaults = None
+    return (name if isinstance(name, str) else None), defaults
 
 
 async def portgroup_show_impl(
@@ -470,7 +485,8 @@ async def portgroup_show_impl(
        name) to find the id. Skipped when ``portgroup`` is given.
     2. ``RetrievePropertiesEx`` of the port group's ``config``.
     3. ``RetrievePropertiesEx`` of the parent switch's ``name`` and
-       ``config.defaultPortConfig``, to resolve inherited settings.
+       ``config.defaultPortConfig``, to resolve inherited settings. Defaults
+       vCenter could not give fail the call when a setting is inherited.
 
     Returns one flat row (see the response schema of
     :data:`VMWARE_NETWORK_PORTGROUP_SHOW_OP`).
@@ -500,7 +516,13 @@ async def portgroup_show_impl(
     config = _as_dict(props.get(PORTGROUP_CONFIG_PROPERTY))
     switch_ref = config.get("distributedVirtualSwitch")
     dvs_name, switch_defaults = await _switch_defaults(connector, operator, target, switch_ref)
-    row = _portgroup_row(portgroup, config, dvs_name, switch_defaults)
+    if switch_defaults is None and _inherits_from_switch(config.get("defaultPortConfig")):
+        raise RuntimeError(
+            "vmware.network.portgroup.show: vCenter could not read the default port settings "
+            f"of the switch of port group {portgroup!r} (missing permission or an unreadable "
+            "object), and the port group inherits settings from the switch"
+        )
+    row = _portgroup_row(portgroup, config, dvs_name, switch_defaults or {})
     _log.info(
         "vmware_portgroup_show_read",
         target=target.name,

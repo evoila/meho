@@ -4512,7 +4512,9 @@ operation for this common task.
   empty list. Each policy says `inherited` (the whole policy comes from the
   switch) and `inherited_settings` (true, false or null per field). When
   vCenter cannot read the switch defaults (for example no permission on the
-  switch), the read logs a warning and shows the port group's own values.
+  switch) and the port group inherits at least one setting, the call fails:
+  an inherited uplink list without the switch value would show as empty.
+  When the port group inherits nothing, the read only logs a warning.
 - **Errors.** An unknown id or name is a `not_found` result. A name used by
   two port groups (for example in two datacenters) is an error that names the
   ids. A `config` property vCenter could not read (a `missingSet` entry, for

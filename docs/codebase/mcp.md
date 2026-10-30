@@ -565,7 +565,10 @@ what to do next:
   (sorted, at most 10), and the message names them, for example "This
   operation exists on connector(s) vmware-rest-9.0". When the list is
   empty, the message tells the caller to use `search_operations` on the
-  connector. `extras.known_op_count` still carries the connector's op
+  connector. When the call has a target, a connector whose catalog check
+  refuses that target is not listed (#5069): for example
+  `vmware-rest-9.0` for a vCenter 8.0.x target, for a generic call that
+  only its catalog has. `extras.known_op_count` still carries the connector's op
   count. A common cause is the other version of the same product; op ids
   can also be spelled differently between versions.
 - **`unknown_connector`** — the `connector_id` matches no connector the

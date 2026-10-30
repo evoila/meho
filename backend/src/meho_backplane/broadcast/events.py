@@ -80,6 +80,7 @@ __all__ = [
     "is_secret_param_name",
     "redact_payload",
     "resolve_op_class",
+    "resolve_operation_op_class",
     "scrub_broadcast_params",
     "scrub_secret_named_values",
 ]
@@ -566,6 +567,16 @@ _WRITE_OPS: Final[frozenset[str]] = frozenset(
         "topology.bulk_import",
         "topology.create_node",
         "topology.delete_node",
+        # Hand-written ``safe`` operations that are not plain reads: each
+        # makes the target do work (rescan a datastore, save an etcd
+        # snapshot, reload a template list, start an HCX diagnostics run).
+        # Without a pin they would get ``read`` from
+        # :func:`resolve_operation_op_class`, like every other ``safe``
+        # hand-written operation.
+        "vmware.composite.datastore.refresh",
+        "rke2.etcd-snapshot.save",
+        "vcfa.tenant.cloud_account.enumerate_images",
+        "hcx.service_mesh.diagnose",
     }
 )
 
@@ -995,6 +1006,58 @@ def resolve_op_class(op_id: str, declared: str | None = None) -> str:
     if declared and derived not in _SECRET_SHAPE_CLASSES:
         return declared
     return derived
+
+
+#: Source kinds of hand-written operations: typed operations and multi-step
+#: (composite) operations. Ingested operations get their class from the
+#: HTTP method in their op id instead.
+_HAND_WRITTEN_SOURCE_KINDS: Final[frozenset[str]] = frozenset({"typed", "composite"})
+
+#: Risk levels of an operation that changes something.
+_CHANGE_SAFETY_LEVELS: Final[frozenset[str]] = frozenset({"caution", "dangerous", "destructive"})
+
+
+def resolve_operation_op_class(op_id: str, *, source_kind: str, safety_level: str | None) -> str:
+    """Return the class of one run of a registered operation.
+
+    The dispatcher stores this class on the audit row, and the announce
+    gate, the announce reminder and the target activity warning use it.
+    So all four always agree.
+
+    A hand-written (typed or multi-step) operation states its risk level
+    where it is registered. That risk level is the declared class that goes
+    to :func:`resolve_op_class`. The last word of the op id is not enough:
+    reads like ``vmware.host.usage`` and writes like
+    ``vmware.composite.vm.destroy`` end in words :func:`classify_op` does
+    not know.
+
+    * Risk level ``caution`` or higher: the class is ``write``.
+    * Risk level ``safe``: the class is ``read`` when :func:`classify_op`
+      knows nothing better (``other``). A ``safe`` operation that does make
+      the target do work is pinned in :data:`_WRITE_OPS`.
+    * The credential and audit-query classes always win, as in
+      :func:`resolve_op_class`.
+    * Ingested operations, and a row with no risk level, keep
+      ``classify_op(op_id)``.
+
+    >>> resolve_operation_op_class("vmware.host.usage", source_kind="typed", safety_level="safe")
+    'read'
+    >>> resolve_operation_op_class(
+    ...     "vmware.composite.vm.destroy", source_kind="composite", safety_level="destructive"
+    ... )
+    'write'
+    >>> resolve_operation_op_class("vault.kv.read", source_kind="typed", safety_level="caution")
+    'credential_read'
+    >>> resolve_operation_op_class("POST:/vcenter/vm", source_kind="ingested", safety_level="safe")
+    'write'
+    """
+    declared: str | None = None
+    if source_kind in _HAND_WRITTEN_SOURCE_KINDS:
+        if safety_level in _CHANGE_SAFETY_LEVELS:
+            declared = "write"
+        elif safety_level == "safe" and classify_op(op_id) == "other":
+            declared = "read"
+    return resolve_op_class(op_id, declared)
 
 
 def _maybe_row_count(raw_params: dict[str, Any]) -> int | None:

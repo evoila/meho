@@ -324,6 +324,50 @@ them in its spec class or registrar.
 Group texts are not checked for safety claims here; that is a separate
 test.
 
+## How group texts reach running installs
+
+A group text (`when_to_use`) of a hand-written connector lives in the
+connector's code. MEHO writes it into the `operation_group` row at
+start-up. Since #4332, a text change in the code reaches installs that
+already have the row, unless an operator changed the text.
+
+How it works
+([`_resolve_or_create_group`](../../backend/src/meho_backplane/operations/typed_register.py)):
+
+- When MEHO writes a code text, it also stores the SHA-256 of that text
+  in `operation_group.code_text_hash`.
+- At start-up, for each group:
+  - The row has a hash, and the hash does not match the row's text: an
+    operator wrote this text with `meho connector edit-group`. MEHO keeps
+    the row as it is. This also holds when a later code text happens to
+    be the same as the operator's text. MEHO does not store that hash,
+    because the row would then look like a text MEHO wrote, and the next
+    code text would overwrite the operator's choice.
+  - The row already holds the code text: MEHO only stores its hash.
+  - The row's text still matches its stored hash: no one changed it, so
+    MEHO writes the new code text and its hash.
+  - Otherwise MEHO keeps the row as it is. This is a text MEHO cannot
+    prove it wrote (no hash).
+- The write only lands when the row still holds the text and hash MEHO
+  read a moment before. During a rolling update, an operator can save an
+  edit through another instance in between. That edit is kept, and the
+  start-up logs `operation_group_text_refresh_skipped`.
+- Some connectors give one group different texts from different
+  operations. Only the first text of a start-up counts, the same text a
+  fresh install writes. So the row does not change back and forth.
+- Groups from spec ingestion have no hash. Their texts never change at
+  start-up.
+
+Migration
+[`0123`](../../backend/alembic/versions/0123_add_operation_group_code_text_hash.py)
+adds the column. It also stores the hash for rows that still hold a text
+MEHO shipped in an earlier version (every release from v0.2.0, including
+the texts of migration `0011`). Those rows then refresh like any other.
+
+What this means for a connector author: change the text in the code. No
+data migration is needed. A test for this is in
+[`backend/tests/test_operations_group_text_refresh.py`](../../backend/tests/test_operations_group_text_refresh.py).
+
 ## References
 
 - Consumer feedback report dated 2026-05-20 from

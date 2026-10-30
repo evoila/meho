@@ -592,10 +592,11 @@ async def test_content_library_status_read_error_dispatches_as_error(
     """The read composite's ``read_error`` already carries an ``error`` issue."""
     op_id = "vmware.composite.content_library.subscribed.status"
     recorder = _RecordingVmwareConnector()
-    recorder.responses["/content/subscribed-library/lib-1"] = {"value": []}
+    library_id = "11111111-1111-1111-1111-111111111111"
+    recorder.responses[f"/content/subscribed-library/{library_id}"] = {"value": []}
 
     result = await _dispatch_direct(
-        recorder, stub_embedding_service, op_id, {"library_id": "lib-1"}
+        recorder, stub_embedding_service, op_id, {"library_id": library_id}
     )
 
     await _assert_dispatch_error(result, op_id, "read_error")

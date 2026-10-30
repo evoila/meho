@@ -42,6 +42,7 @@ from uuid import UUID
 import httpx
 
 from meho_backplane.connectors import OperationResult, ResultHandle
+from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
 from meho_backplane.redaction.engine import redact
@@ -1672,10 +1673,6 @@ def _vi_json_fault(response: httpx.Response) -> tuple[str, str | None] | None:
 
 def _soap_fault(text: str) -> tuple[str | None, str | None] | None:
     """``(fault_type, faultstring)`` of a SOAP ``<soapenv:Fault>`` body, else ``None``."""
-    # Imported here, not at module top: the vmware_rest package imports the
-    # operations package, so a top-level import would be circular.
-    from meho_backplane.connectors.vmware_rest.soap import parse_soap_fault
-
     try:
         fault = parse_soap_fault(text)
     except Exception:  # never raise on the error path (e.g. a defusedxml refusal)
@@ -1691,7 +1688,7 @@ def _http_upstream_fault(response: httpx.Response) -> dict[str, str | None] | No
     Two body shapes are recognised: a VI/JSON fault from vCenter
     (``{"_typeName": ..., "faultstring": ...}``) and a SOAP
     ``<soapenv:Fault>`` from the ESXi / vim25 SOAP path (parsed by
-    :func:`~meho_backplane.connectors.vmware_rest.soap.parse_soap_fault`).
+    :func:`~meho_backplane.connectors._shared.soap_fault.parse_soap_fault`).
     Any other body yields ``None``. The fault type is the most useful field
     for triage (``NotAuthenticated`` vs ``InvalidLogin`` vs
     ``InvalidArgument``), so it gets its own field instead of being buried in
@@ -1740,16 +1737,13 @@ def _add_attached_upstream_fault(extras: dict[str, Any], exc: BaseException) -> 
 
     On the ESXi SOAP path the connector parses the fault itself and raises a
     plain :exc:`RuntimeError` or a ``ConnectorAuthError`` with the parsed fault
-    attached (:func:`~meho_backplane.connectors.vmware_rest.soap.attach_soap_fault`).
+    attached (:func:`~meho_backplane.connectors._shared.soap_fault.attach_soap_fault`).
     No :exc:`httpx.HTTPStatusError` reaches the builders there, so this reads the
     attached fault instead. Same redact-then-cap steps as the HTTP case. Does
     nothing when no fault is attached, or when the key is already set.
     """
     if "upstream_fault" in extras:
         return
-    # Imported here for the same reason as in :func:`_soap_fault`.
-    from meho_backplane.connectors.vmware_rest.soap import soap_fault_of
-
     fault = soap_fault_of(exc)
     if fault is None or (fault.fault_type is None and fault.faultstring is None):
         return

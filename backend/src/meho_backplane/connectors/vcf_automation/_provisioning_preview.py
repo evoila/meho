@@ -25,6 +25,11 @@ generic params echo, so the bespoke builder is their only preview;
 
 ``vcfa.tenant.deployment.delete`` also has a builder here: it reads the
 deployment once so the approver sees its name and project, not only an id.
+``vcfa.provider.role.delete`` reads the role once, with the same rules as
+the call, so the approver sees ``would: "delete"``, ``"unchanged"`` (no
+such role with exactly that name), ``"refuse_built_in"`` (a ``readOnly``
+role) or ``"refuse_ambiguous_name"`` (several roles carry exactly that
+name).
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ import httpx
 
 from meho_backplane.connectors.vcf_automation._lookups import (
     find_global_role,
+    find_global_role_to_delete,
     find_org,
     find_org_user,
     find_project,
@@ -97,6 +103,39 @@ async def _role_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "publish_to": "all" if p.get("publish_all") else p.get("publish_to_org"),
         **await _existence(ctx, lambda c: find_global_role(c, ctx.target, ctx.operator, name)),
     }
+
+
+async def _role_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Read the role the way the call does, so the card and the call agree."""
+    name = ctx.params.get("name")
+    if not isinstance(name, str):
+        return None
+    preview: dict[str, Any] = {
+        "action": "delete_global_role",
+        "name": name,
+        "would": "delete_if_present",
+        "exists": None,
+        "existing_id": None,
+    }
+    connector: Any = ctx.connector_instance
+    if connector is None:
+        return preview
+    try:
+        role, problem = await find_global_role_to_delete(connector, ctx.target, ctx.operator, name)
+    except (httpx.HTTPError, RuntimeError, ValueError, KeyError):
+        return preview
+    if problem is not None:
+        return {**preview, "would": "refuse_ambiguous_name", "reason": problem}
+    if role is None:
+        return {**preview, "would": "unchanged", "exists": False}
+    preview = {**preview, "exists": True, "existing_id": role.get("id")}
+    if role.get("readOnly") is True:
+        return {
+            **preview,
+            "would": "refuse_built_in",
+            "reason": f"global role {name!r} is built in and cannot be deleted",
+        }
+    return {**preview, "would": "delete"}
 
 
 async def _user_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
@@ -165,12 +204,20 @@ async def _api_token_create_preflight(ctx: PreviewContext) -> dict[str, Any] | N
     ``invalid_request``). A probe that itself fails (e.g. the target's
     role refuses the login) is reported ``will_be_denied`` with
     ``reason: probe_failed:<class>`` rather than omitted.
+
+    It also adds the requester's own MEHO policy for that write on the
+    Vault target (``requester_denied`` / ``requester_reason`` /
+    ``requester``, #3898), so the approver sees when the requester itself
+    is denied. A reviewer's resume checks that requester again before the
+    mint.
     """
     from meho_backplane.connectors.vault.ops import vault_kv_write_capability_preflight
     from meho_backplane.connectors.vcf_automation._api_token import (
+        VAULT_TOKEN_WRITE,
         resolve_store_vault_target,
         store_params,
     )
+    from meho_backplane.operations.secondary_target_policy import requester_policy_preflight
 
     p = ctx.params
     if not isinstance(p.get("store_secret_ref"), str):
@@ -192,7 +239,8 @@ async def _api_token_create_preflight(ctx: PreviewContext) -> dict[str, Any] | N
         target=vault_target,
         report_probe_failure=True,
     )
-    return None if result is None else {**result, "vault_target": vault_target.name}
+    requester = await requester_policy_preflight(ctx.operator, VAULT_TOKEN_WRITE, vault_target)
+    return {**(result or {}), "vault_target": vault_target.name, **requester}
 
 
 async def _api_token_revoke_preview(ctx: PreviewContext) -> dict[str, Any] | None:
@@ -248,6 +296,7 @@ async def _deployment_delete_preview(ctx: PreviewContext) -> dict[str, Any] | No
 _BUILDERS = {
     "vcfa.provider.org.create": _org_create_preview,
     "vcfa.provider.role.create": _role_create_preview,
+    "vcfa.provider.role.delete": _role_delete_preview,
     "vcfa.provider.user.create": _user_create_preview,
     "vcfa.provider.api_token.create": _api_token_create_preview,
     "vcfa.provider.api_token.revoke": _api_token_revoke_preview,

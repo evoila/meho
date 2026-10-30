@@ -35,6 +35,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from multidict import CIMultiDict, CIMultiDictProxy
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.kubernetes import KubernetesConnector
@@ -199,6 +200,51 @@ class _StatusFailureResponse:
                 "message": self._message,
             }
         )
+
+
+class _DryRunWithWarningResponse:
+    """A 200 dry-run answer that carries one API-server ``Warning`` header."""
+
+    status = 200
+    reason = "OK"
+    headers = CIMultiDictProxy(
+        CIMultiDict([("Warning", '299 - "apps/v1beta1 Deployment is deprecated"')])
+    )
+
+    async def text(self) -> str:
+        return json.dumps({"kind": "Deployment", "metadata": {"name": "web"}})
+
+
+@pytest.mark.asyncio
+async def test_k8s_apply_preview_shows_api_server_warnings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The approval preview carries the dry-run's ``Warning`` header texts (#3842)."""
+    dyn = MagicMock()
+    dyn.resources.get = AsyncMock(return_value=MagicMock())
+    dyn.server_side_apply = AsyncMock(return_value=_DryRunWithWarningResponse())
+
+    async def _dynamic_client(_api_client: Any) -> Any:
+        return dyn
+
+    monkeypatch.setattr(
+        "meho_backplane.connectors.kubernetes.ops_write_dangerous.DynamicClient",
+        _dynamic_client,
+    )
+    connector = KubernetesConnector(kubeconfig_loader=None)  # type: ignore[arg-type]
+    monkeypatch.setattr(connector, "_get_api_client", AsyncMock(return_value=MagicMock()))
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="k8s.apply"),  # type: ignore[arg-type]
+        connector_instance=connector,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params={"manifest": _SINGLE_MANIFEST, "dry_run": "none"},
+    )
+
+    effect = await build_proposed_effect(ctx)
+
+    assert effect is not None
+    assert effect["preview"]["applied"][0]["warnings"] == ["apps/v1beta1 Deployment is deprecated"]
 
 
 async def _k8s_apply_preview_denied_with(

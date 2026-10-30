@@ -13,7 +13,7 @@ migration uses only generic ``ADD COLUMN`` / ``DROP COLUMN`` DDL.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -68,10 +68,12 @@ def _column_specs(sync_url: str) -> dict[str, dict[str, object]]:
     return {column["name"]: column for column in columns}
 
 
-def test_upgrade_adds_nullable_revoked_reason(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_nullable_revoked_reason(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0104`` adds ``revoked_reason`` as a nullable column."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     specs = _column_specs(sync_url)
     assert _COLUMN in specs
@@ -79,20 +81,24 @@ def test_upgrade_adds_nullable_revoked_reason(alembic_cfg: tuple[Config, str]) -
     assert specs[_COLUMN]["nullable"] is True
 
 
-def test_downgrade_drops_revoked_reason(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_drops_revoked_reason(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade 0103`` drops ``revoked_reason``."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert _COLUMN in _column_specs(sync_url)
 
     command.downgrade(cfg, _DOWN_REVISION)
     assert _COLUMN not in _column_specs(sync_url)
 
 
-def test_upgrade_round_trips_after_clean_downgrade(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_round_trips_after_clean_downgrade(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0104`` → ``downgrade 0103`` → ``upgrade 0104`` restores the column."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     command.downgrade(cfg, _DOWN_REVISION)
     command.upgrade(cfg, _REVISION)
 

@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, Final
 from uuid import UUID, uuid4
@@ -231,10 +231,12 @@ def _read_steps(sync_url: str, row_id: UUID) -> list[dict[str, Any]]:
         sync_eng.dispose()
 
 
-def test_empty_body_is_backfilled(alembic_cfg: tuple[Config, str]) -> None:
+def test_empty_body_is_backfilled(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """A ``manual`` step with an empty ``body`` carries the placeholder after upgrade."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0053")
+    copy_migrated_db(cfg, "0053")
 
     row_id = _insert_template(
         sync_url,
@@ -253,10 +255,12 @@ def test_empty_body_is_backfilled(alembic_cfg: tuple[Config, str]) -> None:
     assert steps[0]["type"] == "manual"
 
 
-def test_whitespace_only_body_is_backfilled(alembic_cfg: tuple[Config, str]) -> None:
+def test_whitespace_only_body_is_backfilled(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """A whitespace-only ``body`` (strips to empty) is backfilled too (AC #1)."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0053")
+    copy_migrated_db(cfg, "0053")
 
     row_id = _insert_template(
         sync_url,
@@ -271,10 +275,12 @@ def test_whitespace_only_body_is_backfilled(alembic_cfg: tuple[Config, str]) -> 
     assert _read_steps(sync_url, row_id)[0]["body"] == _PLACEHOLDER
 
 
-def test_operation_call_step_body_is_backfilled(alembic_cfg: tuple[Config, str]) -> None:
+def test_operation_call_step_body_is_backfilled(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """The rewrite is variant-agnostic: an ``operation_call`` empty body is fixed."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0053")
+    copy_migrated_db(cfg, "0053")
 
     row_id = _insert_template(
         sync_url,
@@ -293,10 +299,12 @@ def test_operation_call_step_body_is_backfilled(alembic_cfg: tuple[Config, str])
     assert steps[0]["type"] == "operation_call"
 
 
-def test_non_empty_body_is_preserved(alembic_cfg: tuple[Config, str]) -> None:
+def test_non_empty_body_is_preserved(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """A step with real content is left byte-identical."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0053")
+    copy_migrated_db(cfg, "0053")
 
     real_body = "SSH to ${run.target} and revoke the cert."
     row_id = _insert_template(
@@ -312,10 +320,12 @@ def test_non_empty_body_is_preserved(alembic_cfg: tuple[Config, str]) -> None:
     assert _read_steps(sync_url, row_id)[0]["body"] == real_body
 
 
-def test_mixed_steps_only_empty_bodies_touched(alembic_cfg: tuple[Config, str]) -> None:
+def test_mixed_steps_only_empty_bodies_touched(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """Within one template, only the empty-body steps move."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0053")
+    copy_migrated_db(cfg, "0053")
 
     row_id = _insert_template(
         sync_url,
@@ -335,7 +345,9 @@ def test_mixed_steps_only_empty_bodies_touched(alembic_cfg: tuple[Config, str]) 
     assert steps[1]["body"] == _PLACEHOLDER
 
 
-def test_re_running_migration_is_idempotent(alembic_cfg: tuple[Config, str]) -> None:
+def test_re_running_migration_is_idempotent(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """Replaying ``upgrade()`` on a repaired DB changes nothing.
 
     Both passes pin the target to ``0054`` (NOT ``head``) so a future
@@ -343,7 +355,7 @@ def test_re_running_migration_is_idempotent(alembic_cfg: tuple[Config, str]) -> 
     -- the house footgun that recurred on 0049/#2015 and 0050/#2021.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0053")
+    copy_migrated_db(cfg, "0053")
 
     row_id = _insert_template(
         sync_url,
@@ -366,6 +378,7 @@ def test_re_running_migration_is_idempotent(alembic_cfg: tuple[Config, str]) -> 
 
 def test_seeded_legacy_row_hydrates_through_show_and_list_runs(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """AC #2: a legacy empty-body row hydrates through ``show_template`` AND ``list_runs``.
 
@@ -379,7 +392,7 @@ def test_seeded_legacy_row_hydrates_through_show_and_list_runs(
     from meho_backplane.runbooks.service import RunbookTemplateService
 
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0053")
+    copy_migrated_db(cfg, "0053")
 
     tenant_id = uuid4()
     operator_sub = "op-1"

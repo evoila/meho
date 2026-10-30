@@ -649,7 +649,10 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     per-document summary (resource identity + ``resourceVersion`` +
     ``uid``) is the diff-preview the reviewer reads. The handler echoes
     no Secret ``data`` -- it operates on the manifest's GVK + metadata --
-    so the summary is identity-only and redaction-safe.
+    so the summary is identity-only and redaction-safe. On top of that
+    summary the builder adds the redacted manifest and a ``subject`` line
+    (:func:`_k8s_apply_manifest_echo`, #3877), so the reviewer sees what
+    the apply sets, not only which objects it touches.
 
     Returns ``None`` when no connector instance resolved (a k8s.apply
     without a target can't dry-run) so the caller falls back to the
@@ -677,12 +680,47 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     # the preview must never persist, even if the parked call itself was
     # a real apply (dry_run="none").
     preview_params = {**ctx.params, "dry_run": "server"}
-    return await k8s_apply(
+    result = await k8s_apply(
         ctx.connector_instance,
         ctx.target,
         ctx.operator,
         preview_params,
     )
+    return {**result, **_k8s_apply_manifest_echo(ctx, result)}
+
+
+def _k8s_apply_manifest_echo(ctx: PreviewContext, result: dict[str, Any]) -> dict[str, Any]:
+    """The ``subject`` and ``manifest`` keys the k8s.apply preview adds (#3877).
+
+    The dry-run summary names each object but not what the apply sets on
+    it. ``manifest`` is the applied manifest, one dict per document, with
+    Secret values and ``env`` values hidden by the connector, then run
+    through the same two-pass redaction as the generic params echo. The
+    connector applies its size limit after that redaction, so the stored
+    echo is what is measured. ``subject`` names the objects for the
+    reviewer context.
+    """
+    from meho_backplane.connectors.kubernetes.ops_write_preview import (
+        apply_manifest_echo,
+        apply_subject,
+    )
+
+    tenant = str(ctx.operator.tenant_id) if ctx.operator.tenant_id is not None else None
+
+    def _redact(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        redacted = _redact_echoed_params(
+            {"manifest": docs},
+            connector_id=ctx.connector_id,
+            tenant=tenant,
+            op_id=ctx.descriptor.op_id,
+        )
+        return [doc for doc in redacted.get("manifest", []) if isinstance(doc, dict)]
+
+    echo: dict[str, Any] = {"manifest": apply_manifest_echo(ctx.params["manifest"], redact=_redact)}
+    subject = apply_subject(result.get("applied"))
+    if subject is not None:
+        echo["subject"] = subject
+    return echo
 
 
 async def _vault_kv_write_preflight(ctx: PreviewContext) -> dict[str, Any] | None:

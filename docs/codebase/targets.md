@@ -14,7 +14,7 @@ each other's code:
 | Front | Where | Purpose |
 |---|---|---|
 | REST `/api/v1/targets` | `backend/src/meho_backplane/api/v1/targets.py` | list, discover, describe, probe, create, patch, soft-delete |
-| CLI `meho targets …` | `cli/` (Go) over the REST routes | operator verbs; `meho targets list` calls `GET /api/v1/targets` |
+| CLI `meho targets …` | `cli/` (Go) over the REST routes | operator verbs; `meho targets list` calls `GET /api/v1/targets`, `meho targets delete` calls `DELETE /api/v1/targets/{name}` |
 | MCP `list_targets` | `backend/src/meho_backplane/mcp/tools/topology.py` | working-surface enumeration for agents |
 
 `meho_targets_register` (`mcp/tools/targets_register.py`) is the
@@ -22,8 +22,8 @@ operator-plane MCP write; every `target` argument elsewhere resolves
 through `resolve_target` (`targets/resolver.py`). Destination checks
 are covered in [`target-ssrf-guard.md`](target-ssrf-guard.md).
 
-This document covers the two **list** paths and how `list_targets`
-bounds its response (#3858).
+This document covers the two **list** paths, how `list_targets`
+bounds its response (#3858), and how a target is deleted.
 
 ## Key types
 
@@ -105,6 +105,61 @@ rows about 165 bytes each):
 End-to-end call time (warm median of 7 calls each, same setup) was
 about the same in both versions: about 6–8 ms for an 89-row page and
 about 12 ms for a 500-row page.
+
+## Control flow — deleting a target
+
+`DELETE /api/v1/targets/{name}` (`tenant_admin`) and the CLI verb
+`meho targets delete <name> [--force] [--confirm]` (#3943) on top of it:
+
+1. The CLI asks y/N first unless `--confirm` is given. Closed stdin
+   counts as no, so a script never deletes by accident.
+2. The route resolves the name or alias in the caller's tenant (404
+   with near-misses, 409 on an ambiguous alias).
+3. It counts the `graph_node` rows that point at the target. Audit rows
+   are not counted: every request against a target writes one.
+4. When that count is above zero and `force` is not set, it answers 409
+   with `detail.kind = "target_has_references"` and
+   `detail.graph_node_refs`. The CLI prints the count and says to run
+   again with `--force`.
+5. Otherwise it sets `deleted_at` (a soft delete) and answers 204. The
+   row stays, so audit rows still point at it; every read path filters
+   it out. With `force`, the topology nodes stay and keep the deleted
+   target's id in `target_id`. The FK's `ON DELETE SET NULL` only acts
+   on a hard delete, which this route never does.
+
+## Removing a target (`targets.remove`)
+
+An agent or a person removes a target with
+`call_operation(connector_id="targets-registry-1.x", op_id="targets.remove",
+params={"target_id": "<target-uuid>"})`. It is the opposite of
+`targets.register` (#4623).
+
+- **One delete service.** The op and `DELETE /api/v1/targets/{name}` both
+  call `soft_delete_target` in `api/v1/targets.py`. It counts the
+  `graph_node` rows that point at the target and refuses when the count is
+  not zero, unless `force` is true. Then it stamps `deleted_at`. The REST
+  route looks the target up by name; the op looks it up by id
+  (`resolve_target_by_id`), in the caller's tenant only.
+- **Result.** `{status, target_id, name}`. `status` is `removed`, or
+  `unchanged` when no live target with that id exists in the caller's
+  tenant (also for a target of another tenant). A second run gives
+  `unchanged`.
+- **What stays.** Only MEHO's record goes. The system, its Vault secret and
+  its checks stay.
+- **Role.** Only a login with the `tenant_admin` role can remove a target,
+  the same rule as the REST route. Any other role gets an error and the
+  target stays. A call that waits for approval runs, once approved, under
+  the login of the person who approved it, so that person's role counts.
+- **Approval.** `dangerous` with `requires_approval=True`; the name ends in
+  `.remove`, so the delete rules apply. A second person must approve every
+  call. See [`mcp.md`](mcp.md#admin-registry-writes-route-through-the-dispatcher).
+- **Preview.** `preview_operation` shows the target (id, name, host), its
+  product and the `graph_node` count, and says whether the call would
+  remove the target, fail, or return `unchanged`.
+- **Audit.** Every call writes an audit row with op id `targets.remove`.
+  The REST route keeps its own op id, `targets.delete`.
+- Code: `connectors/targets/ops.py` (handler, preview, registration) and
+  `connectors/targets/schemas.py`. Tests: `tests/test_targets_remove_op.py`.
 
 ## Dependencies
 

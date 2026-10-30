@@ -31,7 +31,10 @@ What it resolves
   write touches, recovered from the *identity* fields the caller supplied
   on the gate params (the VM ``name`` and/or its path-variable moid), so
   the reviewer reads ``web-01 (vm-1042)`` instead of an unresolved
-  ``{vm}``. Fail-open to ``None`` (the surface keeps the placeholder).
+  ``{vm}``. When the params name no subject, a ``subject`` string the
+  op's preview builder stored under ``proposed_effect.preview`` is used
+  (``k8s.apply`` names its objects there, #3877). Fail-open to ``None``
+  (the surface keeps the placeholder).
 * **parent composite** -- for a composite *child* park, the op id of the
   composite that fanned it out, walked off the ``request_audit_id`` ->
   ``parent_audit_id`` lineage the #3348 fix now records on the direct
@@ -175,7 +178,7 @@ async def resolve_reviewer_context(
     try:
         target_name, target_product, target_version = await _resolve_target(session, request)
         op_summary = await _resolve_op_summary(session, request)
-        subject = _resolve_subject(request)
+        subject = _resolve_subject(request) or _preview_subject(request)
         parent_op = await _resolve_parent_composite_op(session, request)
         blast = _resolve_blast_radius(request)
         summary = _build_summary(
@@ -306,6 +309,29 @@ def _resolve_subject(request: ApprovalRequest) -> str | None:
     if name_value and moid_value and name_value != moid_value:
         return f"{name_value} ({moid_value})"
     return name_value or moid_value or None
+
+
+def _preview_subject(request: ApprovalRequest) -> str | None:
+    """The subject a preview builder named, when the params name none.
+
+    Some ops carry their subject inside a body, not in an identity field.
+    ``k8s.apply`` is one: the objects are inside the manifest. Its preview
+    builder names them under ``proposed_effect.preview.subject``
+    (e.g. ``Deployment/prod/web``, #3877). The same rules apply as for
+    params: no subject for a credential-class op, and a value the
+    redaction engine flags is dropped.
+    """
+    if classify_op(request.op_id) in _CREDENTIAL_CLASSES:
+        return None
+    effect = request.proposed_effect if isinstance(request.proposed_effect, dict) else {}
+    preview = effect.get("preview")
+    value = preview.get("subject") if isinstance(preview, dict) else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    tenant = str(request.tenant_id) if request.tenant_id is not None else None
+    if _looks_secret(value, op_id=request.op_id, tenant=tenant):
+        return None
+    return value.strip()
 
 
 def _first_identity_value(

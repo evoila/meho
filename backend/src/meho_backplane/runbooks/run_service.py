@@ -121,6 +121,7 @@ from meho_backplane.db.models import (
     RunbookTemplate,
 )
 from meho_backplane.operations._audit import run_id_var, step_id_var, work_ref_var
+from meho_backplane.operations._lookup import enabled_for_tenant_clause
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.runbooks.engine import (
     advance,
@@ -1208,7 +1209,7 @@ class RunbookRunService:
                 select(EndpointDescriptor)
                 .where(
                     EndpointDescriptor.op_id == op_id,
-                    EndpointDescriptor.is_enabled.is_(True),
+                    enabled_for_tenant_clause(tenant_id=tenant_id),
                     or_(
                         EndpointDescriptor.tenant_id == tenant_id,
                         EndpointDescriptor.tenant_id.is_(None),

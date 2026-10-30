@@ -26,13 +26,14 @@ the source_kind="composite" persistence.
 Mixed safety posture
 --------------------
 
-The 16 read composites (the five T5 / #508 reads + the datastore
-cache-refresh read ``datastore.refresh`` / #3789 + the VM allocation read
+The 17 read composites (the five T5 / #508 reads + the datastore
+cache-refresh read ``datastore.refresh`` / #3789 + the datastore file list
+``datastore.file.list`` / #3432 + the VM allocation read
 ``vm.resource_allocation.show`` / #3880 + the 4 guest-ops reads
 ``vm.guest.process.list`` / ``vm.guest.env.read`` / ``vm.guest.net.show``
 / ``vm.guest.file.read`` / #3100 + the Supervisor / namespace /
 storage-policy / content-library ``status`` + ``list`` reads) are
-read-only. 15 of them pass ``safety_level="safe"`` +
+read-only. 16 of them pass ``safety_level="safe"`` +
 ``requires_approval=False`` -- overrides of T4's ``dangerous`` / ``True``
 defaults. The exception is ``vm.guest.file.read``, promoted to
 ``caution`` in #3720 (it can fetch arbitrary guest bytes as the in-guest
@@ -115,6 +116,9 @@ from meho_backplane.connectors.vmware_rest.composites._alarm_schemas import (
 from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
     datastore_dir_create_composite,
     datastore_file_delete_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._datastore_list import (
+    datastore_file_list_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
     cluster_drs_rule_delete_composite,
@@ -276,6 +280,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     DATASTORE_DIR_CREATE_RESPONSE_SCHEMA,
     DATASTORE_FILE_DELETE_PARAMETER_SCHEMA,
     DATASTORE_FILE_DELETE_RESPONSE_SCHEMA,
+    DATASTORE_FILE_LIST_PARAMETER_SCHEMA,
+    DATASTORE_FILE_LIST_RESPONSE_SCHEMA,
     DATASTORE_REFRESH_PARAMETER_SCHEMA,
     DATASTORE_REFRESH_RESPONSE_SCHEMA,
     DATASTORE_USAGE_PARAMETER_SCHEMA,
@@ -635,7 +641,7 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "'content_library' for the TKr library id the namespace binds, and "
         "'networking' for the workload / management network context."
     ),
-    # Shared with the typed content-library reads: the same key and text.
+    # Shared with the typed content-library reads and finds: the same key and text.
     CONTENT_LIBRARY_GROUP_KEY: CONTENT_LIBRARY_WHEN_TO_USE,
     # Shared with the two typed licence reads: the same key and text.
     LICENSE_GROUP_KEY: LICENSE_WHEN_TO_USE,
@@ -786,6 +792,24 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="safe",
         requires_approval=False,
         llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS["vmware.composite.datastore.refresh"],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.datastore.file.list",
+        handler=datastore_file_list_composite,
+        summary="List the files in one datastore folder, with size and last change.",
+        description=(
+            "Lists the files and folders in one datastore folder (SearchDatastore_Task), by "
+            "datastore name and a path from the root. pattern keeps matching file names. "
+            "include_usage adds folder sizes and the VMs that use each entry. Works on "
+            "vCenter and on a standalone ESXi host. Read-only."
+        ),
+        parameter_schema=DATASTORE_FILE_LIST_PARAMETER_SCHEMA,
+        response_schema=DATASTORE_FILE_LIST_RESPONSE_SCHEMA,
+        group_key="storage",
+        tags=["composite", "read-only", "storage", "datastore", "vi-json"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS["vmware.composite.datastore.file.list"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.network.portgroup.audit",

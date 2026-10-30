@@ -25,8 +25,9 @@ __all__ = [
 
 CONTENT_LIBRARY_GROUP_KEY: Final = "content_library"
 
-#: Group text, shared by the typed content-library reads and the content-library
-#: composites (``composites/_register.py``), so the group has one text.
+#: Group text, shared by the typed content-library reads, the two typed finds
+#: (``typed_ops_content_library_find.py``) and the content-library composites
+#: (``composites/_register.py``), so the group has one text.
 CONTENT_LIBRARY_WHEN_TO_USE: Final = (
     "Use for vCenter content libraries: the libraries that hold VM templates, OVF "
     "packages and ISO files. Reads: vmware.content_library.get (one library in full), "
@@ -40,8 +41,9 @@ CONTENT_LIBRARY_WHEN_TO_USE: Final = (
     "content_library.subscribed.create and .sync (both wait for approval), "
     "subscribed.status and subscribed.items.list. Deletes (always wait for approval): "
     "content_library.delete (a whole library) and content_library.item.delete (one item "
-    "of a local library). To deploy a VM from an item, use vm.deploy_from_library in the "
-    "vm group."
+    "of a local library). To get the id of a library or an item from its name, use the "
+    "safe reads vmware.content_library.find and vmware.content_library.item.find. To "
+    "deploy a VM from an item, use vm.deploy_from_library in the vm group."
 )
 
 _NULL_TEXT: Final[dict[str, Any]] = {"type": ["string", "null"]}

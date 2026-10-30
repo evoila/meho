@@ -176,25 +176,26 @@ def _texts(lines: list[str]) -> list[str]:
 async def _page_through(
     entries: list[tuple[str, str]], since_time: str, *, pages: int = 20
 ) -> list[str]:
-    """Page with ``since_time = last_line_time`` until ``truncated`` is false.
+    """Page with ``since_time = next_since_time`` until ``truncated`` is false.
 
-    Checks on the way that each next page starts again with exactly the
-    lines of the last kept time, and drops those repeats.
+    Checks on the way that every page stays under the cap, that each
+    next page starts with a line at exactly ``next_since_time``, and
+    that no page repeats a line of the page before.
     """
     collected: list[str] = []
     for _ in range(pages):
         result, _ = await _call(entries, since_time=since_time)
         page = result["lines"]
+        assert page
+        assert _kept_bytes(page) <= MAX_BODY_BYTES
         if collected:
-            repeated = [line for line in collected if line.startswith(since_time + " ")]
-            assert repeated
-            assert page[: len(repeated)] == repeated
-            page = page[len(repeated) :]
+            assert page[0].startswith(since_time + " ")
+            assert not any(line.startswith(since_time + " ") for line in collected)
         collected.extend(page)
         if not result["truncated"]:
             return collected
         assert result["truncated_end"] == "end"
-        since_time = result["last_line_time"]
+        since_time = result["next_since_time"]
     pytest.fail("paging did not reach the end of the log")
 
 
@@ -302,19 +303,20 @@ async def test_large_window_keeps_the_oldest_lines_and_says_where_it_was_cut() -
     assert result["truncated"] is True
     assert result["truncated_end"] == "end"
     assert result["lines"][0] == f"{entries[0][0]} {entries[0][1]}"
-    # The lines at the start time are free; the rest fits in the cap.
-    start_lines = [line for line in result["lines"] if line.startswith(_stamp(0) + " ")]
-    assert len(start_lines) == 2
-    assert _kept_bytes(result["lines"][len(start_lines) :]) <= MAX_BODY_BYTES
-    assert _kept_bytes(result["lines"]) <= MAX_BODY_BYTES + _kept_bytes(start_lines) + 1
+    assert _kept_bytes(result["lines"]) <= MAX_BODY_BYTES
+    assert _kept_bytes(result["lines"]) > MAX_BODY_BYTES - 3000
     assert result["line_count"] == len(result["lines"])
-    last = result["lines"][-1]
-    assert result["last_line_time"] == last.split(" ", 1)[0]
+    # The cut is at a time boundary: the next line to come has a later
+    # time than the last line kept, and the answer names that time.
+    kept = len(result["lines"])
+    assert result["lines"] == [f"{ts} {text}" for ts, text in entries[:kept]]
+    assert entries[kept][0] > entries[kept - 1][0]
+    assert result["next_since_time"] == entries[kept][0]
     assert all(line.endswith("x" * 1000) for line in result["lines"])
 
 
 @pytest.mark.asyncio
-async def test_paging_from_last_line_time_has_no_gap() -> None:
+async def test_paging_from_next_since_time_has_no_gap() -> None:
     entries = _big_log()
     collected = await _page_through(entries, "2026-08-01T00:00:00Z")
     assert collected == [f"{ts} {text}" for ts, text in entries]
@@ -325,10 +327,10 @@ async def test_paging_reaches_every_line_when_one_second_holds_more_than_the_cap
     """``sinceTime`` goes out in whole seconds; paging still moves on.
 
     Each page asks Kubernetes for the log from the start of the second
-    of ``last_line_time``. When that second holds more than one page,
-    the lines before ``last_line_time`` are read and thrown away as they
-    arrive, so every page carries new lines and the read reaches the
-    end. About 2 MiB are written within one second here.
+    of ``next_since_time``. When that second holds more than one page,
+    the lines before ``next_since_time`` are read and thrown away as
+    they arrive, so every page carries new lines and the read reaches
+    the end. About 2 MiB are written within one second here.
     """
     entries = [
         (_stamp(0, index * 1000), f"line {index:05d} " + "x" * 1000) for index in range(2200)
@@ -353,23 +355,129 @@ async def test_a_full_page_stops_reading_the_body() -> None:
 async def test_a_line_that_does_not_fit_opens_the_next_page() -> None:
     """A big line that does not fit behind the earlier lines is not lost.
 
-    The next page starts again with the line at ``last_line_time``.
-    That repeated line does not count toward the cap, so the big line
-    fits on the next page and paging moves forward.
+    The next page starts with that line: ``next_since_time`` is its
+    time, and nothing from the first page comes again.
     """
     half = "h" * (MAX_BODY_BYTES // 2)
     entries = [(_stamp(1), half), (_stamp(2), half), (_stamp(3), "tail")]
     first, _ = await _call(entries, since_time="2026-08-01T00:00:00Z")
     assert _texts(first["lines"]) == [half]
     assert first["truncated"] is True
-    assert first["last_line_time"] == _stamp(1)
+    assert first["next_since_time"] == _stamp(2)
 
-    second, _ = await _call(entries, since_time=_stamp(1))
-    assert _texts(second["lines"]) == [half, half, "tail"]
+    second, _ = await _call(entries, since_time=_stamp(2))
+    assert _texts(second["lines"]) == [half, "tail"]
     assert second["truncated"] is False
 
     collected = await _page_through(entries, "2026-08-01T00:00:00Z")
     assert collected == [f"{ts} {text}" for ts, text in entries]
+
+
+@pytest.mark.asyncio
+async def test_a_line_of_exactly_the_cap_is_reached_by_paging() -> None:
+    """The boundary: a timestamped line of exactly ``MAX_BODY_BYTES``.
+
+    It fits a page only on its own. The page before ends in front of
+    it, the next page holds just this line, and the page after that
+    goes on behind it. Paging reaches every line.
+    """
+    prefix = f"{_stamp(2)} "
+    exact = "e" * (MAX_BODY_BYTES - len(prefix))
+    entries = [(_stamp(1), "before"), (_stamp(2), exact), (_stamp(3), "after")]
+    assert len(f"{_stamp(2)} {exact}".encode()) == MAX_BODY_BYTES
+
+    first, _ = await _call(entries, since_time="2026-08-01T00:00:00Z")
+    assert _texts(first["lines"]) == ["before"]
+    assert first["next_since_time"] == _stamp(2)
+
+    second, _ = await _call(entries, since_time=_stamp(2))
+    assert _texts(second["lines"]) == [exact]
+    assert second["truncated"] is True
+    assert second["next_since_time"] == _stamp(3)
+
+    third, _ = await _call(entries, since_time=_stamp(3))
+    assert _texts(third["lines"]) == ["after"]
+    assert third["truncated"] is False
+
+    collected = await _page_through(entries, "2026-08-01T00:00:00Z")
+    assert collected == [f"{ts} {text}" for ts, text in entries]
+
+
+@pytest.mark.asyncio
+async def test_a_page_never_ends_between_lines_with_the_same_time() -> None:
+    """A cut inside a group of lines with one timestamp moves back to its start.
+
+    The lines of the group that were already kept come again with the
+    next page, so ``since_time = next_since_time`` repeats nothing and
+    skips nothing.
+    """
+    # Three such lines, with their timestamps, fit in one page together.
+    third = "t" * (MAX_BODY_BYTES // 3 - 100)
+    entries = [
+        (_stamp(1), third),
+        (_stamp(2), third),
+        (_stamp(2), third),
+        (_stamp(2), third),
+        (_stamp(3), "after"),
+    ]
+    first, _ = await _call(entries, since_time="2026-08-01T00:00:00Z")
+    assert _texts(first["lines"]) == [third]
+    assert first["truncated"] is True
+    assert first["next_since_time"] == _stamp(2)
+
+    second, _ = await _call(entries, since_time=_stamp(2))
+    assert _texts(second["lines"]) == [third, third, third, "after"]
+    assert second["truncated"] is False
+
+    collected = await _page_through(entries, "2026-08-01T00:00:00Z")
+    assert collected == [f"{ts} {text}" for ts, text in entries]
+
+
+@pytest.mark.asyncio
+async def test_lines_with_one_timestamp_that_exceed_the_cap_are_a_plain_error() -> None:
+    """Eight lines of 512 KiB at the start time: the page stays bounded.
+
+    They can never be returned together, and a page cannot end between
+    them, so the call fails like it does for one oversized line. The
+    read stops early.
+    """
+    # Two such lines, with their timestamps, fit in one page; three do not.
+    big = "b" * (512 * 1024 - 100)
+    entries = [(_stamp(1), big) for _ in range(8)] + [(_stamp(2), "after")]
+    config_patch, core_v1_patch, _core_v1, api_client_mock = _patch_cluster(entries)
+    with config_patch, core_v1_patch, pytest.raises(LogLineTooLargeError) as caught:
+        await k8s_logs(
+            _make_connector(), _TARGET, _make_operator(), {**_POD, "since_time": _stamp(1)}
+        )
+    assert caught.value.line_time == _stamp(1)
+    assert caught.value.line_count == 3
+    assert "3 log lines at " + _stamp(1) in str(caught.value)
+    assert "together larger than 1 MiB" in str(caught.value)
+    # Read: the two kept lines and the third one that did not fit.
+    response = api_client_mock.last_response
+    assert response.body_bytes > 3 * MAX_BODY_BYTES
+    assert response.bytes_read <= 2 * MAX_BODY_BYTES
+    response.release.assert_called_once()
+
+    # The caller continues behind that time.
+    result, _ = await _call(entries, since_time=_stamp(1, 1))
+    assert _texts(result["lines"]) == ["after"]
+
+
+@pytest.mark.asyncio
+async def test_too_large_group_behind_earlier_lines_ends_the_page_before_it() -> None:
+    """The earlier lines are returned; the error comes only when the group is next."""
+    big = "b" * (600 * 1024)
+    entries = [(_stamp(1), "before"), (_stamp(2), big), (_stamp(2), big), (_stamp(3), "after")]
+    first, _ = await _call(entries, since_time="2026-08-01T00:00:00Z")
+    assert _texts(first["lines"]) == ["before"]
+    assert first["truncated"] is True
+    assert first["next_since_time"] == _stamp(2)
+
+    with pytest.raises(LogLineTooLargeError) as caught:
+        await _call(entries, since_time=_stamp(2))
+    assert caught.value.line_time == _stamp(2)
+    assert caught.value.line_count == 2
 
 
 @pytest.mark.asyncio
@@ -383,7 +491,7 @@ async def test_window_that_ends_before_the_byte_limit_is_not_cut() -> None:
     )
     assert result["truncated"] is False
     assert len(result["lines"]) == 100
-    assert "last_line_time" not in result
+    assert "next_since_time" not in result
 
 
 @pytest.mark.asyncio
@@ -493,8 +601,8 @@ async def test_window_request_on_the_wire() -> None:
     page, request = await _read_through_real_api_client(response)
 
     assert page.lines == [f"{_stamp(1)} hello"]
-    assert page.stamps == [_stamp(1)]
     assert page.truncated is False
+    assert page.next_time is None
     response.release.assert_called_once()
     args = request.call_args
     assert args.args == (
@@ -551,17 +659,26 @@ async def test_last_line_without_a_newline_is_kept() -> None:
 
 @pytest.mark.asyncio
 async def test_oversized_line_inside_the_window_is_a_plain_error() -> None:
-    """A line over the cap can never be returned, so the call says so and stops."""
+    """A line over the cap can never be returned, so the call says so and stops.
+
+    The lines before it are still returned: the page before ends in
+    front of it, and the error comes when the next call starts at it.
+    """
     entries = [
         (_stamp(1), "before"),
         (_stamp(2), "o" * (MAX_BODY_BYTES + 10)),
         (_stamp(3), "after"),
     ]
+    first, _ = await _call(entries, since_time="2026-08-01T00:00:00Z")
+    assert _texts(first["lines"]) == ["before"]
+    assert first["truncated"] is True
+    assert first["next_since_time"] == _stamp(2)
+
     with pytest.raises(LogLineTooLargeError) as caught:
-        await _call(entries, since_time="2026-08-01T00:00:00Z")
+        await _call(entries, since_time=_stamp(2))
     assert caught.value.line_time == _stamp(2)
-    assert _stamp(2) in str(caught.value)
-    assert "larger than 1 MiB" in str(caught.value)
+    assert caught.value.line_count == 1
+    assert "the log line at " + _stamp(2) + " is larger than 1 MiB" in str(caught.value)
     assert "since_time" in str(caught.value)
 
 

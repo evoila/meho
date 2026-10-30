@@ -191,19 +191,26 @@ window:
   throws them away as they arrive, however many there are. So paging
   keeps moving, also when more than a page is written in one second.
 * When the window is bigger than 1 MiB, the oldest lines that fit are
-  kept. The answer has `truncated: true`, `truncated_end: "end"`,
-  `line_count` and `last_line_time` (the time of the last line kept).
-* Paging: call again with `since_time` set to `last_line_time`. The
-  next answer starts again with the line(s) at that exact time (the
-  start is inclusive), so no line is skipped; drop the repeated
-  lines. Those lines do not count toward the 1 MiB cap, so every page
-  carries at least one new line and paging always moves forward.
+  kept. Every kept line counts, so a page is never larger than 1 MiB.
+  The answer has `truncated: true`, `truncated_end: "end"`,
+  `line_count` and `next_since_time` (the time of the first line that
+  did not fit).
+* A page ends only at a time boundary. When the line that does not
+  fit has the same timestamp as the last kept lines, those lines are
+  dropped from the page again and come with the next page. So the
+  lines at `next_since_time` are all still to come.
+* Paging: call again with `since_time` set to `next_since_time`. The
+  start is inclusive, so the next answer starts with exactly the
+  lines that did not fit: no line is repeated and none is skipped.
   Repeat until `truncated` is false.
 * One log line larger than 1 MiB can never be returned, on this page
-  or a later one. The call fails with `LogLineTooLargeError`, a plain
-  message that names the line's time. The caller continues behind it
-  with a later `since_time`. Such a line before the window is skipped
-  without being stored; one after `until_time` just ends the read.
+  or a later one. The same holds for several lines with the same
+  timestamp that are larger than 1 MiB together, because a page
+  cannot end between them. The call fails with
+  `LogLineTooLargeError`, a plain message that names the time. The
+  caller continues behind it with a later `since_time`. Such a line
+  before the window is skipped without being stored; one after
+  `until_time` just ends the read.
 * A long window still comes back behind a result handle, as any long
   `lines` list does.
 * Limit: Kubernetes keeps only part of a log. The node rotates old log
@@ -236,8 +243,8 @@ window:
   following live logs continue using `kubectl-vcf.sh -f` until v0.2.next.
 * **A burst within one second is read again on every page.** The API
   server sends `sinceTime` to the node in whole seconds, so every
-  page starts at the start of the second of `last_line_time`. The
-  lines before `last_line_time` are read and thrown away. With a very
+  page starts at the start of the second of `next_since_time`. The
+  lines before `next_since_time` are read and thrown away. With a very
   large burst in one second (many MiB), each page spends time reading
   that prefix again. No line is lost, but paging through such a
   second is slow.

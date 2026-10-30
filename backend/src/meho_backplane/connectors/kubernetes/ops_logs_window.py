@@ -22,8 +22,9 @@ depend on the op's schemas or caps:
   full or the window has ended.
 * :func:`collect_window` -- turns that stream into one page: skips the
   lines before the start, keeps the lines inside the window until the
-  byte cap is reached, and never holds more than the page plus one
-  line in memory.
+  byte cap is reached, ends the page at a time boundary so the next
+  call can continue with no repeat and no gap, and never holds more
+  than the page plus one line in memory.
 
 Kubernetes behaviour this relies on (``k8s.io/cri-client`` log reader
 and the API server's pod log location):
@@ -92,20 +93,28 @@ class LogWindowError(ValueError):
 
 
 class LogLineTooLargeError(ValueError):
-    """One log line inside the window is larger than one answer may hold.
+    """The log at one time inside the window is larger than one answer may hold.
 
-    The byte cap works on whole lines, so such a line can never be
-    returned, on this page or on a later one. The message names the
-    line's time so the caller can continue after it.
+    Either one line is larger than the byte cap, or several lines with
+    the same timestamp are larger than the cap together. A page ends
+    only at a time boundary, so neither can ever be returned, on this
+    page or on a later one. The message names the time so the caller
+    can continue after it.
     """
 
-    def __init__(self, line_time: str, cap_bytes: int) -> None:
+    def __init__(self, line_time: str, cap_bytes: int, *, line_count: int = 1) -> None:
         self.line_time = line_time
+        self.line_count = line_count
+        mib = cap_bytes // (1024 * 1024)
+        if line_count == 1:
+            what, they, them = f"the log line at {line_time} is", "it", "it"
+        else:
+            what = f"the {line_count} log lines at {line_time} are together"
+            they, them = "they", "them"
         super().__init__(
-            f"the log line at {line_time} is larger than {cap_bytes // (1024 * 1024)} MiB, "
-            "the most one answer may hold, so it cannot be returned; set since_time "
-            f"to a time after {line_time} to continue behind it, or until_time to a "
-            "time before it"
+            f"{what} larger than {mib} MiB, the most one answer may hold, so {they} "
+            f"cannot be returned; set since_time to a time after {line_time} to continue "
+            f"behind {them}, or until_time to a time before it"
         )
 
 
@@ -121,14 +130,16 @@ class LogWindow:
 class WindowPage:
     """The lines of one window read.
 
-    ``stamps`` holds the raw timestamp of each kept line, in step with
-    ``lines``. ``truncated`` is true when a line inside the window did
-    not fit in the byte cap, so the window goes on after this page.
+    ``truncated`` is true when a line inside the window did not fit in
+    the byte cap, so the window goes on after this page. ``next_time``
+    is then the raw timestamp of the first line that was not kept: a
+    call with ``since_time`` set to it continues with no repeat and no
+    gap, because a page ends only at a time boundary.
     """
 
     lines: list[str] = field(default_factory=list)
-    stamps: list[str] = field(default_factory=list)
     truncated: bool = False
+    next_time: str | None = None
 
 
 def parse_rfc3339(value: str) -> TimeKey:
@@ -266,20 +277,24 @@ async def collect_window(
     read. Lines inside the window are kept, oldest first, until the
     next one would push the page past ``cap_bytes`` (counted as the
     lines joined by newlines, the same way the newest-lines read
-    counts). Then the read stops and the page is marked ``truncated``.
+    counts). Every kept line counts, so a page is never larger than
+    ``cap_bytes``.
 
-    Lines at exactly ``window.since`` do not count toward the cap. A
-    caller pages with ``since_time`` set to the last kept time, so
-    those lines are the ones the page before already had. Keeping them
-    free means every page carries at least one new line, so paging
-    always moves forward, also when the next line is close to the cap.
+    A page ends only at a time boundary. When the line that does not
+    fit has the same timestamp as the last kept lines, those lines are
+    dropped from the page again and ``next_time`` names that
+    timestamp. So the lines at ``next_time`` are all still to come: a
+    call with ``since_time`` set to it (the start is inclusive) starts
+    with new lines, does not repeat any, and skips none. When the page
+    would be empty, the log at that one time is larger than the cap by
+    itself and can never be returned: :class:`LogLineTooLargeError`
+    names the time so the caller can continue behind it.
 
     Memory stays bounded: at most the kept page plus the line being
     read. A line that is still unfinished at ``cap_bytes`` is decided
     by its timestamp alone: before the window it is skipped without
     being stored, after the window it ends the read, and inside the
-    window it raises :class:`LogLineTooLargeError`, because such a line
-    could never be returned.
+    window it ends the page like any line that does not fit.
 
     A line without a timestamp (should not happen with
     ``timestamps=true``) takes the time of the line before it.
@@ -304,6 +319,10 @@ class _WindowScanner:
         self._stamp = ""
         self._key: TimeKey | None = None
         self._kept_bytes = 0
+        # Where the kept lines with the current timestamp start, so a
+        # cut inside that group can drop them again.
+        self._group_key: TimeKey | None = None
+        self._group_start = 0
         self.page = WindowPage()
 
     def feed(self, chunk: bytes) -> bool:
@@ -353,16 +372,32 @@ class _WindowScanner:
         if place > 0:
             self._done = True
             return
-        if len(raw) > self._cap_bytes:
-            raise LogLineTooLargeError(self._stamp, self._cap_bytes)
-        size = 0 if self._key == self._window.since else len(raw) + (1 if self.page.lines else 0)
+        size = len(raw) + (1 if self.page.lines else 0)
         if self._kept_bytes + size > self._cap_bytes:
-            self.page.truncated = True
-            self._done = True
+            self._cut()
             return
+        if self._key != self._group_key:
+            self._group_key = self._key
+            self._group_start = len(self.page.lines)
         self.page.lines.append(line)
-        self.page.stamps.append(self._stamp)
         self._kept_bytes += size
+
+    def _cut(self) -> None:
+        """End the page before the current line, at a time boundary.
+
+        The kept lines with the current line's timestamp are dropped
+        again; the next page starts with them. When nothing is left,
+        the log at this one time is larger than the cap by itself.
+        """
+        self._done = True
+        dropped = 0
+        if self._key == self._group_key:
+            dropped = len(self.page.lines) - self._group_start
+            del self.page.lines[self._group_start :]
+        if not self.page.lines:
+            raise LogLineTooLargeError(self._stamp, self._cap_bytes, line_count=dropped + 1)
+        self.page.truncated = True
+        self.page.next_time = self._stamp
 
     def _settle_unfinished_line(self) -> None:
         """Decide a line that is already too long to be returned.
@@ -377,6 +412,7 @@ class _WindowScanner:
         if place < 0:
             self._skipping = True
             return
-        self._done = True
-        if place == 0:
-            raise LogLineTooLargeError(self._stamp, self._cap_bytes)
+        if place > 0:
+            self._done = True
+            return
+        self._cut()

@@ -37,8 +37,9 @@ Time windows (#5071): ``since_time`` / ``until_time`` read one window of
 the log, oldest line first, so a caller can page through a log that is
 longer than the 1 MiB cap. In this mode the handler asks Kubernetes for
 ``timestamps=true`` (every line starts with its RFC 3339 time), keeps
-the *oldest* lines that fit in the cap, and reports ``last_line_time``
-so the next call can start there. ``kubernetes_asyncio`` 36 does not
+the *oldest* lines that fit in the cap, and reports ``next_since_time``
+(the time of the first line that did not fit) so the next call can
+start there with no repeat and no gap. ``kubernetes_asyncio`` 36 does not
 expose the API's ``sinceTime`` query parameter on
 ``read_namespaced_pod_log``, so this mode calls the same ``/log`` path
 through :meth:`ApiClient.call_api` and reads the body as a stream,
@@ -214,7 +215,7 @@ K8S_LOGS_RESPONSE_SCHEMA: dict[str, Any] = {
         "byte_count": {"type": "integer", "minimum": 0},
         "truncated_byte_count": {"type": "integer", "minimum": 0},
         "truncated_end": {"type": "string", "enum": ["end"]},
-        "last_line_time": {"type": "string"},
+        "next_since_time": {"type": "string"},
     },
     "required": ["pod", "namespace", "container", "lines", "truncated"],
     "additionalProperties": False,
@@ -272,12 +273,11 @@ K8S_LOGS_LLM_INSTRUCTIONS: dict[str, Any] = {
             "oldest lines from that time, at most "
             f"{MAX_BODY_BYTES // (1024 * 1024)} MiB. When the window "
             "is bigger, 'truncated' is true, 'truncated_end' is "
-            "'end' and 'last_line_time' is the time of the last line "
-            "kept: call again with since_time set to that value to get "
-            "the next lines. The next call starts again with the "
-            "line(s) at that exact time, so nothing is skipped; those "
-            "lines do not count toward the cap, so every call moves "
-            "forward. Repeat until 'truncated' is false."
+            "'end' and 'next_since_time' is the time of the first line "
+            "that did not fit: call again with since_time set to that "
+            "value to get the next lines. A page ends only at a time "
+            "boundary, so the next call repeats no line and skips "
+            "none. Repeat until 'truncated' is false."
         ),
         "until_time": (
             "RFC 3339 end time; needs 'since_time'. Lines after it are "
@@ -295,9 +295,11 @@ K8S_LOGS_LLM_INSTRUCTIONS: dict[str, Any] = {
         "whole seconds only; MEHO drops the lines before since_time "
         "itself, so paging goes on with no gap, also when a lot is "
         "written within one second. One log line larger than "
-        f"{MAX_BODY_BYTES // (1024 * 1024)} MiB cannot be returned: "
-        "the call fails with a plain error that names the line's "
-        "time. Set since_time to a later time to continue behind it."
+        f"{MAX_BODY_BYTES // (1024 * 1024)} MiB cannot be returned, and "
+        "neither can several lines with the same timestamp that are "
+        "larger than that together: the call fails with a plain error "
+        "that names the time. Set since_time to a later time to "
+        "continue behind it."
     ),
     "output_shape": (
         "Flat dict: {'pod': <resolved-name>, 'namespace', 'container', "
@@ -309,7 +311,7 @@ K8S_LOGS_LLM_INSTRUCTIONS: dict[str, Any] = {
         "dropped from the front' hint. With 'since_time', each line "
         "starts with its RFC 3339 time and a cut window instead "
         "carries 'truncated_end': 'end', 'line_count' and "
-        "'last_line_time'. A large ``lines`` collection is "
+        "'next_since_time'. A large ``lines`` collection is "
         "reduced to a JSONFlux handle whose inline ``sample`` shows the "
         "most-recent lines (not the oldest) -- see ``result_ordering`` "
         "below."
@@ -520,8 +522,9 @@ async def k8s_logs(
       missing ``--container``.
     * :class:`LogWindowError` -- unusable ``since_time`` /
       ``until_time`` (bad time, or combined with ``since``).
-    * :class:`LogLineTooLargeError` -- one line inside the window is
-      larger than :data:`MAX_BODY_BYTES`, so it can never be returned.
+    * :class:`LogLineTooLargeError` -- one line inside the window, or
+      the lines at one timestamp together, are larger than
+      :data:`MAX_BODY_BYTES`, so they can never be returned.
     * :class:`kubernetes_asyncio.client.ApiException` -- API errors
       (RBAC, missing namespace, container not running yet for
       ``previous=true``).
@@ -624,7 +627,7 @@ def _window_result(pod: str, namespace: str, container: str, page: WindowPage) -
     The page holds the oldest lines of the window that fit in
     :data:`MAX_BODY_BYTES`. When a line did not fit, the window goes on
     after this page: the answer says where it was cut and the time of
-    the last line kept, so the next call can start there.
+    the first line that did not fit, so the next call can start there.
     """
     result: dict[str, Any] = {
         "pod": pod,
@@ -636,6 +639,5 @@ def _window_result(pod: str, namespace: str, container: str, page: WindowPage) -
     if page.truncated:
         result["truncated_end"] = "end"
         result["line_count"] = len(page.lines)
-        if page.stamps:
-            result["last_line_time"] = page.stamps[-1]
+        result["next_since_time"] = page.next_time
     return result

@@ -399,6 +399,9 @@ func TestValidateIngestModeTable(t *testing.T) {
 			Product: "acme", Version: "1.2", ImplID: "acme-rest",
 			Specs: []string{"file:///x.yaml"}, AuthSecretFields: []string{"username"},
 		}, "--auth-secret-field requires --auth-scheme"},
+		{"save-converted + catalog", ingestOptions{
+			Catalog: "vmware/9.0", SaveConverted: "/tmp/out.json",
+		}, "--save-converted cannot be combined with --catalog"},
 	}
 	for _, c := range cases {
 		err := validateIngestMode(c.opts)

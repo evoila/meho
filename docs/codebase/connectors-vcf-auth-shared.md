@@ -16,11 +16,18 @@ VCF Automation (#832) is **not** a consumer — its dual-plane auth
 → `{token: ...}` + vhost routing via `--fqdn`) is bespoke and stays in
 the Automation connector module.
 
-`connectors/_shared/vcfa_session.py` (Task #5057) is the shared VCF
+`connectors/vmware_shared/vcfa_session.py` (Task #5057) is the shared VCF
 Automation session login for VCF 9 products that sign people in through
 VCF Automation. See "VCF Automation session login" below. The
 Orchestrator connector (`extras.login: vcfa-session`) is its first user;
 other VCF 9 connectors can switch to it in their own Tasks.
+
+`connectors/vmware_shared/` holds the shared code that only VMware
+connectors use: `vcfa_session.py`, the `srm` and `vr` base code
+(`dr_rest.py`, `dr_api_file.py`, `dr_rest_schemas.py`) and the licence
+key mask (`license_key.py`). It is not a connector and registers nothing.
+Shared code that other connectors also use stays in `connectors/_shared/`,
+and `_shared/` does not import `vmware_shared/`.
 
 The recorded-fixture refresh tool at
 `backend/tests/fixtures/vcf/refresh.py` is documented separately in

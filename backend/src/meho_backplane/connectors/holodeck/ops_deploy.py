@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import shlex
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors._shared.pwsh import (
@@ -101,6 +102,7 @@ __all__ = [
     "holodeck_instance_status",
     "holodeck_router_patch",
     "map_instance_status_envelope",
+    "merge_remove_record",
     "target_hr_version",
     "validate_config_apply_params",
 ]
@@ -387,20 +389,224 @@ async def holodeck_instance_status(
     ``notes`` entry with ``status="completed"``, **not** a failure, so a
     verify/Sensor built on this op does not read a fully-deployed 5.2.x lab as
     broken.
+
+    With an ``instance_id``, the op also reads the progress file that
+    ``holodeck.instance.remove`` writes, and adds ``leftover_vms`` and
+    ``removal`` (see :func:`merge_remove_record`).
     """
     instance_id = params.get("instance_id")
     if instance_id:
-        select = f"Get-HoloDeckInstance -InstanceID {ps_single_quote(str(instance_id))}"
+        # A real failure stops the script (non-zero exit -> PwshRunError);
+        # an instance that is not listed answers "null" (status unknown, no error).
+        # The catch also covers errors that stop only one statement (for example
+        # "command not found"), which -ErrorAction Stop alone lets through.
+        script = (
+            "try { "
+            f"$r = @(Get-HoloDeckInstance -InstanceID {ps_single_quote(str(instance_id))} "
+            "-ErrorAction Stop) "
+            "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }; "
+            "if ($r.Count -eq 0) { 'null' } else { $r | ConvertTo-Json -Depth 6 -Compress }"
+        )
     else:
-        select = "Get-HoloDeckInstance"
-    script = f"{select} | ConvertTo-Json -Depth 6 -Compress"
+        script = "Get-HoloDeckInstance | ConvertTo-Json -Depth 6 -Compress"
 
+    envelope: dict[str, Any]
     try:
         payload = await pwsh_run(self, target, script, operator=operator)
     except PwshRunError as exc:
-        return {"status": "unknown", "error": str(exc), "notes": []}
+        envelope = {"status": "unknown", "error": str(exc), "notes": []}
+    else:
+        envelope = map_instance_status_envelope(payload, hr_version=target_hr_version(target))
 
-    return map_instance_status_envelope(payload, hr_version=target_hr_version(target))
+    if instance_id:
+        from meho_backplane.connectors.holodeck.ops_remove import read_remove_record
+
+        record = await read_remove_record(self, target, str(instance_id), operator)
+        if record is not None:
+            merge_remove_record(envelope, record)
+    return envelope
+
+
+def _aware_time(value: Any) -> datetime | None:
+    """Parse an ISO time with a time zone, or return ``None``."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _remove_age(envelope: dict[str, Any], record: dict[str, Any]) -> str:
+    """Say how a remove record relates to the deploy the envelope shows.
+
+    The record stays on the HoloRouter after a remove, and a later deploy may
+    reuse the id. Returns ``current`` when ``Get-HoloDeckInstance`` no longer
+    lists the instance, or the remove started after the listed deploy started;
+    ``older`` when the remove started before it; ``unsure`` when the read
+    failed (the envelope has an ``error``) or MEHO cannot compare the two times.
+    """
+    if envelope.get("error"):
+        return "unsure"
+    listed = envelope.get("status") != "unknown" or any(
+        envelope.get(key) for key in ("instance_id", "started_at", "current_step")
+    )
+    if not listed:
+        return "current"
+    deploy_started = _aware_time(envelope.get("started_at"))
+    remove_started = _aware_time(record.get("started_at"))
+    if deploy_started is None or remove_started is None:
+        return "unsure"
+    return "current" if remove_started > deploy_started else "older"
+
+
+def _str_list(value: Any) -> list[str]:
+    """``ConvertTo-Json`` writes a one-item array as a bare value and none as null."""
+    if value is None:
+        return []
+    return [str(item) for item in (value if isinstance(value, list) else [value])]
+
+
+def _removal_history(record: dict[str, Any]) -> dict[str, Any]:
+    """The ``removal`` block of the status answer, built from the progress file.
+
+    A record that says ``running`` while its ``tmux`` session is gone
+    (``tmux_alive`` false, see ``read_remove_record``) is ``interrupted``: the
+    script was killed, for example by the router reboot, before it finished.
+    """
+    state = str(record.get("state") or "unknown")
+    if state == "running" and record.get("tmux_alive") is False:
+        state = "interrupted"
+    return {
+        "state": state,
+        "started_at": record.get("started_at"),
+        "finished_at": record.get("finished_at"),
+        "reset_router": bool(record.get("reset_router")),
+        "resumed": bool(record.get("resumed")),
+        "deleted": record.get("deleted") if isinstance(record.get("deleted"), bool) else None,
+        "error": record.get("error"),
+        "leftover_error": record.get("leftover_error"),
+        "moved_to": record.get("moved_to"),
+        "moved_files": _str_list(record.get("moved_files")),
+        "move_errors": _str_list(record.get("move_errors")),
+    }
+
+
+def _removed_notes(removal: dict[str, Any], leftover: list[str] | None) -> list[str]:
+    """Notes for an instance whose remove finished, or was interrupted after the cmdlet."""
+    notes: list[str] = []
+    if removal["state"] == "interrupted":
+        notes.append(
+            "the remove ended before it could list the VMs that are left and move the "
+            "state files (its tmux session is gone, for example after the HoloRouter "
+            "reboot); call holodeck.instance.remove again with this instance_id to "
+            "finish these steps"
+        )
+    if leftover:
+        notes.append(
+            "the instance was removed, but some VMs are left; delete them with "
+            "vmware.composite.vm.destroy"
+        )
+    return notes + _step_notes(removal)
+
+
+def _unconfirmed_notes(removal: dict[str, Any], leftover: list[str] | None) -> list[str]:
+    """Notes for a remove that ended without the cmdlet saying that it finished.
+
+    The script writes ``deleted`` only after ``Remove-HoloDeckInstance``
+    returns. A record without it ended before or inside the cmdlet, so MEHO
+    cannot tell whether the VMs are gone and never reports ``removed``.
+    """
+    if removal["state"] == "interrupted":
+        notes = [
+            "the remove ended before Remove-HoloDeckInstance reported that it finished "
+            "(its tmux session is gone), so MEHO cannot tell whether the VMs were "
+            "deleted; call holodeck.instance.remove again with this instance_id: it "
+            "deletes the instance again when Get-HoloDeckInstance still lists it, or "
+            "finishes the last steps when it does not"
+        ]
+    else:
+        notes = [
+            "the remove finished its last steps, but Remove-HoloDeckInstance never "
+            "reported that it finished (the first run was interrupted), so MEHO cannot "
+            "confirm that the VMs were deleted; leftover_vms shows the VMs whose name "
+            "starts with the instance id"
+        ]
+    if leftover:
+        notes.append("some VMs are left; delete them with vmware.composite.vm.destroy")
+    return notes + _step_notes(removal)
+
+
+def _step_notes(removal: dict[str, Any]) -> list[str]:
+    """Notes for the last two steps: a failed VM read and files that did not move."""
+    notes: list[str] = []
+    if removal["leftover_error"]:
+        notes.append(
+            f"MEHO could not list the VMs that are left: {removal['leftover_error']}; "
+            "check vCenter for VM names that start with the instance id"
+        )
+    if removal["move_errors"]:
+        notes.append(
+            f"{len(removal['move_errors'])} file(s) did not move: "
+            + "; ".join(removal["move_errors"])
+        )
+    return notes
+
+
+def merge_remove_record(envelope: dict[str, Any], record: dict[str, Any]) -> None:
+    """Add the progress of a ``holodeck.instance.remove`` to a status envelope.
+
+    ``leftover_vms`` lists the VMs whose name still starts with the instance
+    id (``[]`` when the search found none, ``None`` when the remove could not
+    check). A remove that finished without an error, and whose record says
+    the cmdlet finished (``deleted`` true), sets ``status`` to ``removed``.
+    So does an ``interrupted`` remove whose cmdlet finished: the VMs are
+    gone, and a note says how to finish the last steps. A remove that ended
+    before the cmdlet could say (``deleted`` null) never sets ``removed``: a
+    note keeps that doubt (see :func:`_unconfirmed_notes`). An old record
+    must never hide a newer deploy with the same id (see
+    :func:`_remove_age`). A record older than the listed deploy is kept only
+    as history in ``removal``. When MEHO cannot tell, or the read failed,
+    ``status`` (and any ``error``) stays as ``Get-HoloDeckInstance`` reports it
+    and a note says why.
+    """
+    removal = _removal_history(record)
+    envelope["removal"] = removal
+    notes = envelope.setdefault("notes", [])
+    age = _remove_age(envelope, record)
+    if age == "older":
+        envelope["leftover_vms"] = None
+        notes.append(
+            "an older remove record exists for this id; status shows the newer deploy "
+            "that Get-HoloDeckInstance lists, and removal is kept as history"
+        )
+        return
+    leftover = record.get("leftover_vms")
+    envelope["leftover_vms"] = _str_list(leftover) if leftover is not None else None
+    state = removal["state"]
+    ended = state == "done" or (state == "interrupted" and not removal["error"])
+    finished = ended and removal["deleted"] is True
+    if ended and not finished:
+        notes.extend(_unconfirmed_notes(removal, envelope["leftover_vms"]))
+    elif finished and age == "unsure" and envelope.get("error"):
+        notes.append(
+            "a remove finished, but MEHO could not read Get-HoloDeckInstance, so it "
+            "cannot tell if a newer deploy uses this id; status stays unknown"
+        )
+    elif finished and age == "unsure":
+        notes.append(
+            "a remove finished, but Get-HoloDeckInstance still lists this id and MEHO "
+            "cannot tell which is newer; status shows the listed deploy"
+        )
+    elif finished:
+        envelope["status"] = "removed"
+        envelope.pop("error", None)
+        notes.extend(_removed_notes(removal, envelope["leftover_vms"]))
+    elif state in ("failed", "interrupted"):
+        notes.append(f"the last remove failed: {removal['error']}")
+    elif state == "running":
+        notes.append("a remove is running; poll holodeck.instance.status again")
 
 
 async def holodeck_router_patch(
@@ -1201,12 +1407,18 @@ DEPLOY_OPS: tuple[HolodeckOp, ...] = (
                 "with a note. " + SSH_TRANSPORT_NOTE
             ),
             "parameter_hints": {
-                "instance_id": "Optional; leave it out to read the instance of the appliance.",
+                "instance_id": (
+                    "Optional; leave it out to read the instance of the appliance. "
+                    "Needed for leftover_vms after a remove."
+                ),
             },
             "output_shape": (
                 "{status, current_step, started_at, updated_at, instance_id, "
-                "notes[]}. 'status' is running, completed, failed or unknown. "
-                "'error' is set when the cmdlet failed (status unknown)."
+                "notes[], leftover_vms?, removal?}. 'status' is running, completed, "
+                "failed, unknown, or removed after holodeck.instance.remove finished. "
+                "'error' is set when the cmdlet failed (status unknown). With "
+                "instance_id, after a remove: leftover_vms lists the VMs whose name "
+                "still starts with the instance id."
             ),
             "next_step": (
                 "While running, call again later. When failed, read the deploy "

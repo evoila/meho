@@ -77,6 +77,9 @@ from meho_backplane.connectors.holodeck.ops import HOLODECK_OPS
 from meho_backplane.connectors.holodeck.ops_deploy import (
     HOLODECK_WHEN_TO_USE_DEPLOY_BY_GROUP,
 )
+from meho_backplane.connectors.holodeck.ops_remove import (
+    HOLODECK_WHEN_TO_USE_REMOVE_BY_GROUP,
+)
 from meho_backplane.connectors.holodeck.ops_write import (
     HOLODECK_WHEN_TO_USE_WRITE_BY_GROUP,
 )
@@ -178,6 +181,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # so they never collide with the read/write group keys above; the blurbs
     # are the single source of truth in ``ops_deploy``.
     **HOLODECK_WHEN_TO_USE_DEPLOY_BY_GROUP,
+    # The delete of an instance (holodeck.instance.remove); text in ``ops_remove``.
+    **HOLODECK_WHEN_TO_USE_REMOVE_BY_GROUP,
 }
 
 
@@ -787,6 +792,23 @@ class HolodeckConnector(SshConnector):
         )
 
         return await _holodeck_router_patch(self, target, params, operator)
+
+    async def instance_remove(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``holodeck.instance.remove``.
+
+        **Approval-gated delete.** Delegates to
+        :func:`~meho_backplane.connectors.holodeck.ops_remove.holodeck_instance_remove`.
+        """
+        from meho_backplane.connectors.holodeck.ops_remove import (
+            holodeck_instance_remove as _holodeck_instance_remove,
+        )
+
+        return await _holodeck_instance_remove(self, target, params, operator)
 
     @classmethod
     async def register_operations(cls) -> None:

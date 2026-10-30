@@ -63,6 +63,10 @@ _SYNC_OP = "POST:/content/subscribed-library/{libraryId}?action=sync"
 _FIND_LIBRARY_PATH = "/api/content/library?action=find"
 _FIND_ITEM_PATH = "/api/content/library/item?action=find"
 _DATASTORE_PATH = "/api/vcenter/datastore"
+_LIB = "11111111-1111-1111-1111-111111111111"
+_LIB_9 = "99999999-9999-9999-9999-999999999999"
+_ITEM_1 = "33333333-3333-3333-3333-333333333331"
+_ITEM_2 = "33333333-3333-3333-3333-333333333332"
 
 
 def _make_operator() -> Operator:
@@ -346,26 +350,28 @@ async def test_create_http_fault_surfaces_create_error(gate: _GateRecorder) -> N
 
 
 async def test_sync_by_library_id_triggers_and_gates(gate: _GateRecorder) -> None:
-    conn = _RecordingConnector({"/api/content/subscribed-library/lib-1?action=sync": None})
+    conn = _RecordingConnector({f"/api/content/subscribed-library/{_LIB}?action=sync": None})
     out = await content_library_subscribed_sync_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_id": "lib-1"},
+        params={"library_id": _LIB},
         connector=conn,  # type: ignore[arg-type]
     )
-    assert out == {"status": "sync_triggered", "library_id": "lib-1"}
+    assert out == {"status": "sync_triggered", "library_id": _LIB}
     Draft202012Validator(CONTENT_LIBRARY_SUBSCRIBED_SYNC_RESPONSE_SCHEMA).validate(out)
     # No name resolution when library_id is given; only the sync POST is gated.
-    assert [c["path"] for c in conn.calls] == ["/api/content/subscribed-library/lib-1?action=sync"]
+    assert [c["path"] for c in conn.calls] == [
+        f"/api/content/subscribed-library/{_LIB}?action=sync"
+    ]
     assert gate.gated_op_ids == [_SYNC_OP]
-    assert gate.calls[0]["params"] == {"libraryId": "lib-1"}
+    assert gate.calls[0]["params"] == {"libraryId": _LIB}
 
 
 async def test_sync_by_library_name_resolves_then_syncs(gate: _GateRecorder) -> None:
     conn = _RecordingConnector(
         {
-            _FIND_LIBRARY_PATH: ["lib-9"],
-            "/api/content/subscribed-library/lib-9?action=sync": None,
+            _FIND_LIBRARY_PATH: [_LIB_9],
+            f"/api/content/subscribed-library/{_LIB_9}?action=sync": None,
         }
     )
     out = await content_library_subscribed_sync_composite(
@@ -375,10 +381,10 @@ async def test_sync_by_library_name_resolves_then_syncs(gate: _GateRecorder) -> 
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "sync_triggered"
-    assert out["library_id"] == "lib-9"
+    assert out["library_id"] == _LIB_9
     assert [c["path"] for c in conn.calls] == [
         _FIND_LIBRARY_PATH,
-        "/api/content/subscribed-library/lib-9?action=sync",
+        f"/api/content/subscribed-library/{_LIB_9}?action=sync",
     ]
     # The find is un-gated; only the sync write hits the seam.
     assert gate.gated_op_ids == [_SYNC_OP]
@@ -428,7 +434,7 @@ async def test_sync_gate_short_circuits(monkeypatch: pytest.MonkeyPatch) -> None
     out = await content_library_subscribed_sync_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_id": "lib-1"},
+        params={"library_id": _LIB},
         connector=conn,  # type: ignore[arg-type]
     )
     assert isinstance(out, OperationResult)
@@ -444,7 +450,7 @@ async def test_sync_gate_short_circuits(monkeypatch: pytest.MonkeyPatch) -> None
 async def test_status_reads_model_without_secret(gate: _GateRecorder) -> None:
     conn = _RecordingConnector(
         {
-            "/api/content/subscribed-library/lib-1": {
+            f"/api/content/subscribed-library/{_LIB}": {
                 "name": "vkr-lib",
                 "type": "SUBSCRIBED",
                 "last_sync_time": "2026-09-08T10:00:00Z",
@@ -462,11 +468,11 @@ async def test_status_reads_model_without_secret(gate: _GateRecorder) -> None:
     out = await content_library_subscribed_status_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_id": "lib-1"},
+        params={"library_id": _LIB},
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "ok"
-    assert out["library_id"] == "lib-1"
+    assert out["library_id"] == _LIB
     assert out["name"] == "vkr-lib"
     assert out["type"] == "SUBSCRIBED"
     assert out["last_sync_time"] == "2026-09-08T10:00:00Z"
@@ -497,9 +503,9 @@ async def test_status_invalid_reference(gate: _GateRecorder) -> None:
 async def test_items_list_returns_tkr_rows(gate: _GateRecorder) -> None:
     conn = _RecordingConnector(
         {
-            _FIND_ITEM_PATH: ["item-1", "item-2"],
-            "/api/content/library/item/item-1": {
-                "id": "item-1",
+            _FIND_ITEM_PATH: [_ITEM_1, _ITEM_2],
+            f"/api/content/library/item/{_ITEM_1}": {
+                "id": _ITEM_1,
                 "name": "v1.33.6---vmware.1-fips-vkr.2",
                 "type": "vmtx",
                 "version": "3",
@@ -507,8 +513,8 @@ async def test_items_list_returns_tkr_rows(gate: _GateRecorder) -> None:
                 "size": 3221225472,
                 "last_sync_time": "2026-09-08T09:00:00Z",
             },
-            "/api/content/library/item/item-2": {
-                "id": "item-2",
+            f"/api/content/library/item/{_ITEM_2}": {
+                "id": _ITEM_2,
                 "name": "v1.32.4---vmware.1-vkr.1",
                 "type": "vmtx",
                 "version": "1",
@@ -521,10 +527,10 @@ async def test_items_list_returns_tkr_rows(gate: _GateRecorder) -> None:
     out = await content_library_subscribed_items_list_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_id": "lib-1"},
+        params={"library_id": _LIB},
         connector=conn,  # type: ignore[arg-type]
     )
-    assert out["library_id"] == "lib-1"
+    assert out["library_id"] == _LIB
     assert out["item_count"] == 2
     names = {row["name"] for row in out["items"]}
     assert names == {"v1.33.6---vmware.1-fips-vkr.2", "v1.32.4---vmware.1-vkr.1"}
@@ -540,7 +546,7 @@ async def test_items_list_empty_library(gate: _GateRecorder) -> None:
     out = await content_library_subscribed_items_list_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_id": "lib-1"},
+        params={"library_id": _LIB},
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["item_count"] == 0

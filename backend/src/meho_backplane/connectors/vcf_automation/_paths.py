@@ -29,6 +29,8 @@ __all__ = [
     "OAUTH_TOKEN_PATH",
     "ORG_SESSION_CURRENT_PATH",
     "ORG_SESSION_PATH",
+    "PROVIDER_FEATURE_FLAGS_PATH",
+    "PROVIDER_FEATURE_FLAG_PATH",
     "PROVIDER_GLOBAL_ROLES_PATH",
     "PROVIDER_GLOBAL_ROLE_PATH",
     "PROVIDER_GLOBAL_ROLE_PUBLISH_ALL_PATH",
@@ -75,6 +77,12 @@ PROVIDER_GLOBAL_ROLE_PUBLISH_PATH: Final[str] = "/cloudapi/1.0.0/globalRoles/{id
 PROVIDER_GLOBAL_ROLE_PUBLISH_ALL_PATH: Final[str] = (
     "/cloudapi/1.0.0/globalRoles/{id}/tenants/publishAll"
 )
+#: The appliance feature flags (``GET``), for example ``CLASSIC_TENANT_CREATION``.
+#: ``go-vcloud-director`` ``govcd/feture_flag.go`` (``OpenApiEndpointFeatureFlags``).
+PROVIDER_FEATURE_FLAGS_PATH: Final[str] = "/cloudapi/1.0.0/featureFlags"
+#: One feature flag by id, ``urn:vcloud:featureflag:<NAME>`` (``GET`` with its
+#: ``ETag``, ``PUT`` the change with ``If-Match``).
+PROVIDER_FEATURE_FLAG_PATH: Final[str] = "/cloudapi/1.0.0/featureFlags/{id}"
 #: An org's roles, read with the org's tenant-context headers (``GET``).
 PROVIDER_ROLES_PATH: Final[str] = "/cloudapi/1.0.0/roles"
 #: Org users, read/written with the org's tenant-context headers

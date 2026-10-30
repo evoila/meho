@@ -70,6 +70,7 @@ _COMPOSITES: dict[str, tuple[dict[str, Any], dict[str, Any], str]] = {
 }
 
 _TYPED_IN_SCOPE = (
+    "vmware.host.datastores",
     "vmware.host.network_uplinks",
     "vmware.host.storage_devices",
     "vmware.host.usage",

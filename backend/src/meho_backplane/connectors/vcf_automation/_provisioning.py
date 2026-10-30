@@ -38,6 +38,9 @@ from meho_backplane.connectors.vcf_automation._auth import (
     load_credentials_with_override,
     tenant_login,
 )
+from meho_backplane.connectors.vcf_automation._feature_flags import (
+    classic_tenant_creation_problem,
+)
 from meho_backplane.connectors.vcf_automation._lookups import (
     find_org,
     find_project,
@@ -189,7 +192,10 @@ async def provider_org_create(
     """``vcfa.provider.org.create`` — ``POST /cloudapi/1.0.0/orgs`` (idempotent on name).
 
     ``org_type='vm_apps'`` (default) sets ``isClassicTenant: true`` -- a VM
-    Apps org, which needs no region / VPC / quota. The create may answer
+    Apps org, which needs no region / VPC / quota. A VM Apps org create
+    first reads the ``CLASSIC_TENANT_CREATION`` feature flag; when it is off
+    the op answers ``invalid_request`` naming
+    ``vcfa.provider.feature_flag.set`` and writes nothing. The create may answer
     201 with the org body or 202 with an empty body (async task); in the
     latter case the org is re-read by name for its id.
     """
@@ -209,9 +215,12 @@ async def provider_org_create(
                 f"an org named {existing.get('name')!r} already exists; nothing was written"
             ),
         }
-    created = await connector._post_json(
-        target, PROVIDER_ORGS_PATH, operator=operator, json=org_create_body(params)
-    )
+    body = org_create_body(params)
+    if body["isClassicTenant"]:
+        problem = await classic_tenant_creation_problem(connector, target, operator)
+        if problem is not None:
+            return {"status": "invalid_request", "org": None, "guidance": problem}
+    created = await connector._post_json(target, PROVIDER_ORGS_PATH, operator=operator, json=body)
     if not created.get("id"):
         created = await find_org(connector, target, operator, name) or {"name": name}
     view = _org_view(created)

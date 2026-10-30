@@ -14,7 +14,7 @@ target with ``extras["login"]``:
 * ``vcfa-session`` -- the VCF 9 login. A VCF 9 Orchestrator signs people
   in through VCF Automation, so the connector gets a VCF Automation
   session token for ``<user>@<extras.org>`` with the shared login
-  (:func:`meho_backplane.connectors._shared.vcfa_session.vcfa_session_login`)
+  (:func:`meho_backplane.connectors.vmware_shared.vcfa_session.vcfa_session_login`)
   and sends ``Authorization: Bearer <token>``. It logs in again 60 seconds
   before the token ends and once after a ``401``.
 * ``automation`` -- the Aria Automation token. An Orchestrator inside Aria
@@ -35,7 +35,7 @@ from typing import Any, Final, Protocol, runtime_checkable
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
-from meho_backplane.connectors._shared.vcfa_session import LOGIN_VCFA_SESSION
+from meho_backplane.connectors.vmware_shared.vcfa_session import LOGIN_VCFA_SESSION
 
 __all__ = [
     "LOGIN_AUTOMATION",

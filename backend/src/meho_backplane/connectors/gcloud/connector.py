@@ -105,6 +105,7 @@ from meho_backplane.connectors.gcloud.session import (
     load_credentials_from_vault,
 )
 from meho_backplane.connectors.gcloud.workload_identity import WorkloadIdentityOps
+from meho_backplane.connectors.gcloud.workload_identity_write import WorkloadIdentityWriteOps
 from meho_backplane.connectors.schemas import (
     AuthModel,
     FingerprintResult,
@@ -170,9 +171,10 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "Which principals have which roles? ``gcloud.iam.service_accounts.list`` "
         "enumerates SAs; ``gcloud.iam.policy.read`` returns the full project-level "
         "policy with all role bindings; ``gcloud.iam.service_accounts.policy.read`` "
-        "shows who may use or act as one service account, and "
-        "``gcloud.iam.service_accounts.binding.remove`` takes one member out of one "
-        "role there (a person must approve). The right group when the agent needs to "
+        "shows who may use or act as one service account; "
+        "``gcloud.iam.service_accounts.binding.add`` adds one member to one role there "
+        "and ``gcloud.iam.service_accounts.binding.remove`` takes one member out of one "
+        "role (both need a person's approval). The right group when the agent needs to "
         "verify a permission, pick an impersonation SA, or produce an access-review "
         "report. Pair with the 'identity' group when onboarding a new target."
     ),
@@ -184,8 +186,13 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "issuer a pool trusts (issuerUri) and on which condition "
         "(attributeCondition); ``gcloud.iam.workload_identity_pools.delete`` marks an "
         "old pool deleted (a person must approve; Google keeps it 30 days and it can "
-        "be restored). Pair with the 'iam' group to remove the service-account "
-        "binding that lets the pool act as an account."
+        "be restored). To set up keyless access: "
+        "``gcloud.iam.workload_identity_pools.create`` makes a pool, "
+        "``gcloud.iam.workload_identity_pools.providers.create`` makes an OIDC provider "
+        "(issuer, optional uploaded public keys, condition), and "
+        "``gcloud.iam.workload_identity_pools.providers.update_keys`` replaces the "
+        "uploaded keys; each needs a person's approval. Pair with the 'iam' group to add "
+        "or remove the service-account binding that lets the pool act as an account."
     ),
     "compute": (
         "Use for Compute Engine resource inventory: VMs, VPC networks, and subnets. "
@@ -238,7 +245,7 @@ def _subnet_row(sn: dict[str, Any], *, region: str) -> dict[str, Any]:
     }
 
 
-class GcloudConnector(WorkloadIdentityOps, HttpConnector):
+class GcloudConnector(WorkloadIdentityOps, WorkloadIdentityWriteOps, HttpConnector):
     """GCP REST connector with ADC + service-account impersonation.
 
     Auth: ``google.auth.default()`` for ADC source credentials, wrapped

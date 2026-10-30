@@ -18,10 +18,12 @@ Covers:
   required service_account_email; no key material in the row schema.
 - ``register_gcloud_typed_operations`` — idempotent; AttributeError on
   missing handler; raises on unknown group_key.
-- GCLOUD_OPS has 14 entries; all ops are safe + non-approving except the
-  workload identity pool delete and the service-account binding removal,
-  which are dangerous and wait for approval (handlers tested in
-  ``test_connectors_gcloud_workload_identity.py``).
+- GCLOUD_OPS has 18 entries; all ops are safe + non-approving except the
+  workload identity changes (pool create and delete, provider create and key
+  update) and the service-account binding add and removal,
+  which wait for approval (handlers tested in
+  ``test_connectors_gcloud_workload_identity.py`` and
+  ``test_connectors_gcloud_workload_identity_write.py``).
 
 Auth is fully mocked via the same ADC + impersonation mock pattern
 established in ``test_connectors_gcloud_auth.py``.
@@ -129,8 +131,8 @@ def _make_connector(token: str = "test-bearer-token") -> GcloudConnector:
 # ---------------------------------------------------------------------------
 
 
-def test_gcloud_ops_has_fourteen_entries() -> None:
-    assert len(GCLOUD_OPS) == 14
+def test_gcloud_ops_has_eighteen_entries() -> None:
+    assert len(GCLOUD_OPS) == 18
 
 
 def test_gcloud_ops_op_ids_are_unique() -> None:
@@ -141,12 +143,19 @@ def test_gcloud_ops_op_ids_are_unique() -> None:
 _APPROVAL_OPS = {
     "gcloud.iam.workload_identity_pools.delete",
     "gcloud.iam.service_accounts.binding.remove",
+    "gcloud.iam.workload_identity_pools.providers.create",
+    "gcloud.iam.workload_identity_pools.providers.update_keys",
+    "gcloud.iam.service_accounts.binding.add",
 }
+_CAUTION_OPS = {"gcloud.iam.workload_identity_pools.create"}
 
 
-def test_gcloud_ops_are_safe_except_the_two_approval_writes() -> None:
+def test_gcloud_ops_are_safe_except_the_approval_writes() -> None:
     for op in GCLOUD_OPS:
-        if op.op_id in _APPROVAL_OPS:
+        if op.op_id in _CAUTION_OPS:
+            assert op.safety_level == "caution", f"{op.op_id}: expected 'caution'"
+            assert op.requires_approval is True, f"{op.op_id}: expected requires_approval"
+        elif op.op_id in _APPROVAL_OPS:
             assert op.safety_level == "dangerous", f"{op.op_id}: expected 'dangerous'"
             assert op.requires_approval is True, f"{op.op_id}: expected requires_approval"
         else:
@@ -177,6 +186,10 @@ def test_all_gcloud_ops_have_expected_op_ids() -> None:
         "gcloud.iam.workload_identity_pools.delete",
         "gcloud.iam.service_accounts.policy.read",
         "gcloud.iam.service_accounts.binding.remove",
+        "gcloud.iam.workload_identity_pools.create",
+        "gcloud.iam.workload_identity_pools.providers.create",
+        "gcloud.iam.workload_identity_pools.providers.update_keys",
+        "gcloud.iam.service_accounts.binding.add",
     }
     actual = {op.op_id for op in GCLOUD_OPS}
     assert actual == expected
@@ -1058,8 +1071,8 @@ async def test_register_gcloud_typed_operations_idempotent() -> None:
     ):
         await GcloudConnector.register_gcloud_typed_operations()
         await GcloudConnector.register_gcloud_typed_operations()
-    # 14 ops x 2 calls = 28 total register invocations
-    assert mock_register.call_count == 28
+    # 18 ops x 2 calls = 36 total register invocations
+    assert mock_register.call_count == 36
 
 
 @pytest.mark.asyncio
@@ -1085,7 +1098,7 @@ async def test_register_gcloud_typed_operations_accepts_embedding_service_kwarg(
     ):
         # Mirrors run_typed_op_registrars: the kwarg is always supplied.
         await GcloudConnector.register_gcloud_typed_operations(embedding_service=None)
-    assert mock_register.call_count == 14
+    assert mock_register.call_count == 18
 
 
 @pytest.mark.asyncio

@@ -29,9 +29,9 @@ refused before any token is built. This is not a soft warning — it raises
 Nine read-only ops registered via `register_gcloud_typed_operations()`
 at lifespan startup (eight from G3.7-T5 #848; the ninth,
 `gcloud.iam.service_account_keys.list`, added by #2846). These nine have
-`safety_level="safe"` and `requires_approval=False`. Five more ops for
+`safety_level="safe"` and `requires_approval=False`. Nine more ops for
 workload identity pools and service-account policies are described in
-the next section. They land in the
+the next two sections. They land in the
 `endpoint_descriptor` table under `connector_id="gcloud-rest-1.0"`.
 
 | Op ID | API surface | HTTP verb | Notes |
@@ -128,6 +128,75 @@ How they behave:
 Tests: `backend/tests/test_connectors_gcloud_workload_identity.py` (respx
 answers, no Google project needed).
 
+## Setting up keyless access: create ops
+
+Four more ops make the objects an outside workload needs for keyless Google
+access, so a person no longer makes them by hand. Example: a pod in a
+private Kubernetes cluster needs to read a Google resource. Google cannot
+reach the cluster's token issuer, so the provider carries the cluster's
+public keys, uploaded at creation.
+
+| Op ID | Google call | Risk level |
+|---|---|---|
+| `gcloud.iam.workload_identity_pools.create` | `POST .../locations/global/workloadIdentityPools?workloadIdentityPoolId=<id>` | caution (a person must approve) |
+| `gcloud.iam.workload_identity_pools.providers.create` | `POST .../workloadIdentityPools/<pool>/providers?workloadIdentityPoolProviderId=<id>` | dangerous (a person must approve) |
+| `gcloud.iam.workload_identity_pools.providers.update_keys` | `GET`, then `PATCH .../providers/<id>?updateMask=oidc.jwksJson` | dangerous (a person must approve) |
+| `gcloud.iam.service_accounts.binding.add` | `getIamPolicy`, add one member, `setIamPolicy` with the read `etag` | dangerous (a person must approve) |
+
+Every op that is not `safe` must have `requires_approval: true` (the
+operation contract check), so the pool create waits for approval too.
+
+Source: metadata in `ops_workload_identity_write.py`
+(`WORKLOAD_IDENTITY_WRITE_OPS`, appended to `GCLOUD_OPS`); handlers in
+`workload_identity_write.py`, as the `WorkloadIdentityWriteOps` mixin that
+`GcloudConnector` inherits. They reuse the value checks, the operation wait
+and the policy read/write of `workload_identity.py`.
+
+How they behave:
+
+- **Create and wait.** Pool create and provider create send the create call
+  and poll Google's operation (the same bounded wait as the pool delete).
+  When it is done, MEHO reads the new object, so `state` is its real state
+  (`ACTIVE`). When it is still running, `state` is `CREATE_PENDING` and
+  the `note` says how to check. An operation with an `error` fails the call
+  (`ConnectorUpstreamError`, status 502).
+- **Safe to run twice.** When Google answers `409` (the ID is used), MEHO
+  reads the object and returns it with `already_existed: true`; nothing is
+  changed. When the ID belongs to a deleted object, MEHO refuses: Google
+  keeps it 30 days and the ID cannot be used again in that time.
+- **Uploaded public keys (`jwks`).** A key set `{keys: [...]}`, sent to
+  Google as the string `oidc.jwksJson`. Only `RSA` and `EC` keys, and only
+  the fields Google accepts (`kty`, `alg`, `use`, `kid`, `n`, `e`, `x`, `y`,
+  `crv`). A key with private parts (`d`, `p`, `q`, `dp`, `dq`, `qi`, `oth`,
+  `k`) is refused. The parameter schema already refuses such keys, so a bad
+  key never waits for approval; the handler checks again. Key values are
+  never put in an error or a result: the result shows only `key_count`.
+- **Provider create** sends `oidc.issuerUri` (must be `https://`), the
+  optional keys and `allowedAudiences`, `attributeMapping` (must include
+  `google.subject`; default `{"google.subject": "assertion.sub"}`) and the
+  optional `attributeCondition`. The result shows `issuer_uri`,
+  `key_count` and `attribute_condition`.
+- **Key update** reads the provider first. A missing provider gives
+  `not_found`; a provider that is not OIDC, or is deleted, is refused. When
+  the uploaded keys are already the same, nothing is sent
+  (`changed: false`). The new set replaces every uploaded key.
+- **Binding add** is the opposite of the binding removal: it adds the member
+  to the role's binding without a condition (or makes that binding), keeps
+  every other binding as it is, and writes with the `etag` it read. A member
+  that is already there is kept and nothing is sent (`added: false`). A stale
+  etag raises `GcloudPolicyChangedError` without a retry. A policy with
+  hidden conditions (`_withcond_`) is refused. `allUsers`,
+  `allAuthenticatedUsers` and `deleted:` members are refused.
+- **Check before approval.** Pool create asks the project for
+  `iam.workloadIdentityPools.create`. Provider create reads the pool, then
+  asks the project for `iam.workloadIdentityPoolProviders.create`. Key
+  update reads the provider, then asks the project for
+  `iam.workloadIdentityPoolProviders.update`. Binding add asks the service
+  account for `getIamPolicy` and `setIamPolicy`, like the removal. A missing
+  pool or provider gives `pool_not_found` / `provider_not_found`.
+
+Tests: `backend/tests/test_connectors_gcloud_workload_identity_write.py`.
+
 ### JSONFlux handle note
 
 `gcloud.compute.instances.list` returns a `rows`+`total` envelope
@@ -148,8 +217,9 @@ and return a `ResultHandle` without any connector-side changes.
   `op_id`, `handler_attr`, `summary`, `description`, `parameter_schema`,
   `response_schema`, `group_key`, `tags`, `safety_level`,
   `requires_approval`, `llm_instructions`.
-- **`GCLOUD_OPS`** (`ops.py`) — tuple of all 14 `GcloudOp` entries (the
-  nine in `ops.py` plus `WORKLOAD_IDENTITY_OPS`).
+- **`GCLOUD_OPS`** (`ops.py`) — tuple of all 18 `GcloudOp` entries (the
+  nine in `ops.py` plus `WORKLOAD_IDENTITY_OPS` and
+  `WORKLOAD_IDENTITY_WRITE_OPS`).
   `register_gcloud_typed_operations()` walks this tuple.
 - **`GcloudTargetLike`** (`session.py`) — runtime-checkable Protocol
   capturing the minimum target shape the connector reads: `name`,

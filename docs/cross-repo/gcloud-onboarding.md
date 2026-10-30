@@ -146,14 +146,18 @@ The target SA (`target.gcp_impersonate_sa`) must have at minimum:
 | `gcloud.iam.workload_identity_pools.delete` (a person must approve) | `iam.workloadIdentityPools.delete`, e.g. in `roles/iam.workloadIdentityPoolAdmin` |
 | `gcloud.iam.service_accounts.policy.read` | `iam.serviceAccounts.getIamPolicy` on the service account |
 | `gcloud.iam.service_accounts.binding.remove` (a person must approve) | `iam.serviceAccounts.getIamPolicy` and `iam.serviceAccounts.setIamPolicy`, e.g. in `roles/iam.serviceAccountAdmin` |
+| `gcloud.iam.workload_identity_pools.create` (a person must approve) | `iam.workloadIdentityPools.create`, e.g. in `roles/iam.workloadIdentityPoolAdmin` |
+| `gcloud.iam.workload_identity_pools.providers.create` (a person must approve) | `iam.workloadIdentityPoolProviders.create`, e.g. in `roles/iam.workloadIdentityPoolAdmin` |
+| `gcloud.iam.workload_identity_pools.providers.update_keys` (a person must approve) | `iam.workloadIdentityPoolProviders.update`, e.g. in `roles/iam.workloadIdentityPoolAdmin` |
+| `gcloud.iam.service_accounts.binding.add` (a person must approve) | `iam.serviceAccounts.getIamPolicy` and `iam.serviceAccounts.setIamPolicy`, e.g. in `roles/iam.serviceAccountAdmin` |
 
 A single `roles/viewer` project-level binding covers most of the reads;
-assign narrower custom roles for production least-privilege setups. The two
+assign narrower custom roles for production least-privilege setups. The
 changes need the write permissions above. MEHO checks them with Google's
 `testIamPermissions` before it asks a person to approve, and refuses at once
-when one is missing. For the pool delete the check runs on the project
-(Cloud Resource Manager), so grant `iam.workloadIdentityPools.delete` at the
-project level.
+when one is missing. For the pool and provider changes the check runs on the
+project (Cloud Resource Manager), so grant those permissions at the project
+level.
 
 ## Prerequisites
 

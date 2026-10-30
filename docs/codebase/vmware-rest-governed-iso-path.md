@@ -3,14 +3,15 @@
 ## Overview
 
 The governed way to get a bootable ISO from an HTTP depot into a
-vCenter content library and mounted on a VM — entirely on **raw
+vCenter content library and mounted on a VM. The import runs on **raw
 ingested ops** of the `vmware-rest` connector (`vmware-rest-9.0`),
 dispatched through the ordinary
 `call_operation(connector_id, operation_id, target, params)` path with
 policy, audit, broadcast, and (when tightened) approvals applied per
-call. No composite exists and none is needed: every step is a single
-`call_operation`, the multi-step choreography is four writes plus one
-poll read, and each response is small and self-describing (#3086).
+call. Every import step is a single `call_operation`, the multi-step
+choreography is four writes plus one poll read, and each response is
+small and self-describing (#3086). The last step, mounting the ISO on a
+VM, now has two composites (`#3576`, see steps 6–7).
 
 **Prefer the typed op.** `vmware.composite.content_library.item.upload`
 runs steps 1-5 below in one governed call (with a preview, a read-back and
@@ -60,7 +61,14 @@ Failure/liveness companions (same family, same dispatch shape):
 per-file transfer status.
 
 Mount / unmount (Iso.Image API — creates/removes a VM CD-ROM device
-backed by the library item's ISO):
+backed by the library item's ISO). **Use the two composites for this step**
+(`#3576`): `vmware.composite.vm.cdrom.mount_library_iso` and
+`vmware.composite.vm.cdrom.unmount_library_iso`. They exist on a fresh boot
+(no ingest), wait for approval, look up the library item by name when you
+do not have its id, and turn a vCenter 400/404 into a `refused` /
+`not_found` answer. See **Content-library ISO mount and unmount** in
+`connectors-vmware-rest.md`. The raw rows below stay for reference; they
+send the same request bodies:
 
 | # | Step | op_id | Params (shape) | Result envelope |
 |---|------|-------|----------------|-----------------|
@@ -181,7 +189,8 @@ As ingested from the pinned spec (method-based heuristic in
   #3082/#3083 (204/empty-body acks), #3084/#3085 (scalar preservation),
   `docs/decisions/spec-reconcile-guards-standard.md` (#2979/#2980).
 - Related connector doc: `docs/codebase/connectors-vmware-rest.md`
-  (composites, mounts, session handling); the `vm.device.cdrom`
+  (composites, mounts, session handling; the mount/unmount composites are in
+  **Content-library ISO mount and unmount**); the `vm.device.cdrom`
   composite covers datastore-path ISO pinning — a *different* flow
   from the library-backed Iso.Image mount documented here.
 - Issue: evoila/meho#3086 (nested-substrate prerequisite).
